@@ -1,0 +1,5 @@
+[06:25:26] matrix: native-nr0-p100-500k (queen-native, queen-native.yaml, 1-topic-100-partitions-1kb-4p-4c-500k.yaml, 100 partitions)
+[06:25:32] omb: queen nr0: 3 healthy ("role":"follower")
+[06:29:50] matrix: done native-nr0-p100-500k [queen-native] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 5,054 | pub p50/p99/p99.9 2.2/3.3/3.8 ms | e2e p50/p99/p99.9 4.0/7.0/8.0 ms (max 86.0) | brokers 11.0 cores, disk write 311/315/311 MB/s
+[06:29:54] omb: all stopped
+[06:29:54] matrix: all points done

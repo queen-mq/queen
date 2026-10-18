@@ -1,0 +1,3 @@
+[19:10:18] start 1x1000-3000k-gcp24-xfs-t24-l0 3000000 TOPICS=1 PARTITIONS=1000 CONSUMERS=33 LINGER=0 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dbb: xfs/1073741824 xfs/1073741824 xfs/1073741824)
+[19:13:38] KAFKA_POINT 1x1000-3000k-gcp24-xfs-t24-l0 DONE | 1x1000-3000k-gcp24-xfs-t24-l0  kafka  1x1000 e=0 batch b=100 rr c=33x9 default  3000000   3000k   3000k      0k        1        5          5         4       26.0       25.0          6.6               440              476/455     0      11.4
+KAFKA_L0_DONE

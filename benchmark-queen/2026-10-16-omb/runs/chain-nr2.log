@@ -1,0 +1,44 @@
+    Finished `release` profile [optimized] target(s) in 6m 30s
+rc=0
+n1: nr2 fecf6c26 44181336 bytes
+n2: nr2 fecf6c26 44181336 bytes
+n3: nr2 fecf6c26 44181336 bytes
+[07:39:46] omb: queen nr2: 3 healthy ("role":"follower")
+prof fC:       18 files
+fC-nr2-l1-p100-500k [queen-facade] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 5,007 | pub p50/p99/p99.9 7.4/20.2/25.4 ms | e2e p50/p99/p99.9 10.0/34.0/56.0 ms (max 85.0) | brokers 8.4 cores, disk write 245/245/246 MB/s
+== node 1
+  produceStage   n= 15369 mean   0.27 ms  [(2, 3), (3, 61), (4, 136), (5, 241), (6, 1991), (7, 6872), (8, 4753), (9, 1234), (10, 73), (11, 3), (12, 2)]
+  producePush    n= 15370 mean   3.02 ms  [(9, 42), (10, 2665), (11, 10402), (12, 2206), (13, 55)]
+  produceRender  n= 15370 mean   0.00 ms  [(0, 267), (1, 6034), (2, 7179), (3, 1661), (4, 213), (5, 16)]
+  fetch          n= 20970 mean   3.68 ms  [(6, 19), (7, 99), (8, 569), (9, 2028), (10, 3785), (11, 4977), (12, 9472), (13, 21)]
+  fetchUpstream  n= 20970 mean   3.33 ms  [(6, 51), (7, 617), (8, 2027), (9, 2152), (10, 3537), (11, 3790), (12, 8795), (13, 1)]
+  commit         n= 32370 mean   2.83 ms  [(9, 1661), (10, 9777), (11, 14888), (12, 6006), (13, 38)]
+  producePushes  +15369
+  produceRequests +20975
+  produceRecords +4375079
+  fetchEmpty     +7676
+  fetchRecords   +4375711
+== node 2
+  produceStage   n= 13820 mean   0.26 ms  [(2, 2), (3, 46), (4, 139), (5, 235), (6, 1827), (7, 6398), (8, 4130), (9, 994), (10, 48), (12, 1)]
+  producePush    n= 13820 mean   2.97 ms  [(9, 40), (10, 2484), (11, 9331), (12, 1946), (13, 19)]
+  produceRender  n= 13820 mean   0.00 ms  [(0, 353), (1, 5282), (2, 6551), (3, 1464), (4, 161), (5, 9)]
+  fetch          n= 20556 mean   3.82 ms  [(6, 23), (7, 96), (8, 546), (9, 1868), (10, 3375), (11, 4669), (12, 9970), (13, 9)]
+  fetchUpstream  n= 20557 mean   3.51 ms  [(6, 52), (7, 581), (8, 1869), (9, 1869), (10, 3215), (11, 3612), (12, 9357), (13, 2)]
+  commit         n=     0 mean   0.00 ms  []
+  producePushes  +13820
+  produceRequests +18816
+  produceRecords +3785473
+  fetchEmpty     +8335
+  fetchRecords   +3784666
+== node 3
+  produceStage   n= 14551 mean   0.23 ms  [(2, 2), (3, 44), (4, 137), (5, 273), (6, 2095), (7, 7460), (8, 4037), (9, 489), (10, 9), (11, 4), (12, 1)]
+  producePush    n= 14553 mean   2.12 ms  [(9, 435), (10, 7726), (11, 5871), (12, 520), (13, 1)]
+  produceRender  n= 14553 mean   0.00 ms  [(0, 193), (1, 4903), (2, 7803), (3, 1477), (4, 168), (5, 9)]
+  fetch          n= 21652 mean   3.67 ms  [(6, 12), (7, 84), (8, 660), (9, 2651), (10, 4498), (11, 3546), (12, 10196), (13, 5)]
+  fetchUpstream  n= 21653 mean   3.39 ms  [(6, 36), (7, 666), (8, 2409), (9, 2871), (10, 3481), (11, 2344), (12, 9846)]
+  commit         n=     0 mean   0.00 ms  []
+  producePushes  +14551
+  produceRequests +20438
+  produceRecords +3332200
+  fetchEmpty     +9138
+  fetchRecords   +3332673

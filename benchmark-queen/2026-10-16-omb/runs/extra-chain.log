@@ -1,0 +1,82 @@
+[12:03:46] extra: PAUSE set while kafka-max-10t1p-1kb runs
+[12:08:16] extra: main matrix paused; deploying the popBatch tarball
+[12:08:40] omb: all stopped
+  <host-33>: 69 jars, kafka.yaml queen-facade-wait10-diag.yaml queen-facade.yaml queen-native-v2-b1000.yaml queen-native-v2-b10000.yaml queen-native-v2-topics.yaml queen-native-v2.yaml queen-native.yaml 
+  <host-22>: 69 jars, kafka.yaml queen-facade-wait10-diag.yaml queen-facade.yaml queen-native-v2-b1000.yaml queen-native-v2-b10000.yaml queen-native-v2-topics.yaml queen-native-v2.yaml queen-native.yaml 
+  <host-36>: 69 jars, kafka.yaml queen-facade-wait10-diag.yaml queen-facade.yaml queen-native-v2-b1000.yaml queen-native-v2-b10000.yaml queen-native-v2-topics.yaml queen-native-v2.yaml queen-native.yaml 
+[12:08:58] matrix: paused before native-nr2-max-1t1p-1p1c-100b-b1000
+[12:14:22] extra: restarted (the extra matrix had waited on its own PAUSE)
+[12:14:22] matrix: native-nr2-max-1t1p-1p1c-100b-b1000 (queen-native, queen-native-v2-b1000.yaml, max-rate-1-topic-1-partition-1p-1c-100b.yaml, 1 partitions)
+[12:14:24] omb: queen nr2: 3 healthy ("role":"leader")
+[12:18:44] matrix: done native-nr2-max-1t1p-1p1c-100b-b1000 [queen-native] max-rate-1-topic-1-partition-1p-1c-100b.yaml: pub 475k/s cons 19k/s err 0 backlog max 122,303,345 | pub p50/p99/p99.9 853/989/1,106 ms | e2e p50/p99/p99.9 151,955/241,591/243,273 ms (max 243,411) | brokers 1.7 cores, disk write 34/34/34 MB/s
+[12:18:44] matrix: native-nr2-max-1t1p-1p1c-1kb-b1000 (queen-native, queen-native-v2-b1000.yaml, max-rate-1-topic-1-partition-1p-1c-1kb.yaml, 1 partitions)
+[12:18:51] omb: queen nr2: 3 healthy ("role":"leader")
+[12:23:10] matrix: done native-nr2-max-1t1p-1p1c-1kb-b1000 [queen-native] max-rate-1-topic-1-partition-1p-1c-1kb.yaml: pub 362k/s cons 70k/s err 0 backlog max 74,993,213 | pub p50/p99/p99.9 133/159/168 ms | e2e p50/p99/p99.9 131,538/206,019/207,432 ms (max 207,620) | brokers 4.3 cores, disk write 177/177/177 MB/s
+[12:23:10] matrix: native-nr2-max-1t1p-1p1c-64kb-b1000 (queen-native, queen-native-v2-b1000.yaml, max-rate-1-topic-1-partition-1p-1c-64kb.yaml, 1 partitions)
+[12:23:16] omb: queen nr2: 3 healthy ("role":"leader")
+[12:27:36] matrix: done native-nr2-max-1t1p-1p1c-64kb-b1000 [queen-native] max-rate-1-topic-1-partition-1p-1c-64kb.yaml: pub 11k/s cons 6k/s err 0 backlog max 1,069,200 | pub p50/p99/p99.9 72.7/89.3/96.1 ms | e2e p50/p99/p99.9 64,678/100,655/101,239 ms (max 101,308) | brokers 6.5 cores, disk write 346/346/346 MB/s
+[12:27:36] matrix: native-nr2-max-1t1p-1p1c-100b-b10000 (queen-native, queen-native-v2-b10000.yaml, max-rate-1-topic-1-partition-1p-1c-100b.yaml, 1 partitions)
+[12:27:42] omb: queen nr2: 3 healthy ("role":"leader")
+[12:32:03] matrix: done native-nr2-max-1t1p-1p1c-100b-b10000 [queen-native] max-rate-1-topic-1-partition-1p-1c-100b.yaml: pub 481k/s cons 182k/s err 0 backlog max 82,595,498 | pub p50/p99/p99.9 840/1,004/1,125 ms | e2e p50/p99/p99.9 120,015/170,864/171,930 ms (max 172,061) | brokers 1.8 cores, disk write 34/34/34 MB/s
+[12:32:03] matrix: native-nr2-max-1t1p-1p1c-1kb-b10000 (queen-native, queen-native-v2-b10000.yaml, max-rate-1-topic-1-partition-1p-1c-1kb.yaml, 1 partitions)
+[12:32:09] omb: queen nr2: 3 healthy ("role":"follower")
+[12:36:27] matrix: done native-nr2-max-1t1p-1p1c-1kb-b10000 [queen-native] max-rate-1-topic-1-partition-1p-1c-1kb.yaml: pub 355k/s cons 293k/s err 0 backlog max 18,650,483 | pub p50/p99/p99.9 135/163/172 ms | e2e p50/p99/p99.9 36,716/52,060/52,403 ms (max 52,468) | brokers 4.3 cores, disk write 173/173/173 MB/s
+[12:36:27] matrix: native-nr2-max-1t1p-1p1c-64kb-b10000 (queen-native, queen-native-v2-b10000.yaml, max-rate-1-topic-1-partition-1p-1c-64kb.yaml, 1 partitions)
+[12:36:33] omb: queen nr2: 3 healthy ("role":"follower")
+[12:40:54] matrix: done native-nr2-max-1t1p-1p1c-64kb-b10000 [queen-native] max-rate-1-topic-1-partition-1p-1c-64kb.yaml: pub 11k/s cons 6k/s err 0 backlog max 1,185,684 | pub p50/p99/p99.9 72.5/97.9/107 ms | e2e p50/p99/p99.9 71,077/112,645/113,594 ms (max 113,609) | brokers 6.5 cores, disk write 344/345/345 MB/s
+[12:40:57] omb: all stopped
+[12:40:57] matrix: all points done
+[12:41:04] failover: extra points done; failover runs on nr6 while the main matrix stays paused
+[12:41:04] fresh cluster (nr6)
+[12:41:09] omb: queen nr6: 3 healthy ("role":"leader")
+[12:41:13] produce: 4 producers, 200000 msg/s, 90 s; brokers 10.250.0.43:9092,10.250.0.39:9092,10.250.0.40:9092
+[12:41:43] leader is node 1 (10.250.0.43): kill
+[12:41:46] new leader: node 100
+[12:42:03] start node 1 again
+12:42:28 acked 14812296 (+198189/s) failed 0 sent 14812635
+12:42:33 acked 15802939 (+198128/s) failed 0 sent 15803200
+12:42:38 acked 16794538 (+198319/s) failed 0 sent 16795032
+done in 1m30s: sent 17784150 acked 17784150 failed 0
+[12:42:43] verify
+{
+  "acked": 17784150,
+  "duplicate_examples": [
+    "p0 seq 1494612 again in partition 76 at offset 60707 (after 1494649)",
+    "p0 seq 1494613 again in partition 76 at offset 60708 (after 1494649)",
+    "p0 seq 1494614 again in partition 76 at offset 60709 (after 1494649)",
+    "p0 seq 1494615 again in partition 76 at offset 60710 (after 1494649)",
+    "p0 seq 1494616 again in partition 76 at offset 60711 (after 1494649)"
+  ],
+  "duplicates": 38,
+  "foreign": 0,
+  "lost": 0,
+  "lost_examples": null,
+  "partitions": 100,
+  "records_read": 17784188,
+  "reorder_examples": null,
+  "reorders": 0
+}
+[12:43:02] fresh cluster (nr6)
+[12:43:08] omb: queen nr6: 3 healthy ("role":"follower")
+[12:43:11] produce: 4 producers, 200000 msg/s, 90 s; brokers 10.250.0.43:9092,10.250.0.39:9092,10.250.0.40:9092
+[12:43:41] leader is node 2 (10.250.0.39): stop
+[12:43:45] new leader: node 3
+[12:44:02] start node 2 again
+12:44:26 acked 14817600 (+197287/s) failed 0 sent 14818150
+12:44:31 acked 15804722 (+197424/s) failed 0 sent 15805250
+12:44:36 acked 16792115 (+197478/s) failed 0 sent 16792450
+done in 1m30s: sent 17778900 acked 17778900 failed 0
+[12:44:41] verify
+{
+  "acked": 17778900,
+  "duplicate_examples": null,
+  "duplicates": 0,
+  "foreign": 0,
+  "lost": 0,
+  "lost_examples": null,
+  "partitions": 100,
+  "records_read": 17778900,
+  "reorder_examples": null,
+  "reorders": 0
+}
+[12:45:08] extra: done; resuming the main matrix

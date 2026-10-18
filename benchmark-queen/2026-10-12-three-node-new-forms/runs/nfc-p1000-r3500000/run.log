@@ -1,0 +1,7 @@
+[17:38:47] run nfc-p1000-r3500000: binary nofsync, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3500000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[17:39:07] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 1000 partitions
+[17:40:54] 3,500,000: last 30 s: offered 3,500,087 pushed 3,500,484 consumed 3,500,543 | run: shed 0 errors 0 | push p50 10.4 p99 32.8 | e2e p50 24.3 p99 64.5 worst 68.6 | cores 12.9 / 6.3 / 6.3 | mem GB 11.4 / 10.9 / 10.9 | loaders 22.7c  OK 
+RUN_DONE

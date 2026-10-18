@@ -1,0 +1,98 @@
+{
+    "omb-yumoa6-0000000-Dc8WJUc": {
+        "conflation": false,
+        "kind": "queen",
+        "partitions": [
+            {
+                "lastConsumedAt": null,
+                "leaseActive": false,
+                "offsetLag": 0,
+                "partition": "0",
+                "timeLagSeconds": 0,
+                "totalConsumed": 119428,
+                "workerId": null
+            },
+            {
+                "lastConsumedAt": null,
+                "leaseActive": false,
+                "offsetLag": 0,
+                "partition": "1",
+                "timeLagSeconds": 0,
+                "totalConsumed": 120415,
+                "workerId": null
+            },
+            {
+                "lastConsumedAt": null,
+                "leaseActive": false,
+                "offsetLag": 0,
+                "partition": "2",
+                "timeLagSeconds": 0,
+                "totalConsumed": 124226,
+                "workerId": null
+            },
+            {
+                "lastConsumedAt": null,
+                "leaseActive": true,
+                "offsetLag": 49094,
+                "partition": "3",
+                "timeLagSeconds": 279,
+                "totalConsumed": 73315,
+                "workerId": "01a14db9-e2c8-7001-b384-114233a5e23d"
+            },
+            {
+                "lastConsumedAt": null,
+                "leaseActive": true,
+                "offsetLag": 47274,
+                "partition": "4",
+                "timeLagSeconds": 279,
+                "totalConsumed": 75461,
+                "workerId": "01a14db9-e2c8-7006-b3c9-351372c30277"
+            },
+            {
+                "lastConsumedAt": null,
+                "leaseActive": true,
+                "offsetLag": 48640,
+                "partition": "5",
+                "timeLagSeconds": 279,
+                "totalConsumed": 72104,
+                "workerId": "01a14db9-e2c8-700d-bbe4-b683431b8c43"
+            },
+            {
+                "lastConsumedAt": null,
+                "leaseActive": false,
+                "offsetLag": 0,
+                "partition": "6",
+                "timeLagSeconds": 0,
+                "totalConsumed": 122861,
+                "workerId": null
+            },
+            {
+                "lastConsumedAt": null,
+                "leaseActive": false,
+                "offsetLag": 0,
+                "partition": "7",
+                "timeLagSeconds": 0,
+                "totalConsumed": 125751,
+                "workerId": null
+            },
+            {
+                "lastConsumedAt": null,
+                "leaseActive": false,
+                "offsetLag": 0,
+                "partition": "8",
+                "timeLagSeconds": 0,
+                "totalConsumed": 122022,
+                "workerId": null
+            },
+            {
+                "lastConsumedAt": null,
+                "leaseActive": false,
+                "offsetLag": 0,
+                "partition": "9",
+                "timeLagSeconds": 0,
+                "totalConsumed": 121274,
+                "workerId": null
+            }
+        ]
+    }
+}

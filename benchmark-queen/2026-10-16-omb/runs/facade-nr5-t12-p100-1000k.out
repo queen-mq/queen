@@ -1,0 +1,3 @@
+[10:24:18] omb: run facade-nr5-t12-p100-1000k: system queen-facade, driver queen-facade.yaml, workload 1-topic-100-partitions-1kb-4p-4c-1000k.yaml
+[10:24:23] omb: 6 workers up
+facade-nr5-t12-p100-1000k [queen-facade] 1-topic-100-partitions-1kb-4p-4c-1000k.yaml: pub 983k/s cons 983k/s err 0 backlog max 29,722 | pub p50/p99/p99.9 61.6/286/411 ms | e2e p50/p99/p99.9 81.0/321/447 ms (max 821) | brokers 9.4 cores, disk write 327/327/327 MB/s

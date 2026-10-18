@@ -1,0 +1,9 @@
+queen-bench-3: /dev/md0 xfs  1.5T bench=/dev/md0[/bench]
+queen-bench-1: /dev/md0 xfs  1.5T bench=/dev/md0[/bench]
+queen-bench-2: /dev/md0 xfs  1.5T bench=/dev/md0[/bench]
+queen-bench-3: os-tune ok
+queen-load-1: openjdk version "17.0.20.1" 2026-08-18 nproc=16
+queen-bench-2: os-tune ok
+queen-bench-1: os-tune ok
+queen-load-2: openjdk version "17.0.20.1" 2026-08-18 nproc=16
+queen-load-3: openjdk version "17.0.20.1" 2026-08-18 nproc=16

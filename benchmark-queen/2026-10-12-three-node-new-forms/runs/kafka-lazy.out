@@ -1,0 +1,40 @@
+[14:08:13] start 1x10-3000k-gcp24-lazy 3000000 TOPICS=1 PARTITIONS=10 CONSUMERS=1 (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:09:42]   1x10-3000k-gcp24-lazy failed before any load; once more as 1x10-3000k-gcp24-lazy-r
+[14:13:24] KAFKA_POINT 1x10-3000k-gcp24-lazy-r DONE | 1x10-3000k-gcp24-lazy-r  kafka  1x10 e=0 batch b=100 rr c=1x9 default  3000000   3000k   3000k      0k        6      350        350       165       12.1       11.7          6.5               441              466/446     0       8.7
+[14:13:24] start 1x100-3000k-gcp24-lazy 3000000 TOPICS=1 PARTITIONS=100 CONSUMERS=11 (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:16:33] KAFKA_POINT 1x100-3000k-gcp24-lazy DONE | 1x100-3000k-gcp24-lazy  kafka  1x100 e=0 batch b=100 rr c=11x9 default  3000000   3000k   3000k      0k        6       15         15         9       16.2       14.2          6.6               438              472/452     0       9.7
+[14:16:33] start 1x1000-3000k-gcp24-lazy 3000000 TOPICS=1 PARTITIONS=1000 CONSUMERS=33 (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:19:40] KAFKA_POINT 1x1000-3000k-gcp24-lazy DONE | 1x1000-3000k-gcp24-lazy  kafka  1x1000 e=0 batch b=100 rr c=33x9 default  3000000   3000k   3000k      0k        6       29         44        28       20.8       20.0          6.6               444              472/451     0       9.8
+[14:19:40] start 1x10000-3000k-gcp24-lazy 3000000 TOPICS=1 PARTITIONS=10000 CONSUMERS=33 (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:22:54] KAFKA_POINT 1x10000-3000k-gcp24-lazy DONE | 1x10000-3000k-gcp24-lazy  kafka  1x10000 e=0 batch b=100 rr c=33x9 default  3000000   3000k   3000k      0k        9       46         48        40       49.2       48.6          6.8               478              468/448     0      10.8
+[14:22:54] start 1x100000-3000k-gcp24-lazy 3000000 TOPICS=1 PARTITIONS=100000 CONSUMERS=33 READY_TIMEOUT=1800 GROUP_TIMEOUT=900s GOMEMLIMIT=9GiB (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:31:25] KAFKA_POINT 1x100000-3000k-gcp24-lazy DONE | 1x100000-3000k-gcp24-lazy  kafka  1x100000 e=0 batch b=100 rr c=33x9 default  3000000    195k     88k   2805k    44302    52167      52167     46924       59.9       56.3         11.5                59                29/24     0       3.0
+[14:31:25] 100000 partitions: not carried, the ladder stops here
+KAFKA_LAZY_3M_DONE
+[14:31:25] start 1x10-1000k-p1k-gcp24-lazy 1000000 TOPICS=1 PARTITIONS=10 CONSUMERS=1 PAYLOAD=1024 (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:34:40] KAFKA_POINT 1x10-1000k-p1k-gcp24-lazy DONE | 1x10-1000k-p1k-gcp24-lazy  kafka  1x10 e=0 batch b=100 rr c=1x9 default  1000000   1000k   1000k      0k        8      610        610       465        8.3        7.4          6.5               612              648/621     0       7.7
+[14:34:40] start 1x100-1000k-p1k-gcp24-lazy 1000000 TOPICS=1 PARTITIONS=100 CONSUMERS=11 PAYLOAD=1024 (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:37:41] KAFKA_POINT 1x100-1000k-p1k-gcp24-lazy DONE | 1x100-1000k-p1k-gcp24-lazy  kafka  1x100 e=0 batch b=100 rr c=11x9 default  1000000   1000k   1000k      0k        7      272        281       226        9.7        8.3          6.5               615              648/619     0       7.9
+[14:37:41] start 1x1000-1000k-p1k-gcp24-lazy 1000000 TOPICS=1 PARTITIONS=1000 CONSUMERS=33 PAYLOAD=1024 (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:41:04] KAFKA_POINT 1x1000-1000k-p1k-gcp24-lazy DONE | 1x1000-1000k-p1k-gcp24-lazy  kafka  1x1000 e=0 batch b=100 rr c=33x9 default  1000000   1000k   1000k      0k        7       69         77        69        7.1        6.1          6.6               621              647/617     0       7.9
+[14:41:04] start 1x10000-1000k-p1k-gcp24-lazy 1000000 TOPICS=1 PARTITIONS=10000 CONSUMERS=33 PAYLOAD=1024 (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:44:26] KAFKA_POINT 1x10000-1000k-p1k-gcp24-lazy DONE | 1x10000-1000k-p1k-gcp24-lazy  kafka  1x10000 e=0 batch b=100 rr c=33x9 default  1000000   1000k   1000k      0k        9       91        126        63       33.7       33.2          6.9               599              646/617     0       8.3
+[14:44:26] start 1x100000-1000k-p1k-gcp24-lazy 1000000 TOPICS=1 PARTITIONS=100000 CONSUMERS=33 READY_TIMEOUT=1800 GROUP_TIMEOUT=900s GOMEMLIMIT=9GiB PAYLOAD=1024 (brokers lazytime/dirty_background_bytes: lazytime/1073741824 lazytime/1073741824 lazytime/1073741824)
+[14:53:04] KAFKA_POINT 1x100000-1000k-p1k-gcp24-lazy DONE | 1x100000-1000k-p1k-gcp24-lazy  kafka  1x100000 e=0 batch b=100 rr c=33x9 default  1000000    163k     96k    838k    35389    41157      42205     38011       60.6       57.6         11.9               136              172/148     0       4.0
+[14:53:04] 100000 partitions: not carried, the ladder stops here
+KAFKA_LAZY_1K_DONE
+broker 3: chrony active, 1 settings changed
+broker 2: chrony active, 1 settings changed
+broker 1: chrony active, 1 settings changed
+loader: chrony active, qload flags 5/5
+loader: chrony active, qload flags 5/5
+loader: chrony active, qload flags 5/5
+queen-bench-1 rw,noatime,lazytime,stripe=512
+queen-bench-2 rw,noatime,lazytime,stripe=512
+queen-bench-3 rw,noatime,lazytime,stripe=512
+[14:53:49] run m3lazy-p1000-r3000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[14:54:19] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[14:56:08] 3,000,000: last 30 s: offered 2,999,995 pushed 3,000,834 consumed 3,000,728 | run: shed 0 errors 0 | push p50 9.2 p99 22.8 | e2e p50 21.2 p99 45.6 worst 46.1 | cores 11.3 / 5.6 / 5.6 | mem GB 10.1 / 9.5 / 9.4 | loaders 19.3c  OK 
+GRID3_DONE
+QUEEN_LAZY_DONE

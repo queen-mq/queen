@@ -1,0 +1,455 @@
+[2026-04-21 11:54:56.363] [info] Queen C++ Message Queue Server (Acceptor/Worker Pattern)
+[2026-04-21 11:54:56.363] [info] Configuration:
+[2026-04-21 11:54:56.363] [info]   - Host: 0.0.0.0
+[2026-04-21 11:54:56.363] [info]   - Port: 6632
+[2026-04-21 11:54:56.363] [info]   - Database: 127.0.0.1:5434/queen
+[2026-04-21 11:54:56.363] [warning] Encryption disabled - QUEEN_ENCRYPTION_KEY not set
+[2026-04-21 11:54:56.363] [info] Encryption: disabled
+[2026-04-21 11:54:56.363] [info] JWT Authentication: DISABLED
+[2026-04-21 11:54:56.363] [info] Starting acceptor/worker pattern with 2 workers (hardware cores: 10)
+[2026-04-21 11:54:56.364] [info] Waiting for workers to initialize...
+[2026-04-21 11:54:56.364] [info] [Worker 0] Starting...
+[2026-04-21 11:54:56.364] [info] [Worker 1] Starting...
+[2026-04-21 11:54:56.364] [info] Initializing GLOBAL shared resources (ASYNC-ONLY MODE):
+[2026-04-21 11:54:56.364] [info]   - Total DB connections: 19 (95% of 20) - ALL ASYNC
+[2026-04-21 11:54:56.364] [info]   - DB ThreadPool size: 7 = 2 workers + 5 service
+[2026-04-21 11:54:56.364] [info]     * Queen instances: 2 (one per HTTP worker, each with own event loop)
+[2026-04-21 11:54:56.364] [info]     * Service DB threads: 5 (metrics, retention, eviction)
+[2026-04-21 11:54:56.364] [info]   - System ThreadPool threads: 4 (for background service scheduling)
+[2026-04-21 11:54:56.364] [info]   - Number of HTTP workers: 2
+[2026-04-21 11:54:56.364] [info]   - Creating Async DB Pool (19 connections) for ALL operations
+[2026-04-21 11:54:56.364] [info] [AsyncDbPool] Initializing 19 async connections...
+[2026-04-21 11:54:56.495] [info] [AsyncDbPool] Initialization complete. 19 connections ready.
+[2026-04-21 11:54:56.495] [info]   - Created response queue for worker 0 (poll workers)
+[2026-04-21 11:54:56.495] [info]   - Created response queue for worker 1 (poll workers)
+[2026-04-21 11:54:56.495] [info]   - Per-worker Queen instances will be created in each worker thread
+[2026-04-21 11:54:56.495] [info]   - Created response registry for worker 0 (lock-free across workers)
+[2026-04-21 11:54:56.495] [info]   - Created response registry for worker 1 (lock-free across workers)
+[2026-04-21 11:54:56.495] [info] SharedStateManager: Disabled (no UDP peers or sync disabled)
+[2026-04-21 11:54:56.495] [info] Shared State Manager configured: Sync disabled, queue config cache will be active
+[2026-04-21 11:54:56.495] [info] System info: hostname=alice.local, port=6632
+[2026-04-21 11:54:56.495] [info] Global shared resources initialized successfully
+[2026-04-21 11:54:56.495] [info] [Worker 0] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 11:54:56.495] [info] [Worker 1] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 11:54:56.496] [info] [Worker 0] Database connection: OK | Pool: 18/19 conn available
+[2026-04-21 11:54:56.496] [info] [Worker 0] Initializing database schema...
+[2026-04-21 11:54:56.496] [info] [Worker 1] Database connection: OK | Pool: 18/19 conn available
+[2026-04-21 11:54:56.496] [info] [Worker 1] Waiting for shared file buffer from Worker 0...
+[2026-04-21 11:54:56.496] [info] Initializing schema: queen
+[2026-04-21 11:54:56.502] [info] Running base schema initialization...
+NOTICE:  schema "queen" already exists, skipping
+[2026-04-21 11:54:56.571] [info] Base schema applied successfully
+[2026-04-21 11:54:56.571] [info] Loading 15 stored procedure(s)...
+NOTICE:  function queen.is_stats_leader(text) does not exist, skipping
+NOTICE:  trigger "trg_update_worker_metrics_summary" for relation "queen.worker_metrics" does not exist, skipping
+[2026-04-21 11:54:56.609] [info] [Worker 0] Starting Shared State Manager...
+[2026-04-21 11:54:56.609] [info] SharedStateManager: Loading queue configs and maintenance modes from database...
+[2026-04-21 11:54:56.611] [info] SharedStateManager: Sync disabled, but queue config cache is available
+[2026-04-21 11:54:56.611] [info] [Worker 0] Registered MESSAGE_AVAILABLE callback for Queen instances
+[2026-04-21 11:54:56.611] [info] [Worker 0] Starting background metrics collector (sample: 1000ms, aggregate: 60s)...
+[2026-04-21 11:54:56.611] [info] MetricsCollector started: hostname=alice.local, port=6632, worker=cpp-worker-1, sampling every 1000ms, aggregating every 60s
+[2026-04-21 11:54:56.611] [info] [Worker 0] Starting background retention service...
+[2026-04-21 11:54:56.611] [info] RetentionService started: interval=300000ms, batch_size=1000, partition_cleanup_days=30, metrics_retention_days=90
+[2026-04-21 11:54:56.611] [info] [Worker 0] Starting background eviction service...
+[2026-04-21 11:54:56.611] [info] EvictionService started: interval=60000ms, batch_size=1000
+[2026-04-21 11:54:56.611] [info] [Worker 0] Starting background stats service...
+[2026-04-21 11:54:56.611] [info] StatsService started (queue/partition counts only): interval=10000ms, reconcile_interval=120000ms
+[2026-04-21 11:54:56.611] [info] [Worker 0] Creating SHARED file buffer manager (dir=/tmp/queen)...
+[2026-04-21 11:54:56.611] [info] RetentionService: Running cleanup cycle
+[2026-04-21 11:54:56.611] [info] FileBufferManager initializing: dir=/tmp/queen, recovery=true
+[2026-04-21 11:54:56.611] [info] StatsService: Running initial queue/partition stats refresh...
+[2026-04-21 11:54:56.611] [info] Buffer directories ready: /tmp/queen
+[2026-04-21 11:54:56.611] [info] Starting recovery of buffered events...
+[2026-04-21 11:54:56.611] [info] Deleting incomplete buffer file: qos0_019daf74-a58a-7000-bc30-7352bd9116ac.buf.tmp (only 0 bytes)
+[2026-04-21 11:54:56.611] [info] Deleting incomplete buffer file: failover_019daf74-a58a-7001-80a9-f1db9193b716.buf.tmp (only 0 bytes)
+[2026-04-21 11:54:56.611] [info] Starting recovery (max 3600s to avoid blocking server startup)...
+[2026-04-21 11:54:56.611] [info] Phase 1: Recovering failover events (FIFO order)...
+[2026-04-21 11:54:56.611] [info] Phase 2: Recovering QoS 0 events (batched)...
+[2026-04-21 11:54:56.611] [info] Startup recovery completed in 0ms: failover=0, qos0=0
+[2026-04-21 11:54:56.611] [info] Recovery complete
+[2026-04-21 11:54:56.611] [info] Buffer files initialized successfully
+[2026-04-21 11:54:56.612] [info] Background processor thread started
+[2026-04-21 11:54:56.612] [info] FileBufferManager ready
+[2026-04-21 11:54:56.612] [info] [Worker 0] File buffer ready - Pending: 0, Failed: 0, DB: healthy
+[2026-04-21 11:54:56.612] [info] [Worker 0] Sharing file buffer with other workers...
+[2026-04-21 11:54:56.612] [info] [Worker 0] File buffer shared successfully
+[2026-04-21 11:54:56.612] [info] [Worker 0] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 11:54:56.612] [info] [Worker 0] Creating uWS::App...
+[2026-04-21 11:54:56.612] [info] [Worker 1] Using shared file buffer from Worker 0
+[2026-04-21 11:54:56.612] [info] [Worker 1] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 11:54:56.612] [info] [Worker 1] Creating uWS::App...
+[2026-04-21 11:54:56.612] [info] [Worker 0] Creating per-worker Queen instance (100 connections, total pool split across 2 workers)...
+[2026-04-21 11:54:56.612] [info] [Worker 1] Creating per-worker Queen instance (100 connections, total pool split across 2 workers)...
+[2026-04-21 11:54:56.614] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 11:54:56.615] [info] RetentionService: cycle completed in 3ms
+[2026-04-21 11:54:56.623] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 0}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 0, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 11:54:56.632] [info] StatsService: cycle completed in 8ms
+[2026-04-21 11:54:57.112] [info] [Worker 1] Queen instance ready with 100 connections
+[2026-04-21 11:54:57.112] [info] [Worker 1] Registered Queen instance for UDP notifications
+[2026-04-21 11:54:57.112] [info] [Worker 1] Setting up routes...
+[2026-04-21 11:54:57.113] [warning] [Worker 1] Webapp directory not found - Static file serving disabled
+[2026-04-21 11:54:57.113] [warning] [Worker 1] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 11:54:57.113] [warning] [Worker 1] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 11:54:57.113] [info] [Worker 1] Routes configured
+[2026-04-21 11:54:57.113] [info] [Worker 1] Registered with acceptor
+[2026-04-21 11:54:57.113] [info] [Worker 1] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 11:54:57.113] [info] [Worker 1] Setting up response timer...
+[2026-04-21 11:54:57.113] [info] [Worker 1] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 11:54:57.115] [info] [Worker 0] Queen instance ready with 100 connections
+[2026-04-21 11:54:57.115] [info] [Worker 0] Registered Queen instance for UDP notifications
+[2026-04-21 11:54:57.115] [info] [Worker 0] Setting up routes...
+[2026-04-21 11:54:57.115] [warning] [Worker 0] Webapp directory not found - Static file serving disabled
+[2026-04-21 11:54:57.115] [warning] [Worker 0] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 11:54:57.115] [warning] [Worker 0] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 11:54:57.115] [info] [Worker 0] Routes configured
+[2026-04-21 11:54:57.115] [info] [Worker 0] Registered with acceptor
+[2026-04-21 11:54:57.115] [info] [Worker 0] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 11:54:57.115] [info] [Worker 0] Setting up response timer...
+[2026-04-21 11:54:57.115] [info] [Worker 0] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 11:54:57.125] [info] [Worker 1] [libqueen] Reconnection thread started
+[2026-04-21 11:54:57.125] [info] [Worker 0] [libqueen] Reconnection thread started
+[2026-04-21 11:54:57.153] [info] All 2 workers initialized in 789ms
+[2026-04-21 11:54:57.153] [info] Creating acceptor app...
+[2026-04-21 11:54:57.153] [info] Registered 2 worker apps with acceptor
+[2026-04-21 11:54:57.153] [info] Acceptor listening on 0.0.0.0:6632
+[2026-04-21 11:54:57.153] [info] Round-robin load balancing across 2 workers
+[2026-04-21 11:54:57.153] [info] Starting acceptor event loop...
+[2026-04-21 11:54:57.548] [info] [Worker 0] Configuring queue: perf-test via stored procedure
+[2026-04-21 11:54:58.125] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 13, Backoff: 0, JobsDone: 142, jobs/s: 142
+[2026-04-21 11:54:58.126] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 4, Backoff: 0, JobsDone: 147, jobs/s: 147
+[2026-04-21 11:54:59.125] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 1409, jobs/s: 1409
+[2026-04-21 11:54:59.128] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 0, Backoff: 0, JobsDone: 1388, jobs/s: 1388
+[2026-04-21 11:55:00.126] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 0, JobsDone: 521, jobs/s: 521
+[2026-04-21 11:55:00.129] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 508, jobs/s: 508
+[2026-04-21 11:55:01.127] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 2, Backoff: 0, JobsDone: 304, jobs/s: 304
+[2026-04-21 11:55:01.130] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 0, JobsDone: 328, jobs/s: 328
+[2026-04-21 11:55:02.127] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 0, JobsDone: 124, jobs/s: 124
+[2026-04-21 11:55:02.131] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 0, Backoff: 0, JobsDone: 185, jobs/s: 185
+[2026-04-21 11:55:03.127] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 0, JobsDone: 187, jobs/s: 187
+[2026-04-21 11:55:03.132] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 4, Backoff: 0, JobsDone: 267, jobs/s: 267
+[2026-04-21 11:55:04.126] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 0, Backoff: 0, JobsDone: 154, jobs/s: 154
+[2026-04-21 11:55:04.133] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 0, Backoff: 0, JobsDone: 184, jobs/s: 184
+[2026-04-21 11:55:05.127] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 85/100, Queue: 3, Backoff: 0, JobsDone: 418, jobs/s: 418
+[2026-04-21 11:55:05.133] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 0, Backoff: 0, JobsDone: 351, jobs/s: 351
+[2026-04-21 11:55:06.126] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 509, jobs/s: 509
+[2026-04-21 11:55:06.134] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 500, jobs/s: 500
+[2026-04-21 11:55:06.691] [info] StatsService: cycle completed in 63ms
+[2026-04-21 11:55:07.127] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 687, jobs/s: 687
+[2026-04-21 11:55:07.134] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 632, jobs/s: 632
+[2026-04-21 11:55:08.126] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 0, JobsDone: 767, jobs/s: 767
+[2026-04-21 11:55:08.134] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 0, JobsDone: 681, jobs/s: 681
+[2026-04-21 11:55:08.460] [info] [Worker 1] Configuring queue: perf-test via stored procedure
+[2026-04-21 11:55:09.139] [info] [Worker 1] [libqueen] EVL: 67ms, Slots: 98/100, Queue: 1, Backoff: 0, JobsDone: 94, jobs/s: 94
+[2026-04-21 11:55:09.208] [info] [Worker 0] [libqueen] EVL: 79ms, Slots: 98/100, Queue: 0, Backoff: 0, JobsDone: 100, jobs/s: 100
+[2026-04-21 11:55:09.421] [warning] [Worker 1] [libqueen] Event loop lag is too high: 111ms, expected: 5ms
+[2026-04-21 11:55:10.138] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 0, Backoff: 0, JobsDone: 91, jobs/s: 91
+[2026-04-21 11:55:10.208] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 169, jobs/s: 169
+[2026-04-21 11:55:11.139] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 0, Backoff: 0, JobsDone: 423, jobs/s: 423
+[2026-04-21 11:55:11.236] [info] [Worker 0] [libqueen] EVL: 54ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 498, jobs/s: 498
+[2026-04-21 11:55:12.139] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 483, jobs/s: 483
+[2026-04-21 11:55:12.243] [info] [Worker 0] [libqueen] EVL: 48ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 470, jobs/s: 470
+[2026-04-21 11:55:13.140] [info] [Worker 1] [libqueen] EVL: 45ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 472, jobs/s: 472
+[2026-04-21 11:55:13.244] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 401, jobs/s: 401
+[2026-04-21 11:55:14.139] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 17, Backoff: 1, JobsDone: 247, jobs/s: 247
+[2026-04-21 11:55:14.244] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 25, Backoff: 1, JobsDone: 247, jobs/s: 247
+[2026-04-21 11:55:15.139] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 6, Backoff: 1, JobsDone: 263, jobs/s: 263
+[2026-04-21 11:55:15.245] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 14, Backoff: 1, JobsDone: 264, jobs/s: 264
+[2026-04-21 11:55:16.139] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 23, Backoff: 1, JobsDone: 118, jobs/s: 118
+[2026-04-21 11:55:16.245] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 25, Backoff: 1, JobsDone: 127, jobs/s: 127
+[2026-04-21 11:55:16.709] [info] StatsService: cycle completed in 75ms
+[2026-04-21 11:55:17.139] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 18, Backoff: 1, JobsDone: 268, jobs/s: 268
+[2026-04-21 11:55:17.246] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 75/100, Queue: 13, Backoff: 1, JobsDone: 248, jobs/s: 248
+[2026-04-21 11:55:18.140] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 12, Backoff: 1, JobsDone: 273, jobs/s: 273
+[2026-04-21 11:55:18.247] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 21, Backoff: 1, JobsDone: 177, jobs/s: 177
+[2026-04-21 11:55:19.139] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 10, Backoff: 1, JobsDone: 306, jobs/s: 306
+[2026-04-21 11:55:19.247] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 15, Backoff: 1, JobsDone: 255, jobs/s: 255
+[2026-04-21 11:55:20.140] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 16, Backoff: 1, JobsDone: 154, jobs/s: 154
+[2026-04-21 11:55:20.248] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 10, Backoff: 1, JobsDone: 231, jobs/s: 231
+[2026-04-21 11:55:21.141] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 77/100, Queue: 12, Backoff: 1, JobsDone: 326, jobs/s: 326
+[2026-04-21 11:55:21.248] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 13, Backoff: 1, JobsDone: 261, jobs/s: 261
+[2026-04-21 11:55:22.141] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 79/100, Queue: 12, Backoff: 1, JobsDone: 279, jobs/s: 279
+[2026-04-21 11:55:22.252] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 16, Backoff: 1, JobsDone: 243, jobs/s: 243
+[2026-04-21 11:55:23.141] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 25, Backoff: 1, JobsDone: 209, jobs/s: 209
+[2026-04-21 11:55:23.249] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 17, Backoff: 1, JobsDone: 313, jobs/s: 313
+[2026-04-21 11:55:24.141] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 17, Backoff: 1, JobsDone: 186, jobs/s: 186
+[2026-04-21 11:55:24.249] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 19, Backoff: 1, JobsDone: 260, jobs/s: 260
+[2026-04-21 11:55:25.141] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 5, Backoff: 1, JobsDone: 348, jobs/s: 348
+[2026-04-21 11:55:25.250] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 13, Backoff: 1, JobsDone: 225, jobs/s: 225
+[2026-04-21 11:55:26.142] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 15, Backoff: 1, JobsDone: 274, jobs/s: 274
+[2026-04-21 11:55:26.250] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 82/100, Queue: 11, Backoff: 1, JobsDone: 353, jobs/s: 353
+[2026-04-21 11:55:26.732] [info] StatsService: cycle completed in 90ms
+[2026-04-21 11:55:27.141] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 18, Backoff: 1, JobsDone: 351, jobs/s: 351
+[2026-04-21 11:55:27.250] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 14, Backoff: 1, JobsDone: 295, jobs/s: 295
+[2026-04-21 11:55:28.142] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 80/100, Queue: 11, Backoff: 1, JobsDone: 303, jobs/s: 303
+[2026-04-21 11:55:28.250] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 16, Backoff: 1, JobsDone: 330, jobs/s: 330
+[2026-04-21 11:55:29.142] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 14, Backoff: 1, JobsDone: 370, jobs/s: 370
+[2026-04-21 11:55:29.251] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 16, Backoff: 1, JobsDone: 412, jobs/s: 412
+[2026-04-21 11:55:30.143] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 12, Backoff: 1, JobsDone: 274, jobs/s: 274
+[2026-04-21 11:55:30.252] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 15, Backoff: 1, JobsDone: 258, jobs/s: 258
+[2026-04-21 11:55:31.143] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 7, Backoff: 1, JobsDone: 229, jobs/s: 229
+[2026-04-21 11:55:31.251] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 22, Backoff: 1, JobsDone: 181, jobs/s: 181
+[2026-04-21 11:55:32.142] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 5, Backoff: 1, JobsDone: 243, jobs/s: 243
+[2026-04-21 11:55:32.251] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 1, Backoff: 1, JobsDone: 196, jobs/s: 196
+[2026-04-21 11:55:33.143] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 10, Backoff: 1, JobsDone: 42, jobs/s: 42
+[2026-04-21 11:55:33.252] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 13, Backoff: 1, JobsDone: 67, jobs/s: 67
+[2026-04-21 11:55:34.143] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 12, Backoff: 1, JobsDone: 125, jobs/s: 125
+[2026-04-21 11:55:34.252] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 2, Backoff: 1, JobsDone: 123, jobs/s: 123
+[2026-04-21 11:55:35.144] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 19, Backoff: 1, JobsDone: 302, jobs/s: 302
+[2026-04-21 11:55:35.253] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 12, Backoff: 1, JobsDone: 379, jobs/s: 379
+[2026-04-21 11:55:36.144] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 12, Backoff: 1, JobsDone: 295, jobs/s: 295
+[2026-04-21 11:55:36.252] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 3, Backoff: 1, JobsDone: 339, jobs/s: 339
+[2026-04-21 11:55:36.726] [info] StatsService: cycle completed in 83ms
+[2026-04-21 11:55:37.145] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 23, Backoff: 1, JobsDone: 269, jobs/s: 269
+[2026-04-21 11:55:37.252] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 14, Backoff: 1, JobsDone: 425, jobs/s: 425
+[2026-04-21 11:55:38.145] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 6, Backoff: 1, JobsDone: 298, jobs/s: 298
+[2026-04-21 11:55:38.253] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 6, Backoff: 1, JobsDone: 268, jobs/s: 268
+[2026-04-21 11:55:39.146] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 21, Backoff: 1, JobsDone: 255, jobs/s: 255
+[2026-04-21 11:55:39.252] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 19, Backoff: 1, JobsDone: 250, jobs/s: 250
+[2026-04-21 11:55:40.148] [info] [Worker 1] [libqueen] EVL: 4ms, Slots: 76/100, Queue: 0, Backoff: 1, JobsDone: 162, jobs/s: 162
+[2026-04-21 11:55:40.253] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 5, Backoff: 1, JobsDone: 149, jobs/s: 149
+[2026-04-21 11:55:41.148] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 11, Backoff: 1, JobsDone: 84, jobs/s: 84
+[2026-04-21 11:55:41.253] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 9, Backoff: 1, JobsDone: 105, jobs/s: 105
+[2026-04-21 11:55:42.148] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 17, Backoff: 1, JobsDone: 290, jobs/s: 290
+[2026-04-21 11:55:42.254] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 22, Backoff: 1, JobsDone: 346, jobs/s: 346
+[2026-04-21 11:55:43.148] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 7, Backoff: 1, JobsDone: 297, jobs/s: 297
+[2026-04-21 11:55:43.254] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 10, Backoff: 1, JobsDone: 287, jobs/s: 287
+[2026-04-21 11:55:44.148] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 7, Backoff: 1, JobsDone: 280, jobs/s: 280
+[2026-04-21 11:55:44.254] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 5, Backoff: 1, JobsDone: 426, jobs/s: 426
+[2026-04-21 11:55:45.148] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 14, Backoff: 1, JobsDone: 239, jobs/s: 239
+[2026-04-21 11:55:45.254] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 10, Backoff: 1, JobsDone: 356, jobs/s: 356
+[2026-04-21 11:55:46.148] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 14, Backoff: 1, JobsDone: 244, jobs/s: 244
+[2026-04-21 11:55:46.253] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 2, Backoff: 1, JobsDone: 205, jobs/s: 205
+[2026-04-21 11:55:46.730] [info] StatsService: cycle completed in 86ms
+[2026-04-21 11:55:47.148] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 6, Backoff: 1, JobsDone: 261, jobs/s: 261
+[2026-04-21 11:55:47.253] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 83/100, Queue: 21, Backoff: 1, JobsDone: 283, jobs/s: 283
+[2026-04-21 11:55:48.151] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 0, Backoff: 1, JobsDone: 225, jobs/s: 225
+[2026-04-21 11:55:48.255] [info] [Worker 0] [libqueen] EVL: 27ms, Slots: 71/100, Queue: 0, Backoff: 1, JobsDone: 134, jobs/s: 134
+[2026-04-21 11:55:49.151] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 5, Backoff: 1, JobsDone: 36, jobs/s: 36
+[2026-04-21 11:55:49.255] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 68/100, Queue: 4, Backoff: 1, JobsDone: 36, jobs/s: 36
+[2026-04-21 11:55:50.150] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 8, Backoff: 1, JobsDone: 151, jobs/s: 151
+[2026-04-21 11:55:50.255] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 73/100, Queue: 5, Backoff: 1, JobsDone: 167, jobs/s: 167
+[2026-04-21 11:55:51.151] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 1, Backoff: 1, JobsDone: 260, jobs/s: 260
+[2026-04-21 11:55:51.255] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 15, Backoff: 1, JobsDone: 266, jobs/s: 266
+[2026-04-21 11:55:52.152] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 6, Backoff: 1, JobsDone: 216, jobs/s: 216
+[2026-04-21 11:55:52.255] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 18, Backoff: 1, JobsDone: 207, jobs/s: 207
+[2026-04-21 11:55:53.153] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 8, Backoff: 1, JobsDone: 280, jobs/s: 280
+[2026-04-21 11:55:53.255] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 5, Backoff: 1, JobsDone: 286, jobs/s: 286
+[2026-04-21 11:55:54.153] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 1, Backoff: 1, JobsDone: 150, jobs/s: 150
+[2026-04-21 11:55:54.255] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 4, Backoff: 1, JobsDone: 246, jobs/s: 246
+[2026-04-21 11:55:55.153] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 3, Backoff: 1, JobsDone: 218, jobs/s: 218
+[2026-04-21 11:55:55.255] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 3, Backoff: 1, JobsDone: 306, jobs/s: 306
+[2026-04-21 11:55:56.152] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 4, Backoff: 1, JobsDone: 210, jobs/s: 210
+[2026-04-21 11:55:56.255] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 4, Backoff: 1, JobsDone: 170, jobs/s: 170
+[2026-04-21 11:55:56.978] [info] StatsService: cycle completed in 333ms
+[2026-04-21 11:55:57.153] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 4, Backoff: 1, JobsDone: 209, jobs/s: 209
+[2026-04-21 11:55:57.256] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 2, Backoff: 1, JobsDone: 209, jobs/s: 209
+[2026-04-21 11:55:58.153] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 0, Backoff: 1, JobsDone: 240, jobs/s: 240
+[2026-04-21 11:55:58.256] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 2, Backoff: 1, JobsDone: 286, jobs/s: 286
+[2026-04-21 11:55:59.153] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 7, Backoff: 1, JobsDone: 339, jobs/s: 339
+[2026-04-21 11:55:59.256] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 1, Backoff: 1, JobsDone: 330, jobs/s: 330
+[2026-04-21 11:56:00.153] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 6, Backoff: 1, JobsDone: 176, jobs/s: 176
+[2026-04-21 11:56:00.257] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 4, Backoff: 1, JobsDone: 159, jobs/s: 159
+[2026-04-21 11:56:01.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 5, Backoff: 1, JobsDone: 217, jobs/s: 217
+[2026-04-21 11:56:01.257] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 3, Backoff: 1, JobsDone: 189, jobs/s: 189
+[2026-04-21 11:56:02.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 5, Backoff: 1, JobsDone: 202, jobs/s: 202
+[2026-04-21 11:56:02.257] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 4, Backoff: 1, JobsDone: 241, jobs/s: 241
+[2026-04-21 11:56:03.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 70/100, Queue: 1, Backoff: 1, JobsDone: 180, jobs/s: 180
+[2026-04-21 11:56:03.257] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 69/100, Queue: 1, Backoff: 1, JobsDone: 226, jobs/s: 226
+[2026-04-21 11:56:04.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 3, Backoff: 1, JobsDone: 231, jobs/s: 231
+[2026-04-21 11:56:04.257] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 0, Backoff: 1, JobsDone: 306, jobs/s: 306
+[2026-04-21 11:56:05.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 3, Backoff: 1, JobsDone: 293, jobs/s: 293
+[2026-04-21 11:56:05.258] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 1, Backoff: 1, JobsDone: 236, jobs/s: 236
+[2026-04-21 11:56:06.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 3, Backoff: 1, JobsDone: 256, jobs/s: 256
+[2026-04-21 11:56:06.259] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 0, Backoff: 1, JobsDone: 221, jobs/s: 221
+[2026-04-21 11:56:07.142] [info] StatsService: cycle completed in 482ms
+[2026-04-21 11:56:07.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 2, Backoff: 1, JobsDone: 100, jobs/s: 100
+[2026-04-21 11:56:07.260] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 3, Backoff: 1, JobsDone: 65, jobs/s: 65
+[2026-04-21 11:56:08.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 10, Backoff: 1, JobsDone: 137, jobs/s: 137
+[2026-04-21 11:56:08.261] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 83/100, Queue: 11, Backoff: 1, JobsDone: 169, jobs/s: 169
+[2026-04-21 11:56:09.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 0, Backoff: 1, JobsDone: 202, jobs/s: 202
+[2026-04-21 11:56:09.261] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 0, Backoff: 1, JobsDone: 208, jobs/s: 208
+[2026-04-21 11:56:10.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 0, Backoff: 1, JobsDone: 174, jobs/s: 174
+[2026-04-21 11:56:10.261] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 0, Backoff: 1, JobsDone: 250, jobs/s: 250
+[2026-04-21 11:56:11.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 4, Backoff: 1, JobsDone: 134, jobs/s: 134
+[2026-04-21 11:56:11.261] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 3, Backoff: 1, JobsDone: 238, jobs/s: 238
+[2026-04-21 11:56:12.154] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 2, Backoff: 1, JobsDone: 212, jobs/s: 212
+[2026-04-21 11:56:12.262] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 70/100, Queue: 1, Backoff: 1, JobsDone: 251, jobs/s: 251
+[2026-04-21 11:56:13.155] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 3, Backoff: 1, JobsDone: 99, jobs/s: 99
+[2026-04-21 11:56:13.263] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 71/100, Queue: 2, Backoff: 1, JobsDone: 154, jobs/s: 154
+[2026-04-21 11:56:14.155] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 1, Backoff: 1, JobsDone: 146, jobs/s: 146
+[2026-04-21 11:56:14.263] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 1, Backoff: 1, JobsDone: 148, jobs/s: 148
+[2026-04-21 11:56:15.155] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 14, Backoff: 1, JobsDone: 244, jobs/s: 244
+[2026-04-21 11:56:15.263] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 0, Backoff: 1, JobsDone: 276, jobs/s: 276
+[2026-04-21 11:56:16.155] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 5, Backoff: 1, JobsDone: 244, jobs/s: 244
+[2026-04-21 11:56:16.263] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 5, Backoff: 1, JobsDone: 233, jobs/s: 233
+[2026-04-21 11:56:16.846] [info] StatsService: cycle completed in 182ms
+[2026-04-21 11:56:17.156] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 0, Backoff: 1, JobsDone: 197, jobs/s: 197
+[2026-04-21 11:56:17.263] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 0, Backoff: 1, JobsDone: 164, jobs/s: 164
+[2026-04-21 11:56:18.156] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 5, Backoff: 1, JobsDone: 161, jobs/s: 161
+[2026-04-21 11:56:18.263] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 69/100, Queue: 1, Backoff: 1, JobsDone: 212, jobs/s: 212
+[2026-04-21 11:56:19.156] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 68/100, Queue: 5, Backoff: 1, JobsDone: 84, jobs/s: 84
+[2026-04-21 11:56:19.264] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 68/100, Queue: 6, Backoff: 1, JobsDone: 90, jobs/s: 90
+[2026-04-21 11:56:20.157] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 7, Backoff: 1, JobsDone: 148, jobs/s: 148
+[2026-04-21 11:56:20.264] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 71/100, Queue: 6, Backoff: 1, JobsDone: 186, jobs/s: 186
+[2026-04-21 11:56:21.158] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 4, Backoff: 1, JobsDone: 192, jobs/s: 192
+[2026-04-21 11:56:21.264] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 71/100, Queue: 6, Backoff: 1, JobsDone: 201, jobs/s: 201
+[2026-04-21 11:56:22.157] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 0, Backoff: 1, JobsDone: 208, jobs/s: 208
+[2026-04-21 11:56:22.265] [info] [Worker 0] [libqueen] EVL: 2ms, Slots: 69/100, Queue: 0, Backoff: 1, JobsDone: 278, jobs/s: 278
+[2026-04-21 11:56:23.157] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 71/100, Queue: 3, Backoff: 1, JobsDone: 81, jobs/s: 81
+[2026-04-21 11:56:23.266] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 69/100, Queue: 4, Backoff: 1, JobsDone: 123, jobs/s: 123
+[2026-04-21 11:56:24.157] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 1, Backoff: 1, JobsDone: 161, jobs/s: 161
+[2026-04-21 11:56:24.266] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 71/100, Queue: 2, Backoff: 1, JobsDone: 233, jobs/s: 233
+[2026-04-21 11:56:25.157] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 0, Backoff: 1, JobsDone: 188, jobs/s: 188
+[2026-04-21 11:56:25.266] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 5, Backoff: 1, JobsDone: 267, jobs/s: 267
+[2026-04-21 11:56:26.158] [info] [Worker 1] [libqueen] Cleaned up 1 stale backoff entries
+[2026-04-21 11:56:26.158] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 0, Backoff: 1, JobsDone: 173, jobs/s: 173
+[2026-04-21 11:56:26.267] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 71/100, Queue: 0, Backoff: 1, JobsDone: 145, jobs/s: 145
+[2026-04-21 11:56:27.019] [info] StatsService: cycle completed in 350ms
+[2026-04-21 11:56:27.157] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 0, Backoff: 1, JobsDone: 84, jobs/s: 84
+[2026-04-21 11:56:27.267] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 1, Backoff: 1, JobsDone: 131, jobs/s: 131
+[2026-04-21 11:56:28.157] [info] [Worker 1] [libqueen] Cleaned up 1 stale backoff entries
+[2026-04-21 11:56:28.157] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 2, Backoff: 1, JobsDone: 151, jobs/s: 151
+[2026-04-21 11:56:28.267] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 1, Backoff: 1, JobsDone: 158, jobs/s: 158
+[2026-04-21 11:56:29.158] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 5, Backoff: 1, JobsDone: 204, jobs/s: 204
+[2026-04-21 11:56:29.266] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 4, Backoff: 1, JobsDone: 207, jobs/s: 207
+[2026-04-21 11:56:30.158] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 0, Backoff: 1, JobsDone: 172, jobs/s: 172
+[2026-04-21 11:56:30.267] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 0, Backoff: 1, JobsDone: 171, jobs/s: 171
+[2026-04-21 11:56:31.159] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 68/100, Queue: 6, Backoff: 1, JobsDone: 101, jobs/s: 101
+[2026-04-21 11:56:31.267] [info] [Worker 0] [libqueen] Cleaned up 1 stale backoff entries
+[2026-04-21 11:56:31.267] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 1, Backoff: 1, JobsDone: 117, jobs/s: 117
+[2026-04-21 11:56:32.159] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 68/100, Queue: 3, Backoff: 1, JobsDone: 161, jobs/s: 161
+[2026-04-21 11:56:32.268] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 3, Backoff: 1, JobsDone: 146, jobs/s: 146
+[2026-04-21 11:56:33.159] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 67/100, Queue: 0, Backoff: 1, JobsDone: 44, jobs/s: 44
+[2026-04-21 11:56:33.268] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 71/100, Queue: 2, Backoff: 1, JobsDone: 39, jobs/s: 39
+[2026-04-21 11:56:34.160] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 69/100, Queue: 0, Backoff: 1, JobsDone: 125, jobs/s: 125
+[2026-04-21 11:56:34.269] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 6, Backoff: 1, JobsDone: 103, jobs/s: 103
+[2026-04-21 11:56:35.161] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 68/100, Queue: 3, Backoff: 1, JobsDone: 117, jobs/s: 117
+[2026-04-21 11:56:35.269] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 71/100, Queue: 4, Backoff: 1, JobsDone: 101, jobs/s: 101
+[2026-04-21 11:56:36.161] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 70/100, Queue: 0, Backoff: 1, JobsDone: 164, jobs/s: 164
+[2026-04-21 11:56:36.269] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 70/100, Queue: 0, Backoff: 1, JobsDone: 162, jobs/s: 162
+[2026-04-21 11:56:36.850] [info] StatsService: cycle completed in 178ms
+[2026-04-21 11:56:37.161] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 67/100, Queue: 0, Backoff: 1, JobsDone: 116, jobs/s: 116
+[2026-04-21 11:56:37.269] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 70/100, Queue: 1, Backoff: 1, JobsDone: 132, jobs/s: 132
+[2026-04-21 11:56:38.162] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 68/100, Queue: 0, Backoff: 1, JobsDone: 247, jobs/s: 247
+[2026-04-21 11:56:38.270] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 71/100, Queue: 1, Backoff: 1, JobsDone: 171, jobs/s: 171
+[2026-04-21 11:56:39.163] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 63/100, Queue: 1, Backoff: 1, JobsDone: 53, jobs/s: 53
+[2026-04-21 11:56:39.269] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 2, Backoff: 1, JobsDone: 66, jobs/s: 66
+[2026-04-21 11:56:40.162] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 62/100, Queue: 1, Backoff: 1, JobsDone: 155, jobs/s: 155
+[2026-04-21 11:56:40.269] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 71/100, Queue: 1, Backoff: 1, JobsDone: 110, jobs/s: 110
+[2026-04-21 11:56:41.163] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 6, Backoff: 1, JobsDone: 220, jobs/s: 220
+[2026-04-21 11:56:41.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 0, Backoff: 1, JobsDone: 222, jobs/s: 222
+[2026-04-21 11:56:42.164] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 1, Backoff: 1, JobsDone: 190, jobs/s: 190
+[2026-04-21 11:56:42.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 1, Backoff: 1, JobsDone: 151, jobs/s: 151
+[2026-04-21 11:56:43.165] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 7, Backoff: 1, JobsDone: 222, jobs/s: 222
+[2026-04-21 11:56:43.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 0, Backoff: 1, JobsDone: 218, jobs/s: 218
+[2026-04-21 11:56:44.165] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 72/100, Queue: 8, Backoff: 1, JobsDone: 258, jobs/s: 258
+[2026-04-21 11:56:44.272] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 1, Backoff: 1, JobsDone: 233, jobs/s: 233
+[2026-04-21 11:56:45.165] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 64/100, Queue: 0, Backoff: 1, JobsDone: 311, jobs/s: 311
+[2026-04-21 11:56:45.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 1, Backoff: 1, JobsDone: 203, jobs/s: 203
+[2026-04-21 11:56:46.166] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 68/100, Queue: 0, Backoff: 1, JobsDone: 238, jobs/s: 238
+[2026-04-21 11:56:46.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 0, Backoff: 1, JobsDone: 219, jobs/s: 219
+[2026-04-21 11:56:46.992] [info] StatsService: cycle completed in 317ms
+[2026-04-21 11:56:47.166] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 0, Backoff: 1, JobsDone: 190, jobs/s: 190
+[2026-04-21 11:56:47.274] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 1, Backoff: 1, JobsDone: 196, jobs/s: 196
+[2026-04-21 11:56:48.167] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 2, Backoff: 1, JobsDone: 270, jobs/s: 270
+[2026-04-21 11:56:48.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 1, Backoff: 1, JobsDone: 230, jobs/s: 230
+[2026-04-21 11:56:49.166] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 68/100, Queue: 2, Backoff: 1, JobsDone: 153, jobs/s: 153
+[2026-04-21 11:56:49.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 2, Backoff: 1, JobsDone: 171, jobs/s: 171
+[2026-04-21 11:56:50.167] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 77/100, Queue: 14, Backoff: 1, JobsDone: 268, jobs/s: 268
+[2026-04-21 11:56:50.274] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 5, Backoff: 1, JobsDone: 259, jobs/s: 259
+[2026-04-21 11:56:51.166] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 4, Backoff: 1, JobsDone: 365, jobs/s: 365
+[2026-04-21 11:56:51.274] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 6, Backoff: 1, JobsDone: 254, jobs/s: 254
+[2026-04-21 11:56:52.167] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 2, Backoff: 1, JobsDone: 102, jobs/s: 102
+[2026-04-21 11:56:52.275] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 1, Backoff: 1, JobsDone: 106, jobs/s: 106
+[2026-04-21 11:56:53.168] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 0, Backoff: 1, JobsDone: 134, jobs/s: 134
+[2026-04-21 11:56:53.274] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 3, Backoff: 1, JobsDone: 105, jobs/s: 105
+[2026-04-21 11:56:54.167] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 5, Backoff: 1, JobsDone: 361, jobs/s: 361
+[2026-04-21 11:56:54.275] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 0, Backoff: 1, JobsDone: 272, jobs/s: 272
+[2026-04-21 11:56:55.168] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 7, Backoff: 1, JobsDone: 286, jobs/s: 286
+[2026-04-21 11:56:55.275] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 0, Backoff: 1, JobsDone: 175, jobs/s: 175
+[2026-04-21 11:56:56.168] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 73/100, Queue: 3, Backoff: 1, JobsDone: 199, jobs/s: 199
+[2026-04-21 11:56:56.274] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 2, Backoff: 1, JobsDone: 206, jobs/s: 206
+[2026-04-21 11:56:56.695] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 11:56:57.168] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 75/100, Queue: 0, Backoff: 1, JobsDone: 333, jobs/s: 333
+[2026-04-21 11:56:57.275] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 0, Backoff: 1, JobsDone: 226, jobs/s: 226
+[2026-04-21 11:56:58.168] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 1, Backoff: 1, JobsDone: 207, jobs/s: 207
+[2026-04-21 11:56:58.275] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 0, Backoff: 1, JobsDone: 128, jobs/s: 128
+[2026-04-21 11:56:58.949] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 1}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 244, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 11:56:58.949] [info] StatsService: cycle completed in 2273ms
+[2026-04-21 11:56:59.169] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 2, Backoff: 1, JobsDone: 244, jobs/s: 244
+[2026-04-21 11:56:59.275] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 2, Backoff: 1, JobsDone: 201, jobs/s: 201
+[2026-04-21 11:57:00.169] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 1, Backoff: 1, JobsDone: 385, jobs/s: 385
+[2026-04-21 11:57:00.276] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 1, Backoff: 1, JobsDone: 246, jobs/s: 246
+[2026-04-21 11:57:01.170] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 0, Backoff: 1, JobsDone: 206, jobs/s: 206
+[2026-04-21 11:57:01.275] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 5, Backoff: 1, JobsDone: 254, jobs/s: 254
+[2026-04-21 11:57:02.171] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 1, Backoff: 1, JobsDone: 283, jobs/s: 283
+[2026-04-21 11:57:02.276] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 0, Backoff: 1, JobsDone: 226, jobs/s: 226
+[2026-04-21 11:57:03.171] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 76/100, Queue: 2, Backoff: 1, JobsDone: 194, jobs/s: 194
+[2026-04-21 11:57:03.277] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 8, Backoff: 1, JobsDone: 208, jobs/s: 208
+[2026-04-21 11:57:04.171] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 0, Backoff: 1, JobsDone: 95, jobs/s: 95
+[2026-04-21 11:57:04.277] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 1, Backoff: 1, JobsDone: 151, jobs/s: 151
+[2026-04-21 11:57:05.171] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 73/100, Queue: 0, Backoff: 1, JobsDone: 118, jobs/s: 118
+[2026-04-21 11:57:05.277] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 69/100, Queue: 0, Backoff: 1, JobsDone: 131, jobs/s: 131
+[2026-04-21 11:57:06.172] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 68/100, Queue: 1, Backoff: 1, JobsDone: 193, jobs/s: 193
+[2026-04-21 11:57:06.278] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 78/100, Queue: 0, Backoff: 1, JobsDone: 168, jobs/s: 168
+[2026-04-21 11:57:07.172] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 0, Backoff: 1, JobsDone: 288, jobs/s: 288
+[2026-04-21 11:57:07.278] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 10, Backoff: 1, JobsDone: 246, jobs/s: 246
+[2026-04-21 11:57:08.172] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 74/100, Queue: 0, Backoff: 1, JobsDone: 274, jobs/s: 274
+[2026-04-21 11:57:08.279] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 77/100, Queue: 0, Backoff: 1, JobsDone: 228, jobs/s: 228
+[2026-04-21 11:57:08.729] [info] QPOP: Connection aborted for 10b11292-9bc5-42dc-8c6c-2a1073f95a78
+[2026-04-21 11:57:08.731] [info] QPOP: Connection aborted for fcd15716-2ef2-4ac3-8e23-8998ad9dd089
+[2026-04-21 11:57:08.731] [info] QPOP: Connection aborted for daa3387f-414a-434c-b8b0-c08f83cc4b6f
+[2026-04-21 11:57:08.731] [info] QPOP: Connection aborted for 298b7eed-03b7-4c68-9760-c1a32e8951ed
+[2026-04-21 11:57:08.731] [info] QPOP: Connection aborted for b05e7f9c-3fbf-4091-a2f8-7f617cf47ef7
+[2026-04-21 11:57:08.732] [info] QPOP: Connection aborted for 667b765b-c2cf-4fbc-93be-3ed1bd76041e
+[2026-04-21 11:57:08.732] [info] QPOP: Connection aborted for 1a2e127e-88b1-4187-81b2-5fef6039725a
+[2026-04-21 11:57:08.732] [info] QPOP: Connection aborted for 7df478e0-578e-47f2-a453-3e80cb56be14
+[2026-04-21 11:57:08.733] [info] QPOP: Connection aborted for 258ec488-dfee-4749-9d2f-818b46c0a5a6
+[2026-04-21 11:57:08.734] [info] QPOP: Connection aborted for e39ae546-56b5-452a-b9ec-d19bdd0b06ab
+[2026-04-21 11:57:08.734] [info] QPOP: Connection aborted for f9b7ee30-3ab9-4f4a-b278-4f5136a13f16
+[2026-04-21 11:57:08.734] [info] QPOP: Connection aborted for a0d3fd4a-e446-4883-8d4c-c65396210e78
+[2026-04-21 11:57:08.735] [info] QPOP: Connection aborted for c7b55151-9b84-4150-ab62-f557d2bc2122
+[2026-04-21 11:57:08.735] [info] QPOP: Connection aborted for 72d52245-354f-4ba5-be30-0369cf5c222e
+[2026-04-21 11:57:08.736] [info] QPOP: Connection aborted for 118c824f-f07e-4a15-8e5a-6ec4e0fd6299
+[2026-04-21 11:57:08.736] [info] QPOP: Connection aborted for 359be7f7-5ba4-42d8-a294-8cc06267e2f8
+[2026-04-21 11:57:08.736] [info] QPOP: Connection aborted for be29b738-bf1a-45b4-b3b2-7d582f7d6dcb
+[2026-04-21 11:57:08.736] [info] QPOP: Connection aborted for 49fae11b-3466-4362-b915-e03d0cc2d648
+[2026-04-21 11:57:08.736] [info] QPOP: Connection aborted for 51b07292-5d4a-40c8-89e4-d5ecd5231c64
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for c5604ddd-999c-40e0-b676-f2fb8528d815
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for 54b13fdf-ccad-4d0c-83dc-af74064a9bb5
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for a70c843b-bc71-43ef-8c06-f79409fc3279
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for 9a2aa160-e9f9-466a-bf54-32fa601f3823
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for fa80792a-e726-4041-957d-e5aa0d6943de
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for b2dc550e-13cd-44fb-89d7-4a7a04e9783b
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for b7bac88a-f164-4a89-a3aa-45a23a511097
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for 9e119c9b-7cdc-4c7c-82a9-86c012bfae3c
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for 2710e986-43a7-469e-86cf-c49c635d86c1
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for d34c1399-8bfc-4389-94c7-5ed81acc46c4
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for 6826f403-1d28-4afe-be84-b6eb8dc416d7
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 247d2727-7199-4070-a95d-d6531a0d364f
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 7a0d2043-2676-42c9-b514-16630ea0a796
+[2026-04-21 11:57:08.737] [info] QPOP: Connection aborted for 90d49af1-20de-4081-85a9-fd43aa579097
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for ae52c73f-1ff8-41ed-b1c6-9433bcdc6352
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 9540f62d-6c06-445d-818f-c24bc7415d8a
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for f5b0b102-79db-4810-be8b-47d15224db53
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 1a568056-f8fa-4b6d-8884-3dc63e69d76c
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 4ea71223-448d-4ebf-9771-39b7d3189dfd
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for d2e41920-b88f-4384-b37e-c0985fb3d23a
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 389b157c-dfd3-41a6-af97-21efed2e2ac8
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for a36c6095-7cae-40ff-b3f4-9ab0e1c35baa
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 246ad925-4f91-476f-a516-d10aa4094b5b
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for f1299f60-9191-4628-a12f-98789d66756c
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 2e0a76b2-08f2-4036-b706-1dae801bdda4
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for c9bb72c3-ff07-4215-a202-5c020c87a5ab
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for a2879039-6f16-49ea-8e36-78a9d5a1a001
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 84754880-e3b1-4c47-a17a-7f742be86456
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for 6054be51-e68b-421d-a36e-1b74a49c4e82
+[2026-04-21 11:57:08.738] [info] QPOP: Connection aborted for a0cc0a62-1287-4208-bb37-2dbdbbd77819
+[2026-04-21 11:57:09.173] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 75/100, Queue: 0, Backoff: 1, JobsDone: 153, jobs/s: 153
+[2026-04-21 11:57:09.246] [info] StatsService: cycle completed in 2566ms
+[2026-04-21 11:57:09.279] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 114, jobs/s: 114
+[2026-04-21 11:57:10.173] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 1, JobsDone: 304, jobs/s: 304
+[2026-04-21 11:57:10.279] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 0, JobsDone: 178, jobs/s: 178
+[2026-04-21 11:57:11.279] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 11:57:12.688] [info] Received signal 15, shutting down...
+[2026-04-21 11:57:12.688] [info] Exiting (worker threads will be terminated by OS)

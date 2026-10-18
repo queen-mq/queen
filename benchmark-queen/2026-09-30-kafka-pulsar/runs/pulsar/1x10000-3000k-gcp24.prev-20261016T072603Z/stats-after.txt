@@ -1,0 +1,15 @@
+  n1  node=1 zk     pid=30096 up=50s cpu=4s rss=2225MB thr=154 fds=433 | gc cycles=1 (major 1) pauses=5 max=0.02ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.36ms | log ERROR=0 WARN=7 (since start)
+  n1  node=1 bookie pid=30689 up=43s cpu=7s rss=6346MB thr=230 fds=1016 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.33ms | log ERROR=2 WARN=3 (since start)
+  n1  node=1 bookie   ERROR x2: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark.N (this is okay if it is the first time starting this bookie {
+  n1  node=1 broker pid=31208 up=38s cpu=17s rss=12634MB thr=266 fds=619 | gc cycles=3 (major 3) pauses=15 max=0.02ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.63ms | log ERROR=0 WARN=8 (since start)
+  n1  node=1 disk   data=9MB zk=1MB journal=2MB (2 .txn in 2 dirs) ledgers=9MB (entry logs=0, 0MB; locations=5MB ledgers-index=5MB) | fs 6% used, 1.4T free
+  n2  node=2 zk     pid=26183 up=50s cpu=4s rss=2216MB thr=151 fds=429 | gc cycles=1 (major 1) pauses=5 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.50ms | log ERROR=0 WARN=8 (since start)
+  n2  node=2 bookie pid=26491 up=43s cpu=7s rss=6344MB thr=233 fds=1016 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.29ms | log ERROR=2 WARN=6 (since start)
+  n2  node=2 bookie   ERROR x2: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark.N (this is okay if it is the first time starting this bookie {
+  n2  node=2 broker pid=26925 up=38s cpu=17s rss=12652MB thr=263 fds=619 | gc cycles=3 (major 3) pauses=15 max=0.02ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.51ms | log ERROR=0 WARN=8 (since start)
+  n2  node=2 disk   data=9MB zk=1MB journal=2MB (2 .txn in 2 dirs) ledgers=9MB (entry logs=0, 0MB; locations=5MB ledgers-index=5MB) | fs 6% used, 1.4T free
+  n3  node=3 zk     pid=25893 up=50s cpu=4s rss=2223MB thr=160 fds=431 | gc cycles=1 (major 1) pauses=5 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.37ms | log ERROR=0 WARN=7 (since start)
+  n3  node=3 bookie pid=26209 up=43s cpu=7s rss=6342MB thr=228 fds=1016 | gc cycles=2 (major 2) pauses=10 max=0.01ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.40ms | log ERROR=2 WARN=3 (since start)
+  n3  node=3 bookie   ERROR x2: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark.N (this is okay if it is the first time starting this bookie {
+  n3  node=3 broker pid=26569 up=38s cpu=17s rss=12628MB thr=263 fds=619 | gc cycles=3 (major 3) pauses=15 max=0.03ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.58ms | log ERROR=0 WARN=8 (since start)
+  n3  node=3 disk   data=9MB zk=1MB journal=2MB (2 .txn in 2 dirs) ledgers=9MB (entry logs=0, 0MB; locations=5MB ledgers-index=5MB) | fs 6% used, 1.4T free

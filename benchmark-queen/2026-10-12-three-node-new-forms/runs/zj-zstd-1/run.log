@@ -1,0 +1,7 @@
+[09:44:02] run zj-zstd-1: binary zstd240, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 90s at: 1000000 | EXTRA= | QEXTRA=-ack-counts -tail 30s
+[09:44:25] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 1000 partitions
+[09:46:34] 1,000,000: last 30 s: offered 999,993 pushed 999,976 consumed 1,000,056 | run: shed 0 errors 0 | push p50 2.0 p99 3.3 | e2e p50 4.5 p99 9.5 worst 9.7 | cores 8.7 / 3.7 / 3.8 | mem GB 2.5 / 2.3 / 2.3 | loaders 12.2c  OK 
+RUN_DONE

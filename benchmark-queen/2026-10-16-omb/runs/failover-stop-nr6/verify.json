@@ -1,0 +1,12 @@
+{
+  "acked": 17778900,
+  "duplicate_examples": null,
+  "duplicates": 0,
+  "foreign": 0,
+  "lost": 0,
+  "lost_examples": null,
+  "partitions": 100,
+  "records_read": 17778900,
+  "reorder_examples": null,
+  "reorders": 0
+}

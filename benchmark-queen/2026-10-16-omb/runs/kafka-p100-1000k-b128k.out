@@ -1,0 +1,3 @@
+[14:07:08] omb: run kafka-p100-1000k-b128k: system kafka, driver kafka-b128k.yaml, workload 1-topic-100-partitions-1kb-4p-4c-1000k.yaml
+[14:07:13] omb: 6 workers up
+kafka-p100-1000k-b128k [kafka] 1-topic-100-partitions-1kb-4p-4c-1000k.yaml: pub 1,002k/s cons 1,002k/s err 0 backlog max 8,416 | pub p50/p99/p99.9 1.1/7.7/93.1 ms | e2e p50/p99/p99.9 2.0/9.0/96.0 ms (max 212) | brokers 11.9 cores, disk write 1037/1037/1037 MB/s

@@ -1,0 +1,1 @@
+Kafka's stock driver did not survive 1k topics: in kafka-t1k a producer worker (10.250.0.38:8080, about 1,333 KafkaProducer clients in an 8 GB heap) answered /period-stats with HTTP 500 ten seconds into the warm-up, and OMB aborted; 10k topics means ten times as many clients per worker

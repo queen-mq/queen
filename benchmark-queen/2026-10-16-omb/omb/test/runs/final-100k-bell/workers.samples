@@ -1,0 +1,84 @@
+08:36:17 port 8080 rss_mb 275 threads 41 cpu_ticks 210
+08:36:17 port 8082 rss_mb 266 threads 43 cpu_ticks 169
+08:36:17 tcp_to_broker 0
+08:36:22 port 8080 rss_mb 1142 threads 101 cpu_ticks 1707
+08:36:22 port 8082 rss_mb 1675 threads 121 cpu_ticks 911
+08:36:22 tcp_to_broker 3333
+08:36:27 port 8080 rss_mb 1753 threads 108 cpu_ticks 2116
+08:36:27 port 8082 rss_mb 1843 threads 123 cpu_ticks 3403
+08:36:27 tcp_to_broker 12194
+08:36:32 port 8080 rss_mb 1936 threads 125 cpu_ticks 2265
+08:36:32 port 8082 rss_mb 1883 threads 129 cpu_ticks 4639
+08:36:32 tcp_to_broker 12194
+08:36:37 port 8080 rss_mb 1980 threads 123 cpu_ticks 2427
+08:36:37 port 8082 rss_mb 2459 threads 124 cpu_ticks 6032
+08:36:37 tcp_to_broker 12194
+08:36:42 port 8080 rss_mb 2130 threads 123 cpu_ticks 2593
+08:36:42 port 8082 rss_mb 4573 threads 123 cpu_ticks 7395
+08:36:42 tcp_to_broker 12194
+08:36:47 port 8080 rss_mb 2134 threads 123 cpu_ticks 2751
+08:36:47 port 8082 rss_mb 4578 threads 123 cpu_ticks 8694
+08:36:47 tcp_to_broker 12194
+08:36:52 port 8080 rss_mb 2228 threads 123 cpu_ticks 2916
+08:36:52 port 8082 rss_mb 5991 threads 123 cpu_ticks 9982
+08:36:53 tcp_to_broker 12194
+08:36:58 port 8080 rss_mb 2228 threads 123 cpu_ticks 3046
+08:36:58 port 8082 rss_mb 6488 threads 123 cpu_ticks 11239
+08:36:58 tcp_to_broker 12194
+08:37:03 port 8080 rss_mb 2400 threads 123 cpu_ticks 3178
+08:37:03 port 8082 rss_mb 7036 threads 123 cpu_ticks 12471
+08:37:03 tcp_to_broker 12194
+08:37:08 port 8080 rss_mb 2401 threads 123 cpu_ticks 3297
+08:37:08 port 8082 rss_mb 7579 threads 123 cpu_ticks 13712
+08:37:08 tcp_to_broker 12194
+08:37:13 port 8080 rss_mb 2563 threads 123 cpu_ticks 3432
+08:37:13 port 8082 rss_mb 7590 threads 123 cpu_ticks 14933
+08:37:13 tcp_to_broker 12194
+08:37:18 port 8080 rss_mb 2941 threads 123 cpu_ticks 3575
+08:37:18 port 8082 rss_mb 7695 threads 123 cpu_ticks 16213
+08:37:18 tcp_to_broker 12194
+08:37:23 port 8080 rss_mb 3444 threads 123 cpu_ticks 3719
+08:37:23 port 8082 rss_mb 7696 threads 123 cpu_ticks 17414
+08:37:23 tcp_to_broker 12194
+08:37:28 port 8080 rss_mb 3823 threads 123 cpu_ticks 3863
+08:37:28 port 8082 rss_mb 7714 threads 123 cpu_ticks 18685
+08:37:28 tcp_to_broker 12194
+08:37:33 port 8080 rss_mb 4327 threads 123 cpu_ticks 4015
+08:37:33 port 8082 rss_mb 7714 threads 123 cpu_ticks 19905
+08:37:33 tcp_to_broker 12194
+08:37:38 port 8080 rss_mb 4705 threads 123 cpu_ticks 4159
+08:37:38 port 8082 rss_mb 7715 threads 123 cpu_ticks 21148
+08:37:38 tcp_to_broker 12194
+08:37:43 port 8080 rss_mb 5207 threads 123 cpu_ticks 4306
+08:37:43 port 8082 rss_mb 7715 threads 123 cpu_ticks 22338
+08:37:43 tcp_to_broker 12194
+08:37:48 port 8080 rss_mb 5585 threads 123 cpu_ticks 4444
+08:37:48 port 8082 rss_mb 7731 threads 123 cpu_ticks 23573
+08:37:48 tcp_to_broker 12194
+08:37:53 port 8080 rss_mb 6087 threads 123 cpu_ticks 4593
+08:37:53 port 8082 rss_mb 7731 threads 123 cpu_ticks 24799
+08:37:53 tcp_to_broker 12194
+08:37:58 port 8080 rss_mb 6465 threads 123 cpu_ticks 4730
+08:37:58 port 8082 rss_mb 7731 threads 123 cpu_ticks 26006
+08:37:58 tcp_to_broker 12194
+08:38:03 port 8080 rss_mb 6970 threads 123 cpu_ticks 4879
+08:38:03 port 8082 rss_mb 7731 threads 123 cpu_ticks 27244
+08:38:03 tcp_to_broker 12194
+08:38:08 port 8080 rss_mb 7347 threads 123 cpu_ticks 5020
+08:38:08 port 8082 rss_mb 7734 threads 123 cpu_ticks 28477
+08:38:08 tcp_to_broker 12194
+08:38:13 port 8080 rss_mb 7852 threads 123 cpu_ticks 5170
+08:38:13 port 8082 rss_mb 7734 threads 123 cpu_ticks 29674
+08:38:13 tcp_to_broker 12194
+08:38:18 port 8080 rss_mb 8229 threads 123 cpu_ticks 5306
+08:38:18 port 8082 rss_mb 7734 threads 123 cpu_ticks 30883
+08:38:18 tcp_to_broker 12194
+08:38:24 port 8080 rss_mb 8708 threads 123 cpu_ticks 5454
+08:38:24 port 8082 rss_mb 7734 threads 123 cpu_ticks 32108
+08:38:24 tcp_to_broker 12194
+08:38:29 port 8080 rss_mb 8708 threads 123 cpu_ticks 5579
+08:38:29 port 8082 rss_mb 7734 threads 123 cpu_ticks 33330
+08:38:29 tcp_to_broker 12194
+08:38:34 port 8080 rss_mb 8789 threads 122 cpu_ticks 6009
+08:38:34 port 8082 rss_mb 7965 threads 106 cpu_ticks 34608
+08:38:34 tcp_to_broker 0

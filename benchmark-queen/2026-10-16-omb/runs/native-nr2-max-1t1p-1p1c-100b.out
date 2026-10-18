@@ -1,0 +1,3 @@
+[11:02:50] omb: run native-nr2-max-1t1p-1p1c-100b: system queen-native, driver queen-native-v2.yaml, workload max-rate-1-topic-1-partition-1p-1c-100b.yaml
+[11:02:54] omb: 6 workers up
+native-nr2-max-1t1p-1p1c-100b [queen-native] max-rate-1-topic-1-partition-1p-1c-100b.yaml: pub 466k/s cons 18k/s err 0 backlog max 119,977,142 | pub p50/p99/p99.9 870/1,038/1,099 ms | e2e p50/p99/p99.9 152,604/241,439/243,158 ms (max 243,301) | brokers 1.7 cores, disk write 33/33/33 MB/s

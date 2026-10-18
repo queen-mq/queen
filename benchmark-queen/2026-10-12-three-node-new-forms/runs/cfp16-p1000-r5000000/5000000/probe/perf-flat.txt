@@ -1,0 +1,103 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 99K of event 'cpu-clock'
+# Event count (approx.): 99577577478
+#
+# Overhead  Command          Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+# ........  ...............  .....................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+     4.52%  tokio-rt-worker  [.] _mi_page_malloc_zero
+     2.86%  tokio-rt-worker  [.] mi_free
+     2.39%  queen-raft       [.] 0x00000000001a19d2
+     2.16%  tokio-rt-worker  [.] xxhash_rust::xxh3::hash_long_internal_loop
+     2.07%  tokio-rt-worker  [.] _mi_page_free_collect
+     1.99%  tokio-rt-worker  [.] 0x00000000001a19d2
+     1.88%  tokio-rt-worker  [.] ZSTD_decompressSequences_bmi2.constprop.0
+     1.69%  queen-raft       [k] _copy_to_iter
+     1.62%  tokio-rt-worker  [.] <serde_json::read::SliceRead>::skip_to_escape
+     1.49%  tokio-rt-worker  [.] <core::marker::PhantomData<queen::rsm::planner::PushCommand> as serde_core::de::DeserializeSeed>::deserialize::<&mut postcard::de::deserializer::Deserializer<postcard::de::flavors::Slice>>
+     1.43%  tokio-rt-worker  [k] handle_softirqs
+     1.31%  tokio-rt-worker  [.] <queen::rsm::facade::real::RaftFacade>::push_inputs::{closure#0}
+     1.29%  queen-raft       [.] ZSTD_compressBlock_fast
+     0.90%  tokio-rt-worker  [.] core::slice::sort::stable::quicksort::quicksort::<[u8; 16], <[u8; 16] as core::cmp::PartialOrd>::lt>
+     0.83%  tokio-rt-worker  [k] _raw_spin_unlock_irqrestore
+     0.74%  queen-raft       [k] kernel_init_pages
+     0.66%  tokio-rt-worker  [.] <serde_json::read::SliceRead as serde_json::read::Read>::parse_str
+     0.65%  tokio-rt-worker  [.] <serde_json::de::Deserializer<serde_json::read::SliceRead>>::ignore_value
+     0.64%  tokio-rt-worker  [.] <serde_json::read::SliceRead as serde_json::read::Read>::ignore_str
+     0.63%  tokio-rt-worker  [k] _copy_to_iter
+     0.63%  tokio-rt-worker  [.] <postcard::de::deserializer::SeqAccess<postcard::de::flavors::Slice> as serde_core::de::SeqAccess>::next_element::<alloc::vec::Vec<queen::rsm::planner::AckTarget>>
+     0.62%  tokio-rt-worker  [.] <queen::rsm::facade::real::RaftFacade>::ack_impl::{closure#0}
+     0.60%  tokio-rt-worker  [.] core::str::converts::from_utf8
+     0.56%  queen-qlog-writ  [k] kernel_init_pages
+     0.54%  tokio-rt-worker  [k] finish_task_switch.isra.0
+     0.51%  queen-raft       [k] handle_softirqs
+     0.46%  queen-rsm-apply  [.] <alloc::collections::btree::map::BTreeMap<queen::rsm::store::ram::RamKey, alloc::sync::Arc<[u8]>>>::entry
+     0.45%  queen-raft       [k] check_heap_object
+     0.41%  queen-lane-5     [.] <queen::rsm::planner::Overlay>::unfold_entry
+     0.41%  queen-qlog-writ  [.] 0x00000000001a19d2
+     0.40%  queen-lane-7     [.] <queen::rsm::planner::Overlay>::unfold_entry
+     0.40%  queen-raft       [k] _copy_from_iter
+     0.40%  queen-lane-4     [.] <queen::rsm::planner::Overlay>::unfold_entry
+     0.40%  queen-lane-2     [.] <queen::rsm::planner::Overlay>::unfold_entry
+     0.39%  queen-lane-6     [.] <queen::rsm::planner::Overlay>::unfold_entry
+     0.39%  tokio-rt-worker  [.] 0x00000000001a1653
+     0.38%  queen-lane-1     [.] <queen::rsm::planner::Overlay>::unfold_entry
+     0.37%  queen-lane-3     [.] <queen::rsm::planner::Overlay>::unfold_entry
+     0.36%  queen-lane-0     [.] <queen::rsm::planner::Overlay>::unfold_entry
+     0.36%  queen-raft-log   [.] <queen::rsm::entry::Outcome>::decode_body
+     0.35%  tokio-rt-worker  [.] <core::marker::PhantomData<alloc::vec::Vec<queen::rsm::facade::real::AckBodyItem>> as serde_core::de::DeserializeSeed>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::SliceRead>>
+     0.34%  tokio-rt-worker  [k] skb_add_rx_frag_netmem
+     0.33%  tokio-rt-worker  [.] 0x00000000001986c6
+     0.33%  queen-rsm-apply  [.] <queen::rsm::store::heed_store::HeedStore>::ram_put
+     0.33%  queen-qlog-writ  [k] copy_folio_from_iter_atomic
+     0.33%  tokio-rt-worker  [.] tokio::runtime::task::harness::poll_future::<tokio::runtime::blocking::task::BlockingTask<<queen::rsm::facade::real::RaftFacade>::resolve_acks_once::{closure#0}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>
+     0.31%  tokio-rt-worker  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.31%  tokio-rt-worker  [.] queen::frames::uuid_bytes_to_string
+     0.31%  queen-rsm-apply  [.] <queen::rsm::entry::Outcome>::encode_body
+     0.30%  tokio-rt-worker  [.] <alloc::vec::Vec<[u8; 16]> as alloc::vec::spec_from_iter::SpecFromIter<[u8; 16], core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<(u64, [u8; 16])>, queen::rsm::consume::pop::claim_one<queen::rsm::store::heed_store::HeedRead>::{closure#8}>, queen::rsm::consume::pop::claim_one<queen::rsm::store::heed_store::HeedRead>::{closure#9}>, queen::rsm::consume::pop::claim_one<queen::rsm::store::heed_store::HeedRead>::{closure#10}>>>::from_iter
+     0.30%  tokio-rt-worker  [.] ZSTD_decompressMultiFrame
+     0.30%  tokio-rt-worker  [.] tokio::runtime::scheduler::multi_thread::worker::run
+     0.29%  tokio-rt-worker  [.] ZSTD_buildFSETable_body_bmi2.constprop.0
+     0.28%  consume-serve    [.] <alloc::vec::Vec<[u8; 16]> as alloc::vec::spec_from_iter::SpecFromIter<[u8; 16], core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<(u64, [u8; 16])>, queen::rsm::consume::pop::claim_one<queen::rsm::store::heed_store::HeedRead>::{closure#8}>, queen::rsm::consume::pop::claim_one<queen::rsm::store::heed_store::HeedRead>::{closure#9}>, queen::rsm::consume::pop::claim_one<queen::rsm::store::heed_store::HeedRead>::{closure#10}>>>::from_iter
+     0.28%  queen-rsm-ckpt   [k] copy_folio_from_iter_atomic
+     0.28%  tokio-rt-worker  [.] mi_theap_umalloc
+     0.28%  tokio-rt-worker  [.] mi_theap_malloc_aligned
+     0.27%  tokio-rt-worker  [.] bytes::bytes::promotable_even_clone
+     0.26%  queen-raft       [.] ZSTD_encodeSequences_bmi2
+     0.26%  queen-rsm-ckpt   [.] xxhash_rust::xxh3::hash_long_internal_loop
+     0.26%  tokio-rt-worker  [.] queen::rsm::qlog::codec::preseed_key
+     0.26%  tokio-rt-worker  [.] <axum::routing::route::Route as core::clone::Clone>::clone
+     0.25%  tokio-rt-worker  [.] <axum::serve::WithGracefulShutdown<axum::routing::Router, axum::routing::Router, queen::run_raft::{closure#0}::{closure#1}> as core::future::into_future::IntoFuture>::into_future::{closure#1}::{closure#4}
+     0.25%  tokio-rt-worker  [k] __pi_memcpy
+     0.25%  tokio-rt-worker  [.] <hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+     0.24%  queen-raft       [.] core::ptr::drop_glue::<queen::rsm::entry::Outcome>
+     0.24%  queen-qlog-writ  [.] xxhash_rust::xxh3::hash_long_internal_loop
+     0.24%  queen-raft       [.] mi_free
+     0.24%  queen-raft-log   [.] 0x00000000001a19d2
+     0.23%  queen-raft       [k] _raw_spin_unlock_irqrestore
+     0.23%  queen-raft-log   [.] xxhash_rust::xxh3::hash_long_internal_loop
+     0.23%  tokio-rt-worker  [.] bytes::bytes::shared_drop
+     0.22%  tokio-rt-worker  [.] queen::util::txn_hash128
+     0.22%  tokio-rt-worker  [.] queen::rsm::facade::remote::serve::{closure#0}
+     0.22%  queen-raft-log   [.] <queen::rsm::entry::Outcome>::encode_body
+     0.22%  queen-lane-6     [.] <queen::rsm::planner::Overlay>::fold_effect
+     0.21%  queen-lane-0     [.] <queen::rsm::planner::Overlay>::fold_effect
+     0.21%  queen-lane-5     [.] <queen::rsm::planner::Overlay>::fold_effect
+     0.21%  queen-lane-3     [.] <queen::rsm::planner::Overlay>::fold_effect
+     0.21%  queen-raft       [k] do_user_addr_fault
+     0.21%  tokio-rt-worker  [.] <[u8; 16] as serde_core::de::Deserialize>::deserialize::<&mut postcard::de::deserializer::Deserializer<postcard::de::flavors::Slice>>
+     0.21%  tokio-rt-worker  [.] _mi_malloc_generic
+     0.21%  tokio-rt-worker  [.] <queen::rsm::entry::Outcome>::encode_body
+     0.21%  tokio-rt-worker  [.] _mi_theap_realloc_zero
+     0.20%  tokio-rt-worker  [.] <alloc::vec::Vec<queen::rsm::planner::AckTarget> as core::clone::Clone>::clone
+     0.20%  tokio-rt-worker  [.] bytes::bytes::shared_clone
+     0.20%  queen-lane-2     [.] <queen::rsm::planner::Overlay>::fold_effect
+     0.20%  queen-rsm-apply  [.] _mi_page_malloc_zero
+     0.20%  tokio-rt-worker  [k] check_heap_object
+#
+# (Cannot load tips.txt file, please install perf!)
+#

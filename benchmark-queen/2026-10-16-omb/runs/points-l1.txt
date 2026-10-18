@@ -1,0 +1,3 @@
+kafka-l1-p100-500k kafka kafka.yaml 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+native-nr2-l1-p100-500k queen-native queen-native.yaml 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+facade-nr2-l1-p100-1000k queen-facade queen-facade.yaml 1-topic-100-partitions-1kb-4p-4c-1000k.yaml

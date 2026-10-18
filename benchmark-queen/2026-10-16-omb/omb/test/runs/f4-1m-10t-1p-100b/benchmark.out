@@ -1,0 +1,48 @@
+08:29:05.073 [main] INFO Benchmark - Starting benchmark with config: {
+  "drivers" : [ "test/f4-1m-10t-1p-100b-driver.yaml" ],
+  "workers" : [ "http://10.250.0.38:8080", "http://10.250.0.38:8082" ],
+  "workersFile" : null,
+  "workloads" : [ "test/f4-1m-10t-1p-100b-workload.yaml" ],
+  "output" : "/root/bench/runs/f4-1m-10t-1p-100b/result.json"
+}
+08:29:05.091 [main] INFO Benchmark - Workloads: {
+  "f4-1m-10t-1p-100b-workload" : {
+    "name" : "f4-1m-10t-1p-100b (scaled: 1 min, no warm-up)",
+    "topics" : 10,
+    "partitionsPerTopic" : 1,
+    "keyDistributor" : "NO_KEY",
+    "messageSize" : 100,
+    "messageSizeDistribution" : null,
+    "useRandomizedPayloads" : true,
+    "randomBytesRatio" : 0.5,
+    "randomizedPayloadPoolSize" : 100,
+    "payloadFile" : null,
+    "subscriptionsPerTopic" : 1,
+    "producersPerTopic" : 1,
+    "consumerPerSubscription" : 1,
+    "producerRate" : 1000000,
+    "consumerBacklogSizeGB" : 0,
+    "backlogDrainRatio" : 1.0,
+    "testDurationMinutes" : 1,
+    "warmupDurationMinutes" : 0
+  }
+}
+08:29:05.233 [main] INFO DistributedWorkersEnsemble - Workers list - producers: [http://10.250.0.38:8080]
+08:29:05.233 [main] INFO DistributedWorkersEnsemble - Workers list - consumers: http://10.250.0.38:8082
+08:29:05.235 [main] INFO Benchmark - --------------- WORKLOAD : f4-1m-10t-1p-100b (scaled: 1 min, no warm-up) --- DRIVER : Queen---------------
+08:29:05.450 [main] INFO WorkloadGenerator - Created 10 topics in 9.819441 ms
+08:29:05.458 [main] INFO WorkloadGenerator - Created 10 consumers in 5.206581 ms
+08:29:05.461 [main] INFO WorkloadGenerator - Created 10 producers in 2.598608 ms
+08:29:05.461 [main] INFO WorkloadGenerator - Waiting for consumers to be ready
+08:29:05.466 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 0, Received: 0
+08:29:07.470 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 10, Received: 10
+08:29:07.470 [main] INFO WorkloadGenerator - All consumers are ready
+08:29:07.512 [main] INFO WorkloadGenerator - ----- Starting benchmark traffic (1m)------
+08:29:17.689 [main] INFO WorkloadGenerator - Pub rate 988839.3 msg/s / 94.3 MB/s | Pub err     0.0 err/s | Cons rate 955581.2 msg/s / 91.1 MB/s | Backlog: 338.3 K | Pub Latency (ms) avg:  1.3 - 50%:  1.3 - 99%:  2.7 - 99.9%:  6.7 - Max:  9.6 | Pub Delay Latency (us) avg: 26.3 - 50%: 22.0 - 99%: 75.0 - 99.9%: 87.0 - Max: 2289.0
+08:29:27.849 [main] INFO WorkloadGenerator - Pub rate 1002674.9 msg/s / 95.6 MB/s | Pub err     0.0 err/s | Cons rate 1015410.3 msg/s / 96.8 MB/s | Backlog: 208.9 K | Pub Latency (ms) avg:  2.5 - 50%:  1.5 - 99%: 12.5 - 99.9%: 18.3 - Max: 24.4 | Pub Delay Latency (us) avg: 28.8 - 50%: 22.0 - 99%: 77.0 - 99.9%: 691.0 - Max: 3806.0
+08:29:37.990 [main] INFO WorkloadGenerator - Pub rate 1000361.6 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 997371.8 msg/s / 95.1 MB/s | Backlog: 239.2 K | Pub Latency (ms) avg:  3.6 - 50%:  1.7 - 99%: 14.9 - 99.9%: 19.9 - Max: 24.3 | Pub Delay Latency (us) avg: 29.0 - 50%: 24.0 - 99%: 77.0 - 99.9%: 399.0 - Max: 3577.0
+08:29:48.139 [main] INFO WorkloadGenerator - Pub rate 999699.6 msg/s / 95.3 MB/s | Pub err     0.0 err/s | Cons rate 1000702.0 msg/s / 95.4 MB/s | Backlog: 229.1 K | Pub Latency (ms) avg:  5.2 - 50%:  3.5 - 99%: 19.0 - 99.9%: 25.1 - Max: 32.3 | Pub Delay Latency (us) avg: 30.3 - 50%: 25.0 - 99%: 82.0 - 99.9%: 521.0 - Max: 3915.0
+08:29:58.295 [main] INFO WorkloadGenerator - Pub rate 999156.9 msg/s / 95.3 MB/s | Pub err     0.0 err/s | Cons rate 967885.5 msg/s / 92.3 MB/s | Backlog: 546.7 K | Pub Latency (ms) avg:  6.8 - 50%:  5.8 - 99%: 22.4 - 99.9%: 28.3 - Max: 35.3 | Pub Delay Latency (us) avg: 33.9 - 50%: 25.0 - 99%: 125.0 - 99.9%: 1449.0 - Max: 5390.0
+08:30:08.380 [main] INFO WorkloadGenerator - Pub rate 1005434.4 msg/s / 95.9 MB/s | Pub err     0.0 err/s | Cons rate 1035834.6 msg/s / 98.8 MB/s | Backlog: 240.1 K | Pub Latency (ms) avg:  8.1 - 50%:  7.6 - 99%: 23.4 - 99.9%: 29.5 - Max: 38.4 | Pub Delay Latency (us) avg: 31.0 - 50%: 25.0 - 99%: 96.0 - 99.9%: 657.0 - Max: 5752.0
+08:30:08.456 [main] INFO WorkloadGenerator - ----- Aggregated Pub Latency (ms) avg:  4.6 - 50%:  1.9 - 95%: 14.1 - 99%: 20.1 - 99.9%: 26.5 - 99.99%: 31.3 - Max: 38.4 | Pub Delay (us)  avg: 29.9 - 50%: 24.0 - 95%: 67.0 - 99%: 79.0 - 99.9%: 561.0 - 99.99%: 2785.0 - Max: 5752.0
+08:30:09.342 [main] INFO Benchmark - Writing test result into /root/bench/runs/f4-1m-10t-1p-100b/result.json

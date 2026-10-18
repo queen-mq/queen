@@ -1,0 +1,3 @@
+[13:25:48] omb: run kafka-backlog-1t-16p: system kafka, driver kafka.yaml, workload backlog-1-topic-16-partitions-1kb.yaml
+[13:25:53] omb: 6 workers up
+kafka-backlog-1t-16p: no result.json

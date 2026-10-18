@@ -86,7 +86,9 @@ for TOTAL in "$@"; do
     $SSH root@${LP[$l]} "URLS=$URLS BATCH=${BATCH:-100} POPW=${POPW:-10} POPB=${POPB:-1000} RATE=$RATE PARTS=$PP CONS=$CONS QEXTRA='$QEXTRA' PAYLOAD=${PAYLOAD:-256} $TE nohup /root/p3/ld.sh $ST $START $((l*3)) $DUR > /root/p3/runs/ld-$ST.log 2>&1 </dev/null &" &
   done; wait
   # PROBE=1: on the leader, the apply thread before and after the 70th second of this step (lateprobe.sh).
-  [ -n "${PROBE:-}" ] && $SSH root@${BP[0]} "mkdir -p /root/p3/runs/$ST; nohup env ${PROBE_ENV:-} /root/p3/${PROBE_SH:-lateprobe.sh} $START /root/p3/runs/$ST/probe > /root/p3/runs/$ST/probe.log 2>&1 </dev/null &"
+  # PROBE_NODES (2026-10-14, default "0" = the leader): the brokers (0 1 2) that run PROBE_SH; node 0's files land in
+  # probe/, the others' in probe-n<node+1>/.
+  [ -n "${PROBE:-}" ] && for pn in ${PROBE_NODES:-0}; do $SSH root@${BP[$pn]} "mkdir -p /root/p3/runs/$ST; nohup env ${PROBE_ENV:-} /root/p3/${PROBE_SH:-lateprobe.sh} $START /root/p3/runs/$ST/probe > /root/p3/runs/$ST/probe.log 2>&1 </dev/null &"; done
   sleep $((DUR + 12 + 14))
   for t in $(seq 1 40); do n=0; for l in 0 1 2; do $SSH root@${LP[$l]} "test -f /root/p3/runs/$ST/done-$((l*3))" 2>/dev/null && n=$((n+1)); done; [ $n = 3 ] && break; sleep 3; done
   for i in 0 1 2; do
@@ -95,8 +97,11 @@ for TOTAL in "$@"; do
   done
   for l in 0 1 2; do scp -q -o ConnectTimeout=20 "root@${LP[$l]}:/root/p3/runs/$ST/q*.json" "$OUT/" & done; wait
   if [ -n "${PROBE:-}" ]; then
-    for t in $(seq 1 60); do $SSH root@${BP[0]} "test -f /root/p3/runs/$ST/probe/done" 2>/dev/null && break; sleep 3; done
-    mkdir -p "$OUT/probe"; scp -q -o ConnectTimeout=20 "root@${BP[0]}:/root/p3/runs/$ST/probe/*" "$OUT/probe/" 2>/dev/null
+    for pn in ${PROBE_NODES:-0}; do
+      PD=probe; [ "$pn" != 0 ] && PD=probe-n$((pn+1))
+      for t in $(seq 1 60); do $SSH root@${BP[$pn]} "test -f /root/p3/runs/$ST/probe/done" 2>/dev/null && break; sleep 3; done
+      mkdir -p "$OUT/$PD"; scp -q -o ConnectTimeout=20 "root@${BP[$pn]}:/root/p3/runs/$ST/probe/*" "$OUT/$PD/" 2>/dev/null
+    done
   fi
   V=$(python3 "$HERE/$STEP_PY" "$OUT" $TOTAL)
   log "$V"

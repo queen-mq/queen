@@ -1,0 +1,8 @@
+# Coordinator's check: were OMB's 4 Kafka producers the limit at 1M? (no QEXTRA_ENV: Queen as in family 1)
+kafka-p100-8p8c-1000k kafka kafka.yaml 1-topic-100-partitions-1kb-8p-8c-1000k.yaml
+kafka-p100-16p16c-1000k kafka kafka.yaml 1-topic-100-partitions-1kb-16p-16c-1000k.yaml
+# Coordinator: same 4p/4c 1M point with OMB's kafka-latency.yaml batch size (128 KB, as in Vanlightly's 2023 runs) instead of kafka-throughput.yaml's 1 MB
+kafka-p100-1000k-b128k kafka kafka-b128k.yaml 1-topic-100-partitions-1kb-4p-4c-1000k.yaml
+native-nr2-p100-8p8c-1000k queen-native queen-native-v2.yaml 1-topic-100-partitions-1kb-8p-8c-1000k.yaml
+# Coordinator: family 4's one-partition topics with an explicit pop batch of 10,000 (Alice's popBatch question)
+native-nr2-1m-10t-1p-100b-b10000 queen-native queen-native-v2-b10000.yaml 1m-10-topics-1-partition-100b.yaml

@@ -1,0 +1,42 @@
+07:29:10 pid 7674 port port 8080 rss_mb 257 threads 41 cpu_ticks 174
+07:29:10 pid 7675 port port 8082 rss_mb 266 threads 41 cpu_ticks 183
+07:29:10 tcp_to_broker 0
+07:29:15 pid 7674 port port 8080 rss_mb 660 threads 92 cpu_ticks 831
+07:29:15 pid 7675 port port 8082 rss_mb 848 threads 116 cpu_ticks 1194
+07:29:15 tcp_to_broker 68
+07:29:20 pid 7674 port port 8080 rss_mb 854 threads 87 cpu_ticks 1505
+07:29:20 pid 7675 port port 8082 rss_mb 963 threads 111 cpu_ticks 1630
+07:29:20 tcp_to_broker 68
+07:29:25 pid 7674 port port 8080 rss_mb 1090 threads 87 cpu_ticks 1935
+07:29:25 pid 7675 port port 8082 rss_mb 1135 threads 111 cpu_ticks 1983
+07:29:25 tcp_to_broker 68
+07:29:30 pid 7674 port port 8080 rss_mb 1092 threads 87 cpu_ticks 2352
+07:29:31 pid 7675 port port 8082 rss_mb 1135 threads 111 cpu_ticks 2315
+07:29:31 tcp_to_broker 68
+07:29:36 pid 7674 port port 8080 rss_mb 1133 threads 87 cpu_ticks 2773
+07:29:36 pid 7675 port port 8082 rss_mb 1149 threads 111 cpu_ticks 2641
+07:29:36 tcp_to_broker 68
+07:29:41 pid 7674 port port 8080 rss_mb 1135 threads 88 cpu_ticks 3167
+07:29:41 pid 7675 port port 8082 rss_mb 1153 threads 111 cpu_ticks 2957
+07:29:41 tcp_to_broker 68
+07:29:46 pid 7674 port port 8080 rss_mb 1144 threads 87 cpu_ticks 3572
+07:29:46 pid 7675 port port 8082 rss_mb 1196 threads 111 cpu_ticks 3517
+07:29:46 tcp_to_broker 68
+07:29:51 pid 7674 port port 8080 rss_mb 1145 threads 87 cpu_ticks 3976
+07:29:51 pid 7675 port port 8082 rss_mb 1248 threads 111 cpu_ticks 3844
+07:29:51 tcp_to_broker 68
+07:29:56 pid 7674 port port 8080 rss_mb 1159 threads 87 cpu_ticks 4377
+07:29:56 pid 7675 port port 8082 rss_mb 1586 threads 111 cpu_ticks 4192
+07:29:56 tcp_to_broker 68
+07:30:01 pid 7674 port port 8080 rss_mb 1159 threads 87 cpu_ticks 4773
+07:30:01 pid 7675 port port 8082 rss_mb 1834 threads 111 cpu_ticks 4529
+07:30:01 tcp_to_broker 68
+07:30:06 pid 7674 port port 8080 rss_mb 1289 threads 87 cpu_ticks 5176
+07:30:06 pid 7675 port port 8082 rss_mb 2203 threads 111 cpu_ticks 4878
+07:30:06 tcp_to_broker 68
+07:30:11 pid 7674 port port 8080 rss_mb 1467 threads 87 cpu_ticks 5578
+07:30:11 pid 7675 port port 8082 rss_mb 2449 threads 111 cpu_ticks 5217
+07:30:11 tcp_to_broker 68
+07:30:16 pid 7674 port port 8080 rss_mb 1944 threads 95 cpu_ticks 5922
+07:30:16 pid 7675 port port 8082 rss_mb 2966 threads 92 cpu_ticks 5507
+07:30:16 tcp_to_broker 0

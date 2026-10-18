@@ -1,0 +1,6 @@
+0,,syscalls:sys_enter_fsync,72719747209,100.00,,
+0,,syscalls:sys_enter_fdatasync,72721688178,100.00,,
+0,,syscalls:sys_enter_sync_file_range,72724899278,100.00,,
+0,,syscalls:sys_enter_msync,72725305793,100.00,,
+25219,,syscalls:sys_enter_pwrite64,72723865580,100.00,,
+53924,,syscalls:sys_enter_write,72722972247,100.00,,

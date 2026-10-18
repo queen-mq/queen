@@ -1,0 +1,13 @@
+[2026-10-16T07:03:25Z] run 1x10-3000k-gcp24: start: rate=3000000 over N=9 processes (3 loader hosts x 3) = 333333 msg/s each; 1 topic(s) x 10 partitions (10 total), entities=0 mode=batch batch=100 consumers=1/process (9 total) group-protocol=classic warm=0 tune=1 PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/redpanda/1x10-3000k-gcp24
+[2026-10-16T07:03:25Z] run 1x10-3000k-gcp24: note: 3000000 is not divisible by 9; offering 2999997 msg/s
+[2026-10-16T07:03:30Z] run 1x10-3000k-gcp24: 1. cluster reset (PARTS=10, tune=1)
+[2026-10-16T07:03:30Z] cluster: reset: PROFILE=vm PARTS=10 FALLOC=by-rule MEMPCT=by-rule RPROPS=none START_FLAGS=none TUNE=1 brokers=10.250.0.23 10.250.0.22 10.250.0.25
+  n1 [2026-10-16T07:03:31Z] rc.sh n1: wiped /root/bench/data/redpanda /root/bench/logs/redpanda
+  n2 [2026-10-16T07:03:31Z] rc.sh n2: wiped /root/bench/data/redpanda /root/bench/logs/redpanda
+  n3 [2026-10-16T07:03:31Z] rc.sh n3: wiped /root/bench/data/redpanda /root/bench/logs/redpanda
+  n1 ssh: connect to host <host-05> port 22: Operation timed out
+  n2 mkconf: node 2/3 ip=10.250.0.22 PARTS=10 segment_fallocation_step=33554432 partitions_memory_pct=10 memory_per_partition=204800 io-config=MISSING -> /root/bench/redpanda/conf
+  n3 mkconf: node 3/3 ip=10.250.0.25 PARTS=10 segment_fallocation_step=33554432 partitions_memory_pct=10 memory_per_partition=204800 io-config=MISSING -> /root/bench/redpanda/conf
+[2026-10-16T07:03:41Z] cluster: render failed
+[2026-10-16T07:03:41Z] run 1x10-3000k-gcp24: FAILED: cluster reset failed (cluster.log)
+[2026-10-16T07:03:41Z] run 1x10-3000k-gcp24:    stopping the cluster (data kept until the next reset)

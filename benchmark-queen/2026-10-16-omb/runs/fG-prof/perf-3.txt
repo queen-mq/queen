@@ -1,0 +1,40 @@
+    11.47%  [.] ZSTD_compressBlock_fast
+     7.54%  [.] 0x00000000001a19d2
+                       0x8948085789481a7e
+     5.15%  [.] <base64::engine::general_purpose::GeneralPurpose as base64::engine::Engine>::internal_encode
+     4.17%  [.] xxhash_rust::xxh3::hash_long_internal_loop
+     3.21%  [k] _copy_to_iter
+                                  0x1
+     3.09%  [.] HUF_compress1X_usingCTable_internal_bmi2
+     2.88%  [.] HIST_count_parallel_wksp
+     2.52%  [.] <queen_kafka::records::Fast>::plain_str
+     2.20%  [k] kernel_init_pages
+     2.13%  [.] <base64::engine::general_purpose::GeneralPurpose as base64::engine::Engine>::internal_decode
+     1.80%  [.] mi_free
+     1.75%  [.] crc32c::hw_x86_64::crc_u64_parallel3
+     1.57%  [k] finish_task_switch.isra.0
+     1.56%  [.] <queen::rsm::facade::real::RaftFacade>::push_inputs::{closure#0}
+     1.50%  [.] _mi_page_malloc_zero
+     1.39%  [.] crc32c::hw_x86_64::crc_u64_append
+     1.24%  [k] _raw_spin_unlock_irqrestore
+     1.18%  [.] 0x00000000001a185b
+     1.04%  [.] <queen::rsm::planner::Overlay>::unfold_entry
+     1.02%  [k] handle_softirqs
+     0.93%  [.] _mi_page_free_collect
+     0.85%  [k] _copy_from_iter
+     0.72%  [.] 0x00000000001a1653
+     0.70%  [.] 0x00000000001a180e
+     0.70%  [.] HUF_buildCTable_wksp
+     0.70%  [k] check_heap_object
+     0.66%  [.] <queen::rsm::planner::Overlay>::fold_effect
+     0.64%  [.] ZSTD_decompressSequences_bmi2.constprop.0
+     0.46%  [.] tokio::runtime::scheduler::multi_thread::worker::run
+     0.46%  [.] HIST_count_simple
+     0.45%  [.] bytes::bytes::shared_drop
+     0.45%  [.] 0x00000000001a1846
+     0.44%  [.] HIST_add
+     0.44%  [k] do_user_addr_fault
+     0.43%  [.] 0x00000000001a1854
+     0.38%  [.] HUF_simpleQuickSort
+     0.38%  [.] 0x00000000001a184d
+     0.37%  [.] <queen::rsm::planner::Planner<queen::rsm::store::heed_store::HeedRead>>::plan_push_known

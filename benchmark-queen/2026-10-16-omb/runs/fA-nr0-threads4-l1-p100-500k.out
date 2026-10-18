@@ -1,0 +1,3 @@
+[07:00:57] omb: run fA-nr0-threads4-l1-p100-500k: system queen-facade, driver queen-facade.yaml, workload 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+[07:01:01] omb: 2 workers up
+fA-nr0-threads4-l1-p100-500k: no result.json

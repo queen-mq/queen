@@ -1,0 +1,5 @@
+# Built binaries (go build in failover/) and the OMB workers' log slices (5-7 MB each).
+failover/kfail
+failover/kfail-darwin
+*.slice.gz
+*.slice

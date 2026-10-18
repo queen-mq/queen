@@ -1,0 +1,46 @@
+[2026-10-14T18:02:26Z] run 1x1000-3000k-gcp24-xfs-t24-share: start: rate=3000000 over N=9 processes (3 loader hosts x 3) = 333333 msg/s each; 1 topic(s) x 1000 partitions (1000 total), entities=0 mode=batch batch=100 consumers=33/process (297 total) warm=0 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x1000-3000k-gcp24-xfs-t24-share
+[2026-10-14T18:02:26Z] run 1x1000-3000k-gcp24-xfs-t24-share: note: 3000000 is not divisible by 9; offering 2999997 msg/s
+[2026-10-14T18:02:32Z] run 1x1000-3000k-gcp24-xfs-t24-share: 1. cluster reset (profile default, PARTS=1000)
+    [2026-10-14T18:02:41Z] cluster: healthy in 9s: cluster id Hy9yMb7LISD1o2SiXmt9Hg
+      n1 node=1 alive=1 leader=3 voters=3 unfenced=3 fenced=0 maxlag=0
+      n2 node=2 alive=1 leader=3 voters=3 unfenced=3 fenced=0 maxlag=0
+      n3 node=3 alive=1 leader=3 voters=3 unfenced=3 fenced=0 maxlag=0
+    [2026-10-14T18:02:42Z] cluster: versions (conf_hash must be equal: nodes differ only in node.id + listener IPs)
+      n1 node=1 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=14ace2a2 pid=409127 jvm=[-Xms6g -Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n2 node=2 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=14ace2a2 pid=332968 jvm=[-Xms6g -Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n3 node=3 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=14ace2a2 pid=332595 jvm=[-Xms6g -Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+    [2026-10-14T18:02:44Z] cluster: features: eligible.leader.replicas.version=1 group.version=1 kraft.version=0 metadata.version=4.3-IV0 share.version=1 streams.version=1 transaction.version=2 
+[2026-10-14T18:02:45Z] run 1x1000-3000k-gcp24-xfs-t24-share: 2. samplers start (kafka-1x1000-3000k-gcp24-xfs-t24-share, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-14T18:02:46Z] run 1x1000-3000k-gcp24-xfs-t24-share: 3. create 1 topic(s) x 1000 partitions, RF 3, min.insync 2 on loader 1
+      [config] broker.num.network.threads = 12 (STATIC_BROKER_CONFIG)
+      [config] broker.num.replica.fetchers = 12 (STATIC_BROKER_CONFIG)
+      [config] topic.compression.type = producer (STATIC_BROKER_CONFIG)
+      [config] topic.flush.messages = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 16777216 (STATIC_BROKER_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+    [create] done: 1 topics x 1000 partitions ready
+[2026-10-14T18:02:54Z] run 1x1000-3000k-gcp24-xfs-t24-share:    topics ready after 28s since start
+    node=1 rss_MB=6579 threads=208 maps=2973 fds=1300 data_MB=6 part_dirs=1001 gc_pauses=9 gc_max_ms=7.278 gc_sum_ms=30 errors=0 warns=3 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=18
+    node=2 rss_MB=6629 threads=208 maps=2976 fds=1300 data_MB=6 part_dirs=1001 gc_pauses=9 gc_max_ms=8.451 gc_sum_ms=33 errors=0 warns=3 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=18
+    node=3 rss_MB=6561 threads=208 maps=2972 fds=1308 data_MB=6 part_dirs=1001 gc_pauses=9 gc_max_ms=9.466 gc_sum_ms=33 errors=0 warns=4 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=18
+[2026-10-14T18:02:54Z] run 1x1000-3000k-gcp24-xfs-t24-share: 4. launch 9 kload processes
+    launched 3 4 5 on queen-load-2.europe-west1-b.c.<gcp-project>.internal
+    launched 0 1 2 on queen-load-1.europe-west1-b.c.<gcp-project>.internal
+    launched 6 7 8 on queen-load-3.europe-west1-b.c.<gcp-project>.internal
+[2026-10-14T18:03:07Z] run 1x1000-3000k-gcp24-xfs-t24-share:    READY 0/9
+ssh: connect to host <host-17> port 22: Operation timed out
+[2026-10-14T18:03:24Z] run 1x1000-3000k-gcp24-xfs-t24-share: FAILED: interrupted
+[2026-10-14T18:03:26Z] run 1x1000-3000k-gcp24-xfs-t24-share: 6. collect
+kafka/run.sh: line 329: /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x1000-3000k-gcp24-xfs-t24-share/stats-after.txt.n0: No such file or directory
+kafka/run.sh: line 329: /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x1000-3000k-gcp24-xfs-t24-share/stats-after.txt.n1: No such file or directory
+kafka/run.sh: line 329: /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x1000-3000k-gcp24-xfs-t24-share/stats-after.txt.n2: No such file or directory
+kafka/run.sh: line 327: /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x1000-3000k-gcp24-xfs-t24-share/stats-after.txt: No such file or directory
+sed: /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x1000-3000k-gcp24-xfs-t24-share/stats-after.txt: No such file or directory
+kafka/run.sh: line 349: /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x1000-3000k-gcp24-xfs-t24-share/samples/l1.txt: No such file or directory
+[2026-10-14T18:03:42Z] run 1x1000-3000k-gcp24-xfs-t24-share:    collected 352K into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x1000-3000k-gcp24-xfs-t24-share
+[2026-10-14T18:03:42Z] run 1x1000-3000k-gcp24-xfs-t24-share:    stopping the cluster (data kept until the next reset)

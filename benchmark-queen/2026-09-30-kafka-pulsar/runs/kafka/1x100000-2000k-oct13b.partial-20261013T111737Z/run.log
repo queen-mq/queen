@@ -1,0 +1,26 @@
+[2026-10-13T11:12:52Z] run 1x100000-2000k-oct13b: start: rate=2000000 over N=9 processes (3 loader hosts x 3) = 222222 msg/s each; 1 topic(s) x 100000 partitions (100000 total), entities=0 mode=batch batch=100 consumers=33/process (297 total) warm=1 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x100000-2000k-oct13b
+[2026-10-13T11:12:52Z] run 1x100000-2000k-oct13b: note: 2000000 is not divisible by 9; offering 1999998 msg/s
+[2026-10-13T11:12:58Z] run 1x100000-2000k-oct13b: 1. cluster reset (profile default, PARTS=100000)
+    [2026-10-13T11:13:29Z] cluster: healthy in 31s: cluster id D4tOXL7L2FuCMWekfqgmdw
+      n1 node=1 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+      n2 node=2 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+      n3 node=3 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+    [2026-10-13T11:13:30Z] cluster: versions (conf_hash must be equal: nodes differ only in node.id + listener IPs)
+      n1 node=1 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=f7ae8457 pid=536388 jvm=[-Xms10g -Xmx10g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n2 node=2 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=f7ae8457 pid=470618 jvm=[-Xms10g -Xmx10g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n3 node=3 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=f7ae8457 pid=467785 jvm=[-Xms10g -Xmx10g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+    [2026-10-13T11:13:32Z] cluster: features: eligible.leader.replicas.version=1 group.version=1 kraft.version=0 metadata.version=4.3-IV0 share.version=1 streams.version=1 transaction.version=2 
+[2026-10-13T11:13:33Z] run 1x100000-2000k-oct13b: 2. samplers start (kafka-1x100000-2000k-oct13b, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-13T11:13:35Z] run 1x100000-2000k-oct13b: 3. create 1 topic(s) x 100000 partitions, RF 3, min.insync 2, warm on loader 1
+ssh: connect to host <host-11> port 22: Operation timed out
+[2026-10-13T11:13:45Z] run 1x100000-2000k-oct13b: ERROR ship /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x100000-2000k-oct13b/loaders/l1/create.sh
+[2026-10-13T11:13:45Z] run 1x100000-2000k-oct13b: FAILED: ship /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x100000-2000k-oct13b/loaders/l1/create.sh
+[2026-10-13T11:13:45Z] run 1x100000-2000k-oct13b: 6. collect
+    node=1 rss_MB=10629 threads=150 maps=722 fds=194 data_MB=1 part_dirs=1 gc_pauses=8 gc_max_ms=5.307 gc_sum_ms=21 errors=0 warns=9 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=24
+    node=2 rss_MB=10635 threads=150 maps=720 fds=188 data_MB=1 part_dirs=1 gc_pauses=8 gc_max_ms=6.617 gc_sum_ms=24 errors=0 warns=1 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=24
+    ssh: connect to host <host-04> port 22: Operation timed out
+bash: line 1: cd: /root/bench/runs/kafka/1x100000-2000k-oct13b: No such file or directory
+bash: line 1: cd: /root/bench/runs/kafka/1x100000-2000k-oct13b: No such file or directory
+bash: line 1: cd: /root/bench/runs/kafka/1x100000-2000k-oct13b: No such file or directory
+[2026-10-13T11:14:12Z] run 1x100000-2000k-oct13b:    collected 232K into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x100000-2000k-oct13b
+[2026-10-13T11:14:12Z] run 1x100000-2000k-oct13b:    stopping the cluster (data kept until the next reset)

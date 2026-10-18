@@ -1,0 +1,24 @@
+[12:43:02] fresh cluster (nr6)
+[12:43:08] omb: queen nr6: 3 healthy ("role":"follower")
+[12:43:11] produce: 4 producers, 200000 msg/s, 90 s; brokers 10.250.0.43:9092,10.250.0.39:9092,10.250.0.40:9092
+[12:43:41] leader is node 2 (10.250.0.39): stop
+[12:43:45] new leader: node 3
+[12:44:02] start node 2 again
+12:44:26 acked 14817600 (+197287/s) failed 0 sent 14818150
+12:44:31 acked 15804722 (+197424/s) failed 0 sent 15805250
+12:44:36 acked 16792115 (+197478/s) failed 0 sent 16792450
+done in 1m30s: sent 17778900 acked 17778900 failed 0
+[12:44:41] verify
+verify rc=0
+{
+  "acked": 17778900,
+  "duplicate_examples": null,
+  "duplicates": 0,
+  "foreign": 0,
+  "lost": 0,
+  "lost_examples": null,
+  "partitions": 100,
+  "records_read": 17778900,
+  "reorder_examples": null,
+  "reorders": 0
+}

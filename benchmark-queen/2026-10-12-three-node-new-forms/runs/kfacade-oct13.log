@@ -1,0 +1,430 @@
+[2026-10-13T10:49:47Z] run b1-1x200-300k: start: rate=300000 over N=9 processes (3 loader hosts x 3) = 33333 msg/s each; 1 topic(s) x 200 partitions (200 total), entities=0 mode=batch batch=100 consumers=22/process (198 total) warm=0 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-300k
+[2026-10-13T10:49:47Z] run b1-1x200-300k: note: 300000 is not divisible by 9; offering 299997 msg/s
+[2026-10-13T10:49:54Z] run b1-1x200-300k: 1. TARGET=queen: Queen's Kafka facade on 10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 (cluster managed outside run.sh; no reset)
+[2026-10-13T10:49:54Z] run b1-1x200-300k: 2. samplers start (kafka-b1-1x200-300k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-13T10:49:55Z] run b1-1x200-300k: 3. create 1 topic(s) x 200 partitions, RF 3, min.insync 2 on loader 1
+      payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~319 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+      [topic] 1 topics created, 0 grown, 200 partitions each x RF 3 accepted by the controller in 0.0s (1 requests of <= 5000 partitions)
+      [topic] t=+0s 1 topics missing, 0 with != 200 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.1s: 1 topics x 200 partitions, leaders + full ISR + every replica log on disk
+      [config] broker.compression.type = producer (DEFAULT_CONFIG)
+      [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+      [config] topic.min.insync.replicas = 1 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 1 topics x 200 partitions ready
+[2026-10-13T10:50:03Z] run b1-1x200-300k:    topics ready after 16s since start
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T10:50:04Z] run b1-1x200-300k: 4. launch 9 kload processes
+    launched 6 7 8 on queen-06
+    launched 3 4 5 on queen-05
+    launched 0 1 2 on queen-04
+[2026-10-13T10:50:17Z] run b1-1x200-300k:    READY 0/9
+ssh: connect to host <host-11> port 22: Operation timed out
+    p0 DONE 1
+    p1 DONE 1
+    p2 DONE 1
+    p3 DONE 1
+    p4 DONE 1
+    p5 DONE 1
+    p6 DONE 1
+    p7 DONE 1
+    p8 DONE 1
+    --- 10.114.0.7 p0.log
+      [group] t=+152.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+154.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+156.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+158.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+160.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+162.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+164.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+166.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+168.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+170.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+172.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+174.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+176.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+178.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    FATAL groups not stable after -group-timeout 3m0s: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.7 p1.log
+      [group] t=+152.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+154.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+156.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+158.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+160.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+162.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+164.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+166.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+168.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+170.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+172.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+174.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+176.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+178.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    FATAL groups not stable after -group-timeout 3m0s: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.7 p2.log
+      [group] t=+152.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+154.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+156.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+158.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+160.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+162.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+164.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+166.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+168.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+170.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+172.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+174.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+176.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+178.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    FATAL groups not stable after -group-timeout 3m0s: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.8 p3.log
+      [group] t=+152.5s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+154.5s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+156.5s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+158.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+160.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+162.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+164.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+166.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+168.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+170.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+172.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+174.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+176.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+178.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    FATAL groups not stable after -group-timeout 3m0s: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.8 p4.log
+      [group] t=+152.5s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+154.5s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+156.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+158.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+160.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+162.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+164.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+166.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+168.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+170.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+172.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+174.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+176.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+178.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    FATAL groups not stable after -group-timeout 3m0s: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.8 p5.log
+      [group] t=+152.5s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+154.5s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+156.5s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+158.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+160.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+162.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+164.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+166.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+168.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+170.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+172.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+174.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+176.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+178.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+    FATAL groups not stable after -group-timeout 3m0s: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.9 p6.log
+      [group] t=+152.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+154.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+156.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+158.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+160.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+162.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+164.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+166.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+168.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+170.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+172.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+174.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+176.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+178.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    FATAL groups not stable after -group-timeout 3m0s: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.9 p7.log
+      [group] t=+152.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+154.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+156.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+158.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+160.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+162.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+164.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+166.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+168.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+170.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+172.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+174.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+176.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+178.8s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    FATAL groups not stable after -group-timeout 3m0s: kb1-1x200-300k-g-t0: local members 22/198 hold 22/200 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.9 p8.log
+      [group] t=+152.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+154.6s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+156.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+158.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+160.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+162.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+164.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+166.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+168.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+170.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+172.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+174.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+176.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+178.7s waiting: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+    FATAL groups not stable after -group-timeout 3m0s: kb1-1x200-300k-g-t0: local members 22/198 hold 23/200 partitions (group-wide ? members=0 assigned=0)
+[2026-10-13T10:53:19Z] run b1-1x200-300k: FAILED: a load process exited before READY
+[2026-10-13T10:53:20Z] run b1-1x200-300k: 6. collect
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T10:54:38Z] run b1-1x200-300k:    collected  55M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-300k
+[2026-10-13T10:56:33Z] run b1-1x200-300k: start: rate=300000 over N=9 processes (3 loader hosts x 3) = 33333 msg/s each; 1 topic(s) x 200 partitions (200 total), entities=0 mode=batch batch=100 consumers=22/process (198 total) warm=0 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-300k
+[2026-10-13T10:56:33Z] run b1-1x200-300k: note: 300000 is not divisible by 9; offering 299997 msg/s
+[2026-10-13T10:56:38Z] run b1-1x200-300k: 1. TARGET=queen: Queen's Kafka facade on 10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 (cluster managed outside run.sh; no reset)
+[2026-10-13T10:56:38Z] run b1-1x200-300k: 2. samplers start (kafka-b1-1x200-300k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-13T10:56:39Z] run b1-1x200-300k: 3. create 1 topic(s) x 200 partitions, RF 3, min.insync 2 on loader 1
+      topics: 1 x 200 partitions (kb1-1x200-300k..kb1-1x200-300k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+      [topic] 1 topics created, 0 grown, 200 partitions each x RF 3 accepted by the controller in 0.0s (1 requests of <= 5000 partitions)
+      [topic] t=+0s 1 topics missing, 0 with != 200 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.0s: 1 topics x 200 partitions, leaders + full ISR + every replica log on disk
+      [config] broker.compression.type = producer (DEFAULT_CONFIG)
+      [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+      [config] topic.min.insync.replicas = 1 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 1 topics x 200 partitions ready
+[2026-10-13T10:56:47Z] run b1-1x200-300k:    topics ready after 14s since start
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T10:56:48Z] run b1-1x200-300k: 4. launch 9 kload processes
+    launched 3 4 5 on queen-05
+    launched 0 1 2 on queen-04
+    launched 6 7 8 on queen-06
+[2026-10-13T10:57:02Z] run b1-1x200-300k:    READY 0/9
+[2026-10-13T10:57:11Z] run b1-1x200-300k:    all 9 READY after 38s since start
+[2026-10-13T10:57:13Z] run b1-1x200-300k: 5. start instant 1791889043127 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s)
+[2026-10-13T10:57:21Z] run b1-1x200-300k:    0/9 exited | p0: 
+[2026-10-13T10:57:51Z] run b1-1x200-300k:    0/9 exited | p0: [10:57:43] offered=    33340/s achieved=    33340/s shed=        0/s inflight=     4 | p50=   8.10 p99=   10.18 p999=   11.20 ms | push=499800 pop=494700 lag=5100 | errs push=0 pop=0 empty=0 gor=229 |
+[2026-10-13T10:58:22Z] run b1-1x200-300k:    0/9 exited | p0: [10:58:13] offered=    33339/s achieved=    33319/s shed=        0/s inflight=     3 | p50=   8.10 p99=   10.05 p999=   10.69 ms | push=1499800 pop=1484500 lag=15300 | errs push=0 pop=0 empty=0 gor=22
+[2026-10-13T10:58:37Z] run b1-1x200-300k:    load finished after 124s since start
+[2026-10-13T10:58:37Z] run b1-1x200-300k: 6. collect
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T10:59:16Z] run b1-1x200-300k:    collected  55M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-300k
+    p0: msgs offered=2166700 achieved=2166700 shed=0 pushed=2166700 popped=2145100 lag=21600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=8.16/10.18/11.33 ms | e2e p50/p99/p999=8.51/10.69/12.35 ms | cpu=16.0%
+    p1: msgs offered=2166700 achieved=2166700 shed=0 pushed=2166700 popped=2144900 lag=21800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=8.26/10.30/11.46 ms | e2e p50/p99/p999=8.77/10.94/12.10 ms | cpu=15.8%
+    p2: msgs offered=2166700 achieved=2166700 shed=0 pushed=2166700 popped=2145000 lag=21700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=8.26/10.56/11.33 ms | e2e p50/p99/p999=8.77/10.94/12.48 ms | cpu=15.8%
+    p3: msgs offered=2166600 achieved=2166600 shed=0 pushed=2166600 popped=2145000 lag=21600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=8.26/10.43/12.10 ms | e2e p50/p99/p999=8.77/10.94/12.61 ms | cpu=18.4%
+    p4: msgs offered=2166700 achieved=2166700 shed=0 pushed=2166700 popped=2145000 lag=21700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=8.26/10.30/11.84 ms | e2e p50/p99/p999=8.77/10.94/12.22 ms | cpu=18.4%
+    p5: msgs offered=2166800 achieved=2166800 shed=0 pushed=2166800 popped=2242500 lag=-75700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=8.26/10.56/11.84 ms | e2e p50/p99/p999=8.64/10.82/12.10 ms | cpu=18.4%
+    p6: msgs offered=2166500 achieved=2166500 shed=0 pushed=2166500 popped=2144900 lag=21600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=8.38/10.30/11.71 ms | e2e p50/p99/p999=8.64/10.69/12.22 ms | cpu=22.7%
+    p7: msgs offered=2166700 achieved=2166700 shed=0 pushed=2166700 popped=2145100 lag=21600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=8.51/10.30/11.46 ms | e2e p50/p99/p999=8.64/10.56/12.35 ms | cpu=23.0%
+    p8: msgs offered=2166500 achieved=2166500 shed=0 pushed=2166500 popped=2242300 lag=-75800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=8.38/10.43/11.46 ms | e2e p50/p99/p999=8.77/10.69/12.35 ms | cpu=23.0%
+    total: 9/9 processes with a final line | msgs offered=19499900 achieved=19499900 shed=0 pushed=19499900 popped=19499800 errors=0 | worst produce p99=10.56 ms | worst e2e p99=10.94 ms
+[2026-10-13T10:59:19Z] run b1-1x200-300k: DONE in 166s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-300k
+[2026-10-13T10:59:38Z] run b1-1x200-1000k: start: rate=1000000 over N=9 processes (3 loader hosts x 3) = 111111 msg/s each; 1 topic(s) x 200 partitions (200 total), entities=0 mode=batch batch=100 consumers=22/process (198 total) warm=0 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-1000k
+[2026-10-13T10:59:38Z] run b1-1x200-1000k: note: 1000000 is not divisible by 9; offering 999999 msg/s
+[2026-10-13T10:59:44Z] run b1-1x200-1000k: 1. TARGET=queen: Queen's Kafka facade on 10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 (cluster managed outside run.sh; no reset)
+[2026-10-13T10:59:44Z] run b1-1x200-1000k: 2. samplers start (kafka-b1-1x200-1000k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-13T10:59:45Z] run b1-1x200-1000k: 3. create 1 topic(s) x 200 partitions, RF 3, min.insync 2 on loader 1
+      topics: 1 x 200 partitions (kb1-1x200-1000k..kb1-1x200-1000k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+      [topic] 1 topics created, 0 grown, 200 partitions each x RF 3 accepted by the controller in 0.0s (1 requests of <= 5000 partitions)
+      [topic] t=+0s 1 topics missing, 0 with != 200 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.0s: 1 topics x 200 partitions, leaders + full ISR + every replica log on disk
+      [config] broker.compression.type = producer (DEFAULT_CONFIG)
+      [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+      [config] topic.min.insync.replicas = 1 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 1 topics x 200 partitions ready
+[2026-10-13T10:59:53Z] run b1-1x200-1000k:    topics ready after 15s since start
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T10:59:54Z] run b1-1x200-1000k: 4. launch 9 kload processes
+    launched 3 4 5 on queen-05
+    launched 0 1 2 on queen-04
+    launched 6 7 8 on queen-06
+[2026-10-13T11:00:08Z] run b1-1x200-1000k:    READY 0/9
+[2026-10-13T11:00:17Z] run b1-1x200-1000k:    all 9 READY after 39s since start
+[2026-10-13T11:00:20Z] run b1-1x200-1000k: 5. start instant 1791889229371 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s)
+[2026-10-13T11:00:28Z] run b1-1x200-1000k:    0/9 exited | p0: 
+[2026-10-13T11:00:58Z] run b1-1x200-1000k:    0/9 exited | p0: [11:00:49] offered=   111097/s achieved=   111207/s shed=        0/s inflight=     9 | p50=  10.94 p99=   20.10 p999=   28.54 ms | push=1665800 pop=1648900 lag=16900 | errs push=0 pop=0 empty=0 gor=27
+[2026-10-13T11:01:30Z] run b1-1x200-1000k:    0/9 exited | p0: [11:01:29] offered=   111101/s achieved=   111091/s shed=        0/s inflight=    14 | p50=  10.82 p99=   17.28 p999=   21.63 ms | push=6109700 pop=6048600 lag=61100 | errs push=0 pop=0 empty=0 gor=31
+[2026-10-13T11:01:44Z] run b1-1x200-1000k:    load finished after 126s since start
+[2026-10-13T11:01:44Z] run b1-1x200-1000k: 6. collect
+    node=1 not running
+    node=2 not running
+    node=3 not running
+ssh: connect to host <host-11> port 22: Operation timed out
+[2026-10-13T11:02:33Z] run b1-1x200-1000k:    collected  55M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-1000k
+    p3: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7150100 lag=72200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.94/18.30/24.19 ms | e2e p50/p99/p999=11.71/19.33/24.96 ms | cpu=48.2%
+    p4: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7150000 lag=72200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.82/18.30/24.19 ms | e2e p50/p99/p999=11.71/19.58/25.98 ms | cpu=48.4%
+    p5: msgs offered=7222700 achieved=7222700 shed=0 pushed=7222700 popped=7474900 lag=-252200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.94/18.56/24.45 ms | e2e p50/p99/p999=11.58/36.10/56.06 ms | cpu=49.3%
+    p6: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7150000 lag=72100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=11.33/18.30/24.70 ms | e2e p50/p99/p999=11.58/19.58/25.73 ms | cpu=57.7%
+    p7: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7150100 lag=72100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=11.20/18.30/24.19 ms | e2e p50/p99/p999=11.46/19.07/25.22 ms | cpu=57.9%
+    p8: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7475000 lag=-252900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=11.07/18.56/24.96 ms | e2e p50/p99/p999=12.22/38.66/57.09 ms | cpu=59.6%
+    total: 6/9 processes with a final line | msgs offered=43333600 achieved=43333600 shed=0 pushed=43333600 popped=43550100 errors=0 | worst produce p99=18.56 ms | worst e2e p99=38.66 ms
+    p0: no [final] line
+    p1: no [final] line
+    p2: no [final] line
+[2026-10-13T11:02:36Z] run b1-1x200-1000k: FAILED: load processes did not all finish cleanly (timeout=0)
+[2026-10-13T11:03:12Z] run b1-1x200-1500k: start: rate=1500000 over N=9 processes (3 loader hosts x 3) = 166666 msg/s each; 1 topic(s) x 200 partitions (200 total), entities=0 mode=batch batch=100 consumers=22/process (198 total) warm=0 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-1500k
+[2026-10-13T11:03:12Z] run b1-1x200-1500k: note: 1500000 is not divisible by 9; offering 1499994 msg/s
+[2026-10-13T11:03:18Z] run b1-1x200-1500k: 1. TARGET=queen: Queen's Kafka facade on 10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 (cluster managed outside run.sh; no reset)
+[2026-10-13T11:03:18Z] run b1-1x200-1500k: 2. samplers start (kafka-b1-1x200-1500k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-13T11:03:19Z] run b1-1x200-1500k: 3. create 1 topic(s) x 200 partitions, RF 3, min.insync 2 on loader 1
+      topics: 1 x 200 partitions (kb1-1x200-1500k..kb1-1x200-1500k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~319 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+      [topic] 1 topics created, 0 grown, 200 partitions each x RF 3 accepted by the controller in 0.0s (1 requests of <= 5000 partitions)
+      [topic] t=+0s 1 topics missing, 0 with != 200 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.0s: 1 topics x 200 partitions, leaders + full ISR + every replica log on disk
+      [config] broker.compression.type = producer (DEFAULT_CONFIG)
+      [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+      [config] topic.min.insync.replicas = 1 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 1 topics x 200 partitions ready
+[2026-10-13T11:03:27Z] run b1-1x200-1500k:    topics ready after 15s since start
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T11:03:28Z] run b1-1x200-1500k: 4. launch 9 kload processes
+    launched 6 7 8 on queen-06
+    launched 0 1 2 on queen-04
+    launched 3 4 5 on queen-05
+[2026-10-13T11:03:41Z] run b1-1x200-1500k:    READY 0/9
+[2026-10-13T11:03:50Z] run b1-1x200-1500k:    all 9 READY after 38s since start
+[2026-10-13T11:03:52Z] run b1-1x200-1500k: 5. start instant 1791889442192 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s)
+ssh: connect to host <host-11> port 22: Operation timed out
+[2026-10-13T11:04:10Z] run b1-1x200-1500k:    0/9 exited | p0: 
+[2026-10-13T11:04:40Z] run b1-1x200-1500k:    0/9 exited | p0: [11:04:32] offered=   166686/s achieved=   167116/s shed=        0/s inflight=    47 | p50=  32.38 p99=   69.12 p999=   86.53 ms | push=4162500 pop=4108800 lag=53700 | errs push=0 pop=0 empty=0 gor=52
+ssh: connect to host <host-11> port 22: Operation timed out
+[2026-10-13T11:05:13Z] run b1-1x200-1500k:    1/9 exited | p0: [11:05:12] offered=   166665/s achieved=   166845/s shed=        0/s inflight=    54 | p50=  34.05 p99=   77.31 p999=   95.74 ms | push=10828200 pop=10712600 lag=115600 | errs push=0 pop=0 empty=0 gor
+[2026-10-13T11:05:20Z] run b1-1x200-1500k:    load finished after 128s since start
+[2026-10-13T11:05:20Z] run b1-1x200-1500k: 6. collect
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T11:05:59Z] run b1-1x200-1500k:    collected  55M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-1500k
+    p0: msgs offered=10833600 achieved=10833600 shed=0 pushed=10833600 popped=10715700 lag=117900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=32.64/70.14/88.58 ms | e2e p50/p99/p999=89.60/156.67/183.30 ms | cpu=42.9%
+    p1: msgs offered=10833000 achieved=10833000 shed=0 pushed=10833000 popped=10717800 lag=115200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=32.64/70.14/86.53 ms | e2e p50/p99/p999=90.62/156.67/185.34 ms | cpu=43.2%
+    p2: msgs offered=10832800 achieved=10832800 shed=0 pushed=10832800 popped=10717900 lag=114900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=32.38/70.14/86.53 ms | e2e p50/p99/p999=90.62/158.72/185.34 ms | cpu=42.8%
+    p3: msgs offered=10833500 achieved=10833500 shed=0 pushed=10833500 popped=10717300 lag=116200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=32.64/70.14/87.55 ms | e2e p50/p99/p999=92.67/160.77/187.39 ms | cpu=49.6%
+    p4: msgs offered=10833400 achieved=10833400 shed=0 pushed=10833400 popped=10717500 lag=115900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=32.64/70.14/88.58 ms | e2e p50/p99/p999=91.65/158.72/187.39 ms | cpu=49.5%
+    p5: msgs offered=10833100 achieved=10833100 shed=0 pushed=10833100 popped=11200900 lag=-367800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=33.02/71.17/87.55 ms | e2e p50/p99/p999=91.65/166.91/211.97 ms | cpu=49.6%
+    p6: msgs offered=10833000 achieved=10833000 shed=0 pushed=10833000 popped=10717100 lag=115900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=33.02/70.14/87.55 ms | e2e p50/p99/p999=89.60/156.67/183.30 ms | cpu=59.8%
+    p7: msgs offered=10833400 achieved=10833400 shed=0 pushed=10833400 popped=10717000 lag=116400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=33.02/71.17/88.58 ms | e2e p50/p99/p999=90.62/160.77/187.39 ms | cpu=59.8%
+    p8: msgs offered=10832900 achieved=10832900 shed=0 pushed=10832900 popped=11204700 lag=-371800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=33.02/71.17/88.58 ms | e2e p50/p99/p999=89.60/158.72/185.34 ms | cpu=59.7%
+    total: 9/9 processes with a final line | msgs offered=97498700 achieved=97498700 shed=0 pushed=97498700 popped=97425900 errors=0 | worst produce p99=71.17 ms | worst e2e p99=166.91 ms
+[2026-10-13T11:06:02Z] run b1-1x200-1500k: DONE in 170s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-1500k
+[2026-10-13T11:06:21Z] run b1-1x10k-1000k: start: rate=1000000 over N=9 processes (3 loader hosts x 3) = 111111 msg/s each; 1 topic(s) x 10000 partitions (10000 total), entities=0 mode=batch batch=100 consumers=33/process (297 total) warm=1 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x10k-1000k
+[2026-10-13T11:06:21Z] run b1-1x10k-1000k: note: 1000000 is not divisible by 9; offering 999999 msg/s
+[2026-10-13T11:06:26Z] run b1-1x10k-1000k: 1. TARGET=queen: Queen's Kafka facade on 10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 (cluster managed outside run.sh; no reset)
+[2026-10-13T11:06:26Z] run b1-1x10k-1000k: 2. samplers start (kafka-b1-1x10k-1000k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-13T11:06:27Z] run b1-1x10k-1000k: 3. create 1 topic(s) x 10000 partitions, RF 3, min.insync 2, warm on loader 1
+      payload: goload jsonEvent target 256 B, avg 289.6 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+      [topic] 1 topics created, 0 grown, 10000 partitions each x RF 3 accepted by the controller in 0.0s (2 requests of <= 5000 partitions)
+      [topic] t=+0s 1 topics missing, 0 with != 10000 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.1s: 1 topics x 10000 partitions, leaders + full ISR + every replica log on disk
+      [warm] one record (no "ts") into each of 10000 partitions, acks=all, in 0.1s; READY again after 0.0s
+      [config] broker.compression.type = producer (DEFAULT_CONFIG)
+      [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+      [config] topic.min.insync.replicas = 1 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 1 topics x 10000 partitions ready
+[2026-10-13T11:06:36Z] run b1-1x10k-1000k:    topics ready after 15s since start
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T11:06:37Z] run b1-1x10k-1000k: 4. launch 9 kload processes
+    launched 3 4 5 on queen-05
+    launched 6 7 8 on queen-06
+    launched 0 1 2 on queen-04
+[2026-10-13T11:06:50Z] run b1-1x10k-1000k:    READY 0/9
+[2026-10-13T11:06:59Z] run b1-1x10k-1000k:    all 9 READY after 38s since start
+[2026-10-13T11:07:02Z] run b1-1x10k-1000k: 5. start instant 1791889631512 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s)
+[2026-10-13T11:07:10Z] run b1-1x10k-1000k:    0/9 exited | p0: 
+[2026-10-13T11:07:40Z] run b1-1x10k-1000k:    0/9 exited | p0: [11:07:31] offered=   111112/s achieved=   111122/s shed=        0/s inflight=    18 | p50=  11.97 p99=   20.35 p999=   25.73 ms | push=1665200 pop=1663200 lag=2000 | errs push=0 pop=0 empty=0 gor=525
+[2026-10-13T11:08:12Z] run b1-1x10k-1000k:    0/9 exited | p0: [11:08:11] offered=   111107/s achieved=   111107/s shed=        0/s inflight=    10 | p50=  12.22 p99=   21.38 p999=   27.01 ms | push=6110100 pop=6103400 lag=6700 | errs push=0 pop=0 empty=0 gor=548
+[2026-10-13T11:08:27Z] run b1-1x10k-1000k:    load finished after 126s since start
+[2026-10-13T11:08:27Z] run b1-1x10k-1000k: 6. collect
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T11:09:05Z] run b1-1x10k-1000k:    collected  55M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x10k-1000k
+    p0: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7214900 lag=7300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=11.97/20.86/27.26 ms | e2e p50/p99/p999=12.99/22.40/29.31 ms | cpu=58.9%
+    p1: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7215000 lag=7100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=12.10/20.86/28.29 ms | e2e p50/p99/p999=12.86/22.14/28.80 ms | cpu=59.6%
+    p2: msgs offered=7222400 achieved=7222400 shed=0 pushed=7222400 popped=7260500 lag=-38100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=12.10/21.12/28.03 ms | e2e p50/p99/p999=12.99/22.14/29.82 ms | cpu=59.3%
+    p3: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7169400 lag=52700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=12.10/20.86/27.01 ms | e2e p50/p99/p999=12.86/21.89/29.06 ms | cpu=66.4%
+    p4: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7228000 lag=-5900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=12.22/20.61/27.78 ms | e2e p50/p99/p999=12.86/21.89/29.82 ms | cpu=67.0%
+    p5: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7215100 lag=7200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=12.22/20.86/27.26 ms | e2e p50/p99/p999=12.86/22.40/29.31 ms | cpu=67.7%
+    p6: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7182600 lag=39700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=12.48/21.12/28.80 ms | e2e p50/p99/p999=12.99/21.63/29.06 ms | cpu=81.7%
+    p7: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7240900 lag=-18700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=12.35/20.86/28.80 ms | e2e p50/p99/p999=12.99/21.89/29.06 ms | cpu=80.9%
+    p8: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7273300 lag=-51000 errs push=0 pop=0 ack=0 | produce p50/p99/p999=12.35/21.12/28.80 ms | e2e p50/p99/p999=12.99/21.63/29.06 ms | cpu=80.7%
+    total: 9/9 processes with a final line | msgs offered=65000000 achieved=65000000 shed=0 pushed=65000000 popped=64999700 errors=0 | worst produce p99=21.12 ms | worst e2e p99=22.4 ms
+[2026-10-13T11:09:09Z] run b1-1x10k-1000k: DONE in 168s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x10k-1000k
+[2026-10-13T11:09:46Z] run b1-1x200-2000k: start: rate=2000000 over N=9 processes (3 loader hosts x 3) = 222222 msg/s each; 1 topic(s) x 200 partitions (200 total), entities=0 mode=batch batch=100 consumers=22/process (198 total) warm=0 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-2000k
+[2026-10-13T11:09:46Z] run b1-1x200-2000k: note: 2000000 is not divisible by 9; offering 1999998 msg/s
+[2026-10-13T11:09:52Z] run b1-1x200-2000k: 1. TARGET=queen: Queen's Kafka facade on 10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 (cluster managed outside run.sh; no reset)
+[2026-10-13T11:09:52Z] run b1-1x200-2000k: 2. samplers start (kafka-b1-1x200-2000k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-13T11:09:53Z] run b1-1x200-2000k: 3. create 1 topic(s) x 200 partitions, RF 3, min.insync 2 on loader 1
+      topics: 1 x 200 partitions (kb1-1x200-2000k..kb1-1x200-2000k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.4:9092,10.114.0.5:9092,10.114.0.6:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+      [topic] 1 topics created, 0 grown, 200 partitions each x RF 3 accepted by the controller in 0.0s (1 requests of <= 5000 partitions)
+      [topic] t=+0s 1 topics missing, 0 with != 200 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.0s: 1 topics x 200 partitions, leaders + full ISR + every replica log on disk
+      [config] broker.compression.type = producer (DEFAULT_CONFIG)
+      [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+      [config] topic.min.insync.replicas = 1 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 1 topics x 200 partitions ready
+[2026-10-13T11:10:01Z] run b1-1x200-2000k:    topics ready after 15s since start
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T11:10:07Z] run b1-1x200-2000k: 4. launch 9 kload processes
+    launched 3 4 5 on queen-05
+    launched 0 1 2 on queen-04
+    launched 6 7 8 on queen-06
+[2026-10-13T11:10:22Z] run b1-1x200-2000k:    READY 0/9
+[2026-10-13T11:10:31Z] run b1-1x200-2000k:    all 9 READY after 45s since start
+[2026-10-13T11:10:33Z] run b1-1x200-2000k: 5. start instant 1791889843262 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s)
+[2026-10-13T11:10:42Z] run b1-1x200-2000k:    0/9 exited | p0: 
+[2026-10-13T11:11:12Z] run b1-1x200-2000k:    0/9 exited | p0: [11:11:03] offered=   222235/s achieved=   216865/s shed=        0/s inflight=   748 | p50= 254.98 p99=  432.13 p999=  473.09 ms | push=3258800 pop=3201300 lag=57500 | errs push=0 pop=0 empty=0 gor=55
+ssh: connect to host <host-11> port 22: Operation timed out
+[2026-10-13T11:11:45Z] run b1-1x200-2000k:    0/9 exited | p0: [11:11:43] offered=   222221/s achieved=   222781/s shed=        0/s inflight=   226 | p50= 105.98 p99=  195.58 p999=  222.21 ms | push=12197500 pop=12052800 lag=144700 | errs push=0 pop=0 empty=0 gor
+[2026-10-13T11:12:00Z] run b1-1x200-2000k:    load finished after 134s since start
+[2026-10-13T11:12:00Z] run b1-1x200-2000k: 6. collect
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-13T11:12:38Z] run b1-1x200-2000k:    collected  55M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-2000k
+    p0: msgs offered=14444400 achieved=14444400 shed=0 pushed=14444400 popped=14283500 lag=160900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=152.58/395.26/440.32 ms | e2e p50/p99/p999=284.67/569.34/634.88 ms | cpu=44.4%
+    p1: msgs offered=14444700 achieved=14444700 shed=0 pushed=14444700 popped=14284300 lag=160400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=152.58/395.26/440.32 ms | e2e p50/p99/p999=280.58/544.77/618.50 ms | cpu=44.2%
+    p2: msgs offered=14444400 achieved=14444400 shed=0 pushed=14444400 popped=14286800 lag=157600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=152.58/395.26/444.42 ms | e2e p50/p99/p999=280.58/552.96/626.69 ms | cpu=44.2%
+    p3: msgs offered=14444300 achieved=14444300 shed=0 pushed=14444300 popped=14275600 lag=168700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=152.58/395.26/448.51 ms | e2e p50/p99/p999=288.77/561.15/626.69 ms | cpu=50.2%
+    p4: msgs offered=14444000 achieved=14444000 shed=0 pushed=14444000 popped=14284441 lag=159559 errs push=0 pop=0 ack=0 | produce p50/p99/p999=152.58/395.26/448.51 ms | e2e p50/p99/p999=284.67/561.15/643.07 ms | cpu=50.1%
+    p5: msgs offered=14444200 achieved=14444200 shed=0 pushed=14444200 popped=14567474 lag=-123274 errs push=0 pop=0 ack=0 | produce p50/p99/p999=152.58/395.26/444.42 ms | e2e p50/p99/p999=288.77/15269.89/18219.01 ms | cpu=50.4%
+    p6: msgs offered=14444500 achieved=14444500 shed=0 pushed=14444500 popped=14282700 lag=161800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=152.58/395.26/444.42 ms | e2e p50/p99/p999=313.34/593.92/667.65 ms | cpu=60.6%
+    p7: msgs offered=14444800 achieved=14444800 shed=0 pushed=14444800 popped=14283200 lag=161600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=152.58/395.26/444.42 ms | e2e p50/p99/p999=309.25/585.73/659.46 ms | cpu=60.2%
+    p8: msgs offered=14444500 achieved=14444500 shed=0 pushed=14444500 popped=14410737 lag=33763 errs push=0 pop=0 ack=0 | produce p50/p99/p999=152.58/395.26/448.51 ms | e2e p50/p99/p999=321.54/20316.16/25296.90 ms | cpu=60.5%
+    total: 9/9 processes with a final line | msgs offered=129999800 achieved=129999800 shed=0 pushed=129999800 popped=128958752 errors=0 | worst produce p99=395.26 ms | worst e2e p99=20316.16 ms
+[2026-10-13T11:12:42Z] run b1-1x200-2000k: DONE in 176s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/b1-1x200-2000k

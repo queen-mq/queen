@@ -1,0 +1,4 @@
+[07:39:46] omb: run fC-nr2-l1-p100-500k: system queen-facade, driver queen-facade.yaml, workload 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+ControlSocket /Users/alice/.ssh/cm/15d5a95cb41d4989329841486e48f383db90fd01 already exists, disabling multiplexing
+[07:39:51] omb: 2 workers up
+fC-nr2-l1-p100-500k [queen-facade] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 5,007 | pub p50/p99/p99.9 7.4/20.2/25.4 ms | e2e p50/p99/p99.9 10.0/34.0/56.0 ms (max 85.0) | brokers 8.4 cores, disk write 245/245/246 MB/s

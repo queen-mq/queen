@@ -1,0 +1,40 @@
+[08:56:58] matrix: native-nr2-p100-200k (queen-native, queen-native-v2.yaml, 1-topic-100-partitions-1kb-4p-4c-200k.yaml, 100 partitions)
+[08:57:01] omb: queen nr2: 3 healthy ("role":"follower")
+[09:01:19] matrix: done native-nr2-p100-200k [queen-native] 1-topic-100-partitions-1kb-4p-4c-200k.yaml: pub 200k/s cons 200k/s err 0 backlog max 1,689 | pub p50/p99/p99.9 1.8/2.6/2.9 ms | e2e p50/p99/p99.9 3.0/4.0/5.0 ms (max 19.0) | brokers 8.8 cores, disk write 251/251/253 MB/s
+[09:01:19] matrix: kafka-p100-200k (kafka, kafka.yaml, 1-topic-100-partitions-1kb-4p-4c-200k.yaml, 100 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[09:05:54] matrix: done kafka-p100-200k [kafka] 1-topic-100-partitions-1kb-4p-4c-200k.yaml: pub 200k/s cons 200k/s err 0 backlog max 1,816 | pub p50/p99/p99.9 1.2/2.5/6.2 ms | e2e p50/p99/p99.9 1.0/3.0/7.0 ms (max 234) | brokers 3.4 cores, disk write 208/209/208 MB/s
+[09:05:54] matrix: kafka-p100-1000k (kafka, kafka.yaml, 1-topic-100-partitions-1kb-4p-4c-1000k.yaml, 100 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[09:10:38] matrix: done kafka-p100-1000k [kafka] 1-topic-100-partitions-1kb-4p-4c-1000k.yaml: pub 690k/s cons 690k/s err 0 backlog max 34,959 | pub p50/p99/p99.9 5.9/1,427/2,159 ms | e2e p50/p99/p99.9 20.0/1,445/2,172 ms (max 3,375) | brokers 3.7 cores, disk write 646/649/650 MB/s
+[09:10:38] matrix: native-nr2-p100-2000k (queen-native, queen-native-v2.yaml, 1-topic-100-partitions-1kb-4p-4c-2000k.yaml, 100 partitions)
+[09:11:26] omb: queen nr2: 3 healthy ("role":"leader")
+[09:15:46] matrix: done native-nr2-p100-2000k [queen-native] 1-topic-100-partitions-1kb-4p-4c-2000k.yaml: pub 1,285k/s cons 1,285k/s err 0 backlog max 24,478 | pub p50/p99/p99.9 56.7/180/195 ms | e2e p50/p99/p99.9 67.0/191/206 ms (max 322) | brokers 17.4 cores, disk write 625/624/624 MB/s
+[09:15:46] matrix: kafka-p100-2000k (kafka, kafka.yaml, 1-topic-100-partitions-1kb-4p-4c-2000k.yaml, 100 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[09:20:29] matrix: done kafka-p100-2000k [kafka] 1-topic-100-partitions-1kb-4p-4c-2000k.yaml: pub 1,161k/s cons 1,161k/s err 0 backlog max 93,182 | pub p50/p99/p99.9 15.2/762/1,108 ms | e2e p50/p99/p99.9 44.0/781/1,126 ms (max 1,755) | brokers 7.4 cores, disk write 1307/1306/1205 MB/s
+[09:20:29] matrix: native-nr2-p10000-200k (queen-native, queen-native-v2.yaml, 1-topic-10000-partitions-1kb-4p-4c-200k.yaml, 10000 partitions)
+[09:20:58] omb: queen nr2: 3 healthy ("role":"follower")
+[09:25:16] matrix: done native-nr2-p10000-200k [queen-native] 1-topic-10000-partitions-1kb-4p-4c-200k.yaml: pub 200k/s cons 200k/s err 0 backlog max 1,654 | pub p50/p99/p99.9 1.8/2.6/2.9 ms | e2e p50/p99/p99.9 3.0/4.0/5.0 ms (max 13.0) | brokers 8.7 cores, disk write 266/266/268 MB/s
+[09:25:16] matrix: kafka-p10000-200k (kafka, kafka.yaml, 1-topic-10000-partitions-1kb-4p-4c-200k.yaml, 10000 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[09:35:43] matrix: done kafka-p10000-200k: no result.json
+[09:35:43] matrix: paused before native-nr2-p10000-500k
+[10:11:35] matrix: resumed
+[10:11:35] matrix: native-nr2-p10000-500k (queen-native, queen-native-v2.yaml, 1-topic-10000-partitions-1kb-4p-4c-500k.yaml, 10000 partitions)
+[10:11:39] omb: queen nr2: 3 healthy ("role":"follower")
+[10:15:59] matrix: done native-nr2-p10000-500k [queen-native] 1-topic-10000-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 6,699 | pub p50/p99/p99.9 2.6/4.0/4.4 ms | e2e p50/p99/p99.9 5.0/7.0/8.0 ms (max 25.0) | brokers 11.2 cores, disk write 321/324/319 MB/s
+[10:15:59] matrix: kafka-p10000-500k (kafka, kafka.yaml, 1-topic-10000-partitions-1kb-4p-4c-500k.yaml, 10000 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[10:16:38] matrix: done kafka-p10000-500k: no result.json
+[10:16:38] matrix: paused before native-nr2-p10000-1000k

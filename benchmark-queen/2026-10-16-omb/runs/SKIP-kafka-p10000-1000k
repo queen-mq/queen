@@ -1,0 +1,1 @@
+Kafka 4.3 KRaft refuses OMB's single CreateTopics of 10,000 partitions: BoundedListTooLongException, more than 10,000 records in one operation (controller.log, kafka-p10000-200k); OMB retries it silently until the worker's 600 s timeout

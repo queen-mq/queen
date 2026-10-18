@@ -1,0 +1,3 @@
+node=1 rss_MB=10629 threads=150 maps=722 fds=194 data_MB=1 part_dirs=1 gc_pauses=8 gc_max_ms=5.307 gc_sum_ms=21 errors=0 warns=9 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=24
+node=2 rss_MB=10635 threads=150 maps=720 fds=188 data_MB=1 part_dirs=1 gc_pauses=8 gc_max_ms=6.617 gc_sum_ms=24 errors=0 warns=1 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=24
+ssh: connect to host <host-04> port 22: Operation timed out

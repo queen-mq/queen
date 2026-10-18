@@ -1,0 +1,1 @@
+not a measurement with the harness's Kafka settings: log.retention.ms=600000 (10 min) deletes the oldest part of a 100 GB backlog that takes 17.5 min to build, and the consumer resets past it (kafka-backlog-1t-16p: 41.4M messages never delivered). Rerun at the end with retention off as kafka-backlog-1t-1p-ret

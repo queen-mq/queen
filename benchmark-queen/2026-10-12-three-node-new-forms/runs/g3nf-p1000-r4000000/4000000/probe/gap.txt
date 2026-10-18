@@ -1,0 +1,3735 @@
+Attaching 19 probes...
+BEGIN 38583936574538
+END 38594586516207
+
+
+
+
+@off_stack_us[queen-lane-4, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function+87
+    asm_sysvec_call_function+27
+]: 6
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    syscall_copy_user_array+100
+    trace_user_fault_read+240
+]: 6
+@off_stack_us[queen-lane-1, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    io_schedule+76
+    folio_wait_bit_common+317
+    __folio_lock+23
+    iomap_page_mkwrite+713
+    __xfs_write_fault+386
+]: 7
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    common_interrupt+100
+    asm_common_interrupt+39
+    irqentry_exit+315
+    common_interrupt+100
+]: 7
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    tcp_mtu_probe+36
+    tcp_write_xmit+1572
+]: 9
+@off_stack_us[queen-lane-7, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 10
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    fput+0
+    ep_send_events+272
+]: 10
+@off_stack_us[queen-rsm-ckpt, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function+87
+    asm_sysvec_call_function+27
+]: 11
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    futex_hash+176
+    futex_wake+136
+    do_futex+398
+    __x64_sys_futex+297
+]: 11
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function+87
+    asm_sysvec_call_function+27
+]: 12
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    post_alloc_hook+159
+    __alloc_frozen_pages_noprof+368
+]: 12
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_notrace+89
+    preempt_schedule_notrace_thunk+22
+    perf_syscall_enter+589
+    trace_syscall_enter+119
+    do_syscall_64+1079
+    entry_SYSCALL_64_after_hwframe+118
+]: 12
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    xfs_fsb_to_db+5
+    xfs_buffered_write_iomap_begin+1582
+]: 13
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    get_mem_cgroup_from_mm+187
+    __mem_cgroup_charge+32
+]: 14
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    __fget_files+151
+    fdget+103
+    __x64_sys_pwrite64+61
+    x64_sys_call+9631
+]: 14
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    mnt_put_write_access_file+9
+    kiocb_modified+45
+]: 15
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    fdget_pos+25
+    do_writev+50
+]: 16
+@off_stack_us[queen-rsm-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    do_syscall_64+87
+    entry_SYSCALL_64_after_hwframe+118
+]: 16
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    _raw_spin_unlock_irqrestore+66
+    __folio_mark_dirty+90
+    filemap_dirty_folio+61
+    iomap_write_end+251
+]: 16
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    _raw_spin_unlock_irq+51
+    eventfd_write+228
+    vfs_write+266
+    ksys_write+113
+]: 19
+@off_stack_us[queen-lane-1, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    try_to_wake_up+737
+    wake_up_q+75
+    futex_wake+397
+    do_futex+398
+]: 19
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    xfs_file_buffered_write+550
+    xfs_file_write_iter+391
+]: 19
+@off_stack_us[queen-rsm-ckpt, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    common_interrupt+100
+    asm_common_interrupt+39
+    irqentry_exit+315
+    sysvec_apic_timer_interrupt+87
+]: 21
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    __tcp_transmit_skb+492
+    __tcp_send_ack.part.0+243
+]: 22
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    _raw_spin_unlock_irqrestore+66
+    __mod_timer+289
+    mod_timer+16
+    sk_reset_timer+24
+]: 24
+@off_stack_us[queen-raft-purg, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    xfs_ilock+6
+    xfs_generic_create+774
+]: 26
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    sock_def_readable+229
+    tcp_data_ready+56
+    tcp_data_queue+614
+    tcp_rcv_established+958
+]: 26
+@off_stack_us[queen-lane-0, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    exc_page_fault+146
+    asm_exc_page_fault+39
+]: 28
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function_single+87
+    asm_sysvec_call_function_single+27
+]: 28
+@off_stack_us[queen-qlog-next, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    perf_event_wakeup+199
+    perf_event_exit_event.isra.0+395
+    perf_event_exit_task_context+297
+    perf_event_exit_task+212
+]: 28
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    xfs_inode_to_log_dinode+1038
+    xlog_cil_insert_items+219
+]: 28
+@off_stack_us[queen-rsm-dedup, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 29
+@off_stack_us[consume-serve, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    try_to_wake_up+737
+    wake_up_q+75
+    futex_wake+397
+    do_futex+398
+]: 29
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    iomap_iter+279
+    iomap_file_buffered_write+182
+]: 29
+@off_stack_us[consume-serve, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function_single+87
+    asm_sysvec_call_function_single+27
+]: 30
+@off_stack_us[queen-qlog-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    _raw_spin_unlock+45
+    __remove_mapping+270
+    remove_mapping+22
+    mapping_evict_folio+123
+]: 30
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    irqentry_exit+315
+    sysvec_call_function+87
+]: 33
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    __x64_sys_futex+302
+    x64_sys_call+8536
+]: 34
+@off_stack_us[queen-qlog-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 34
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    __hrtimer_setup+130
+    hrtimer_setup_sleeper_on_stack+46
+]: 36
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    common_interrupt+100
+    asm_common_interrupt+39
+    ep_item_poll.isra.0+27
+    ep_send_events+272
+]: 37
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    __fget_files+151
+    fdget_raw+94
+    __x64_sys_fcntl+46
+    x64_sys_call+6931
+]: 37
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    irqentry_exit+315
+    common_interrupt+100
+]: 39
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    do_anonymous_page+846
+    handle_pte_fault+500
+    __handle_mm_fault+1386
+    handle_mm_fault+298
+]: 40
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    copy_folio_from_iter_atomic+169
+    iomap_write_iter+363
+]: 41
+@off_stack_us[queen-lane-1, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function_single+87
+    asm_sysvec_call_function_single+27
+]: 45
+@off_stack_us[queen-rsm-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 45
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    filemap_get_entry+462
+    __filemap_get_folio_mpol+52
+    iomap_get_folio+95
+    iomap_write_begin+959
+]: 45
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    common_interrupt+100
+    asm_common_interrupt+39
+    irqentry_exit+315
+    sysvec_apic_timer_interrupt+87
+]: 46
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    iomap_adjust_read_range+352
+    __iomap_write_begin+515
+]: 48
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    try_to_wake_up+737
+    wake_up_q+75
+    futex_wake+397
+    do_futex+398
+]: 48
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    __local_bh_enable_ip+80
+    _raw_spin_unlock_bh+29
+    lock_sock_nested+58
+    tcp_recvmsg+107
+]: 49
+@off_stack_us[queen-lane-1, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function+87
+    asm_sysvec_call_function+27
+]: 50
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    kernel_init_pages+62
+    post_alloc_hook+143
+]: 51
+@off_stack_us[consume-serve, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function+87
+    asm_sysvec_call_function+27
+]: 51
+@off_stack_us[queen-rsm-dedup, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 52
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    _copy_to_iter+191
+    simple_copy_to_iter+58
+]: 52
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    tcp_recvmsg_locked+366
+    tcp_recvmsg+131
+]: 53
+@off_stack_us[queen-rsm-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 56
+@off_stack_us[queen-planner, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    try_to_wake_up+737
+    wake_up_q+75
+    futex_wake+397
+    do_futex+398
+]: 57
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    handle_mm_fault+589
+    do_user_addr_fault+466
+]: 57
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    common_interrupt+100
+    asm_common_interrupt+39
+    xlog_ticket_alloc+96
+    xfs_log_reserve+175
+]: 57
+@off_stack_us[queen-qlog-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_sched_yield+130
+    __x64_sys_sched_yield+14
+    x64_sys_call+1090
+    do_syscall_64+217
+    entry_SYSCALL_64_after_hwframe+118
+]: 59
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    schedule_preempt_disabled+21
+    rwsem_down_write_slowpath+505
+    down_write+94
+    xfs_ilock+333
+    xfs_file_buffered_write+306
+]: 59
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    __raw_spin_lock_irqsave+11
+    _raw_spin_lock_irqsave+14
+]: 62
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    exc_page_fault+146
+    asm_exc_page_fault+39
+]: 63
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    do_syscall_64+82
+    entry_SYSCALL_64_after_hwframe+118
+]: 64
+@off_stack_us[queen-qlog-fsyn, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 66
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    sock_poll+68
+    ep_item_poll.isra.0+77
+]: 66
+@off_stack_us[queen-lane-4, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    io_schedule+76
+    folio_wait_bit_common+317
+    __folio_lock+23
+    iomap_page_mkwrite+713
+    __xfs_write_fault+386
+]: 66
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    __pi_memset+13
+    kmalloc_reserve+162
+]: 75
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    common_interrupt+100
+    asm_common_interrupt+39
+    kernel_init_pages+62
+    post_alloc_hook+143
+]: 77
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    xlog_format_start+0
+    xlog_cil_insert_items+219
+]: 78
+@off_stack_us[queen-lane-4, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 88
+@off_stack_us[queen-lane-5, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 94
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    kernel_init_pages+62
+    post_alloc_hook+143
+]: 95
+@off_stack_us[queen-lane-2, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 97
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    iomap_write_begin+779
+    iomap_write_iter+296
+]: 99
+@off_stack_us[queen-lane-2, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    exc_page_fault+146
+    asm_exc_page_fault+39
+]: 104
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    try_to_wake_up+737
+    wake_up_q+75
+    futex_wake+397
+    do_futex+398
+]: 104
+@off_stack_us[queen-raft-wake, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 108
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    kernel_init_pages+62
+    post_alloc_hook+143
+]: 112
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    check_heap_object+126
+    __check_object_size+137
+]: 117
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function_single+87
+    asm_sysvec_call_function_single+27
+]: 120
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    do_user_addr_fault+208
+    exc_page_fault+129
+]: 122
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    __ip_queue_xmit+862
+    ip_queue_xmit+21
+    __tcp_transmit_skb+3184
+    tcp_write_xmit+1445
+]: 124
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    try_charge_memcg+551
+    mem_cgroup_sk_charge+35
+    sk_forced_mem_schedule+163
+    tcp_stream_alloc_skb+186
+]: 133
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    common_interrupt+100
+    asm_common_interrupt+39
+    irqentry_exit+315
+    sysvec_apic_timer_interrupt+87
+]: 134
+@off_stack_us[queen-qlog-next, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 146
+@off_stack_us[queen-lane-6, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 149
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    irqentry_exit+315
+    common_interrupt+100
+]: 150
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function_single+87
+    asm_sysvec_call_function_single+27
+]: 154
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    irqentry_exit+315
+    common_interrupt+100
+]: 156
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    do_syscall_64+82
+    entry_SYSCALL_64_after_hwframe+118
+]: 157
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    _raw_spin_unlock+45
+    futex_wake+389
+    do_futex+398
+    __x64_sys_futex+297
+]: 167
+@off_stack_us[queen-lane-0, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 169
+@off_stack_us[queen-rsm-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 178
+@off_stack_us[queen-lane-7, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    irqentry_exit+315
+    common_interrupt+100
+]: 181
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    _raw_spin_unlock_irqrestore+66
+    __folio_mark_dirty+90
+    filemap_dirty_folio+61
+    iomap_write_end+251
+]: 202
+@off_stack_us[queen-rsm-ckpt, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    kernel_init_pages+62
+    post_alloc_hook+143
+]: 203
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_reschedule_ipi+103
+    asm_sysvec_reschedule_ipi+27
+]: 206
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    kernel_init_pages+62
+    post_alloc_hook+143
+]: 220
+@off_stack_us[queen-raft-wake, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 227
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    schedule_preempt_disabled+21
+    rwsem_down_write_slowpath+505
+    down_write+94
+    xfs_ilock+333
+    xfs_file_buffered_write+306
+]: 246
+@off_stack_us[queen-lane-5, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    irqentry_exit+315
+    common_interrupt+100
+]: 256
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 284
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    irqentry_exit+315
+    common_interrupt+100
+]: 316
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule_irq+56
+    irqentry_exit+80
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+    _copy_to_iter+148
+    simple_copy_to_iter+58
+]: 321
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    try_to_wake_up+737
+    wake_up_q+75
+    futex_wake+397
+    do_futex+398
+]: 353
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function+87
+    asm_sysvec_call_function+27
+]: 358
+@off_stack_us[queen-lane-4, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 397
+@off_stack_us[queen-lane-1, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 409
+@off_stack_us[queen-rsm-ckpt, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    exc_page_fault+146
+    asm_exc_page_fault+39
+]: 441
+@off_stack_us[queen-planner, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_sched_yield+130
+    __x64_sys_sched_yield+14
+    x64_sys_call+1090
+    do_syscall_64+217
+    entry_SYSCALL_64_after_hwframe+118
+]: 458
+@off_stack_us[queen-lane-0, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 464
+@off_stack_us[queen-raft-wake, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_sched_yield+130
+    __x64_sys_sched_yield+14
+    x64_sys_call+1090
+    do_syscall_64+217
+    entry_SYSCALL_64_after_hwframe+118
+]: 480
+@off_stack_us[consume-serve, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    exc_page_fault+146
+    asm_exc_page_fault+39
+]: 489
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function+87
+    asm_sysvec_call_function+27
+]: 500
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    try_to_wake_up+737
+    wake_up_q+75
+    futex_wake+397
+    do_futex+398
+]: 520
+@off_stack_us[queen-lane-5, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 543
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_sched_yield+130
+    __x64_sys_sched_yield+14
+    x64_sys_call+1090
+    do_syscall_64+217
+    entry_SYSCALL_64_after_hwframe+118
+]: 573
+@off_stack_us[queen-lane-3, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 577
+@off_stack_us[queen-qlog-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 670
+@off_stack_us[queen-lane-6, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 717
+@off_stack_us[queen-lane-7, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 775
+@off_stack_us[queen-planner, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 789
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 795
+@off_stack_us[queen-rsm-ckpt, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    io_schedule+76
+    folio_wait_bit_common+317
+    __filemap_get_folio_mpol+665
+    iomap_get_folio+95
+    iomap_write_begin+959
+]: 833
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    try_to_wake_up+737
+    wake_up_q+75
+    futex_wake+397
+    do_futex+398
+]: 891
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_sched_yield+130
+    __x64_sys_sched_yield+14
+    x64_sys_call+1090
+    do_syscall_64+217
+    entry_SYSCALL_64_after_hwframe+118
+]: 905
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_call_function_single+87
+    asm_sysvec_call_function_single+27
+]: 927
+@off_stack_us[queen-qlog-next, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    preempt_schedule+89
+    preempt_schedule_thunk+22
+    _raw_spin_unlock_irqrestore+66
+    sched_move_task+314
+    sched_autogroup_exit_task+19
+    do_exit+560
+]: 956
+@off_stack_us[queen-lane-2, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 1035
+@off_stack_us[queen-lane-3, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 1148
+@off_stack_us[queen-lane-1, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 1156
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    exc_page_fault+146
+    asm_exc_page_fault+39
+]: 1233
+@off_stack_us[queen-pg, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    schedule_hrtimeout_range_clock+271
+    schedule_hrtimeout_range+19
+    ep_poll+1338
+    do_epoll_wait+87
+    __x64_sys_epoll_wait+110
+]: 1255
+@off_stack_us[queen-raft-wake, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 1316
+@off_stack_us[queen-lane-7, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 1341
+@off_stack_us[consume-serve, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 1457
+@off_stack_us[consume-serve, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_sched_yield+130
+    __x64_sys_sched_yield+14
+    x64_sys_call+1090
+    do_syscall_64+217
+    entry_SYSCALL_64_after_hwframe+118
+]: 1818
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 1888
+@off_stack_us[queen-planner, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 2127
+@off_stack_us[queen-lane-6, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 2142
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 2354
+@off_stack_us[queen-rsm-ckpt, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 2471
+@off_stack_us[queen-rsm-ckpt, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 2683
+@off_stack_us[queen-lane-2, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 2772
+@off_stack_us[queen-rsm-ckpt, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 3049
+@off_stack_us[queen-lane-4, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 3082
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    exc_page_fault+146
+    asm_exc_page_fault+39
+]: 3282
+@off_stack_us[queen-lane-5, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 3373
+@off_stack_us[queen-lane-3, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 3811
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 4242
+@off_stack_us[queen-lane-1, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 4299
+@off_stack_us[queen-qlog-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    schedule_preempt_disabled+21
+    rwsem_down_read_slowpath+670
+    down_read+60
+    xfs_ilock+104
+    xfs_map_blocks.isra.0+276
+]: 4577
+@off_stack_us[queen-lane-0, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 5243
+@off_stack_us[consume-serve, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 5539
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_sched_yield+130
+    __x64_sys_sched_yield+14
+    x64_sys_call+1090
+    do_syscall_64+217
+    entry_SYSCALL_64_after_hwframe+118
+]: 6867
+@off_stack_us[consume-serve, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 8085
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 8888
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    io_schedule+76
+    folio_wait_bit_common+317
+    folio_wait_bit+24
+    folio_wait_writeback+61
+    truncate_inode_partial_folio+128
+]: 9450
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 10180
+@off_stack_us[queen-planner, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 12728
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    sysvec_apic_timer_interrupt+87
+    asm_sysvec_apic_timer_interrupt+27
+]: 14125
+@off_stack_us[queen-qlog-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 20714
+@off_stack_us[queen-qlog-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    io_schedule+76
+    rq_qos_wait+240
+    wbt_wait+177
+    __rq_qos_throttle+40
+    blk_mq_submit_bio+1483
+]: 38337
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 43783
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    exc_page_fault+146
+    asm_exc_page_fault+39
+]: 62054
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 65393
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_sched_yield+130
+    __x64_sys_sched_yield+14
+    x64_sys_call+1090
+    do_syscall_64+217
+    entry_SYSCALL_64_after_hwframe+118
+]: 74352
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    irqentry_exit+235
+    common_interrupt+100
+    asm_common_interrupt+39
+]: 83845
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 89134
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 95928
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 114055
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    exit_to_user_mode_loop+108
+    do_syscall_64+544
+    entry_SYSCALL_64_after_hwframe+118
+]: 407332
+@off_stack_us[queen-pg-main, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 5002409
+@off_stack_us[queen-qlog-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7058051
+@off_stack_us[queen-planner, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7063182
+@off_stack_us[queen-lane-1, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7725498
+@off_stack_us[queen-lane-3, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7733826
+@off_stack_us[queen-lane-0, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7734742
+@off_stack_us[queen-lane-2, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7741740
+@off_stack_us[queen-lane-5, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7742222
+@off_stack_us[queen-lane-4, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7743800
+@off_stack_us[queen-lane-6, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7766095
+@off_stack_us[queen-lane-7, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 7769603
+@off_stack_us[consume-serve, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 8100789
+@off_stack_us[queen-pg, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    schedule_hrtimeout_range_clock+211
+    schedule_hrtimeout_range+19
+    ep_poll+1338
+    do_epoll_wait+87
+    __x64_sys_epoll_wait+110
+]: 8317563
+@off_stack_us[queen-rsm-drop, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 9533586
+@off_stack_us[queen-raft-wake, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 16690676
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    schedule_hrtimeout_range_clock+211
+    schedule_hrtimeout_range+19
+    ep_poll+1338
+    do_epoll_wait+87
+    __x64_sys_epoll_wait+110
+]: 19214419
+@off_stack_us[queen-raft-log, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 23211316
+@off_stack_us[queen-raft-purg, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 24497249
+@off_stack_us[queen-rsm-ckpt, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 26251583
+@off_stack_us[queen-raft-sync, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 26281512
+@off_stack_us[queen-store-scr, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_nanosleep+96
+    hrtimer_nanosleep+139
+    common_nsleep_timens+78
+    __x64_sys_clock_nanosleep+242
+    x64_sys_call+7846
+]: 27001670
+@off_stack_us[queen-rsm-dedup, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_nanosleep+96
+    hrtimer_nanosleep+139
+    common_nsleep_timens+78
+    __x64_sys_clock_nanosleep+242
+    x64_sys_call+7846
+]: 29580012
+@off_stack_us[queen-rsm-retsc, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    do_nanosleep+96
+    hrtimer_nanosleep+139
+    common_nsleep_timens+78
+    __x64_sys_clock_nanosleep+242
+    x64_sys_call+7846
+]: 29605434
+@off_stack_us[queen-qlog-writ, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 75972825
+@off_stack_us[queen-raft, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 83752734
+@off_stack_us[queen-rsm-apply, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 95463995
+@off_stack_us[queen-qlog-fsyn, 
+    perf_trace_sched_switch+20
+    __schedule+1167
+    schedule+39
+    futex_do_wait+58
+    __futex_wait+153
+    futex_wait+114
+    do_futex+261
+    __x64_sys_futex+297
+]: 153336998
+@off_us[queen-qlog-next, 501109]: 8
+@off_us[queen-qlog-next, 501233]: 12
+@off_us[queen-qlog-next, 501246]: 14
+@off_us[queen-qlog-next, 500736]: 24
+@off_us[queen-qlog-next, 501290]: 33
+@off_us[queen-qlog-next, 501274]: 39
+@off_us[queen-qlog-next, 501200]: 40
+@off_us[queen-qlog-next, 501117]: 43
+@off_us[queen-qlog-next, 500763]: 54
+@off_us[queen-qlog-next, 501277]: 55
+@off_us[queen-qlog-next, 500356]: 59
+@off_us[queen-qlog-next, 501204]: 77
+@off_us[queen-qlog-next, 501221]: 81
+@off_us[queen-qlog-next, 501249]: 109
+@off_us[queen-qlog-next, 501186]: 143
+@off_us[queen-qlog-next, 501210]: 158
+@off_us[queen-qlog-next, 501288]: 181
+@off_us[queen-qlog-fsyn, 499166]: 2317385
+@off_us[queen-qlog-fsyn, 499165]: 2326966
+@off_us[queen-qlog-fsyn, 499164]: 2377445
+@off_us[queen-qlog-fsyn, 499162]: 2708910
+@off_us[queen-qlog-fsyn, 499163]: 2715085
+@off_us[queen-qlog-fsyn, 499159]: 3007909
+@off_us[queen-qlog-fsyn, 499160]: 3131834
+@off_us[queen-qlog-fsyn, 499158]: 3492991
+@off_us[queen-qlog-fsyn, 499156]: 3518953
+@off_us[queen-qlog-fsyn, 499157]: 3854059
+@off_us[queen-qlog-fsyn, 499187]: 3891790
+@off_us[queen-qlog-fsyn, 499161]: 3924195
+@off_us[queen-qlog-fsyn, 499184]: 3941456
+@off_us[queen-qlog-fsyn, 499186]: 3986062
+@off_us[queen-qlog-fsyn, 499185]: 3986902
+@off_us[queen-qlog-fsyn, 499179]: 4090449
+@off_us[queen-qlog-fsyn, 499180]: 4122779
+@off_us[queen-qlog-fsyn, 499181]: 4190382
+@off_us[queen-qlog-fsyn, 499183]: 4211193
+@off_us[queen-qlog-fsyn, 499182]: 4287195
+@off_us[queen-pg-main, 498082]: 5002409
+@off_us[queen-raft, 497920]: 5890363
+@off_us[queen-raft, 497922]: 5910059
+@off_us[queen-raft, 497921]: 5917202
+@off_us[queen-raft, 497919]: 5924241
+@off_us[queen-qlog-fsyn, 499175]: 5942260
+@off_us[queen-qlog-fsyn, 499178]: 5986258
+@off_us[queen-qlog-fsyn, 499177]: 6356577
+@off_us[queen-qlog-fsyn, 499176]: 6357560
+@off_us[queen-qlog-fsyn, 499174]: 6903051
+@off_us[queen-planner, 497984]: 7079341
+@off_us[queen-qlog-drop, 499221]: 7122472
+@off_us[queen-qlog-fsyn, 499173]: 7126764
+@off_us[queen-qlog-fsyn, 499172]: 7203590
+@off_us[queen-rsm-apply, 497909]: 7204086
+@off_us[queen-qlog-fsyn, 499171]: 7253808
+@off_us[queen-qlog-fsyn, 499170]: 7392381
+@off_us[queen-qlog-fsyn, 499169]: 7414292
+@off_us[queen-rsm-apply, 497978]: 7487928
+@off_us[queen-rsm-apply, 498013]: 7529184
+@off_us[queen-qlog-fsyn, 499167]: 7541478
+@off_us[queen-raft-log, 497907]: 7664413
+@off_us[queen-lane-1, 498001]: 7731483
+@off_us[queen-lane-3, 498003]: 7739362
+@off_us[queen-lane-0, 498000]: 7740646
+@off_us[queen-lane-2, 498002]: 7745748
+@off_us[queen-lane-5, 498005]: 7746488
+@off_us[queen-lane-4, 498004]: 7747439
+@off_us[queen-lane-6, 498006]: 7769103
+@off_us[queen-lane-7, 498007]: 7771910
+@off_us[queen-qlog-fsyn, 499168]: 7775105
+@off_us[queen-raft-log, 497976]: 7787964
+@off_us[queen-raft, 498024]: 7834329
+@off_us[queen-raft, 497991]: 7836159
+@off_us[queen-raft, 497993]: 7836704
+@off_us[queen-raft, 497992]: 7838716
+@off_us[queen-raft, 497994]: 7841650
+@off_us[queen-raft, 498025]: 7870789
+@off_us[queen-raft-log, 498011]: 7888296
+@off_us[queen-raft, 498026]: 7901194
+@off_us[queen-raft, 498023]: 7971621
+@off_us[queen-raft-purg, 497908]: 7999165
+@off_us[queen-raft-purg, 497977]: 7999185
+@off_us[consume-serve, 497999]: 8118287
+@off_us[queen-rsm-apply, 497986]: 8152502
+@off_us[queen-rsm-apply, 498019]: 8153810
+@off_us[queen-rsm-apply, 498018]: 8157415
+@off_us[queen-rsm-apply, 498020]: 8161652
+@off_us[queen-rsm-apply, 497915]: 8163350
+@off_us[queen-rsm-apply, 497914]: 8165026
+@off_us[queen-rsm-apply, 497987]: 8165849
+@off_us[queen-rsm-apply, 497988]: 8169194
+@off_us[queen-rsm-apply, 497916]: 8173229
+@off_us[queen-pg, 498080]: 8318818
+@off_us[queen-raft-wake, 499150]: 8344820
+@off_us[queen-raft-wake, 499149]: 8347987
+@off_us[queen-raft, 499191]: 8481792
+@off_us[queen-raft-purg, 498012]: 8498925
+@off_us[queen-raft, 499143]: 8499507
+@off_us[queen-raft-sync, 497906]: 8607169
+@off_us[queen-rsm-ckpt, 497918]: 8741717
+@off_us[queen-rsm-ckpt, 498022]: 8748904
+@off_us[queen-rsm-ckpt, 497990]: 8770674
+@off_us[queen-raft-sync, 497975]: 8868317
+@off_us[queen-raft-sync, 498010]: 8911381
+@off_us[queen-store-scr, 497905]: 9000453
+@off_us[queen-store-scr, 498009]: 9000604
+@off_us[queen-store-scr, 497974]: 9000613
+@off_us[queen-qlog-writ, 498186]: 9446753
+@off_us[queen-qlog-writ, 498184]: 9455188
+@off_us[queen-qlog-writ, 498182]: 9483296
+@off_us[queen-qlog-writ, 498185]: 9499191
+@off_us[queen-qlog-writ, 498183]: 9524700
+@off_us[queen-rsm-drop, 498187]: 9533881
+@off_us[queen-qlog-writ, 498180]: 9534357
+@off_us[queen-qlog-writ, 498181]: 9539137
+@off_us[queen-qlog-writ, 498179]: 9558743
+@off_us[queen-rsm-retsc, 498029]: 9806570
+@off_us[queen-rsm-dedup, 497973]: 9859042
+@off_us[queen-rsm-dedup, 498079]: 9859689
+@off_us[queen-rsm-dedup, 498008]: 9861362
+@off_us[queen-rsm-retsc, 497983]: 9891757
+@off_us[queen-rsm-retsc, 498083]: 9907107
+@pwrite_bytes[queen-raft-sync]: 105121
+@pwrite_bytes[queen-rsm-ckpt]: 3469912
+@pwrite_bytes[queen-qlog-writ]: 110074867
+@pwrite_bytes[queen-raft-log]: 186688387
+@pwrite_n[queen-rsm-ckpt]: 852
+@pwrite_n[queen-qlog-writ]: 2109
+@pwrite_n[queen-raft-log]: 3281
+@pwrite_n[queen-raft-sync]: 3391
+@pwrite_total_us[queen-rsm-ckpt]: 1598
+@pwrite_total_us[queen-raft-sync]: 15930
+@pwrite_total_us[queen-qlog-writ]: 39101
+@pwrite_total_us[queen-raft-log]: 65005
+@runq_total_us[kworker/23:0]: 2
+@runq_total_us[queen]: 3
+@runq_total_us[kworker/6:0]: 3
+@runq_total_us[kthreadd]: 4
+@runq_total_us[kworker/19:3]: 4
+@runq_total_us[kworker/18:1]: 4
+@runq_total_us[khungtaskd]: 7
+@runq_total_us[python3]: 8
+@runq_total_us[kworker/20:2]: 8
+@runq_total_us[kworker/4:3]: 9
+@runq_total_us[kworker/0:1]: 9
+@runq_total_us[gmain]: 11
+@runq_total_us[khugepaged]: 12
+@runq_total_us[queen-pg-main]: 17
+@runq_total_us[kworker/u96:1]: 24
+@runq_total_us[migration/11]: 28
+@runq_total_us[ksoftirqd/22]: 31
+@runq_total_us[migration/7]: 32
+@runq_total_us[migration/16]: 33
+@runq_total_us[migration/8]: 35
+@runq_total_us[migration/6]: 38
+@runq_total_us[migration/18]: 40
+@runq_total_us[migration/4]: 42
+@runq_total_us[ksoftirqd/16]: 43
+@runq_total_us[migration/20]: 43
+@runq_total_us[migration/23]: 45
+@runq_total_us[migration/2]: 46
+@runq_total_us[migration/10]: 47
+@runq_total_us[migration/14]: 47
+@runq_total_us[ksoftirqd/20]: 48
+@runq_total_us[sleep]: 48
+@runq_total_us[queen-pg]: 49
+@runq_total_us[migration/1]: 50
+@runq_total_us[migration/5]: 50
+@runq_total_us[ksoftirqd/18]: 50
+@runq_total_us[migration/3]: 50
+@runq_total_us[migration/21]: 50
+@runq_total_us[migration/9]: 51
+@runq_total_us[migration/13]: 52
+@runq_total_us[migration/19]: 53
+@runq_total_us[google_osconfig]: 57
+@runq_total_us[migration/12]: 57
+@runq_total_us[perf-exec]: 58
+@runq_total_us[migration/22]: 58
+@runq_total_us[ksoftirqd/17]: 59
+@runq_total_us[migration/17]: 60
+@runq_total_us[migration/15]: 63
+@runq_total_us[migration/0]: 66
+@runq_total_us[kworker/4:0]: 83
+@runq_total_us[kcompactd0]: 97
+@runq_total_us[ksoftirqd/19]: 100
+@runq_total_us[multipathd]: 110
+@runq_total_us[ksoftirqd/21]: 119
+@runq_total_us[google_guest_ag]: 165
+@runq_total_us[queen-store-scr]: 193
+@runq_total_us[ksoftirqd/23]: 472
+@runq_total_us[queen-raft-purg]: 547
+@runq_total_us[bpftrace]: 743
+@runq_total_us[ksoftirqd/8]: 975
+@runq_total_us[queen-rsm-ckpt]: 983
+@runq_total_us[ksoftirqd/4]: 1270
+@runq_total_us[queen-qlog-fsyn]: 1555
+@runq_total_us[xfsaild/md0]: 1662
+@runq_total_us[ksoftirqd/3]: 1872
+@runq_total_us[ksoftirqd/11]: 1940
+@runq_total_us[ksoftirqd/1]: 2074
+@runq_total_us[ksoftirqd/10]: 2146
+@runq_total_us[ksoftirqd/12]: 2448
+@runq_total_us[kworker/0:2]: 2676
+@runq_total_us[ksoftirqd/6]: 2787
+@runq_total_us[ksoftirqd/2]: 2796
+@runq_total_us[kworker/15:0H]: 2887
+@runq_total_us[ksoftirqd/14]: 3133
+@runq_total_us[ksoftirqd/15]: 3208
+@runq_total_us[ksoftirqd/9]: 3216
+@runq_total_us[kworker/3:1H]: 3241
+@runq_total_us[kworker/17:1H]: 3305
+@runq_total_us[ksoftirqd/0]: 3456
+@runq_total_us[kworker/18:1H]: 3507
+@runq_total_us[kworker/8:0H]: 3535
+@runq_total_us[ksoftirqd/13]: 3581
+@runq_total_us[kworker/2:1H]: 3608
+@runq_total_us[ksoftirqd/5]: 3795
+@runq_total_us[kworker/0:1H]: 3922
+@runq_total_us[kworker/14:0H]: 3989
+@runq_total_us[kworker/1:1H]: 3996
+@runq_total_us[kworker/8:0]: 4210
+@runq_total_us[kworker/6:1H]: 4500
+@runq_total_us[kworker/22:1H]: 4601
+@runq_total_us[kworker/0:0]: 4663
+@runq_total_us[kworker/16:1H]: 4744
+@runq_total_us[kworker/14:2]: 4773
+@runq_total_us[queen-rsm-retsc]: 4857
+@runq_total_us[kworker/12:1H]: 5012
+@runq_total_us[kworker/2:1]: 5042
+@runq_total_us[kworker/9:1H]: 5045
+@runq_total_us[kworker/13:1H]: 5143
+@runq_total_us[kworker/11:1H]: 5662
+@runq_total_us[kworker/7:1H]: 5673
+@runq_total_us[kworker/4:0H]: 5772
+@runq_total_us[kworker/10:1H]: 5943
+@runq_total_us[kworker/16:0]: 5960
+@runq_total_us[kworker/23:1H]: 5981
+@runq_total_us[kworker/20:1H]: 6180
+@runq_total_us[kworker/20:0]: 6225
+@runq_total_us[kworker/4:2]: 6441
+@runq_total_us[kworker/19:1H]: 6810
+@runq_total_us[kworker/15:0]: 6977
+@runq_total_us[kworker/17:0]: 7175
+@runq_total_us[kworker/5:1H]: 7415
+@runq_total_us[kworker/13:0]: 7496
+@runq_total_us[kworker/21:1H]: 7765
+@runq_total_us[kworker/1:0]: 8265
+@runq_total_us[ksoftirqd/7]: 8446
+@runq_total_us[kworker/23:2]: 8630
+@runq_total_us[kworker/3:0]: 9118
+@runq_total_us[kworker/10:2]: 9218
+@runq_total_us[kworker/11:1]: 9347
+@runq_total_us[kworker/19:1]: 9546
+@runq_total_us[kworker/9:0]: 9731
+@runq_total_us[perf]: 10095
+@runq_total_us[kworker/15:4]: 11640
+@runq_total_us[kworker/5:2]: 12003
+@runq_total_us[kworker/7:2]: 12153
+@runq_total_us[kworker/18:0]: 12751
+@runq_total_us[kworker/16:5]: 13748
+@runq_total_us[kworker/12:2]: 14223
+@runq_total_us[kworker/22:1]: 14527
+@runq_total_us[rcu_sched]: 15736
+@runq_total_us[kworker/6:1]: 15778
+@runq_total_us[kworker/21:0]: 15796
+@runq_total_us[kworker/u96:6]: 15974
+@runq_total_us[kworker/u96:10]: 22229
+@runq_total_us[queen-rsm-dedup]: 34766
+@runq_total_us[bash]: 39175
+@runq_total_us[queen-lane-0]: 109861
+@runq_total_us[queen-lane-1]: 124664
+@runq_total_us[queen-lane-2]: 138779
+@runq_total_us[queen-lane-3]: 156857
+@runq_total_us[queen-rsm-drop]: 160566
+@runq_total_us[queen-lane-4]: 162317
+@runq_total_us[queen-raft-wake]: 166717
+@runq_total_us[queen-lane-6]: 174700
+@runq_total_us[queen-lane-5]: 183448
+@runq_total_us[queen-lane-7]: 195769
+@runq_total_us[consume-serve]: 454623
+@runq_total_us[queen-planner]: 539722
+@runq_total_us[queen-qlog-drop]: 572231
+@runq_total_us[queen-qlog-writ]: 702029
+@runq_total_us[queen-raft-sync]: 865004
+@runq_total_us[queen-raft-log]: 1185470
+@runq_total_us[queen-rsm-apply]: 1239579
+@runq_total_us[tokio-rt-worker]: 5571324
+@runq_total_us[queen-raft]: 6897930
+@runq_us[kworker/20:2]: 
+[4, 8)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[kworker/23:0]: 
+[0]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[kworker/19:3]: 
+[1]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[kworker/6:0]: 
+[1]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[kworker/18:1]: 
+[1]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[khungtaskd]: 
+[4, 8)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[perf-exec]: 
+[32, 64)               1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[queen]: 
+[1]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[kthreadd]: 
+[0]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[kworker/4:3]: 
+[1]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 0 |                                                    |
+[4, 8)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[kworker/0:1]: 
+[2, 4)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[python3]: 
+[1]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[gmain]: 
+[4, 8)                 2 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[khugepaged]: 
+[1]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[queen-pg-main]: 
+[1]                    1 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[2, 4)                 2 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+
+@runq_us[kworker/4:0]: 
+[2, 4)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8, 16)                1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[16, 32)               0 |                                                    |
+[32, 64)               1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@runq_us[migration/11]: 
+[1]                    2 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 0 |                                                    |
+[4, 8)                 2 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8, 16)                1 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+
+@runq_us[queen-pg]: 
+[2, 4)                 3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8, 16)                2 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+
+@runq_us[migration/16]: 
+[0]                    1 |@@@@@@@@@@                                          |
+[1]                    3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[2, 4)                 5 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 2 |@@@@@@@@@@@@@@@@@@@@                                |
+
+@runq_us[sleep]: 
+[0]                    1 |@@@@@@@@@@                                          |
+[1]                    5 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[4, 8)                 2 |@@@@@@@@@@@@@@@@@@@@                                |
+[8, 16)                1 |@@@@@@@@@@                                          |
+
+@runq_us[kworker/u96:1]: 
+[0]                    2 |@@@@@@@@@@@@@                                       |
+[1]                    8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 2 |@@@@@@@@@@@@@                                       |
+
+@runq_us[migration/4]: 
+[1]                    4 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@           |
+[2, 4)                 5 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+
+@runq_us[ksoftirqd/23]: 
+[1]                   11 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 0 |                                                    |
+[4, 8)                 0 |                                                    |
+[8, 16)                0 |                                                    |
+[16, 32)               0 |                                                    |
+[32, 64)               0 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             0 |                                                    |
+[256, 512)             1 |@@@@                                                |
+
+@runq_us[migration/7]: 
+[1]                    8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 3 |@@@@@@@@@@@@@@@@@@@                                 |
+[4, 8)                 1 |@@@@@@                                              |
+
+@runq_us[migration/6]: 
+[1]                    4 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+[2, 4)                 6 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+
+@runq_us[migration/23]: 
+[1]                    7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 3 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@@@@@@                              |
+
+@runq_us[migration/10]: 
+[1]                    8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 3 |@@@@@@@@@@@@@@@@@@@                                 |
+[4, 8)                 1 |@@@@@@                                              |
+[8, 16)                1 |@@@@@@                                              |
+
+@runq_us[migration/8]: 
+[1]                    5 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[2, 4)                 7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 1 |@@@@@@@                                             |
+
+@runq_us[ksoftirqd/22]: 
+[0]                    2 |@@@@@@@@@@@                                         |
+[1]                    9 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 2 |@@@@@@@@@@@                                         |
+[4, 8)                 1 |@@@@@                                               |
+
+@runq_us[migration/3]: 
+[1]                    5 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+[2, 4)                 6 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 2 |@@@@@@@@@@@@@@@@@                                   |
+[8, 16)                1 |@@@@@@@@                                            |
+
+@runq_us[migration/5]: 
+[1]                    4 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[2, 4)                 8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@@@                                 |
+
+@runq_us[ksoftirqd/20]: 
+[1]                   14 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 0 |                                                    |
+[4, 8)                 0 |                                                    |
+[8, 16)                0 |                                                    |
+[16, 32)               1 |@@@                                                 |
+
+@runq_us[google_guest_ag]: 
+[0]                    3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[1]                    3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[2, 4)                 5 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 2 |@@@@@@@@@@@@@@@@@@@@                                |
+[8, 16)                0 |                                                    |
+[16, 32)               0 |                                                    |
+[32, 64)               1 |@@@@@@@@@@                                          |
+[64, 128)              1 |@@@@@@@@@@                                          |
+
+@runq_us[migration/20]: 
+[1]                    9 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 5 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[4, 8)                 1 |@@@@@                                               |
+
+@runq_us[migration/2]: 
+[1]                    6 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 6 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+
+@runq_us[migration/18]: 
+[0]                    1 |@@@@@                                               |
+[1]                    9 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 4 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[4, 8)                 1 |@@@@@                                               |
+
+@runq_us[migration/21]: 
+[1]                    8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 4 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[4, 8)                 4 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+
+@runq_us[migration/1]: 
+[1]                    5 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[2, 4)                10 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 2 |@@@@@@@@@@                                          |
+
+@runq_us[migration/0]: 
+[1]                    1 |@@@@                                                |
+[2, 4)                12 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@@@@@@                                       |
+[8, 16)                1 |@@@@                                                |
+
+@runq_us[migration/14]: 
+[1]                    7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@@@@@@                              |
+
+@runq_us[migration/12]: 
+[1]                    8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 6 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@             |
+[4, 8)                 2 |@@@@@@@@@@@@@                                       |
+[8, 16)                1 |@@@@@@                                              |
+
+@runq_us[migration/15]: 
+[1]                    7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@       |
+[2, 4)                 8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 1 |@@@@@@                                              |
+[8, 16)                2 |@@@@@@@@@@@@@                                       |
+
+@runq_us[migration/9]: 
+[1]                    7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@       |
+[2, 4)                 8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@@@                                 |
+
+@runq_us[migration/17]: 
+[1]                   10 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                |
+[4, 8)                 0 |                                                    |
+[8, 16)                0 |                                                    |
+[16, 32)               1 |@@@@@                                               |
+
+@runq_us[migration/19]: 
+[1]                    6 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+[2, 4)                 9 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@                                   |
+
+@runq_us[migration/13]: 
+[1]                    7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 4 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                       |
+
+@runq_us[ksoftirqd/18]: 
+[1]                   14 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 0 |                                                    |
+[4, 8)                 3 |@@@@@@@@@@@                                         |
+[8, 16)                1 |@@@                                                 |
+
+@runq_us[kcompactd0]: 
+[0]                    2 |@@@@@@@@@@@@@@                                      |
+[1]                    7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 6 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        |
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[8, 16)                0 |                                                    |
+[16, 32)               2 |@@@@@@@@@@@@@@                                      |
+
+@runq_us[migration/22]: 
+[1]                   11 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                   |
+[4, 8)                 2 |@@@@@@@@@                                           |
+
+@runq_us[ksoftirqd/16]: 
+[0]                    1 |@@                                                  |
+[1]                   18 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 0 |                                                    |
+[4, 8)                 0 |                                                    |
+[8, 16)                1 |@@                                                  |
+
+@runq_us[multipathd]: 
+[1]                    5 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[2, 4)                 4 |@@@@@@@@@@@@@@@@@@@@                                |
+[4, 8)                10 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8, 16)                2 |@@@@@@@@@@                                          |
+
+@runq_us[ksoftirqd/17]: 
+[0]                    3 |@@@@@@@@@                                           |
+[1]                   16 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 1 |@@@                                                 |
+[4, 8)                 0 |                                                    |
+[8, 16)                2 |@@@@@@                                              |
+
+@runq_us[google_osconfig]: 
+[0]                    3 |@@@@@@@@@@@@@@@@@                                   |
+[1]                    9 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@      |
+[4, 8)                 3 |@@@@@@@@@@@@@@@@@                                   |
+
+@runq_us[ksoftirqd/19]: 
+[0]                    4 |@@@@@@@@@@@@@@@@                                    |
+[1]                   13 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 2 |@@@@@@@@                                            |
+[4, 8)                 5 |@@@@@@@@@@@@@@@@@@@@                                |
+[8, 16)                3 |@@@@@@@@@@@@                                        |
+
+@runq_us[queen-raft-purg]: 
+[1]                    2 |@@@@@                                               |
+[2, 4)                18 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 3 |@@@@@@@@                                            |
+[8, 16)                2 |@@@@@                                               |
+[16, 32)               0 |                                                    |
+[32, 64)               1 |@@                                                  |
+[64, 128)              2 |@@@@@                                               |
+[128, 256)             1 |@@                                                  |
+
+@runq_us[queen-store-scr]: 
+[0]                    1 |@@@@                                                |
+[1]                    0 |                                                    |
+[2, 4)                13 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                 7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[8, 16)                8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    |
+[16, 32)               1 |@@@@                                                |
+
+@runq_us[ksoftirqd/21]: 
+[1]                   20 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                 1 |@@                                                  |
+[4, 8)                 7 |@@@@@@@@@@@@@@@@@@                                  |
+[8, 16)                3 |@@@@@@@                                             |
+
+@runq_us[bpftrace]: 
+[0]                   25 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@  |
+[1]                   22 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        |
+[2, 4)                26 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                17 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+[8, 16)                4 |@@@@@@@@                                            |
+[16, 32)               4 |@@@@@@@@                                            |
+[32, 64)               0 |                                                    |
+[64, 128)              2 |@@@@                                                |
+[128, 256)             1 |@@                                                  |
+
+@runq_us[kworker/0:0]: 
+[0]                    2 |@@@                                                 |
+[1]                    6 |@@@@@@@@@                                           |
+[2, 4)                34 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                32 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@    |
+[8, 16)                9 |@@@@@@@@@@@@@                                       |
+[16, 32)               5 |@@@@@@@                                             |
+[32, 64)               6 |@@@@@@@@@                                           |
+[64, 128)              6 |@@@@@@@@@                                           |
+[128, 256)             3 |@@@@                                                |
+[256, 512)             1 |@                                                   |
+[512, 1K)              3 |@@@@                                                |
+
+@runq_us[queen-rsm-ckpt]: 
+[0]                    1 |                                                    |
+[1]                   13 |@@@@@@@@@                                           |
+[2, 4)                68 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                24 |@@@@@@@@@@@@@@@@@@                                  |
+[8, 16)                5 |@@@                                                 |
+[16, 32)               3 |@@                                                  |
+[32, 64)               4 |@@@                                                 |
+[64, 128)              3 |@@                                                  |
+
+@runq_us[queen-qlog-fsyn]: 
+[0]                    7 |@@@@@                                               |
+[1]                   19 |@@@@@@@@@@@@@@                                      |
+[2, 4)                68 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                28 |@@@@@@@@@@@@@@@@@@@@@                               |
+[8, 16)               11 |@@@@@@@@                                            |
+[16, 32)               7 |@@@@@                                               |
+[32, 64)               2 |@                                                   |
+[64, 128)              2 |@                                                   |
+[128, 256)             2 |@                                                   |
+[256, 512)             1 |                                                    |
+
+@runq_us[kworker/16:0]: 
+[0]                    1 |                                                    |
+[1]                   23 |@@@@@@@@@@@@@@@@@@@@@                               |
+[2, 4)                55 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                33 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[8, 16)               11 |@@@@@@@@@@                                          |
+[16, 32)               6 |@@@@@                                               |
+[32, 64)              10 |@@@@@@@@@                                           |
+[64, 128)              6 |@@@@@                                               |
+[128, 256)             5 |@@@@                                                |
+[256, 512)             4 |@@@                                                 |
+[512, 1K)              2 |@                                                   |
+
+@runq_us[kworker/0:2]: 
+[0]                    5 |@@@@@                                               |
+[1]                   27 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[2, 4)                41 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+[4, 8)                45 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8, 16)               14 |@@@@@@@@@@@@@@@@                                    |
+[16, 32)              12 |@@@@@@@@@@@@@                                       |
+[32, 64)               3 |@@@                                                 |
+[64, 128)              5 |@@@@@                                               |
+[128, 256)             5 |@@@@@                                               |
+[256, 512)             1 |@                                                   |
+
+@runq_us[kworker/8:0]: 
+[0]                    4 |@@@                                                 |
+[1]                   30 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[2, 4)                60 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                34 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                       |
+[8, 16)               11 |@@@@@@@@@                                           |
+[16, 32)              13 |@@@@@@@@@@@                                         |
+[32, 64)              10 |@@@@@@@@                                            |
+[64, 128)              7 |@@@@@@                                              |
+[128, 256)             7 |@@@@@@                                              |
+[256, 512)             3 |@@                                                  |
+
+@runq_us[kworker/14:2]: 
+[0]                    3 |@@@                                                 |
+[1]                   23 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[2, 4)                49 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                49 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8, 16)               21 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[16, 32)              17 |@@@@@@@@@@@@@@@@@@                                  |
+[32, 64)               8 |@@@@@@@@                                            |
+[64, 128)              7 |@@@@@@@                                             |
+[128, 256)             4 |@@@@                                                |
+[256, 512)             3 |@@@                                                 |
+[512, 1K)              0 |                                                    |
+[1K, 2K)               1 |@                                                   |
+
+@runq_us[xfsaild/md0]: 
+[0]                   29 |@@@@@@@@@@@@@@@@@@@                                 |
+[1]                   78 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                38 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[4, 8)                26 |@@@@@@@@@@@@@@@@@                                   |
+[8, 16)               10 |@@@@@@                                              |
+[16, 32)               5 |@@@                                                 |
+[32, 64)               2 |@                                                   |
+[64, 128)              3 |@@                                                  |
+[128, 256)             2 |@                                                   |
+[256, 512)             1 |                                                    |
+
+@runq_us[kworker/15:0H]: 
+[0]                   36 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@    |
+[1]                   39 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                38 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@  |
+[4, 8)                30 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@            |
+[8, 16)               17 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[16, 32)              16 |@@@@@@@@@@@@@@@@@@@@@                               |
+[32, 64)              15 |@@@@@@@@@@@@@@@@@@@@                                |
+[64, 128)              4 |@@@@@                                               |
+[128, 256)             5 |@@@@@@                                              |
+
+@runq_us[kworker/17:0]: 
+[0]                    2 |@                                                   |
+[1]                   29 |@@@@@@@@@@@@@@@@@@@@                                |
+[2, 4)                72 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                44 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[8, 16)               15 |@@@@@@@@@@                                          |
+[16, 32)               9 |@@@@@@                                              |
+[32, 64)              11 |@@@@@@@                                             |
+[64, 128)              7 |@@@@@                                               |
+[128, 256)             4 |@@                                                  |
+[256, 512)             5 |@@@                                                 |
+[512, 1K)              3 |@@                                                  |
+
+@runq_us[kworker/20:0]: 
+[0]                    1 |                                                    |
+[1]                   34 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[2, 4)                73 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                32 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[8, 16)               24 |@@@@@@@@@@@@@@@@@                                   |
+[16, 32)              11 |@@@@@@@                                             |
+[32, 64)              12 |@@@@@@@@                                            |
+[64, 128)              5 |@@@                                                 |
+[128, 256)             7 |@@@@                                                |
+[256, 512)             0 |                                                    |
+[512, 1K)              3 |@@                                                  |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/7:1H]: 
+[0]                   22 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[1]                   40 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                35 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@       |
+[4, 8)                27 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                 |
+[8, 16)               31 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@            |
+[16, 32)              21 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[32, 64)              17 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[64, 128)              7 |@@@@@@@@@                                           |
+[128, 256)             5 |@@@@@@                                              |
+[256, 512)             3 |@@@                                                 |
+[512, 1K)              2 |@@                                                  |
+
+@runq_us[kworker/17:1H]: 
+[0]                   43 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@   |
+[1]                   45 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                24 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[4, 8)                38 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+[8, 16)               22 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[16, 32)              19 |@@@@@@@@@@@@@@@@@@@@@                               |
+[32, 64)               9 |@@@@@@@@@@                                          |
+[64, 128)              5 |@@@@@                                               |
+[128, 256)             5 |@@@@@                                               |
+[256, 512)             2 |@@                                                  |
+
+@runq_us[kworker/13:1H]: 
+[0]                   41 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@              |
+[1]                   56 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                23 |@@@@@@@@@@@@@@@@@@@@@                               |
+[4, 8)                23 |@@@@@@@@@@@@@@@@@@@@@                               |
+[8, 16)               24 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[16, 32)              19 |@@@@@@@@@@@@@@@@@                                   |
+[32, 64)              10 |@@@@@@@@@                                           |
+[64, 128)             12 |@@@@@@@@@@@                                         |
+[128, 256)             2 |@                                                   |
+[256, 512)             1 |                                                    |
+[512, 1K)              0 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/4:2]: 
+[0]                    2 |@                                                   |
+[1]                   39 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[2, 4)                71 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                44 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    |
+[8, 16)               21 |@@@@@@@@@@@@@@@                                     |
+[16, 32)              14 |@@@@@@@@@@                                          |
+[32, 64)               6 |@@@@                                                |
+[64, 128)              2 |@                                                   |
+[128, 256)             8 |@@@@@                                               |
+[256, 512)             4 |@@                                                  |
+[512, 1K)              3 |@@                                                  |
+
+@runq_us[kworker/15:4]: 
+[0]                    4 |@@@                                                 |
+[1]                   35 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                       |
+[2, 4)                62 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                47 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@             |
+[8, 16)               25 |@@@@@@@@@@@@@@@@@@@@                                |
+[16, 32)               7 |@@@@@                                               |
+[32, 64)               8 |@@@@@@                                              |
+[64, 128)             11 |@@@@@@@@@                                           |
+[128, 256)             6 |@@@@@                                               |
+[256, 512)             6 |@@@@@                                               |
+[512, 1K)              3 |@@                                                  |
+[1K, 2K)               0 |                                                    |
+[2K, 4K)               1 |                                                    |
+
+@runq_us[kworker/3:1H]: 
+[0]                   52 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@  |
+[1]                   54 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                19 |@@@@@@@@@@@@@@@@@@                                  |
+[4, 8)                38 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                |
+[8, 16)               16 |@@@@@@@@@@@@@@@                                     |
+[16, 32)              13 |@@@@@@@@@@@@                                        |
+[32, 64)              13 |@@@@@@@@@@@@                                        |
+[64, 128)              4 |@@@                                                 |
+[128, 256)             5 |@@@@                                                |
+[256, 512)             2 |@                                                   |
+
+@runq_us[kworker/6:1H]: 
+[0]                   54 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   40 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@              |
+[2, 4)                24 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[4, 8)                37 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                 |
+[8, 16)               15 |@@@@@@@@@@@@@@                                      |
+[16, 32)              17 |@@@@@@@@@@@@@@@@                                    |
+[32, 64)              14 |@@@@@@@@@@@@@                                       |
+[64, 128)              8 |@@@@@@@                                             |
+[128, 256)             5 |@@@@                                                |
+[256, 512)             5 |@@@@                                                |
+
+@runq_us[kworker/14:0H]: 
+[0]                   43 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   32 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@              |
+[2, 4)                27 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    |
+[4, 8)                39 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+[8, 16)               31 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[16, 32)              20 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[32, 64)              20 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[64, 128)              5 |@@@@@@                                              |
+[128, 256)             2 |@@                                                  |
+[256, 512)             1 |@                                                   |
+[512, 1K)              1 |@                                                   |
+
+@runq_us[kworker/2:1H]: 
+[0]                   47 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+[1]                   52 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                37 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[4, 8)                25 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[8, 16)               19 |@@@@@@@@@@@@@@@@@@@                                 |
+[16, 32)              22 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[32, 64)              16 |@@@@@@@@@@@@@@@@                                    |
+[64, 128)              4 |@@@@                                                |
+[128, 256)             4 |@@@@                                                |
+[256, 512)             2 |@@                                                  |
+
+@runq_us[kworker/18:1H]: 
+[0]                   54 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@      |
+[1]                   61 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                31 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[4, 8)                32 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[8, 16)               18 |@@@@@@@@@@@@@@@                                     |
+[16, 32)              17 |@@@@@@@@@@@@@@                                      |
+[32, 64)               6 |@@@@@                                               |
+[64, 128)              5 |@@@@                                                |
+[128, 256)             7 |@@@@@                                               |
+[256, 512)             1 |                                                    |
+
+@runq_us[kworker/0:1H]: 
+[0]                   50 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   43 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        |
+[2, 4)                36 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[4, 8)                42 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+[8, 16)               31 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    |
+[16, 32)              15 |@@@@@@@@@@@@@@@                                     |
+[32, 64)               5 |@@@@@                                               |
+[64, 128)              6 |@@@@@@                                              |
+[128, 256)             3 |@@@                                                 |
+[256, 512)             1 |@                                                   |
+[512, 1K)              0 |                                                    |
+[1K, 2K)               1 |@                                                   |
+
+@runq_us[kworker/2:1]: 
+[0]                    7 |@@@@@                                               |
+[1]                   44 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                   |
+[2, 4)                68 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                57 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+[8, 16)               19 |@@@@@@@@@@@@@@                                      |
+[16, 32)              14 |@@@@@@@@@@                                          |
+[32, 64)               9 |@@@@@@                                              |
+[64, 128)              6 |@@@@                                                |
+[128, 256)             6 |@@@@                                                |
+[256, 512)             4 |@@@                                                 |
+[512, 1K)              1 |                                                    |
+
+@runq_us[kworker/12:1H]: 
+[0]                   61 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   53 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@       |
+[2, 4)                27 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[4, 8)                29 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[8, 16)               25 |@@@@@@@@@@@@@@@@@@@@@                               |
+[16, 32)              21 |@@@@@@@@@@@@@@@@@                                   |
+[32, 64)               8 |@@@@@@                                              |
+[64, 128)              9 |@@@@@@@                                             |
+[128, 256)             5 |@@@@                                                |
+[256, 512)             1 |                                                    |
+[512, 1K)              0 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/5:2]: 
+[0]                    2 |@                                                   |
+[1]                   38 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[2, 4)                70 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                66 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@   |
+[8, 16)               25 |@@@@@@@@@@@@@@@@@@                                  |
+[16, 32)              12 |@@@@@@@@                                            |
+[32, 64)               7 |@@@@@                                               |
+[64, 128)              6 |@@@@                                                |
+[128, 256)             6 |@@@@                                                |
+[256, 512)             3 |@@                                                  |
+[512, 1K)              6 |@@@@                                                |
+[1K, 2K)               0 |                                                    |
+[2K, 4K)               1 |                                                    |
+
+@runq_us[kworker/9:1H]: 
+[0]                   43 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@  |
+[1]                   44 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                34 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@            |
+[4, 8)                33 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@             |
+[8, 16)               31 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                |
+[16, 32)              30 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                 |
+[32, 64)              13 |@@@@@@@@@@@@@@@                                     |
+[64, 128)              9 |@@@@@@@@@@                                          |
+[128, 256)             3 |@@@                                                 |
+[256, 512)             1 |@                                                   |
+[512, 1K)              2 |@@                                                  |
+
+@runq_us[kworker/1:1H]: 
+[0]                   63 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   47 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@              |
+[2, 4)                22 |@@@@@@@@@@@@@@@@@@                                  |
+[4, 8)                43 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                 |
+[8, 16)               29 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[16, 32)              23 |@@@@@@@@@@@@@@@@@@                                  |
+[32, 64)               4 |@@@                                                 |
+[64, 128)              7 |@@@@@                                               |
+[128, 256)             3 |@@                                                  |
+[256, 512)             2 |@                                                   |
+[512, 1K)              1 |                                                    |
+
+@runq_us[kworker/8:0H]: 
+[0]                   62 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   52 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+[2, 4)                23 |@@@@@@@@@@@@@@@@@@@                                 |
+[4, 8)                34 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[8, 16)               18 |@@@@@@@@@@@@@@@                                     |
+[16, 32)              28 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[32, 64)              14 |@@@@@@@@@@@                                         |
+[64, 128)              9 |@@@@@@@                                             |
+[128, 256)             5 |@@@@                                                |
+
+@runq_us[kworker/13:0]: 
+[0]                    3 |@@                                                  |
+[1]                   35 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[2, 4)                67 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                64 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@   |
+[8, 16)               31 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[16, 32)              12 |@@@@@@@@@                                           |
+[32, 64)              13 |@@@@@@@@@@                                          |
+[64, 128)              7 |@@@@@                                               |
+[128, 256)            10 |@@@@@@@                                             |
+[256, 512)             3 |@@                                                  |
+[512, 1K)              3 |@@                                                  |
+
+@runq_us[kworker/20:1H]: 
+[0]                   67 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   47 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                |
+[2, 4)                32 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[4, 8)                33 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[8, 16)               13 |@@@@@@@@@@                                          |
+[16, 32)              24 |@@@@@@@@@@@@@@@@@@                                  |
+[32, 64)              22 |@@@@@@@@@@@@@@@@@                                   |
+[64, 128)              7 |@@@@@                                               |
+[128, 256)             7 |@@@@@                                               |
+[256, 512)             1 |                                                    |
+[512, 1K)              1 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/19:1]: 
+[0]                    8 |@@@@@                                               |
+[1]                   39 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[2, 4)                79 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                58 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@              |
+[8, 16)               23 |@@@@@@@@@@@@@@@                                     |
+[16, 32)              10 |@@@@@@                                              |
+[32, 64)               9 |@@@@@                                               |
+[64, 128)              8 |@@@@@                                               |
+[128, 256)             9 |@@@@@                                               |
+[256, 512)             9 |@@@@@                                               |
+[512, 1K)              2 |@                                                   |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/15:0]: 
+[0]                    7 |@@@@@                                               |
+[1]                   52 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@              |
+[2, 4)                70 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                61 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@       |
+[8, 16)               27 |@@@@@@@@@@@@@@@@@@@@                                |
+[16, 32)              21 |@@@@@@@@@@@@@@@                                     |
+[32, 64)              12 |@@@@@@@@                                            |
+[64, 128)              5 |@@@                                                 |
+[128, 256)             7 |@@@@@                                               |
+[256, 512)             5 |@@@                                                 |
+[512, 1K)              2 |@                                                   |
+
+@runq_us[kworker/7:2]: 
+[0]                    5 |@@@                                                 |
+[1]                   34 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[2, 4)                75 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@  |
+[4, 8)                78 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8, 16)               28 |@@@@@@@@@@@@@@@@@@                                  |
+[16, 32)              23 |@@@@@@@@@@@@@@@                                     |
+[32, 64)               6 |@@@@                                                |
+[64, 128)             11 |@@@@@@@                                             |
+[128, 256)             5 |@@@                                                 |
+[256, 512)             4 |@@                                                  |
+[512, 1K)              2 |@                                                   |
+[1K, 2K)               0 |                                                    |
+[2K, 4K)               2 |@                                                   |
+
+@runq_us[kworker/11:1]: 
+[0]                    7 |@@@@@                                               |
+[1]                   61 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        |
+[2, 4)                71 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                63 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@      |
+[8, 16)               20 |@@@@@@@@@@@@@@                                      |
+[16, 32)              17 |@@@@@@@@@@@@                                        |
+[32, 64)              14 |@@@@@@@@@@                                          |
+[64, 128)             11 |@@@@@@@@                                            |
+[128, 256)             6 |@@@@                                                |
+[256, 512)             7 |@@@@@                                               |
+[512, 1K)              2 |@                                                   |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/6:1]: 
+[0]                    7 |@@@@                                                |
+[1]                   40 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[2, 4)                89 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                61 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                 |
+[8, 16)               21 |@@@@@@@@@@@@                                        |
+[16, 32)              23 |@@@@@@@@@@@@@                                       |
+[32, 64)              15 |@@@@@@@@                                            |
+[64, 128)              9 |@@@@@                                               |
+[128, 256)             5 |@@                                                  |
+[256, 512)             7 |@@@@                                                |
+[512, 1K)              0 |                                                    |
+[1K, 2K)               3 |@                                                   |
+[2K, 4K)               2 |@                                                   |
+
+@runq_us[kworker/1:0]: 
+[0]                    9 |@@@@@                                               |
+[1]                   59 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@              |
+[2, 4)                79 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                56 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                |
+[8, 16)               25 |@@@@@@@@@@@@@@@@                                    |
+[16, 32)              17 |@@@@@@@@@@@                                         |
+[32, 64)              18 |@@@@@@@@@@@                                         |
+[64, 128)              8 |@@@@@                                               |
+[128, 256)            15 |@@@@@@@@@                                           |
+[256, 512)             5 |@@@                                                 |
+[512, 1K)              1 |                                                    |
+
+@runq_us[kworker/11:1H]: 
+[0]                   55 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   49 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@      |
+[2, 4)                37 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+[4, 8)                50 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+[8, 16)               40 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[16, 32)              27 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[32, 64)              17 |@@@@@@@@@@@@@@@@                                    |
+[64, 128)             11 |@@@@@@@@@@                                          |
+[128, 256)             4 |@@@                                                 |
+[256, 512)             2 |@                                                   |
+[512, 1K)              1 |                                                    |
+
+@runq_us[ksoftirqd/8]: 
+[0]                    7 |@                                                   |
+[1]                  192 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                31 |@@@@@@@@                                            |
+[4, 8)                46 |@@@@@@@@@@@@                                        |
+[8, 16)               11 |@@                                                  |
+[16, 32)               6 |@                                                   |
+[32, 64)               0 |                                                    |
+[64, 128)              1 |                                                    |
+
+@runq_us[kworker/10:2]: 
+[0]                    8 |@@@@                                                |
+[1]                   52 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    |
+[2, 4)                71 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+[4, 8)                84 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8, 16)               40 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[16, 32)              16 |@@@@@@@@@                                           |
+[32, 64)              14 |@@@@@@@@                                            |
+[64, 128)              7 |@@@@                                                |
+[128, 256)             6 |@@@                                                 |
+[256, 512)             5 |@@@                                                 |
+[512, 1K)              5 |@@@                                                 |
+
+@runq_us[kworker/23:2]: 
+[0]                    7 |@@@                                                 |
+[1]                   50 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[2, 4)               107 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                69 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                   |
+[8, 16)               22 |@@@@@@@@@@                                          |
+[16, 32)              17 |@@@@@@@@                                            |
+[32, 64)              18 |@@@@@@@@                                            |
+[64, 128)              6 |@@                                                  |
+[128, 256)             9 |@@@@                                                |
+[256, 512)             3 |@                                                   |
+[512, 1K)              2 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/22:1H]: 
+[0]                   73 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ |
+[1]                   74 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                37 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[4, 8)                44 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      |
+[8, 16)               27 |@@@@@@@@@@@@@@@@@@                                  |
+[16, 32)              25 |@@@@@@@@@@@@@@@@@                                   |
+[32, 64)              19 |@@@@@@@@@@@@@                                       |
+[64, 128)             10 |@@@@@@@                                             |
+[128, 256)             5 |@@@                                                 |
+[256, 512)             1 |                                                    |
+
+@runq_us[kworker/4:0H]: 
+[0]                   85 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   68 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@           |
+[2, 4)                28 |@@@@@@@@@@@@@@@@@                                   |
+[4, 8)                44 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[8, 16)               28 |@@@@@@@@@@@@@@@@@                                   |
+[16, 32)              29 |@@@@@@@@@@@@@@@@@                                   |
+[32, 64)              16 |@@@@@@@@@                                           |
+[64, 128)              6 |@@@                                                 |
+[128, 256)             6 |@@@                                                 |
+[256, 512)             4 |@@                                                  |
+[512, 1K)              1 |                                                    |
+
+@runq_us[kworker/5:1H]: 
+[0]                   65 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   50 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@            |
+[2, 4)                41 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    |
+[4, 8)                47 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[8, 16)               34 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[16, 32)              25 |@@@@@@@@@@@@@@@@@@@@                                |
+[32, 64)              30 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[64, 128)             17 |@@@@@@@@@@@@@                                       |
+[128, 256)             2 |@                                                   |
+[256, 512)             1 |                                                    |
+[512, 1K)              2 |@                                                   |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/16:1H]: 
+[0]                   82 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   73 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@      |
+[2, 4)                40 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[4, 8)                42 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[8, 16)               22 |@@@@@@@@@@@@@                                       |
+[16, 32)              23 |@@@@@@@@@@@@@@                                      |
+[32, 64)              20 |@@@@@@@@@@@@                                        |
+[64, 128)              6 |@@@                                                 |
+[128, 256)             9 |@@@@@                                               |
+[256, 512)             2 |@                                                   |
+
+@runq_us[kworker/10:1H]: 
+[0]                   73 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   65 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@      |
+[2, 4)                47 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                   |
+[4, 8)                36 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[8, 16)               38 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[16, 32)              24 |@@@@@@@@@@@@@@@@@                                   |
+[32, 64)              18 |@@@@@@@@@@@@                                        |
+[64, 128)              8 |@@@@@                                               |
+[128, 256)             7 |@@@@                                                |
+[256, 512)             4 |@@                                                  |
+
+@runq_us[kworker/19:1H]: 
+[0]                   75 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   64 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        |
+[2, 4)                37 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[4, 8)                59 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@            |
+[8, 16)               26 |@@@@@@@@@@@@@@@@@@                                  |
+[16, 32)              25 |@@@@@@@@@@@@@@@@@                                   |
+[32, 64)              28 |@@@@@@@@@@@@@@@@@@@                                 |
+[64, 128)             18 |@@@@@@@@@@@@                                        |
+[128, 256)             8 |@@@@@                                               |
+[256, 512)             3 |@@                                                  |
+
+@runq_us[kworker/16:5]: 
+[0]                    7 |@@@                                                 |
+[1]                   63 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      |
+[2, 4)               106 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                83 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@            |
+[8, 16)               23 |@@@@@@@@@@@                                         |
+[16, 32)              17 |@@@@@@@@                                            |
+[32, 64)              17 |@@@@@@@@                                            |
+[64, 128)              9 |@@@@                                                |
+[128, 256)            12 |@@@@@                                               |
+[256, 512)             6 |@@                                                  |
+[512, 1K)              3 |@                                                   |
+[1K, 2K)               3 |@                                                   |
+
+@runq_us[kworker/3:0]: 
+[0]                    6 |@@                                                  |
+[1]                   63 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      |
+[2, 4)               108 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                76 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                |
+[8, 16)               32 |@@@@@@@@@@@@@@@                                     |
+[16, 32)              21 |@@@@@@@@@@                                          |
+[32, 64)              16 |@@@@@@@                                             |
+[64, 128)              9 |@@@@                                                |
+[128, 256)            11 |@@@@@                                               |
+[256, 512)             7 |@@@                                                 |
+[512, 1K)              1 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[ksoftirqd/4]: 
+[0]                   16 |@@@                                                 |
+[1]                  243 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                28 |@@@@@                                               |
+[4, 8)                55 |@@@@@@@@@@@                                         |
+[8, 16)               19 |@@@@                                                |
+[16, 32)               4 |                                                    |
+[32, 64)               0 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             1 |                                                    |
+
+@runq_us[kworker/23:1H]: 
+[0]                   98 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                   76 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@            |
+[2, 4)                51 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[4, 8)                46 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[8, 16)               23 |@@@@@@@@@@@@                                        |
+[16, 32)              32 |@@@@@@@@@@@@@@@@                                    |
+[32, 64)              13 |@@@@@@                                              |
+[64, 128)             18 |@@@@@@@@@                                           |
+[128, 256)            10 |@@@@@                                               |
+[256, 512)             0 |                                                    |
+[512, 1K)              1 |                                                    |
+
+@runq_us[queen-rsm-retsc]: 
+[1]                    1 |                                                    |
+[2, 4)               191 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)               108 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                       |
+[8, 16)               48 |@@@@@@@@@@@@@                                       |
+[16, 32)              19 |@@@@@                                               |
+[32, 64)               6 |@                                                   |
+[64, 128)              3 |                                                    |
+[128, 256)             5 |@                                                   |
+[256, 512)             1 |                                                    |
+[512, 1K)              1 |                                                    |
+
+@runq_us[kworker/21:1H]: 
+[0]                   87 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@    |
+[1]                   94 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                52 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[4, 8)                49 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[8, 16)               31 |@@@@@@@@@@@@@@@@@                                   |
+[16, 32)              43 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[32, 64)              15 |@@@@@@@@                                            |
+[64, 128)             11 |@@@@@@                                              |
+[128, 256)             9 |@@@@                                                |
+[256, 512)             1 |                                                    |
+[512, 1K)              1 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/22:1]: 
+[0]                    6 |@@                                                  |
+[1]                   72 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[2, 4)               135 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                81 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[8, 16)               24 |@@@@@@@@@                                           |
+[16, 32)              25 |@@@@@@@@@                                           |
+[32, 64)              17 |@@@@@@                                              |
+[64, 128)             12 |@@@@                                                |
+[128, 256)            16 |@@@@@@                                              |
+[256, 512)             6 |@@                                                  |
+[512, 1K)              4 |@                                                   |
+[1K, 2K)               2 |                                                    |
+
+@runq_us[kworker/9:0]: 
+[0]                    6 |@@                                                  |
+[1]                   70 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      |
+[2, 4)               119 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)               100 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+[8, 16)               41 |@@@@@@@@@@@@@@@@@                                   |
+[16, 32)              25 |@@@@@@@@@@                                          |
+[32, 64)              19 |@@@@@@@@                                            |
+[64, 128)             19 |@@@@@@@@                                            |
+[128, 256)            11 |@@@@                                                |
+[256, 512)             6 |@@                                                  |
+[512, 1K)              2 |                                                    |
+
+@runq_us[ksoftirqd/2]: 
+[0]                   29 |@@@@@                                               |
+[1]                  289 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                44 |@@@@@@@                                             |
+[4, 8)                60 |@@@@@@@@@@                                          |
+[8, 16)               15 |@@                                                  |
+[16, 32)               5 |                                                    |
+[32, 64)               2 |                                                    |
+[64, 128)              1 |                                                    |
+[128, 256)             2 |                                                    |
+[256, 512)             0 |                                                    |
+[512, 1K)              0 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[kworker/12:2]: 
+[0]                    7 |@@                                                  |
+[1]                   80 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[2, 4)               160 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                93 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      |
+[8, 16)               54 |@@@@@@@@@@@@@@@@@                                   |
+[16, 32)              22 |@@@@@@@                                             |
+[32, 64)              26 |@@@@@@@@                                            |
+[64, 128)             17 |@@@@@                                               |
+[128, 256)            13 |@@@@                                                |
+[256, 512)             6 |@                                                   |
+[512, 1K)              6 |@                                                   |
+
+@runq_us[ksoftirqd/3]: 
+[0]                   30 |@@@@@                                               |
+[1]                  312 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                68 |@@@@@@@@@@@                                         |
+[4, 8)                81 |@@@@@@@@@@@@@                                       |
+[8, 16)               20 |@@@                                                 |
+[16, 32)               9 |@                                                   |
+[32, 64)               2 |                                                    |
+[64, 128)              1 |                                                    |
+[128, 256)             1 |                                                    |
+
+@runq_us[kworker/21:0]: 
+[0]                    9 |@@                                                  |
+[1]                   80 |@@@@@@@@@@@@@@@@@@@@@                               |
+[2, 4)               194 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)               131 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                 |
+[8, 16)               52 |@@@@@@@@@@@@@                                       |
+[16, 32)              19 |@@@@@                                               |
+[32, 64)              23 |@@@@@@                                              |
+[64, 128)             23 |@@@@@@                                              |
+[128, 256)             9 |@@                                                  |
+[256, 512)            11 |@@                                                  |
+[512, 1K)              4 |@                                                   |
+[1K, 2K)               0 |                                                    |
+[2K, 4K)               1 |                                                    |
+
+@runq_us[kworker/18:0]: 
+[0]                   12 |@@@                                                 |
+[1]                  141 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+[2, 4)               169 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)               107 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    |
+[8, 16)               42 |@@@@@@@@@@@@                                        |
+[16, 32)              37 |@@@@@@@@@@@                                         |
+[32, 64)              25 |@@@@@@@                                             |
+[64, 128)             20 |@@@@@@                                              |
+[128, 256)            18 |@@@@@                                               |
+[256, 512)             6 |@                                                   |
+[512, 1K)              3 |                                                    |
+
+@runq_us[ksoftirqd/11]: 
+[0]                   31 |@@@@                                                |
+[1]                  390 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                48 |@@@@@@                                              |
+[4, 8)                75 |@@@@@@@@@@                                          |
+[8, 16)               43 |@@@@@                                               |
+[16, 32)              17 |@@                                                  |
+[32, 64)               1 |                                                    |
+
+@runq_us[ksoftirqd/10]: 
+[0]                   44 |@@@@@                                               |
+[1]                  422 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                57 |@@@@@@@                                             |
+[4, 8)                91 |@@@@@@@@@@@                                         |
+[8, 16)               38 |@@@@                                                |
+[16, 32)              11 |@                                                   |
+[32, 64)               0 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             1 |                                                    |
+
+@runq_us[ksoftirqd/12]: 
+[0]                   80 |@@@@@@@@                                            |
+[1]                  463 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                51 |@@@@@                                               |
+[4, 8)                56 |@@@@@@                                              |
+[8, 16)               23 |@@                                                  |
+[16, 32)              11 |@                                                   |
+[32, 64)               4 |                                                    |
+[64, 128)              1 |                                                    |
+[128, 256)             3 |                                                    |
+
+@runq_us[ksoftirqd/1]: 
+[0]                   90 |@@@@@@@@@                                           |
+[1]                  515 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                59 |@@@@@                                               |
+[4, 8)                92 |@@@@@@@@@                                           |
+[8, 16)               20 |@@                                                  |
+[16, 32)               3 |                                                    |
+[32, 64)               3 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             1 |                                                    |
+
+@runq_us[ksoftirqd/6]: 
+[0]                   99 |@@@@@@@@@                                           |
+[1]                  519 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                77 |@@@@@@@                                             |
+[4, 8)                76 |@@@@@@@                                             |
+[8, 16)               28 |@@                                                  |
+[16, 32)               9 |                                                    |
+[32, 64)               4 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             2 |                                                    |
+[256, 512)             1 |                                                    |
+
+@runq_us[ksoftirqd/9]: 
+[0]                   87 |@@@@@@@                                             |
+[1]                  582 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                71 |@@@@@@                                              |
+[4, 8)                98 |@@@@@@@@                                            |
+[8, 16)               38 |@@@                                                 |
+[16, 32)              22 |@                                                   |
+[32, 64)               6 |                                                    |
+[64, 128)              4 |                                                    |
+[128, 256)             1 |                                                    |
+
+@runq_us[ksoftirqd/15]: 
+[0]                   67 |@@@@@                                               |
+[1]                  624 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                98 |@@@@@@@@                                            |
+[4, 8)               102 |@@@@@@@@                                            |
+[8, 16)               31 |@@                                                  |
+[16, 32)              21 |@                                                   |
+[32, 64)               5 |                                                    |
+[64, 128)              2 |                                                    |
+[128, 256)             1 |                                                    |
+
+@runq_us[ksoftirqd/5]: 
+[0]                   67 |@@@@@@                                              |
+[1]                  580 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                78 |@@@@@@                                              |
+[4, 8)               156 |@@@@@@@@@@@@@                                       |
+[8, 16)               65 |@@@@@                                               |
+[16, 32)              25 |@@                                                  |
+[32, 64)               5 |                                                    |
+[64, 128)              2 |                                                    |
+[128, 256)             1 |                                                    |
+
+@runq_us[ksoftirqd/13]: 
+[0]                  122 |@@@@@@@@@                                           |
+[1]                  691 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                67 |@@@@@                                               |
+[4, 8)                83 |@@@@@@                                              |
+[8, 16)               36 |@@                                                  |
+[16, 32)              28 |@@                                                  |
+[32, 64)               0 |                                                    |
+[64, 128)              1 |                                                    |
+[128, 256)             3 |                                                    |
+[256, 512)             1 |                                                    |
+
+@runq_us[ksoftirqd/14]: 
+[0]                  142 |@@@@@@@@@                                           |
+[1]                  744 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                79 |@@@@@                                               |
+[4, 8)                76 |@@@@@                                               |
+[8, 16)               38 |@@                                                  |
+[16, 32)              18 |@                                                   |
+[32, 64)               3 |                                                    |
+[64, 128)              2 |                                                    |
+[128, 256)             1 |                                                    |
+
+@runq_us[ksoftirqd/0]: 
+[0]                  105 |@@@@@@@                                             |
+[1]                  763 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)                90 |@@@@@@                                              |
+[4, 8)               108 |@@@@@@@                                             |
+[8, 16)               44 |@@                                                  |
+[16, 32)              15 |@                                                   |
+[32, 64)               3 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             3 |                                                    |
+[256, 512)             1 |                                                    |
+
+@runq_us[rcu_sched]: 
+[0]                  453 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                  386 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        |
+[2, 4)               190 |@@@@@@@@@@@@@@@@@@@@@                               |
+[4, 8)               105 |@@@@@@@@@@@@                                        |
+[8, 16)               51 |@@@@@                                               |
+[16, 32)              18 |@@                                                  |
+[32, 64)              14 |@                                                   |
+[64, 128)             20 |@@                                                  |
+[128, 256)            11 |@                                                   |
+[256, 512)            12 |@                                                   |
+[512, 1K)              3 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[perf]: 
+[0]                  722 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                  252 |@@@@@@@@@@@@@@@@@@                                  |
+[2, 4)               163 |@@@@@@@@@@@                                         |
+[4, 8)               105 |@@@@@@@                                             |
+[8, 16)               43 |@@@                                                 |
+[16, 32)              29 |@@                                                  |
+[32, 64)              23 |@                                                   |
+[64, 128)             17 |@                                                   |
+[128, 256)            10 |                                                    |
+[256, 512)             5 |                                                    |
+[512, 1K)              2 |                                                    |
+
+@runq_us[ksoftirqd/7]: 
+[0]                  378 |@@@@@@@@@@@@@@@@@@                                  |
+[1]                 1081 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)               120 |@@@@@                                               |
+[4, 8)               115 |@@@@@                                               |
+[8, 16)               67 |@@@                                                 |
+[16, 32)              25 |@                                                   |
+[32, 64)               5 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             3 |                                                    |
+[256, 512)             0 |                                                    |
+[512, 1K)              0 |                                                    |
+[1K, 2K)               0 |                                                    |
+[2K, 4K)               1 |                                                    |
+
+@runq_us[kworker/u96:6]: 
+[0]                 1201 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                  386 |@@@@@@@@@@@@@@@@                                    |
+[2, 4)               291 |@@@@@@@@@@@@                                        |
+[4, 8)               221 |@@@@@@@@@                                           |
+[8, 16)              119 |@@@@@                                               |
+[16, 32)              59 |@@                                                  |
+[32, 64)              45 |@                                                   |
+[64, 128)             26 |@                                                   |
+[128, 256)            16 |                                                    |
+[256, 512)             3 |                                                    |
+[512, 1K)              1 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[queen-rsm-dedup]: 
+[1]                  897 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)               821 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+[4, 8)               748 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+[8, 16)              197 |@@@@@@@@@@@                                         |
+[16, 32)             118 |@@@@@@                                              |
+[32, 64)              64 |@@@                                                 |
+[64, 128)             57 |@@@                                                 |
+[128, 256)            40 |@@                                                  |
+[256, 512)            16 |                                                    |
+[512, 1K)              3 |                                                    |
+
+@runq_us[kworker/u96:10]: 
+[0]                 1621 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                  508 |@@@@@@@@@@@@@@@@                                    |
+[2, 4)               329 |@@@@@@@@@@                                          |
+[4, 8)               227 |@@@@@@@                                             |
+[8, 16)              160 |@@@@@                                               |
+[16, 32)              91 |@@                                                  |
+[32, 64)              59 |@                                                   |
+[64, 128)             35 |@                                                   |
+[128, 256)            18 |                                                    |
+[256, 512)             8 |                                                    |
+[512, 1K)              2 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[bash]: 
+[0]                 1243 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    |
+[1]                  906 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[2, 4)              1988 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)               458 |@@@@@@@@@@@                                         |
+[8, 16)             1011 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[16, 32)             108 |@@                                                  |
+[32, 64)              58 |@                                                   |
+[64, 128)             58 |@                                                   |
+[128, 256)            19 |                                                    |
+[256, 512)             7 |                                                    |
+[512, 1K)              2 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[queen-lane-6]: 
+[0]                  414 |@@@                                                 |
+[1]                 6623 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              2599 |@@@@@@@@@@@@@@@@@@@@                                |
+[4, 8)              1283 |@@@@@@@@@@                                          |
+[8, 16)              876 |@@@@@@                                              |
+[16, 32)             592 |@@@@                                                |
+[32, 64)             588 |@@@@                                                |
+[64, 128)            362 |@@                                                  |
+[128, 256)           206 |@                                                   |
+[256, 512)            78 |                                                    |
+[512, 1K)              6 |                                                    |
+
+@runq_us[queen-lane-0]: 
+[0]                  328 |@@                                                  |
+[1]                 6469 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              3856 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      |
+[4, 8)              1271 |@@@@@@@@@@                                          |
+[8, 16)              797 |@@@@@@                                              |
+[16, 32)             361 |@@                                                  |
+[32, 64)             243 |@                                                   |
+[64, 128)            158 |@                                                   |
+[128, 256)           119 |                                                    |
+[256, 512)            44 |                                                    |
+[512, 1K)              5 |                                                    |
+
+@runq_us[queen-lane-7]: 
+[0]                  308 |@@                                                  |
+[1]                 6365 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              2816 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[4, 8)              1315 |@@@@@@@@@@                                          |
+[8, 16)              764 |@@@@@@                                              |
+[16, 32)             625 |@@@@@                                               |
+[32, 64)             723 |@@@@@                                               |
+[64, 128)            406 |@@@                                                 |
+[128, 256)           235 |@                                                   |
+[256, 512)            79 |                                                    |
+[512, 1K)             16 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[queen-raft-wake]: 
+[0]                  797 |@@@@@@                                              |
+[1]                 6436 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              2966 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[4, 8)              1262 |@@@@@@@@@@                                          |
+[8, 16)              788 |@@@@@@                                              |
+[16, 32)             492 |@@@                                                 |
+[32, 64)             454 |@@@                                                 |
+[64, 128)            292 |@@                                                  |
+[128, 256)           193 |@                                                   |
+[256, 512)            84 |                                                    |
+[512, 1K)             15 |                                                    |
+[1K, 2K)               2 |                                                    |
+
+@runq_us[queen-lane-3]: 
+[0]                  302 |@@                                                  |
+[1]                 6595 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              3335 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[4, 8)              1355 |@@@@@@@@@@                                          |
+[8, 16)              814 |@@@@@@                                              |
+[16, 32)             460 |@@@                                                 |
+[32, 64)             444 |@@@                                                 |
+[64, 128)            252 |@                                                   |
+[128, 256)           170 |@                                                   |
+[256, 512)            81 |                                                    |
+[512, 1K)             16 |                                                    |
+
+@runq_us[queen-lane-5]: 
+[0]                  260 |@@                                                  |
+[1]                 6153 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              3440 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                       |
+[4, 8)              1368 |@@@@@@@@@@@                                         |
+[8, 16)              813 |@@@@@@                                              |
+[16, 32)             562 |@@@@                                                |
+[32, 64)             563 |@@@@                                                |
+[64, 128)            354 |@@                                                  |
+[128, 256)           199 |@                                                   |
+[256, 512)            94 |                                                    |
+[512, 1K)             19 |                                                    |
+[1K, 2K)               2 |                                                    |
+
+@runq_us[queen-lane-4]: 
+[0]                  294 |@@                                                  |
+[1]                 6286 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              3494 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[4, 8)              1378 |@@@@@@@@@@@                                         |
+[8, 16)              781 |@@@@@@                                              |
+[16, 32)             535 |@@@@                                                |
+[32, 64)             499 |@@@@                                                |
+[64, 128)            322 |@@                                                  |
+[128, 256)           179 |@                                                   |
+[256, 512)            77 |                                                    |
+[512, 1K)              9 |                                                    |
+
+@runq_us[queen-lane-2]: 
+[0]                  370 |@@                                                  |
+[1]                 6920 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              3178 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[4, 8)              1339 |@@@@@@@@@@                                          |
+[8, 16)              775 |@@@@@                                               |
+[16, 32)             416 |@@@                                                 |
+[32, 64)             389 |@@                                                  |
+[64, 128)            267 |@@                                                  |
+[128, 256)           142 |@                                                   |
+[256, 512)            54 |                                                    |
+[512, 1K)             15 |                                                    |
+
+@runq_us[queen-lane-1]: 
+[0]                  344 |@@                                                  |
+[1]                 7092 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              3286 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[4, 8)              1362 |@@@@@@@@@                                           |
+[8, 16)              753 |@@@@@                                               |
+[16, 32)             394 |@@                                                  |
+[32, 64)             287 |@@                                                  |
+[64, 128)            233 |@                                                   |
+[128, 256)           139 |@                                                   |
+[256, 512)            56 |                                                    |
+[512, 1K)              4 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[queen-rsm-drop]: 
+[0]                 1301 |@@@@@@                                              |
+[1]                 9735 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              6216 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                   |
+[4, 8)              2360 |@@@@@@@@@@@@                                        |
+[8, 16)             1111 |@@@@@                                               |
+[16, 32)             503 |@@                                                  |
+[32, 64)             314 |@                                                   |
+[64, 128)            241 |@                                                   |
+[128, 256)           138 |                                                    |
+[256, 512)            71 |                                                    |
+[512, 1K)             11 |                                                    |
+
+@runq_us[consume-serve]: 
+[0]                13587 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@       |
+[1]                15571 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)              7972 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[4, 8)              3833 |@@@@@@@@@@@@                                        |
+[8, 16)             1938 |@@@@@@                                              |
+[16, 32)            1364 |@@@@                                                |
+[32, 64)            1428 |@@@@                                                |
+[64, 128)           1048 |@@@                                                 |
+[128, 256)           515 |@                                                   |
+[256, 512)           166 |                                                    |
+[512, 1K)             34 |                                                    |
+[1K, 2K)               4 |                                                    |
+
+@runq_us[queen-qlog-drop]: 
+[0]                17082 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[1]                30769 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)             14274 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[4, 8)              7794 |@@@@@@@@@@@@@                                       |
+[8, 16)             3836 |@@@@@@                                              |
+[16, 32)            2536 |@@@@                                                |
+[32, 64)            1903 |@@@                                                 |
+[64, 128)           1071 |@                                                   |
+[128, 256)           451 |                                                    |
+[256, 512)           171 |                                                    |
+[512, 1K)             35 |                                                    |
+[1K, 2K)               2 |                                                    |
+
+@runq_us[queen-qlog-writ]: 
+[0]                 5458 |@@@@@@@                                             |
+[1]                39140 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)             16619 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[4, 8)              7721 |@@@@@@@@@@                                          |
+[8, 16)             4592 |@@@@@@                                              |
+[16, 32)            2794 |@@@                                                 |
+[32, 64)            2729 |@@@                                                 |
+[64, 128)           1302 |@                                                   |
+[128, 256)           547 |                                                    |
+[256, 512)           236 |                                                    |
+[512, 1K)             47 |                                                    |
+[1K, 2K)               3 |                                                    |
+
+@runq_us[queen-planner]: 
+[0]                29950 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        |
+[1]                35303 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)             17074 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[4, 8)              9648 |@@@@@@@@@@@@@@                                      |
+[8, 16)             3968 |@@@@@                                               |
+[16, 32)            2188 |@@@                                                 |
+[32, 64)            1446 |@@                                                  |
+[64, 128)            819 |@                                                   |
+[128, 256)           447 |                                                    |
+[256, 512)           169 |                                                    |
+[512, 1K)             20 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+@runq_us[queen-rsm-apply]: 
+[0]                 7342 |@@@@@@@@                                            |
+[1]                46680 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)             19175 |@@@@@@@@@@@@@@@@@@@@@                               |
+[4, 8)             10054 |@@@@@@@@@@@                                         |
+[8, 16)             6334 |@@@@@@@                                             |
+[16, 32)            3887 |@@@@                                                |
+[32, 64)            3879 |@@@@                                                |
+[64, 128)           2677 |@@                                                  |
+[128, 256)          1349 |@                                                   |
+[256, 512)           534 |                                                    |
+[512, 1K)            113 |                                                    |
+[1K, 2K)               5 |                                                    |
+
+@runq_us[queen-raft-sync]: 
+[0]                12678 |@@@@@@@@@@@@                                        |
+[1]                54394 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)             26454 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[4, 8)             12425 |@@@@@@@@@@@                                         |
+[8, 16)             5987 |@@@@@                                               |
+[16, 32)            3267 |@@@                                                 |
+[32, 64)            2644 |@@                                                  |
+[64, 128)           1457 |@                                                   |
+[128, 256)           706 |                                                    |
+[256, 512)           266 |                                                    |
+[512, 1K)             50 |                                                    |
+[1K, 2K)               9 |                                                    |
+[2K, 4K)               1 |                                                    |
+
+@runq_us[queen-raft-log]: 
+[0]                28540 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[1]                61693 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)             29089 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[4, 8)             13675 |@@@@@@@@@@@                                         |
+[8, 16)             7140 |@@@@@@                                              |
+[16, 32)            4942 |@@@@                                                |
+[32, 64)            4178 |@@@                                                 |
+[64, 128)           2316 |@                                                   |
+[128, 256)           937 |                                                    |
+[256, 512)           377 |                                                    |
+[512, 1K)             69 |                                                    |
+[1K, 2K)               3 |                                                    |
+
+@runq_us[tokio-rt-worker]: 
+[0]               306983 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1]                86535 |@@@@@@@@@@@@@@                                      |
+[2, 4)             55575 |@@@@@@@@@                                           |
+[4, 8)             35149 |@@@@@                                               |
+[8, 16)            16341 |@@                                                  |
+[16, 32)           13654 |@@                                                  |
+[32, 64)           14846 |@@                                                  |
+[64, 128)           9911 |@                                                   |
+[128, 256)          5809 |                                                    |
+[256, 512)          2920 |                                                    |
+[512, 1K)           1079 |                                                    |
+[1K, 2K)             107 |                                                    |
+[2K, 4K)               7 |                                                    |
+[4K, 8K)               1 |                                                    |
+
+@runq_us[queen-raft]: 
+[0]               260476 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@             |
+[1]               339890 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2, 4)            146242 |@@@@@@@@@@@@@@@@@@@@@@                              |
+[4, 8)             82702 |@@@@@@@@@@@@                                        |
+[8, 16)            40049 |@@@@@@                                              |
+[16, 32)           25503 |@@@                                                 |
+[32, 64)           23292 |@@@                                                 |
+[64, 128)          14075 |@@                                                  |
+[128, 256)          6421 |                                                    |
+[256, 512)          2267 |                                                    |
+[512, 1K)            415 |                                                    |
+[1K, 2K)              40 |                                                    |
+[2K, 4K)               2 |                                                    |
+
+
+
+
+
+
+
+
+

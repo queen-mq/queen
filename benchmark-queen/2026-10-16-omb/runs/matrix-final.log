@@ -1,0 +1,23 @@
+[13:57:31] matrix: kafka-p100-8p8c-1000k (kafka, kafka.yaml, 1-topic-100-partitions-1kb-8p-8c-1000k.yaml, 100 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[14:02:07] matrix: done kafka-p100-8p8c-1000k [kafka] 1-topic-100-partitions-1kb-8p-8c-1000k.yaml: pub 1,001k/s cons 1,001k/s err 0 backlog max 4,411 | pub p50/p99/p99.9 1.5/3.9/55.0 ms | e2e p50/p99/p99.9 2.0/13.0/107 ms (max 382) | brokers 10.8 cores, disk write 1037/1037/1037 MB/s
+[14:02:07] matrix: kafka-p100-16p16c-1000k (kafka, kafka.yaml, 1-topic-100-partitions-1kb-16p-16c-1000k.yaml, 100 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[14:06:50] matrix: done kafka-p100-16p16c-1000k [kafka] 1-topic-100-partitions-1kb-16p-16c-1000k.yaml: pub 1,002k/s cons 1,002k/s err 0 backlog max 2,156 | pub p50/p99/p99.9 1.3/3.1/33.5 ms | e2e p50/p99/p99.9 2.0/4.0/90.0 ms (max 522) | brokers 14.5 cores, disk write 1038/1038/1038 MB/s
+[14:06:50] matrix: kafka-p100-1000k-b128k (kafka, kafka-b128k.yaml, 1-topic-100-partitions-1kb-4p-4c-1000k.yaml, 100 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[14:11:34] matrix: done kafka-p100-1000k-b128k [kafka] 1-topic-100-partitions-1kb-4p-4c-1000k.yaml: pub 1,002k/s cons 1,002k/s err 0 backlog max 8,416 | pub p50/p99/p99.9 1.1/7.7/93.1 ms | e2e p50/p99/p99.9 2.0/9.0/96.0 ms (max 212) | brokers 11.9 cores, disk write 1037/1037/1037 MB/s
+[14:11:34] matrix: native-nr2-p100-8p8c-1000k (queen-native, queen-native-v2.yaml, 1-topic-100-partitions-1kb-8p-8c-1000k.yaml, 100 partitions)
+[14:11:47] omb: queen nr2: 3 healthy ("role":"follower")
+[14:16:05] matrix: done native-nr2-p100-8p8c-1000k [queen-native] 1-topic-100-partitions-1kb-8p-8c-1000k.yaml: pub 1,001k/s cons 1,002k/s err 0 backlog max 15,434 | pub p50/p99/p99.9 8.0/22.2/31.0 ms | e2e p50/p99/p99.9 18.0/39.0/51.0 ms (max 125) | brokers 15.9 cores, disk write 534/536/534 MB/s
+[14:16:05] matrix: native-nr2-1m-10t-1p-100b-b10000 (queen-native, queen-native-v2-b10000.yaml, 1m-10-topics-1-partition-100b.yaml, 1 partitions)
+[14:16:11] omb: queen nr2: 3 healthy ("role":"follower")
+[14:20:30] matrix: done native-nr2-1m-10t-1p-100b-b10000 [queen-native] 1m-10-topics-1-partition-100b.yaml: pub 1,001k/s cons 1,001k/s err 0 backlog max 469,462 | pub p50/p99/p99.9 6.7/23.3/30.7 ms | e2e p50/p99/p99.9 246/1,059/1,332 ms (max 1,749) | brokers 6.5 cores, disk write 222/222/224 MB/s
+[14:20:33] omb: all stopped
+[14:20:33] matrix: all points done

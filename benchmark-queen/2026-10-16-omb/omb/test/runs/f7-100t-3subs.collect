@@ -1,0 +1,35 @@
+DONE
+benchmark.out
+result.json
+start-8080.lines
+start-8082.lines
+worker-8080.slice
+worker-8082.slice
+workers.samples
+INFO WorkloadGenerator - Created 100 topics in 15.840645 ms
+INFO WorkloadGenerator - Created 300 consumers in 12.593986 ms
+INFO WorkloadGenerator - Created 100 producers in 2.204691 ms
+INFO WorkloadGenerator - Waiting for consumers to be ready
+INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 0, Received: 0
+INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 100, Received: 300
+INFO WorkloadGenerator - All consumers are ready
+-- worker 8080
+QueenBenchmarkDriver - Queen: 100 queues configured in 10 ms; partition count 1 in KV omb/omb-9rjyhz
+QueenBenchmarkDriver - Queen: 100 producers on 100 topics, 16 lanes, in 0 ms
+QueenBenchmarkDriver - Queen driver closed: pushes 1532478 (failed 0, 2.4 groups each), messages pushed 3642568 (failed 0), 0 failed at once on a full buffer; pops 0 (empty 0, errors 0, JSON answers 0, after close 0), messages delivered 0; acks 0 (failed 0), messages acked 0 (refused 0); lease extensions 0 (failed 0); pop pool {subscriptions=0, totalWant=0, maxPops=4096, share=-1, rotating=false, peakPopsInFlight=0, consumerGroups=0}
+QueenBenchmarkDriver - Queen verify: 0 subscriptions, 0 partitions, 0 distinct messages, 0 delivered again, 0 holes between the first and the last offset delivered; 0 subscriptions with duplicates or holes
+-- worker 8082
+QueenBenchmarkDriver - Queen: 300 consumers on 100 topics in 6 ms; pop pool {subscriptions=300, totalWant=300, maxPops=4096, share=13, rotating=false, peakPopsInFlight=300, consumerGroups=3}
+QueenBenchmarkDriver - pop omb-9rjyhz-0000060-_sRFpnE: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"} (and 86 more like it in the last seconds)
+QueenBenchmarkDriver - pop omb-9rjyhz-0000039-_aFpWYc: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"} (and 1 more like it in the last seconds)
+QueenBenchmarkDriver - pop omb-9rjyhz-0000063-nxaNj3s: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"} (and 1 more like it in the last seconds)
+QueenBenchmarkDriver - pop omb-9rjyhz-0000042-_OGdETY: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+QueenBenchmarkDriver - pop omb-9rjyhz-0000024-D2AaFiI: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+QueenBenchmarkDriver - pop omb-9rjyhz-0000071-rOWtJkg: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+QueenBenchmarkDriver - pop omb-9rjyhz-0000061-YqNPHEM: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+QueenBenchmarkDriver - pop omb-9rjyhz-0000056-U4K26h4: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+QueenBenchmarkDriver - Queen driver closed: pushes 0 (failed 0, 0.0 groups each), messages pushed 0 (failed 0), 0 failed at once on a full buffer; pops 5794963 (empty 24422, errors 10, JSON answers 0, after close 0), messages delivered 10917861; acks 2449823 (failed 0), messages acked 10917861 (refused 0); lease extensions 0 (failed 0); pop pool {subscriptions=0, totalWant=0, maxPops=4096, share=13, rotating=false, peakPopsInFlight=300, consumerGroups=3}
+QueenBenchmarkDriver - Queen verify: 300 subscriptions, 300 partitions, 10917861 distinct messages, 0 delivered again, 0 holes between the first and the last offset delivered; 0 subscriptions with duplicates or holes
+f7-100t-3subs: pub 29995 msg/s, cons 89855 msg/s, pub err 0.0/s, backlog end 16002; pub p50/p99/p99.9 1.8/3.1/11.3 ms; e2e p50/p99/p99.9/max 6.0/694.0/708.0/1018.0 ms
+  broker peak: rss 2235 MB, threads 172, fds 577, data 5328 MB
+  workers peak: 8080 rss 12067 MB threads 111, 8082 rss 12363 MB threads 123; tcp to broker peak 428

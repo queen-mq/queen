@@ -1,0 +1,9 @@
+[2026-10-16T06:46:52Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: signing key 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 -> /usr/share/keyrings/artifact-registry.gpg
+[2026-10-16T06:46:52Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: wrote /etc/apt/sources.list.d/redpanda.list
+  available:   redpanda |   26.2.4-1 | https://linux.pkg.redpanda.com/apt redpanda-apt/main amd64 Packages
+  available:   redpanda |   26.2.3-1 | https://linux.pkg.redpanda.com/apt redpanda-apt/main amd64 Packages
+  available:   redpanda |   26.2.2-1 | https://linux.pkg.redpanda.com/apt redpanda-apt/main amd64 Packages
+[2026-10-16T06:47:01Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: installed redpanda 26.2.3-1, redpanda-rpk 26.2.3-1, redpanda-tuner 26.2.3-1
+[2026-10-16T06:47:01Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: disabled redpanda.service (the postinst enables it)
+[2026-10-16T06:47:02Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: disabled redpanda-tuner.service (the postinst enables it)
+[2026-10-16T06:47:02Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: redpanda: v26.2.3 - 3c9fc8dd623ed22ad66eaca7621fe7ab1c268369 | rpk: rpk version (Redpanda CLI): v26.2.3 (rev 3c9fc8dd623ed22ad66eaca7621fe7ab1c268369) | units=redpanda:disabled/inactive redpanda-tuner:disabled/inactive

@@ -1,0 +1,6 @@
+[2026-10-14T15:09:06Z] install queen-bench-3.europe-west1-b.c.<gcp-project>.internal: openjdk version "21.0.12.1" 2026-08-18
+[2026-10-14T15:09:06Z] install queen-bench-3.europe-west1-b.c.<gcp-project>.internal: downloading https://downloads.apache.org/kafka/4.3.1/kafka_2.13-4.3.1.tgz
+[2026-10-14T15:09:09Z] install queen-bench-3.europe-west1-b.c.<gcp-project>.internal: published sha512: c7d7b2318cb51aa0c61d3246a51c349210073c5c9b754947ef965a439f2f939e8600f204e134a75ac31faf3829c9370960ef7c6a9886c8a1dbf0339a21f4c54c
+[2026-10-14T15:09:09Z] install queen-bench-3.europe-west1-b.c.<gcp-project>.internal: computed  sha512: c7d7b2318cb51aa0c61d3246a51c349210073c5c9b754947ef965a439f2f939e8600f204e134a75ac31faf3829c9370960ef7c6a9886c8a1dbf0339a21f4c54c
+[2026-10-14T15:09:09Z] install queen-bench-3.europe-west1-b.c.<gcp-project>.internal: SHA512 OK (135852628 bytes)
+[2026-10-14T15:09:10Z] install queen-bench-3.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 installed in /root/bench/kafka/dist: kafka_2.13-4.3.1.jar

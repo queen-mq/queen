@@ -1,0 +1,11 @@
+# Family 2: topic count, 4p/4c, 1 KB, 500k msg/s; Queen with QUEEN_QLOG_SHARDS=16 (this invocation's QEXTRA_ENV)
+native-nr2s16-t100 queen-native queen-native-v2-topics.yaml 100-topic-1kb-4p-4c-500k.yaml
+kafka-t100 kafka kafka.yaml 100-topic-1kb-4p-4c-500k.yaml
+native-nr2s16-t1k queen-native queen-native-v2-topics.yaml 1k-topic-1kb-4p-4c-500k.yaml
+kafka-t1k kafka kafka.yaml 1k-topic-1kb-4p-4c-500k.yaml
+native-nr2s16-t10k queen-native queen-native-v2-topics.yaml 10k-topic-1kb-4p-4c-500k.yaml
+kafka-t10k kafka kafka.yaml 10k-topic-1kb-4p-4c-500k.yaml
+native-nr2s16-t100k queen-native queen-native-v2-topics.yaml 100k-topic-1kb-4p-4c-500k.yaml
+# The topic-count points again with popBatch 10000 (the autopilot rows had one or two topics falling behind: backlog +6k/s, e2e p99 growing to 69 s at 100 topics)
+native-nr2s16-t100-b10000 queen-native queen-native-v2-topics-b10000.yaml 100-topic-1kb-4p-4c-500k.yaml
+native-nr2s16-t1k-b10000 queen-native queen-native-v2-topics-b10000.yaml 1k-topic-1kb-4p-4c-500k.yaml

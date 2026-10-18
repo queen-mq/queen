@@ -1,0 +1,48 @@
+08:03:31.429 [main] INFO Benchmark - Starting benchmark with config: {
+  "drivers" : [ "test/f6-keyed-nano-driver.yaml" ],
+  "workers" : [ "http://10.250.0.38:8080", "http://10.250.0.38:8082" ],
+  "workersFile" : null,
+  "workloads" : [ "test/f6-keyed-nano-workload.yaml" ],
+  "output" : "/root/bench/runs/f6-keyed-nano/result.json"
+}
+08:03:31.448 [main] INFO Benchmark - Workloads: {
+  "f6-keyed-nano-workload" : {
+    "name" : "keyed RANDOM_NANO 1 topic 100 partitions 1kb 4p 4c 50k",
+    "topics" : 1,
+    "partitionsPerTopic" : 100,
+    "keyDistributor" : "RANDOM_NANO",
+    "messageSize" : 1024,
+    "messageSizeDistribution" : null,
+    "useRandomizedPayloads" : false,
+    "randomBytesRatio" : 0.0,
+    "randomizedPayloadPoolSize" : 0,
+    "payloadFile" : "payload/payload-1Kb.data",
+    "subscriptionsPerTopic" : 1,
+    "producersPerTopic" : 4,
+    "consumerPerSubscription" : 4,
+    "producerRate" : 50000,
+    "consumerBacklogSizeGB" : 0,
+    "backlogDrainRatio" : 1.0,
+    "testDurationMinutes" : 1,
+    "warmupDurationMinutes" : 0
+  }
+}
+08:03:31.587 [main] INFO DistributedWorkersEnsemble - Workers list - producers: [http://10.250.0.38:8080]
+08:03:31.587 [main] INFO DistributedWorkersEnsemble - Workers list - consumers: http://10.250.0.38:8082
+08:03:31.589 [main] INFO Benchmark - --------------- WORKLOAD : keyed RANDOM_NANO 1 topic 100 partitions 1kb 4p 4c 50k --- DRIVER : Queen---------------
+08:03:31.795 [main] INFO WorkloadGenerator - Created 1 topics in 6.384671 ms
+08:03:31.803 [main] INFO WorkloadGenerator - Created 4 consumers in 5.805167 ms
+08:03:31.806 [main] INFO WorkloadGenerator - Created 4 producers in 2.069755 ms
+08:03:31.806 [main] INFO WorkloadGenerator - Waiting for consumers to be ready
+08:03:31.810 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 0, Received: 0
+08:03:33.813 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 4, Received: 4
+08:03:33.813 [main] INFO WorkloadGenerator - All consumers are ready
+08:03:33.850 [main] INFO WorkloadGenerator - ----- Starting benchmark traffic (1m)------
+08:03:44.014 [main] INFO WorkloadGenerator - Pub rate 49482.6 msg/s / 48.3 MB/s | Pub err     0.0 err/s | Cons rate 49479.3 msg/s / 48.3 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.2 - 99%:  2.0 - 99.9%:  8.4 - Max: 10.1 | Pub Delay Latency (us) avg: 61.9 - 50%: 66.0 - 99%: 87.0 - 99.9%: 117.0 - Max: 1094.0
+08:03:54.145 [main] INFO WorkloadGenerator - Pub rate 50148.1 msg/s / 49.0 MB/s | Pub err     0.0 err/s | Cons rate 50148.9 msg/s / 49.0 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.2 - 99%:  2.0 - 99.9%:  8.3 - Max:  9.8 | Pub Delay Latency (us) avg: 62.3 - 50%: 66.0 - 99%: 86.0 - 99.9%: 122.0 - Max: 2886.0
+08:04:04.275 [main] INFO WorkloadGenerator - Pub rate 49994.9 msg/s / 48.8 MB/s | Pub err     0.0 err/s | Cons rate 49989.9 msg/s / 48.8 MB/s | Backlog:  0.1 K | Pub Latency (ms) avg:  1.3 - 50%:  1.2 - 99%:  2.0 - 99.9%:  8.1 - Max:  9.9 | Pub Delay Latency (us) avg: 61.9 - 50%: 66.0 - 99%: 86.0 - 99.9%: 116.0 - Max: 317.0
+08:04:14.406 [main] INFO WorkloadGenerator - Pub rate 49995.8 msg/s / 48.8 MB/s | Pub err     0.0 err/s | Cons rate 49999.6 msg/s / 48.8 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.3 - 99%:  2.0 - 99.9%:  8.4 - Max: 10.1 | Pub Delay Latency (us) avg: 61.9 - 50%: 66.0 - 99%: 86.0 - 99.9%: 117.0 - Max: 396.0
+08:04:24.544 [main] INFO WorkloadGenerator - Pub rate 49967.3 msg/s / 48.8 MB/s | Pub err     0.0 err/s | Cons rate 49967.0 msg/s / 48.8 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.3 - 99%:  2.0 - 99.9%:  8.4 - Max: 10.0 | Pub Delay Latency (us) avg: 61.9 - 50%: 66.0 - 99%: 86.0 - 99.9%: 118.0 - Max: 2173.0
+08:04:34.611 [main] INFO WorkloadGenerator - Pub rate 50288.7 msg/s / 49.1 MB/s | Pub err     0.0 err/s | Cons rate 50288.4 msg/s / 49.1 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.3 - 99%:  2.1 - 99.9%:  8.4 - Max: 10.3 | Pub Delay Latency (us) avg: 62.2 - 50%: 66.0 - 99%: 87.0 - 99.9%: 122.0 - Max: 2537.0
+08:04:34.680 [main] INFO WorkloadGenerator - ----- Aggregated Pub Latency (ms) avg:  1.3 - 50%:  1.3 - 95%:  1.8 - 99%:  2.0 - 99.9%:  8.3 - 99.99%:  9.5 - Max: 10.3 | Pub Delay (us)  avg: 62.0 - 50%: 66.0 - 95%: 77.0 - 99%: 86.0 - 99.9%: 119.0 - 99.99%: 226.0 - Max: 2886.0
+08:04:35.415 [main] INFO Benchmark - Writing test result into /root/bench/runs/f6-keyed-nano/result.json

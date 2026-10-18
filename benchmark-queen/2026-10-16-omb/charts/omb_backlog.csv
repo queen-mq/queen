@@ -1,0 +1,5 @@
+tag,system,partitions,build_s,drain_s,backlog_messages,note
+native-nr2-backlog-1t-16p,queen,16,1049.3,32.1,104666428,
+kafka-backlog-1t-16p-ret,kafka,16,1049.4,143.1,105040569,log.retention.ms=-1
+kafka-backlog-1t-1p-ret,kafka,1,1049.4,326.2,105036235,log.retention.ms=-1
+native-nr2-backlog-1t-1p,queen,1,,,,"not run: one partition consumes 65k msg/s with the default pops, below the 100k msg/s producer"

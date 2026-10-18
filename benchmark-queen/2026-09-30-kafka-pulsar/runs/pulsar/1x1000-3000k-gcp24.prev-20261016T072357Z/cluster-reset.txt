@@ -1,0 +1,5 @@
+[2026-10-16T07:01:13Z] reset: stop all + wipe on 3 nodes (10.250.0.23 10.250.0.22 10.250.0.25)
+  n1  ssh: connect to host <host-05> port 22: Operation timed out
+  n2  [2026-10-16T07:01:18Z] node 2 wiped /root/bench/data/pulsar /root/bench/logs/pulsar
+  n3  [2026-10-16T07:01:18Z] node 3 wiped /root/bench/data/pulsar /root/bench/logs/pulsar
+[2026-10-16T07:01:27Z] ERROR: wipe failed

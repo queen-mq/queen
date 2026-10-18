@@ -1,0 +1,4 @@
+[20:24:52] omb: queen nr0: 3 healthy ("role":"follower")
+[20:24:52] omb: run facade-nr0-p100-500k: system queen-facade, driver queen-facade.yaml, workload 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+[20:24:57] omb: 6 workers up
+facade-nr0-p100-500k [queen-facade] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 81,716 | pub p50/p99/p99.9 8.6/26.0/35.1 ms | e2e p50/p99/p99.9 46.0/625/792 ms (max 1,629) | brokers 8.8 cores, disk write 269/269/271 MB/s

@@ -1,0 +1,1 @@
+not carried by Queen: one partition is consumed one lease of at most 1,000 messages at a time, 65k msg/s at 1 KB in native-nr2-max-1t1p-1p1c-1kb, below the workload's 100k msg/s producer, so the backlog can never drain and OMB would wait forever

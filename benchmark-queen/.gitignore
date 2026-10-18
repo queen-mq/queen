@@ -1,0 +1,8 @@
+# Heavy files the archives leave out, as 6c82ad1cd did: the brokers' logs, Kafka's GC logs,
+# Pulsar's log tarballs, and the loaders built from the sources beside them.
+2026-09-30-kafka-pulsar/runs/**/brokers/**/*.gz
+2026-09-30-kafka-pulsar/runs/**/*-gc.log*
+2026-09-30-kafka-pulsar/runs/pulsar/**/logs.tgz
+2026-09-30-kafka-pulsar/mqload/bin/
+2026-10-12-three-node-new-forms/runs/**/broker-n*.log.gz
+2026-08-20-gate/bufload/bufload-linux-amd64

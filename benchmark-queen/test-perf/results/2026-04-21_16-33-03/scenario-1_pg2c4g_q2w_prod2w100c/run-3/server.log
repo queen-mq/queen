@@ -1,0 +1,1812 @@
+[2026-04-21 16:45:26.424] [info] Queen C++ Message Queue Server (Acceptor/Worker Pattern)
+[2026-04-21 16:45:26.425] [info] Configuration:
+[2026-04-21 16:45:26.425] [info]   - Host: 0.0.0.0
+[2026-04-21 16:45:26.425] [info]   - Port: 6632
+[2026-04-21 16:45:26.425] [info]   - Database: 127.0.0.1:5434/queen
+[2026-04-21 16:45:26.425] [warning] Encryption disabled - QUEEN_ENCRYPTION_KEY not set
+[2026-04-21 16:45:26.425] [info] Encryption: disabled
+[2026-04-21 16:45:26.425] [info] JWT Authentication: DISABLED
+[2026-04-21 16:45:26.425] [info] Starting acceptor/worker pattern with 2 workers (hardware cores: 10)
+[2026-04-21 16:45:26.425] [info] Waiting for workers to initialize...
+[2026-04-21 16:45:26.425] [info] [Worker 1] Starting...
+[2026-04-21 16:45:26.425] [info] [Worker 0] Starting...
+[2026-04-21 16:45:26.425] [info] Initializing GLOBAL shared resources (ASYNC-ONLY MODE):
+[2026-04-21 16:45:26.425] [info]   - Total DB connections: 19 (95% of 20) - ALL ASYNC
+[2026-04-21 16:45:26.425] [info]   - DB ThreadPool size: 7 = 2 workers + 5 service
+[2026-04-21 16:45:26.425] [info]     * Queen instances: 2 (one per HTTP worker, each with own event loop)
+[2026-04-21 16:45:26.425] [info]     * Service DB threads: 5 (metrics, retention, eviction)
+[2026-04-21 16:45:26.425] [info]   - System ThreadPool threads: 4 (for background service scheduling)
+[2026-04-21 16:45:26.425] [info]   - Number of HTTP workers: 2
+[2026-04-21 16:45:26.425] [info]   - Creating Async DB Pool (19 connections) for ALL operations
+[2026-04-21 16:45:26.425] [info] [AsyncDbPool] Initializing 19 async connections...
+[2026-04-21 16:45:26.536] [info] [AsyncDbPool] Initialization complete. 19 connections ready.
+[2026-04-21 16:45:26.537] [info]   - Created response queue for worker 0 (poll workers)
+[2026-04-21 16:45:26.537] [info]   - Created response queue for worker 1 (poll workers)
+[2026-04-21 16:45:26.537] [info]   - Per-worker Queen instances will be created in each worker thread
+[2026-04-21 16:45:26.537] [info]   - Created response registry for worker 0 (lock-free across workers)
+[2026-04-21 16:45:26.537] [info]   - Created response registry for worker 1 (lock-free across workers)
+[2026-04-21 16:45:26.537] [info] SharedStateManager: Disabled (no UDP peers or sync disabled)
+[2026-04-21 16:45:26.537] [info] Shared State Manager configured: Sync disabled, queue config cache will be active
+[2026-04-21 16:45:26.537] [info] System info: hostname=alice.local, port=6632
+[2026-04-21 16:45:26.537] [info] Global shared resources initialized successfully
+[2026-04-21 16:45:26.537] [info] [Worker 1] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 16:45:26.537] [info] [Worker 0] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 16:45:26.537] [info] [Worker 1] Database connection: OK | Pool: 18/19 conn available
+[2026-04-21 16:45:26.537] [info] [Worker 1] Waiting for shared file buffer from Worker 0...
+[2026-04-21 16:45:26.537] [info] [Worker 0] Database connection: OK | Pool: 19/19 conn available
+[2026-04-21 16:45:26.537] [info] [Worker 0] Initializing database schema...
+[2026-04-21 16:45:26.537] [info] Initializing schema: queen
+[2026-04-21 16:45:26.544] [info] Running base schema initialization...
+NOTICE:  schema "queen" already exists, skipping
+NOTICE:  column "producer_sub" of relation "messages" already exists, skipping
+[2026-04-21 16:45:26.637] [info] Base schema applied successfully
+[2026-04-21 16:45:26.637] [info] Loading 15 stored procedure(s)...
+NOTICE:  function queen.is_stats_leader(text) does not exist, skipping
+NOTICE:  trigger "trg_update_worker_metrics_summary" for relation "queen.worker_metrics" does not exist, skipping
+[2026-04-21 16:45:26.676] [info] [Worker 0] Starting Shared State Manager...
+[2026-04-21 16:45:26.676] [info] SharedStateManager: Loading queue configs and maintenance modes from database...
+[2026-04-21 16:45:26.678] [info] SharedStateManager: Sync disabled, but queue config cache is available
+[2026-04-21 16:45:26.678] [info] [Worker 0] Registered MESSAGE_AVAILABLE callback for Queen instances
+[2026-04-21 16:45:26.678] [info] [Worker 0] Starting background metrics collector (sample: 1000ms, aggregate: 60s)...
+[2026-04-21 16:45:26.678] [info] MetricsCollector started: hostname=alice.local, port=6632, worker=cpp-worker-1, sampling every 1000ms, aggregating every 60s
+[2026-04-21 16:45:26.678] [info] [Worker 0] Starting background retention service...
+[2026-04-21 16:45:26.678] [info] RetentionService started: interval=300000ms, batch_size=1000, partition_cleanup_days=30, metrics_retention_days=90
+[2026-04-21 16:45:26.678] [info] [Worker 0] Starting background eviction service...
+[2026-04-21 16:45:26.678] [info] RetentionService: Running cleanup cycle
+[2026-04-21 16:45:26.678] [info] EvictionService started: interval=60000ms, batch_size=1000
+[2026-04-21 16:45:26.678] [info] [Worker 0] Starting background stats service...
+[2026-04-21 16:45:26.678] [info] StatsService started (queue/partition counts only): interval=10000ms, reconcile_interval=120000ms
+[2026-04-21 16:45:26.678] [info] [Worker 0] Creating SHARED file buffer manager (dir=/tmp/queen)...
+[2026-04-21 16:45:26.678] [info] FileBufferManager initializing: dir=/tmp/queen, recovery=true
+[2026-04-21 16:45:26.678] [info] StatsService: Running initial queue/partition stats refresh...
+[2026-04-21 16:45:26.678] [info] Buffer directories ready: /tmp/queen
+[2026-04-21 16:45:26.678] [info] Starting recovery of buffered events...
+[2026-04-21 16:45:26.678] [info] Deleting incomplete buffer file: failover_019db07f-4031-7000-b774-3789b22e88c1.buf.tmp (only 0 bytes)
+[2026-04-21 16:45:26.678] [info] Deleting incomplete buffer file: qos0_019db07e-9a0e-7000-9b94-8de2ed1a34dd.buf.tmp (only 0 bytes)
+[2026-04-21 16:45:26.678] [info] Starting recovery (max 3600s to avoid blocking server startup)...
+[2026-04-21 16:45:26.678] [info] Phase 1: Recovering failover events (FIFO order)...
+[2026-04-21 16:45:26.678] [info] Phase 2: Recovering QoS 0 events (batched)...
+[2026-04-21 16:45:26.678] [info] Startup recovery completed in 0ms: failover=0, qos0=0
+[2026-04-21 16:45:26.678] [info] Recovery complete
+[2026-04-21 16:45:26.678] [info] Buffer files initialized successfully
+[2026-04-21 16:45:26.678] [info] FileBufferManager ready
+[2026-04-21 16:45:26.678] [info] [Worker 0] File buffer ready - Pending: 0, Failed: 0, DB: healthy
+[2026-04-21 16:45:26.678] [info] [Worker 0] Sharing file buffer with other workers...
+[2026-04-21 16:45:26.678] [info] [Worker 0] File buffer shared successfully
+[2026-04-21 16:45:26.678] [info] [Worker 0] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 16:45:26.678] [info] [Worker 0] Creating uWS::App...
+[2026-04-21 16:45:26.678] [info] Background processor thread started
+[2026-04-21 16:45:26.678] [info] [Worker 1] Using shared file buffer from Worker 0
+[2026-04-21 16:45:26.678] [info] [Worker 1] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 16:45:26.678] [info] [Worker 1] Creating uWS::App...
+[2026-04-21 16:45:26.679] [info] [Worker 0] Creating per-worker Queen instance (100 connections, total pool split across 2 workers)...
+[2026-04-21 16:45:26.679] [info] [Worker 1] Creating per-worker Queen instance (100 connections, total pool split across 2 workers)...
+[2026-04-21 16:45:26.680] [info] RetentionService: cycle completed in 1ms
+[2026-04-21 16:45:26.680] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 16:45:26.693] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 0}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 0, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 16:45:26.701] [info] StatsService: cycle completed in 7ms
+[2026-04-21 16:45:27.083] [info] [Worker 0] [libqueen] Reconnection thread started
+[2026-04-21 16:45:27.085] [info] [Worker 1] [libqueen] Reconnection thread started
+[2026-04-21 16:45:27.182] [info] [Worker 1] Queen instance ready with 100 connections
+[2026-04-21 16:45:27.182] [info] [Worker 1] Registered Queen instance for UDP notifications
+[2026-04-21 16:45:27.182] [info] [Worker 1] Setting up routes...
+[2026-04-21 16:45:27.184] [info] [Worker 0] Queen instance ready with 100 connections
+[2026-04-21 16:45:27.184] [info] [Worker 0] Registered Queen instance for UDP notifications
+[2026-04-21 16:45:27.184] [info] [Worker 0] Setting up routes...
+[2026-04-21 16:45:27.186] [warning] [Worker 0] Webapp directory not found - Static file serving disabled
+[2026-04-21 16:45:27.186] [warning] [Worker 0] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 16:45:27.186] [warning] [Worker 0] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 16:45:27.186] [info] [Worker 0] Routes configured
+[2026-04-21 16:45:27.186] [info] [Worker 0] Registered with acceptor
+[2026-04-21 16:45:27.186] [warning] [Worker 1] Webapp directory not found - Static file serving disabled
+[2026-04-21 16:45:27.186] [warning] [Worker 1] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 16:45:27.186] [warning] [Worker 1] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 16:45:27.186] [info] [Worker 1] Routes configured
+[2026-04-21 16:45:27.186] [info] [Worker 1] Registered with acceptor
+[2026-04-21 16:45:27.186] [info] [Worker 0] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 16:45:27.186] [info] [Worker 0] Setting up response timer...
+[2026-04-21 16:45:27.186] [info] [Worker 1] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 16:45:27.186] [info] [Worker 1] Setting up response timer...
+[2026-04-21 16:45:27.186] [info] [Worker 0] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 16:45:27.186] [info] [Worker 1] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 16:45:27.205] [info] All 2 workers initialized in 780ms
+[2026-04-21 16:45:27.205] [info] Creating acceptor app...
+[2026-04-21 16:45:27.205] [info] Registered 2 worker apps with acceptor
+[2026-04-21 16:45:27.206] [info] Acceptor listening on 0.0.0.0:6632
+[2026-04-21 16:45:27.206] [info] Round-robin load balancing across 2 workers
+[2026-04-21 16:45:27.206] [info] Starting acceptor event loop...
+[2026-04-21 16:45:27.614] [info] [Worker 1] Configuring queue: perf-test via stored procedure
+[2026-04-21 16:45:28.084] [info] [Worker 0] [libqueen] push(q=23 f=1/2 p99rtt=29ms) slots=99/100 jobs/s=353 drains=401 evl=0ms
+[2026-04-21 16:45:28.086] [info] [Worker 1] [libqueen] push(q=0 f=1/2 p99rtt=29ms) custom(q=0 f=0/1 p99rtt=10ms) slots=99/100 jobs/s=377 drains=420 evl=0ms
+[2026-04-21 16:45:29.086] [info] [Worker 0] [libqueen] push(q=22 f=1/3 p99rtt=35ms) slots=99/100 jobs/s=2139 drains=2404 evl=0ms
+[2026-04-21 16:45:29.087] [info] [Worker 1] [libqueen] push(q=27 f=1/3 p99rtt=33ms) custom(q=0 f=0/1 p99rtt=10ms) slots=99/100 jobs/s=2203 drains=2385 evl=0ms
+[2026-04-21 16:45:30.086] [info] [Worker 0] [libqueen] push(q=0 f=1/4 p99rtt=38ms) slots=99/100 jobs/s=2210 drains=4473 evl=0ms
+[2026-04-21 16:45:30.089] [info] [Worker 1] [libqueen] push(q=0 f=1/4 p99rtt=42ms) custom(q=0 f=0/1 p99rtt=10ms) slots=99/100 jobs/s=2243 drains=4390 evl=0ms
+[2026-04-21 16:45:31.088] [info] [Worker 0] [libqueen] push(q=10 f=0/4 p99rtt=35ms) slots=100/100 jobs/s=2183 drains=6369 evl=0ms
+[2026-04-21 16:45:31.090] [info] [Worker 1] [libqueen] push(q=31 f=0/4 p99rtt=36ms) custom(q=0 f=0/1 p99rtt=10ms) slots=100/100 jobs/s=2255 drains=6480 evl=0ms
+[2026-04-21 16:45:32.089] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=43ms) custom(q=0 f=0/1 p99rtt=10ms) slots=96/100 jobs/s=1820 drains=8017 evl=0ms
+[2026-04-21 16:45:32.092] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=42ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=1764 drains=8177 evl=0ms
+[2026-04-21 16:45:33.091] [info] [Worker 0] [libqueen] push(q=11 f=3/4 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=10ms) slots=97/100 jobs/s=821 drains=8871 evl=0ms
+[2026-04-21 16:45:33.093] [info] [Worker 1] [libqueen] push(q=3 f=3/4 p99rtt=106ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=777 drains=8929 evl=0ms
+[2026-04-21 16:45:34.092] [info] [Worker 0] [libqueen] push(q=6 f=3/4 p99rtt=100ms) custom(q=0 f=0/1 p99rtt=10ms) slots=97/100 jobs/s=926 drains=9759 evl=0ms
+[2026-04-21 16:45:34.094] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=117ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=973 drains=9891 evl=0ms
+[2026-04-21 16:45:35.093] [info] [Worker 0] [libqueen] push(q=14 f=2/4 p99rtt=95ms) custom(q=0 f=0/1 p99rtt=10ms) slots=98/100 jobs/s=1233 drains=10926 evl=0ms
+[2026-04-21 16:45:35.096] [info] [Worker 1] [libqueen] push(q=10 f=2/4 p99rtt=117ms) custom(q=0 f=0/1 p99rtt=47ms) slots=98/100 jobs/s=1188 drains=11006 evl=0ms
+[2026-04-21 16:45:36.095] [info] [Worker 0] [libqueen] push(q=6 f=3/4 p99rtt=94ms) custom(q=0 f=0/1 p99rtt=10ms) slots=97/100 jobs/s=1292 drains=12084 evl=0ms
+[2026-04-21 16:45:36.097] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=106ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=1300 drains=12150 evl=0ms
+[2026-04-21 16:45:36.739] [info] StatsService: cycle completed in 33ms
+[2026-04-21 16:45:37.095] [info] [Worker 0] [libqueen] push(q=9 f=2/4 p99rtt=94ms) custom(q=0 f=0/1 p99rtt=10ms) slots=98/100 jobs/s=1446 drains=13393 evl=0ms
+[2026-04-21 16:45:37.097] [info] [Worker 1] [libqueen] push(q=0 f=2/4 p99rtt=102ms) custom(q=0 f=0/1 p99rtt=47ms) slots=98/100 jobs/s=1440 drains=13460 evl=0ms
+[2026-04-21 16:45:38.098] [info] [Worker 0] [libqueen] push(q=0 f=0/4 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=10ms) slots=100/100 jobs/s=1179 drains=14418 evl=0ms
+[2026-04-21 16:45:38.100] [info] [Worker 1] [libqueen] push(q=0 f=0/4 p99rtt=101ms) custom(q=0 f=0/1 p99rtt=47ms) slots=100/100 jobs/s=1219 drains=14579 evl=0ms
+[2026-04-21 16:45:38.466] [info] [Worker 0] Configuring queue: perf-test via stored procedure
+[2026-04-21 16:45:39.099] [info] [Worker 0] [libqueen] push(q=0 f=1/4 p99rtt=92ms) pop(q=0 f=1/2 p99rtt=72ms) custom(q=0 f=0/1 p99rtt=11ms) slots=98/100 jobs/s=135 drains=14447 evl=0ms
+[2026-04-21 16:45:39.100] [info] [Worker 1] [libqueen] push(q=15 f=1/4 p99rtt=101ms) pop(q=0 f=1/2 p99rtt=70ms) custom(q=0 f=0/1 p99rtt=47ms) slots=98/100 jobs/s=155 drains=14679 evl=0ms
+[2026-04-21 16:45:40.099] [info] [Worker 0] [libqueen] push(q=14 f=2/4 p99rtt=107ms) pop(q=0 f=2/3 p99rtt=105ms) custom(q=0 f=0/1 p99rtt=11ms) slots=96/100 jobs/s=737 drains=14981 evl=0ms
+[2026-04-21 16:45:40.101] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=122ms) pop(q=0 f=2/3 p99rtt=128ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=671 drains=15178 evl=0ms
+[2026-04-21 16:45:41.100] [info] [Worker 0] [libqueen] push(q=22 f=2/4 p99rtt=129ms) pop(q=0 f=3/4 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=11ms) slots=95/100 jobs/s=505 drains=15304 evl=0ms
+[2026-04-21 16:45:41.102] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=149ms) pop(q=0 f=3/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=47ms) slots=93/100 jobs/s=538 drains=15606 evl=0ms
+[2026-04-21 16:45:42.101] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=141ms) pop(q=0 f=1/4 p99rtt=133ms) custom(q=0 f=0/1 p99rtt=11ms) slots=96/100 jobs/s=698 drains=15875 evl=0ms
+[2026-04-21 16:45:42.102] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=152ms) pop(q=0 f=1/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=683 drains=16111 evl=0ms
+[2026-04-21 16:45:43.102] [info] [Worker 1] [libqueen] push(q=26 f=2/4 p99rtt=152ms) pop(q=0 f=2/4 p99rtt=139ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=791 drains=16685 evl=0ms
+[2026-04-21 16:45:43.102] [info] [Worker 0] [libqueen] push(q=4 f=3/4 p99rtt=141ms) pop(q=0 f=3/4 p99rtt=133ms) custom(q=0 f=0/1 p99rtt=11ms) slots=94/100 jobs/s=802 drains=16498 evl=0ms
+[2026-04-21 16:45:44.103] [info] [Worker 0] [libqueen] push(q=11 f=1/4 p99rtt=141ms) pop(q=0 f=2/4 p99rtt=133ms) custom(q=0 f=0/1 p99rtt=11ms) slots=97/100 jobs/s=726 drains=17014 evl=0ms
+[2026-04-21 16:45:44.105] [info] [Worker 1] [libqueen] push(q=0 f=1/4 p99rtt=152ms) pop(q=2 f=2/4 p99rtt=139ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=666 drains=17175 evl=0ms
+[2026-04-21 16:45:45.108] [info] [Worker 1] [libqueen] push(q=1 f=2/4 p99rtt=164ms) pop(q=0 f=2/4 p99rtt=139ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=695 drains=17673 evl=0ms
+[2026-04-21 16:45:45.126] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=141ms) pop(q=0 f=1/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=11ms) slots=96/100 jobs/s=713 drains=17545 evl=0ms
+[2026-04-21 16:45:46.108] [info] [Worker 1] [libqueen] push(q=16 f=2/4 p99rtt=164ms) pop(q=0 f=1/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=731 drains=18179 evl=0ms
+[2026-04-21 16:45:46.127] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=153ms) pop(q=1 f=1/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=11ms) slots=95/100 jobs/s=724 drains=18058 evl=0ms
+[2026-04-21 16:45:46.772] [info] StatsService: cycle completed in 59ms
+[2026-04-21 16:45:47.116] [info] [Worker 1] [libqueen] push(q=0 f=1/4 p99rtt=172ms) pop(q=0 f=1/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=47ms) slots=98/100 jobs/s=744 drains=18673 evl=0ms
+[2026-04-21 16:45:47.127] [info] [Worker 0] [libqueen] push(q=27 f=1/4 p99rtt=155ms) pop(q=0 f=2/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=11ms) slots=97/100 jobs/s=738 drains=18631 evl=0ms
+[2026-04-21 16:45:48.122] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=180ms) pop(q=0 f=1/4 p99rtt=139ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=572 drains=19157 evl=0ms
+[2026-04-21 16:45:48.129] [info] [Worker 0] [libqueen] push(q=11 f=2/4 p99rtt=158ms) pop(q=0 f=1/4 p99rtt=120ms) custom(q=0 f=0/1 p99rtt=11ms) slots=97/100 jobs/s=614 drains=19027 evl=0ms
+[2026-04-21 16:45:49.123] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=184ms) pop(q=0 f=1/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=626 drains=19612 evl=0ms
+[2026-04-21 16:45:49.144] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=165ms) pop(q=0 f=1/4 p99rtt=120ms) custom(q=0 f=0/1 p99rtt=11ms) slots=96/100 jobs/s=593 drains=19454 evl=0ms
+[2026-04-21 16:45:50.125] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=184ms) pop(q=0 f=1/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=761 drains=20175 evl=0ms
+[2026-04-21 16:45:50.146] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=166ms) pop(q=1 f=2/4 p99rtt=120ms) custom(q=0 f=0/1 p99rtt=11ms) slots=94/100 jobs/s=723 drains=19982 evl=0ms
+[2026-04-21 16:45:51.126] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=184ms) pop(q=0 f=2/4 p99rtt=131ms) custom(q=0 f=0/1 p99rtt=47ms) slots=94/100 jobs/s=622 drains=20687 evl=0ms
+[2026-04-21 16:45:51.146] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=179ms) pop(q=0 f=3/4 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=11ms) slots=94/100 jobs/s=650 drains=20428 evl=0ms
+[2026-04-21 16:45:52.141] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=186ms) pop(q=11 f=0/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=604 drains=21167 evl=0ms
+[2026-04-21 16:45:52.147] [info] [Worker 0] [libqueen] push(q=14 f=4/4 p99rtt=193ms) pop(q=0 f=1/4 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=11ms) slots=95/100 jobs/s=542 drains=20887 evl=0ms
+[2026-04-21 16:45:53.142] [info] [Worker 1] [libqueen] push(q=0 f=2/4 p99rtt=198ms) pop(q=0 f=2/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=684 drains=21728 evl=0ms
+[2026-04-21 16:45:53.148] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=194ms) pop(q=0 f=2/4 p99rtt=111ms) custom(q=0 f=0/1 p99rtt=11ms) slots=95/100 jobs/s=599 drains=21460 evl=0ms
+[2026-04-21 16:45:54.141] [info] [Worker 1] [libqueen] push(q=5 f=3/4 p99rtt=198ms) pop(q=0 f=1/4 p99rtt=131ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=615 drains=22408 evl=0ms
+[2026-04-21 16:45:54.148] [info] [Worker 0] [libqueen] push(q=7 f=2/4 p99rtt=197ms) pop(q=0 f=1/4 p99rtt=111ms) custom(q=0 f=0/1 p99rtt=11ms) slots=97/100 jobs/s=616 drains=22123 evl=0ms
+[2026-04-21 16:45:55.142] [info] [Worker 1] [libqueen] push(q=10 f=2/4 p99rtt=198ms) pop(q=0 f=1/4 p99rtt=131ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=566 drains=22980 evl=0ms
+[2026-04-21 16:45:55.149] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=197ms) pop(q=0 f=3/4 p99rtt=111ms) custom(q=0 f=0/1 p99rtt=11ms) slots=94/100 jobs/s=471 drains=22593 evl=0ms
+[2026-04-21 16:45:56.143] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=200ms) pop(q=2 f=1/4 p99rtt=128ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=612 drains=23619 evl=0ms
+[2026-04-21 16:45:56.149] [info] [Worker 0] [libqueen] push(q=1 f=3/4 p99rtt=201ms) pop(q=0 f=1/4 p99rtt=110ms) custom(q=0 f=0/1 p99rtt=11ms) slots=96/100 jobs/s=650 drains=23258 evl=0ms
+[2026-04-21 16:45:56.759] [info] StatsService: cycle completed in 41ms
+[2026-04-21 16:45:57.144] [info] [Worker 1] [libqueen] push(q=0 f=2/4 p99rtt=200ms) pop(q=3 f=0/4 p99rtt=128ms) custom(q=0 f=0/1 p99rtt=47ms) slots=98/100 jobs/s=700 drains=24315 evl=0ms
+[2026-04-21 16:45:57.150] [info] [Worker 0] [libqueen] push(q=4 f=2/4 p99rtt=214ms) pop(q=0 f=1/4 p99rtt=110ms) custom(q=0 f=0/1 p99rtt=11ms) slots=97/100 jobs/s=669 drains=23936 evl=0ms
+[2026-04-21 16:45:58.143] [info] [Worker 1] [libqueen] push(q=7 f=2/4 p99rtt=200ms) pop(q=0 f=2/4 p99rtt=118ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=763 drains=25036 evl=0ms
+[2026-04-21 16:45:58.150] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=214ms) pop(q=0 f=2/4 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=11ms) slots=94/100 jobs/s=750 drains=24692 evl=0ms
+[2026-04-21 16:45:59.145] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=200ms) pop(q=0 f=1/4 p99rtt=118ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=802 drains=25823 evl=0ms
+[2026-04-21 16:45:59.150] [info] [Worker 0] [libqueen] push(q=4 f=3/4 p99rtt=214ms) pop(q=0 f=1/4 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=11ms) slots=96/100 jobs/s=773 drains=25453 evl=0ms
+[2026-04-21 16:46:00.146] [info] [Worker 1] [libqueen] push(q=17 f=1/4 p99rtt=200ms) pop(q=5 f=1/4 p99rtt=116ms) custom(q=2 f=0/1 p99rtt=47ms) slots=98/100 jobs/s=795 drains=26575 evl=0ms
+[2026-04-21 16:46:00.151] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=214ms) pop(q=1 f=2/4 p99rtt=107ms) custom(q=2 f=0/1 p99rtt=11ms) slots=95/100 jobs/s=677 drains=26205 evl=0ms
+[2026-04-21 16:46:01.145] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=200ms) pop(q=0 f=2/4 p99rtt=116ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=780 drains=27322 evl=0ms
+[2026-04-21 16:46:01.152] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=215ms) pop(q=0 f=2/4 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=20ms) slots=94/100 jobs/s=686 drains=26891 evl=0ms
+[2026-04-21 16:46:02.146] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=205ms) pop(q=0 f=2/4 p99rtt=110ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=555 drains=27928 evl=0ms
+[2026-04-21 16:46:02.152] [info] [Worker 0] [libqueen] push(q=10 f=3/4 p99rtt=218ms) pop(q=0 f=2/4 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=20ms) slots=95/100 jobs/s=652 drains=27567 evl=0ms
+[2026-04-21 16:46:03.146] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=217ms) pop(q=0 f=2/4 p99rtt=119ms) custom(q=0 f=0/1 p99rtt=47ms) slots=94/100 jobs/s=500 drains=28436 evl=0ms
+[2026-04-21 16:46:03.152] [info] [Worker 0] [libqueen] push(q=5 f=4/4 p99rtt=223ms) pop(q=1 f=1/4 p99rtt=110ms) custom(q=0 f=0/1 p99rtt=20ms) slots=95/100 jobs/s=473 drains=28095 evl=0ms
+[2026-04-21 16:46:04.148] [info] [Worker 1] [libqueen] push(q=1 f=2/4 p99rtt=217ms) pop(q=0 f=1/4 p99rtt=116ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=669 drains=29153 evl=0ms
+[2026-04-21 16:46:04.153] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=231ms) pop(q=0 f=1/4 p99rtt=110ms) custom(q=0 f=0/1 p99rtt=20ms) slots=96/100 jobs/s=612 drains=28756 evl=0ms
+[2026-04-21 16:46:05.149] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=240ms) pop(q=0 f=1/4 p99rtt=105ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=315 drains=29543 evl=0ms
+[2026-04-21 16:46:05.157] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=253ms) pop(q=12 f=0/4 p99rtt=110ms) custom(q=0 f=0/1 p99rtt=20ms) slots=96/100 jobs/s=281 drains=29110 evl=1ms
+[2026-04-21 16:46:06.150] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=247ms) pop(q=0 f=2/4 p99rtt=105ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=482 drains=30056 evl=0ms
+[2026-04-21 16:46:06.155] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=254ms) pop(q=0 f=1/4 p99rtt=103ms) custom(q=0 f=0/1 p99rtt=20ms) slots=96/100 jobs/s=465 drains=29667 evl=1ms
+[2026-04-21 16:46:06.950] [info] StatsService: cycle completed in 228ms
+[2026-04-21 16:46:07.150] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=252ms) pop(q=0 f=1/4 p99rtt=116ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=316 drains=30398 evl=0ms
+[2026-04-21 16:46:07.156] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=257ms) pop(q=0 f=2/4 p99rtt=110ms) custom(q=0 f=0/1 p99rtt=20ms) slots=94/100 jobs/s=261 drains=29950 evl=0ms
+[2026-04-21 16:46:08.151] [info] [Worker 1] [libqueen] push(q=7 f=4/4 p99rtt=300ms) pop(q=0 f=1/4 p99rtt=121ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=239 drains=30734 evl=0ms
+[2026-04-21 16:46:08.157] [info] [Worker 0] [libqueen] push(q=12 f=3/4 p99rtt=325ms) pop(q=0 f=2/4 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=20ms) slots=95/100 jobs/s=248 drains=30291 evl=0ms
+[2026-04-21 16:46:09.152] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=363ms) pop(q=4 f=1/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=242 drains=31048 evl=0ms
+[2026-04-21 16:46:09.157] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=374ms) pop(q=3 f=1/4 p99rtt=116ms) custom(q=0 f=0/1 p99rtt=20ms) slots=95/100 jobs/s=225 drains=30611 evl=0ms
+[2026-04-21 16:46:10.153] [info] [Worker 1] [libqueen] push(q=13 f=4/4 p99rtt=398ms) pop(q=9 f=1/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=382 drains=31524 evl=0ms
+[2026-04-21 16:46:10.159] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=375ms) pop(q=1 f=1/4 p99rtt=121ms) custom(q=0 f=0/1 p99rtt=20ms) slots=95/100 jobs/s=325 drains=31022 evl=0ms
+[2026-04-21 16:46:11.153] [info] [Worker 1] [libqueen] push(q=6 f=4/4 p99rtt=398ms) pop(q=0 f=2/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=47ms) slots=94/100 jobs/s=471 drains=32079 evl=0ms
+[2026-04-21 16:46:11.157] [info] [Worker 0] [libqueen] push(q=4 f=4/4 p99rtt=384ms) pop(q=4 f=0/4 p99rtt=121ms) custom(q=0 f=0/1 p99rtt=20ms) slots=96/100 jobs/s=418 drains=31513 evl=0ms
+[2026-04-21 16:46:12.153] [info] [Worker 1] [libqueen] push(q=11 f=3/4 p99rtt=398ms) pop(q=5 f=2/4 p99rtt=121ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=607 drains=32707 evl=0ms
+[2026-04-21 16:46:12.157] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=384ms) pop(q=5 f=0/4 p99rtt=121ms) custom(q=0 f=0/1 p99rtt=20ms) slots=97/100 jobs/s=539 drains=32097 evl=0ms
+[2026-04-21 16:46:13.154] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=398ms) pop(q=0 f=2/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=47ms) slots=94/100 jobs/s=454 drains=33195 evl=0ms
+[2026-04-21 16:46:13.158] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=384ms) pop(q=3 f=3/4 p99rtt=125ms) custom(q=0 f=0/1 p99rtt=20ms) slots=93/100 jobs/s=404 drains=32563 evl=0ms
+[2026-04-21 16:46:14.154] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=415ms) pop(q=6 f=1/4 p99rtt=134ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=331 drains=33556 evl=0ms
+[2026-04-21 16:46:14.158] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=384ms) pop(q=0 f=2/4 p99rtt=127ms) custom(q=0 f=0/1 p99rtt=20ms) slots=95/100 jobs/s=236 drains=32823 evl=0ms
+[2026-04-21 16:46:15.155] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=434ms) pop(q=0 f=0/4 p99rtt=134ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=193 drains=33852 evl=0ms
+[2026-04-21 16:46:15.159] [info] [Worker 0] [libqueen] push(q=1 f=4/4 p99rtt=438ms) pop(q=0 f=1/4 p99rtt=127ms) custom(q=0 f=0/1 p99rtt=20ms) slots=95/100 jobs/s=164 drains=33083 evl=0ms
+[2026-04-21 16:46:15.635] [error] [Worker 0] [libqueen] Query failed: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.636] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.636] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.636] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.636] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.636] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.636] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.637] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.637] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.637] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.637] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.637] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.637] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.638] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.638] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.638] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.638] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.638] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.638] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.638] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.639] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.639] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.639] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.639] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 300 waits for ShareLock on transaction 7298; blocked by process 305.
+Process 305 waits for ShareLock on transaction 7287; blocked by process 300.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (16,80) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 16:46:15.640] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 16:46:15.906] [info] Failover: Processing 120 events from failover_019db080-d616-7001-8e9a-2bf9e6751931.buf in 2 batches (db_healthy=true, duplicate key errors are normal during recovery)
+[2026-04-21 16:46:16.155] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=459ms) pop(q=0 f=1/4 p99rtt=124ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=338 drains=34215 evl=0ms
+[2026-04-21 16:46:16.159] [info] [Worker 0] [libqueen] push(q=5 f=2/4 p99rtt=535ms) pop(q=5 f=1/4 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=20ms) slots=97/100 jobs/s=361 drains=33507 evl=0ms
+[2026-04-21 16:46:16.795] [info] StatsService: cycle completed in 68ms
+[2026-04-21 16:46:17.135] [info] Failover: Progress 120/120 events (100.0%)
+[2026-04-21 16:46:17.136] [info] Failover: Completed 120 events in 1228ms (98 events/sec) - file removed
+[2026-04-21 16:46:17.155] [info] [Worker 1] [libqueen] push(q=15 f=3/4 p99rtt=459ms) pop(q=0 f=2/4 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=397 drains=34673 evl=0ms
+[2026-04-21 16:46:17.159] [info] [Worker 0] [libqueen] push(q=1 f=2/4 p99rtt=535ms) pop(q=0 f=2/4 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=45ms) slots=96/100 jobs/s=439 drains=34025 evl=0ms
+[2026-04-21 16:46:18.156] [info] [Worker 1] [libqueen] push(q=15 f=2/4 p99rtt=459ms) pop(q=0 f=1/4 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=649 drains=35322 evl=0ms
+[2026-04-21 16:46:18.160] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=535ms) pop(q=0 f=1/4 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=45ms) slots=96/100 jobs/s=638 drains=34681 evl=0ms
+[2026-04-21 16:46:19.156] [info] [Worker 1] [libqueen] push(q=18 f=1/4 p99rtt=459ms) pop(q=0 f=3/4 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=708 drains=36019 evl=0ms
+[2026-04-21 16:46:19.160] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=535ms) pop(q=0 f=2/4 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=45ms) slots=95/100 jobs/s=679 drains=35364 evl=0ms
+[2026-04-21 16:46:20.161] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=459ms) pop(q=0 f=1/4 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=640 drains=36653 evl=0ms
+[2026-04-21 16:46:20.162] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=535ms) pop(q=0 f=1/4 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=45ms) slots=95/100 jobs/s=675 drains=36034 evl=0ms
+[2026-04-21 16:46:21.161] [info] [Worker 0] [libqueen] push(q=5 f=4/4 p99rtt=535ms) pop(q=0 f=3/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=45ms) slots=93/100 jobs/s=259 drains=36354 evl=0ms
+[2026-04-21 16:46:21.162] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=479ms) pop(q=0 f=1/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=241 drains=36972 evl=0ms
+[2026-04-21 16:46:22.161] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=535ms) pop(q=0 f=1/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=45ms) slots=95/100 jobs/s=514 drains=36960 evl=0ms
+[2026-04-21 16:46:22.161] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=479ms) pop(q=7 f=0/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=545 drains=37570 evl=0ms
+[2026-04-21 16:46:23.162] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=479ms) pop(q=0 f=2/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=47ms) slots=94/100 jobs/s=632 drains=38223 evl=0ms
+[2026-04-21 16:46:23.162] [info] [Worker 0] [libqueen] push(q=13 f=3/4 p99rtt=535ms) pop(q=0 f=1/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=45ms) slots=96/100 jobs/s=619 drains=37618 evl=0ms
+[2026-04-21 16:46:24.162] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=535ms) pop(q=0 f=1/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=45ms) slots=95/100 jobs/s=525 drains=38237 evl=0ms
+[2026-04-21 16:46:24.162] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=479ms) pop(q=0 f=1/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=513 drains=38757 evl=0ms
+[2026-04-21 16:46:25.165] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=479ms) pop(q=4 f=1/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=47ms) slots=95/100 jobs/s=544 drains=39361 evl=0ms
+[2026-04-21 16:46:25.166] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=535ms) pop(q=2 f=1/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=45ms) slots=95/100 jobs/s=515 drains=38787 evl=0ms
+[2026-04-21 16:46:26.166] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=479ms) pop(q=0 f=1/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=614 drains=39988 evl=0ms
+[2026-04-21 16:46:26.166] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=535ms) pop(q=0 f=2/4 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=45ms) slots=95/100 jobs/s=573 drains=39389 evl=0ms
+[2026-04-21 16:46:26.891] [info] StatsService: cycle completed in 157ms
+[2026-04-21 16:46:27.165] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=479ms) pop(q=1 f=4/4 p99rtt=169ms) custom(q=0 f=0/1 p99rtt=47ms) slots=92/100 jobs/s=426 drains=40414 evl=0ms
+[2026-04-21 16:46:27.166] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=535ms) pop(q=0 f=1/4 p99rtt=139ms) custom(q=0 f=0/1 p99rtt=45ms) slots=95/100 jobs/s=402 drains=39814 evl=0ms
+[2026-04-21 16:46:28.166] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=483ms) pop(q=13 f=0/4 p99rtt=170ms) custom(q=0 f=0/1 p99rtt=47ms) slots=97/100 jobs/s=262 drains=40762 evl=0ms
+[2026-04-21 16:46:28.167] [info] [Worker 0] [libqueen] push(q=5 f=3/4 p99rtt=546ms) pop(q=0 f=1/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=45ms) slots=96/100 jobs/s=335 drains=40270 evl=0ms
+[2026-04-21 16:46:29.167] [info] [Worker 1] [libqueen] push(q=11 f=4/4 p99rtt=483ms) pop(q=0 f=3/4 p99rtt=170ms) custom(q=0 f=0/1 p99rtt=47ms) slots=93/100 jobs/s=368 drains=41198 evl=0ms
+[2026-04-21 16:46:29.167] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=546ms) pop(q=0 f=1/4 p99rtt=148ms) custom(q=0 f=0/1 p99rtt=45ms) slots=96/100 jobs/s=302 drains=40605 evl=0ms
+[2026-04-21 16:46:30.167] [info] [Worker 1] [libqueen] push(q=1 f=4/4 p99rtt=497ms) pop(q=0 f=2/4 p99rtt=170ms) custom(q=0 f=0/1 p99rtt=47ms) slots=94/100 jobs/s=390 drains=41650 evl=0ms
+[2026-04-21 16:46:30.168] [info] [Worker 0] [libqueen] push(q=6 f=4/4 p99rtt=549ms) pop(q=0 f=1/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=45ms) slots=95/100 jobs/s=381 drains=40989 evl=1ms
+[2026-04-21 16:46:31.168] [info] [Worker 0] [libqueen] push(q=10 f=4/4 p99rtt=549ms) pop(q=1 f=2/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=45ms) slots=94/100 jobs/s=292 drains=41334 evl=1ms
+[2026-04-21 16:46:31.168] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=497ms) pop(q=10 f=1/4 p99rtt=170ms) custom(q=0 f=0/1 p99rtt=47ms) slots=96/100 jobs/s=274 drains=41995 evl=1ms
+[2026-04-21 16:46:32.170] [info] [Worker 1] [libqueen] push(q=4 f=4/4 p99rtt=520ms) pop(q=0 f=2/4 p99rtt=180ms) custom(q=0 f=1/1 p99rtt=47ms) slots=93/100 jobs/s=328 drains=42358 evl=0ms
+[2026-04-21 16:46:32.170] [info] [Worker 0] [libqueen] push(q=10 f=4/4 p99rtt=573ms) pop(q=0 f=3/4 p99rtt=157ms) custom(q=0 f=1/1 p99rtt=56ms) slots=92/100 jobs/s=327 drains=41751 evl=0ms
+[2026-04-21 16:46:33.169] [info] [Worker 1] [libqueen] push(q=8 f=4/4 p99rtt=544ms) pop(q=4 f=4/4 p99rtt=228ms) custom(q=0 f=0/1 p99rtt=50ms) slots=92/100 jobs/s=123 drains=42574 evl=1ms
+[2026-04-21 16:46:33.172] [info] [Worker 0] [libqueen] push(q=8 f=4/4 p99rtt=598ms) pop(q=0 f=2/4 p99rtt=170ms) custom(q=0 f=0/1 p99rtt=74ms) slots=94/100 jobs/s=138 drains=41947 evl=1ms
+[2026-04-21 16:46:34.170] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=586ms) pop(q=0 f=2/4 p99rtt=210ms) custom(q=0 f=0/1 p99rtt=50ms) slots=94/100 jobs/s=295 drains=42948 evl=1ms
+[2026-04-21 16:46:34.173] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=599ms) pop(q=0 f=1/4 p99rtt=171ms) custom(q=0 f=0/1 p99rtt=74ms) slots=95/100 jobs/s=249 drains=42284 evl=1ms
+[2026-04-21 16:46:35.171] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=586ms) pop(q=0 f=3/4 p99rtt=201ms) custom(q=0 f=0/1 p99rtt=50ms) slots=93/100 jobs/s=371 drains=43409 evl=0ms
+[2026-04-21 16:46:35.173] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=622ms) pop(q=1 f=2/4 p99rtt=171ms) custom(q=0 f=0/1 p99rtt=74ms) slots=94/100 jobs/s=280 drains=42628 evl=1ms
+[2026-04-21 16:46:36.171] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=599ms) pop(q=0 f=2/4 p99rtt=201ms) custom(q=0 f=0/1 p99rtt=50ms) slots=94/100 jobs/s=438 drains=43942 evl=1ms
+[2026-04-21 16:46:36.173] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=665ms) pop(q=0 f=1/4 p99rtt=171ms) custom(q=0 f=0/1 p99rtt=74ms) slots=95/100 jobs/s=373 drains=43067 evl=0ms
+[2026-04-21 16:46:36.812] [info] StatsService: cycle completed in 75ms
+[2026-04-21 16:46:37.172] [info] [Worker 1] [libqueen] push(q=6 f=4/4 p99rtt=599ms) pop(q=0 f=2/4 p99rtt=210ms) custom(q=0 f=0/1 p99rtt=50ms) slots=94/100 jobs/s=514 drains=44490 evl=1ms
+[2026-04-21 16:46:37.173] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=665ms) pop(q=0 f=3/4 p99rtt=186ms) custom(q=0 f=0/1 p99rtt=74ms) slots=93/100 jobs/s=440 drains=43518 evl=0ms
+[2026-04-21 16:46:38.173] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=599ms) pop(q=1 f=2/4 p99rtt=210ms) custom(q=0 f=0/1 p99rtt=50ms) slots=94/100 jobs/s=527 drains=45074 evl=0ms
+[2026-04-21 16:46:38.174] [info] [Worker 0] [libqueen] push(q=8 f=4/4 p99rtt=665ms) pop(q=1 f=2/4 p99rtt=186ms) custom(q=0 f=0/1 p99rtt=74ms) slots=94/100 jobs/s=437 drains=43992 evl=1ms
+[2026-04-21 16:46:39.173] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=599ms) pop(q=0 f=3/4 p99rtt=185ms) custom(q=0 f=0/1 p99rtt=50ms) slots=93/100 jobs/s=557 drains=45703 evl=1ms
+[2026-04-21 16:46:39.175] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=665ms) pop(q=0 f=2/4 p99rtt=186ms) custom(q=0 f=0/1 p99rtt=74ms) slots=94/100 jobs/s=522 drains=44585 evl=0ms
+[2026-04-21 16:46:40.172] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=599ms) pop(q=0 f=2/4 p99rtt=185ms) custom(q=0 f=0/1 p99rtt=50ms) slots=95/100 jobs/s=644 drains=46380 evl=0ms
+[2026-04-21 16:46:40.175] [info] [Worker 0] [libqueen] push(q=14 f=3/4 p99rtt=665ms) pop(q=0 f=2/4 p99rtt=176ms) custom(q=0 f=0/1 p99rtt=74ms) slots=95/100 jobs/s=591 drains=45221 evl=1ms
+[2026-04-21 16:46:41.177] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=665ms) pop(q=0 f=4/4 p99rtt=176ms) custom(q=0 f=0/1 p99rtt=74ms) slots=92/100 jobs/s=434 drains=45668 evl=1ms
+[2026-04-21 16:46:41.178] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=599ms) pop(q=0 f=4/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=50ms) slots=92/100 jobs/s=430 drains=46849 evl=1ms
+[2026-04-21 16:46:42.175] [info] [Worker 1] [libqueen] push(q=6 f=4/4 p99rtt=646ms) pop(q=0 f=1/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=50ms) slots=95/100 jobs/s=312 drains=47247 evl=0ms
+[2026-04-21 16:46:42.178] [info] [Worker 0] [libqueen] push(q=3 f=4/4 p99rtt=687ms) pop(q=0 f=1/4 p99rtt=176ms) custom(q=0 f=0/1 p99rtt=74ms) slots=95/100 jobs/s=250 drains=45980 evl=1ms
+[2026-04-21 16:46:43.175] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=646ms) pop(q=0 f=2/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=50ms) slots=94/100 jobs/s=384 drains=47686 evl=0ms
+[2026-04-21 16:46:43.178] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=687ms) pop(q=0 f=1/4 p99rtt=186ms) custom(q=0 f=0/1 p99rtt=74ms) slots=95/100 jobs/s=338 drains=46359 evl=0ms
+[2026-04-21 16:46:44.175] [info] [Worker 1] [libqueen] push(q=6 f=3/4 p99rtt=646ms) pop(q=3 f=2/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=50ms) slots=95/100 jobs/s=463 drains=48177 evl=1ms
+[2026-04-21 16:46:44.178] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=687ms) pop(q=0 f=1/4 p99rtt=186ms) custom(q=0 f=0/1 p99rtt=74ms) slots=96/100 jobs/s=378 drains=46788 evl=1ms
+[2026-04-21 16:46:45.177] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=646ms) pop(q=3 f=1/4 p99rtt=190ms) custom(q=0 f=0/1 p99rtt=50ms) slots=95/100 jobs/s=431 drains=48655 evl=1ms
+[2026-04-21 16:46:45.179] [info] [Worker 0] [libqueen] push(q=5 f=4/4 p99rtt=687ms) pop(q=0 f=2/4 p99rtt=186ms) custom(q=0 f=0/1 p99rtt=74ms) slots=94/100 jobs/s=364 drains=47194 evl=1ms
+[2026-04-21 16:46:46.178] [info] [Worker 1] [libqueen] push(q=1 f=4/4 p99rtt=646ms) pop(q=0 f=4/4 p99rtt=190ms) custom(q=0 f=0/1 p99rtt=50ms) slots=92/100 jobs/s=445 drains=49115 evl=1ms
+[2026-04-21 16:46:46.182] [info] [Worker 0] [libqueen] push(q=14 f=4/4 p99rtt=687ms) pop(q=0 f=1/4 p99rtt=186ms) custom(q=0 f=0/1 p99rtt=74ms) slots=95/100 jobs/s=401 drains=47648 evl=1ms
+[2026-04-21 16:46:47.082] [info] StatsService: cycle completed in 344ms
+[2026-04-21 16:46:47.177] [info] [Worker 1] [libqueen] push(q=17 f=4/4 p99rtt=586ms) pop(q=3 f=2/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=96ms) slots=94/100 jobs/s=350 drains=49517 evl=0ms
+[2026-04-21 16:46:47.183] [info] [Worker 0] [libqueen] push(q=9 f=4/4 p99rtt=687ms) pop(q=0 f=2/4 p99rtt=188ms) custom(q=0 f=0/1 p99rtt=103ms) slots=94/100 jobs/s=303 drains=47983 evl=0ms
+[2026-04-21 16:46:48.184] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=586ms) pop(q=3 f=2/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=96ms) slots=94/100 jobs/s=391 drains=49921 evl=0ms
+[2026-04-21 16:46:48.185] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=687ms) pop(q=0 f=2/4 p99rtt=176ms) custom(q=0 f=0/1 p99rtt=103ms) slots=94/100 jobs/s=392 drains=48420 evl=1ms
+[2026-04-21 16:46:49.184] [info] [Worker 1] [libqueen] push(q=9 f=3/4 p99rtt=586ms) pop(q=1 f=1/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=96ms) slots=96/100 jobs/s=401 drains=50318 evl=0ms
+[2026-04-21 16:46:49.185] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=687ms) pop(q=0 f=1/4 p99rtt=176ms) custom(q=0 f=0/1 p99rtt=103ms) slots=95/100 jobs/s=432 drains=48857 evl=0ms
+[2026-04-21 16:46:50.186] [info] [Worker 1] [libqueen] push(q=7 f=4/4 p99rtt=586ms) pop(q=0 f=1/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=96ms) slots=95/100 jobs/s=251 drains=50529 evl=0ms
+[2026-04-21 16:46:50.186] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=687ms) pop(q=6 f=1/4 p99rtt=186ms) custom(q=0 f=0/1 p99rtt=103ms) slots=95/100 jobs/s=314 drains=49197 evl=1ms
+[2026-04-21 16:46:51.187] [info] [Worker 0] [libqueen] push(q=7 f=4/4 p99rtt=688ms) pop(q=0 f=2/4 p99rtt=188ms) custom(q=0 f=0/1 p99rtt=103ms) slots=94/100 jobs/s=164 drains=49420 evl=1ms
+[2026-04-21 16:46:51.187] [info] [Worker 1] [libqueen] push(q=5 f=4/4 p99rtt=646ms) pop(q=0 f=3/4 p99rtt=208ms) custom(q=0 f=0/1 p99rtt=96ms) slots=93/100 jobs/s=180 drains=50759 evl=1ms
+[2026-04-21 16:46:52.188] [info] [Worker 0] [libqueen] push(q=1 f=4/4 p99rtt=665ms) pop(q=3 f=2/4 p99rtt=188ms) custom(q=0 f=0/1 p99rtt=103ms) slots=94/100 jobs/s=184 drains=49706 evl=3ms
+[2026-04-21 16:46:52.188] [info] [Worker 1] [libqueen] push(q=5 f=4/4 p99rtt=646ms) pop(q=0 f=2/4 p99rtt=210ms) custom(q=0 f=0/1 p99rtt=96ms) slots=94/100 jobs/s=192 drains=50998 evl=1ms
+[2026-04-21 16:46:53.188] [info] [Worker 0] [libqueen] push(q=4 f=4/4 p99rtt=687ms) pop(q=3 f=2/4 p99rtt=188ms) custom(q=0 f=0/1 p99rtt=103ms) slots=94/100 jobs/s=204 drains=49953 evl=0ms
+[2026-04-21 16:46:53.190] [info] [Worker 1] [libqueen] push(q=5 f=4/4 p99rtt=660ms) pop(q=0 f=3/4 p99rtt=210ms) custom(q=0 f=0/1 p99rtt=96ms) slots=93/100 jobs/s=185 drains=51248 evl=1ms
+[2026-04-21 16:46:54.188] [info] [Worker 0] [libqueen] push(q=4 f=4/4 p99rtt=688ms) pop(q=4 f=2/4 p99rtt=188ms) custom(q=0 f=0/1 p99rtt=103ms) slots=94/100 jobs/s=254 drains=50251 evl=1ms
+[2026-04-21 16:46:54.191] [info] [Worker 1] [libqueen] push(q=9 f=4/4 p99rtt=671ms) pop(q=0 f=2/4 p99rtt=210ms) custom(q=0 f=0/1 p99rtt=96ms) slots=94/100 jobs/s=293 drains=51589 evl=1ms
+[2026-04-21 16:46:55.189] [info] [Worker 0] [libqueen] push(q=4 f=4/4 p99rtt=688ms) pop(q=2 f=1/4 p99rtt=188ms) custom(q=0 f=0/1 p99rtt=103ms) slots=95/100 jobs/s=385 drains=50691 evl=0ms
+[2026-04-21 16:46:55.191] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=671ms) pop(q=0 f=1/4 p99rtt=210ms) custom(q=0 f=0/1 p99rtt=96ms) slots=95/100 jobs/s=392 drains=51980 evl=1ms
+[2026-04-21 16:46:56.191] [info] [Worker 0] [libqueen] push(q=4 f=4/4 p99rtt=688ms) pop(q=0 f=4/4 p99rtt=188ms) custom(q=0 f=0/1 p99rtt=103ms) slots=92/100 jobs/s=218 drains=51003 evl=0ms
+[2026-04-21 16:46:56.192] [info] [Worker 1] [libqueen] push(q=6 f=4/4 p99rtt=671ms) pop(q=0 f=2/4 p99rtt=226ms) custom(q=0 f=0/1 p99rtt=96ms) slots=94/100 jobs/s=293 drains=52330 evl=0ms
+[2026-04-21 16:46:57.035] [info] StatsService: cycle completed in 286ms
+[2026-04-21 16:46:57.192] [info] [Worker 0] [libqueen] push(q=13 f=4/4 p99rtt=688ms) pop(q=0 f=3/4 p99rtt=189ms) custom(q=0 f=0/1 p99rtt=103ms) slots=93/100 jobs/s=215 drains=51268 evl=0ms
+[2026-04-21 16:46:57.193] [info] [Worker 1] [libqueen] push(q=13 f=4/4 p99rtt=671ms) pop(q=3 f=2/4 p99rtt=226ms) custom(q=0 f=0/1 p99rtt=96ms) slots=94/100 jobs/s=235 drains=52642 evl=0ms
+[2026-04-21 16:46:58.192] [info] [Worker 0] [libqueen] push(q=7 f=4/4 p99rtt=688ms) pop(q=0 f=3/4 p99rtt=192ms) custom(q=0 f=0/1 p99rtt=103ms) slots=93/100 jobs/s=193 drains=51536 evl=1ms
+[2026-04-21 16:46:58.195] [info] [Worker 1] [libqueen] push(q=13 f=4/4 p99rtt=660ms) pop(q=0 f=4/4 p99rtt=226ms) custom(q=0 f=0/1 p99rtt=96ms) slots=92/100 jobs/s=202 drains=52934 evl=0ms
+[2026-04-21 16:46:59.192] [info] [Worker 0] [libqueen] push(q=7 f=4/4 p99rtt=688ms) pop(q=0 f=3/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=103ms) slots=93/100 jobs/s=152 drains=51791 evl=0ms
+[2026-04-21 16:46:59.196] [info] [Worker 1] [libqueen] push(q=7 f=4/4 p99rtt=646ms) pop(q=0 f=4/4 p99rtt=233ms) custom(q=0 f=0/1 p99rtt=96ms) slots=92/100 jobs/s=173 drains=53188 evl=0ms
+[2026-04-21 16:47:00.194] [info] [Worker 0] [libqueen] push(q=11 f=4/4 p99rtt=717ms) pop(q=0 f=4/4 p99rtt=205ms) custom(q=2 f=0/1 p99rtt=103ms) slots=92/100 jobs/s=183 drains=52073 evl=1ms
+[2026-04-21 16:47:00.199] [info] [Worker 1] [libqueen] push(q=13 f=4/4 p99rtt=659ms) pop(q=0 f=2/4 p99rtt=236ms) custom(q=2 f=0/1 p99rtt=96ms) slots=94/100 jobs/s=148 drains=53407 evl=0ms
+[2026-04-21 16:47:01.199] [info] [Worker 0] [libqueen] push(q=9 f=4/4 p99rtt=717ms) pop(q=12 f=0/4 p99rtt=207ms) custom(q=0 f=0/1 p99rtt=116ms) slots=96/100 jobs/s=200 drains=52292 evl=0ms
+[2026-04-21 16:47:01.200] [info] [Worker 1] [libqueen] push(q=1 f=3/4 p99rtt=660ms) pop(q=0 f=1/4 p99rtt=220ms) custom(q=0 f=0/1 p99rtt=140ms) slots=96/100 jobs/s=303 drains=53771 evl=1ms
+[2026-04-21 16:47:02.198] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=647ms) pop(q=0 f=3/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=433 drains=52801 evl=1ms
+[2026-04-21 16:47:02.202] [info] [Worker 1] [libqueen] push(q=6 f=4/4 p99rtt=660ms) pop(q=0 f=2/4 p99rtt=220ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=496 drains=54330 evl=0ms
+[2026-04-21 16:47:03.199] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=647ms) pop(q=0 f=2/4 p99rtt=197ms) custom(q=0 f=0/1 p99rtt=116ms) slots=95/100 jobs/s=506 drains=53320 evl=1ms
+[2026-04-21 16:47:03.202] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=660ms) pop(q=0 f=1/4 p99rtt=220ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=503 drains=54818 evl=1ms
+[2026-04-21 16:47:04.200] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=647ms) pop(q=0 f=2/4 p99rtt=198ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=279 drains=53624 evl=1ms
+[2026-04-21 16:47:04.202] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=660ms) pop(q=0 f=1/4 p99rtt=230ms) custom(q=0 f=0/1 p99rtt=140ms) slots=96/100 jobs/s=273 drains=55095 evl=1ms
+[2026-04-21 16:47:05.202] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=651ms) pop(q=2 f=2/4 p99rtt=207ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=86 drains=53728 evl=0ms
+[2026-04-21 16:47:05.204] [info] [Worker 1] [libqueen] push(q=2 f=4/4 p99rtt=671ms) pop(q=0 f=2/4 p99rtt=235ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=101 drains=55209 evl=0ms
+[2026-04-21 16:47:06.203] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=683ms) pop(q=3 f=2/4 p99rtt=207ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=377 drains=54194 evl=0ms
+[2026-04-21 16:47:06.205] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=674ms) pop(q=1 f=3/4 p99rtt=235ms) custom(q=0 f=0/1 p99rtt=140ms) slots=93/100 jobs/s=359 drains=55620 evl=0ms
+[2026-04-21 16:47:06.790] [info] StatsService: cycle completed in 38ms
+[2026-04-21 16:47:07.203] [info] [Worker 0] [libqueen] push(q=6 f=3/4 p99rtt=683ms) pop(q=11 f=1/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=96/100 jobs/s=548 drains=54743 evl=0ms
+[2026-04-21 16:47:07.205] [info] [Worker 1] [libqueen] push(q=1 f=4/4 p99rtt=674ms) pop(q=0 f=1/4 p99rtt=233ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=550 drains=56168 evl=1ms
+[2026-04-21 16:47:08.205] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=683ms) pop(q=0 f=2/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=400 drains=55212 evl=0ms
+[2026-04-21 16:47:08.206] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=674ms) pop(q=0 f=1/4 p99rtt=233ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=470 drains=56706 evl=0ms
+[2026-04-21 16:47:09.206] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=683ms) pop(q=0 f=2/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=546 drains=55792 evl=1ms
+[2026-04-21 16:47:09.207] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=674ms) pop(q=6 f=0/4 p99rtt=233ms) custom(q=0 f=0/1 p99rtt=140ms) slots=97/100 jobs/s=481 drains=57210 evl=0ms
+[2026-04-21 16:47:10.206] [info] [Worker 0] [libqueen] push(q=1 f=3/4 p99rtt=683ms) pop(q=0 f=1/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=96/100 jobs/s=414 drains=56247 evl=1ms
+[2026-04-21 16:47:10.208] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=674ms) pop(q=0 f=1/4 p99rtt=233ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=429 drains=57635 evl=1ms
+[2026-04-21 16:47:11.206] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=683ms) pop(q=7 f=1/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=95/100 jobs/s=547 drains=56820 evl=0ms
+[2026-04-21 16:47:11.210] [info] [Worker 1] [libqueen] push(q=2 f=3/4 p99rtt=674ms) pop(q=2 f=1/4 p99rtt=233ms) custom(q=0 f=0/1 p99rtt=140ms) slots=96/100 jobs/s=544 drains=58161 evl=1ms
+[2026-04-21 16:47:12.206] [info] [Worker 0] [libqueen] push(q=3 f=4/4 p99rtt=683ms) pop(q=0 f=2/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=510 drains=57352 evl=0ms
+[2026-04-21 16:47:12.210] [info] [Worker 1] [libqueen] push(q=8 f=4/4 p99rtt=674ms) pop(q=6 f=2/4 p99rtt=233ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=539 drains=58675 evl=1ms
+[2026-04-21 16:47:13.208] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=683ms) pop(q=0 f=1/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=96/100 jobs/s=407 drains=57827 evl=1ms
+[2026-04-21 16:47:13.211] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=674ms) pop(q=0 f=2/4 p99rtt=230ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=542 drains=59268 evl=0ms
+[2026-04-21 16:47:14.209] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=683ms) pop(q=0 f=3/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=93/100 jobs/s=488 drains=58342 evl=1ms
+[2026-04-21 16:47:14.211] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=674ms) pop(q=0 f=3/4 p99rtt=230ms) custom(q=0 f=0/1 p99rtt=140ms) slots=93/100 jobs/s=553 drains=59846 evl=1ms
+[2026-04-21 16:47:15.210] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=683ms) pop(q=0 f=1/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=96/100 jobs/s=445 drains=58840 evl=1ms
+[2026-04-21 16:47:15.211] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=674ms) pop(q=0 f=1/4 p99rtt=230ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=558 drains=60442 evl=1ms
+[2026-04-21 16:47:16.211] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=683ms) pop(q=0 f=1/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=96/100 jobs/s=465 drains=59251 evl=0ms
+[2026-04-21 16:47:16.213] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=635ms) pop(q=0 f=3/4 p99rtt=230ms) custom(q=0 f=0/1 p99rtt=140ms) slots=93/100 jobs/s=506 drains=60924 evl=1ms
+[2026-04-21 16:47:16.826] [info] StatsService: cycle completed in 74ms
+[2026-04-21 16:47:17.211] [info] [Worker 0] [libqueen] push(q=1 f=4/4 p99rtt=683ms) pop(q=2 f=1/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=95/100 jobs/s=399 drains=59727 evl=1ms
+[2026-04-21 16:47:17.213] [info] [Worker 1] [libqueen] push(q=1 f=3/4 p99rtt=635ms) pop(q=13 f=0/4 p99rtt=230ms) custom(q=0 f=0/1 p99rtt=140ms) slots=97/100 jobs/s=570 drains=61501 evl=0ms
+[2026-04-21 16:47:18.212] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=683ms) pop(q=5 f=1/4 p99rtt=205ms) custom(q=0 f=0/1 p99rtt=116ms) slots=95/100 jobs/s=482 drains=60217 evl=0ms
+[2026-04-21 16:47:18.214] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=635ms) pop(q=1 f=3/4 p99rtt=220ms) custom(q=0 f=0/1 p99rtt=140ms) slots=93/100 jobs/s=617 drains=62128 evl=0ms
+[2026-04-21 16:47:19.214] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=683ms) pop(q=0 f=2/4 p99rtt=198ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=536 drains=60745 evl=1ms
+[2026-04-21 16:47:19.218] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=635ms) pop(q=0 f=2/4 p99rtt=220ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=559 drains=62673 evl=1ms
+[2026-04-21 16:47:20.216] [info] [Worker 0] [libqueen] push(q=0 f=2/4 p99rtt=665ms) pop(q=0 f=3/4 p99rtt=197ms) custom(q=0 f=0/1 p99rtt=116ms) slots=95/100 jobs/s=512 drains=61259 evl=0ms
+[2026-04-21 16:47:20.219] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=635ms) pop(q=0 f=1/4 p99rtt=220ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=491 drains=63183 evl=1ms
+[2026-04-21 16:47:21.216] [info] [Worker 0] [libqueen] push(q=3 f=4/4 p99rtt=651ms) pop(q=0 f=1/4 p99rtt=197ms) custom(q=0 f=0/1 p99rtt=116ms) slots=95/100 jobs/s=499 drains=61774 evl=0ms
+[2026-04-21 16:47:21.222] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=635ms) pop(q=0 f=2/4 p99rtt=207ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=541 drains=63785 evl=0ms
+[2026-04-21 16:47:22.216] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=647ms) pop(q=12 f=0/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=116ms) slots=96/100 jobs/s=381 drains=62176 evl=0ms
+[2026-04-21 16:47:22.221] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=635ms) pop(q=12 f=0/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=140ms) slots=96/100 jobs/s=461 drains=64264 evl=1ms
+[2026-04-21 16:47:23.216] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=634ms) pop(q=0 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=591 drains=62743 evl=1ms
+[2026-04-21 16:47:23.222] [info] [Worker 1] [libqueen] push(q=4 f=4/4 p99rtt=635ms) pop(q=0 f=2/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=682 drains=64912 evl=1ms
+[2026-04-21 16:47:24.216] [info] [Worker 0] [libqueen] push(q=1 f=3/4 p99rtt=634ms) pop(q=0 f=1/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=116ms) slots=96/100 jobs/s=589 drains=63364 evl=0ms
+[2026-04-21 16:47:24.222] [info] [Worker 1] [libqueen] push(q=7 f=2/4 p99rtt=608ms) pop(q=1 f=1/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=140ms) slots=97/100 jobs/s=623 drains=65538 evl=0ms
+[2026-04-21 16:47:25.216] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=634ms) pop(q=0 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=501 drains=63904 evl=1ms
+[2026-04-21 16:47:25.223] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=608ms) pop(q=3 f=1/4 p99rtt=185ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=474 drains=66032 evl=0ms
+[2026-04-21 16:47:26.217] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=634ms) pop(q=0 f=1/4 p99rtt=188ms) custom(q=0 f=0/1 p99rtt=116ms) slots=95/100 jobs/s=489 drains=64427 evl=1ms
+[2026-04-21 16:47:26.224] [info] [Worker 1] [libqueen] push(q=15 f=2/4 p99rtt=608ms) pop(q=2 f=2/4 p99rtt=185ms) custom(q=0 f=0/1 p99rtt=140ms) slots=96/100 jobs/s=561 drains=66652 evl=0ms
+[2026-04-21 16:47:26.764] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 16:47:27.218] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=634ms) pop(q=0 f=1/4 p99rtt=173ms) custom(q=0 f=0/1 p99rtt=116ms) slots=96/100 jobs/s=476 drains=64925 evl=1ms
+[2026-04-21 16:47:27.225] [info] [Worker 1] [libqueen] push(q=9 f=3/4 p99rtt=608ms) pop(q=0 f=2/4 p99rtt=174ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=507 drains=67166 evl=0ms
+[2026-04-21 16:47:28.220] [info] [Worker 0] [libqueen] push(q=3 f=4/4 p99rtt=630ms) pop(q=0 f=1/4 p99rtt=177ms) custom(q=0 f=0/1 p99rtt=116ms) slots=95/100 jobs/s=203 drains=65188 evl=1ms
+[2026-04-21 16:47:28.225] [info] [Worker 1] [libqueen] push(q=7 f=4/4 p99rtt=633ms) pop(q=0 f=2/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=215 drains=67441 evl=1ms
+[2026-04-21 16:47:29.220] [info] [Worker 0] [libqueen] push(q=3 f=4/4 p99rtt=630ms) pop(q=7 f=1/4 p99rtt=176ms) custom(q=0 f=0/1 p99rtt=116ms) slots=95/100 jobs/s=330 drains=65602 evl=0ms
+[2026-04-21 16:47:29.227] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=633ms) pop(q=0 f=3/4 p99rtt=161ms) custom(q=0 f=0/1 p99rtt=140ms) slots=93/100 jobs/s=356 drains=67861 evl=0ms
+[2026-04-21 16:47:29.641] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 1}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 502, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 16:47:29.641] [info] StatsService: cycle completed in 2879ms
+[2026-04-21 16:47:30.221] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=630ms) pop(q=5 f=2/4 p99rtt=176ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=447 drains=66126 evl=0ms
+[2026-04-21 16:47:30.229] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=633ms) pop(q=0 f=2/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=492 drains=68375 evl=0ms
+[2026-04-21 16:47:31.221] [info] [Worker 0] [libqueen] push(q=5 f=4/4 p99rtt=630ms) pop(q=0 f=2/4 p99rtt=163ms) custom(q=0 f=0/1 p99rtt=116ms) slots=94/100 jobs/s=483 drains=66645 evl=0ms
+[2026-04-21 16:47:31.229] [info] [Worker 1] [libqueen] push(q=2 f=3/4 p99rtt=633ms) pop(q=0 f=1/4 p99rtt=167ms) custom(q=0 f=0/1 p99rtt=140ms) slots=96/100 jobs/s=469 drains=68839 evl=1ms
+[2026-04-21 16:47:32.221] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=630ms) pop(q=0 f=1/4 p99rtt=155ms) custom(q=0 f=1/1 p99rtt=116ms) slots=94/100 jobs/s=444 drains=67084 evl=0ms
+[2026-04-21 16:47:32.230] [info] [Worker 1] [libqueen] push(q=8 f=4/4 p99rtt=604ms) pop(q=0 f=3/4 p99rtt=152ms) custom(q=1 f=1/1 p99rtt=140ms) slots=92/100 jobs/s=482 drains=69358 evl=1ms
+[2026-04-21 16:47:33.222] [info] [Worker 0] [libqueen] push(q=9 f=4/4 p99rtt=647ms) pop(q=0 f=2/4 p99rtt=170ms) custom(q=0 f=0/1 p99rtt=130ms) slots=94/100 jobs/s=90 drains=67174 evl=0ms
+[2026-04-21 16:47:33.232] [info] [Worker 1] [libqueen] push(q=8 f=4/4 p99rtt=633ms) pop(q=3 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=143 drains=69546 evl=0ms
+[2026-04-21 16:47:34.223] [info] [Worker 0] [libqueen] push(q=4 f=4/4 p99rtt=672ms) pop(q=0 f=2/4 p99rtt=180ms) custom(q=0 f=0/1 p99rtt=130ms) slots=94/100 jobs/s=190 drains=67400 evl=0ms
+[2026-04-21 16:47:34.236] [info] [Worker 1] [libqueen] push(q=11 f=4/4 p99rtt=633ms) pop(q=0 f=2/4 p99rtt=216ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=186 drains=69794 evl=0ms
+[2026-04-21 16:47:35.225] [info] [Worker 0] [libqueen] push(q=0 f=3/4 p99rtt=672ms) pop(q=0 f=1/4 p99rtt=180ms) custom(q=0 f=0/1 p99rtt=130ms) slots=96/100 jobs/s=451 drains=67873 evl=0ms
+[2026-04-21 16:47:35.237] [info] [Worker 1] [libqueen] push(q=18 f=4/4 p99rtt=604ms) pop(q=0 f=1/4 p99rtt=216ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=482 drains=70287 evl=0ms
+[2026-04-21 16:47:36.225] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=672ms) pop(q=0 f=2/4 p99rtt=180ms) custom(q=0 f=0/1 p99rtt=130ms) slots=94/100 jobs/s=434 drains=68296 evl=0ms
+[2026-04-21 16:47:36.237] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=604ms) pop(q=0 f=2/4 p99rtt=216ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=457 drains=70761 evl=1ms
+[2026-04-21 16:47:37.234] [info] [Worker 0] [libqueen] push(q=11 f=4/4 p99rtt=651ms) pop(q=0 f=2/4 p99rtt=180ms) custom(q=0 f=0/1 p99rtt=130ms) slots=94/100 jobs/s=392 drains=68737 evl=1ms
+[2026-04-21 16:47:37.242] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=586ms) pop(q=0 f=2/4 p99rtt=216ms) custom(q=0 f=0/1 p99rtt=140ms) slots=94/100 jobs/s=460 drains=71230 evl=1ms
+[2026-04-21 16:47:38.227] [info] [Worker 0] [libqueen] push(q=11 f=4/4 p99rtt=672ms) pop(q=2 f=1/4 p99rtt=214ms) custom(q=0 f=0/1 p99rtt=130ms) slots=95/100 jobs/s=196 drains=68964 evl=0ms
+[2026-04-21 16:47:38.241] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=556ms) pop(q=1 f=1/4 p99rtt=217ms) custom(q=0 f=0/1 p99rtt=140ms) slots=95/100 jobs/s=257 drains=71561 evl=1ms
+[2026-04-21 16:47:38.725] [info] QPOP: Connection aborted for 788edbd3-3a64-453d-8640-dff3313d8c36
+[2026-04-21 16:47:38.725] [info] QPOP: Connection aborted for 91f2d70c-5c3f-4554-89a7-984516b2bc69
+[2026-04-21 16:47:38.726] [info] QPOP: Connection aborted for cd29edc2-c072-43a1-8b0b-371149f8f46d
+[2026-04-21 16:47:38.726] [info] QPOP: Connection aborted for ecc600e5-3c2d-4003-af81-825cca1fb936
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for 17c8a93f-cd24-40f8-8438-6ebbef5caab0
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for a5880c1c-05c9-4f1b-a3ec-49a9b293d3de
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for cf013b81-439b-4bfe-884f-138909f6fa3b
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for 601e5f73-f4b7-45a2-a058-0d9d4ab07d35
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for 9c3f341b-38d3-4904-94fd-93f2068ca115
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for 812c0dd7-f520-42c5-a76e-73cdca778d17
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for ec4ca28a-c2e7-418d-b9d4-327374367c12
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for f3eb7ae4-821d-43b5-93a9-7208e378d7ee
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for 38540494-193f-474a-a7de-61a162c20db3
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for c7d1d12d-51f3-402b-a4da-dce7a83e3ffe
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for de4a6cfb-ff75-4323-933f-c8ed4b0c6b99
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for c9daf145-a751-4ee7-ba57-b0bca24442a3
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for c3308223-9c8f-404c-9518-d64f0e6e92dd
+[2026-04-21 16:47:38.727] [info] QPOP: Connection aborted for fb6b2226-ca37-488a-8802-860cb1b7f669
+[2026-04-21 16:47:39.229] [info] [Worker 0] [libqueen] push(q=0 f=0/4 p99rtt=618ms) pop(q=0 f=0/4 p99rtt=214ms) custom(q=0 f=0/1 p99rtt=130ms) slots=100/100 jobs/s=464 drains=69426 evl=1ms
+[2026-04-21 16:47:39.243] [info] [Worker 1] [libqueen] push(q=0 f=0/4 p99rtt=550ms) pop(q=0 f=0/4 p99rtt=217ms) custom(q=0 f=0/1 p99rtt=140ms) slots=100/100 jobs/s=466 drains=72038 evl=0ms
+[2026-04-21 16:47:40.221] [info] StatsService: cycle completed in 3452ms
+[2026-04-21 16:47:42.238] [info] [Worker 0] [libqueen] push(q=0 f=0/4 p99rtt=618ms) pop(q=0 f=0/4 p99rtt=214ms) custom(q=0 f=0/1 p99rtt=130ms) slots=100/100 jobs/s=1 drains=69428 evl=1ms
+[2026-04-21 16:47:43.021] [info] Received signal 15, shutting down...
+[2026-04-21 16:47:43.021] [info] Exiting (worker threads will be terminated by OS)

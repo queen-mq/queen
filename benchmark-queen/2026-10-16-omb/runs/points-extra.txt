@@ -1,0 +1,7 @@
+# Extra (Alice): single-partition max rate with an explicit pop batch, one ack per claim
+native-nr2-max-1t1p-1p1c-100b-b1000 queen-native queen-native-v2-b1000.yaml max-rate-1-topic-1-partition-1p-1c-100b.yaml
+native-nr2-max-1t1p-1p1c-1kb-b1000 queen-native queen-native-v2-b1000.yaml max-rate-1-topic-1-partition-1p-1c-1kb.yaml
+native-nr2-max-1t1p-1p1c-64kb-b1000 queen-native queen-native-v2-b1000.yaml max-rate-1-topic-1-partition-1p-1c-64kb.yaml
+native-nr2-max-1t1p-1p1c-100b-b10000 queen-native queen-native-v2-b10000.yaml max-rate-1-topic-1-partition-1p-1c-100b.yaml
+native-nr2-max-1t1p-1p1c-1kb-b10000 queen-native queen-native-v2-b10000.yaml max-rate-1-topic-1-partition-1p-1c-1kb.yaml
+native-nr2-max-1t1p-1p1c-64kb-b10000 queen-native queen-native-v2-b10000.yaml max-rate-1-topic-1-partition-1p-1c-64kb.yaml

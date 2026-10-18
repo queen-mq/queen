@@ -1,0 +1,3 @@
+[09:25:31] omb: run kafka-p10000-200k: system kafka, driver kafka.yaml, workload 1-topic-10000-partitions-1kb-4p-4c-200k.yaml
+[09:25:36] omb: 6 workers up
+kafka-p10000-200k: no result.json

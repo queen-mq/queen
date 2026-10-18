@@ -1,0 +1,42 @@
+08:23:59 port 8080 rss_mb 10809 threads 87 cpu_ticks 31408
+08:23:59 port 8082 rss_mb 10424 threads 59 cpu_ticks 19719
+08:23:59 tcp_to_broker 0
+08:24:04 port 8080 rss_mb 10816 threads 125 cpu_ticks 31721
+08:24:04 port 8082 rss_mb 10431 threads 101 cpu_ticks 19958
+08:24:04 tcp_to_broker 70
+08:24:09 port 8080 rss_mb 10816 threads 124 cpu_ticks 31932
+08:24:09 port 8082 rss_mb 10432 threads 100 cpu_ticks 20434
+08:24:09 tcp_to_broker 70
+08:24:14 port 8080 rss_mb 10816 threads 124 cpu_ticks 32149
+08:24:14 port 8082 rss_mb 10432 threads 100 cpu_ticks 20914
+08:24:14 tcp_to_broker 70
+08:24:19 port 8080 rss_mb 10816 threads 124 cpu_ticks 32361
+08:24:19 port 8082 rss_mb 10432 threads 100 cpu_ticks 21396
+08:24:19 tcp_to_broker 70
+08:24:24 port 8080 rss_mb 10816 threads 124 cpu_ticks 32574
+08:24:24 port 8082 rss_mb 10435 threads 100 cpu_ticks 21884
+08:24:24 tcp_to_broker 70
+08:24:29 port 8080 rss_mb 10816 threads 124 cpu_ticks 32785
+08:24:29 port 8082 rss_mb 10435 threads 100 cpu_ticks 22356
+08:24:29 tcp_to_broker 70
+08:24:34 port 8080 rss_mb 10816 threads 124 cpu_ticks 33002
+08:24:34 port 8082 rss_mb 10435 threads 100 cpu_ticks 22834
+08:24:34 tcp_to_broker 70
+08:24:39 port 8080 rss_mb 10816 threads 124 cpu_ticks 33215
+08:24:39 port 8082 rss_mb 10435 threads 100 cpu_ticks 23313
+08:24:39 tcp_to_broker 70
+08:24:44 port 8080 rss_mb 10816 threads 118 cpu_ticks 33429
+08:24:44 port 8082 rss_mb 10435 threads 100 cpu_ticks 23785
+08:24:44 tcp_to_broker 70
+08:24:49 port 8080 rss_mb 10816 threads 118 cpu_ticks 33643
+08:24:49 port 8082 rss_mb 10435 threads 100 cpu_ticks 24251
+08:24:49 tcp_to_broker 70
+08:24:54 port 8080 rss_mb 10816 threads 118 cpu_ticks 33869
+08:24:54 port 8082 rss_mb 10435 threads 100 cpu_ticks 24726
+08:24:54 tcp_to_broker 70
+08:24:59 port 8080 rss_mb 10816 threads 118 cpu_ticks 34080
+08:24:59 port 8082 rss_mb 10435 threads 100 cpu_ticks 25207
+08:24:59 tcp_to_broker 70
+08:25:04 port 8080 rss_mb 10818 threads 115 cpu_ticks 34282
+08:25:04 port 8082 rss_mb 10434 threads 92 cpu_ticks 25606
+08:25:04 tcp_to_broker 0

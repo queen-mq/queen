@@ -1,0 +1,3 @@
+[12:49:42] omb: run kafka-1m-10t-1p-100b: system kafka, driver kafka.yaml, workload 1m-10-topics-1-partition-100b.yaml
+[12:49:47] omb: 6 workers up
+kafka-1m-10t-1p-100b [kafka] 1m-10-topics-1-partition-100b.yaml: pub 1,001k/s cons 1,001k/s err 0 backlog max 9,191 | pub p50/p99/p99.9 1.0/1.9/3.5 ms | e2e p50/p99/p99.9 1.0/2.0/4.0 ms (max 13.0) | brokers 7.3 cores, disk write 111/113/114 MB/s

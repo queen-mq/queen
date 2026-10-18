@@ -1,0 +1,13 @@
+[19:49:19] run g3b-p1000-r4000000: binary 230, groups 3, sync, checkpoint 5 ms, tenants 3, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 4000000 | EXTRA= QUEEN_TENANCY_HEADER=1 QUEEN_KV_TRUSTED_PROXY=1 QUEEN_RAFT_GROUPS=3 QUEEN_TENANT_GROUPS=00000000-0000-4000-8000-000000000000=0,00000001-0000-4000-8000-000000000000=1,00000002-0000-4000-8000-000000000000=2 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[19:49:29] roles: n1 healthy leader | n2 healthy follower+leader | n3 healthy follower+leader
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 333 partitions
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 333 partitions
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 333 partitions
+[19:51:48] 4,000,000: last 30 s: offered 4,000,004 pushed 3,999,890 consumed 3,999,801 | run: shed 0 errors 0 | push p50 4.4 p99 22.8 | e2e p50 9.7 p99 36.4 worst 38.4 | cores 14.3 / 14.3 / 14.7 | mem GB 13.1 / 13.0 / 13.0 | loaders 27.2c  OK 
+RUN_DONE

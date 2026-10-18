@@ -1,0 +1,1871 @@
+[2026-04-21 10:37:18.737] [info] Queen C++ Message Queue Server (Acceptor/Worker Pattern)
+[2026-04-21 10:37:18.738] [info] Configuration:
+[2026-04-21 10:37:18.738] [info]   - Host: 0.0.0.0
+[2026-04-21 10:37:18.738] [info]   - Port: 6632
+[2026-04-21 10:37:18.738] [info]   - Database: 127.0.0.1:5434/queen
+[2026-04-21 10:37:18.738] [warning] Encryption disabled - QUEEN_ENCRYPTION_KEY not set
+[2026-04-21 10:37:18.738] [info] Encryption: disabled
+[2026-04-21 10:37:18.738] [info] JWT Authentication: DISABLED
+[2026-04-21 10:37:18.738] [info] Starting acceptor/worker pattern with 8 workers (hardware cores: 10)
+[2026-04-21 10:37:18.738] [info] [Worker 1] Starting...
+[2026-04-21 10:37:18.738] [info] [Worker 0] Starting...
+[2026-04-21 10:37:18.738] [info] Waiting for workers to initialize...
+[2026-04-21 10:37:18.738] [info] [Worker 3] Starting...
+[2026-04-21 10:37:18.738] [info] [Worker 4] Starting...
+[2026-04-21 10:37:18.738] [info] [Worker 5] Starting...
+[2026-04-21 10:37:18.738] [info] [Worker 6] Starting...
+[2026-04-21 10:37:18.738] [info] Initializing GLOBAL shared resources (ASYNC-ONLY MODE):
+[2026-04-21 10:37:18.738] [info]   - Total DB connections: 19 (95% of 20) - ALL ASYNC
+[2026-04-21 10:37:18.738] [info] [Worker 2] Starting...
+[2026-04-21 10:37:18.738] [info]   - DB ThreadPool size: 13 = 8 workers + 5 service
+[2026-04-21 10:37:18.738] [info]     * Queen instances: 8 (one per HTTP worker, each with own event loop)
+[2026-04-21 10:37:18.738] [info]     * Service DB threads: 5 (metrics, retention, eviction)
+[2026-04-21 10:37:18.738] [info]   - System ThreadPool threads: 4 (for background service scheduling)
+[2026-04-21 10:37:18.738] [info]   - Number of HTTP workers: 8
+[2026-04-21 10:37:18.738] [info]   - Creating Async DB Pool (19 connections) for ALL operations
+[2026-04-21 10:37:18.738] [info] [Worker 7] Starting...
+[2026-04-21 10:37:18.738] [info] [AsyncDbPool] Initializing 19 async connections...
+[2026-04-21 10:37:18.867] [info] [AsyncDbPool] Initialization complete. 19 connections ready.
+[2026-04-21 10:37:18.867] [info]   - Created response queue for worker 0 (poll workers)
+[2026-04-21 10:37:18.867] [info]   - Created response queue for worker 1 (poll workers)
+[2026-04-21 10:37:18.867] [info]   - Created response queue for worker 2 (poll workers)
+[2026-04-21 10:37:18.867] [info]   - Created response queue for worker 3 (poll workers)
+[2026-04-21 10:37:18.867] [info]   - Created response queue for worker 4 (poll workers)
+[2026-04-21 10:37:18.867] [info]   - Created response queue for worker 5 (poll workers)
+[2026-04-21 10:37:18.867] [info]   - Created response queue for worker 6 (poll workers)
+[2026-04-21 10:37:18.867] [info]   - Created response queue for worker 7 (poll workers)
+[2026-04-21 10:37:18.867] [info]   - Per-worker Queen instances will be created in each worker thread
+[2026-04-21 10:37:18.867] [info]   - Created response registry for worker 0 (lock-free across workers)
+[2026-04-21 10:37:18.867] [info]   - Created response registry for worker 1 (lock-free across workers)
+[2026-04-21 10:37:18.867] [info]   - Created response registry for worker 2 (lock-free across workers)
+[2026-04-21 10:37:18.867] [info]   - Created response registry for worker 3 (lock-free across workers)
+[2026-04-21 10:37:18.867] [info]   - Created response registry for worker 4 (lock-free across workers)
+[2026-04-21 10:37:18.867] [info]   - Created response registry for worker 5 (lock-free across workers)
+[2026-04-21 10:37:18.867] [info]   - Created response registry for worker 6 (lock-free across workers)
+[2026-04-21 10:37:18.867] [info]   - Created response registry for worker 7 (lock-free across workers)
+[2026-04-21 10:37:18.867] [info] SharedStateManager: Disabled (no UDP peers or sync disabled)
+[2026-04-21 10:37:18.867] [info] Shared State Manager configured: Sync disabled, queue config cache will be active
+[2026-04-21 10:37:18.867] [info] System info: hostname=alice.local, port=6632
+[2026-04-21 10:37:18.867] [info] Global shared resources initialized successfully
+[2026-04-21 10:37:18.867] [info] [Worker 1] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:37:18.868] [info] [Worker 4] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:37:18.867] [info] [Worker 3] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:37:18.868] [info] [Worker 5] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:37:18.868] [info] [Worker 7] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:37:18.867] [info] [Worker 0] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:37:18.868] [info] [Worker 2] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:37:18.868] [info] [Worker 6] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:37:18.869] [info] [Worker 0] Database connection: OK | Pool: 12/19 conn available
+[2026-04-21 10:37:18.869] [info] [Worker 0] Initializing database schema...
+[2026-04-21 10:37:18.869] [info] [Worker 4] Database connection: OK | Pool: 12/19 conn available
+[2026-04-21 10:37:18.869] [info] [Worker 4] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:37:18.869] [info] [Worker 5] Database connection: OK | Pool: 13/19 conn available
+[2026-04-21 10:37:18.869] [info] [Worker 5] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:37:18.869] [info] [Worker 7] Database connection: OK | Pool: 15/19 conn available
+[2026-04-21 10:37:18.869] [info] [Worker 7] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:37:18.869] [info] [Worker 3] Database connection: OK | Pool: 14/19 conn available
+[2026-04-21 10:37:18.869] [info] [Worker 3] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:37:18.869] [info] [Worker 6] Database connection: OK | Pool: 16/19 conn available
+[2026-04-21 10:37:18.869] [info] [Worker 6] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:37:18.869] [info] [Worker 1] Database connection: OK | Pool: 17/19 conn available
+[2026-04-21 10:37:18.869] [info] [Worker 1] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:37:18.869] [info] Initializing schema: queen
+[2026-04-21 10:37:18.869] [info] [Worker 2] Database connection: OK | Pool: 18/19 conn available
+[2026-04-21 10:37:18.869] [info] [Worker 2] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:37:18.874] [info] Running base schema initialization...
+NOTICE:  schema "queen" already exists, skipping
+[2026-04-21 10:37:18.949] [info] Base schema applied successfully
+[2026-04-21 10:37:18.949] [info] Loading 15 stored procedure(s)...
+NOTICE:  function queen.is_stats_leader(text) does not exist, skipping
+NOTICE:  trigger "trg_update_worker_metrics_summary" for relation "queen.worker_metrics" does not exist, skipping
+[2026-04-21 10:37:18.985] [info] [Worker 0] Starting Shared State Manager...
+[2026-04-21 10:37:18.985] [info] SharedStateManager: Loading queue configs and maintenance modes from database...
+[2026-04-21 10:37:18.987] [info] SharedStateManager: Sync disabled, but queue config cache is available
+[2026-04-21 10:37:18.987] [info] [Worker 0] Registered MESSAGE_AVAILABLE callback for Queen instances
+[2026-04-21 10:37:18.987] [info] [Worker 0] Starting background metrics collector (sample: 1000ms, aggregate: 60s)...
+[2026-04-21 10:37:18.987] [info] MetricsCollector started: hostname=alice.local, port=6632, worker=cpp-worker-1, sampling every 1000ms, aggregating every 60s
+[2026-04-21 10:37:18.987] [info] [Worker 0] Starting background retention service...
+[2026-04-21 10:37:18.987] [info] RetentionService started: interval=300000ms, batch_size=1000, partition_cleanup_days=30, metrics_retention_days=90
+[2026-04-21 10:37:18.987] [info] [Worker 0] Starting background eviction service...
+[2026-04-21 10:37:18.987] [info] RetentionService: Running cleanup cycle
+[2026-04-21 10:37:18.987] [info] EvictionService started: interval=60000ms, batch_size=1000
+[2026-04-21 10:37:18.987] [info] [Worker 0] Starting background stats service...
+[2026-04-21 10:37:18.987] [info] StatsService started (queue/partition counts only): interval=10000ms, reconcile_interval=120000ms
+[2026-04-21 10:37:18.987] [info] [Worker 0] Creating SHARED file buffer manager (dir=/tmp/queen)...
+[2026-04-21 10:37:18.987] [info] FileBufferManager initializing: dir=/tmp/queen, recovery=true
+[2026-04-21 10:37:18.987] [info] Buffer directories ready: /tmp/queen
+[2026-04-21 10:37:18.987] [info] Starting recovery of buffered events...
+[2026-04-21 10:37:18.987] [info] StatsService: Running initial queue/partition stats refresh...
+[2026-04-21 10:37:18.987] [info] Deleting incomplete buffer file: qos0_019daf2e-6cad-7000-ad58-aa77f1b1412c.buf.tmp (only 0 bytes)
+[2026-04-21 10:37:18.987] [info] Deleting incomplete buffer file: failover_019daf2f-950b-7000-a4c0-6cf85d36d3d1.buf.tmp (only 0 bytes)
+[2026-04-21 10:37:18.987] [info] Starting recovery (max 3600s to avoid blocking server startup)...
+[2026-04-21 10:37:18.987] [info] Phase 1: Recovering failover events (FIFO order)...
+[2026-04-21 10:37:18.987] [info] Phase 2: Recovering QoS 0 events (batched)...
+[2026-04-21 10:37:18.987] [info] Startup recovery completed in 0ms: failover=0, qos0=0
+[2026-04-21 10:37:18.987] [info] Recovery complete
+[2026-04-21 10:37:18.987] [info] Buffer files initialized successfully
+[2026-04-21 10:37:18.987] [info] FileBufferManager ready
+[2026-04-21 10:37:18.987] [info] [Worker 0] File buffer ready - Pending: 0, Failed: 0, DB: healthy
+[2026-04-21 10:37:18.987] [info] [Worker 0] Sharing file buffer with other workers...
+[2026-04-21 10:37:18.987] [info] [Worker 0] File buffer shared successfully
+[2026-04-21 10:37:18.987] [info] [Worker 0] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:37:18.987] [info] [Worker 7] Using shared file buffer from Worker 0
+[2026-04-21 10:37:18.987] [info] [Worker 7] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:37:18.987] [info] [Worker 7] Creating uWS::App...
+[2026-04-21 10:37:18.987] [info] [Worker 6] Using shared file buffer from Worker 0
+[2026-04-21 10:37:18.987] [info] [Worker 6] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:37:18.987] [info] [Worker 6] Creating uWS::App...
+[2026-04-21 10:37:18.987] [info] [Worker 2] Using shared file buffer from Worker 0
+[2026-04-21 10:37:18.987] [info] [Worker 2] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:37:18.987] [info] [Worker 2] Creating uWS::App...
+[2026-04-21 10:37:18.987] [info] Background processor thread started
+[2026-04-21 10:37:18.987] [info] [Worker 5] Using shared file buffer from Worker 0
+[2026-04-21 10:37:18.987] [info] [Worker 5] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:37:18.987] [info] [Worker 5] Creating uWS::App...
+[2026-04-21 10:37:18.987] [info] [Worker 3] Using shared file buffer from Worker 0
+[2026-04-21 10:37:18.987] [info] [Worker 3] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:37:18.987] [info] [Worker 3] Creating uWS::App...
+[2026-04-21 10:37:18.987] [info] [Worker 4] Using shared file buffer from Worker 0
+[2026-04-21 10:37:18.987] [info] [Worker 4] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:37:18.987] [info] [Worker 4] Creating uWS::App...
+[2026-04-21 10:37:18.987] [info] [Worker 0] Creating uWS::App...
+[2026-04-21 10:37:18.987] [info] [Worker 1] Using shared file buffer from Worker 0
+[2026-04-21 10:37:18.987] [info] [Worker 1] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:37:18.987] [info] [Worker 1] Creating uWS::App...
+[2026-04-21 10:37:18.987] [info] [Worker 7] Creating per-worker Queen instance (25 connections, total pool split across 8 workers)...
+[2026-04-21 10:37:18.987] [info] [Worker 3] Creating per-worker Queen instance (25 connections, total pool split across 8 workers)...
+[2026-04-21 10:37:18.988] [info] [Worker 6] Creating per-worker Queen instance (25 connections, total pool split across 8 workers)...
+[2026-04-21 10:37:18.988] [info] [Worker 1] Creating per-worker Queen instance (25 connections, total pool split across 8 workers)...
+[2026-04-21 10:37:18.988] [info] [Worker 5] Creating per-worker Queen instance (25 connections, total pool split across 8 workers)...
+[2026-04-21 10:37:18.988] [info] [Worker 0] Creating per-worker Queen instance (25 connections, total pool split across 8 workers)...
+[2026-04-21 10:37:18.988] [info] [Worker 2] Creating per-worker Queen instance (25 connections, total pool split across 8 workers)...
+[2026-04-21 10:37:18.988] [info] [Worker 4] Creating per-worker Queen instance (25 connections, total pool split across 8 workers)...
+[2026-04-21 10:37:18.988] [info] RetentionService: cycle completed in 1ms
+[2026-04-21 10:37:18.989] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 10:37:19.003] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 0}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 0, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 10:37:19.021] [info] StatsService: cycle completed in 18ms
+[2026-04-21 10:37:19.357] [info] [Worker 7] [libqueen] Reconnection thread started
+[2026-04-21 10:37:19.371] [info] [Worker 2] [libqueen] Reconnection thread started
+[2026-04-21 10:37:19.371] [info] [Worker 0] [libqueen] Reconnection thread started
+[2026-04-21 10:37:19.372] [info] [Worker 6] [libqueen] Reconnection thread started
+[2026-04-21 10:37:19.372] [info] [Worker 4] [libqueen] Reconnection thread started
+[2026-04-21 10:37:19.378] [info] [Worker 1] [libqueen] Reconnection thread started
+[2026-04-21 10:37:19.379] [info] [Worker 5] [libqueen] Reconnection thread started
+[2026-04-21 10:37:19.383] [info] [Worker 3] [libqueen] Reconnection thread started
+[2026-04-21 10:37:19.489] [info] [Worker 1] Queen instance ready with 25 connections
+[2026-04-21 10:37:19.489] [info] [Worker 1] Registered Queen instance for UDP notifications
+[2026-04-21 10:37:19.489] [info] [Worker 1] Setting up routes...
+[2026-04-21 10:37:19.489] [warning] [Worker 1] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:37:19.489] [warning] [Worker 1] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:37:19.489] [warning] [Worker 1] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:37:19.489] [info] [Worker 1] Routes configured
+[2026-04-21 10:37:19.489] [info] [Worker 1] Registered with acceptor
+[2026-04-21 10:37:19.489] [info] [Worker 1] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:37:19.489] [info] [Worker 1] Setting up response timer...
+[2026-04-21 10:37:19.489] [info] [Worker 1] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:37:19.490] [info] [Worker 7] Queen instance ready with 25 connections
+[2026-04-21 10:37:19.490] [info] [Worker 7] Registered Queen instance for UDP notifications
+[2026-04-21 10:37:19.490] [info] [Worker 7] Setting up routes...
+[2026-04-21 10:37:19.490] [warning] [Worker 7] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:37:19.490] [warning] [Worker 7] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:37:19.490] [warning] [Worker 7] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:37:19.490] [info] [Worker 7] Routes configured
+[2026-04-21 10:37:19.490] [info] [Worker 7] Registered with acceptor
+[2026-04-21 10:37:19.490] [info] [Worker 7] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:37:19.490] [info] [Worker 7] Setting up response timer...
+[2026-04-21 10:37:19.490] [info] [Worker 7] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:37:19.492] [info] [Worker 2] Queen instance ready with 25 connections
+[2026-04-21 10:37:19.492] [info] [Worker 2] Registered Queen instance for UDP notifications
+[2026-04-21 10:37:19.492] [info] [Worker 2] Setting up routes...
+[2026-04-21 10:37:19.492] [info] [Worker 5] Queen instance ready with 25 connections
+[2026-04-21 10:37:19.492] [info] [Worker 5] Registered Queen instance for UDP notifications
+[2026-04-21 10:37:19.492] [info] [Worker 5] Setting up routes...
+[2026-04-21 10:37:19.492] [warning] [Worker 2] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:37:19.492] [warning] [Worker 2] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:37:19.492] [warning] [Worker 2] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:37:19.492] [info] [Worker 2] Routes configured
+[2026-04-21 10:37:19.492] [info] [Worker 2] Registered with acceptor
+[2026-04-21 10:37:19.492] [warning] [Worker 5] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:37:19.492] [warning] [Worker 5] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:37:19.492] [warning] [Worker 5] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:37:19.492] [info] [Worker 5] Routes configured
+[2026-04-21 10:37:19.492] [info] [Worker 5] Registered with acceptor
+[2026-04-21 10:37:19.492] [info] [Worker 2] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:37:19.492] [info] [Worker 2] Setting up response timer...
+[2026-04-21 10:37:19.492] [info] [Worker 5] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:37:19.492] [info] [Worker 5] Setting up response timer...
+[2026-04-21 10:37:19.492] [info] [Worker 5] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:37:19.492] [info] [Worker 2] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:37:19.492] [info] [Worker 4] Queen instance ready with 25 connections
+[2026-04-21 10:37:19.492] [info] [Worker 4] Registered Queen instance for UDP notifications
+[2026-04-21 10:37:19.492] [info] [Worker 4] Setting up routes...
+[2026-04-21 10:37:19.492] [info] [Worker 6] Queen instance ready with 25 connections
+[2026-04-21 10:37:19.492] [info] [Worker 6] Registered Queen instance for UDP notifications
+[2026-04-21 10:37:19.492] [info] [Worker 6] Setting up routes...
+[2026-04-21 10:37:19.493] [info] [Worker 3] Queen instance ready with 25 connections
+[2026-04-21 10:37:19.493] [info] [Worker 3] Registered Queen instance for UDP notifications
+[2026-04-21 10:37:19.493] [info] [Worker 3] Setting up routes...
+[2026-04-21 10:37:19.493] [warning] [Worker 6] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:37:19.493] [warning] [Worker 6] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:37:19.493] [warning] [Worker 6] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:37:19.493] [info] [Worker 6] Routes configured
+[2026-04-21 10:37:19.493] [info] [Worker 6] Registered with acceptor
+[2026-04-21 10:37:19.493] [warning] [Worker 4] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:37:19.493] [warning] [Worker 4] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:37:19.493] [warning] [Worker 4] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:37:19.493] [info] [Worker 4] Routes configured
+[2026-04-21 10:37:19.493] [info] [Worker 4] Registered with acceptor
+[2026-04-21 10:37:19.493] [info] [Worker 6] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:37:19.493] [info] [Worker 6] Setting up response timer...
+[2026-04-21 10:37:19.493] [info] [Worker 6] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:37:19.493] [warning] [Worker 3] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:37:19.493] [warning] [Worker 3] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:37:19.493] [warning] [Worker 3] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:37:19.493] [info] [Worker 3] Routes configured
+[2026-04-21 10:37:19.493] [info] [Worker 3] Registered with acceptor
+[2026-04-21 10:37:19.493] [info] [Worker 4] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:37:19.493] [info] [Worker 4] Setting up response timer...
+[2026-04-21 10:37:19.493] [info] [Worker 4] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:37:19.493] [info] [Worker 3] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:37:19.493] [info] [Worker 3] Setting up response timer...
+[2026-04-21 10:37:19.493] [info] [Worker 3] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:37:19.493] [info] [Worker 0] Queen instance ready with 25 connections
+[2026-04-21 10:37:19.493] [info] [Worker 0] Registered Queen instance for UDP notifications
+[2026-04-21 10:37:19.493] [info] [Worker 0] Setting up routes...
+[2026-04-21 10:37:19.493] [warning] [Worker 0] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:37:19.493] [warning] [Worker 0] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:37:19.493] [warning] [Worker 0] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:37:19.493] [info] [Worker 0] Routes configured
+[2026-04-21 10:37:19.493] [info] [Worker 0] Registered with acceptor
+[2026-04-21 10:37:19.493] [info] [Worker 0] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:37:19.493] [info] [Worker 0] Setting up response timer...
+[2026-04-21 10:37:19.493] [info] [Worker 0] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:37:19.533] [info] All 8 workers initialized in 794ms
+[2026-04-21 10:37:19.533] [info] Creating acceptor app...
+[2026-04-21 10:37:19.533] [info] Registered 8 worker apps with acceptor
+[2026-04-21 10:37:19.533] [info] Acceptor listening on 0.0.0.0:6632
+[2026-04-21 10:37:19.533] [info] Round-robin load balancing across 8 workers
+[2026-04-21 10:37:19.533] [info] Starting acceptor event loop...
+[2026-04-21 10:37:19.928] [info] [Worker 7] Configuring queue: perf-test via stored procedure
+[2026-04-21 10:37:20.357] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:37:22.358] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 3, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:37:22.382] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:37:23.359] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:37:23.373] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:37:23.374] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:37:23.375] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:37:23.381] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:37:23.382] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:37:23.387] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:37:24.359] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 52, jobs/s: 52
+[2026-04-21 10:37:24.374] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:37:24.374] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 94, jobs/s: 94
+[2026-04-21 10:37:24.375] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 43, jobs/s: 43
+[2026-04-21 10:37:24.381] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 12, jobs/s: 12
+[2026-04-21 10:37:24.382] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 1, Backoff: 0, JobsDone: 99, jobs/s: 99
+[2026-04-21 10:37:24.387] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 53, jobs/s: 53
+[2026-04-21 10:37:25.360] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 43, jobs/s: 43
+[2026-04-21 10:37:25.374] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 82, jobs/s: 82
+[2026-04-21 10:37:25.374] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 60, jobs/s: 60
+[2026-04-21 10:37:25.374] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 76, jobs/s: 76
+[2026-04-21 10:37:25.376] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 82, jobs/s: 82
+[2026-04-21 10:37:25.382] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 49, jobs/s: 49
+[2026-04-21 10:37:25.382] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 71, jobs/s: 71
+[2026-04-21 10:37:25.387] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 58, jobs/s: 58
+[2026-04-21 10:37:26.360] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 31, jobs/s: 31
+[2026-04-21 10:37:26.374] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 2, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:37:26.375] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 49, jobs/s: 49
+[2026-04-21 10:37:26.375] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 6/25, Queue: 0, Backoff: 0, JobsDone: 50, jobs/s: 50
+[2026-04-21 10:37:26.376] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 40, jobs/s: 40
+[2026-04-21 10:37:26.381] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 42, jobs/s: 42
+[2026-04-21 10:37:26.383] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 1, Backoff: 0, JobsDone: 47, jobs/s: 47
+[2026-04-21 10:37:26.387] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 69, jobs/s: 69
+[2026-04-21 10:37:27.360] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 34, jobs/s: 34
+[2026-04-21 10:37:27.374] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 53, jobs/s: 53
+[2026-04-21 10:37:27.375] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 2, Backoff: 0, JobsDone: 72, jobs/s: 72
+[2026-04-21 10:37:27.375] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 5/25, Queue: 3, Backoff: 0, JobsDone: 51, jobs/s: 51
+[2026-04-21 10:37:27.376] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 39, jobs/s: 39
+[2026-04-21 10:37:27.382] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 41, jobs/s: 41
+[2026-04-21 10:37:27.384] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 42, jobs/s: 42
+[2026-04-21 10:37:27.387] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:37:28.361] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 36, jobs/s: 36
+[2026-04-21 10:37:28.374] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 27, jobs/s: 27
+[2026-04-21 10:37:28.375] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 3, Backoff: 0, JobsDone: 39, jobs/s: 39
+[2026-04-21 10:37:28.375] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 47, jobs/s: 47
+[2026-04-21 10:37:28.377] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 25, jobs/s: 25
+[2026-04-21 10:37:28.382] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:37:28.385] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 22, jobs/s: 22
+[2026-04-21 10:37:28.387] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 49, jobs/s: 49
+[2026-04-21 10:37:29.360] [info] [Worker 7] [libqueen] EVL: 1ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 40, jobs/s: 40
+[2026-04-21 10:37:29.374] [info] [Worker 4] [libqueen] EVL: 1ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:37:29.375] [info] [Worker 0] [libqueen] EVL: 4ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:37:29.375] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 36, jobs/s: 36
+[2026-04-21 10:37:29.379] [info] [Worker 6] [libqueen] EVL: 3ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 26, jobs/s: 26
+[2026-04-21 10:37:29.384] [info] [Worker 5] [libqueen] EVL: 1ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:37:29.385] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 27, jobs/s: 27
+[2026-04-21 10:37:29.388] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 5/25, Queue: 0, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:37:29.469] [info] StatsService: cycle completed in 465ms
+[2026-04-21 10:37:30.360] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 36, jobs/s: 36
+[2026-04-21 10:37:30.374] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 19, jobs/s: 19
+[2026-04-21 10:37:30.376] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 3, Backoff: 0, JobsDone: 25, jobs/s: 25
+[2026-04-21 10:37:30.376] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 34, jobs/s: 34
+[2026-04-21 10:37:30.380] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 3, Backoff: 0, JobsDone: 34, jobs/s: 34
+[2026-04-21 10:37:30.385] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 3, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:37:30.385] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 11, jobs/s: 11
+[2026-04-21 10:37:30.388] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 55, jobs/s: 55
+[2026-04-21 10:37:31.360] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 15, jobs/s: 15
+[2026-04-21 10:37:31.374] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 3, Backoff: 0, JobsDone: 19, jobs/s: 19
+[2026-04-21 10:37:31.376] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 23, jobs/s: 23
+[2026-04-21 10:37:31.377] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:37:31.380] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 27, jobs/s: 27
+[2026-04-21 10:37:31.385] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 16, jobs/s: 16
+[2026-04-21 10:37:31.386] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 15, jobs/s: 15
+[2026-04-21 10:37:31.389] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:37:32.360] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 16/25, Queue: 0, Backoff: 0, JobsDone: 46, jobs/s: 46
+[2026-04-21 10:37:32.375] [info] [Worker 4] [libqueen] EVL: 2ms, Slots: 14/25, Queue: 0, Backoff: 0, JobsDone: 38, jobs/s: 38
+[2026-04-21 10:37:32.376] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 21/25, Queue: 0, Backoff: 0, JobsDone: 56, jobs/s: 56
+[2026-04-21 10:37:32.377] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 14/25, Queue: 0, Backoff: 0, JobsDone: 50, jobs/s: 50
+[2026-04-21 10:37:32.380] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 16/25, Queue: 0, Backoff: 0, JobsDone: 60, jobs/s: 60
+[2026-04-21 10:37:32.386] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 15/25, Queue: 0, Backoff: 0, JobsDone: 38, jobs/s: 38
+[2026-04-21 10:37:32.386] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 11/25, Queue: 0, Backoff: 0, JobsDone: 36, jobs/s: 36
+[2026-04-21 10:37:32.389] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 16/25, Queue: 0, Backoff: 0, JobsDone: 53, jobs/s: 53
+[2026-04-21 10:37:33.361] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 22/25, Queue: 0, Backoff: 0, JobsDone: 16, jobs/s: 16
+[2026-04-21 10:37:33.375] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 22/25, Queue: 0, Backoff: 0, JobsDone: 22, jobs/s: 22
+[2026-04-21 10:37:33.377] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 24/25, Queue: 0, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:37:33.378] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 24/25, Queue: 0, Backoff: 0, JobsDone: 22, jobs/s: 22
+[2026-04-21 10:37:33.380] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 21/25, Queue: 0, Backoff: 0, JobsDone: 8, jobs/s: 8
+[2026-04-21 10:37:33.385] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 22/25, Queue: 0, Backoff: 0, JobsDone: 23, jobs/s: 23
+[2026-04-21 10:37:33.387] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 24/25, Queue: 0, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:37:33.390] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 21/25, Queue: 0, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:37:33.535] [info] [Worker 0] Configuring queue: perf-test via stored procedure
+[2026-04-21 10:37:34.364] [info] [Worker 7] [libqueen] EVL: 11ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:37:34.375] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:37:34.383] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 4, jobs/s: 4
+[2026-04-21 10:37:34.383] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:37:34.384] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 7, jobs/s: 7
+[2026-04-21 10:37:34.388] [info] [Worker 1] [libqueen] EVL: 3ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 4, jobs/s: 4
+[2026-04-21 10:37:34.395] [info] [Worker 5] [libqueen] EVL: 3ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:37:34.396] [info] [Worker 3] [libqueen] EVL: 6ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 12, jobs/s: 12
+[2026-04-21 10:37:36.365] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 20/25, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:37:36.387] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 20/25, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:37:36.406] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 20/25, Queue: 3, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:37:37.366] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 5, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:37:37.388] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 6, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:37:37.388] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 7, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:37:37.390] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:37:37.403] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:37:37.407] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 8, jobs/s: 8
+[2026-04-21 10:37:38.365] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 3, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:37:38.407] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:37:39.389] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:37:39.389] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 4, Backoff: 0, JobsDone: 4, jobs/s: 4
+[2026-04-21 10:37:39.391] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:37:39.398] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 5, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:37:39.403] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:37:39.407] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:37:39.629] [info] StatsService: cycle completed in 619ms
+[2026-04-21 10:37:40.366] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 26, jobs/s: 26
+[2026-04-21 10:37:40.378] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:37:40.390] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:37:40.390] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 56, jobs/s: 56
+[2026-04-21 10:37:40.392] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 27, jobs/s: 27
+[2026-04-21 10:37:40.398] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:37:40.405] [info] [Worker 5] [libqueen] EVL: 5ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:37:40.410] [info] [Worker 2] [libqueen] EVL: 10ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 103, jobs/s: 103
+[2026-04-21 10:37:41.367] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 39, jobs/s: 39
+[2026-04-21 10:37:41.379] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:37:41.390] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 26, jobs/s: 26
+[2026-04-21 10:37:41.391] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 29, jobs/s: 29
+[2026-04-21 10:37:41.393] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 37, jobs/s: 37
+[2026-04-21 10:37:41.399] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:37:41.406] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 14, jobs/s: 14
+[2026-04-21 10:37:41.411] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 111, jobs/s: 111
+[2026-04-21 10:37:42.367] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 65, jobs/s: 65
+[2026-04-21 10:37:42.379] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 22, jobs/s: 22
+[2026-04-21 10:37:42.391] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 55, jobs/s: 55
+[2026-04-21 10:37:42.391] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 72, jobs/s: 72
+[2026-04-21 10:37:42.393] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 73, jobs/s: 73
+[2026-04-21 10:37:42.399] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 2, Backoff: 0, JobsDone: 103, jobs/s: 103
+[2026-04-21 10:37:42.405] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 28, jobs/s: 28
+[2026-04-21 10:37:42.411] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 241, jobs/s: 241
+[2026-04-21 10:37:43.368] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 41, jobs/s: 41
+[2026-04-21 10:37:43.380] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 48, jobs/s: 48
+[2026-04-21 10:37:43.391] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 25, jobs/s: 25
+[2026-04-21 10:37:43.392] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 48, jobs/s: 48
+[2026-04-21 10:37:43.394] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 49, jobs/s: 49
+[2026-04-21 10:37:43.399] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 64, jobs/s: 64
+[2026-04-21 10:37:43.405] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 28, jobs/s: 28
+[2026-04-21 10:37:43.412] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 184, jobs/s: 184
+[2026-04-21 10:37:44.367] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 28, jobs/s: 28
+[2026-04-21 10:37:44.380] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:37:44.391] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 18, jobs/s: 18
+[2026-04-21 10:37:44.393] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 22, jobs/s: 22
+[2026-04-21 10:37:44.394] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 22, jobs/s: 22
+[2026-04-21 10:37:44.400] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:37:44.406] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:37:44.412] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 60, jobs/s: 60
+[2026-04-21 10:37:45.367] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 6, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:37:45.382] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 4, Backoff: 0, JobsDone: 11, jobs/s: 11
+[2026-04-21 10:37:45.392] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 7, Backoff: 0, JobsDone: 38, jobs/s: 38
+[2026-04-21 10:37:45.394] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 9, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:37:45.394] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 4, Backoff: 0, JobsDone: 34, jobs/s: 34
+[2026-04-21 10:37:45.401] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:37:45.407] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 10, Backoff: 0, JobsDone: 20, jobs/s: 20
+[2026-04-21 10:37:45.413] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:37:46.367] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 4, Backoff: 0, JobsDone: 23, jobs/s: 23
+[2026-04-21 10:37:46.381] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 18, jobs/s: 18
+[2026-04-21 10:37:46.392] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 26, jobs/s: 26
+[2026-04-21 10:37:46.393] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:37:46.395] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 37, jobs/s: 37
+[2026-04-21 10:37:46.402] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 3, Backoff: 0, JobsDone: 16, jobs/s: 16
+[2026-04-21 10:37:46.407] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 3, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:37:46.413] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 16, jobs/s: 16
+[2026-04-21 10:37:47.367] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 40, jobs/s: 40
+[2026-04-21 10:37:47.381] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 11, jobs/s: 11
+[2026-04-21 10:37:47.392] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 47, jobs/s: 47
+[2026-04-21 10:37:47.393] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 39, jobs/s: 39
+[2026-04-21 10:37:47.396] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 52, jobs/s: 52
+[2026-04-21 10:37:47.403] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 64, jobs/s: 64
+[2026-04-21 10:37:47.408] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 113, jobs/s: 113
+[2026-04-21 10:37:47.413] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 53, jobs/s: 53
+[2026-04-21 10:37:48.368] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 7/25, Queue: 0, Backoff: 0, JobsDone: 209, jobs/s: 209
+[2026-04-21 10:37:48.381] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 6/25, Queue: 0, Backoff: 0, JobsDone: 127, jobs/s: 127
+[2026-04-21 10:37:48.392] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 122, jobs/s: 122
+[2026-04-21 10:37:48.393] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 141, jobs/s: 141
+[2026-04-21 10:37:48.397] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 293, jobs/s: 293
+[2026-04-21 10:37:48.403] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 169, jobs/s: 169
+[2026-04-21 10:37:48.409] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 8/25, Queue: 0, Backoff: 0, JobsDone: 145, jobs/s: 145
+[2026-04-21 10:37:48.413] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 79, jobs/s: 79
+[2026-04-21 10:37:49.369] [info] [Worker 7] [libqueen] EVL: 1ms, Slots: 8/25, Queue: 0, Backoff: 0, JobsDone: 388, jobs/s: 388
+[2026-04-21 10:37:49.382] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 5/25, Queue: 0, Backoff: 0, JobsDone: 78, jobs/s: 78
+[2026-04-21 10:37:49.392] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 47, jobs/s: 47
+[2026-04-21 10:37:49.393] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 148, jobs/s: 148
+[2026-04-21 10:37:49.397] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 804, jobs/s: 804
+[2026-04-21 10:37:49.403] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 5/25, Queue: 0, Backoff: 0, JobsDone: 587, jobs/s: 587
+[2026-04-21 10:37:49.409] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 9/25, Queue: 0, Backoff: 0, JobsDone: 326, jobs/s: 326
+[2026-04-21 10:37:49.414] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 149, jobs/s: 149
+[2026-04-21 10:37:49.507] [info] StatsService: cycle completed in 493ms
+[2026-04-21 10:37:50.371] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 7/25, Queue: 0, Backoff: 0, JobsDone: 763, jobs/s: 763
+[2026-04-21 10:37:50.382] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 7/25, Queue: 0, Backoff: 0, JobsDone: 30, jobs/s: 30
+[2026-04-21 10:37:50.396] [info] [Worker 0] [libqueen] EVL: 4ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 241, jobs/s: 241
+[2026-04-21 10:37:50.396] [info] [Worker 1] [libqueen] EVL: 4ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 718, jobs/s: 718
+[2026-04-21 10:37:50.396] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 6/25, Queue: 1, Backoff: 0, JobsDone: 43, jobs/s: 43
+[2026-04-21 10:37:50.403] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 715, jobs/s: 715
+[2026-04-21 10:37:50.410] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 10/25, Queue: 0, Backoff: 0, JobsDone: 778, jobs/s: 778
+[2026-04-21 10:37:50.413] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 6/25, Queue: 0, Backoff: 0, JobsDone: 86, jobs/s: 86
+[2026-04-21 10:37:51.371] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 7/25, Queue: 0, Backoff: 0, JobsDone: 775, jobs/s: 775
+[2026-04-21 10:37:51.383] [info] [Worker 4] [libqueen] EVL: 1ms, Slots: 7/25, Queue: 0, Backoff: 0, JobsDone: 40, jobs/s: 40
+[2026-04-21 10:37:51.396] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 124, jobs/s: 124
+[2026-04-21 10:37:51.396] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 727, jobs/s: 727
+[2026-04-21 10:37:51.396] [info] [Worker 6] [libqueen] EVL: 1ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 102, jobs/s: 102
+[2026-04-21 10:37:51.403] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 710, jobs/s: 710
+[2026-04-21 10:37:51.410] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 12/25, Queue: 0, Backoff: 0, JobsDone: 686, jobs/s: 686
+[2026-04-21 10:37:51.414] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 6/25, Queue: 0, Backoff: 0, JobsDone: 99, jobs/s: 99
+[2026-04-21 10:37:52.373] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 10/25, Queue: 4, Backoff: 0, JobsDone: 658, jobs/s: 658
+[2026-04-21 10:37:52.384] [info] [Worker 4] [libqueen] EVL: 2ms, Slots: 7/25, Queue: 0, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:37:52.395] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 9, Backoff: 0, JobsDone: 390, jobs/s: 390
+[2026-04-21 10:37:52.396] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 144, jobs/s: 144
+[2026-04-21 10:37:52.397] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 7/25, Queue: 12, Backoff: 0, JobsDone: 645, jobs/s: 645
+[2026-04-21 10:37:52.404] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 676, jobs/s: 676
+[2026-04-21 10:37:52.411] [info] [Worker 5] [libqueen] EVL: 1ms, Slots: 13/25, Queue: 12, Backoff: 0, JobsDone: 739, jobs/s: 739
+[2026-04-21 10:37:52.415] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 8/25, Queue: 0, Backoff: 0, JobsDone: 425, jobs/s: 425
+[2026-04-21 10:37:53.374] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 12/25, Queue: 13, Backoff: 0, JobsDone: 798, jobs/s: 798
+[2026-04-21 10:37:53.385] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 11/25, Queue: 1, Backoff: 0, JobsDone: 131, jobs/s: 131
+[2026-04-21 10:37:53.397] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 5/25, Queue: 0, Backoff: 0, JobsDone: 246, jobs/s: 246
+[2026-04-21 10:37:53.397] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 5/25, Queue: 13, Backoff: 0, JobsDone: 817, jobs/s: 817
+[2026-04-21 10:37:53.399] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 8/25, Queue: 3, Backoff: 0, JobsDone: 789, jobs/s: 789
+[2026-04-21 10:37:53.403] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 8, Backoff: 0, JobsDone: 781, jobs/s: 781
+[2026-04-21 10:37:53.411] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 9/25, Queue: 12, Backoff: 0, JobsDone: 803, jobs/s: 803
+[2026-04-21 10:37:53.416] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 7/25, Queue: 0, Backoff: 0, JobsDone: 790, jobs/s: 790
+[2026-04-21 10:37:54.374] [info] [Worker 7] [libqueen] EVL: 1ms, Slots: 11/25, Queue: 0, Backoff: 0, JobsDone: 915, jobs/s: 915
+[2026-04-21 10:37:54.385] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 8/25, Queue: 0, Backoff: 0, JobsDone: 113, jobs/s: 113
+[2026-04-21 10:37:54.397] [info] [Worker 6] [libqueen] EVL: 2ms, Slots: 5/25, Queue: 0, Backoff: 0, JobsDone: 414, jobs/s: 414
+[2026-04-21 10:37:54.398] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 817, jobs/s: 817
+[2026-04-21 10:37:54.400] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 6/25, Queue: 0, Backoff: 0, JobsDone: 781, jobs/s: 781
+[2026-04-21 10:37:54.405] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 6/25, Queue: 0, Backoff: 0, JobsDone: 802, jobs/s: 802
+[2026-04-21 10:37:54.411] [info] [Worker 5] [libqueen] EVL: 1ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 820, jobs/s: 820
+[2026-04-21 10:37:54.418] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 7/25, Queue: 1, Backoff: 0, JobsDone: 826, jobs/s: 826
+[2026-04-21 10:37:55.375] [info] [Worker 7] [libqueen] EVL: 1ms, Slots: 10/25, Queue: 0, Backoff: 0, JobsDone: 833, jobs/s: 833
+[2026-04-21 10:37:55.388] [info] [Worker 4] [libqueen] EVL: 3ms, Slots: 8/25, Queue: 0, Backoff: 0, JobsDone: 305, jobs/s: 305
+[2026-04-21 10:37:55.399] [info] [Worker 0] [libqueen] EVL: 4ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 722, jobs/s: 722
+[2026-04-21 10:37:55.399] [info] [Worker 6] [libqueen] EVL: 1ms, Slots: 3/25, Queue: 7, Backoff: 0, JobsDone: 825, jobs/s: 825
+[2026-04-21 10:37:55.400] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 3/25, Queue: 0, Backoff: 0, JobsDone: 718, jobs/s: 718
+[2026-04-21 10:37:55.405] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 665, jobs/s: 665
+[2026-04-21 10:37:55.411] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 6/25, Queue: 2, Backoff: 0, JobsDone: 700, jobs/s: 700
+[2026-04-21 10:37:55.417] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 752, jobs/s: 752
+[2026-04-21 10:37:56.376] [info] [Worker 7] [libqueen] EVL: 1ms, Slots: 8/25, Queue: 13, Backoff: 0, JobsDone: 766, jobs/s: 766
+[2026-04-21 10:37:56.389] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 754, jobs/s: 754
+[2026-04-21 10:37:56.400] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 16, Backoff: 0, JobsDone: 46, jobs/s: 46
+[2026-04-21 10:37:56.400] [info] [Worker 6] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 741, jobs/s: 741
+[2026-04-21 10:37:56.401] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 753, jobs/s: 753
+[2026-04-21 10:37:56.406] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 747, jobs/s: 747
+[2026-04-21 10:37:56.411] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 809, jobs/s: 809
+[2026-04-21 10:37:56.419] [info] [Worker 2] [libqueen] EVL: 2ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 767, jobs/s: 767
+[2026-04-21 10:37:57.377] [info] [Worker 7] [libqueen] EVL: 1ms, Slots: 6/25, Queue: 13, Backoff: 0, JobsDone: 979, jobs/s: 979
+[2026-04-21 10:37:57.388] [info] [Worker 4] [libqueen] EVL: 1ms, Slots: 4/25, Queue: 1, Backoff: 0, JobsDone: 863, jobs/s: 863
+[2026-04-21 10:37:57.400] [info] [Worker 6] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 181, jobs/s: 181
+[2026-04-21 10:37:57.400] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 31, jobs/s: 31
+[2026-04-21 10:37:57.401] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 16, Backoff: 0, JobsDone: 446, jobs/s: 446
+[2026-04-21 10:37:57.407] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 479, jobs/s: 479
+[2026-04-21 10:37:57.412] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 861, jobs/s: 861
+[2026-04-21 10:37:57.420] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 842, jobs/s: 842
+[2026-04-21 10:37:58.377] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 742, jobs/s: 742
+[2026-04-21 10:37:58.389] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 347, jobs/s: 347
+[2026-04-21 10:37:58.400] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 23, Backoff: 0, JobsDone: 73, jobs/s: 73
+[2026-04-21 10:37:58.401] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 72, jobs/s: 72
+[2026-04-21 10:37:58.402] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 25, jobs/s: 25
+[2026-04-21 10:37:58.406] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 19, jobs/s: 19
+[2026-04-21 10:37:58.412] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 400, jobs/s: 400
+[2026-04-21 10:37:58.421] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 75, jobs/s: 75
+[2026-04-21 10:37:59.293] [info] StatsService: cycle completed in 273ms
+[2026-04-21 10:37:59.378] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 13, Backoff: 0, JobsDone: 473, jobs/s: 473
+[2026-04-21 10:37:59.389] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 675, jobs/s: 675
+[2026-04-21 10:37:59.400] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 128, jobs/s: 128
+[2026-04-21 10:37:59.401] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 1/25, Queue: 13, Backoff: 0, JobsDone: 52, jobs/s: 52
+[2026-04-21 10:37:59.403] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 665, jobs/s: 665
+[2026-04-21 10:37:59.406] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 13, jobs/s: 13
+[2026-04-21 10:37:59.412] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 330, jobs/s: 330
+[2026-04-21 10:37:59.422] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 763, jobs/s: 763
+[2026-04-21 10:38:00.379] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 844, jobs/s: 844
+[2026-04-21 10:38:00.390] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 627, jobs/s: 627
+[2026-04-21 10:38:00.401] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 14, Backoff: 0, JobsDone: 157, jobs/s: 157
+[2026-04-21 10:38:00.401] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 13, Backoff: 0, JobsDone: 588, jobs/s: 588
+[2026-04-21 10:38:00.404] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 395, jobs/s: 395
+[2026-04-21 10:38:00.407] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 43, jobs/s: 43
+[2026-04-21 10:38:00.413] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 499, jobs/s: 499
+[2026-04-21 10:38:00.421] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 732, jobs/s: 732
+[2026-04-21 10:38:01.379] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 912, jobs/s: 912
+[2026-04-21 10:38:01.391] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 17, Backoff: 0, JobsDone: 19, jobs/s: 19
+[2026-04-21 10:38:01.402] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 254, jobs/s: 254
+[2026-04-21 10:38:01.402] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 652, jobs/s: 652
+[2026-04-21 10:38:01.405] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 25, jobs/s: 25
+[2026-04-21 10:38:01.407] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:38:01.413] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 29, jobs/s: 29
+[2026-04-21 10:38:01.422] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 1094, jobs/s: 1094
+[2026-04-21 10:38:02.379] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 127, jobs/s: 127
+[2026-04-21 10:38:02.392] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 12, Backoff: 0, JobsDone: 146, jobs/s: 146
+[2026-04-21 10:38:02.401] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 664, jobs/s: 664
+[2026-04-21 10:38:02.402] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 68, jobs/s: 68
+[2026-04-21 10:38:02.406] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 12, jobs/s: 12
+[2026-04-21 10:38:02.407] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 18, jobs/s: 18
+[2026-04-21 10:38:02.414] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 7, jobs/s: 7
+[2026-04-21 10:38:02.423] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 684, jobs/s: 684
+[2026-04-21 10:38:03.378] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 46, jobs/s: 46
+[2026-04-21 10:38:03.392] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 415, jobs/s: 415
+[2026-04-21 10:38:03.401] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 29, jobs/s: 29
+[2026-04-21 10:38:03.402] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 16, Backoff: 0, JobsDone: 291, jobs/s: 291
+[2026-04-21 10:38:03.407] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 27, jobs/s: 27
+[2026-04-21 10:38:03.407] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 19, Backoff: 0, JobsDone: 34, jobs/s: 34
+[2026-04-21 10:38:03.415] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 12, jobs/s: 12
+[2026-04-21 10:38:03.423] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 330, jobs/s: 330
+[2026-04-21 10:38:04.378] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 210, jobs/s: 210
+[2026-04-21 10:38:04.391] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 200, jobs/s: 200
+[2026-04-21 10:38:04.401] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 17, Backoff: 0, JobsDone: 19, jobs/s: 19
+[2026-04-21 10:38:04.402] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 109, jobs/s: 109
+[2026-04-21 10:38:04.407] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 105, jobs/s: 105
+[2026-04-21 10:38:04.408] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 458, jobs/s: 458
+[2026-04-21 10:38:04.415] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 46, jobs/s: 46
+[2026-04-21 10:38:04.423] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 165, jobs/s: 165
+[2026-04-21 10:38:05.378] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 1, Backoff: 0, JobsDone: 317, jobs/s: 317
+[2026-04-21 10:38:05.391] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 92, jobs/s: 92
+[2026-04-21 10:38:05.401] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 112, jobs/s: 112
+[2026-04-21 10:38:05.403] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 34, jobs/s: 34
+[2026-04-21 10:38:05.407] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 600, jobs/s: 600
+[2026-04-21 10:38:05.409] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 220, jobs/s: 220
+[2026-04-21 10:38:05.416] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 514, jobs/s: 514
+[2026-04-21 10:38:05.423] [info] [Worker 2] [libqueen] EVL: 2ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 241, jobs/s: 241
+[2026-04-21 10:38:06.379] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 129, jobs/s: 129
+[2026-04-21 10:38:06.393] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 14, jobs/s: 14
+[2026-04-21 10:38:06.401] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 46, jobs/s: 46
+[2026-04-21 10:38:06.403] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 18, Backoff: 0, JobsDone: 6, jobs/s: 6
+[2026-04-21 10:38:06.407] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 7, jobs/s: 7
+[2026-04-21 10:38:06.409] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 111, jobs/s: 111
+[2026-04-21 10:38:06.416] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 84, jobs/s: 84
+[2026-04-21 10:38:06.423] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 239, jobs/s: 239
+[2026-04-21 10:38:07.378] [info] [Worker 7] [libqueen] EVL: 1ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 228, jobs/s: 228
+[2026-04-21 10:38:07.393] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 81, jobs/s: 81
+[2026-04-21 10:38:07.401] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 19, Backoff: 0, JobsDone: 36, jobs/s: 36
+[2026-04-21 10:38:07.403] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 12, jobs/s: 12
+[2026-04-21 10:38:07.408] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 66, jobs/s: 66
+[2026-04-21 10:38:07.410] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 272, jobs/s: 272
+[2026-04-21 10:38:07.416] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 107, jobs/s: 107
+[2026-04-21 10:38:07.422] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 141, jobs/s: 141
+[2026-04-21 10:38:08.378] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 319, jobs/s: 319
+[2026-04-21 10:38:08.395] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 67, jobs/s: 67
+[2026-04-21 10:38:08.402] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:38:08.403] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 17, Backoff: 0, JobsDone: 97, jobs/s: 97
+[2026-04-21 10:38:08.408] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 572, jobs/s: 572
+[2026-04-21 10:38:08.410] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 472, jobs/s: 472
+[2026-04-21 10:38:08.416] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 353, jobs/s: 353
+[2026-04-21 10:38:08.423] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:38:09.232] [info] StatsService: cycle completed in 208ms
+[2026-04-21 10:38:09.379] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 713, jobs/s: 713
+[2026-04-21 10:38:09.395] [info] [Worker 4] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 42, jobs/s: 42
+[2026-04-21 10:38:09.403] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:38:09.404] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 44, jobs/s: 44
+[2026-04-21 10:38:09.408] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 104, jobs/s: 104
+[2026-04-21 10:38:09.411] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 11, Backoff: 0, JobsDone: 290, jobs/s: 290
+[2026-04-21 10:38:09.417] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 356, jobs/s: 356
+[2026-04-21 10:38:09.423] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 93, jobs/s: 93
+[2026-04-21 10:38:10.378] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 13, Backoff: 0, JobsDone: 326, jobs/s: 326
+[2026-04-21 10:38:10.396] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 117, jobs/s: 117
+[2026-04-21 10:38:10.403] [info] [Worker 0] [libqueen] EVL: 2ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 464, jobs/s: 464
+[2026-04-21 10:38:10.405] [info] [Worker 6] [libqueen] EVL: 2ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 129, jobs/s: 129
+[2026-04-21 10:38:10.408] [info] [Worker 1] [libqueen] EVL: 2ms, Slots: 1/25, Queue: 2, Backoff: 0, JobsDone: 579, jobs/s: 579
+[2026-04-21 10:38:10.412] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 5, Backoff: 0, JobsDone: 684, jobs/s: 684
+[2026-04-21 10:38:10.416] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 7, Backoff: 0, JobsDone: 167, jobs/s: 167
+[2026-04-21 10:38:10.425] [info] [Worker 2] [libqueen] EVL: 2ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 115, jobs/s: 115
+[2026-04-21 10:38:11.378] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 6, Backoff: 0, JobsDone: 794, jobs/s: 794
+[2026-04-21 10:38:11.396] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 372, jobs/s: 372
+[2026-04-21 10:38:11.403] [info] [Worker 0] [libqueen] EVL: 2ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 288, jobs/s: 288
+[2026-04-21 10:38:11.405] [info] [Worker 6] [libqueen] EVL: 1ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 560, jobs/s: 560
+[2026-04-21 10:38:11.410] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 174, jobs/s: 174
+[2026-04-21 10:38:11.413] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 688, jobs/s: 688
+[2026-04-21 10:38:11.416] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 254, jobs/s: 254
+[2026-04-21 10:38:11.426] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 8, Backoff: 0, JobsDone: 196, jobs/s: 196
+[2026-04-21 10:38:12.379] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 473, jobs/s: 473
+[2026-04-21 10:38:12.395] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 12, Backoff: 0, JobsDone: 572, jobs/s: 572
+[2026-04-21 10:38:12.403] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 409, jobs/s: 409
+[2026-04-21 10:38:12.405] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 699, jobs/s: 699
+[2026-04-21 10:38:12.410] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 4, Backoff: 0, JobsDone: 92, jobs/s: 92
+[2026-04-21 10:38:12.413] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 5, Backoff: 0, JobsDone: 88, jobs/s: 88
+[2026-04-21 10:38:12.416] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 8, Backoff: 0, JobsDone: 109, jobs/s: 109
+[2026-04-21 10:38:12.425] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 75, jobs/s: 75
+[2026-04-21 10:38:13.380] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 113, jobs/s: 113
+[2026-04-21 10:38:13.396] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 187, jobs/s: 187
+[2026-04-21 10:38:13.404] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 18, jobs/s: 18
+[2026-04-21 10:38:13.406] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 14, Backoff: 0, JobsDone: 888, jobs/s: 888
+[2026-04-21 10:38:13.411] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 94, jobs/s: 94
+[2026-04-21 10:38:13.414] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 14, Backoff: 0, JobsDone: 44, jobs/s: 44
+[2026-04-21 10:38:13.417] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 41, jobs/s: 41
+[2026-04-21 10:38:13.427] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 242, jobs/s: 242
+[2026-04-21 10:38:14.380] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 17, Backoff: 0, JobsDone: 25, jobs/s: 25
+[2026-04-21 10:38:14.396] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:38:14.404] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 93, jobs/s: 93
+[2026-04-21 10:38:14.405] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 83, jobs/s: 83
+[2026-04-21 10:38:14.411] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 60, jobs/s: 60
+[2026-04-21 10:38:14.414] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 101, jobs/s: 101
+[2026-04-21 10:38:14.416] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 13, Backoff: 0, JobsDone: 28, jobs/s: 28
+[2026-04-21 10:38:14.428] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 91, jobs/s: 91
+[2026-04-21 10:38:14.940] [error] [Worker 2] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:14.940] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:14.941] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:14.941] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:14.942] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:14.942] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:14.942] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:14.942] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:14.942] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:14.942] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:14.942] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.168] [info] Failover: Processing 50 events from failover_019daf2f-ce0b-7001-a5d6-1c91a014cc6a.buf in 1 batches (db_healthy=true, duplicate key errors are normal during recovery)
+[2026-04-21 10:38:15.381] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 23, Backoff: 0, JobsDone: 39, jobs/s: 39
+[2026-04-21 10:38:15.397] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 60, jobs/s: 60
+[2026-04-21 10:38:15.405] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:38:15.406] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 877, jobs/s: 877
+[2026-04-21 10:38:15.412] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 90, jobs/s: 90
+[2026-04-21 10:38:15.414] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 142, jobs/s: 142
+[2026-04-21 10:38:15.417] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 83, jobs/s: 83
+[2026-04-21 10:38:15.428] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 127, jobs/s: 127
+[2026-04-21 10:38:15.559] [error] [Worker 2] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.559] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.559] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.559] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.560] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.560] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.560] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.560] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.560] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.560] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.561] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.561] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.561] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.561] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.562] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.562] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.562] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.562] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.562] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.562] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.563] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:15.563] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:15.563] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:16.221] [error] [Worker 2] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:16.221] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:16.221] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:16.221] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:16.222] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:16.222] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:16.222] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:16.222] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:16.222] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:38:16.381] [info] [Worker 7] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 28, jobs/s: 28
+[2026-04-21 10:38:16.396] [info] [Worker 4] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 18, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:38:16.405] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 3/25, Queue: 13, Backoff: 0, JobsDone: 606, jobs/s: 606
+[2026-04-21 10:38:16.408] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 17, Backoff: 0, JobsDone: 486, jobs/s: 486
+[2026-04-21 10:38:16.411] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 165, jobs/s: 165
+[2026-04-21 10:38:16.414] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 69, jobs/s: 69
+[2026-04-21 10:38:16.418] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 12, Backoff: 0, JobsDone: 83, jobs/s: 83
+[2026-04-21 10:38:16.429] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 118, jobs/s: 118
+[2026-04-21 10:38:17.397] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 30, jobs/s: 30
+[2026-04-21 10:38:17.405] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 1, Backoff: 0, JobsDone: 960, jobs/s: 960
+[2026-04-21 10:38:17.408] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 16, jobs/s: 16
+[2026-04-21 10:38:17.412] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 2, Backoff: 0, JobsDone: 174, jobs/s: 174
+[2026-04-21 10:38:17.414] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 1, Backoff: 0, JobsDone: 87, jobs/s: 87
+[2026-04-21 10:38:17.418] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 108, jobs/s: 108
+[2026-04-21 10:38:17.430] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 8, Backoff: 0, JobsDone: 114, jobs/s: 114
+[2026-04-21 10:38:18.382] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 54, jobs/s: 54
+[2026-04-21 10:38:18.397] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 331, jobs/s: 331
+[2026-04-21 10:38:18.405] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 240, jobs/s: 240
+[2026-04-21 10:38:18.407] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 28, jobs/s: 28
+[2026-04-21 10:38:18.411] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 124, jobs/s: 124
+[2026-04-21 10:38:18.414] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 49, jobs/s: 49
+[2026-04-21 10:38:18.418] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 53, jobs/s: 53
+[2026-04-21 10:38:18.431] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 95, jobs/s: 95
+[2026-04-21 10:38:19.156] [info] StatsService: cycle completed in 130ms
+[2026-04-21 10:38:19.382] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 13, Backoff: 0, JobsDone: 432, jobs/s: 432
+[2026-04-21 10:38:19.397] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 840, jobs/s: 840
+[2026-04-21 10:38:19.406] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 19, Backoff: 0, JobsDone: 26, jobs/s: 26
+[2026-04-21 10:38:19.408] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:38:19.412] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 106, jobs/s: 106
+[2026-04-21 10:38:19.415] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 77, jobs/s: 77
+[2026-04-21 10:38:19.419] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 91, jobs/s: 91
+[2026-04-21 10:38:19.432] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 196, jobs/s: 196
+[2026-04-21 10:38:20.382] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 224, jobs/s: 224
+[2026-04-21 10:38:20.398] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 469, jobs/s: 469
+[2026-04-21 10:38:20.406] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 767, jobs/s: 767
+[2026-04-21 10:38:20.408] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 299, jobs/s: 299
+[2026-04-21 10:38:20.413] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 126, jobs/s: 126
+[2026-04-21 10:38:20.415] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 14, Backoff: 0, JobsDone: 17, jobs/s: 17
+[2026-04-21 10:38:20.420] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 96, jobs/s: 96
+[2026-04-21 10:38:20.432] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 306, jobs/s: 306
+[2026-04-21 10:38:21.382] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 164, jobs/s: 164
+[2026-04-21 10:38:21.399] [info] [Worker 4] [libqueen] EVL: 1ms, Slots: 2/25, Queue: 12, Backoff: 0, JobsDone: 862, jobs/s: 862
+[2026-04-21 10:38:21.407] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 512, jobs/s: 512
+[2026-04-21 10:38:21.408] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 230, jobs/s: 230
+[2026-04-21 10:38:21.414] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 80, jobs/s: 80
+[2026-04-21 10:38:21.415] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 10, Backoff: 0, JobsDone: 135, jobs/s: 135
+[2026-04-21 10:38:21.420] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 4, Backoff: 0, JobsDone: 49, jobs/s: 49
+[2026-04-21 10:38:21.432] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 12, Backoff: 0, JobsDone: 886, jobs/s: 886
+[2026-04-21 10:38:22.383] [info] [Worker 7] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 658, jobs/s: 658
+[2026-04-21 10:38:22.400] [info] [Worker 4] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 600, jobs/s: 600
+[2026-04-21 10:38:22.408] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 202, jobs/s: 202
+[2026-04-21 10:38:22.408] [info] [Worker 6] [libqueen] EVL: 2ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 531, jobs/s: 531
+[2026-04-21 10:38:22.414] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 44, jobs/s: 44
+[2026-04-21 10:38:22.415] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:38:22.422] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 118, jobs/s: 118
+[2026-04-21 10:38:22.432] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 798, jobs/s: 798
+[2026-04-21 10:38:23.382] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 10, Backoff: 0, JobsDone: 426, jobs/s: 426
+[2026-04-21 10:38:23.400] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 193, jobs/s: 193
+[2026-04-21 10:38:23.408] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 3, Backoff: 0, JobsDone: 138, jobs/s: 138
+[2026-04-21 10:38:23.409] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 34, jobs/s: 34
+[2026-04-21 10:38:23.415] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 85, jobs/s: 85
+[2026-04-21 10:38:23.416] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 71, jobs/s: 71
+[2026-04-21 10:38:23.422] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 103, jobs/s: 103
+[2026-04-21 10:38:23.433] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 12, Backoff: 0, JobsDone: 671, jobs/s: 671
+[2026-04-21 10:38:24.383] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 292, jobs/s: 292
+[2026-04-21 10:38:24.399] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 59, jobs/s: 59
+[2026-04-21 10:38:24.408] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 26, jobs/s: 26
+[2026-04-21 10:38:24.409] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 15, jobs/s: 15
+[2026-04-21 10:38:24.416] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 110, jobs/s: 110
+[2026-04-21 10:38:24.417] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 39, jobs/s: 39
+[2026-04-21 10:38:24.422] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:38:24.433] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 308, jobs/s: 308
+[2026-04-21 10:38:25.383] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 13, Backoff: 0, JobsDone: 890, jobs/s: 890
+[2026-04-21 10:38:25.400] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 29, jobs/s: 29
+[2026-04-21 10:38:25.408] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 16, Backoff: 0, JobsDone: 390, jobs/s: 390
+[2026-04-21 10:38:25.410] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 55, jobs/s: 55
+[2026-04-21 10:38:25.416] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 34, jobs/s: 34
+[2026-04-21 10:38:25.417] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 76, jobs/s: 76
+[2026-04-21 10:38:25.422] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 17, Backoff: 0, JobsDone: 53, jobs/s: 53
+[2026-04-21 10:38:25.434] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 29, jobs/s: 29
+[2026-04-21 10:38:26.384] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 146, jobs/s: 146
+[2026-04-21 10:38:26.400] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 218, jobs/s: 218
+[2026-04-21 10:38:26.408] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 1, Backoff: 0, JobsDone: 538, jobs/s: 538
+[2026-04-21 10:38:26.410] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 140, jobs/s: 140
+[2026-04-21 10:38:26.416] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 276, jobs/s: 276
+[2026-04-21 10:38:26.416] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 3/25, Queue: 5, Backoff: 0, JobsDone: 155, jobs/s: 155
+[2026-04-21 10:38:26.423] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:38:26.435] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 12, Backoff: 0, JobsDone: 145, jobs/s: 145
+[2026-04-21 10:38:27.385] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 13, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:38:27.401] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 70, jobs/s: 70
+[2026-04-21 10:38:27.409] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 356, jobs/s: 356
+[2026-04-21 10:38:27.411] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 5, Backoff: 0, JobsDone: 281, jobs/s: 281
+[2026-04-21 10:38:27.417] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 2/25, Queue: 4, Backoff: 0, JobsDone: 584, jobs/s: 584
+[2026-04-21 10:38:27.418] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 330, jobs/s: 330
+[2026-04-21 10:38:27.424] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 77, jobs/s: 77
+[2026-04-21 10:38:27.434] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 311, jobs/s: 311
+[2026-04-21 10:38:28.385] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 87, jobs/s: 87
+[2026-04-21 10:38:28.402] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 6, Backoff: 0, JobsDone: 136, jobs/s: 136
+[2026-04-21 10:38:28.410] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 15, Backoff: 0, JobsDone: 108, jobs/s: 108
+[2026-04-21 10:38:28.411] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 147, jobs/s: 147
+[2026-04-21 10:38:28.418] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 56, jobs/s: 56
+[2026-04-21 10:38:28.418] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 809, jobs/s: 809
+[2026-04-21 10:38:28.423] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 142, jobs/s: 142
+[2026-04-21 10:38:28.435] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 12, Backoff: 0, JobsDone: 114, jobs/s: 114
+[2026-04-21 10:38:29.387] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 576, jobs/s: 576
+[2026-04-21 10:38:29.395] [info] StatsService: cycle completed in 365ms
+[2026-04-21 10:38:29.404] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 111, jobs/s: 111
+[2026-04-21 10:38:29.411] [info] [Worker 6] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 217, jobs/s: 217
+[2026-04-21 10:38:29.412] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 146, jobs/s: 146
+[2026-04-21 10:38:29.419] [info] [Worker 1] [libqueen] EVL: 3ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 256, jobs/s: 256
+[2026-04-21 10:38:29.420] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 628, jobs/s: 628
+[2026-04-21 10:38:29.425] [info] [Worker 5] [libqueen] EVL: 3ms, Slots: 1/25, Queue: 2, Backoff: 0, JobsDone: 576, jobs/s: 576
+[2026-04-21 10:38:29.435] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 636, jobs/s: 636
+[2026-04-21 10:38:30.387] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:38:30.404] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 35, jobs/s: 35
+[2026-04-21 10:38:30.412] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 193, jobs/s: 193
+[2026-04-21 10:38:30.412] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 4, Backoff: 0, JobsDone: 143, jobs/s: 143
+[2026-04-21 10:38:30.420] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 1/25, Queue: 12, Backoff: 0, JobsDone: 79, jobs/s: 79
+[2026-04-21 10:38:30.421] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 2/25, Queue: 0, Backoff: 0, JobsDone: 910, jobs/s: 910
+[2026-04-21 10:38:30.425] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 7, Backoff: 0, JobsDone: 558, jobs/s: 558
+[2026-04-21 10:38:30.437] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 68, jobs/s: 68
+[2026-04-21 10:38:31.388] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 86, jobs/s: 86
+[2026-04-21 10:38:31.405] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:38:31.411] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 387, jobs/s: 387
+[2026-04-21 10:38:31.412] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 109, jobs/s: 109
+[2026-04-21 10:38:31.421] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 502, jobs/s: 502
+[2026-04-21 10:38:31.422] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 0, Backoff: 0, JobsDone: 654, jobs/s: 654
+[2026-04-21 10:38:31.425] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 6, Backoff: 0, JobsDone: 732, jobs/s: 732
+[2026-04-21 10:38:32.389] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 6, Backoff: 0, JobsDone: 141, jobs/s: 141
+[2026-04-21 10:38:32.412] [info] [Worker 6] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 17, Backoff: 0, JobsDone: 80, jobs/s: 80
+[2026-04-21 10:38:32.412] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 94, jobs/s: 94
+[2026-04-21 10:38:32.409] [info] [Worker 4] [libqueen] EVL: 11ms, Slots: 0/25, Queue: 8, Backoff: 0, JobsDone: 50, jobs/s: 50
+[2026-04-21 10:38:32.421] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 15, jobs/s: 15
+[2026-04-21 10:38:32.423] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 263, jobs/s: 263
+[2026-04-21 10:38:32.426] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 1/25, Queue: 12, Backoff: 0, JobsDone: 448, jobs/s: 448
+[2026-04-21 10:38:32.439] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 18, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:38:33.389] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 29, jobs/s: 29
+[2026-04-21 10:38:33.409] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 16, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:38:33.411] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 17, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:38:33.412] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 35, jobs/s: 35
+[2026-04-21 10:38:33.421] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:38:33.424] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 36, jobs/s: 36
+[2026-04-21 10:38:33.427] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 6, Backoff: 0, JobsDone: 53, jobs/s: 53
+[2026-04-21 10:38:33.439] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:38:34.121] [error] push_messages_internal failed for partition group: SELECT query failed: ERROR:  canceling statement due to lock timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:34.135] [error] FileBuffer drain failed: item[0] status='failed', error='SELECT query failed: ERROR:  canceling statement due to lock timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+', tx_id='019daf30-332e-7000-89b0-0513c10dbd3c'
+[2026-04-21 10:38:34.136] [error] Failed to flush batch to DB: Push failed: SELECT query failed: ERROR:  canceling statement due to lock timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:38:34.136] [warning] PostgreSQL appears to be down
+[2026-04-21 10:38:34.136] [warning] Failed to flush batch at event 40/50, DB appears down
+[2026-04-21 10:38:34.315] [info] Failover: Processing 150 events from failover_019daf30-a97f-700e-9f66-ba076ff79071.buf in 2 batches (db_healthy=false, duplicate key errors are normal during recovery)
+[2026-04-21 10:38:34.389] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 17, Backoff: 0, JobsDone: 37, jobs/s: 37
+[2026-04-21 10:38:34.409] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 18, jobs/s: 18
+[2026-04-21 10:38:34.412] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 15, Backoff: 0, JobsDone: 31, jobs/s: 31
+[2026-04-21 10:38:34.412] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 13, jobs/s: 13
+[2026-04-21 10:38:34.421] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 16, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:38:34.424] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 28, jobs/s: 28
+[2026-04-21 10:38:34.428] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 264, jobs/s: 264
+[2026-04-21 10:38:34.440] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:38:35.162] [info] PostgreSQL recovered! Database is healthy again
+[2026-04-21 10:38:35.389] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:38:35.409] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 7, jobs/s: 7
+[2026-04-21 10:38:35.412] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 13, jobs/s: 13
+[2026-04-21 10:38:35.413] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 14, Backoff: 0, JobsDone: 18, jobs/s: 18
+[2026-04-21 10:38:35.421] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 49, jobs/s: 49
+[2026-04-21 10:38:35.424] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 48, jobs/s: 48
+[2026-04-21 10:38:35.429] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 12, Backoff: 0, JobsDone: 13, jobs/s: 13
+[2026-04-21 10:38:35.441] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:38:36.389] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 13, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:38:36.409] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 28, Backoff: 0, JobsDone: 31, jobs/s: 31
+[2026-04-21 10:38:36.412] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 8, Backoff: 0, JobsDone: 52, jobs/s: 52
+[2026-04-21 10:38:36.413] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 63, jobs/s: 63
+[2026-04-21 10:38:36.422] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 0, Backoff: 0, JobsDone: 110, jobs/s: 110
+[2026-04-21 10:38:36.424] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:38:36.429] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 1, Backoff: 0, JobsDone: 98, jobs/s: 98
+[2026-04-21 10:38:36.441] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/25, Queue: 2, Backoff: 0, JobsDone: 35, jobs/s: 35
+[2026-04-21 10:38:37.389] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 5/25, Queue: 0, Backoff: 0, JobsDone: 54, jobs/s: 54
+[2026-04-21 10:38:37.409] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 4/25, Queue: 0, Backoff: 0, JobsDone: 40, jobs/s: 40
+[2026-04-21 10:38:37.413] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 10/25, Queue: 0, Backoff: 0, JobsDone: 93, jobs/s: 93
+[2026-04-21 10:38:37.413] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 5/25, Queue: 0, Backoff: 0, JobsDone: 39, jobs/s: 39
+[2026-04-21 10:38:37.423] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 9/25, Queue: 0, Backoff: 0, JobsDone: 75, jobs/s: 75
+[2026-04-21 10:38:37.424] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 8/25, Queue: 0, Backoff: 0, JobsDone: 64, jobs/s: 64
+[2026-04-21 10:38:37.431] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 5/25, Queue: 0, Backoff: 0, JobsDone: 18, jobs/s: 18
+[2026-04-21 10:38:37.441] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 7/25, Queue: 0, Backoff: 0, JobsDone: 56, jobs/s: 56
+[2026-04-21 10:38:38.389] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 24/25, Queue: 0, Backoff: 0, JobsDone: 73, jobs/s: 73
+[2026-04-21 10:38:38.409] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 23/25, Queue: 0, Backoff: 0, JobsDone: 63, jobs/s: 63
+[2026-04-21 10:38:38.412] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 24/25, Queue: 0, Backoff: 0, JobsDone: 46, jobs/s: 46
+[2026-04-21 10:38:38.414] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 23/25, Queue: 0, Backoff: 0, JobsDone: 69, jobs/s: 69
+[2026-04-21 10:38:38.423] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 24/25, Queue: 0, Backoff: 0, JobsDone: 48, jobs/s: 48
+[2026-04-21 10:38:38.425] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 21/25, Queue: 0, Backoff: 0, JobsDone: 37, jobs/s: 37
+[2026-04-21 10:38:38.431] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 22/25, Queue: 0, Backoff: 0, JobsDone: 68, jobs/s: 68
+[2026-04-21 10:38:38.441] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 23/25, Queue: 0, Backoff: 0, JobsDone: 53, jobs/s: 53
+[2026-04-21 10:38:38.519] [info] Failover: Progress 150/150 events (100.0%)
+[2026-04-21 10:38:38.520] [info] Failover: Completed 150 events in 4203ms (36 events/sec) - file removed
+[2026-04-21 10:38:38.628] [info] Retrying failed buffer: failover_019daf30-f398-7000-b408-d2f3ddcd4639.buf (moved back to main directory)
+[2026-04-21 10:38:38.732] [info] Failover: Processing 50 events from failover_019daf30-f398-7000-b408-d2f3ddcd4639.buf in 1 batches (db_healthy=true, duplicate key errors are normal during recovery)
+[2026-04-21 10:38:38.809] [info] Failover: Progress 50/50 events (100.0%)
+[2026-04-21 10:38:38.809] [info] Failover: Completed 50 events in 76ms (658 events/sec) - file removed
+[2026-04-21 10:38:39.047] [info] StatsService: cycle completed in 13ms
+[2026-04-21 10:38:39.388] [info] [Worker 7] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 14, jobs/s: 14
+[2026-04-21 10:38:39.408] [info] [Worker 4] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 11, jobs/s: 11
+[2026-04-21 10:38:39.413] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 4, jobs/s: 4
+[2026-04-21 10:38:39.414] [info] [Worker 6] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 8, jobs/s: 8
+[2026-04-21 10:38:39.423] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:38:39.425] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 25, jobs/s: 25
+[2026-04-21 10:38:39.430] [info] [Worker 5] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:38:39.441] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 25/25, Queue: 0, Backoff: 0, JobsDone: 8, jobs/s: 8
+[2026-04-21 10:38:40.713] [info] Received signal 15, shutting down...
+[2026-04-21 10:38:40.713] [info] Exiting (worker threads will be terminated by OS)

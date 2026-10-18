@@ -1,0 +1,9 @@
+[18:02:26] start 1x1000-3000k-gcp24-xfs-t24-share
+[18:03:27] first try stopped: share group max 200 members (297 consumers); relaunch with group.share.max.size=300
+[18:03:29] start 1x1000-3000k-gcp24-xfs-t24-share
+[18:06:21] SHARE_POINT 1x1000-3000k-gcp24-xfs-t24-share DONE | 1x1000-3000k-gcp24-xfs-t24-share  kafka  1x1000 e=0 batch b=100 rr c=33x9 default  3000000   3000k   3000k      0k        6       23         23        21       35.0       33.5          6.6               445              479/459     0       9.6
+[18:06:21] start 1x100-3000k-gcp24-xfs-t24-share
+[18:09:18] SHARE_POINT 1x100-3000k-gcp24-xfs-t24-share DONE | 1x100-3000k-gcp24-xfs-t24-share  kafka  1x100 e=0 batch b=100 rr c=11x9 default  3000000   3000k   3000k      0k        6        9         10         8       24.6       24.9          6.7               441              481/461     0       9.1
+[18:09:18] start 1x10000-3000k-gcp24-xfs-t24-share
+[18:12:32] SHARE_POINT 1x10000-3000k-gcp24-xfs-t24-share DONE | 1x10000-3000k-gcp24-xfs-t24-share  kafka  1x10000 e=0 batch b=100 rr c=33x9 default  3000000   3001k   3004k      0k       84      206        210       124       52.2       51.5          7.1               480              467/448     0      11.5
+SHARE_DONE

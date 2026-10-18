@@ -1,0 +1,12 @@
+  n1  node=1 zk     not running | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=1.65ms | log ERROR=0 WARN=1 (since mark 06:59:22Z)
+  n1  node=1 bookie not running | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=1.92ms | log ERROR=0 WARN=0 (since mark 06:59:22Z)
+  n1  node=1 broker not running | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=3.27ms | log ERROR=0 WARN=2 (since mark 06:59:22Z)
+  n1  node=1 disk   data=48299MB zk=1MB journal=22199MB (12 .txn in 2 dirs) ledgers=26101MB (entry logs=27, 26085MB; locations=16MB ledgers-index=1MB) | fs 9% used, 1.4T free
+  n2  node=2 zk     not running | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since start)
+  n2  node=2 bookie not running | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since start)
+  n2  node=2 broker not running | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since start)
+  n2  node=2 disk   data=0MB zk=0MB journal=0MB (0 .txn in 0 dirs) ledgers=0MB (entry logs=0, 0MB; locations=0MB ledgers-index=0MB) | fs 12% used, 25G free
+  n3  node=3 zk     not running | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since start)
+  n3  node=3 bookie not running | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since start)
+  n3  node=3 broker not running | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since start)
+  n3  node=3 disk   data=0MB zk=0MB journal=0MB (0 .txn in 0 dirs) ledgers=0MB (entry logs=0, 0MB; locations=0MB ledgers-index=0MB) | fs 12% used, 25G free

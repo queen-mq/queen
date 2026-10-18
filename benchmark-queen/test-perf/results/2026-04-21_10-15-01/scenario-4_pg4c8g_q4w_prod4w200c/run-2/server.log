@@ -1,0 +1,3371 @@
+[2026-04-21 10:29:43.182] [info] Queen C++ Message Queue Server (Acceptor/Worker Pattern)
+[2026-04-21 10:29:43.183] [info] Configuration:
+[2026-04-21 10:29:43.183] [info]   - Host: 0.0.0.0
+[2026-04-21 10:29:43.183] [info]   - Port: 6632
+[2026-04-21 10:29:43.183] [info]   - Database: 127.0.0.1:5434/queen
+[2026-04-21 10:29:43.183] [warning] Encryption disabled - QUEEN_ENCRYPTION_KEY not set
+[2026-04-21 10:29:43.183] [info] Encryption: disabled
+[2026-04-21 10:29:43.183] [info] JWT Authentication: DISABLED
+[2026-04-21 10:29:43.183] [info] Starting acceptor/worker pattern with 4 workers (hardware cores: 10)
+[2026-04-21 10:29:43.183] [info] [Worker 0] Starting...
+[2026-04-21 10:29:43.183] [info] [Worker 1] Starting...
+[2026-04-21 10:29:43.183] [info] [Worker 2] Starting...
+[2026-04-21 10:29:43.183] [info] Initializing GLOBAL shared resources (ASYNC-ONLY MODE):
+[2026-04-21 10:29:43.183] [info]   - Total DB connections: 19 (95% of 20) - ALL ASYNC
+[2026-04-21 10:29:43.183] [info]   - DB ThreadPool size: 9 = 4 workers + 5 service
+[2026-04-21 10:29:43.183] [info]     * Queen instances: 4 (one per HTTP worker, each with own event loop)
+[2026-04-21 10:29:43.183] [info]     * Service DB threads: 5 (metrics, retention, eviction)
+[2026-04-21 10:29:43.183] [info]   - System ThreadPool threads: 4 (for background service scheduling)
+[2026-04-21 10:29:43.183] [info]   - Number of HTTP workers: 4
+[2026-04-21 10:29:43.183] [info]   - Creating Async DB Pool (19 connections) for ALL operations
+[2026-04-21 10:29:43.183] [info] Waiting for workers to initialize...
+[2026-04-21 10:29:43.183] [info] [Worker 3] Starting...
+[2026-04-21 10:29:43.183] [info] [AsyncDbPool] Initializing 19 async connections...
+[2026-04-21 10:29:43.439] [info] [AsyncDbPool] Initialization complete. 19 connections ready.
+[2026-04-21 10:29:43.440] [info]   - Created response queue for worker 0 (poll workers)
+[2026-04-21 10:29:43.440] [info]   - Created response queue for worker 1 (poll workers)
+[2026-04-21 10:29:43.440] [info]   - Created response queue for worker 2 (poll workers)
+[2026-04-21 10:29:43.440] [info]   - Created response queue for worker 3 (poll workers)
+[2026-04-21 10:29:43.440] [info]   - Per-worker Queen instances will be created in each worker thread
+[2026-04-21 10:29:43.440] [info]   - Created response registry for worker 0 (lock-free across workers)
+[2026-04-21 10:29:43.440] [info]   - Created response registry for worker 1 (lock-free across workers)
+[2026-04-21 10:29:43.440] [info]   - Created response registry for worker 2 (lock-free across workers)
+[2026-04-21 10:29:43.440] [info]   - Created response registry for worker 3 (lock-free across workers)
+[2026-04-21 10:29:43.440] [info] SharedStateManager: Disabled (no UDP peers or sync disabled)
+[2026-04-21 10:29:43.440] [info] Shared State Manager configured: Sync disabled, queue config cache will be active
+[2026-04-21 10:29:43.440] [info] System info: hostname=alice.local, port=6632
+[2026-04-21 10:29:43.440] [info] Global shared resources initialized successfully
+[2026-04-21 10:29:43.440] [info] [Worker 0] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:29:43.440] [info] [Worker 2] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:29:43.440] [info] [Worker 1] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:29:43.440] [info] [Worker 3] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 10:29:43.440] [info] [Worker 0] Database connection: OK | Pool: 16/19 conn available
+[2026-04-21 10:29:43.440] [info] [Worker 0] Initializing database schema...
+[2026-04-21 10:29:43.440] [info] [Worker 3] Database connection: OK | Pool: 17/19 conn available
+[2026-04-21 10:29:43.441] [info] [Worker 3] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:29:43.441] [info] [Worker 1] Database connection: OK | Pool: 17/19 conn available
+[2026-04-21 10:29:43.441] [info] [Worker 1] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:29:43.441] [info] [Worker 2] Database connection: OK | Pool: 18/19 conn available
+[2026-04-21 10:29:43.441] [info] [Worker 2] Waiting for shared file buffer from Worker 0...
+[2026-04-21 10:29:43.441] [info] Initializing schema: queen
+[2026-04-21 10:29:43.447] [info] Running base schema initialization...
+NOTICE:  schema "queen" already exists, skipping
+[2026-04-21 10:29:43.537] [info] Base schema applied successfully
+[2026-04-21 10:29:43.538] [info] Loading 15 stored procedure(s)...
+NOTICE:  function queen.is_stats_leader(text) does not exist, skipping
+NOTICE:  trigger "trg_update_worker_metrics_summary" for relation "queen.worker_metrics" does not exist, skipping
+[2026-04-21 10:29:43.588] [info] [Worker 0] Starting Shared State Manager...
+[2026-04-21 10:29:43.588] [info] SharedStateManager: Loading queue configs and maintenance modes from database...
+[2026-04-21 10:29:43.591] [info] SharedStateManager: Sync disabled, but queue config cache is available
+[2026-04-21 10:29:43.591] [info] [Worker 0] Registered MESSAGE_AVAILABLE callback for Queen instances
+[2026-04-21 10:29:43.591] [info] [Worker 0] Starting background metrics collector (sample: 1000ms, aggregate: 60s)...
+[2026-04-21 10:29:43.592] [info] MetricsCollector started: hostname=alice.local, port=6632, worker=cpp-worker-1, sampling every 1000ms, aggregating every 60s
+[2026-04-21 10:29:43.592] [info] [Worker 0] Starting background retention service...
+[2026-04-21 10:29:43.592] [info] RetentionService: Running cleanup cycle
+[2026-04-21 10:29:43.592] [info] RetentionService started: interval=300000ms, batch_size=1000, partition_cleanup_days=30, metrics_retention_days=90
+[2026-04-21 10:29:43.592] [info] [Worker 0] Starting background eviction service...
+[2026-04-21 10:29:43.592] [info] EvictionService started: interval=60000ms, batch_size=1000
+[2026-04-21 10:29:43.592] [info] [Worker 0] Starting background stats service...
+[2026-04-21 10:29:43.592] [info] StatsService started (queue/partition counts only): interval=10000ms, reconcile_interval=120000ms
+[2026-04-21 10:29:43.592] [info] [Worker 0] Creating SHARED file buffer manager (dir=/tmp/queen)...
+[2026-04-21 10:29:43.592] [info] FileBufferManager initializing: dir=/tmp/queen, recovery=true
+[2026-04-21 10:29:43.592] [info] Buffer directories ready: /tmp/queen
+[2026-04-21 10:29:43.592] [info] Starting recovery of buffered events...
+[2026-04-21 10:29:43.592] [info] StatsService: Running initial queue/partition stats refresh...
+[2026-04-21 10:29:43.592] [info] Deleting incomplete buffer file: qos0_019daf27-84ca-7000-9e97-4c5fc2ace670.buf.tmp (only 0 bytes)
+[2026-04-21 10:29:43.592] [info] Deleting incomplete buffer file: failover_019daf27-84ca-7001-8ff8-64dbd9b356ba.buf.tmp (only 0 bytes)
+[2026-04-21 10:29:43.592] [info] Starting recovery (max 3600s to avoid blocking server startup)...
+[2026-04-21 10:29:43.592] [info] Phase 1: Recovering failover events (FIFO order)...
+[2026-04-21 10:29:43.592] [info] Phase 2: Recovering QoS 0 events (batched)...
+[2026-04-21 10:29:43.592] [info] Startup recovery completed in 0ms: failover=0, qos0=0
+[2026-04-21 10:29:43.592] [info] Recovery complete
+[2026-04-21 10:29:43.592] [info] Buffer files initialized successfully
+[2026-04-21 10:29:43.592] [info] Background processor thread started
+[2026-04-21 10:29:43.592] [info] FileBufferManager ready
+[2026-04-21 10:29:43.592] [info] [Worker 0] File buffer ready - Pending: 0, Failed: 0, DB: healthy
+[2026-04-21 10:29:43.592] [info] [Worker 0] Sharing file buffer with other workers...
+[2026-04-21 10:29:43.592] [info] [Worker 0] File buffer shared successfully
+[2026-04-21 10:29:43.592] [info] [Worker 0] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:29:43.592] [info] [Worker 2] Using shared file buffer from Worker 0
+[2026-04-21 10:29:43.592] [info] [Worker 2] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:29:43.592] [info] [Worker 2] Creating uWS::App...
+[2026-04-21 10:29:43.592] [info] [Worker 1] Using shared file buffer from Worker 0
+[2026-04-21 10:29:43.592] [info] [Worker 1] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:29:43.592] [info] [Worker 1] Creating uWS::App...
+[2026-04-21 10:29:43.592] [info] [Worker 0] Creating uWS::App...
+[2026-04-21 10:29:43.592] [info] [Worker 3] Using shared file buffer from Worker 0
+[2026-04-21 10:29:43.592] [info] [Worker 3] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 10:29:43.592] [info] [Worker 3] Creating uWS::App...
+[2026-04-21 10:29:43.593] [info] [Worker 2] Creating per-worker Queen instance (50 connections, total pool split across 4 workers)...
+[2026-04-21 10:29:43.593] [info] [Worker 0] Creating per-worker Queen instance (50 connections, total pool split across 4 workers)...
+[2026-04-21 10:29:43.593] [info] [Worker 3] Creating per-worker Queen instance (50 connections, total pool split across 4 workers)...
+[2026-04-21 10:29:43.593] [info] [Worker 1] Creating per-worker Queen instance (50 connections, total pool split across 4 workers)...
+[2026-04-21 10:29:43.600] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 10:29:43.623] [info] RetentionService: cycle completed in 31ms
+[2026-04-21 10:29:43.628] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 0}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 0, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 10:29:43.652] [info] StatsService: cycle completed in 23ms
+[2026-04-21 10:29:44.093] [info] [Worker 2] Queen instance ready with 50 connections
+[2026-04-21 10:29:44.093] [info] [Worker 2] Registered Queen instance for UDP notifications
+[2026-04-21 10:29:44.093] [info] [Worker 2] Setting up routes...
+[2026-04-21 10:29:44.093] [info] [Worker 1] Queen instance ready with 50 connections
+[2026-04-21 10:29:44.093] [info] [Worker 1] Registered Queen instance for UDP notifications
+[2026-04-21 10:29:44.093] [info] [Worker 1] Setting up routes...
+[2026-04-21 10:29:44.094] [warning] [Worker 1] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:29:44.094] [warning] [Worker 1] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:29:44.094] [warning] [Worker 1] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:29:44.094] [info] [Worker 1] Routes configured
+[2026-04-21 10:29:44.094] [info] [Worker 1] Registered with acceptor
+[2026-04-21 10:29:44.094] [warning] [Worker 2] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:29:44.094] [warning] [Worker 2] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:29:44.094] [warning] [Worker 2] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:29:44.094] [info] [Worker 2] Routes configured
+[2026-04-21 10:29:44.094] [info] [Worker 2] Registered with acceptor
+[2026-04-21 10:29:44.094] [info] [Worker 1] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:29:44.094] [info] [Worker 1] Setting up response timer...
+[2026-04-21 10:29:44.094] [info] [Worker 0] Queen instance ready with 50 connections
+[2026-04-21 10:29:44.094] [info] [Worker 0] Registered Queen instance for UDP notifications
+[2026-04-21 10:29:44.094] [info] [Worker 0] Setting up routes...
+[2026-04-21 10:29:44.094] [info] [Worker 3] Queen instance ready with 50 connections
+[2026-04-21 10:29:44.094] [info] [Worker 3] Registered Queen instance for UDP notifications
+[2026-04-21 10:29:44.094] [info] [Worker 3] Setting up routes...
+[2026-04-21 10:29:44.094] [info] [Worker 1] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:29:44.094] [info] [Worker 2] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:29:44.095] [info] [Worker 2] Setting up response timer...
+[2026-04-21 10:29:44.095] [info] [Worker 2] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:29:44.095] [warning] [Worker 3] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:29:44.095] [warning] [Worker 3] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:29:44.095] [warning] [Worker 3] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:29:44.095] [info] [Worker 3] Routes configured
+[2026-04-21 10:29:44.095] [info] [Worker 3] Registered with acceptor
+[2026-04-21 10:29:44.095] [info] [Worker 3] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:29:44.095] [info] [Worker 3] Setting up response timer...
+[2026-04-21 10:29:44.095] [info] [Worker 3] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:29:44.095] [warning] [Worker 0] Webapp directory not found - Static file serving disabled
+[2026-04-21 10:29:44.095] [warning] [Worker 0] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 10:29:44.095] [warning] [Worker 0] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 10:29:44.095] [info] [Worker 0] Routes configured
+[2026-04-21 10:29:44.095] [info] [Worker 0] Registered with acceptor
+[2026-04-21 10:29:44.095] [info] [Worker 0] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 10:29:44.095] [info] [Worker 0] Setting up response timer...
+[2026-04-21 10:29:44.095] [info] [Worker 0] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 10:29:44.129] [info] All 4 workers initialized in 945ms
+[2026-04-21 10:29:44.129] [info] Creating acceptor app...
+[2026-04-21 10:29:44.129] [info] Registered 4 worker apps with acceptor
+[2026-04-21 10:29:44.129] [info] Acceptor listening on 0.0.0.0:6632
+[2026-04-21 10:29:44.129] [info] Round-robin load balancing across 4 workers
+[2026-04-21 10:29:44.129] [info] Starting acceptor event loop...
+[2026-04-21 10:29:44.251] [info] [Worker 1] [libqueen] Reconnection thread started
+[2026-04-21 10:29:44.263] [info] [Worker 2] [libqueen] Reconnection thread started
+[2026-04-21 10:29:44.269] [info] [Worker 0] [libqueen] Reconnection thread started
+[2026-04-21 10:29:44.291] [info] [Worker 3] [libqueen] Reconnection thread started
+[2026-04-21 10:29:44.397] [info] [Worker 2] Configuring queue: perf-test via stored procedure
+[2026-04-21 10:29:45.252] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 45/50, Queue: 0, Backoff: 0, JobsDone: 194, jobs/s: 194
+[2026-04-21 10:29:45.264] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 47/50, Queue: 10, Backoff: 0, JobsDone: 201, jobs/s: 201
+[2026-04-21 10:29:45.270] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 48/50, Queue: 7, Backoff: 0, JobsDone: 216, jobs/s: 216
+[2026-04-21 10:29:45.291] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 46/50, Queue: 0, Backoff: 0, JobsDone: 233, jobs/s: 233
+[2026-04-21 10:29:46.253] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 46/50, Queue: 0, Backoff: 0, JobsDone: 589, jobs/s: 589
+[2026-04-21 10:29:46.263] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 44/50, Queue: 0, Backoff: 0, JobsDone: 556, jobs/s: 556
+[2026-04-21 10:29:46.271] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 595, jobs/s: 595
+[2026-04-21 10:29:46.290] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 46/50, Queue: 0, Backoff: 0, JobsDone: 590, jobs/s: 590
+[2026-04-21 10:29:47.254] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 44/50, Queue: 0, Backoff: 0, JobsDone: 291, jobs/s: 291
+[2026-04-21 10:29:47.264] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 44/50, Queue: 0, Backoff: 0, JobsDone: 247, jobs/s: 247
+[2026-04-21 10:29:47.271] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 340, jobs/s: 340
+[2026-04-21 10:29:47.291] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 296, jobs/s: 296
+[2026-04-21 10:29:48.254] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 45/50, Queue: 1, Backoff: 0, JobsDone: 165, jobs/s: 165
+[2026-04-21 10:29:48.264] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 42/50, Queue: 0, Backoff: 0, JobsDone: 178, jobs/s: 178
+[2026-04-21 10:29:48.272] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 4, Backoff: 0, JobsDone: 149, jobs/s: 149
+[2026-04-21 10:29:48.291] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 41/50, Queue: 0, Backoff: 0, JobsDone: 140, jobs/s: 140
+[2026-04-21 10:29:49.254] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 42/50, Queue: 9, Backoff: 0, JobsDone: 184, jobs/s: 184
+[2026-04-21 10:29:49.263] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 41/50, Queue: 0, Backoff: 0, JobsDone: 153, jobs/s: 153
+[2026-04-21 10:29:49.272] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 42/50, Queue: 0, Backoff: 0, JobsDone: 222, jobs/s: 222
+[2026-04-21 10:29:49.291] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 45/50, Queue: 0, Backoff: 0, JobsDone: 250, jobs/s: 250
+[2026-04-21 10:29:50.253] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 45/50, Queue: 0, Backoff: 0, JobsDone: 306, jobs/s: 306
+[2026-04-21 10:29:50.264] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 209, jobs/s: 209
+[2026-04-21 10:29:50.272] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 40/50, Queue: 0, Backoff: 0, JobsDone: 282, jobs/s: 282
+[2026-04-21 10:29:50.292] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 40/50, Queue: 0, Backoff: 0, JobsDone: 193, jobs/s: 193
+[2026-04-21 10:29:51.254] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 219, jobs/s: 219
+[2026-04-21 10:29:51.263] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 39/50, Queue: 0, Backoff: 0, JobsDone: 326, jobs/s: 326
+[2026-04-21 10:29:51.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 224, jobs/s: 224
+[2026-04-21 10:29:51.292] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 40/50, Queue: 0, Backoff: 0, JobsDone: 284, jobs/s: 284
+[2026-04-21 10:29:52.254] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 273, jobs/s: 273
+[2026-04-21 10:29:52.264] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 42/50, Queue: 0, Backoff: 0, JobsDone: 309, jobs/s: 309
+[2026-04-21 10:29:52.272] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 46/50, Queue: 0, Backoff: 0, JobsDone: 226, jobs/s: 226
+[2026-04-21 10:29:52.291] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 223, jobs/s: 223
+[2026-04-21 10:29:53.254] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 42/50, Queue: 1, Backoff: 0, JobsDone: 380, jobs/s: 380
+[2026-04-21 10:29:53.265] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 42/50, Queue: 0, Backoff: 0, JobsDone: 347, jobs/s: 347
+[2026-04-21 10:29:53.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 363, jobs/s: 363
+[2026-04-21 10:29:53.292] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 244, jobs/s: 244
+[2026-04-21 10:29:53.740] [info] StatsService: cycle completed in 106ms
+[2026-04-21 10:29:54.255] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 40/50, Queue: 0, Backoff: 0, JobsDone: 186, jobs/s: 186
+[2026-04-21 10:29:54.265] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 39/50, Queue: 0, Backoff: 0, JobsDone: 105, jobs/s: 105
+[2026-04-21 10:29:54.273] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 162, jobs/s: 162
+[2026-04-21 10:29:54.292] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 86, jobs/s: 86
+[2026-04-21 10:29:55.255] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 50/50, Queue: 0, Backoff: 0, JobsDone: 98, jobs/s: 98
+[2026-04-21 10:29:55.265] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 50/50, Queue: 0, Backoff: 0, JobsDone: 71, jobs/s: 71
+[2026-04-21 10:29:55.274] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 50/50, Queue: 0, Backoff: 0, JobsDone: 99, jobs/s: 99
+[2026-04-21 10:29:55.292] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 50/50, Queue: 0, Backoff: 0, JobsDone: 83, jobs/s: 83
+[2026-04-21 10:29:55.804] [info] [Worker 3] Configuring queue: perf-test via stored procedure
+[2026-04-21 10:29:56.293] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 50/50, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:29:57.261] [warning] [Worker 3] [libqueen] Event loop lag is too high: 125ms, expected: 5ms
+[2026-04-21 10:29:57.293] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 44/50, Queue: 0, Backoff: 0, JobsDone: 15, jobs/s: 15
+[2026-04-21 10:29:58.255] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:29:58.272] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 31/50, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:29:58.274] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 24/50, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:29:58.292] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 37/50, Queue: 0, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:29:59.256] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 25/50, Queue: 0, Backoff: 0, JobsDone: 18, jobs/s: 18
+[2026-04-21 10:29:59.272] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 29/50, Queue: 0, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:29:59.274] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 22/50, Queue: 0, Backoff: 0, JobsDone: 20, jobs/s: 20
+[2026-04-21 10:29:59.292] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 36/50, Queue: 0, Backoff: 0, JobsDone: 37, jobs/s: 37
+[2026-04-21 10:30:00.257] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 24/50, Queue: 0, Backoff: 0, JobsDone: 22, jobs/s: 22
+[2026-04-21 10:30:00.273] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 0, Backoff: 0, JobsDone: 58, jobs/s: 58
+[2026-04-21 10:30:00.275] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 21/50, Queue: 0, Backoff: 0, JobsDone: 48, jobs/s: 48
+[2026-04-21 10:30:00.293] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 32/50, Queue: 0, Backoff: 0, JobsDone: 84, jobs/s: 84
+[2026-04-21 10:30:01.259] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 52, jobs/s: 52
+[2026-04-21 10:30:01.273] [info] [Worker 2] [libqueen] EVL: 3ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:30:01.277] [info] [Worker 0] [libqueen] EVL: 4ms, Slots: 19/50, Queue: 0, Backoff: 0, JobsDone: 31, jobs/s: 31
+[2026-04-21 10:30:01.293] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 31/50, Queue: 0, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:30:02.258] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 25/50, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:30:02.274] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 24/50, Queue: 0, Backoff: 0, JobsDone: 7, jobs/s: 7
+[2026-04-21 10:30:02.280] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 20/50, Queue: 0, Backoff: 0, JobsDone: 8, jobs/s: 8
+[2026-04-21 10:30:02.293] [info] [Worker 3] [libqueen] EVL: 2ms, Slots: 30/50, Queue: 0, Backoff: 0, JobsDone: 19, jobs/s: 19
+[2026-04-21 10:30:03.259] [info] [Worker 1] [libqueen] EVL: 3ms, Slots: 25/50, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:30:03.275] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 24/50, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:30:03.278] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 20/50, Queue: 0, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:30:03.304] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 29/50, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:30:04.259] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 25/50, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:30:04.274] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 23/50, Queue: 0, Backoff: 0, JobsDone: 6, jobs/s: 6
+[2026-04-21 10:30:04.278] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 21/50, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:30:04.304] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 0, Backoff: 0, JobsDone: 8, jobs/s: 8
+[2026-04-21 10:30:05.007] [info] StatsService: cycle completed in 1367ms
+[2026-04-21 10:30:05.259] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 29/50, Queue: 2, Backoff: 0, JobsDone: 69, jobs/s: 69
+[2026-04-21 10:30:05.275] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 60, jobs/s: 60
+[2026-04-21 10:30:05.278] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 24/50, Queue: 1, Backoff: 0, JobsDone: 43, jobs/s: 43
+[2026-04-21 10:30:05.305] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 36/50, Queue: 0, Backoff: 0, JobsDone: 68, jobs/s: 68
+[2026-04-21 10:30:06.260] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 29/50, Queue: 0, Backoff: 0, JobsDone: 158, jobs/s: 158
+[2026-04-21 10:30:06.274] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 33/50, Queue: 0, Backoff: 0, JobsDone: 192, jobs/s: 192
+[2026-04-21 10:30:06.279] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 0, Backoff: 0, JobsDone: 135, jobs/s: 135
+[2026-04-21 10:30:06.312] [info] [Worker 3] [libqueen] EVL: 4ms, Slots: 38/50, Queue: 3, Backoff: 0, JobsDone: 223, jobs/s: 223
+[2026-04-21 10:30:07.273] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 21/50, Queue: 0, Backoff: 0, JobsDone: 42, jobs/s: 42
+[2026-04-21 10:30:07.281] [info] [Worker 2] [libqueen] EVL: 14ms, Slots: 27/50, Queue: 0, Backoff: 0, JobsDone: 77, jobs/s: 77
+[2026-04-21 10:30:07.281] [info] [Worker 0] [libqueen] EVL: 2ms, Slots: 21/50, Queue: 0, Backoff: 0, JobsDone: 59, jobs/s: 59
+[2026-04-21 10:30:07.313] [info] [Worker 3] [libqueen] EVL: 9ms, Slots: 29/50, Queue: 0, Backoff: 0, JobsDone: 86, jobs/s: 86
+[2026-04-21 10:30:08.272] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 21/50, Queue: 0, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:30:08.278] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 21/50, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:30:08.281] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:30:08.314] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 6, jobs/s: 6
+[2026-04-21 10:30:09.273] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 22/50, Queue: 0, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:30:09.279] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 20/50, Queue: 0, Backoff: 0, JobsDone: 14, jobs/s: 14
+[2026-04-21 10:30:09.281] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 4, Backoff: 0, JobsDone: 25, jobs/s: 25
+[2026-04-21 10:30:09.314] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:30:10.273] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 25/50, Queue: 0, Backoff: 0, JobsDone: 86, jobs/s: 86
+[2026-04-21 10:30:10.282] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 28/50, Queue: 0, Backoff: 0, JobsDone: 117, jobs/s: 117
+[2026-04-21 10:30:10.282] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 27/50, Queue: 0, Backoff: 0, JobsDone: 96, jobs/s: 96
+[2026-04-21 10:30:10.313] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 112, jobs/s: 112
+[2026-04-21 10:30:11.273] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 0, Backoff: 0, JobsDone: 92, jobs/s: 92
+[2026-04-21 10:30:11.283] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 30/50, Queue: 4, Backoff: 0, JobsDone: 93, jobs/s: 93
+[2026-04-21 10:30:11.283] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 30/50, Queue: 0, Backoff: 0, JobsDone: 106, jobs/s: 106
+[2026-04-21 10:30:11.319] [info] [Worker 3] [libqueen] EVL: 2ms, Slots: 27/50, Queue: 2, Backoff: 0, JobsDone: 171, jobs/s: 171
+[2026-04-21 10:30:12.273] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 31/50, Queue: 0, Backoff: 0, JobsDone: 170, jobs/s: 170
+[2026-04-21 10:30:12.282] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 31/50, Queue: 0, Backoff: 0, JobsDone: 252, jobs/s: 252
+[2026-04-21 10:30:12.283] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 36/50, Queue: 0, Backoff: 0, JobsDone: 150, jobs/s: 150
+[2026-04-21 10:30:12.319] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 29/50, Queue: 0, Backoff: 0, JobsDone: 308, jobs/s: 308
+[2026-04-21 10:30:13.273] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 35/50, Queue: 0, Backoff: 0, JobsDone: 278, jobs/s: 278
+[2026-04-21 10:30:13.282] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 33/50, Queue: 0, Backoff: 0, JobsDone: 267, jobs/s: 267
+[2026-04-21 10:30:13.283] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 39/50, Queue: 1, Backoff: 0, JobsDone: 321, jobs/s: 321
+[2026-04-21 10:30:13.319] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 32/50, Queue: 2, Backoff: 0, JobsDone: 757, jobs/s: 757
+[2026-04-21 10:30:14.273] [info] [Worker 1] [libqueen] EVL: 2ms, Slots: 32/50, Queue: 0, Backoff: 0, JobsDone: 63, jobs/s: 63
+[2026-04-21 10:30:14.283] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 38/50, Queue: 0, Backoff: 0, JobsDone: 70, jobs/s: 70
+[2026-04-21 10:30:14.283] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 30/50, Queue: 0, Backoff: 0, JobsDone: 100, jobs/s: 100
+[2026-04-21 10:30:14.319] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 32/50, Queue: 0, Backoff: 0, JobsDone: 582, jobs/s: 582
+[2026-04-21 10:30:14.648] [info] StatsService: cycle completed in 1002ms
+[2026-04-21 10:30:15.273] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 30/50, Queue: 0, Backoff: 0, JobsDone: 49, jobs/s: 49
+[2026-04-21 10:30:15.283] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 30/50, Queue: 0, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:30:15.284] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 36/50, Queue: 0, Backoff: 0, JobsDone: 56, jobs/s: 56
+[2026-04-21 10:30:15.320] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 30/50, Queue: 0, Backoff: 0, JobsDone: 447, jobs/s: 447
+[2026-04-21 10:30:16.273] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 29/50, Queue: 0, Backoff: 0, JobsDone: 19, jobs/s: 19
+[2026-04-21 10:30:16.284] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 27/50, Queue: 0, Backoff: 0, JobsDone: 23, jobs/s: 23
+[2026-04-21 10:30:16.284] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 36/50, Queue: 0, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:30:16.320] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 30/50, Queue: 0, Backoff: 0, JobsDone: 214, jobs/s: 214
+[2026-04-21 10:30:17.273] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 32/50, Queue: 0, Backoff: 0, JobsDone: 95, jobs/s: 95
+[2026-04-21 10:30:17.284] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 35/50, Queue: 0, Backoff: 0, JobsDone: 108, jobs/s: 108
+[2026-04-21 10:30:17.284] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 0, Backoff: 0, JobsDone: 139, jobs/s: 139
+[2026-04-21 10:30:17.321] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 30/50, Queue: 0, Backoff: 0, JobsDone: 626, jobs/s: 626
+[2026-04-21 10:30:18.274] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 32/50, Queue: 0, Backoff: 0, JobsDone: 51, jobs/s: 51
+[2026-04-21 10:30:18.284] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 32/50, Queue: 0, Backoff: 0, JobsDone: 61, jobs/s: 61
+[2026-04-21 10:30:18.286] [info] [Worker 2] [libqueen] EVL: 2ms, Slots: 27/50, Queue: 0, Backoff: 0, JobsDone: 51, jobs/s: 51
+[2026-04-21 10:30:18.321] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 0, Backoff: 0, JobsDone: 367, jobs/s: 367
+[2026-04-21 10:30:19.274] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 31/50, Queue: 0, Backoff: 0, JobsDone: 39, jobs/s: 39
+[2026-04-21 10:30:19.284] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 33/50, Queue: 0, Backoff: 0, JobsDone: 44, jobs/s: 44
+[2026-04-21 10:30:19.285] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 52, jobs/s: 52
+[2026-04-21 10:30:19.321] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 31/50, Queue: 0, Backoff: 0, JobsDone: 523, jobs/s: 523
+[2026-04-21 10:30:20.274] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 0, Backoff: 0, JobsDone: 85, jobs/s: 85
+[2026-04-21 10:30:20.284] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 29/50, Queue: 0, Backoff: 0, JobsDone: 107, jobs/s: 107
+[2026-04-21 10:30:20.286] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 106, jobs/s: 106
+[2026-04-21 10:30:20.322] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 31/50, Queue: 0, Backoff: 0, JobsDone: 846, jobs/s: 846
+[2026-04-21 10:30:21.274] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 0, Backoff: 0, JobsDone: 228, jobs/s: 228
+[2026-04-21 10:30:21.285] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 26/50, Queue: 0, Backoff: 0, JobsDone: 244, jobs/s: 244
+[2026-04-21 10:30:21.285] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 32/50, Queue: 12, Backoff: 0, JobsDone: 365, jobs/s: 365
+[2026-04-21 10:30:21.322] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 12, Backoff: 0, JobsDone: 947, jobs/s: 947
+[2026-04-21 10:30:22.274] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 25/50, Queue: 0, Backoff: 0, JobsDone: 63, jobs/s: 63
+[2026-04-21 10:30:22.286] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 22/50, Queue: 4, Backoff: 0, JobsDone: 370, jobs/s: 370
+[2026-04-21 10:30:22.286] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 28/50, Queue: 1, Backoff: 0, JobsDone: 462, jobs/s: 462
+[2026-04-21 10:30:22.333] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 20/50, Queue: 0, Backoff: 0, JobsDone: 131, jobs/s: 131
+[2026-04-21 10:30:23.275] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 24/50, Queue: 0, Backoff: 0, JobsDone: 71, jobs/s: 71
+[2026-04-21 10:30:23.286] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 25/50, Queue: 0, Backoff: 0, JobsDone: 249, jobs/s: 249
+[2026-04-21 10:30:23.286] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 23/50, Queue: 0, Backoff: 0, JobsDone: 151, jobs/s: 151
+[2026-04-21 10:30:23.338] [info] [Worker 3] [libqueen] EVL: 5ms, Slots: 17/50, Queue: 0, Backoff: 0, JobsDone: 45, jobs/s: 45
+[2026-04-21 10:30:24.276] [info] [Worker 1] [libqueen] EVL: 2ms, Slots: 19/50, Queue: 0, Backoff: 0, JobsDone: 184, jobs/s: 184
+[2026-04-21 10:30:24.286] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 21/50, Queue: 0, Backoff: 0, JobsDone: 282, jobs/s: 282
+[2026-04-21 10:30:24.287] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 18/50, Queue: 0, Backoff: 0, JobsDone: 324, jobs/s: 324
+[2026-04-21 10:30:24.338] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 16/50, Queue: 0, Backoff: 0, JobsDone: 74, jobs/s: 74
+[2026-04-21 10:30:25.276] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 18/50, Queue: 0, Backoff: 0, JobsDone: 141, jobs/s: 141
+[2026-04-21 10:30:25.286] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 23/50, Queue: 0, Backoff: 0, JobsDone: 79, jobs/s: 79
+[2026-04-21 10:30:25.288] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 16/50, Queue: 0, Backoff: 0, JobsDone: 94, jobs/s: 94
+[2026-04-21 10:30:25.338] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 14/50, Queue: 0, Backoff: 0, JobsDone: 55, jobs/s: 55
+[2026-04-21 10:30:26.276] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 17/50, Queue: 0, Backoff: 0, JobsDone: 64, jobs/s: 64
+[2026-04-21 10:30:26.286] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 22/50, Queue: 0, Backoff: 0, JobsDone: 121, jobs/s: 121
+[2026-04-21 10:30:26.288] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 16/50, Queue: 0, Backoff: 0, JobsDone: 106, jobs/s: 106
+[2026-04-21 10:30:26.340] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 14/50, Queue: 0, Backoff: 0, JobsDone: 30, jobs/s: 30
+[2026-04-21 10:30:27.165] [info] StatsService: cycle completed in 3518ms
+[2026-04-21 10:30:27.277] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 18/50, Queue: 0, Backoff: 0, JobsDone: 158, jobs/s: 158
+[2026-04-21 10:30:27.287] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 23/50, Queue: 0, Backoff: 0, JobsDone: 444, jobs/s: 444
+[2026-04-21 10:30:27.288] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 17/50, Queue: 0, Backoff: 0, JobsDone: 319, jobs/s: 319
+[2026-04-21 10:30:27.341] [info] [Worker 3] [libqueen] EVL: 2ms, Slots: 15/50, Queue: 3, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:30:28.278] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 15/50, Queue: 0, Backoff: 0, JobsDone: 89, jobs/s: 89
+[2026-04-21 10:30:28.287] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 21/50, Queue: 0, Backoff: 0, JobsDone: 85, jobs/s: 85
+[2026-04-21 10:30:28.288] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 14/50, Queue: 0, Backoff: 0, JobsDone: 148, jobs/s: 148
+[2026-04-21 10:30:28.341] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 9/50, Queue: 0, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:30:29.278] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 19/50, Queue: 0, Backoff: 0, JobsDone: 122, jobs/s: 122
+[2026-04-21 10:30:29.288] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 21/50, Queue: 0, Backoff: 0, JobsDone: 258, jobs/s: 258
+[2026-04-21 10:30:29.288] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 15/50, Queue: 0, Backoff: 0, JobsDone: 208, jobs/s: 208
+[2026-04-21 10:30:29.341] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 11/50, Queue: 0, Backoff: 0, JobsDone: 31, jobs/s: 31
+[2026-04-21 10:30:30.278] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 17/50, Queue: 0, Backoff: 0, JobsDone: 331, jobs/s: 331
+[2026-04-21 10:30:30.288] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 20/50, Queue: 0, Backoff: 0, JobsDone: 331, jobs/s: 331
+[2026-04-21 10:30:30.288] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 17/50, Queue: 1, Backoff: 0, JobsDone: 371, jobs/s: 371
+[2026-04-21 10:30:30.342] [info] [Worker 3] [libqueen] EVL: 4ms, Slots: 13/50, Queue: 0, Backoff: 0, JobsDone: 61, jobs/s: 61
+[2026-04-21 10:30:31.279] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 17/50, Queue: 14, Backoff: 0, JobsDone: 464, jobs/s: 464
+[2026-04-21 10:30:31.288] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 16/50, Queue: 13, Backoff: 0, JobsDone: 349, jobs/s: 349
+[2026-04-21 10:30:31.288] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 13/50, Queue: 12, Backoff: 0, JobsDone: 445, jobs/s: 445
+[2026-04-21 10:30:31.342] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 9/50, Queue: 2, Backoff: 0, JobsDone: 81, jobs/s: 81
+[2026-04-21 10:30:32.280] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 9/50, Queue: 0, Backoff: 0, JobsDone: 312, jobs/s: 312
+[2026-04-21 10:30:32.288] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 14/50, Queue: 0, Backoff: 0, JobsDone: 433, jobs/s: 433
+[2026-04-21 10:30:32.288] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 9/50, Queue: 0, Backoff: 0, JobsDone: 381, jobs/s: 381
+[2026-04-21 10:30:32.343] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 10/50, Queue: 0, Backoff: 0, JobsDone: 98, jobs/s: 98
+[2026-04-21 10:30:33.280] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 8/50, Queue: 0, Backoff: 0, JobsDone: 57, jobs/s: 57
+[2026-04-21 10:30:33.288] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 12/50, Queue: 0, Backoff: 0, JobsDone: 8, jobs/s: 8
+[2026-04-21 10:30:33.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 9/50, Queue: 0, Backoff: 0, JobsDone: 84, jobs/s: 84
+[2026-04-21 10:30:33.350] [info] [Worker 3] [libqueen] EVL: 14ms, Slots: 3/50, Queue: 0, Backoff: 0, JobsDone: 22, jobs/s: 22
+[2026-04-21 10:30:34.281] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 6/50, Queue: 1, Backoff: 0, JobsDone: 160, jobs/s: 160
+[2026-04-21 10:30:34.288] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 8/50, Queue: 0, Backoff: 0, JobsDone: 127, jobs/s: 127
+[2026-04-21 10:30:34.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 8/50, Queue: 0, Backoff: 0, JobsDone: 171, jobs/s: 171
+[2026-04-21 10:30:34.349] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 18, jobs/s: 18
+[2026-04-21 10:30:34.687] [info] StatsService: cycle completed in 1037ms
+[2026-04-21 10:30:35.282] [info] [Worker 1] [libqueen] EVL: 3ms, Slots: 7/50, Queue: 0, Backoff: 0, JobsDone: 205, jobs/s: 205
+[2026-04-21 10:30:35.288] [info] [Worker 0] [libqueen] EVL: 3ms, Slots: 8/50, Queue: 0, Backoff: 0, JobsDone: 145, jobs/s: 145
+[2026-04-21 10:30:35.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 11/50, Queue: 0, Backoff: 0, JobsDone: 233, jobs/s: 233
+[2026-04-21 10:30:35.349] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:30:36.283] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 8/50, Queue: 0, Backoff: 0, JobsDone: 304, jobs/s: 304
+[2026-04-21 10:30:36.288] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 11/50, Queue: 0, Backoff: 0, JobsDone: 321, jobs/s: 321
+[2026-04-21 10:30:36.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 13/50, Queue: 12, Backoff: 0, JobsDone: 325, jobs/s: 325
+[2026-04-21 10:30:36.349] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 6/50, Queue: 0, Backoff: 0, JobsDone: 47, jobs/s: 47
+[2026-04-21 10:30:37.282] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 9/50, Queue: 0, Backoff: 0, JobsDone: 450, jobs/s: 450
+[2026-04-21 10:30:37.288] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 13/50, Queue: 0, Backoff: 0, JobsDone: 329, jobs/s: 329
+[2026-04-21 10:30:37.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 15/50, Queue: 0, Backoff: 0, JobsDone: 258, jobs/s: 258
+[2026-04-21 10:30:37.349] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 7/50, Queue: 0, Backoff: 0, JobsDone: 52, jobs/s: 52
+[2026-04-21 10:30:38.283] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 10/50, Queue: 0, Backoff: 0, JobsDone: 560, jobs/s: 560
+[2026-04-21 10:30:38.288] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 15/50, Queue: 0, Backoff: 0, JobsDone: 579, jobs/s: 579
+[2026-04-21 10:30:38.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 17/50, Queue: 0, Backoff: 0, JobsDone: 261, jobs/s: 261
+[2026-04-21 10:30:38.349] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 14/50, Queue: 0, Backoff: 0, JobsDone: 138, jobs/s: 138
+[2026-04-21 10:30:39.283] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 11/50, Queue: 0, Backoff: 0, JobsDone: 733, jobs/s: 733
+[2026-04-21 10:30:39.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 15/50, Queue: 0, Backoff: 0, JobsDone: 93, jobs/s: 93
+[2026-04-21 10:30:39.290] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 14/50, Queue: 0, Backoff: 0, JobsDone: 143, jobs/s: 143
+[2026-04-21 10:30:39.350] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 15/50, Queue: 5, Backoff: 0, JobsDone: 82, jobs/s: 82
+[2026-04-21 10:30:40.285] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 12/50, Queue: 0, Backoff: 0, JobsDone: 473, jobs/s: 473
+[2026-04-21 10:30:40.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 16/50, Queue: 1, Backoff: 0, JobsDone: 151, jobs/s: 151
+[2026-04-21 10:30:40.290] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 13/50, Queue: 0, Backoff: 0, JobsDone: 182, jobs/s: 182
+[2026-04-21 10:30:40.349] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 15/50, Queue: 0, Backoff: 0, JobsDone: 102, jobs/s: 102
+[2026-04-21 10:30:41.286] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 12/50, Queue: 0, Backoff: 0, JobsDone: 224, jobs/s: 224
+[2026-04-21 10:30:41.290] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 13/50, Queue: 0, Backoff: 0, JobsDone: 161, jobs/s: 161
+[2026-04-21 10:30:41.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 17/50, Queue: 0, Backoff: 0, JobsDone: 150, jobs/s: 150
+[2026-04-21 10:30:41.350] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 14/50, Queue: 0, Backoff: 0, JobsDone: 115, jobs/s: 115
+[2026-04-21 10:30:42.286] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 9/50, Queue: 1, Backoff: 0, JobsDone: 200, jobs/s: 200
+[2026-04-21 10:30:42.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 17/50, Queue: 0, Backoff: 0, JobsDone: 156, jobs/s: 156
+[2026-04-21 10:30:42.291] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 15/50, Queue: 0, Backoff: 0, JobsDone: 165, jobs/s: 165
+[2026-04-21 10:30:42.351] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 12/50, Queue: 0, Backoff: 0, JobsDone: 152, jobs/s: 152
+[2026-04-21 10:30:43.286] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 6/50, Queue: 0, Backoff: 0, JobsDone: 109, jobs/s: 109
+[2026-04-21 10:30:43.290] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 14/50, Queue: 0, Backoff: 0, JobsDone: 16, jobs/s: 16
+[2026-04-21 10:30:43.307] [error] [Worker 2] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:43.308] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:43.311] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:43.350] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 8/50, Queue: 0, Backoff: 0, JobsDone: 15, jobs/s: 15
+[2026-04-21 10:30:43.613] [info] Failover: Processing 10 events from failover_019daf28-db28-7001-894f-a25d3611633a.buf in 1 batches (db_healthy=true, duplicate key errors are normal during recovery)
+[2026-04-21 10:30:44.286] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 6/50, Queue: 1, Backoff: 0, JobsDone: 13, jobs/s: 13
+[2026-04-21 10:30:44.295] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 10/50, Queue: 0, Backoff: 0, JobsDone: 16, jobs/s: 16
+[2026-04-21 10:30:44.351] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 7/50, Queue: 0, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:30:45.287] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 4/50, Queue: 0, Backoff: 0, JobsDone: 11, jobs/s: 11
+[2026-04-21 10:30:45.296] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 9/50, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:30:45.351] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 8/50, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:30:45.763] [warning] [Worker 2] [libqueen] Event loop lag is too high: 2459ms, expected: 5ms
+[2026-04-21 10:30:45.763] [info] [Worker 2] [libqueen] EVL: 2454ms, Slots: 14/50, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:30:46.287] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 3/50, Queue: 0, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:30:46.296] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 6/50, Queue: 0, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:30:46.352] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 5/50, Queue: 0, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:30:46.764] [info] [Worker 2] [libqueen] EVL: 3ms, Slots: 11/50, Queue: 0, Backoff: 0, JobsDone: 50, jobs/s: 50
+[2026-04-21 10:30:47.287] [info] [Worker 1] [libqueen] EVL: 85ms, Slots: 2/50, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:30:47.546] [warning] [Worker 1] [libqueen] Event loop lag is too high: 134ms, expected: 5ms
+[2026-04-21 10:30:48.036] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:48.037] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:48.038] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:48.789] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 5/50, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:30:49.073] [warning] [Worker 0] [libqueen] Event loop lag is too high: 1041ms, expected: 5ms
+[2026-04-21 10:30:49.073] [info] [Worker 0] [libqueen] EVL: 1036ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 10:30:49.074] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:49.076] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:49.076] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:49.077] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:49.077] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:49.079] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:49.079] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:49.288] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:30:49.351] [warning] [Worker 0] [libqueen] Event loop lag is too high: 278ms, expected: 5ms
+[2026-04-21 10:30:49.354] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 3, jobs/s: 3
+[2026-04-21 10:30:49.738] [info] StatsService: cycle completed in 6087ms
+[2026-04-21 10:30:49.790] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 3/50, Queue: 0, Backoff: 0, JobsDone: 48, jobs/s: 48
+[2026-04-21 10:30:49.813] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:49.814] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:49.814] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:49.815] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:49.815] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:49.815] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:49.816] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:50.073] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 1/50, Queue: 0, Backoff: 0, JobsDone: 42, jobs/s: 42
+[2026-04-21 10:30:50.288] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 17, jobs/s: 17
+[2026-04-21 10:30:50.355] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 6, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:30:50.756] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:50.756] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:50.756] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:50.757] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:50.757] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:50.757] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:50.757] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:50.758] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:50.758] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:50.758] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:50.758] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:50.790] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 2/50, Queue: 0, Backoff: 0, JobsDone: 53, jobs/s: 53
+[2026-04-21 10:30:51.289] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 1, Backoff: 0, JobsDone: 70, jobs/s: 70
+[2026-04-21 10:30:51.321] [error] [Worker 2] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.322] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.322] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.355] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 13, jobs/s: 13
+[2026-04-21 10:30:51.431] [warning] [Worker 2] [libqueen] Event loop lag is too high: 110ms, expected: 5ms
+[2026-04-21 10:30:51.456] [warning] [Worker 0] [libqueen] Event loop lag is too high: 701ms, expected: 5ms
+[2026-04-21 10:30:51.457] [info] [Worker 0] [libqueen] EVL: 696ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 27, jobs/s: 27
+[2026-04-21 10:30:51.457] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.458] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.459] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.460] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.460] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.460] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.460] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while locking tuple (45,25) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.461] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.461] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.462] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.462] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.462] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.473] [info] Failover: Progress 10/10 events (100.0%)
+[2026-04-21 10:30:51.474] [info] Failover: Completed 10 events in 7860ms (1 events/sec) - file removed
+[2026-04-21 10:30:51.666] [info] Failover: Processing 180 events from failover_019daf29-c59c-7000-b88c-d33ba7d75fb3.buf in 2 batches (db_healthy=true, duplicate key errors are normal during recovery)
+[2026-04-21 10:30:51.710] [error] [Worker 1] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.710] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.710] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.710] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.711] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.711] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.711] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.711] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.711] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.711] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.712] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.712] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.712] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.712] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:51.713] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:51.790] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 2, Backoff: 0, JobsDone: 40, jobs/s: 40
+[2026-04-21 10:30:52.110] [error] [Worker 1] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:52.110] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:52.110] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:52.181] [error] [Worker 3] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:52.182] [warning] [Worker 3] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  while inserting index tuple (45,51) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:52.182] [info] [Worker 3] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:52.233] [warning] [Worker 1] [libqueen] Event loop lag is too high: 128ms, expected: 5ms
+[2026-04-21 10:30:52.289] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 50, jobs/s: 50
+[2026-04-21 10:30:52.427] [warning] [Worker 3] [libqueen] Event loop lag is too high: 247ms, expected: 5ms
+[2026-04-21 10:30:52.428] [info] [Worker 3] [libqueen] EVL: 242ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 15, jobs/s: 15
+[2026-04-21 10:30:52.454] [error] [Worker 1] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:52.454] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:52.455] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:52.455] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:52.456] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:52.456] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 6, Backoff: 0, JobsDone: 31, jobs/s: 31
+[2026-04-21 10:30:52.574] [warning] [Worker 1] [libqueen] Event loop lag is too high: 125ms, expected: 5ms
+[2026-04-21 10:30:52.790] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 69, jobs/s: 69
+[2026-04-21 10:30:53.290] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 19, jobs/s: 19
+[2026-04-21 10:30:53.427] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/50, Queue: 0, Backoff: 0, JobsDone: 46, jobs/s: 46
+[2026-04-21 10:30:53.456] [info] [Worker 0] [libqueen] EVL: 2ms, Slots: 0/50, Queue: 4, Backoff: 0, JobsDone: 42, jobs/s: 42
+[2026-04-21 10:30:53.704] [error] [Worker 1] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:53.704] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:53.705] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:53.705] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:53.705] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:53.794] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 1, Backoff: 0, JobsDone: 46, jobs/s: 46
+[2026-04-21 10:30:54.283] [warning] [Worker 1] [libqueen] Event loop lag is too high: 584ms, expected: 5ms
+[2026-04-21 10:30:54.301] [info] [Worker 1] [libqueen] EVL: 10ms, Slots: 1/50, Queue: 0, Backoff: 0, JobsDone: 32, jobs/s: 32
+[2026-04-21 10:30:54.427] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/50, Queue: 0, Backoff: 0, JobsDone: 25, jobs/s: 25
+[2026-04-21 10:30:54.456] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 13, Backoff: 0, JobsDone: 11, jobs/s: 11
+[2026-04-21 10:30:54.516] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:54.577] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:54.578] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:54.578] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:54.579] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:54.579] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:54.580] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:54.580] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:54.581] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:54.581] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:54.581] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:54.802] [info] [Worker 2] [libqueen] EVL: 24ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:30:54.932] [warning] [Worker 0] [libqueen] Event loop lag is too high: 420ms, expected: 5ms
+[2026-04-21 10:30:55.299] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 1, Backoff: 0, JobsDone: 21, jobs/s: 21
+[2026-04-21 10:30:55.428] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 1/50, Queue: 12, Backoff: 0, JobsDone: 55, jobs/s: 55
+[2026-04-21 10:30:55.456] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 1, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:30:55.472] [error] [Worker 2] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:55.472] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:55.473] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:55.667] [warning] [Worker 2] [libqueen] Event loop lag is too high: 199ms, expected: 5ms
+[2026-04-21 10:30:55.802] [info] [Worker 2] [libqueen] EVL: 1ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:30:56.298] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 1, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:30:56.428] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 41, jobs/s: 41
+[2026-04-21 10:30:56.457] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 2/50, Queue: 0, Backoff: 0, JobsDone: 23, jobs/s: 23
+[2026-04-21 10:30:56.803] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 0/50, Queue: 0, Backoff: 0, JobsDone: 55, jobs/s: 55
+[2026-04-21 10:30:56.803] [info] StatsService: cycle completed in 3146ms
+[2026-04-21 10:30:57.299] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 1/50, Queue: 0, Backoff: 0, JobsDone: 76, jobs/s: 76
+[2026-04-21 10:30:57.429] [info] [Worker 3] [libqueen] EVL: 1ms, Slots: 5/50, Queue: 12, Backoff: 0, JobsDone: 126, jobs/s: 126
+[2026-04-21 10:30:57.457] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 1/50, Queue: 0, Backoff: 0, JobsDone: 75, jobs/s: 75
+[2026-04-21 10:30:57.803] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 4/50, Queue: 0, Backoff: 0, JobsDone: 103, jobs/s: 103
+[2026-04-21 10:30:58.299] [info] [Worker 1] [libqueen] EVL: 3ms, Slots: 1/50, Queue: 0, Backoff: 0, JobsDone: 75, jobs/s: 75
+[2026-04-21 10:30:58.375] [error] [Worker 3] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:58.375] [warning] [Worker 3] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:58.377] [info] [Worker 3] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:58.457] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 8/50, Queue: 0, Backoff: 0, JobsDone: 64, jobs/s: 64
+[2026-04-21 10:30:58.548] [warning] [Worker 3] [libqueen] Event loop lag is too high: 176ms, expected: 5ms
+[2026-04-21 10:30:58.548] [info] [Worker 3] [libqueen] EVL: 171ms, Slots: 7/50, Queue: 0, Backoff: 0, JobsDone: 148, jobs/s: 148
+[2026-04-21 10:30:58.803] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 20/50, Queue: 0, Backoff: 0, JobsDone: 33, jobs/s: 33
+[2026-04-21 10:30:59.207] [error] [Worker 3] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:59.207] [warning] [Worker 3] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:59.208] [info] [Worker 3] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:59.300] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 32/50, Queue: 0, Backoff: 0, JobsDone: 59, jobs/s: 59
+[2026-04-21 10:30:59.458] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 30/50, Queue: 0, Backoff: 0, JobsDone: 31, jobs/s: 31
+[2026-04-21 10:30:59.531] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:59.531] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:30:59.532] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:30:59.549] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 35/50, Queue: 0, Backoff: 0, JobsDone: 54, jobs/s: 54
+[2026-04-21 10:30:59.803] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 34/50, Queue: 0, Backoff: 0, JobsDone: 24, jobs/s: 24
+[2026-04-21 10:31:00.081] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:00.081] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:00.082] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:31:00.089] [error] [Worker 1] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:00.089] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:00.089] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:31:00.089] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:00.090] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:31:00.202] [error] [Worker 2] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:00.205] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:00.205] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:31:00.301] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 37/50, Queue: 0, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:31:00.315] [error] [Worker 0] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:00.316] [warning] [Worker 0] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:00.316] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:31:00.458] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 43/50, Queue: 0, Backoff: 0, JobsDone: 20, jobs/s: 20
+[2026-04-21 10:31:00.548] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 47/50, Queue: 0, Backoff: 0, JobsDone: 17, jobs/s: 17
+[2026-04-21 10:31:00.804] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 42/50, Queue: 0, Backoff: 0, JobsDone: 13, jobs/s: 13
+[2026-04-21 10:31:01.038] [error] [Worker 1] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:01.040] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:01.040] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:31:01.040] [warning] [Worker 1] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:01.041] [info] [Worker 1] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:31:01.301] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 42/50, Queue: 0, Backoff: 0, JobsDone: 13, jobs/s: 13
+[2026-04-21 10:31:01.458] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 47/50, Queue: 0, Backoff: 0, JobsDone: 10, jobs/s: 10
+[2026-04-21 10:31:01.548] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 49/50, Queue: 0, Backoff: 0, JobsDone: 5, jobs/s: 5
+[2026-04-21 10:31:01.737] [error] [Worker 2] [libqueen] Query failed: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:01.740] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:01.740] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:31:01.741] [warning] [Worker 2] PUSH: Database error detected: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+    SELECT message_id, transaction_id, partition_id, payload, trace_id, is_encrypted
+    FROM tmp_items
+    WHERE NOT COALESCE(is_duplicate, false)"
+PL/pgSQL function queen.push_messages_v2(jsonb,boolean,boolean) line 58 at SQL statement
+
+[2026-04-21 10:31:01.742] [info] [Worker 2] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 10:31:01.804] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 49/50, Queue: 0, Backoff: 0, JobsDone: 19, jobs/s: 19
+[2026-04-21 10:31:02.301] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 50/50, Queue: 0, Backoff: 0, JobsDone: 16, jobs/s: 16
+[2026-04-21 10:31:02.458] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 50/50, Queue: 0, Backoff: 0, JobsDone: 9, jobs/s: 9
+[2026-04-21 10:31:02.549] [info] [Worker 3] [libqueen] EVL: 0ms, Slots: 50/50, Queue: 0, Backoff: 0, JobsDone: 4, jobs/s: 4
+[2026-04-21 10:31:02.804] [info] [Worker 2] [libqueen] EVL: 0ms, Slots: 50/50, Queue: 0, Backoff: 0, JobsDone: 2, jobs/s: 2
+[2026-04-21 10:31:03.310] [info] Received signal 15, shutting down...
+[2026-04-21 10:31:03.311] [info] Exiting (worker threads will be terminated by OS)

@@ -1,0 +1,102 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 31K of event 'cpu-clock'
+# Event count (approx.): 31871871840
+#
+# Overhead  Command          Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+# ........  ...............  .....................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+     4.43%  tokio-rt-worker  [.] 0x00000000001a19d2
+     3.12%  tokio-rt-worker  [.] _mi_page_malloc_zero
+     2.78%  tokio-rt-worker  [.] ZSTD_decompressSequences_bmi2.constprop.0
+     2.68%  tokio-rt-worker  [.] mi_free
+     2.57%  tokio-rt-worker  [.] <serde_json::read::SliceRead>::skip_to_escape
+     2.35%  tokio-rt-worker  [.] _mi_page_free_collect
+     1.62%  tokio-rt-worker  [.] <queen::rsm::facade::real::RaftFacade>::push_inputs::{closure#0}
+     1.26%  tokio-rt-worker  [k] finish_task_switch.isra.0
+     1.22%  tokio-rt-worker  [.] <serde_json::read::SliceRead as serde_json::read::Read>::parse_str
+     1.20%  tokio-rt-worker  [.] <serde_json::de::Deserializer<serde_json::read::SliceRead>>::ignore_value
+     1.18%  tokio-rt-worker  [k] handle_softirqs
+     1.16%  tokio-rt-worker  [.] <serde_json::read::SliceRead as serde_json::read::Read>::ignore_str
+     1.11%  tokio-rt-worker  [k] _copy_to_iter
+     1.11%  queen-raft-log   [k] kernel_init_pages
+     1.03%  queen-raft       [.] ZSTD_decompressSequences_bmi2.constprop.0
+     0.97%  queen-raft       [.] 0x00000000001a19d2
+     0.92%  tokio-rt-worker  [.] core::str::converts::from_utf8
+     0.87%  tokio-rt-worker  [k] _raw_spin_unlock_irqrestore
+     0.86%  tokio-rt-worker  [k] kernel_init_pages
+     0.85%  tokio-rt-worker  [.] tokio::runtime::scheduler::multi_thread::worker::run
+     0.83%  queen-rsm-apply  [.] <queen::rsm::store::heed_store::HeedStore>::ram_put
+     0.80%  queen-rsm-apply  [.] std::sys::backtrace::__rust_begin_short_backtrace::<<queen::rsm::apply::shard::Pool>::new::{closure#1}, ()>
+     0.79%  queen-rsm-apply  [.] <alloc::collections::btree::map::BTreeMap<queen::rsm::store::ram::RamKey, alloc::sync::Arc<[u8]>>>::entry
+     0.75%  queen-raft       [k] _copy_to_iter
+     0.74%  tokio-rt-worker  [.] <queen::rsm::facade::real::RaftFacade>::ack_impl::{closure#0}
+     0.73%  queen-raft-log   [.] 0x00000000001a19d2
+     0.67%  queen-raft       [.] <queen::rsm::entry::Outcome>::decode_body
+     0.66%  tokio-rt-worker  [.] <core::marker::PhantomData<alloc::vec::Vec<queen::rsm::facade::real::AckBodyItem>> as serde_core::de::DeserializeSeed>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::SliceRead>>
+     0.65%  tokio-rt-worker  [.] 0x00000000001a16b3
+     0.56%  queen-rsm-ckpt   [k] copy_folio_from_iter_atomic
+     0.55%  tokio-rt-worker  [.] 0x00000000001986c6
+     0.48%  queen-rsm-ckpt   [.] xxhash_rust::xxh3::hash_long_internal_loop
+     0.46%  queen-rsm-apply  [.] <hashbrown::map::HashMap<queen::rsm::store::ram::RamKey, core::option::Option<alloc::sync::Arc<[u8]>>, core::hash::BuildHasherDefault<queen::rsm::fasthash::FxHasher>>>::get_mut::<[u8]>
+     0.46%  tokio-rt-worker  [.] <queen::rsm::replicator::node::NodeReplicator<queen::rsm::store::heed_store::HeedStore>>::forward_command::{closure#0}
+     0.45%  queen-rsm-apply  [.] <queen::rsm::entry::Outcome>::encode_body
+     0.45%  queen-rsm-apply  [.] 0x00000000001986a5
+     0.45%  tokio-rt-worker  [.] ZSTD_decompressMultiFrame
+     0.44%  tokio-rt-worker  [.] ZSTD_buildFSETable_body_bmi2.constprop.0
+     0.44%  tokio-rt-worker  [.] <[u8; 16] as serde_core::ser::Serialize>::serialize::<&mut postcard::ser::serializer::Serializer<postcard::ser::flavors::alloc_vec::AllocVec>>
+     0.44%  tokio-rt-worker  [.] tokio::runtime::task::harness::poll_future::<tokio::runtime::blocking::task::BlockingTask<<queen::rsm::facade::real::RaftFacade>::resolve_acks_once::{closure#0}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>
+     0.41%  tokio-rt-worker  [.] bytes::bytes::promotable_even_clone
+     0.41%  tokio-rt-worker  [k] check_heap_object
+     0.41%  tokio-rt-worker  [.] xxhash_rust::xxh3::hash_long_internal_loop
+     0.41%  tokio-rt-worker  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.38%  tokio-rt-worker  [.] queen::util::txn_hash128
+     0.38%  tokio-rt-worker  [k] _copy_from_iter
+     0.38%  tokio-rt-worker  [.] bytes::bytes::shared_drop
+     0.37%  queen-rsm-apply  [.] queen::rsm::store::keys::push_name
+     0.37%  tokio-rt-worker  [.] <axum::serve::WithGracefulShutdown<axum::routing::Router, axum::routing::Router, queen::run_raft::{closure#0}::{closure#1}> as core::future::into_future::IntoFuture>::into_future::{closure#1}::{closure#4}
+     0.37%  queen-raft-log   [.] xxhash_rust::xxh3::hash_long_internal_loop
+     0.36%  queen-rsm-apply  [.] _mi_page_malloc_zero
+     0.35%  tokio-rt-worker  [.] 0x00000000001a1653
+     0.35%  queen-raft-log   [k] copy_folio_from_iter_atomic
+     0.34%  tokio-rt-worker  [.] <queen::rsm::entry::Outcome>::decode_body
+     0.33%  queen-raft       [k] finish_task_switch.isra.0
+     0.32%  tokio-rt-worker  [.] mi_theap_malloc_aligned
+     0.31%  tokio-rt-worker  [.] <queen::rsm::facade::real::RaftFacade>::push_impl::{closure#0}
+     0.30%  queen-rsm-ckpt   [k] kernel_init_pages
+     0.30%  tokio-rt-worker  [.] <queen::rsm::facade::real::RaftFacade>::resolve_acks::{closure#0}
+     0.29%  tokio-rt-worker  [.] <hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+     0.29%  tokio-rt-worker  [.] <serde_json::de::Deserializer<serde_json::read::SliceRead>>::ignore_integer
+     0.29%  queen-raft       [k] handle_softirqs
+     0.28%  tokio-rt-worker  [.] <axum::middleware::from_fn::FromFn<queen::handlers::raft::forward_to_leader, alloc::sync::Arc<queen::handlers::AppState>, axum::routing::route::Route, (axum::extract::state::State<alloc::sync::Arc<queen::handlers::AppState>>, http::request::Request<axum_core::body::Body>)> as tower_service::Service<http::request::Request<axum_core::body::Body>>>::call::{closure#0}
+     0.28%  tokio-rt-worker  [.] 0x000000000000099a
+     0.27%  tokio-rt-worker  [.] HUF_readDTableX2_wksp
+     0.27%  tokio-rt-worker  [.] queen::frames::uuid_bytes_to_string
+     0.27%  queen-raft       [k] _raw_spin_unlock_irqrestore
+     0.25%  tokio-rt-worker  [.] <tower::util::map_response::MapResponseFuture<tower::util::map_err::MapErrFuture<tower::util::map_response::MapResponseFuture<axum::middleware::from_fn::ResponseFuture, <http::response::Response<axum_core::body::Body> as axum_core::response::into_response::IntoResponse>::into_response>, <core::convert::Infallible as core::convert::Into<core::convert::Infallible>>::into>, <http::response::Response<axum_core::body::Body> as axum_core::response::into_response::IntoResponse>::into_response> as core::future::future::Future>::poll
+     0.25%  tokio-rt-worker  [.] core::ptr::drop_glue::<alloc::vec::Vec<queen::rsm::facade::real::AckBodyItem>>
+     0.25%  queen-rsm-apply  [.] 0x000000000019869e
+     0.25%  tokio-rt-worker  [.] <queen::rsm::facade::real::RaftFacade>::submit_offloaded::{closure#0}
+     0.24%  tokio-rt-worker  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+     0.24%  tokio-rt-worker  [.] core::ptr::drop_glue::<queen::rsm::facade::real::PushResolved>
+     0.23%  tokio-rt-worker  [.] <axum::routing::route::Route as core::clone::Clone>::clone
+     0.23%  queen-rsm-apply  [.] <queen::rsm::store::ram::TreeRows>::put_in_map
+     0.23%  queen-raft       [.] core::ptr::drop_glue::<queen::rsm::entry::Outcome>
+     0.23%  queen-rsm-apply  [.] <hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, i64, core::hash::BuildHasherDefault<queen::rsm::fasthash::FxHasher>>>::get_mut::<[u8]>
+     0.22%  tokio-rt-worker  [.] <queen::handlers::data::handle_push as axum::handler::Handler<(axum_core::extract::private::ViaRequest, axum::extract::state::State<alloc::sync::Arc<queen::handlers::AppState>>, axum::extension::Extension<queen::auth::AuthedSub>, axum::extension::Extension<queen::tenant::Tenant>, bytes::bytes::Bytes), alloc::sync::Arc<queen::handlers::AppState>>>::call::{closure#0}
+     0.22%  tokio-rt-worker  [.] _mi_malloc_generic
+     0.22%  tokio-rt-worker  [.] queen::rsm::facade::real::client_frames
+     0.22%  queen-rsm-apply  [.] core::ptr::drop_glue::<<queen::rsm::apply::shard::Pool>::scope::WaitAll>
+     0.22%  tokio-rt-worker  [.] <axum::middleware::from_fn::FromFn<queen::handlers::raft::refuse_reserved_tenant, (), axum::routing::route::Route, (http::request::Request<axum_core::body::Body>,)> as tower_service::Service<http::request::Request<axum_core::body::Body>>>::call::{closure#0}
+     0.21%  tokio-rt-worker  [.] <axum::middleware::from_fn::FromFn<queen::auth::auth_middleware, alloc::sync::Arc<queen::auth::Authenticator>, axum::routing::route::Route, (axum::extract::state::State<alloc::sync::Arc<queen::auth::Authenticator>>, http::request::Request<axum_core::body::Body>)> as tower_service::Service<http::request::Request<axum_core::body::Body>>>::call::{closure#0}
+     0.21%  tokio-rt-worker  [.] <axum::middleware::from_fn::FromFn<queen::handlers::raft::admit_edge, (), axum::routing::route::Route, (http::request::Request<axum_core::body::Body>,)> as tower_service::Service<http::request::Request<axum_core::body::Body>>>::call::{closure#0}
+     0.21%  tokio-rt-worker  [.] <parking_lot::condvar::Condvar>::wait_until_internal
+     0.21%  tokio-rt-worker  [.] <tower::util::map_response::MapResponseFuture<axum::routing::route::RouteFuture<core::convert::Infallible>, <http::response::Response<axum_core::body::Body> as axum_core::response::into_response::IntoResponse>::into_response> as core::future::future::Future>::poll
+     0.20%  queen-rsm-ckpt   [.] queen::rsm::store::integrity::open
+     0.20%  tokio-rt-worker  [.] syscall
+#
+# (Cannot load tips.txt file, please install perf!)
+#

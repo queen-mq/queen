@@ -1,0 +1,3 @@
+[07:23:26] omb: run fB-nr1-topicwake-l1-p100-500k: system queen-facade, driver queen-facade.yaml, workload 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+[07:23:30] omb: 2 workers up
+fB-nr1-topicwake-l1-p100-500k [queen-facade] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 4,418 | pub p50/p99/p99.9 6.7/19.3/25.2 ms | e2e p50/p99/p99.9 9.0/32.0/55.0 ms (max 88.0) | brokers 8.3 cores, disk write 242/242/243 MB/s
