@@ -1,0 +1,1 @@
+{"status":"healthy","engine":"raft","version":"2.3.0","raft":{"role":"leader","leader":true,"term":2,"applied":137868,"commit":137907,"lag":0,"quorumAckMs":60,"storageReady":true,"clusterVersion":6,"kinds":6,"apply":[{"apply":{"failure":null,"skipped":[]},"group":0},{"apply":{"failure":null,"skipped":[]},"group":1},{"apply":{"failure":null,"skipped":[]},"group":2}]}}

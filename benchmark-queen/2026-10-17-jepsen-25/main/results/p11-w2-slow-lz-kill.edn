@@ -1,0 +1,157 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final nil,
+          :member-removals {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches ()},
+ :lazyfs {:valid? true,
+          :max-usage-pct 2.050018310546875,
+          :nodes {"n1" {:max-usage-pct 1.25885009765625,
+                        :clears 5,
+                        :lossy-clears 5,
+                        :lost-bytes 662570},
+                  "n2" {:max-usage-pct 0.812530517578125,
+                        :clears 6,
+                        :lossy-clears 6,
+                        :lost-bytes 855463},
+                  "n3" {:max-usage-pct 1.146697998046875,
+                        :clears 4,
+                        :lossy-clears 4,
+                        :lost-bytes 539915},
+                  "n4" {:max-usage-pct 1.46026611328125,
+                        :clears 4,
+                        :lossy-clears 4,
+                        :lost-bytes 576437},
+                  "n5" {:max-usage-pct 2.050018310546875,
+                        :clears 2,
+                        :lossy-clears 2,
+                        :lost-bytes 279850}}},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:total-queue {:ok-count 11232,
+                          :duplicated-count 0,
+                          :valid? true,
+                          :lost-count 0,
+                          :lost #{},
+                          :acknowledged-count 11172,
+                          :recovered #{3616
+                                       22384
+                                       10953
+                                       10593
+                                       22925
+                                       23262
+                                       7158
+                                       2556
+                                       7919
+                                       7723
+                                       6325
+                                       19745
+                                       7520
+                                       15089
+                                       22443
+                                       6078
+                                       8239
+                                       2900
+                                       8421
+                                       23186
+                                       2892
+                                       6329
+                                       19743
+                                       8749
+                                       10954
+                                       10619
+                                       23472
+                                       13544
+                                       3633
+                                       10178
+                                       22907
+                                       10995
+                                       2552
+                                       22114
+                                       3768
+                                       15087
+                                       6826
+                                       7280
+                                       22806
+                                       19330
+                                       13273
+                                       13157
+                                       13542
+                                       24059
+                                       9
+                                       11006
+                                       3293
+                                       19335
+                                       22647
+                                       23626
+                                       4076
+                                       6652
+                                       4110
+                                       24237
+                                       10115
+                                       7113
+                                       10831
+                                       3238
+                                       13556
+                                       11049},
+                          :attempt-count 24510,
+                          :unexpected #{},
+                          :unexpected-count 0,
+                          :recovered-count 60,
+                          :duplicated #{}},
+            :queue {:lease-overlaps (),
+                    :payload-mismatch (),
+                    :valid? true,
+                    :noop-ack-examples (),
+                    :acked-twice (),
+                    :acked-twice-count 0,
+                    :lease-overlap-count 0,
+                    :partial-acks 0,
+                    :acked 11230,
+                    :redeliveries 60,
+                    :pop-skips (),
+                    :offset-value-mismatch (),
+                    :ack-unknown 2,
+                    :pop-skip-count 0,
+                    :noop-acks 0,
+                    :deliveries 11233,
+                    :pop-internal-gaps (),
+                    :redelivered-after-ack-count 0,
+                    :ack-rejected 1,
+                    :redelivered-after-ack ()},
+            :valid? true},
+ :stats {:valid? true,
+         :count 48920,
+         :ok-count 22045,
+         :fail-count 26812,
+         :info-count 63,
+         :by-f {:dequeue {:valid? true,
+                          :count 24410,
+                          :ok-count 10873,
+                          :fail-count 13536,
+                          :info-count 1},
+                :enqueue {:valid? true,
+                          :count 24510,
+                          :ok-count 11172,
+                          :fail-count 13276,
+                          :info-count 62}}}}

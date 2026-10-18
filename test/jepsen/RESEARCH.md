@@ -192,7 +192,7 @@ References: `S/rsm/facade/mod.rs:176-229`, `S/handlers/raft.rs:49-97`. Set the s
   - **kill:** `grepkill` the wrapper and the binary, then lose un-fsynced writes if lazyfs is on.
   - **pause:** SIGSTOP the binary only.
   - **primaries:** read `/health`. Do not use `/status` (it says "segments-rust") or `/api/v1/raft/status`, which hard-codes node 1.
-  - **logs:** `queen.log` (including restart lines), `raft/*.json`, `lazyfs.log`; add `log-file-pattern` for panics and `NA-QLOG-I1`.
+  - **logs:** `queen.log` (including restart lines), `raft/*.json`, `lazyfs.log`; check them for panics and `NA-QLOG-I1` (`panic-checker` in `core.clj`, which excuses the corrupt nemesis's own boot refusals).
   - `jepsen.db.watchdog` restarts on any death, which would hide crashes. The `run.sh` loop is better.
 - **What breaks on Ubuntu 24.04:**
   1. `jepsen.lazyfs/install!` hardcodes `libfuse3-4` (`lazyfs.clj:75`, a Debian 13 package). Noble ships `libfuse3-3` ([fuse3 3.14](https://packages.ubuntu.com/noble/fuse3)), so write our own installer and reuse `mount!` and `lose-unfsynced-writes!`.

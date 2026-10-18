@@ -1,0 +1,1665 @@
+[2026-04-21 14:08:51.639] [info] Queen C++ Message Queue Server (Acceptor/Worker Pattern)
+[2026-04-21 14:08:51.639] [info] Configuration:
+[2026-04-21 14:08:51.639] [info]   - Host: 0.0.0.0
+[2026-04-21 14:08:51.639] [info]   - Port: 6632
+[2026-04-21 14:08:51.639] [info]   - Database: 127.0.0.1:5434/queen
+[2026-04-21 14:08:51.639] [warning] Encryption disabled - QUEEN_ENCRYPTION_KEY not set
+[2026-04-21 14:08:51.639] [info] Encryption: disabled
+[2026-04-21 14:08:51.639] [info] JWT Authentication: DISABLED
+[2026-04-21 14:08:51.639] [info] Starting acceptor/worker pattern with 2 workers (hardware cores: 10)
+[2026-04-21 14:08:51.639] [info] Waiting for workers to initialize...
+[2026-04-21 14:08:51.639] [info] [Worker 1] Starting...
+[2026-04-21 14:08:51.639] [info] Initializing GLOBAL shared resources (ASYNC-ONLY MODE):
+[2026-04-21 14:08:51.639] [info]   - Total DB connections: 19 (95% of 20) - ALL ASYNC
+[2026-04-21 14:08:51.639] [info]   - DB ThreadPool size: 7 = 2 workers + 5 service
+[2026-04-21 14:08:51.639] [info]     * Queen instances: 2 (one per HTTP worker, each with own event loop)
+[2026-04-21 14:08:51.639] [info]     * Service DB threads: 5 (metrics, retention, eviction)
+[2026-04-21 14:08:51.639] [info]   - System ThreadPool threads: 4 (for background service scheduling)
+[2026-04-21 14:08:51.639] [info]   - Number of HTTP workers: 2
+[2026-04-21 14:08:51.639] [info] [Worker 0] Starting...
+[2026-04-21 14:08:51.639] [info]   - Creating Async DB Pool (19 connections) for ALL operations
+[2026-04-21 14:08:51.640] [info] [AsyncDbPool] Initializing 19 async connections...
+[2026-04-21 14:08:51.755] [info] [AsyncDbPool] Initialization complete. 19 connections ready.
+[2026-04-21 14:08:51.756] [info]   - Created response queue for worker 0 (poll workers)
+[2026-04-21 14:08:51.756] [info]   - Created response queue for worker 1 (poll workers)
+[2026-04-21 14:08:51.756] [info]   - Per-worker Queen instances will be created in each worker thread
+[2026-04-21 14:08:51.756] [info]   - Created response registry for worker 0 (lock-free across workers)
+[2026-04-21 14:08:51.756] [info]   - Created response registry for worker 1 (lock-free across workers)
+[2026-04-21 14:08:51.756] [info] SharedStateManager: Disabled (no UDP peers or sync disabled)
+[2026-04-21 14:08:51.756] [info] Shared State Manager configured: Sync disabled, queue config cache will be active
+[2026-04-21 14:08:51.756] [info] System info: hostname=alice.local, port=6632
+[2026-04-21 14:08:51.756] [info] Global shared resources initialized successfully
+[2026-04-21 14:08:51.756] [info] [Worker 1] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 14:08:51.756] [info] [Worker 0] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 14:08:51.756] [info] [Worker 0] Database connection: OK | Pool: 18/19 conn available
+[2026-04-21 14:08:51.756] [info] [Worker 0] Initializing database schema...
+[2026-04-21 14:08:51.756] [info] [Worker 1] Database connection: OK | Pool: 18/19 conn available
+[2026-04-21 14:08:51.756] [info] [Worker 1] Waiting for shared file buffer from Worker 0...
+[2026-04-21 14:08:51.756] [info] Initializing schema: queen
+[2026-04-21 14:08:51.763] [info] Running base schema initialization...
+NOTICE:  schema "queen" already exists, skipping
+NOTICE:  column "producer_sub" of relation "messages" already exists, skipping
+[2026-04-21 14:08:51.894] [info] Base schema applied successfully
+[2026-04-21 14:08:51.894] [info] Loading 15 stored procedure(s)...
+NOTICE:  function queen.is_stats_leader(text) does not exist, skipping
+NOTICE:  trigger "trg_update_worker_metrics_summary" for relation "queen.worker_metrics" does not exist, skipping
+[2026-04-21 14:08:51.943] [info] [Worker 0] Starting Shared State Manager...
+[2026-04-21 14:08:51.943] [info] SharedStateManager: Loading queue configs and maintenance modes from database...
+[2026-04-21 14:08:51.945] [info] SharedStateManager: Sync disabled, but queue config cache is available
+[2026-04-21 14:08:51.945] [info] [Worker 0] Registered MESSAGE_AVAILABLE callback for Queen instances
+[2026-04-21 14:08:51.945] [info] [Worker 0] Starting background metrics collector (sample: 1000ms, aggregate: 60s)...
+[2026-04-21 14:08:51.945] [info] MetricsCollector started: hostname=alice.local, port=6632, worker=cpp-worker-1, sampling every 1000ms, aggregating every 60s
+[2026-04-21 14:08:51.945] [info] [Worker 0] Starting background retention service...
+[2026-04-21 14:08:51.945] [info] RetentionService started: interval=300000ms, batch_size=1000, partition_cleanup_days=30, metrics_retention_days=90
+[2026-04-21 14:08:51.945] [info] [Worker 0] Starting background eviction service...
+[2026-04-21 14:08:51.945] [info] EvictionService started: interval=60000ms, batch_size=1000
+[2026-04-21 14:08:51.945] [info] [Worker 0] Starting background stats service...
+[2026-04-21 14:08:51.945] [info] StatsService started (queue/partition counts only): interval=10000ms, reconcile_interval=120000ms
+[2026-04-21 14:08:51.945] [info] [Worker 0] Creating SHARED file buffer manager (dir=/tmp/queen)...
+[2026-04-21 14:08:51.945] [info] RetentionService: Running cleanup cycle
+[2026-04-21 14:08:51.945] [info] FileBufferManager initializing: dir=/tmp/queen, recovery=true
+[2026-04-21 14:08:51.945] [info] Buffer directories ready: /tmp/queen
+[2026-04-21 14:08:51.945] [info] Starting recovery of buffered events...
+[2026-04-21 14:08:51.945] [info] StatsService: Running initial queue/partition stats refresh...
+[2026-04-21 14:08:51.945] [info] Deleting incomplete buffer file: qos0_019dafee-c2c4-7000-927a-b9c5746aab82.buf.tmp (only 0 bytes)
+[2026-04-21 14:08:51.945] [info] Deleting incomplete buffer file: failover_019dafee-c2c4-7001-9b97-224ac541c376.buf.tmp (only 0 bytes)
+[2026-04-21 14:08:51.945] [info] Starting recovery (max 3600s to avoid blocking server startup)...
+[2026-04-21 14:08:51.945] [info] Phase 1: Recovering failover events (FIFO order)...
+[2026-04-21 14:08:51.945] [info] Phase 2: Recovering QoS 0 events (batched)...
+[2026-04-21 14:08:51.945] [info] Startup recovery completed in 0ms: failover=0, qos0=0
+[2026-04-21 14:08:51.945] [info] Recovery complete
+[2026-04-21 14:08:51.945] [info] Buffer files initialized successfully
+[2026-04-21 14:08:51.945] [info] FileBufferManager ready
+[2026-04-21 14:08:51.945] [info] [Worker 0] File buffer ready - Pending: 0, Failed: 0, DB: healthy
+[2026-04-21 14:08:51.945] [info] [Worker 0] Sharing file buffer with other workers...
+[2026-04-21 14:08:51.945] [info] [Worker 0] File buffer shared successfully
+[2026-04-21 14:08:51.945] [info] [Worker 0] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 14:08:51.945] [info] [Worker 0] Creating uWS::App...
+[2026-04-21 14:08:51.945] [info] Background processor thread started
+[2026-04-21 14:08:51.945] [info] [Worker 1] Using shared file buffer from Worker 0
+[2026-04-21 14:08:51.945] [info] [Worker 1] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 14:08:51.945] [info] [Worker 1] Creating uWS::App...
+[2026-04-21 14:08:51.945] [info] [Worker 0] Creating per-worker Queen instance (100 connections, total pool split across 2 workers)...
+[2026-04-21 14:08:51.945] [info] [Worker 1] Creating per-worker Queen instance (100 connections, total pool split across 2 workers)...
+[2026-04-21 14:08:51.947] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 14:08:51.955] [info] RetentionService: cycle completed in 9ms
+[2026-04-21 14:08:51.963] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 0}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 0, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 14:08:51.972] [info] StatsService: cycle completed in 8ms
+[2026-04-21 14:08:52.446] [info] [Worker 1] Queen instance ready with 100 connections
+[2026-04-21 14:08:52.446] [info] [Worker 1] Registered Queen instance for UDP notifications
+[2026-04-21 14:08:52.446] [info] [Worker 1] Setting up routes...
+[2026-04-21 14:08:52.447] [warning] [Worker 1] Webapp directory not found - Static file serving disabled
+[2026-04-21 14:08:52.447] [warning] [Worker 1] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 14:08:52.447] [warning] [Worker 1] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 14:08:52.447] [info] [Worker 1] Routes configured
+[2026-04-21 14:08:52.447] [info] [Worker 1] Registered with acceptor
+[2026-04-21 14:08:52.447] [info] [Worker 1] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 14:08:52.447] [info] [Worker 1] Setting up response timer...
+[2026-04-21 14:08:52.447] [info] [Worker 1] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 14:08:52.448] [info] [Worker 0] Queen instance ready with 100 connections
+[2026-04-21 14:08:52.448] [info] [Worker 0] Registered Queen instance for UDP notifications
+[2026-04-21 14:08:52.448] [info] [Worker 0] Setting up routes...
+[2026-04-21 14:08:52.448] [warning] [Worker 0] Webapp directory not found - Static file serving disabled
+[2026-04-21 14:08:52.448] [warning] [Worker 0] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 14:08:52.448] [warning] [Worker 0] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 14:08:52.448] [info] [Worker 0] Routes configured
+[2026-04-21 14:08:52.448] [info] [Worker 0] Registered with acceptor
+[2026-04-21 14:08:52.448] [info] [Worker 0] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 14:08:52.448] [info] [Worker 0] Setting up response timer...
+[2026-04-21 14:08:52.448] [info] [Worker 0] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 14:08:52.468] [info] [Worker 0] [libqueen] Reconnection thread started
+[2026-04-21 14:08:52.469] [info] All 2 workers initialized in 829ms
+[2026-04-21 14:08:52.469] [info] Creating acceptor app...
+[2026-04-21 14:08:52.469] [info] Registered 2 worker apps with acceptor
+[2026-04-21 14:08:52.469] [info] Acceptor listening on 0.0.0.0:6632
+[2026-04-21 14:08:52.469] [info] Round-robin load balancing across 2 workers
+[2026-04-21 14:08:52.469] [info] Starting acceptor event loop...
+[2026-04-21 14:08:52.472] [info] [Worker 1] [libqueen] Reconnection thread started
+[2026-04-21 14:08:52.832] [info] [Worker 0] Configuring queue: perf-test via stored procedure
+[2026-04-21 14:08:53.467] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 0, Backoff: 0, JobsDone: 497, jobs/s: 497
+[2026-04-21 14:08:53.472] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 0, Backoff: 0, JobsDone: 510, jobs/s: 510
+[2026-04-21 14:08:54.467] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 0, Backoff: 0, JobsDone: 1225, jobs/s: 1225
+[2026-04-21 14:08:54.472] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 0, Backoff: 0, JobsDone: 1327, jobs/s: 1327
+[2026-04-21 14:08:55.468] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 96/100, Queue: 0, Backoff: 0, JobsDone: 2096, jobs/s: 2096
+[2026-04-21 14:08:55.472] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 0, Backoff: 0, JobsDone: 2044, jobs/s: 2044
+[2026-04-21 14:08:56.467] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 7, Backoff: 0, JobsDone: 2188, jobs/s: 2188
+[2026-04-21 14:08:56.472] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 0, Backoff: 0, JobsDone: 2060, jobs/s: 2060
+[2026-04-21 14:08:57.467] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 96/100, Queue: 4, Backoff: 0, JobsDone: 1947, jobs/s: 1947
+[2026-04-21 14:08:57.472] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 96/100, Queue: 6, Backoff: 0, JobsDone: 2014, jobs/s: 2014
+[2026-04-21 14:08:58.468] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 96/100, Queue: 0, Backoff: 0, JobsDone: 1877, jobs/s: 1877
+[2026-04-21 14:08:58.473] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 0, Backoff: 0, JobsDone: 1776, jobs/s: 1776
+[2026-04-21 14:08:59.468] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 6, Backoff: 0, JobsDone: 1730, jobs/s: 1730
+[2026-04-21 14:08:59.473] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 93/100, Queue: 0, Backoff: 0, JobsDone: 1837, jobs/s: 1837
+[2026-04-21 14:09:00.469] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 9, Backoff: 0, JobsDone: 1348, jobs/s: 1348
+[2026-04-21 14:09:00.473] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 7, Backoff: 0, JobsDone: 1432, jobs/s: 1432
+[2026-04-21 14:09:01.469] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 1099, jobs/s: 1099
+[2026-04-21 14:09:01.473] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 0, Backoff: 0, JobsDone: 1177, jobs/s: 1177
+[2026-04-21 14:09:02.014] [info] StatsService: cycle completed in 49ms
+[2026-04-21 14:09:02.470] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 92/100, Queue: 3, Backoff: 0, JobsDone: 1027, jobs/s: 1027
+[2026-04-21 14:09:02.473] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 0, Backoff: 0, JobsDone: 1044, jobs/s: 1044
+[2026-04-21 14:09:03.470] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 0, JobsDone: 806, jobs/s: 806
+[2026-04-21 14:09:03.473] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 0, JobsDone: 863, jobs/s: 863
+[2026-04-21 14:09:03.704] [info] [Worker 1] Configuring queue: perf-test via stored procedure
+[2026-04-21 14:09:04.470] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 93/100, Queue: 1, Backoff: 0, JobsDone: 320, jobs/s: 320
+[2026-04-21 14:09:04.473] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 93/100, Queue: 0, Backoff: 0, JobsDone: 345, jobs/s: 345
+[2026-04-21 14:09:05.471] [info] [Worker 0] [libqueen] EVL: 4ms, Slots: 96/100, Queue: 1, Backoff: 0, JobsDone: 698, jobs/s: 698
+[2026-04-21 14:09:05.473] [info] [Worker 1] [libqueen] EVL: 7ms, Slots: 96/100, Queue: 0, Backoff: 1, JobsDone: 756, jobs/s: 756
+[2026-04-21 14:09:06.472] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 7, Backoff: 1, JobsDone: 696, jobs/s: 696
+[2026-04-21 14:09:06.473] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 711, jobs/s: 711
+[2026-04-21 14:09:07.476] [info] [Worker 1] [libqueen] EVL: 10ms, Slots: 95/100, Queue: 0, Backoff: 1, JobsDone: 703, jobs/s: 703
+[2026-04-21 14:09:07.484] [info] [Worker 0] [libqueen] EVL: 21ms, Slots: 92/100, Queue: 0, Backoff: 0, JobsDone: 636, jobs/s: 636
+[2026-04-21 14:09:08.476] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 97/100, Queue: 0, Backoff: 0, JobsDone: 638, jobs/s: 638
+[2026-04-21 14:09:08.483] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 4, Backoff: 0, JobsDone: 801, jobs/s: 801
+[2026-04-21 14:09:09.492] [info] [Worker 0] [libqueen] EVL: 17ms, Slots: 93/100, Queue: 2, Backoff: 1, JobsDone: 617, jobs/s: 617
+[2026-04-21 14:09:09.499] [info] [Worker 1] [libqueen] EVL: 26ms, Slots: 94/100, Queue: 0, Backoff: 0, JobsDone: 624, jobs/s: 624
+[2026-04-21 14:09:10.492] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 1, JobsDone: 638, jobs/s: 638
+[2026-04-21 14:09:10.499] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 1, Backoff: 0, JobsDone: 633, jobs/s: 633
+[2026-04-21 14:09:11.492] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 0, Backoff: 1, JobsDone: 631, jobs/s: 631
+[2026-04-21 14:09:11.500] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 636, jobs/s: 636
+[2026-04-21 14:09:12.015] [info] StatsService: cycle completed in 49ms
+[2026-04-21 14:09:12.492] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 1, Backoff: 1, JobsDone: 478, jobs/s: 478
+[2026-04-21 14:09:12.505] [info] [Worker 1] [libqueen] EVL: 2ms, Slots: 89/100, Queue: 7, Backoff: 1, JobsDone: 529, jobs/s: 529
+[2026-04-21 14:09:13.492] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 513, jobs/s: 513
+[2026-04-21 14:09:13.505] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 477, jobs/s: 477
+[2026-04-21 14:09:14.493] [info] [Worker 0] [libqueen] EVL: 5ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 531, jobs/s: 531
+[2026-04-21 14:09:14.509] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 91/100, Queue: 2, Backoff: 1, JobsDone: 549, jobs/s: 549
+[2026-04-21 14:09:15.493] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 3, Backoff: 1, JobsDone: 538, jobs/s: 538
+[2026-04-21 14:09:15.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 5, Backoff: 1, JobsDone: 629, jobs/s: 629
+[2026-04-21 14:09:16.492] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 3, Backoff: 1, JobsDone: 449, jobs/s: 449
+[2026-04-21 14:09:16.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 3, Backoff: 1, JobsDone: 513, jobs/s: 513
+[2026-04-21 14:09:17.493] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 3, Backoff: 1, JobsDone: 452, jobs/s: 452
+[2026-04-21 14:09:17.509] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 6, Backoff: 1, JobsDone: 414, jobs/s: 414
+[2026-04-21 14:09:18.493] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 3, Backoff: 1, JobsDone: 491, jobs/s: 491
+[2026-04-21 14:09:18.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 2, Backoff: 1, JobsDone: 576, jobs/s: 576
+[2026-04-21 14:09:19.493] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 10, Backoff: 1, JobsDone: 522, jobs/s: 522
+[2026-04-21 14:09:19.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 594, jobs/s: 594
+[2026-04-21 14:09:20.493] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 5, Backoff: 1, JobsDone: 712, jobs/s: 712
+[2026-04-21 14:09:20.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 5, Backoff: 1, JobsDone: 601, jobs/s: 601
+[2026-04-21 14:09:21.494] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 739, jobs/s: 739
+[2026-04-21 14:09:21.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 5, Backoff: 0, JobsDone: 830, jobs/s: 830
+[2026-04-21 14:09:22.034] [info] StatsService: cycle completed in 65ms
+[2026-04-21 14:09:22.493] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 1, Backoff: 1, JobsDone: 800, jobs/s: 800
+[2026-04-21 14:09:22.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 1, JobsDone: 982, jobs/s: 982
+[2026-04-21 14:09:23.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 8, Backoff: 1, JobsDone: 933, jobs/s: 933
+[2026-04-21 14:09:23.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 2, Backoff: 1, JobsDone: 919, jobs/s: 919
+[2026-04-21 14:09:24.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 1, Backoff: 1, JobsDone: 981, jobs/s: 981
+[2026-04-21 14:09:24.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 10, Backoff: 0, JobsDone: 985, jobs/s: 985
+[2026-04-21 14:09:25.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 794, jobs/s: 794
+[2026-04-21 14:09:25.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 904, jobs/s: 904
+[2026-04-21 14:09:26.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 1, Backoff: 1, JobsDone: 813, jobs/s: 813
+[2026-04-21 14:09:26.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 4, Backoff: 1, JobsDone: 874, jobs/s: 874
+[2026-04-21 14:09:27.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 8, Backoff: 1, JobsDone: 921, jobs/s: 921
+[2026-04-21 14:09:27.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 2, Backoff: 1, JobsDone: 949, jobs/s: 949
+[2026-04-21 14:09:28.436] [error] [Worker 0] [libqueen] Query failed: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.437] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.437] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.438] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.438] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.438] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.438] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.439] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.439] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.439] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.439] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.439] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.440] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.440] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.445] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.445] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.445] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.446] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.446] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.446] [warning] [Worker 0] PUSH: Database error detected: ERROR:  deadlock detected
+DETAIL:  Process 301 waits for ShareLock on transaction 14617; blocked by process 293.
+Process 293 waits for ShareLock on transaction 14606; blocked by process 301.
+HINT:  See server log for query details.
+CONTEXT:  while locking tuple (39,3) in relation "partition_lookup"
+SQL statement "WITH batch_max AS (
+        SELECT DISTINCT ON (partition_id)
+            partition_id, 
+            created_at as max_created_at,
+            id as max_id
+        FROM new_messages
+        ORDER BY partition_id, created_at DESC, id DESC
+    )
+    INSERT INTO queen.partition_lookup (
+        queue_name, partition_id, last_message_id, last_message_created_at, updated_at
+    )
+    SELECT 
+        q.name, 
+        bm.partition_id, 
+        bm.max_id, 
+        bm.max_created_at, 
+        NOW()
+    FROM batch_max bm
+    JOIN queen.partitions p ON p.id = bm.partition_id
+    JOIN queen.queues q ON q.id = p.queue_id
+    ORDER BY bm.partition_id  -- Consistent lock ordering prevents deadlocks
+    ON CONFLICT (queue_name, partition_id)
+    DO UPDATE SET
+        last_message_id = EXCLUDED.last_message_id,
+        last_message_created_at = EXCLUDED.last_message_created_at,
+        updated_at = NOW()
+    WHERE 
+        EXCLUDED.last_message_created_at > queen.partition_lookup.last_message_created_at
+        OR (EXCLUDED.last_message_created_at = queen.partition_lookup.last_message_created_at 
+            AND EXCLUDED.last_message_id > queen.partition_lookup.last_message_id)"
+PL/pgSQL function queen.update_partition_lookup_trigger() line 3 at SQL statement
+SQL statement "WITH parsed AS MATERIALIZED (
+        SELECT
+            (t.idx - 1)::int                                   AS idx,
+            COALESCE((t.item->>'messageId')::uuid,
+                     gen_random_uuid())                        AS message_id,
+            COALESCE(t.item->>'transactionId',
+                     gen_random_uuid()::text)                  AS transaction_id,
+            t.item->>'queue'                                   AS queue_name,
+            COALESCE(t.item->>'partition', 'Default')          AS partition_name,
+            COALESCE(t.item->'payload', '{}'::jsonb)           AS payload,
+            NULLIF(t.item->>'traceId', '')::uuid               AS trace_id,
+            COALESCE((t.item->>'is_encrypted')::boolean, false) AS is_encrypted,
+            -- producerSub is server-stamped (from validated JWT 'sub' claim);
+            -- empty string must map to SQL NULL.
+            NULLIF(t.item->>'producerSub', '')                 AS producer_sub
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(item, idx)
+    ),
+    items AS (
+        SELECT
+            p.id AS partition_id,
+            par.idx,
+            par.message_id,
+            par.transaction_id,
+            par.payload,
+            par.trace_id,
+            par.is_encrypted,
+            par.producer_sub,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.id, par.transaction_id
+                ORDER BY par.idx
+            ) AS dup_rank
+        FROM parsed par
+        JOIN queen.queues     q ON q.name     = par.queue_name
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = par.partition_name
+    ),
+    inserted AS (
+        INSERT INTO queen.messages
+            (id, transaction_id, partition_id, payload,
+             trace_id, is_encrypted, producer_sub)
+        SELECT message_id, transaction_id, partition_id, payload,
+               trace_id, is_encrypted, producer_sub
+        FROM items
+        WHERE dup_rank = 1
+        ON CONFLICT (partition_id, transaction_id) DO NOTHING
+        RETURNING id, transaction_id, partition_id
+    ),
+    items_json AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'idx',            idx,
+            'message_id',     message_id::text,
+            'transaction_id', transaction_id,
+            'partition_id',   partition_id::text,
+            'trace_id',       trace_id::text,
+            'dup_rank',       dup_rank
+        )) AS v FROM items
+    ),
+    inserted_json AS (
+        SELECT COALESCE(
+            jsonb_object_agg(
+                partition_id::text || E'\x1f' || transaction_id,
+                id::text
+            ),
+            '{}'::jsonb
+        ) AS v FROM inserted
+    )
+    SELECT items_json.v, inserted_json.v
+                                 FROM items_json, inserted_json"
+PL/pgSQL function queen.push_messages_v3(jsonb,boolean,boolean) line 52 at SQL statement
+
+[2026-04-21 14:09:28.446] [info] [Worker 0] PUSH: Failed over 10 items to file buffer after DB error
+[2026-04-21 14:09:28.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 10, Backoff: 1, JobsDone: 63, jobs/s: 63
+[2026-04-21 14:09:28.510] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 16, Backoff: 1, JobsDone: 70, jobs/s: 70
+[2026-04-21 14:09:28.744] [info] Failover: Processing 100 events from failover_019daff1-7be9-7001-aa86-4e6a46ca746d.buf in 1 batches (db_healthy=true, duplicate key errors are normal during recovery)
+[2026-04-21 14:09:29.070] [info] Failover: Progress 100/100 events (100.0%)
+[2026-04-21 14:09:29.070] [info] Failover: Completed 100 events in 325ms (308 events/sec) - file removed
+[2026-04-21 14:09:29.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 1, JobsDone: 1213, jobs/s: 1213
+[2026-04-21 14:09:29.511] [info] [Worker 1] [libqueen] EVL: 3ms, Slots: 94/100, Queue: 10, Backoff: 0, JobsDone: 1247, jobs/s: 1247
+[2026-04-21 14:09:30.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 3, Backoff: 1, JobsDone: 585, jobs/s: 585
+[2026-04-21 14:09:30.511] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 577, jobs/s: 577
+[2026-04-21 14:09:31.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 7, Backoff: 1, JobsDone: 528, jobs/s: 528
+[2026-04-21 14:09:31.511] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 588, jobs/s: 588
+[2026-04-21 14:09:32.312] [info] StatsService: cycle completed in 340ms
+[2026-04-21 14:09:32.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 0, Backoff: 1, JobsDone: 407, jobs/s: 407
+[2026-04-21 14:09:32.511] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 83/100, Queue: 3, Backoff: 1, JobsDone: 548, jobs/s: 548
+[2026-04-21 14:09:33.495] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 341, jobs/s: 341
+[2026-04-21 14:09:33.512] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 89/100, Queue: 7, Backoff: 1, JobsDone: 409, jobs/s: 409
+[2026-04-21 14:09:34.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 713, jobs/s: 713
+[2026-04-21 14:09:34.512] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 1, Backoff: 1, JobsDone: 703, jobs/s: 703
+[2026-04-21 14:09:35.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 0, Backoff: 1, JobsDone: 871, jobs/s: 871
+[2026-04-21 14:09:35.512] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 2, Backoff: 0, JobsDone: 909, jobs/s: 909
+[2026-04-21 14:09:36.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 0, JobsDone: 618, jobs/s: 618
+[2026-04-21 14:09:36.512] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 3, Backoff: 1, JobsDone: 575, jobs/s: 575
+[2026-04-21 14:09:37.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 815, jobs/s: 815
+[2026-04-21 14:09:37.512] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 926, jobs/s: 926
+[2026-04-21 14:09:38.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 981, jobs/s: 981
+[2026-04-21 14:09:38.513] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 2, Backoff: 0, JobsDone: 935, jobs/s: 935
+[2026-04-21 14:09:39.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 800, jobs/s: 800
+[2026-04-21 14:09:39.515] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 1, Backoff: 1, JobsDone: 889, jobs/s: 889
+[2026-04-21 14:09:40.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 2, Backoff: 1, JobsDone: 756, jobs/s: 756
+[2026-04-21 14:09:40.515] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 788, jobs/s: 788
+[2026-04-21 14:09:41.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 657, jobs/s: 657
+[2026-04-21 14:09:41.515] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 730, jobs/s: 730
+[2026-04-21 14:09:42.057] [info] StatsService: cycle completed in 80ms
+[2026-04-21 14:09:42.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 5, Backoff: 0, JobsDone: 849, jobs/s: 849
+[2026-04-21 14:09:42.515] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 4, Backoff: 1, JobsDone: 866, jobs/s: 866
+[2026-04-21 14:09:43.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 0, JobsDone: 825, jobs/s: 825
+[2026-04-21 14:09:43.516] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 1, Backoff: 1, JobsDone: 874, jobs/s: 874
+[2026-04-21 14:09:44.496] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 1, Backoff: 1, JobsDone: 889, jobs/s: 889
+[2026-04-21 14:09:44.516] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 820, jobs/s: 820
+[2026-04-21 14:09:45.497] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 820, jobs/s: 820
+[2026-04-21 14:09:45.517] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 3, Backoff: 1, JobsDone: 736, jobs/s: 736
+[2026-04-21 14:09:46.498] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 932, jobs/s: 932
+[2026-04-21 14:09:46.518] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 997, jobs/s: 997
+[2026-04-21 14:09:47.498] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 1, Backoff: 0, JobsDone: 697, jobs/s: 697
+[2026-04-21 14:09:47.517] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 1, Backoff: 1, JobsDone: 705, jobs/s: 705
+[2026-04-21 14:09:48.498] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 0, JobsDone: 866, jobs/s: 866
+[2026-04-21 14:09:48.517] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 1, Backoff: 0, JobsDone: 980, jobs/s: 980
+[2026-04-21 14:09:49.498] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 1, JobsDone: 933, jobs/s: 933
+[2026-04-21 14:09:49.517] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 5, Backoff: 1, JobsDone: 792, jobs/s: 792
+[2026-04-21 14:09:50.498] [info] [Worker 0] [libqueen] EVL: 2ms, Slots: 94/100, Queue: 1, Backoff: 1, JobsDone: 855, jobs/s: 855
+[2026-04-21 14:09:50.517] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 835, jobs/s: 835
+[2026-04-21 14:09:51.498] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 2, Backoff: 1, JobsDone: 954, jobs/s: 954
+[2026-04-21 14:09:51.517] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 1241, jobs/s: 1241
+[2026-04-21 14:09:52.051] [info] StatsService: cycle completed in 71ms
+[2026-04-21 14:09:52.498] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 1, JobsDone: 865, jobs/s: 865
+[2026-04-21 14:09:52.517] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 732, jobs/s: 732
+[2026-04-21 14:09:53.498] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 1, Backoff: 1, JobsDone: 555, jobs/s: 555
+[2026-04-21 14:09:53.517] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 4, Backoff: 1, JobsDone: 557, jobs/s: 557
+[2026-04-21 14:09:54.498] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 815, jobs/s: 815
+[2026-04-21 14:09:54.518] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 910, jobs/s: 910
+[2026-04-21 14:09:55.498] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 1, Backoff: 1, JobsDone: 923, jobs/s: 923
+[2026-04-21 14:09:55.518] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 0, JobsDone: 865, jobs/s: 865
+[2026-04-21 14:09:56.499] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 1, JobsDone: 825, jobs/s: 825
+[2026-04-21 14:09:56.518] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 4, Backoff: 1, JobsDone: 784, jobs/s: 784
+[2026-04-21 14:09:57.499] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 1, JobsDone: 399, jobs/s: 399
+[2026-04-21 14:09:57.518] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 463, jobs/s: 463
+[2026-04-21 14:09:58.500] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 1, Backoff: 1, JobsDone: 726, jobs/s: 726
+[2026-04-21 14:09:58.519] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 0, Backoff: 0, JobsDone: 855, jobs/s: 855
+[2026-04-21 14:09:59.500] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 93/100, Queue: 10, Backoff: 0, JobsDone: 921, jobs/s: 921
+[2026-04-21 14:09:59.520] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 4, Backoff: 0, JobsDone: 974, jobs/s: 974
+[2026-04-21 14:10:00.500] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 1029, jobs/s: 1029
+[2026-04-21 14:10:00.519] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 7, Backoff: 1, JobsDone: 1055, jobs/s: 1055
+[2026-04-21 14:10:01.500] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 93/100, Queue: 2, Backoff: 1, JobsDone: 1120, jobs/s: 1120
+[2026-04-21 14:10:01.519] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 94/100, Queue: 0, Backoff: 0, JobsDone: 1264, jobs/s: 1264
+[2026-04-21 14:10:02.191] [info] StatsService: cycle completed in 210ms
+[2026-04-21 14:10:02.499] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 883, jobs/s: 883
+[2026-04-21 14:10:02.519] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 5, Backoff: 1, JobsDone: 1019, jobs/s: 1019
+[2026-04-21 14:10:03.499] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 866, jobs/s: 866
+[2026-04-21 14:10:03.519] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 983, jobs/s: 983
+[2026-04-21 14:10:04.500] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 1045, jobs/s: 1045
+[2026-04-21 14:10:04.520] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 92/100, Queue: 7, Backoff: 0, JobsDone: 1249, jobs/s: 1249
+[2026-04-21 14:10:05.499] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 866, jobs/s: 866
+[2026-04-21 14:10:05.520] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 817, jobs/s: 817
+[2026-04-21 14:10:06.500] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 838, jobs/s: 838
+[2026-04-21 14:10:06.520] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 93/100, Queue: 5, Backoff: 1, JobsDone: 971, jobs/s: 971
+[2026-04-21 14:10:07.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 5, Backoff: 0, JobsDone: 1040, jobs/s: 1040
+[2026-04-21 14:10:07.521] [info] [Worker 1] [libqueen] EVL: 2ms, Slots: 92/100, Queue: 1, Backoff: 1, JobsDone: 1067, jobs/s: 1067
+[2026-04-21 14:10:08.500] [info] [Worker 0] [libqueen] EVL: 1ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 935, jobs/s: 935
+[2026-04-21 14:10:08.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 1, Backoff: 1, JobsDone: 1185, jobs/s: 1185
+[2026-04-21 14:10:09.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 1, Backoff: 1, JobsDone: 858, jobs/s: 858
+[2026-04-21 14:10:09.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 943, jobs/s: 943
+[2026-04-21 14:10:10.500] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 657, jobs/s: 657
+[2026-04-21 14:10:10.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 726, jobs/s: 726
+[2026-04-21 14:10:11.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 4, Backoff: 0, JobsDone: 728, jobs/s: 728
+[2026-04-21 14:10:11.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 8, Backoff: 1, JobsDone: 901, jobs/s: 901
+[2026-04-21 14:10:12.096] [info] StatsService: cycle completed in 111ms
+[2026-04-21 14:10:12.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 93/100, Queue: 10, Backoff: 1, JobsDone: 899, jobs/s: 899
+[2026-04-21 14:10:12.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 935, jobs/s: 935
+[2026-04-21 14:10:13.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 746, jobs/s: 746
+[2026-04-21 14:10:13.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 5, Backoff: 0, JobsDone: 926, jobs/s: 926
+[2026-04-21 14:10:14.502] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 7, Backoff: 0, JobsDone: 893, jobs/s: 893
+[2026-04-21 14:10:14.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 1001, jobs/s: 1001
+[2026-04-21 14:10:15.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 720, jobs/s: 720
+[2026-04-21 14:10:15.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 1, JobsDone: 904, jobs/s: 904
+[2026-04-21 14:10:16.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 1, Backoff: 1, JobsDone: 975, jobs/s: 975
+[2026-04-21 14:10:16.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 2, Backoff: 1, JobsDone: 1050, jobs/s: 1050
+[2026-04-21 14:10:17.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 662, jobs/s: 662
+[2026-04-21 14:10:17.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 640, jobs/s: 640
+[2026-04-21 14:10:18.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 4, Backoff: 1, JobsDone: 899, jobs/s: 899
+[2026-04-21 14:10:18.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 2, Backoff: 1, JobsDone: 998, jobs/s: 998
+[2026-04-21 14:10:19.502] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 1, JobsDone: 564, jobs/s: 564
+[2026-04-21 14:10:19.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 560, jobs/s: 560
+[2026-04-21 14:10:20.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 0, Backoff: 1, JobsDone: 809, jobs/s: 809
+[2026-04-21 14:10:20.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 870, jobs/s: 870
+[2026-04-21 14:10:21.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 0, Backoff: 0, JobsDone: 248, jobs/s: 248
+[2026-04-21 14:10:21.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 0, Backoff: 1, JobsDone: 302, jobs/s: 302
+[2026-04-21 14:10:22.234] [info] StatsService: cycle completed in 249ms
+[2026-04-21 14:10:22.502] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 3, Backoff: 0, JobsDone: 443, jobs/s: 443
+[2026-04-21 14:10:22.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 0, JobsDone: 470, jobs/s: 470
+[2026-04-21 14:10:23.502] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 14, Backoff: 1, JobsDone: 926, jobs/s: 926
+[2026-04-21 14:10:23.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 1045, jobs/s: 1045
+[2026-04-21 14:10:24.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 668, jobs/s: 668
+[2026-04-21 14:10:24.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 763, jobs/s: 763
+[2026-04-21 14:10:25.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 810, jobs/s: 810
+[2026-04-21 14:10:25.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 1, JobsDone: 874, jobs/s: 874
+[2026-04-21 14:10:26.501] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 1, Backoff: 0, JobsDone: 738, jobs/s: 738
+[2026-04-21 14:10:26.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 2, Backoff: 1, JobsDone: 713, jobs/s: 713
+[2026-04-21 14:10:27.502] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 1, Backoff: 1, JobsDone: 641, jobs/s: 641
+[2026-04-21 14:10:27.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 3, Backoff: 1, JobsDone: 625, jobs/s: 625
+[2026-04-21 14:10:28.503] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 694, jobs/s: 694
+[2026-04-21 14:10:28.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 0, Backoff: 0, JobsDone: 802, jobs/s: 802
+[2026-04-21 14:10:29.503] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 3, Backoff: 1, JobsDone: 727, jobs/s: 727
+[2026-04-21 14:10:29.521] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 770, jobs/s: 770
+[2026-04-21 14:10:30.503] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 742, jobs/s: 742
+[2026-04-21 14:10:30.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 2, Backoff: 1, JobsDone: 791, jobs/s: 791
+[2026-04-21 14:10:31.504] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 11, Backoff: 1, JobsDone: 708, jobs/s: 708
+[2026-04-21 14:10:31.523] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 0, JobsDone: 778, jobs/s: 778
+[2026-04-21 14:10:32.325] [info] StatsService: cycle completed in 338ms
+[2026-04-21 14:10:32.504] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 0, JobsDone: 473, jobs/s: 473
+[2026-04-21 14:10:32.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 553, jobs/s: 553
+[2026-04-21 14:10:33.503] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 0, Backoff: 1, JobsDone: 309, jobs/s: 309
+[2026-04-21 14:10:33.522] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 82/100, Queue: 0, Backoff: 0, JobsDone: 367, jobs/s: 367
+[2026-04-21 14:10:34.504] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 0, Backoff: 1, JobsDone: 376, jobs/s: 376
+[2026-04-21 14:10:34.523] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 3, Backoff: 1, JobsDone: 403, jobs/s: 403
+[2026-04-21 14:10:35.504] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 678, jobs/s: 678
+[2026-04-21 14:10:35.524] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 91/100, Queue: 3, Backoff: 0, JobsDone: 763, jobs/s: 763
+[2026-04-21 14:10:36.504] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 3, Backoff: 1, JobsDone: 708, jobs/s: 708
+[2026-04-21 14:10:36.524] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 6, Backoff: 0, JobsDone: 753, jobs/s: 753
+[2026-04-21 14:10:37.507] [info] [Worker 0] [libqueen] EVL: 2ms, Slots: 97/100, Queue: 8, Backoff: 0, JobsDone: 887, jobs/s: 887
+[2026-04-21 14:10:37.524] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 907, jobs/s: 907
+[2026-04-21 14:10:38.507] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 1, JobsDone: 490, jobs/s: 490
+[2026-04-21 14:10:38.524] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 11, Backoff: 0, JobsDone: 559, jobs/s: 559
+[2026-04-21 14:10:39.507] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 0, Backoff: 1, JobsDone: 614, jobs/s: 614
+[2026-04-21 14:10:39.523] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 0, JobsDone: 741, jobs/s: 741
+[2026-04-21 14:10:40.507] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 963, jobs/s: 963
+[2026-04-21 14:10:40.524] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 1, Backoff: 0, JobsDone: 1000, jobs/s: 1000
+[2026-04-21 14:10:41.508] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 0, JobsDone: 623, jobs/s: 623
+[2026-04-21 14:10:41.523] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 545, jobs/s: 545
+[2026-04-21 14:10:42.086] [info] StatsService: cycle completed in 98ms
+[2026-04-21 14:10:42.508] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 699, jobs/s: 699
+[2026-04-21 14:10:42.524] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 1, Backoff: 1, JobsDone: 740, jobs/s: 740
+[2026-04-21 14:10:43.507] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 649, jobs/s: 649
+[2026-04-21 14:10:43.524] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 639, jobs/s: 639
+[2026-04-21 14:10:44.507] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 3, Backoff: 0, JobsDone: 345, jobs/s: 345
+[2026-04-21 14:10:44.523] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 0, JobsDone: 285, jobs/s: 285
+[2026-04-21 14:10:45.507] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 456, jobs/s: 456
+[2026-04-21 14:10:45.524] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 522, jobs/s: 522
+[2026-04-21 14:10:46.508] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 0, Backoff: 0, JobsDone: 904, jobs/s: 904
+[2026-04-21 14:10:46.525] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 1, JobsDone: 921, jobs/s: 921
+[2026-04-21 14:10:47.508] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 1, Backoff: 1, JobsDone: 681, jobs/s: 681
+[2026-04-21 14:10:47.526] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 1, Backoff: 1, JobsDone: 682, jobs/s: 682
+[2026-04-21 14:10:48.508] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 0, Backoff: 0, JobsDone: 774, jobs/s: 774
+[2026-04-21 14:10:48.526] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 1, Backoff: 0, JobsDone: 808, jobs/s: 808
+[2026-04-21 14:10:49.508] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 1, Backoff: 1, JobsDone: 754, jobs/s: 754
+[2026-04-21 14:10:49.525] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 1, JobsDone: 730, jobs/s: 730
+[2026-04-21 14:10:50.507] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 1, JobsDone: 872, jobs/s: 872
+[2026-04-21 14:10:50.526] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 0, Backoff: 1, JobsDone: 896, jobs/s: 896
+[2026-04-21 14:10:51.508] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 681, jobs/s: 681
+[2026-04-21 14:10:51.526] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 83/100, Queue: 0, Backoff: 0, JobsDone: 655, jobs/s: 655
+[2026-04-21 14:10:52.010] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 14:10:52.509] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 607, jobs/s: 607
+[2026-04-21 14:10:52.526] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 639, jobs/s: 639
+[2026-04-21 14:10:53.508] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 3, Backoff: 0, JobsDone: 656, jobs/s: 656
+[2026-04-21 14:10:53.526] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 0, JobsDone: 651, jobs/s: 651
+[2026-04-21 14:10:54.508] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 609, jobs/s: 609
+[2026-04-21 14:10:54.525] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 662, jobs/s: 662
+[2026-04-21 14:10:54.673] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 1}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 502, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 14:10:54.674] [info] StatsService: cycle completed in 2682ms
+[2026-04-21 14:10:55.515] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 5, Backoff: 0, JobsDone: 562, jobs/s: 562
+[2026-04-21 14:10:55.527] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 95/100, Queue: 11, Backoff: 0, JobsDone: 675, jobs/s: 675
+[2026-04-21 14:10:56.514] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 674, jobs/s: 674
+[2026-04-21 14:10:56.528] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 5, Backoff: 0, JobsDone: 564, jobs/s: 564
+[2026-04-21 14:10:57.515] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 873, jobs/s: 873
+[2026-04-21 14:10:57.528] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 1, Backoff: 1, JobsDone: 731, jobs/s: 731
+[2026-04-21 14:10:58.514] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 1, JobsDone: 753, jobs/s: 753
+[2026-04-21 14:10:58.528] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 91/100, Queue: 1, Backoff: 0, JobsDone: 772, jobs/s: 772
+[2026-04-21 14:10:59.514] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 4, Backoff: 0, JobsDone: 722, jobs/s: 722
+[2026-04-21 14:10:59.528] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 793, jobs/s: 793
+[2026-04-21 14:11:00.515] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 0, JobsDone: 648, jobs/s: 648
+[2026-04-21 14:11:00.528] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 6, Backoff: 1, JobsDone: 696, jobs/s: 696
+[2026-04-21 14:11:01.515] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 694, jobs/s: 694
+[2026-04-21 14:11:01.528] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 723, jobs/s: 723
+[2026-04-21 14:11:02.514] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 4, Backoff: 0, JobsDone: 579, jobs/s: 579
+[2026-04-21 14:11:02.528] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 0, Backoff: 1, JobsDone: 628, jobs/s: 628
+[2026-04-21 14:11:03.515] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 4, Backoff: 1, JobsDone: 555, jobs/s: 555
+[2026-04-21 14:11:03.528] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 3, Backoff: 0, JobsDone: 599, jobs/s: 599
+[2026-04-21 14:11:04.515] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 1, Backoff: 1, JobsDone: 572, jobs/s: 572
+[2026-04-21 14:11:04.529] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 0, JobsDone: 632, jobs/s: 632
+[2026-04-21 14:11:05.514] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 429, jobs/s: 429
+[2026-04-21 14:11:05.529] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 1, JobsDone: 458, jobs/s: 458
+[2026-04-21 14:11:06.516] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 1, Backoff: 0, JobsDone: 513, jobs/s: 513
+[2026-04-21 14:11:06.530] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 639, jobs/s: 639
+[2026-04-21 14:11:07.516] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 1, JobsDone: 501, jobs/s: 501
+[2026-04-21 14:11:07.531] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 1, Backoff: 0, JobsDone: 455, jobs/s: 455
+[2026-04-21 14:11:08.515] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 508, jobs/s: 508
+[2026-04-21 14:11:08.531] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 542, jobs/s: 542
+[2026-04-21 14:11:09.516] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 1, JobsDone: 455, jobs/s: 455
+[2026-04-21 14:11:09.532] [info] [Worker 1] [libqueen] EVL: 10ms, Slots: 92/100, Queue: 5, Backoff: 0, JobsDone: 481, jobs/s: 481
+[2026-04-21 14:11:10.519] [info] [Worker 0] [libqueen] EVL: 9ms, Slots: 94/100, Queue: 1, Backoff: 0, JobsDone: 531, jobs/s: 531
+[2026-04-21 14:11:10.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 8, Backoff: 0, JobsDone: 466, jobs/s: 466
+[2026-04-21 14:11:11.520] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 91/100, Queue: 8, Backoff: 1, JobsDone: 490, jobs/s: 490
+[2026-04-21 14:11:11.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 93/100, Queue: 3, Backoff: 1, JobsDone: 429, jobs/s: 429
+[2026-04-21 14:11:12.525] [info] [Worker 0] [libqueen] EVL: 5ms, Slots: 89/100, Queue: 6, Backoff: 0, JobsDone: 411, jobs/s: 411
+[2026-04-21 14:11:12.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 1, JobsDone: 343, jobs/s: 343
+[2026-04-21 14:11:13.524] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 0, Backoff: 0, JobsDone: 451, jobs/s: 451
+[2026-04-21 14:11:13.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 1, Backoff: 1, JobsDone: 410, jobs/s: 410
+[2026-04-21 14:11:14.526] [info] [Worker 0] [libqueen] EVL: 4ms, Slots: 89/100, Queue: 1, Backoff: 1, JobsDone: 317, jobs/s: 317
+[2026-04-21 14:11:14.531] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 86/100, Queue: 0, Backoff: 0, JobsDone: 309, jobs/s: 309
+[2026-04-21 14:11:15.526] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 0, JobsDone: 475, jobs/s: 475
+[2026-04-21 14:11:15.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 1, Backoff: 1, JobsDone: 540, jobs/s: 540
+[2026-04-21 14:11:16.526] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 0, JobsDone: 500, jobs/s: 500
+[2026-04-21 14:11:16.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 483, jobs/s: 483
+[2026-04-21 14:11:17.526] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 0, JobsDone: 262, jobs/s: 262
+[2026-04-21 14:11:17.532] [info] [Worker 1] [libqueen] EVL: 1ms, Slots: 91/100, Queue: 1, Backoff: 1, JobsDone: 268, jobs/s: 268
+[2026-04-21 14:11:17.649] [info] StatsService: cycle completed in 15652ms
+[2026-04-21 14:11:18.526] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 2, Backoff: 0, JobsDone: 402, jobs/s: 402
+[2026-04-21 14:11:18.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 92/100, Queue: 9, Backoff: 1, JobsDone: 348, jobs/s: 348
+[2026-04-21 14:11:19.527] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 0, JobsDone: 480, jobs/s: 480
+[2026-04-21 14:11:19.531] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 452, jobs/s: 452
+[2026-04-21 14:11:20.527] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 432, jobs/s: 432
+[2026-04-21 14:11:20.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 90/100, Queue: 1, Backoff: 0, JobsDone: 380, jobs/s: 380
+[2026-04-21 14:11:21.527] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 1, JobsDone: 362, jobs/s: 362
+[2026-04-21 14:11:21.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 1, Backoff: 1, JobsDone: 368, jobs/s: 368
+[2026-04-21 14:11:22.526] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 435, jobs/s: 435
+[2026-04-21 14:11:22.532] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 0, JobsDone: 455, jobs/s: 455
+[2026-04-21 14:11:23.527] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 1, JobsDone: 293, jobs/s: 293
+[2026-04-21 14:11:23.533] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 1, Backoff: 0, JobsDone: 310, jobs/s: 310
+[2026-04-21 14:11:24.527] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 80/100, Queue: 0, Backoff: 1, JobsDone: 225, jobs/s: 225
+[2026-04-21 14:11:24.535] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 84/100, Queue: 0, Backoff: 1, JobsDone: 244, jobs/s: 244
+[2026-04-21 14:11:25.528] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 0, Backoff: 1, JobsDone: 257, jobs/s: 257
+[2026-04-21 14:11:25.535] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 0, Backoff: 1, JobsDone: 279, jobs/s: 279
+[2026-04-21 14:11:26.528] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 202, jobs/s: 202
+[2026-04-21 14:11:26.535] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 207, jobs/s: 207
+[2026-04-21 14:11:27.528] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 1, JobsDone: 119, jobs/s: 119
+[2026-04-21 14:11:27.535] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 89/100, Queue: 0, Backoff: 0, JobsDone: 151, jobs/s: 151
+[2026-04-21 14:11:28.528] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 1, Backoff: 1, JobsDone: 359, jobs/s: 359
+[2026-04-21 14:11:28.535] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 87/100, Queue: 0, Backoff: 0, JobsDone: 437, jobs/s: 437
+[2026-04-21 14:11:29.528] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 1, JobsDone: 411, jobs/s: 411
+[2026-04-21 14:11:29.535] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 450, jobs/s: 450
+[2026-04-21 14:11:30.530] [info] [Worker 0] [libqueen] EVL: 4ms, Slots: 82/100, Queue: 0, Backoff: 1, JobsDone: 307, jobs/s: 307
+[2026-04-21 14:11:30.536] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 79/100, Queue: 0, Backoff: 1, JobsDone: 296, jobs/s: 296
+[2026-04-21 14:11:31.530] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 331, jobs/s: 331
+[2026-04-21 14:11:31.536] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 85/100, Queue: 0, Backoff: 1, JobsDone: 332, jobs/s: 332
+[2026-04-21 14:11:32.530] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 88/100, Queue: 0, Backoff: 1, JobsDone: 201, jobs/s: 201
+[2026-04-21 14:11:32.535] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 0, Backoff: 1, JobsDone: 235, jobs/s: 235
+[2026-04-21 14:11:33.530] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 81/100, Queue: 0, Backoff: 1, JobsDone: 314, jobs/s: 314
+[2026-04-21 14:11:33.536] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 86/100, Queue: 5, Backoff: 1, JobsDone: 359, jobs/s: 359
+[2026-04-21 14:11:33.938] [info] QPOP: Connection aborted for 17db7815-24f5-4110-951c-22dff05a2151
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for fca7e569-7795-45c6-bacc-bb0aa2029fae
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 2067eeb7-9b99-4f6e-a49f-dae89d94c9bd
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 49693406-c98a-4a73-ae2f-e92d8a012f07
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 36071d74-88fe-4547-9767-b6e8fa457ddb
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for e3e6d88c-d357-4fba-8efc-d566aa37dd1c
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for d743821c-6d69-4afc-9298-f5a1ba1eaf0e
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for e006cbe0-a7be-4031-8463-859488ede0f8
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for bc935fa4-306e-4f76-9667-d98b8e313402
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 89eb8855-cc8b-4250-9c53-42f5f082ef0f
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 378d838e-bdae-49e8-af16-ac3c3af62d03
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 771da868-4df0-439c-993d-8d892e34ef46
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for ecd98b2c-d366-45e7-be0b-558f8b95a6af
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for d556e31a-6aab-4387-bf8b-34ce4baab580
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 430fc2ee-0520-4ad0-94c6-5cbe255f603f
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for bce27830-bc3d-436b-9e0d-b504443d3c87
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for eadbbcec-cb30-42f5-bbf2-d5755ece1b99
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for afef5776-7dae-43bc-bda8-a06f4cf5a766
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 4604b38c-52e9-4ed9-9a99-f9c4c6ba20a8
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 81c50b78-a020-41ff-acb5-3763ff2baf8c
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for d3d7d977-9e73-41b8-8270-e967eea96ffb
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for b5a612a9-f8f1-4297-9475-f5708143f954
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 8a4ad1ba-d3ca-490e-846f-edfdf4ad7fea
+[2026-04-21 14:11:33.939] [info] QPOP: Connection aborted for 3b2ae1df-7c05-4dba-abc3-6176897dc571
+[2026-04-21 14:11:33.940] [info] QPOP: Connection aborted for 7bb3b758-37d8-4675-b530-08332f310fd8
+[2026-04-21 14:11:34.530] [info] [Worker 0] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 0, JobsDone: 400, jobs/s: 400
+[2026-04-21 14:11:34.537] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 0, JobsDone: 346, jobs/s: 346
+[2026-04-21 14:11:36.537] [info] [Worker 1] [libqueen] EVL: 0ms, Slots: 100/100, Queue: 0, Backoff: 0, JobsDone: 1, jobs/s: 1
+[2026-04-21 14:11:37.513] [info] Received signal 15, shutting down...
+[2026-04-21 14:11:37.513] [info] Exiting (worker threads will be terminated by OS)

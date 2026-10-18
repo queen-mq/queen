@@ -1,0 +1,3 @@
+[13:03:17] omb: run native-nr2-backlog-1t-16p: system queen-native, driver queen-native-v2.yaml, workload backlog-1-topic-16-partitions-1kb.yaml
+[13:03:22] omb: 6 workers up
+native-nr2-backlog-1t-16p [queen-native] backlog-1-topic-16-partitions-1kb.yaml: pub 100k/s cons 100k/s err 0 backlog max 104,666,428 | pub p50/p99/p99.9 1.7/2.3/2.5 ms | e2e p50/p99/p99.9 437,170/1,037,996/1,048,932 ms (max 1,050,104) | brokers 3.7 cores, disk write 24/24/24 MB/s

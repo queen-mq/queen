@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,11 @@ func newHTTP(base string, conns int, timeout time.Duration) *qhttp {
 // tenant this process works as on a broker run with QUEEN_TENANCY_HEADER=1.
 var tenantHeader string
 
+// bearerToken, when QLOAD_TOKEN is set, goes on every request as Authorization: a
+// Queen Cloud tenant's API key. An environment variable, not a flag, so the key
+// never shows up in ps.
+var bearerToken = os.Getenv("QLOAD_TOKEN")
+
 type httpErr struct {
 	code int
 	body string
@@ -64,6 +70,9 @@ func (q *qhttp) do(ctx context.Context, method, path string, body []byte, ok ...
 	}
 	if tenantHeader != "" {
 		req.Header.Set("x-queen-tenant", tenantHeader)
+	}
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
 	}
 	resp, err := q.hc.Do(req)
 	if err != nil {

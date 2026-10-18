@@ -1,0 +1,141 @@
+14:36:53.608 [main] INFO Benchmark - Starting benchmark with config: {
+  "drivers" : [ "drivers/kafka.yaml" ],
+  "workers" : [ "http://10.250.0.41:8080", "http://10.250.0.42:8080", "http://10.250.0.38:8080", "http://10.250.0.41:8082", "http://10.250.0.42:8082", "http://10.250.0.38:8082" ],
+  "workersFile" : null,
+  "workloads" : [ "workloads-run/1k-topic-1kb-4p-4c-500k.yaml" ],
+  "output" : "/root/bench/omb-results/kafka-t1k.json"
+}
+14:36:53.626 [main] INFO Benchmark - Workloads: {
+  "1k-topic-1kb-4p-4c-500k" : {
+    "name" : "500k rate 4 producers and 4 consumers on 1k topic",
+    "topics" : 1000,
+    "partitionsPerTopic" : 1,
+    "keyDistributor" : "NO_KEY",
+    "messageSize" : 1024,
+    "messageSizeDistribution" : null,
+    "useRandomizedPayloads" : true,
+    "randomBytesRatio" : 0.5,
+    "randomizedPayloadPoolSize" : 1000,
+    "payloadFile" : null,
+    "subscriptionsPerTopic" : 1,
+    "producersPerTopic" : 4,
+    "consumerPerSubscription" : 4,
+    "producerRate" : 500000,
+    "consumerBacklogSizeGB" : 0,
+    "backlogDrainRatio" : 1.0,
+    "testDurationMinutes" : 3,
+    "warmupDurationMinutes" : 1
+  }
+}
+14:36:53.769 [main] INFO DistributedWorkersEnsemble - Workers list - producers: [http://10.250.0.38:8080,http://10.250.0.42:8080,http://10.250.0.41:8080]
+14:36:53.769 [main] INFO DistributedWorkersEnsemble - Workers list - consumers: http://10.250.0.38:8082,http://10.250.0.42:8082,http://10.250.0.41:8082
+14:36:53.771 [main] INFO Benchmark - --------------- WORKLOAD : 500k rate 4 producers and 4 consumers on 1k topic --- DRIVER : Kafka---------------
+14:36:54.490 [main] INFO WorkloadGenerator - Created 1000 topics in 390.472622 ms
+14:37:00.152 [main] INFO WorkloadGenerator - Created 4000 consumers in 5643.692226 ms
+14:37:04.742 [main] INFO WorkloadGenerator - Created 4000 producers in 4589.520049 ms
+14:37:04.743 [main] INFO WorkloadGenerator - Waiting for consumers to be ready
+14:37:06.224 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 4000, Received: 4000
+14:37:06.225 [main] INFO WorkloadGenerator - All consumers are ready
+14:37:06.376 [main] INFO WorkloadGenerator - ----- Starting warm-up traffic (1m) ------
+14:37:16.969 [AsyncHttpClient-7-1] ERROR HttpWorkerClient - Failed to do HTTP get request to http://10.250.0.38:8080/period-stats -- code: 500
+14:37:16.970 [main] ERROR Benchmark - Failed to run the workload '500k rate 4 producers and 4 consumers on 1k topic' for driver 'drivers/kafka.yaml'
+java.util.concurrent.CompletionException: java.util.concurrent.CompletionException: java.lang.IllegalArgumentException
+	at jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance0(Native Method) ~[?:?]
+	at jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance(NativeConstructorAccessorImpl.java:77) ~[?:?]
+	at jdk.internal.reflect.DelegatingConstructorAccessorImpl.newInstance(DelegatingConstructorAccessorImpl.java:45) ~[?:?]
+	at java.lang.reflect.Constructor.newInstanceWithCaller(Constructor.java:500) ~[?:?]
+	at java.lang.reflect.Constructor.newInstance(Constructor.java:481) ~[?:?]
+	at java.util.concurrent.ForkJoinTask.getThrowableException(ForkJoinTask.java:562) ~[?:?]
+	at java.util.concurrent.ForkJoinTask.reportException(ForkJoinTask.java:591) ~[?:?]
+	at java.util.concurrent.ForkJoinTask.invoke(ForkJoinTask.java:689) ~[?:?]
+	at java.util.stream.ReduceOps$ReduceOp.evaluateParallel(ReduceOps.java:927) ~[?:?]
+	at java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:233) ~[?:?]
+	at java.util.stream.ReferencePipeline.reduce(ReferencePipeline.java:657) ~[?:?]
+	at io.openmessaging.benchmark.worker.DistributedWorkersEnsemble.getPeriodStats(DistributedWorkersEnsemble.java:236) ~[io.openmessaging.benchmark-benchmark-framework-0.0.1-SNAPSHOT.jar:?]
+	at io.openmessaging.benchmark.WorkloadGenerator.printAndCollectStats(WorkloadGenerator.java:393) ~[io.openmessaging.benchmark-benchmark-framework-0.0.1-SNAPSHOT.jar:?]
+	at io.openmessaging.benchmark.WorkloadGenerator.run(WorkloadGenerator.java:152) ~[io.openmessaging.benchmark-benchmark-framework-0.0.1-SNAPSHOT.jar:?]
+	at io.openmessaging.benchmark.Benchmark.lambda$main$0(Benchmark.java:173) ~[io.openmessaging.benchmark-benchmark-framework-0.0.1-SNAPSHOT.jar:?]
+	at java.util.ArrayList.forEach(ArrayList.java:1511) ~[?:?]
+	at io.openmessaging.benchmark.Benchmark.lambda$main$1(Benchmark.java:153) ~[io.openmessaging.benchmark-benchmark-framework-0.0.1-SNAPSHOT.jar:?]
+	at java.util.TreeMap.forEach(TreeMap.java:1282) [?:?]
+	at io.openmessaging.benchmark.Benchmark.main(Benchmark.java:151) [io.openmessaging.benchmark-benchmark-framework-0.0.1-SNAPSHOT.jar:?]
+Caused by: java.util.concurrent.CompletionException: java.lang.IllegalArgumentException
+	at java.util.concurrent.CompletableFuture.encodeThrowable(CompletableFuture.java:315) ~[?:?]
+	at java.util.concurrent.CompletableFuture.completeThrowable(CompletableFuture.java:320) ~[?:?]
+	at java.util.concurrent.CompletableFuture$UniApply.tryFire(CompletableFuture.java:649) ~[?:?]
+	at java.util.concurrent.CompletableFuture.postComplete(CompletableFuture.java:510) ~[?:?]
+	at java.util.concurrent.CompletableFuture.complete(CompletableFuture.java:2147) ~[?:?]
+	at org.asynchttpclient.netty.NettyResponseFuture.loadContent(NettyResponseFuture.java:222) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.NettyResponseFuture.done(NettyResponseFuture.java:257) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.handler.AsyncHttpClientHandler.finishUpdate(AsyncHttpClientHandler.java:241) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.handler.HttpHandler.handleChunk(HttpHandler.java:113) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.handler.HttpHandler.handleRead(HttpHandler.java:142) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.handler.AsyncHttpClientHandler.channelRead(AsyncHttpClientHandler.java:78) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:379) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:365) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.fireChannelRead(AbstractChannelHandlerContext.java:357) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.handler.codec.MessageToMessageDecoder.channelRead(MessageToMessageDecoder.java:103) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:379) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:365) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.fireChannelRead(AbstractChannelHandlerContext.java:357) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.CombinedChannelDuplexHandler$DelegatingChannelHandlerContext.fireChannelRead(CombinedChannelDuplexHandler.java:436) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.handler.codec.ByteToMessageDecoder.fireChannelRead(ByteToMessageDecoder.java:324) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.handler.codec.ByteToMessageDecoder.channelRead(ByteToMessageDecoder.java:296) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.CombinedChannelDuplexHandler.channelRead(CombinedChannelDuplexHandler.java:251) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:379) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:365) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.fireChannelRead(AbstractChannelHandlerContext.java:357) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.DefaultChannelPipeline$HeadContext.channelRead(DefaultChannelPipeline.java:1410) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:379) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:365) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.DefaultChannelPipeline.fireChannelRead(DefaultChannelPipeline.java:919) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.AbstractNioByteChannel$NioByteUnsafe.read(AbstractNioByteChannel.java:166) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.NioEventLoop.processSelectedKey(NioEventLoop.java:719) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.NioEventLoop.processSelectedKeysOptimized(NioEventLoop.java:655) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.NioEventLoop.processSelectedKeys(NioEventLoop.java:581) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.NioEventLoop.run(NioEventLoop.java:493) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.util.concurrent.SingleThreadEventExecutor$4.run(SingleThreadEventExecutor.java:989) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.util.internal.ThreadExecutorMap$2.run(ThreadExecutorMap.java:74) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.util.concurrent.FastThreadLocalRunnable.run(FastThreadLocalRunnable.java:30) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at java.lang.Thread.run(Thread.java:840) ~[?:?]
+Caused by: java.lang.IllegalArgumentException
+	at com.google.common.base.Preconditions.checkArgument(Preconditions.java:128) ~[com.google.guava-guava-29.0-jre.jar:?]
+	at io.openmessaging.benchmark.worker.HttpWorkerClient.lambda$get$1(HttpWorkerClient.java:194) ~[io.openmessaging.benchmark-benchmark-framework-0.0.1-SNAPSHOT.jar:?]
+	at java.util.concurrent.CompletableFuture$UniApply.tryFire(CompletableFuture.java:646) ~[?:?]
+	at java.util.concurrent.CompletableFuture.postComplete(CompletableFuture.java:510) ~[?:?]
+	at java.util.concurrent.CompletableFuture.complete(CompletableFuture.java:2147) ~[?:?]
+	at org.asynchttpclient.netty.NettyResponseFuture.loadContent(NettyResponseFuture.java:222) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.NettyResponseFuture.done(NettyResponseFuture.java:257) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.handler.AsyncHttpClientHandler.finishUpdate(AsyncHttpClientHandler.java:241) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.handler.HttpHandler.handleChunk(HttpHandler.java:113) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.handler.HttpHandler.handleRead(HttpHandler.java:142) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at org.asynchttpclient.netty.handler.AsyncHttpClientHandler.channelRead(AsyncHttpClientHandler.java:78) ~[org.asynchttpclient-async-http-client-2.12.3.jar:?]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:379) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:365) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.fireChannelRead(AbstractChannelHandlerContext.java:357) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.handler.codec.MessageToMessageDecoder.channelRead(MessageToMessageDecoder.java:103) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:379) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:365) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.fireChannelRead(AbstractChannelHandlerContext.java:357) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.CombinedChannelDuplexHandler$DelegatingChannelHandlerContext.fireChannelRead(CombinedChannelDuplexHandler.java:436) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.handler.codec.ByteToMessageDecoder.fireChannelRead(ByteToMessageDecoder.java:324) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.handler.codec.ByteToMessageDecoder.channelRead(ByteToMessageDecoder.java:296) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.CombinedChannelDuplexHandler.channelRead(CombinedChannelDuplexHandler.java:251) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:379) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:365) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.fireChannelRead(AbstractChannelHandlerContext.java:357) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.DefaultChannelPipeline$HeadContext.channelRead(DefaultChannelPipeline.java:1410) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:379) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:365) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.DefaultChannelPipeline.fireChannelRead(DefaultChannelPipeline.java:919) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.AbstractNioByteChannel$NioByteUnsafe.read(AbstractNioByteChannel.java:166) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.NioEventLoop.processSelectedKey(NioEventLoop.java:719) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.NioEventLoop.processSelectedKeysOptimized(NioEventLoop.java:655) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.NioEventLoop.processSelectedKeys(NioEventLoop.java:581) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.channel.nio.NioEventLoop.run(NioEventLoop.java:493) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.util.concurrent.SingleThreadEventExecutor$4.run(SingleThreadEventExecutor.java:989) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.util.internal.ThreadExecutorMap$2.run(ThreadExecutorMap.java:74) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at io.netty.util.concurrent.FastThreadLocalRunnable.run(FastThreadLocalRunnable.java:30) ~[io.netty-netty-all-4.1.65.Final.jar:4.1.65.Final]
+	at java.lang.Thread.run(Thread.java:840) ~[?:?]
+14:37:17.403 [AsyncHttpClient-3-1] ERROR HttpWorkerClient - Failed to do HTTP get request to http://10.250.0.41:8080/period-stats -- code: 500
+rc=0

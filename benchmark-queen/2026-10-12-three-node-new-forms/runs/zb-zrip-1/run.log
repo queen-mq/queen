@@ -1,0 +1,7 @@
+[09:41:25] run zb-zrip-1: binary zrip240, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 90s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[09:41:46] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 1000 partitions
+[09:43:55] 3,000,000: last 30 s: offered 2,999,946 pushed 3,000,156 consumed 3,000,062 | run: shed 0 errors 0 | push p50 4.7 p99 9.7 | e2e p50 10.4 p99 20.2 worst 20.7 | cores 12.3 / 5.5 / 5.6 | mem GB 6.6 / 6.0 / 6.0 | loaders 21.0c  OK 
+RUN_DONE

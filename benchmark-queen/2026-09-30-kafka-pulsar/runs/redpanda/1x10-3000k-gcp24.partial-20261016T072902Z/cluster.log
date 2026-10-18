@@ -1,0 +1,8 @@
+[2026-10-16T07:03:30Z] cluster: reset: PROFILE=vm PARTS=10 FALLOC=by-rule MEMPCT=by-rule RPROPS=none START_FLAGS=none TUNE=1 brokers=10.250.0.23 10.250.0.22 10.250.0.25
+  n1 [2026-10-16T07:03:31Z] rc.sh n1: wiped /root/bench/data/redpanda /root/bench/logs/redpanda
+  n2 [2026-10-16T07:03:31Z] rc.sh n2: wiped /root/bench/data/redpanda /root/bench/logs/redpanda
+  n3 [2026-10-16T07:03:31Z] rc.sh n3: wiped /root/bench/data/redpanda /root/bench/logs/redpanda
+  n1 ssh: connect to host <host-05> port 22: Operation timed out
+  n2 mkconf: node 2/3 ip=10.250.0.22 PARTS=10 segment_fallocation_step=33554432 partitions_memory_pct=10 memory_per_partition=204800 io-config=MISSING -> /root/bench/redpanda/conf
+  n3 mkconf: node 3/3 ip=10.250.0.25 PARTS=10 segment_fallocation_step=33554432 partitions_memory_pct=10 memory_per_partition=204800 io-config=MISSING -> /root/bench/redpanda/conf
+[2026-10-16T07:03:41Z] cluster: render failed

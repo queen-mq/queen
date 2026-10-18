@@ -1,0 +1,3 @@
+[14:56:27] omb: run native-nr2s16-t1k-b10000: system queen-native, driver queen-native-v2-topics-b10000.yaml, workload 1k-topic-1kb-4p-4c-500k.yaml
+[14:56:32] omb: 6 workers up
+native-nr2s16-t1k-b10000 [queen-native] 1k-topic-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 210,622 | pub p50/p99/p99.9 47.6/95.3/120 ms | e2e p50/p99/p99.9 444/527/940 ms (max 1,244) | brokers 25.9 cores, disk write 488/487/487 MB/s

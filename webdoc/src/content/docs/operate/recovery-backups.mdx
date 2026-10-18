@@ -79,7 +79,7 @@ kill -CONT "$PID"          # thaw whether or not the copy worked
 # Freeze the container, copy its volume through a helper container, thaw.
 docker pause queen
 docker run --rm --entrypoint tar -v queen-data:/data:ro -v /backup:/backup \
-  ghcr.io/queen-mq/queen:latest -C /data -cf "/backup/queen-$(date -u +%Y%m%dT%H%MZ).tar" .
+  ghcr.io/queen-mq/queen:2.5.0 -C /data -cf "/backup/queen-$(date -u +%Y%m%dT%H%MZ).tar" .
 docker unpause queen
 ```
 

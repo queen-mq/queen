@@ -1,0 +1,46 @@
+diff --git a/benchmark-framework/pom.xml b/benchmark-framework/pom.xml
+index 698a79c..7b12743 100644
+--- a/benchmark-framework/pom.xml
++++ b/benchmark-framework/pom.xml
+@@ -61,6 +61,17 @@
+             <artifactId>driver-kafka</artifactId>
+             <version>${project.version}</version>
+         </dependency>
++        <dependency>
++            <groupId>${project.groupId}</groupId>
++            <artifactId>driver-queen</artifactId>
++            <version>${project.version}</version>
++        </dependency>
++        <!-- The framework uses Netty itself (DefaultThreadFactory, ByteBufUtil); it otherwise arrives only
++             through other drivers, so a build trimmed to driver-kafka + driver-queen needs it named here. -->
++        <dependency>
++            <groupId>io.netty</groupId>
++            <artifactId>netty-all</artifactId>
++        </dependency>
+         <dependency>
+             <groupId>${project.groupId}</groupId>
+             <artifactId>driver-kop</artifactId>
+@@ -129,6 +140,11 @@
+             <groupId>org.apache.logging.log4j</groupId>
+             <artifactId>log4j-slf4j-impl</artifactId>
+         </dependency>
++        <!-- The log4j2 backend: without it (a trimmed build) OMB logs nothing, not even the rate lines. -->
++        <dependency>
++            <groupId>org.apache.logging.log4j</groupId>
++            <artifactId>log4j-core</artifactId>
++        </dependency>
+         <dependency>
+             <groupId>org.asynchttpclient</groupId>
+             <artifactId>async-http-client</artifactId>
+diff --git a/pom.xml b/pom.xml
+index 8ee13b1..4bb3689 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -46,6 +46,7 @@
+         <module>driver-pravega</module>
+         <module>driver-pulsar</module>
+         <module>driver-kafka</module>
++        <module>driver-queen</module>
+         <module>driver-rabbitmq</module>
+         <module>driver-artemis</module>
+         <module>driver-bookkeeper</module>

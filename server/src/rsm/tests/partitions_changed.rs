@@ -1055,3 +1055,162 @@ async fn fetch_log_carries_the_routes_transaction_ids() {
     );
     close(f, dir).await;
 }
+
+// ---------------------------------------------------------------------------
+// The fetch long poll's topic wake (2026-10-17)
+// ---------------------------------------------------------------------------
+
+/// A fetch parked on a quiet partition answers, empty, soon after another
+/// partition of its queue is written, instead of holding to the end of its
+/// wait. A Kafka client leaves the partitions it still holds records of out of
+/// its one fetch per broker, and asks for them again only once that fetch is
+/// back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_parked_fetch_answers_empty_when_another_partition_of_its_queue_is_written() {
+    let dir = scratch("topic-wake");
+    let f = Arc::new(RaftFacade::open(&build_ctx(&dir)).expect("open facade"));
+    push(
+        &f,
+        vec![json!({"queue":"log","partition":"a","payload":{"n":0}})],
+    )
+    .await;
+    let g = f.clone();
+    let parked = tokio::spawn(async move {
+        let t = Instant::now();
+        let out = g
+            .fetch_records(ctx(), from_zero("log", &["b"]), 5_000, 1)
+            .await
+            .expect("fetch");
+        (t.elapsed(), out)
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    push(
+        &f,
+        vec![json!({"queue":"log","partition":"a","payload":{"n":1}})],
+    )
+    .await;
+    let (took, out) = parked.await.expect("the fetch task");
+    assert!(
+        took < Duration::from_secs(2),
+        "held {took:?} of its 5 s wait"
+    );
+    assert!(
+        took >= Duration::from_millis(90),
+        "answered before the write: {took:?}"
+    );
+    assert!(out[0].records.is_empty(), "partition b was never written");
+    let f = Arc::try_unwrap(f).ok().expect("the fetch is done");
+    close(f, dir).await;
+}
+
+/// The early answer is an empty one: a fetch that has read fewer bytes than
+/// its `min_bytes` keeps waiting for them when another partition of its queue
+/// is written, so a client asking for batches still gets batches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_fetch_holding_fewer_than_min_bytes_keeps_waiting_when_its_queue_is_written() {
+    let dir = scratch("topic-wake-min");
+    let f = Arc::new(RaftFacade::open(&build_ctx(&dir)).expect("open facade"));
+    push(
+        &f,
+        vec![json!({"queue":"log","partition":"b","payload":{"n":0}})],
+    )
+    .await;
+    let g = f.clone();
+    let parked = tokio::spawn(async move {
+        let t = Instant::now();
+        let out = g
+            .fetch_records(ctx(), from_zero("log", &["b"]), 600, 1 << 20)
+            .await
+            .expect("fetch");
+        (t.elapsed(), out)
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    push(
+        &f,
+        vec![json!({"queue":"log","partition":"a","payload":{"n":1}})],
+    )
+    .await;
+    let (took, out) = parked.await.expect("the fetch task");
+    assert!(
+        took >= Duration::from_millis(550),
+        "answered after {took:?} with {} record(s), short of its min_bytes",
+        out[0].records.len()
+    );
+    assert_eq!(out[0].records.len(), 1);
+    let f = Arc::try_unwrap(f).ok().expect("the fetch is done");
+    close(f, dir).await;
+}
+
+// ---------------------------------------------------------------------------
+// Ordered pushes: the next one sent once this one is in the log (2026-10-17)
+// ---------------------------------------------------------------------------
+
+/// Pushes to one partition, each sent as soon as the one before it is in the
+/// log ([`crate::rsm::facade::OrderedPush`]) rather than when it is answered,
+/// land in the order they were sent, and the signal says `true`: every command
+/// of the push was proposed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordered_pushes_sent_on_the_in_the_log_signal_keep_their_order() {
+    use crate::rsm::facade::{OrderedPush, RecordPush};
+    let dir = scratch("ordered");
+    let f = Arc::new(RaftFacade::open(&build_ctx(&dir)).expect("open facade"));
+    push(
+        &f,
+        vec![json!({"queue":"ord","partition":"p","payload":{"n":-1}})],
+    )
+    .await;
+    const N: i64 = 30;
+    let mut tasks = Vec::new();
+    let mut prev: Option<tokio::sync::oneshot::Receiver<bool>> = None;
+    for n in 0..N {
+        // The one before is in the log: send this one, before that one is
+        // answered.
+        if let Some(rx) = prev.take() {
+            assert!(
+                rx.await.unwrap_or(false),
+                "push {} was answered without its in-the-log signal",
+                n - 1
+            );
+        }
+        let (o, rx) = OrderedPush::new();
+        let mut c = ctx();
+        c.ordered = Some(o);
+        let g = f.clone();
+        tasks.push(tokio::spawn(async move {
+            g.push_records(
+                c,
+                vec![RecordPush {
+                    queue: "ord".into(),
+                    partition: "p".into(),
+                    payload: json!({ "n": n }).to_string().into_bytes(),
+                }],
+            )
+            .await
+        }));
+        prev = Some(rx);
+    }
+    for t in tasks {
+        let out = t.await.expect("push task").expect("push");
+        assert_eq!(out[0].status, "queued");
+    }
+    let got = f
+        .fetch_records(ctx(), from_zero("ord", &["p"]), 0, 1)
+        .await
+        .expect("fetch");
+    let seen: Vec<i64> = got[0]
+        .records
+        .iter()
+        .map(|r| {
+            serde_json::from_slice::<Value>(&r.payload).unwrap()["n"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    let want: Vec<i64> = (-1..N).collect();
+    assert_eq!(
+        seen, want,
+        "the partition holds the pushes in the order they were sent"
+    );
+    let f = Arc::try_unwrap(f).ok().expect("the pushes are done");
+    close(f, dir).await;
+}

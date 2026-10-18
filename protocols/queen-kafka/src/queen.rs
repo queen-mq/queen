@@ -1138,6 +1138,34 @@ pub trait QueenApi: Send + Sync + 'static {
         })
     }
 
+    /// Whether a push sent now is planned by this node as leader, so that
+    /// [`QueenApi::push_raw_ordered`] can say it is in the log. Only the
+    /// in-process transport ever says yes.
+    fn leads(&self) -> bool {
+        false
+    }
+
+    /// The raft node that leads, when this node follows it and knows it: the
+    /// facade relays its clients' produce to the facade on that node.
+    fn leader_node(&self) -> Option<u64> {
+        None
+    }
+
+    /// [`QueenApi::push_raw`] for a caller that pipelines its pushes: `in_log`
+    /// says `true` once the push is in the log, so the next may go before this
+    /// one is answered ([`LocalDispatch::push_records_ordered`]). The default,
+    /// and every transport but in-process, never says `true`.
+    fn push_raw_ordered<'a>(
+        &'a self,
+        items: Vec<RawPush>,
+        token: Option<&'a str>,
+    ) -> OrderedPushed<'a> {
+        OrderedPushed {
+            in_log: Box::pin(async { false }),
+            done: self.push_raw(items, token),
+        }
+    }
+
     /// [`QueenApi::fetch`] answered as [`RawFetched`]: the same read, each
     /// payload as the bytes it is stored as. The default goes through `fetch`.
     fn fetch_raw<'a>(
@@ -1464,6 +1492,18 @@ pub struct LocalResponse {
 /// process implements it over its router. `Err` is a call that produced no
 /// answer at all (the broker task died): the local twin of a reset connection,
 /// and reported as [`Error::Transport`].
+/// An ordered in-process push ([`LocalDispatch::push_records_ordered`]).
+pub struct OrderedLocal {
+    pub in_log: BoxFuture<'static, bool>,
+    pub done: BoxFuture<'static, std::result::Result<LocalAnswer<Vec<Pushed>>, String>>,
+}
+
+/// An ordered push ([`QueenApi::push_raw_ordered`]).
+pub struct OrderedPushed<'a> {
+    pub in_log: BoxFuture<'a, bool>,
+    pub done: BoxFuture<'a, Result<Vec<Pushed>>>,
+}
+
 pub trait LocalDispatch: Send + Sync + 'static {
     fn call(
         &self,
@@ -1487,6 +1527,31 @@ pub trait LocalDispatch: Send + Sync + 'static {
     ) -> BoxFuture<'static, std::result::Result<LocalAnswer<Vec<Pushed>>, String>> {
         let _ = (bearer, items);
         Box::pin(async { Err("this broker does not serve records in-process".to_string()) })
+    }
+
+    /// Whether this broker leads the raft group the facade's tenant is served
+    /// by, now: where an ordered push is planned
+    /// ([`LocalDispatch::push_records_ordered`]).
+    fn leads(&self) -> bool {
+        false
+    }
+
+    /// The raft node that leads, when this broker follows it and knows it.
+    fn leader_node(&self) -> Option<u64> {
+        None
+    }
+
+    /// [`LocalDispatch::push_records`] for a caller that sends its next push
+    /// as soon as this one is in the log: `in_log` answers `true` once every
+    /// command of the push was proposed by this node as leader (anything sent
+    /// after it lands after it), `false` when the push ended without that, and
+    /// then the caller waits for `done` before sending the next. The default
+    /// never says `true`.
+    fn push_records_ordered(&self, bearer: Option<String>, items: Vec<RawPush>) -> OrderedLocal {
+        OrderedLocal {
+            in_log: Box::pin(async { false }),
+            done: self.push_records(bearer, items),
+        }
     }
 
     /// `POST /api/v1/fetch` answered as records, without the JSON: the
@@ -2074,6 +2139,52 @@ impl QueenApi for HttpQueen {
                 .await?;
             align_push_results(&body, n)
         })
+    }
+
+    fn leads(&self) -> bool {
+        self.records_dispatch().is_some_and(|d| d.leads())
+    }
+
+    fn leader_node(&self) -> Option<u64> {
+        self.records_dispatch().and_then(|d| d.leader_node())
+    }
+
+    fn push_raw_ordered<'a>(
+        &'a self,
+        items: Vec<RawPush>,
+        token: Option<&'a str>,
+    ) -> OrderedPushed<'a> {
+        let Some(dispatch) = self.records_dispatch() else {
+            return OrderedPushed {
+                in_log: Box::pin(async { false }),
+                done: self.push_raw(items, token),
+            };
+        };
+        let n = items.len();
+        let OrderedLocal { in_log, done } =
+            dispatch.push_records_ordered(token.map(str::to_string), items);
+        OrderedPushed {
+            in_log,
+            done: Box::pin(async move {
+                let answer = tokio::time::timeout(REQUEST_TIMEOUT, done)
+                    .await
+                    .map_err(|_| {
+                        Error::Transport(format!(
+                            "in-process push timed out after {} ms",
+                            REQUEST_TIMEOUT.as_millis()
+                        ))
+                    })?
+                    .map_err(Error::Transport)?;
+                match answer {
+                    LocalAnswer::Done(pushed) if pushed.len() == n => Ok(pushed),
+                    LocalAnswer::Done(pushed) => Err(Error::Body(format!(
+                        "push answered {} results for {n} items",
+                        pushed.len()
+                    ))),
+                    LocalAnswer::Refused(r) => Err(refused(r)),
+                }
+            }),
+        }
     }
 
     fn fetch_raw<'a>(
@@ -2991,11 +3102,17 @@ pub struct Catalog {
     /// registry does, for the same reason.
     ///
     /// Held for a map read or a map write and never across an await on Queen.
-    entries: tokio::sync::Mutex<HashMap<TenantKey, Entry>>,
+    ///
+    /// A plain mutex, not an async one (2026-10-17): it is held for a map
+    /// read or write and never across an await, and the async mutex's fair
+    /// hand-off made every lookup queue behind a waiter whose thread was busy.
+    /// With the Kafka facade's produce, fetch and commit all reading the list
+    /// on one node at 1M msg/s, a cached lookup took 7.4 ms on average.
+    entries: std::sync::Mutex<HashMap<TenantKey, Entry>>,
     /// One refresh lock per tenant — the same key space as `entries`. THIS is
     /// what is held across the call to Queen, and holding it blocks only the
     /// callers that have no list to serve.
-    refreshes: tokio::sync::Mutex<HashMap<TenantKey, Arc<tokio::sync::Mutex<()>>>>,
+    refreshes: std::sync::Mutex<HashMap<TenantKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// How many scopes one catalog keeps an answer for.
@@ -3079,8 +3196,8 @@ impl Catalog {
             identities: crate::identity::Identities::new(Arc::clone(&api)),
             api,
             ttl,
-            entries: tokio::sync::Mutex::new(HashMap::new()),
-            refreshes: tokio::sync::Mutex::new(HashMap::new()),
+            entries: std::sync::Mutex::new(HashMap::new()),
+            refreshes: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -3194,7 +3311,7 @@ impl Catalog {
         key: &TenantKey,
         cred: CredentialKey,
     ) -> Option<Result<Arc<Vec<Queue>>>> {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         let entry = entries.get_mut(key)?;
         if entry.probed_at.elapsed() >= self.ttl {
             return None;
@@ -3214,14 +3331,14 @@ impl Catalog {
 
     /// The last list that arrived for `key`, at any age.
     async fn in_hand(&self, key: &TenantKey) -> Option<Arc<Vec<Queue>>> {
-        let entries = self.entries.lock().await;
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         entries.get(key)?.queues.as_ref().map(Arc::clone)
     }
 
     /// The failure `cred`'s last call produced, while it is still inside the
     /// TTL.
     async fn remembered_failure(&self, key: &TenantKey, cred: CredentialKey) -> Option<Error> {
-        let entries = self.entries.lock().await;
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         let entry = entries.get(key)?;
         (entry.probed_at.elapsed() < self.ttl)
             .then(|| remembered(entry, cred))
@@ -3235,7 +3352,7 @@ impl Catalog {
     /// held stays, because two callers holding two different mutexes for one
     /// credential would be two calls to Queen where the point is to have one.
     async fn refresh_lock(&self, key: &TenantKey) -> Arc<tokio::sync::Mutex<()>> {
-        let mut refreshes = self.refreshes.lock().await;
+        let mut refreshes = self.refreshes.lock().unwrap_or_else(|p| p.into_inner());
         if refreshes.len() >= MAX_CREDENTIALS && !refreshes.contains_key(key) {
             refreshes.retain(|_, lock| Arc::strong_count(lock) > 1);
         }
@@ -3272,7 +3389,7 @@ impl Catalog {
         // narrows a topic, so a short scan must fall back to what was already
         // known rather than to the broker-wide default.
         let (previous, previous_floors, previous_floors_at) = {
-            let entries = self.entries.lock().await;
+            let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             let e = entries.get(key);
             (
                 e.and_then(|e| e.queues.as_ref().map(|q| (Arc::clone(q), e.listed_at))),
@@ -3399,7 +3516,7 @@ impl Catalog {
                 }
                 let queues = Arc::new(queues);
                 let now = Instant::now();
-                let mut entries = self.entries.lock().await;
+                let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
                 make_room(&mut entries, key);
                 entries.insert(
                     key.clone(),
@@ -3419,7 +3536,7 @@ impl Catalog {
             Err(e) => {
                 // The failure is remembered whether or not it is served, so the
                 // callers behind this one do not each pay for it — see `Entry`.
-                let mut entries = self.entries.lock().await;
+                let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
                 make_room(&mut entries, key);
                 entries.insert(
                     key.clone(),
@@ -3463,7 +3580,10 @@ impl Catalog {
         // The tenant's entry, so the sibling credentials of the key that
         // created the topic see it too rather than each waiting out a TTL.
         let key = self.identities.known(token);
-        self.entries.lock().await.remove(&key);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key);
         Ok(())
     }
 
@@ -3480,7 +3600,10 @@ impl Catalog {
     ) -> Result<()> {
         self.api.create_queue_with(name, options, token).await?;
         let key = self.identities.known(token);
-        self.entries.lock().await.remove(&key);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key);
         Ok(())
     }
 
@@ -3493,7 +3616,10 @@ impl Catalog {
     pub async fn delete(&self, name: &str, token: Option<&str>) -> Result<Deleted> {
         let answer = self.api.delete_queue(name, token).await;
         let key = self.identities.known(token);
-        self.entries.lock().await.remove(&key);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key);
         answer
     }
 
@@ -3511,7 +3637,10 @@ impl Catalog {
     /// path.
     pub async fn invalidate(&self, token: Option<&str>) {
         let key = self.identities.known(token);
-        self.entries.lock().await.remove(&key);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key);
     }
 }
 
@@ -3666,6 +3795,18 @@ pub mod testing {
         /// [`QueenApi::native_positions`]: off unless a test turns it on
         /// ([`FakeQueen::keep_positions`]).
         pub native: std::sync::atomic::AtomicBool,
+        /// [`QueenApi::leads`]: off unless a test pipelines produce.
+        pub leads: std::sync::atomic::AtomicBool,
+        /// [`QueenApi::leader_node`]: who leads, as a follower would know it.
+        pub leader_node: Mutex<Option<u64>>,
+        /// Every [`QueenApi::push_raw_ordered`], in order: `("sent", n)` when
+        /// push `n` was handed over, `("answered", n)` when its answer came.
+        pub ordered_log: Mutex<Vec<(&'static str, usize)>>,
+        /// How long an ordered push takes to be answered (it is in the log at
+        /// once), and which one fails, by number.
+        pub ordered_delay: Mutex<std::time::Duration>,
+        pub ordered_fail_at: Mutex<Option<usize>>,
+        pub ordered_seq: AtomicUsize,
         /// The positions this Queen keeps, per (group, queue, partition): the
         /// next offset and the metadata — the broker's cursor rows, behaving
         /// like them: set and forgotten only by a transaction that committed.
@@ -3814,6 +3955,12 @@ pub mod testing {
                 transactions: Mutex::new(Vec::new()),
                 transaction_error: Mutex::new(None),
                 native: std::sync::atomic::AtomicBool::new(false),
+                leads: std::sync::atomic::AtomicBool::new(false),
+                leader_node: Mutex::new(None),
+                ordered_log: Mutex::new(Vec::new()),
+                ordered_delay: Mutex::new(std::time::Duration::ZERO),
+                ordered_fail_at: Mutex::new(None),
+                ordered_seq: AtomicUsize::new(0),
                 positions: Mutex::new(std::collections::BTreeMap::new()),
                 position_calls: Mutex::new(Vec::new()),
                 forgets: Mutex::new(Vec::new()),
@@ -4225,6 +4372,36 @@ pub mod testing {
     }
 
     impl QueenApi for FakeQueen {
+        fn leads(&self) -> bool {
+            self.leads.load(Ordering::Relaxed)
+        }
+
+        fn leader_node(&self) -> Option<u64> {
+            *self.leader_node.lock().unwrap()
+        }
+
+        fn push_raw_ordered<'a>(
+            &'a self,
+            items: Vec<RawPush>,
+            token: Option<&'a str>,
+        ) -> OrderedPushed<'a> {
+            let n = self.ordered_seq.fetch_add(1, Ordering::Relaxed);
+            self.ordered_log.lock().unwrap().push(("sent", n));
+            let delay = *self.ordered_delay.lock().unwrap();
+            let fail = *self.ordered_fail_at.lock().unwrap() == Some(n);
+            OrderedPushed {
+                in_log: Box::pin(async { true }),
+                done: Box::pin(async move {
+                    tokio::time::sleep(delay).await;
+                    self.ordered_log.lock().unwrap().push(("answered", n));
+                    if fail {
+                        return Err(Error::Transport(format!("push {n} failed, as scripted")));
+                    }
+                    self.push_raw(items, token).await
+                }),
+            }
+        }
+
         fn partition_bytes<'a>(
             &'a self,
             queue: &'a str,
@@ -5849,7 +6026,7 @@ mod tests {
             catalog.refresh(Some(token)).await.unwrap();
         }
         assert_eq!(
-            catalog.entries.lock().await.len(),
+            catalog.entries.lock().unwrap().len(),
             2,
             "one tenant's two credentials are two queue-list caches"
         );
@@ -5871,7 +6048,7 @@ mod tests {
         // ...and a credential nobody could identify is its own entry rather
         // than joining a shared bucket.
         catalog.refresh(Some("key-d")).await.unwrap();
-        assert_eq!(catalog.entries.lock().await.len(), 3);
+        assert_eq!(catalog.entries.lock().unwrap().len(), 3);
     }
 
     /// A shared entry must not let one credential answer for another AT
@@ -6157,9 +6334,9 @@ mod tests {
             catalog.list(Some(&format!("guess-{i}"))).await.ok();
         }
 
-        assert_eq!(catalog.entries.lock().await.len(), MAX_CREDENTIALS);
+        assert_eq!(catalog.entries.lock().unwrap().len(), MAX_CREDENTIALS);
         assert!(
-            catalog.refreshes.lock().await.len() <= MAX_CREDENTIALS,
+            catalog.refreshes.lock().unwrap().len() <= MAX_CREDENTIALS,
             "the refresh locks grew past the bound the entries are held to"
         );
         // The credential that is being used is still cached: a flood of wrong
@@ -6190,7 +6367,7 @@ mod tests {
         let keys: Vec<String> = catalog
             .entries
             .lock()
-            .await
+            .unwrap()
             .keys()
             .map(|k| format!("{k:?}"))
             .collect();

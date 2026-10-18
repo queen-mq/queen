@@ -391,6 +391,21 @@ impl RaftFacade {
     /// read until an append to one of them or `max_wait` (re-reading at least
     /// every second, the floor for a missed wake). The bytes are counted as the
     /// records are read, never by re-reading the answer.
+    ///
+    /// A parked fetch that has read nothing also answers, empty, once it has
+    /// waited [`topic_wake_floor`] and its topic was written on this node
+    /// meanwhile.
+    /// A Kafka client keeps ONE fetch in flight per broker, and leaves out of
+    /// it every partition it still holds records of: a partition it drains
+    /// while this fetch is parked on quiet ones waits for this fetch to come
+    /// back, up to the client's `fetch.max.wait.ms` (500 ms in Java). The early
+    /// answer lets it ask again with every partition it can take. Measured
+    /// 2026-10-17 with the OpenMessaging Benchmark's stock Java consumer (1 KB,
+    /// 100 partitions, 500,000 msg/s, three GCP nodes): e2e p50/p99/p99.9
+    /// 46/625/792 ms with fetches held to the client's 500 ms, 11/39/56 ms with
+    /// the client's wait set to 10 ms. An idle topic still parks to
+    /// `max_wait`, and the floor bounds the extra round trips of a client
+    /// whose partitions are quiet on a busy topic.
     async fn fetch_wait(
         &self,
         ctx: &ReqCtx,
@@ -417,22 +432,59 @@ impl RaftFacade {
                 .collect();
             self.notifier.watch_partitions(&parts)
         });
+        let floor = topic_wake_floor();
+        let topic = (watch.is_some() && !floor.is_zero()).then(|| {
+            let mut qkeys: Vec<String> = asks
+                .iter()
+                .map(|e| crate::handlers::tenant_queue_key(&ctx.tenant, &e.queue))
+                .collect();
+            qkeys.sort_unstable();
+            qkeys.dedup();
+            self.notifier.watch_topics(&qkeys)
+        });
+        let early = std::time::Instant::now() + floor;
+        // The topic was written on this node since the fetch arrived.
+        let mut moved = false;
         loop {
             let (answers, bytes) = self.fetch_once(ctx, asks, want_txn).await?;
             if max_wait == 0 || min_bytes == 0 {
                 return Ok(answers);
             }
             let error = answers.iter().any(|a| a.error.is_some());
-            if error || bytes >= min_bytes || std::time::Instant::now() >= deadline {
+            let now = std::time::Instant::now();
+            // The early answer is an EMPTY one: a fetch holding some bytes keeps
+            // waiting for its `min_bytes`, which is how a client asks for batches.
+            if error
+                || bytes >= min_bytes
+                || now >= deadline
+                || (moved && bytes == 0 && now >= early)
+            {
                 return Ok(answers);
             }
             // Capped at a second: the wake is the fast path, and the re-read on
             // the cap is the floor if one is ever missed.
             let wait = deadline
-                .saturating_duration_since(std::time::Instant::now())
+                .saturating_duration_since(now)
                 .min(std::time::Duration::from_secs(1));
-            if let Some(w) = &watch {
-                w.wait(wait).await;
+            match (&watch, &topic) {
+                (Some(w), Some(t)) if !moved => {
+                    tokio::select! {
+                        _ = w.wait(wait) => {}
+                        woke = t.wait(wait) => {
+                            moved = woke;
+                            // Not before the floor; an append to one of this
+                            // fetch's own partitions still ends the wait.
+                            let left = early.saturating_duration_since(std::time::Instant::now());
+                            if moved && !left.is_zero() {
+                                w.wait(left.min(wait)).await;
+                            }
+                        }
+                    }
+                }
+                (Some(w), _) => {
+                    w.wait(wait).await;
+                }
+                (None, _) => {}
             }
         }
     }
@@ -2397,4 +2449,18 @@ mod tests {
         assert_eq!(pct_decode("%zz%41"), "%zzA", "a bad escape is kept");
         assert_eq!(pct_decode("%+5x"), "%+5x", "a sign is not a hex digit");
     }
+}
+
+/// How long a parked fetch waits at least before it answers because its topic
+/// was written elsewhere on this node ([`RaftFacade::fetch_wait`]):
+/// `QUEEN_FETCH_TOPIC_WAKE_MS`, default 5 ms; `0` parks a fetch on its own
+/// partitions only, as before 2026-10-17.
+fn topic_wake_floor() -> std::time::Duration {
+    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    std::time::Duration::from_millis(*MS.get_or_init(|| {
+        std::env::var("QUEEN_FETCH_TOPIC_WAKE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(5, |v| v.min(30_000))
+    }))
 }

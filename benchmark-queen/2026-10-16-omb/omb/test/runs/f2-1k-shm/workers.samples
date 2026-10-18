@@ -1,0 +1,78 @@
+07:43:05 port 8080 rss_mb 8665 threads 58 cpu_ticks 4774
+07:43:05 port 8082 rss_mb 5741 threads 61 cpu_ticks 9012
+07:43:05 tcp_to_broker 0
+07:43:10 port 8080 rss_mb 8953 threads 111 cpu_ticks 5064
+07:43:10 port 8082 rss_mb 6154 threads 114 cpu_ticks 9559
+07:43:10 tcp_to_broker 1096
+07:43:15 port 8080 rss_mb 9246 threads 111 cpu_ticks 5527
+07:43:15 port 8082 rss_mb 6904 threads 114 cpu_ticks 10503
+07:43:15 tcp_to_broker 1096
+07:43:20 port 8080 rss_mb 9246 threads 111 cpu_ticks 5953
+07:43:20 port 8082 rss_mb 7805 threads 114 cpu_ticks 11457
+07:43:20 tcp_to_broker 1096
+07:43:25 port 8080 rss_mb 9265 threads 111 cpu_ticks 6374
+07:43:25 port 8082 rss_mb 8567 threads 114 cpu_ticks 12389
+07:43:25 tcp_to_broker 1096
+07:43:31 port 8080 rss_mb 9285 threads 111 cpu_ticks 6798
+07:43:31 port 8082 rss_mb 9460 threads 114 cpu_ticks 13340
+07:43:31 tcp_to_broker 1096
+07:43:36 port 8080 rss_mb 9289 threads 111 cpu_ticks 7211
+07:43:36 port 8082 rss_mb 9462 threads 114 cpu_ticks 14189
+07:43:36 tcp_to_broker 1096
+07:43:41 port 8080 rss_mb 9323 threads 111 cpu_ticks 7635
+07:43:41 port 8082 rss_mb 9463 threads 114 cpu_ticks 15060
+07:43:41 tcp_to_broker 1096
+07:43:46 port 8080 rss_mb 9324 threads 111 cpu_ticks 8050
+07:43:46 port 8082 rss_mb 9463 threads 114 cpu_ticks 15930
+07:43:46 tcp_to_broker 1096
+07:43:51 port 8080 rss_mb 9359 threads 111 cpu_ticks 8459
+07:43:51 port 8082 rss_mb 9468 threads 114 cpu_ticks 16766
+07:43:51 tcp_to_broker 1096
+07:43:56 port 8080 rss_mb 9359 threads 111 cpu_ticks 8872
+07:43:56 port 8082 rss_mb 9469 threads 114 cpu_ticks 17626
+07:43:56 tcp_to_broker 1096
+07:44:01 port 8080 rss_mb 9394 threads 111 cpu_ticks 9286
+07:44:01 port 8082 rss_mb 9469 threads 114 cpu_ticks 18461
+07:44:01 tcp_to_broker 1096
+07:44:06 port 8080 rss_mb 9394 threads 111 cpu_ticks 9695
+07:44:06 port 8082 rss_mb 9469 threads 114 cpu_ticks 19271
+07:44:06 tcp_to_broker 1096
+07:44:11 port 8080 rss_mb 9429 threads 111 cpu_ticks 10100
+07:44:11 port 8082 rss_mb 9469 threads 114 cpu_ticks 20072
+07:44:11 tcp_to_broker 1096
+07:44:16 port 8080 rss_mb 9430 threads 112 cpu_ticks 10524
+07:44:16 port 8082 rss_mb 9469 threads 114 cpu_ticks 20888
+07:44:16 tcp_to_broker 1096
+07:44:21 port 8080 rss_mb 9465 threads 111 cpu_ticks 10943
+07:44:21 port 8082 rss_mb 9469 threads 115 cpu_ticks 21734
+07:44:21 tcp_to_broker 1096
+07:44:26 port 8080 rss_mb 9611 threads 111 cpu_ticks 11368
+07:44:26 port 8082 rss_mb 9469 threads 115 cpu_ticks 22579
+07:44:26 tcp_to_broker 1096
+07:44:31 port 8080 rss_mb 9640 threads 111 cpu_ticks 11786
+07:44:31 port 8082 rss_mb 9469 threads 114 cpu_ticks 23417
+07:44:31 tcp_to_broker 1096
+07:44:36 port 8080 rss_mb 9640 threads 111 cpu_ticks 12199
+07:44:36 port 8082 rss_mb 9469 threads 114 cpu_ticks 24266
+07:44:36 tcp_to_broker 1096
+07:44:41 port 8080 rss_mb 9640 threads 111 cpu_ticks 12610
+07:44:41 port 8082 rss_mb 9522 threads 114 cpu_ticks 25112
+07:44:41 tcp_to_broker 1096
+07:44:46 port 8080 rss_mb 9640 threads 111 cpu_ticks 13015
+07:44:46 port 8082 rss_mb 9579 threads 114 cpu_ticks 25933
+07:44:46 tcp_to_broker 1096
+07:44:51 port 8080 rss_mb 9640 threads 111 cpu_ticks 13425
+07:44:51 port 8082 rss_mb 9581 threads 114 cpu_ticks 26767
+07:44:51 tcp_to_broker 1096
+07:44:56 port 8080 rss_mb 9640 threads 111 cpu_ticks 13826
+07:44:56 port 8082 rss_mb 9581 threads 114 cpu_ticks 27575
+07:44:56 tcp_to_broker 1096
+07:45:01 port 8080 rss_mb 9640 threads 111 cpu_ticks 14237
+07:45:01 port 8082 rss_mb 9581 threads 114 cpu_ticks 28413
+07:45:01 tcp_to_broker 1096
+07:45:06 port 8080 rss_mb 9640 threads 111 cpu_ticks 14640
+07:45:06 port 8082 rss_mb 9608 threads 114 cpu_ticks 29229
+07:45:06 tcp_to_broker 1096
+07:45:11 port 8080 rss_mb 9651 threads 111 cpu_ticks 15001
+07:45:11 port 8082 rss_mb 9616 threads 94 cpu_ticks 29864
+07:45:11 tcp_to_broker 0

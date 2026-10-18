@@ -1,0 +1,137 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final nil,
+          :member-removals {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches ()},
+ :lazyfs {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:total-queue {:ok-count 21856,
+                          :duplicated-count 0,
+                          :valid? true,
+                          :lost-count 0,
+                          :lost #{},
+                          :acknowledged-count 21795,
+                          :recovered #{16391
+                                       18350
+                                       7123
+                                       19569
+                                       20207
+                                       7843
+                                       7957
+                                       21429
+                                       15973
+                                       15716
+                                       18042
+                                       17293
+                                       19012
+                                       16693
+                                       17368
+                                       20411
+                                       19231
+                                       7220
+                                       6692
+                                       21425
+                                       6914
+                                       21118
+                                       18787
+                                       16837
+                                       19209
+                                       20408
+                                       6843
+                                       21121
+                                       6577
+                                       7478
+                                       21704
+                                       20067
+                                       20524
+                                       18620
+                                       21309
+                                       20694
+                                       20755
+                                       17181
+                                       21559
+                                       15955
+                                       19799
+                                       21542
+                                       17841
+                                       18471
+                                       19428
+                                       7374
+                                       17290
+                                       19620
+                                       16186
+                                       17641
+                                       6912
+                                       17703
+                                       7481
+                                       21705
+                                       18180
+                                       17922
+                                       20412
+                                       16834
+                                       7669
+                                       18895
+                                       19909},
+                          :attempt-count 21856,
+                          :unexpected #{},
+                          :unexpected-count 0,
+                          :recovered-count 61,
+                          :duplicated #{}},
+            :queue {:lease-overlaps (),
+                    :payload-mismatch (),
+                    :valid? true,
+                    :noop-ack-examples (),
+                    :acked-twice (),
+                    :acked-twice-count 0,
+                    :lease-overlap-count 0,
+                    :partial-acks 0,
+                    :acked 21856,
+                    :redeliveries 59,
+                    :pop-skips (),
+                    :offset-value-mismatch (),
+                    :ack-unknown 0,
+                    :pop-skip-count 0,
+                    :noop-acks 0,
+                    :deliveries 21856,
+                    :pop-internal-gaps (),
+                    :redelivered-after-ack-count 0,
+                    :ack-rejected 0,
+                    :redelivered-after-ack ()},
+            :valid? true},
+ :stats {:valid? true,
+         :count 44016,
+         :ok-count 43827,
+         :fail-count 128,
+         :info-count 61,
+         :by-f {:dequeue {:valid? true,
+                          :count 22160,
+                          :ok-count 22032,
+                          :fail-count 128,
+                          :info-count 0},
+                :enqueue {:valid? true,
+                          :count 21856,
+                          :ok-count 21795,
+                          :fail-count 0,
+                          :info-count 61}}}}

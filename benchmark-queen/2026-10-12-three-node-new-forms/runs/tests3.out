@@ -1,3 +1,37 @@
 [12:44:42] start 1x100-2000k-gcp24-dbb1g 2000000 TOPICS=1 PARTITIONS=100 CONSUMERS=11
 [12:47:42] KAFKA_POINT 1x100-2000k-gcp24-dbb1g DONE | 1x100-2000k-gcp24-dbb1g  kafka  1x100 e=0 batch b=100 rr c=11x9 default  2000000   2000k   2000k      0k        6       26         27        28       11.8       10.9          6.5               303              316/303     0       6.7
 [12:47:44] start 1x1000-2000k-gcp24-dbb1g 2000000 TOPICS=1 PARTITIONS=1000 CONSUMERS=33
+[12:50:42] KAFKA_POINT 1x1000-2000k-gcp24-dbb1g DONE | 1x1000-2000k-gcp24-dbb1g  kafka  1x1000 e=0 batch b=100 rr c=33x9 default  2000000   2000k   2000k      0k        6       95         97        92       15.7       15.3          6.6               305              316/303     0       7.0
+TEST1_DONE
+[12:50:44] start 1x10-3000k-gcp24-dbb1g-poll20k 3000000 TOPICS=1 PARTITIONS=10 CONSUMERS=1 POLL=20000 FETCH_MAX_PARTITION_BYTES=8388608
+[12:53:51] KAFKA_POINT 1x10-3000k-gcp24-dbb1g-poll20k DONE | 1x10-3000k-gcp24-dbb1g-poll20k  kafka  1x10 e=0 batch b=100 rr c=1x9 default  3000000   3005k   3005k      0k        6      594        594       528       13.5       10.8          6.5               429              467/447     0       8.0
+[12:53:55] start 1x100-3000k-gcp24-dbb1g-poll5k 3000000 TOPICS=1 PARTITIONS=100 CONSUMERS=11 POLL=5000 FETCH_MAX_PARTITION_BYTES=8388608
+[12:56:51] KAFKA_POINT 1x100-3000k-gcp24-dbb1g-poll5k DONE | 1x100-3000k-gcp24-dbb1g-poll5k  kafka  1x100 e=0 batch b=100 rr c=11x9 default  3000000   3000k   3000k      0k        6      114        113       111       15.0       14.2          6.6               440              472/452     0       9.8
+TEST3_DONE
+[12:56:51] rebuild md0 on two disks
+## queen-bench-2: /dev/md0 736.9G, md0 members: nvme0n1 nvme1n1 
+## queen-bench-3: /dev/md0 736.9G, md0 members: nvme0n1 nvme1n1 
+## queen-bench-1: /dev/md0 736.9G, md0 members: nvme0n1 nvme1n1 
+md0-2disks       16996 syncs/s | ms p50 0.048 p90 0.061 p99 0.211 p99.9 0.394 max 2.9
+md0-2disks       17342 syncs/s | ms p50 0.048 p90 0.060 p99 0.208 p99.9 0.521 max 1.6
+md0-2disks       16373 syncs/s | ms p50 0.056 p90 0.066 p99 0.194 p99.9 0.322 max 1.1
+md0-2disks     seq write 1M qd32, 30 s: 668 MB/s
+md0-2disks     seq write 1M qd32, 30 s: 670 MB/s
+md0-2disks     seq write 1M qd32, 30 s: 670 MB/s
+broker 1: chrony active, 1 settings changed
+broker 3: chrony active, 1 settings changed
+broker 2: chrony active, 1 settings changed
+loader: chrony active, qload flags 5/5
+loader: chrony active, qload flags 5/5
+loader: chrony active, qload flags 5/5
+[12:58:48] run d2-p1000-r2000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 2000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[12:59:10] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[13:00:59] 2,000,000: last 30 s: offered 2,000,030 pushed 2,000,543 consumed 2,000,694 | run: shed 0 errors 0 | push p50 5.4 p99 28.9 | e2e p50 13.4 p99 47.1 worst 50.2 | cores 8.8 / 4.1 / 4.2 | mem GB 7.0 / 6.6 / 6.6 | loaders 12.7c  OK 
+[13:01:03] run d2-p1000-r3000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[13:01:14] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[13:03:03] 3,000,000: last 30 s: offered 3,000,079 pushed 2,749,526 consumed 2,750,613 | run: shed 11,536,600 errors 0 | push p50 1654.8 p99 1835.0 | e2e p50 1720.3 p99 1916.9 worst 1916.9 | cores 10.8 / 6.2 / 6.3 | mem GB 10.9 / 13.9 / 13.8 | loaders 19.1c  NOT CARRIED 
+[13:03:07] 1000 partitions: not carried at 3000000, the column stops here
+GRID3_DONE
+TEST2_DONE

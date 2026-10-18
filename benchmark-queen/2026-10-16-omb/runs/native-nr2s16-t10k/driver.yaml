@@ -1,0 +1,17 @@
+# Queen native for the topic-count family: one parked pop per subscription up to 12,000 per worker, the doorbell past that.
+name: Queen (native)
+driverClass: io.openmessaging.benchmark.driver.queen.QueenBenchmarkDriver
+urls:
+  - http://10.250.0.43:6632
+  - http://10.250.0.39:6632
+  - http://10.250.0.40:6632
+dedupWindowSeconds: 60
+lingerMs: 1
+batchMaxBytes: 1048576
+maxInFlight: 5
+bufferMaxBytes: 67108864
+compression: none
+pollers: 8
+maxPops: 12000
+popTimeoutMs: 1000
+ackMaxInFlight: 16

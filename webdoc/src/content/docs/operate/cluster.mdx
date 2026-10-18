@@ -63,6 +63,12 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-16 (2.4.0): the upgrade paragraphs name 2.4.0, which moves the
 # cluster from 6 to 7 (effect.rs), and its rehearsal; the /health example shows cluster version 7.
 # raft/mod.rs and facade/real.rs are otherwise as described.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (2.5.0): the upgrade paragraphs add 2.5.0, which leaves the cluster at
+# version 7.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -169,7 +175,7 @@ name: queen-cluster
 
 x-node: &node
   # QUEEN_VERSION in .env picks another release (README.md: rolling upgrade).
-  image: ghcr.io/queen-mq/queen:${QUEEN_VERSION:-latest}
+  image: ghcr.io/queen-mq/queen:${QUEEN_VERSION:-2.5.0}
   # A node that was away long enough to need a snapshot exits with code 75 to
   # load it at start; the restart policy brings it back.
   restart: unless-stopped
@@ -385,6 +391,8 @@ from 2.3.0 to 2.4.0 under 4,500 messages a second with deduplication on: the ver
 while one node still ran 2.3.0, rose to 7 three seconds after the last one moved, and every
 `transactionId` pushed before, during and after the roll was answered as a duplicate when pushed
 again, also after a full restart (`benchmark-queen/2026-10-15-jepsen-24`).
+
+2.5.0 leaves the cluster at version 7: a cluster rolls from 2.4.0 to 2.5.0 one node at a time.
 
 ## Ephemeral queues in a cluster
 

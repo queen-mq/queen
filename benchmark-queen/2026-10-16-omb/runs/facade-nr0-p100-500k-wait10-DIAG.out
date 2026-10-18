@@ -1,0 +1,2 @@
+[06:35:13] omb: run facade-nr0-p100-500k-wait10-DIAG: system queen-facade, driver queen-facade-wait10-diag.yaml, workload 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+[06:35:18] omb: 6 workers up

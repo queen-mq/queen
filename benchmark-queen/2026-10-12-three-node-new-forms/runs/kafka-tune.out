@@ -1,0 +1,70 @@
+[15:08:41] brokers reformatted XFS by hand at 15:10Z (the first try killed its own shell with pkill -f kafka.Kafka)
+  kafka    <ip>     rc=0  [2026-10-14T15:09:10Z] install queen-bench-1.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 installed 
+  kafka    <ip>     rc=0  [2026-10-14T15:09:10Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 installed 
+  kafka    <ip>     rc=0  [2026-10-14T15:09:10Z] install queen-bench-3.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 installed 
+  check    <ip>     rc=0  listening
+  check    <ip>     rc=0  listening
+  check    <ip>     rc=0  listening
+[15:09:11] start 1x100-3000k-gcp24-xfs-t24 3000000 TOPICS=1 PARTITIONS=100 CONSUMERS=11 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824)
+[15:12:17] KAFKA_POINT 1x100-3000k-gcp24-xfs-t24 DONE | 1x100-3000k-gcp24-xfs-t24  kafka  1x100 e=0 batch b=100 rr c=11x9 default  3000000   3000k   3000k      0k        6        8          8         8       18.5       16.2          6.6               435              474/453     0       9.7
+    server.properties n1: num.network.threads=8 num.io.threads=16 num.replica.fetchers=8 num.io.threads=24 num.network.threads=12 num.replica.fetchers=12 
+[15:12:18] start 1x1000-3000k-gcp24-xfs-t24 3000000 TOPICS=1 PARTITIONS=1000 CONSUMERS=33 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824)
+[15:15:18] KAFKA_POINT 1x1000-3000k-gcp24-xfs-t24 DONE | 1x1000-3000k-gcp24-xfs-t24  kafka  1x1000 e=0 batch b=100 rr c=33x9 default  3000000   3000k   3000k      0k        6        8          8         8       21.0       21.0          6.6               443              473/453     0      10.0
+    server.properties n1: num.network.threads=8 num.io.threads=16 num.replica.fetchers=8 num.io.threads=24 num.network.threads=12 num.replica.fetchers=12 
+[15:15:18] start 1x100-1000k-p1k-gcp24-xfs-t24 1000000 TOPICS=1 PARTITIONS=100 CONSUMERS=11 PAYLOAD=1024 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824)
+[15:18:25] KAFKA_POINT 1x100-1000k-p1k-gcp24-xfs-t24 DONE | 1x100-1000k-p1k-gcp24-xfs-t24  kafka  1x100 e=0 batch b=100 rr c=11x9 default  1000000   1000k   1000k      0k        7       10         10        10        9.5        8.5          6.6               615              648/619     0       7.5
+    server.properties n1: num.network.threads=8 num.io.threads=16 num.replica.fetchers=8 num.io.threads=24 num.network.threads=12 num.replica.fetchers=12 
+[15:18:25] start 1x1000-1000k-p1k-gcp24-xfs-t24 1000000 TOPICS=1 PARTITIONS=1000 CONSUMERS=33 PAYLOAD=1024 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824)
+[15:21:25] KAFKA_POINT 1x1000-1000k-p1k-gcp24-xfs-t24 DONE | 1x1000-1000k-p1k-gcp24-xfs-t24  kafka  1x1000 e=0 batch b=100 rr c=33x9 default  1000000   1000k   1000k      0k        7        9         10         9       11.9       10.9          6.6               615              648/619     0       8.1
+    server.properties n1: num.network.threads=8 num.io.threads=16 num.replica.fetchers=8 num.io.threads=24 num.network.threads=12 num.replica.fetchers=12 
+TUNE_FOUR_DONE
+[15:21:25] start 1x10-3000k-gcp24-xfs-t24 3000000 TOPICS=1 PARTITIONS=10 CONSUMERS=1 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824)
+[15:24:28] KAFKA_POINT 1x10-3000k-gcp24-xfs-t24 DONE | 1x10-3000k-gcp24-xfs-t24  kafka  1x10 e=0 batch b=100 rr c=1x9 default  3000000   3000k   3000k      0k        6       45         46         8       14.9       12.9          6.6               444              467/447     0       8.8
+    server.properties n1: num.network.threads=8 num.io.threads=16 num.replica.fetchers=8 num.io.threads=24 num.network.threads=12 num.replica.fetchers=12 
+[15:24:28] start 1x10000-3000k-gcp24-xfs-t24 3000000 TOPICS=1 PARTITIONS=10000 CONSUMERS=33 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824)
+[15:28:01] KAFKA_POINT 1x10000-3000k-gcp24-xfs-t24 DONE | 1x10000-3000k-gcp24-xfs-t24  kafka  1x10000 e=0 batch b=100 rr c=33x9 default  3000000   3000k   3000k      0k        8       78         80        62       52.8       52.3          6.8               480              470/449     0      10.5
+    server.properties n1: num.network.threads=8 num.io.threads=16 num.replica.fetchers=8 num.io.threads=24 num.network.threads=12 num.replica.fetchers=12 
+[15:28:01] start 1x10-1000k-p1k-gcp24-xfs-t24 1000000 TOPICS=1 PARTITIONS=10 CONSUMERS=1 PAYLOAD=1024 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824)
+[15:31:01] KAFKA_POINT 1x10-1000k-p1k-gcp24-xfs-t24 DONE | 1x10-1000k-p1k-gcp24-xfs-t24  kafka  1x10 e=0 batch b=100 rr c=1x9 default  1000000   1000k   1000k      0k        8        9          9         9        9.2        8.1          6.6               613              648/619     0       8.1
+    server.properties n1: num.network.threads=8 num.io.threads=16 num.replica.fetchers=8 num.io.threads=24 num.network.threads=12 num.replica.fetchers=12 
+[15:31:01] start 1x10000-1000k-p1k-gcp24-xfs-t24 1000000 TOPICS=1 PARTITIONS=10000 CONSUMERS=33 PAYLOAD=1024 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824)
+[15:32:26]   1x10000-1000k-p1k-gcp24-xfs-t24 failed before any load; once more as 1x10000-1000k-p1k-gcp24-xfs-t24-r
+[15:36:11] KAFKA_POINT 1x10000-1000k-p1k-gcp24-xfs-t24-r DONE | 1x10000-1000k-p1k-gcp24-xfs-t24-r  kafka  1x10000 e=0 batch b=100 rr c=33x9 default  1000000   1000k   1000k      0k        9       20         20        20       31.4       30.5          6.9               668              646/618     0       8.9
+    server.properties n1: num.network.threads=8 num.io.threads=16 num.replica.fetchers=8 num.io.threads=24 num.network.threads=12 num.replica.fetchers=12 
+[15:36:11] start 1x100000-3000k-gcp24-xfs-t24 3000000 TOPICS=1 PARTITIONS=100000 CONSUMERS=33 READY_TIMEOUT=1800 GROUP_TIMEOUT=900s GOMEMLIMIT=9GiB KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824 xfs::::rw,noatime,inode64,logbufs=8,logb/1073741824)
+[15:44:33] KAFKA_POINT 1x100000-3000k-gcp24-xfs-t24 DONE | 1x100000-3000k-gcp24-xfs-t24  kafka  1x100000 e=0 batch b=100 rr c=33x9 default  3000000    174k    234k   2826k    37487    39059      39059     33423       60.5       56.0         11.5                86                29/26     0       3.2
+    server.properties n1: num.network.threads=8 num.io.threads=16 num.replica.fetchers=8 num.io.threads=24 num.network.threads=12 num.replica.fetchers=12 
+TUNE_ALL_DONE
+queen-bench-2 xfs    rw,noatime,inode64,logbufs=8,logb: xfs              16580 syncs/s | ms p50 0.051 p90 0.063 p99 0.193 p99.9 0.501 max 1.9
+queen-bench-1 xfs    rw,noatime,inode64,logbufs=8,logb: xfs              17043 syncs/s | ms p50 0.056 p90 0.062 p99 0.145 p99.9 0.319 max 0.9
+queen-bench-3 xfs    rw,noatime,inode64,logbufs=8,logb: xfs              16422 syncs/s | ms p50 0.052 p90 0.064 p99 0.197 p99.9 0.500 max 5.0
+broker 1: chrony active, 1 settings changed
+broker 3: chrony active, 1 settings changed
+broker 2: chrony active, 1 settings changed
+loader: chrony active, qload flags 5/5
+loader: chrony active, qload flags 5/5
+loader: chrony active, qload flags 5/5
+[15:45:38] run xq3-p1000-r3000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[15:46:00] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[15:47:49] 3,000,000: last 30 s: offered 2,999,960 pushed 2,999,954 consumed 2,999,600 | run: shed 0 errors 0 | push p50 8.8 p99 25.6 | e2e p50 20.5 p99 49.2 worst 49.7 | cores 11.3 / 5.7 / 5.6 | mem GB 10.0 / 9.4 / 9.5 | loaders 19.0c  OK 
+GRID3_DONE
+[15:47:54] run xq1k-p1000-r1000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 1000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[15:48:17] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[15:50:06] 1,000,000: last 30 s: offered 999,995 pushed 999,905 consumed 999,849 | run: shed 0 errors 0 | push p50 4.8 p99 12.3 | e2e p50 9.1 p99 24.6 worst 25.3 | cores 8.6 / 4.1 / 3.9 | mem GB 4.6 / 3.6 / 3.7 | loaders 15.9c  OK 
+GRID3_DONE
+QUEEN_XFS_CHECK_DONE
+[15:50:13] start 1x25000-3000k-gcp24-xfs-t24 3000000 TOPICS=1 PARTITIONS=25000 CONSUMERS=33 READY_TIMEOUT=1800 GROUP_TIMEOUT=900s GOMEMLIMIT=9GiB KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dbb: xfs/1073741824 xfs/1073741824 xfs/1073741824)
+[15:54:26] KAFKA_POINT 1x25000-3000k-gcp24-xfs-t24 DONE | 1x25000-3000k-gcp24-xfs-t24  kafka  1x25000 e=0 batch b=100 rr c=33x9 default  3000000   3001k   3001k      0k       60      146        159        91       57.0       55.2         11.2               546              449/431     0       9.9
+[15:54:26] start 1x25000-1000k-p1k-gcp24-xfs-t24 1000000 TOPICS=1 PARTITIONS=25000 CONSUMERS=33 PAYLOAD=1024 READY_TIMEOUT=1800 GROUP_TIMEOUT=900s GOMEMLIMIT=9GiB KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dbb: xfs/1073741824 xfs/1073741824 xfs/1073741824)
+[15:58:16] KAFKA_POINT 1x25000-1000k-p1k-gcp24-xfs-t24 DONE | 1x25000-1000k-p1k-gcp24-xfs-t24  kafka  1x25000 e=0 batch b=100 rr c=33x9 default  1000000   1000k   1000k      0k       15       49         52        45       55.9       53.6         11.6               741              638/613     0       9.5
+[15:58:16] start 1x50000-3000k-gcp24-xfs-t24 3000000 TOPICS=1 PARTITIONS=50000 CONSUMERS=33 READY_TIMEOUT=1800 GROUP_TIMEOUT=900s GOMEMLIMIT=9GiB KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dbb: xfs/1073741824 xfs/1073741824 xfs/1073741824)
+[16:04:15] KAFKA_POINT 1x50000-3000k-gcp24-xfs-t24 DONE | 1x50000-3000k-gcp24-xfs-t24  kafka  1x50000 e=0 batch b=100 rr c=33x9 default  3000000    601k    668k   2431k    23986    33817      40632     49021       50.2       46.4         11.7               220              131/127     0       4.4
+[16:04:15] start 1x50000-1000k-p1k-gcp24-xfs-t24 1000000 TOPICS=1 PARTITIONS=50000 CONSUMERS=33 PAYLOAD=1024 READY_TIMEOUT=1800 GROUP_TIMEOUT=900s GOMEMLIMIT=9GiB KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dbb: xfs/1073741824 xfs/1073741824 xfs/1073741824)
+[16:08:26]   1x50000-1000k-p1k-gcp24-xfs-t24 failed before any load; once more as 1x50000-1000k-p1k-gcp24-xfs-t24-r
+[16:15:02] KAFKA_POINT 1x50000-1000k-p1k-gcp24-xfs-t24-r DONE | 1x50000-1000k-p1k-gcp24-xfs-t24-r  kafka  1x50000 e=0 batch b=100 rr c=33x9 default  1000000    159k    248k    841k    29229    44827      45351     40632       46.5       42.2         12.1               152              123/104     0       3.5
+[16:15:02] start 1x100000-1000k-p1k-gcp24-xfs-t24 1000000 TOPICS=1 PARTITIONS=100000 CONSUMERS=33 PAYLOAD=1024 READY_TIMEOUT=1800 GROUP_TIMEOUT=900s GOMEMLIMIT=9GiB KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dbb: xfs/1073741824 xfs/1073741824 xfs/1073741824)
+[16:23:28] KAFKA_POINT 1x100000-1000k-p1k-gcp24-xfs-t24 DONE | 1x100000-1000k-p1k-gcp24-xfs-t24  kafka  1x100000 e=0 batch b=100 rr c=33x9 default  1000000    153k     22k    848k    34341    43778      43778     42729       60.6       57.2         12.4               167              150/128     0       3.8
+[16:23:28] 100,000 partitions carried: 3M=0 1KB=0
+KAFKA_XFS_MATRIX_DONE

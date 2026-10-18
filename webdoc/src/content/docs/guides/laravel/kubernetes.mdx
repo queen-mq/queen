@@ -71,6 +71,13 @@ sourceOfTruth:
 # facade/real.rs reads the binary bodies and renders framed pops only for a client that asks,
 # planner/timers.rs only converts a frame's type, and phase2.rs and phase2/reads.rs give a fetch
 # call a ceiling for the whole call. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (a parked fetch answers when its topic is written): reads.rs's
+# fetch_wait also watches the topics it reads (QUEEN_FETCH_TOPIC_WAKE_MS), and answers early only a
+# fetch that has read nothing. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel

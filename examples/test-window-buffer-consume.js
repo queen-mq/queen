@@ -1,17 +1,17 @@
 /**
- * Test: Window Buffer with Staggered Push (Debounce Behavior)
- * 
- * This test verifies window buffer DEBOUNCE behavior:
+ * Test: Window Buffer with Staggered Push
+ *
+ * This test verifies how the window buffer batches:
  * - Push message 1 at T=0
  * - Wait 1 second
- * - Push message 2 at T=1 (this RESETS the window!)
+ * - Push message 2 at T=1 (inside the window: it does NOT extend it)
  * - Window buffer is 3 seconds
- * 
- * Expected behavior (DEBOUNCE):
- * - Window buffer waits until 3 seconds after the LAST message
- * - Message 2 pushed at T=1, so window expires at T=1+3=T=4
- * - BOTH messages are released together at T=4
- * 
+ *
+ * Expected behavior:
+ * - The window runs 3 seconds from the OLDEST message waiting (message 1)
+ * - So it ends at T=0+3=T=3, whatever is pushed meanwhile
+ * - BOTH messages are released together at T=3
+ *
  * This is different from delayedProcessing which delays each message individually!
  */
 
@@ -56,14 +56,14 @@ console.log(`[${elapsed()}s] Pushing message 2...`)
 await queen.queue(queueName).push([
   { data: { id: 2, message: 'Second message' } }
 ])
-console.log(`[${elapsed()}s] Message 2 pushed (will be available at ~4s)`)
+console.log(`[${elapsed()}s] Message 2 pushed (will be available with message 1 at ~3s)`)
 
 // Start consuming
 console.log(`\n[${elapsed()}s] Starting consume() with batch(100)...`)
-console.log('Timeline (DEBOUNCE behavior):')
-console.log('  - Message 2 pushed at T=1s resets the window')
-console.log('  - Window expires at T=1+3=T=4s')
-console.log('  - BOTH messages should arrive together at ~T=4s\n')
+console.log('Timeline:')
+console.log('  - Message 2 pushed at T=1s joins the window message 1 opened')
+console.log('  - The window ends at T=0+3=T=3s')
+console.log('  - BOTH messages should arrive together at ~T=3s\n')
 
 let batchCount = 0
 let totalMessages = 0
@@ -99,14 +99,14 @@ console.log(`Total batches: ${batchCount}`)
 console.log(`Total messages: ${totalMessages}`)
 
 if (batchCount === 1 && totalMessages === 2) {
-  console.log('SUCCESS: Both messages arrived in 1 batch (DEBOUNCE working!)')
+  console.log('SUCCESS: Both messages arrived in 1 batch')
   console.log('')
-  console.log('Window buffer works like debounce:')
-  console.log('- Waits until N seconds after the LAST message')
+  console.log('Window buffer:')
+  console.log('- Waits N seconds from the OLDEST waiting message (later pushes do not extend it)')
   console.log('- Then releases ALL accumulated messages together')
 } else if (batchCount === 2 && totalMessages === 2) {
   console.log('ISSUE: Messages arrived in SEPARATE batches')
-  console.log('This suggests window buffer is not using debounce semantics.')
+  console.log('This suggests the window buffer did not hold message 1 for its window.')
 } else {
   console.log('RESULT: Unexpected behavior')
 }

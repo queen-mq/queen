@@ -1,0 +1,14 @@
+name: "f3-max-1t-10p-10p10c-64kb (scaled: 1 min, no warm-up)"
+topics: 1
+partitionsPerTopic: 10
+messageSize: 65536
+useRandomizedPayloads: true
+randomBytesRatio: 0.5
+randomizedPayloadPoolSize: 100
+subscriptionsPerTopic: 1
+consumerPerSubscription: 10
+producersPerTopic: 10
+producerRate: 10000000
+consumerBacklogSizeGB: 0
+warmupDurationMinutes: 0
+testDurationMinutes: 1

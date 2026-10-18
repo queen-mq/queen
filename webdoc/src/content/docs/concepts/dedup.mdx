@@ -51,6 +51,13 @@ verifiedBy:
 # write a push's outcome as runs (catalogue version 7) where the cluster reads 7; dedup.rs and
 # facade/real.rs checkpoint a txns row without its hashes and refill them from the queue log at
 # boot. A duplicate is found as before, also after a restart. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (the catalog behind a plain mutex): queen.rs's queue-list cache
+# takes a std mutex instead of an async one, and produce reports its staging parts in /status.
+# Nothing this page states changes.
 ---
 
 Every message carries a `transactionId`. Push the same id to the same partition again, inside the

@@ -78,6 +78,14 @@ digest: >-
 # client that asks; a JSON request is served as before. Nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-16 (2.4.0): server/Cargo.toml says 2.4.0; the /health example is a
 # fresh 2.4.0 node's (cluster version 7). raft/mod.rs and facade/real.rs are otherwise as described.
+# sourceOfTruth re-read 2026-10-16 (openraft 0.10.0-alpha.37, PR 138): server/Cargo.toml only moves openraft from
+# a git pin to the crates.io release. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (2.5.0): server/Cargo.toml says 2.5.0; the /health example is a
+# fresh 2.5.0 node's (cluster version 7, which 2.5.0 does not raise). Nothing else this page states changes.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
@@ -94,7 +102,7 @@ five times.
 ```bash
 docker run -d --name queen -p 6632:6632 \
   -v queen-data:/var/lib/queen/raft \
-  ghcr.io/queen-mq/queen:latest
+  ghcr.io/queen-mq/queen:2.5.0
 ```
 
 </TabItem>
@@ -103,7 +111,7 @@ docker run -d --name queen -p 6632:6632 \
 ```yaml
 services:
   queen:
-    image: ghcr.io/queen-mq/queen:latest
+    image: ghcr.io/queen-mq/queen:2.5.0
     ports: ["6632:6632"]
     volumes:
       - queen-data:/var/lib/queen/raft
@@ -130,7 +138,7 @@ curl -s localhost:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.4.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":7,"kinds":7}}
+{"status":"healthy","engine":"raft","version":"2.5.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":7,"kinds":7}}
 ```
 
 The dashboard is at `http://localhost:6632/`, and the image carries the CLI, so

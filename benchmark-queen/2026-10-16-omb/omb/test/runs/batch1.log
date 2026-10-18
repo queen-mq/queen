@@ -1,0 +1,54 @@
+=== 07:59:30 f5-backlog-100p-4p4c
+{"status":"healthy","engine":"raft","version":"2.4.0","raft"
+started f5-backlog-100p-4p4c
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f5-backlog-100p-4p4c/worker-8080.slice:08:01:51.409 [qtp1380976928-332] INFO QueenBenchmarkDriver - Queen driver closed: pushes 479740 (failed 0, 1.0 groups each), messages pushed 6577573 (failed 0), 0 failed at once on a full buffer; pops 0 (empty 0, errors 0, JSON answers 0, after close 0), messages delivered 0; acks 0 (failed 0), messages acked 0
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f5-backlog-100p-4p4c/worker-8082.slice:08:01:51.985 [qtp1380976928-49] INFO QueenBenchmarkDriver - Queen driver closed: pushes 0 (failed 0, 0.0 groups each), messages pushed 0 (failed 0), 0 failed at once on a full buffer; pops 244544 (empty 96, errors 0, JSON answers 0, after close 0), messages delivered 6577795; acks 244434 (failed 0), messages ac
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f5-backlog-100p-4p4c/worker-8082.slice:08:01:51.985 [qtp1380976928-49] INFO QueenBenchmarkDriver - Queen verify: 1 subscriptions, 100 partitions, 6577573 distinct messages, 222 delivered again, 0 holes between the first and the last offset delivered; 1 subscriptions with duplicates or holes; omb-notkj2-0000000-rH4_vYA / sub-000: 100 partitions, 6577
+f5-backlog-100p-4p4c: pub 49993 msg/s, cons 50110 msg/s, pub err 0.0/s, backlog end 0; pub p50/p99/p99.9 0.9/1.5/2.1 ms; e2e p50/p99/p99.9/max 1568.0/62763.0/63898.1/64035.1 ms
+  broker peak: rss 722 MB, threads 116, fds 166, data 4014 MB
+  workers peak: 8080 rss 12048 MB threads 95, 8082 rss 12334 MB threads 128; tcp to broker peak 68
+=== 08:02:02 f6-keyed-rr
+{"status":"healthy","engine":"raft","version":"2.4.0","raft"
+started f6-keyed-rr
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f6-keyed-rr/worker-8080.slice:08:03:13.436 [qtp1380976928-161] INFO QueenBenchmarkDriver - Queen driver closed: pushes 220787 (failed 0, 12.9 groups each), messages pushed 3044166 (failed 0), 0 failed at once on a full buffer; pops 0 (empty 0, errors 0, JSON answers 0, after close 0), messages delivered 0; acks 0 (failed 0), messages acked 0 (refuse
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f6-keyed-rr/worker-8082.slice:08:03:14.012 [qtp1380976928-104] INFO QueenBenchmarkDriver - Queen driver closed: pushes 0 (failed 0, 0.0 groups each), messages pushed 0 (failed 0), 0 failed at once on a full buffer; pops 1676305 (empty 96, errors 0, JSON answers 0, after close 0), messages delivered 3044166; acks 977533 (failed 0), messages acked 304
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f6-keyed-rr/worker-8082.slice:08:03:14.012 [qtp1380976928-104] INFO QueenBenchmarkDriver - Queen verify: 1 subscriptions, 100 partitions, 3044166 distinct messages, 0 delivered again, 0 holes between the first and the last offset delivered; 0 subscriptions with duplicates or holes
+f6-keyed-rr: pub 49976 msg/s, cons 49975 msg/s, pub err 0.0/s, backlog end 49; pub p50/p99/p99.9 1.3/2.0/8.4 ms; e2e p50/p99/p99.9/max 2.0/4.0/11.0/14.0 ms
+  broker peak: rss 1671 MB, threads 136, fds 150, data 3555 MB
+  workers peak: 8080 rss 12062 MB threads 95, 8082 rss 12350 MB threads 125; tcp to broker peak 68
+=== 08:03:24 f6-keyed-nano
+{"status":"healthy","engine":"raft","version":"2.4.0","raft"
+started f6-keyed-nano
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f6-keyed-nano/worker-8080.slice:08:04:34.819 [qtp1380976928-104] INFO QueenBenchmarkDriver - Queen driver closed: pushes 220663 (failed 0, 12.9 groups each), messages pushed 3043368 (failed 0), 0 failed at once on a full buffer; pops 0 (empty 0, errors 0, JSON answers 0, after close 0), messages delivered 0; acks 0 (failed 0), messages acked 0 (refu
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f6-keyed-nano/worker-8082.slice:08:04:35.413 [qtp1380976928-105] INFO QueenBenchmarkDriver - Queen driver closed: pushes 0 (failed 0, 0.0 groups each), messages pushed 0 (failed 0), 0 failed at once on a full buffer; pops 1674344 (empty 96, errors 0, JSON answers 0, after close 0), messages delivered 3043368; acks 969233 (failed 0), messages acked 3
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f6-keyed-nano/worker-8082.slice:08:04:35.413 [qtp1380976928-105] INFO QueenBenchmarkDriver - Queen verify: 1 subscriptions, 100 partitions, 3043368 distinct messages, 0 delivered again, 0 holes between the first and the last offset delivered; 0 subscriptions with duplicates or holes
+f6-keyed-nano: pub 49980 msg/s, cons 49979 msg/s, pub err 0.0/s, backlog end 47; pub p50/p99/p99.9 1.3/2.0/8.3 ms; e2e p50/p99/p99.9/max 2.0/4.0/11.0/15.0 ms
+  broker peak: rss 1652 MB, threads 101, fds 152, data 3516 MB
+  workers peak: 8080 rss 12062 MB threads 94, 8082 rss 12356 MB threads 124; tcp to broker peak 68
+=== 08:04:45 f7-100t-3subs
+{"status":"healthy","engine":"raft","version":"2.4.0","raft"
+started f7-100t-3subs
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f7-100t-3subs/worker-8080.slice:08:06:57.064 [qtp1380976928-241] INFO QueenBenchmarkDriver - Queen driver closed: pushes 1532478 (failed 0, 2.4 groups each), messages pushed 3642568 (failed 0), 0 failed at once on a full buffer; pops 0 (empty 0, errors 0, JSON answers 0, after close 0), messages delivered 0; acks 0 (failed 0), messages acked 0 (refu
+/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f7-100t-3subs/worker-8082.slice:08:06:57.766 [qtp1380976928-219] INFO QueenBenchmarkDriver - Queen driver closed: pushes 0 (failed 0, 0.0 groups each), messages pushed 0 (failed 0), 0 failed at once on a full buffer; pops 5794963 (empty 24422, errors 10, JSON answers 0, after close 0), messages delivered 10917861; acks 2449823 (failed 0), messages a
+f7-100t-3subs: pub 29995 msg/s, cons 89855 msg/s, pub err 0.0/s, backlog end 16002; pub p50/p99/p99.9 1.8/3.1/11.3 ms; e2e p50/p99/p99.9/max 6.0/694.0/708.0/1018.0 ms
+  broker peak: rss 2235 MB, threads 172, fds 577, data 5328 MB
+  workers peak: 8080 rss 12067 MB threads 111, 8082 rss 12363 MB threads 123; tcp to broker peak 428
+=== 08:07:08 f4-1m-10t-16p-100b
+{"status":"healthy","engine":"raft","version":"2.4.0","raft"
+started f4-1m-10t-16p-100b
+Traceback (most recent call last):
+  File "/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/summary.py", line 5, in <module>
+    r = json.load(open(os.path.join(d, 'result.json')))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f4-1m-10t-16p-100b/result.json'
+=== 08:07:28 f4-1m-10t-1p-100b
+{"status":"healthy","engine":"raft","version":"2.4.0","raft"
+started f4-1m-10t-1p-100b
+Traceback (most recent call last):
+  File "/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/summary.py", line 5, in <module>
+    r = json.load(open(os.path.join(d, 'result.json')))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/Users/alice/Work/queen/benchmark-queen/2026-10-16-omb/omb/test/runs/f4-1m-10t-1p-100b/result.json'
+=== 08:07:48 f3-max-1t-1p-1p1c-100b
+{"status":"healthy","engine":"raft","version":"2.4.0","raft"
+started f3-max-1t-1p-1p1c-100b

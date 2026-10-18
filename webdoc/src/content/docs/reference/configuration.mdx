@@ -69,6 +69,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-16 (2.4.0): QUEEN_RAFT_CHECKPOINT_TXNS and QUEEN_QLOG_ENTRY_HASHES
 # join the table (store/heed_store.rs, replicator/local.rs); batcher.rs, entry.rs, dedup.rs and
 # facade/real.rs add no other setting.
+# sourceOfTruth re-read 2026-10-17 (the fetch topic wake and the Kafka facade's pipelined produce):
+# QUEEN_FETCH_TOPIC_WAKE_MS gets its row; the facade's pipelining settings are the Kafka reference's.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
@@ -81,7 +83,7 @@ default, with the value the code applies when you don't.
 ```bash
 docker run -p 6632:6632 -v queen-data:/var/lib/queen/raft \
   -e QUEEN_KV_MAX_VALUE_BYTES=262144 -e LOG_LEVEL=info \
-  ghcr.io/queen-mq/queen:latest
+  ghcr.io/queen-mq/queen:2.5.0
 ```
 
 In a cluster, give every node the same values except the per-node ones: `QUEEN_RAFT_NODE_ID`,
@@ -145,6 +147,7 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 | `QUEEN_CONSUME_IDLE_UNLOAD_S` | `600` | A whole-queue group's partition that holds nothing (no lease, nothing to deliver, every change committed) for this long leaves the leader's memory; the next message on it loads it back from its cursor row. `0` keeps every one. |
 | `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` | `500` | The clock difference between nodes that lease exclusivity allows for. A new leader serves no pops or acks for one checkpoint interval plus this. |
 | `QUEEN_RAFT_POP_REPLY_MARGIN_MS` | `50` | A pop this close to its deadline is answered empty and never claimed for. |
+| `QUEEN_FETCH_TOPIC_WAKE_MS` | `5` | A `POST /api/v1/fetch` long poll, and so a Kafka Fetch, that has read nothing answers empty once it has waited this long and another partition of a queue it reads was written on the node, so a Kafka client can fetch again the partitions it left out. `0` keeps it waiting for its own partitions. |
 
 ### Cluster
 

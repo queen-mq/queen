@@ -1,0 +1,22 @@
+# Batched pushes (2026-10-15), for the build of branch worktree-bytes-per-msg ("2.4"): every test
+# of matrix-220.txt pushes ONE message per push, and a one-message push keeps its version-1
+# outcome, so none of them writes a push outcome as runs (catalogue version 7, rsm/entry.rs
+# PushOutcome::planned). These tests do: --batch-sends N makes every push carry several messages
+# of one partition (log: 1 to N sends to one key; dedup: 2 to N distinct ids of one partition).
+# The snapshot test ships checkpoints whose request_ids rows are runs; the restart, kill and
+# lazyfs tests reopen them; the rw test lets rows leave the store at a 2 s window.
+#
+#   cd /root/jepsen-batch && RUNS=/root/runs-24-batch BIN=/root/bin/queen-24 NODES=n1,n2,n3,n4,n5 ./run-campaign.sh matrix-24-batch.txt
+b-w1-kill               --workload log --batch-sends 8 --nemesis kill --time-limit 300 --rate 200
+b-w1-part               --workload log --batch-sends 8 --nemesis partition --time-limit 300 --rate 200
+b-w1-pause              --workload log --batch-sends 8 --nemesis pause --time-limit 300 --rate 200
+b-w1-lz-kill            --workload log --batch-sends 8 --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+b-w1-leader-deaf        --workload log --batch-sends 8 --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+b-w1-restart            --workload log --batch-sends 8 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+b-w1-member-snap        --workload log --batch-sends 8 --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+b-w1-clock              --workload log --batch-sends 8 --nemesis clock --time-limit 300 --rate 200
+b-w1-rw-kill            --workload log --batch-sends 8 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+b-w6-kill               --workload dedup --batch-sends 6 --nemesis kill --time-limit 300 --rate 200
+b-w6-part               --workload dedup --batch-sends 6 --nemesis partition --time-limit 300 --rate 200
+b-w6-restart            --workload dedup --batch-sends 6 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+b-w6-lz-kill            --workload dedup --batch-sends 6 --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10

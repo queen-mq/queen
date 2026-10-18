@@ -1,0 +1,12 @@
+name: 100 topics 1 partition 3 subscriptions 1kb (scaled from 100-topics-1-partitions-1kb)
+topics: 100
+partitionsPerTopic: 1
+messageSize: 1024
+payloadFile: "payload/payload-1Kb.data"
+subscriptionsPerTopic: 3
+consumerPerSubscription: 1
+producersPerTopic: 1
+producerRate: 30000
+consumerBacklogSizeGB: 0
+warmupDurationMinutes: 0
+testDurationMinutes: 2

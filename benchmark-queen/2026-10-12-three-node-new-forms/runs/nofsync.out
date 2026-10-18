@@ -1,0 +1,13 @@
+[17:36:12] binary nofsync md5: 5d99b1c5 5d99b1c5 5d99b1c5 
+[17:36:12] start: 3M at 1,000 partitions, nofsync binary
+[17:37:40]   nf-p1000-r3000000-3000000 syscalls in 10 s mid-load (n1|n2|n3, fsync fdatasync sync_file_range msync pwrite64 write): 0 0 0 0 60428 186761 | 0 0 0 0 50260 89691 | 0 0 0 0 48288 89206 | 
+[17:38:47] NF_POINT nf 3000000 | 3,000,000: last 30 s: offered 3,000,012 pushed 2,999,855 consumed 2,999,299 | run: shed 0 errors 0 | push p50 4.3 p99 13.4 | e2e p50 9.2 p99 26.9 worst 27.4 | cores 12.2 / 5.8 / 5.8 | mem GB 9.9 / 9.4 / 9.4 | loaders 19.6c  OK  | median 9.0/26.0 worst 26.0 windows p99 26 26 24
+NF_POINT_DONE
+[17:38:47] median p99 26.0 < 47: ceiling ladder from 3.5M
+[17:40:09]   nfc-p1000-r3500000-3500000 syscalls in 10 s mid-load (n1|n2|n3, fsync fdatasync sync_file_range msync pwrite64 write): 0 0 0 0 32316 157138 | 0 0 0 0 28651 56343 | 0 0 0 0 28818 56439 | 
+[17:42:27]   nfc-p1000-r4000000-4000000 syscalls in 10 s mid-load (n1|n2|n3, fsync fdatasync sync_file_range msync pwrite64 write): 0 0 0 0 27375 148843 | 0 0 0 0 26919 53903 | 0 0 0 0 25219 53924 | 
+[17:44:39]   nfc-p1000-r4500000-4500000 syscalls in 10 s mid-load (n1|n2|n3, fsync fdatasync sync_file_range msync pwrite64 write): 0 0 0 0 27286 88369 | 0 0 0 0 25828 28089 | 0 0 0 0 26008 27625 | 
+[17:45:46] NF_POINT nfc 3500000 | 3,500,000: last 30 s: offered 3,500,087 pushed 3,500,484 consumed 3,500,543 | run: shed 0 errors 0 | push p50 10.4 p99 32.8 | e2e p50 24.3 p99 64.5 worst 68.6 | cores 12.9 / 6.3 / 6.3 | mem GB 11.4 / 10.9 / 10.9 | loaders 22.7c  OK  | median 24.2/81.4 worst 85.5 windows p99 86 62 81
+[17:45:46] NF_POINT nfc 4000000 | 4,000,000: last 30 s: offered 4,000,038 pushed 4,000,528 consumed 4,001,774 | run: shed 0 errors 0 | push p50 14.6 p99 48.1 | e2e p50 37.4 p99 92.2 worst 96.3 | cores 7.3 / 7.4 | mem GB 12.6 / 12.7 | loaders 26.0c  OK  | median 38.1/87.6 worst 98.8 windows p99 99 86 88
+[17:45:46] NF_POINT nfc 4500000 | 4,500,000: last 30 s: offered 4,499,973 pushed 4,040,626 consumed 4,083,533 | run: shed 17,073,800 errors 754 | push p50 999.4 p99 7405.6 | e2e p50 1040.4 p99 2228.2 worst 2588.7 | cores 16.8 / 9.0 / 10.4 | mem GB 16.2 / 17.9 / 18.3 | loaders 28.2c  NOT CARRIED  | median 1036.3/1155.1 worst 1155.1 windows p99 1155 1155 1122
+NF_DONE

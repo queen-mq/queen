@@ -143,22 +143,7 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
         None => req.conflate,
     };
     let q = &cfg.queue;
-
-    // window_buffer quiet debounce: a partition written within the last
-    // window_buffer seconds delivers nothing (a burst is one batch).
     let has_live = tail >= log_start as i64;
-    if q.window_buffer > 0 && !req.skip_window && has_live {
-        let win = q.window_buffer as i64 * SEC_US;
-        let newest = match fr.r.partition_head(pid)? {
-            Some(h) if h.last_offset >= h.log_start as i64 => Some(h.last_created_at_us),
-            _ => None,
-        };
-        if let Some(newest) = newest {
-            if newest > now - win {
-                return Ok(Claimed::Hold(newest + win));
-            }
-        }
-    }
 
     if part.cur.leased(now, grace) {
         return Ok(Claimed::Nothing);
@@ -196,6 +181,13 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
         // out by itself otherwise).
         if fr.defer_cold && !conflate && from < pi.rows_start && !fr.has_ready(pid) {
             return Ok(Claimed::Cold(ColdNeed { pid, from }));
+        }
+        // window_buffer: a partition just written holds its frames for the
+        // group, at most until the first of them is window_buffer seconds old.
+        if q.window_buffer > 0 && !req.skip_window {
+            if let Some(c) = window_hold(fr, pid, from, q.window_buffer as i64 * SEC_US, now)? {
+                return Ok(c);
+            }
         }
         if conflate {
             // ONE backward step to the newest fresh segment: its last frame is
@@ -387,6 +379,44 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
         },
         taken,
     ))
+}
+
+/// The window buffer of a part whose next frame for the group is `from`
+/// (`win` in µs): `Hold(t)` while the partition was written within the last
+/// `win` and the append holding `from`, the oldest waiting, is younger than
+/// `win` (`t`: that append's stamp plus `win`); `Cold` when that append has
+/// no row ([`Frames::defer_cold`]); `None` when nothing holds the part.
+///
+/// A burst shorter than the window is one batch, and steady writes give a
+/// batch each time the oldest waiting message turns `win` old: the hold ends
+/// at `min(newest + win, oldest + win)`, which is `oldest + win`. Before
+/// 2026-10-16 it ended at `newest + win` (a quiet debounce), so a partition
+/// written more often than every `win` delivered nothing at all.
+///
+/// The stamps are the stored ones: every leader ends a hold at the same
+/// instant. A quiet partition costs the head read; one written within the
+/// window also reads the `txns` row holding `from`.
+fn window_hold<R: Reads + ?Sized>(
+    fr: &Frames<'_, R>,
+    pid: Pid,
+    from: u64,
+    win: i64,
+    now: i64,
+) -> Result<Option<Claimed>> {
+    let newest = match fr.r.partition_head(pid)? {
+        Some(h) if h.last_offset >= h.log_start as i64 => h.last_created_at_us,
+        _ => return Ok(None),
+    };
+    if newest <= now - win {
+        return Ok(None);
+    }
+    let oldest = fr.created_at(pid, from)?;
+    if let Some(need) = fr.take_cold_need() {
+        return Ok(Some(Claimed::Cold(need)));
+    }
+    Ok(oldest
+        .filter(|o| *o > now - win)
+        .map(|o| Claimed::Hold(o + win)))
 }
 
 /// Mark a part changed (its row goes to the next checkpoint).

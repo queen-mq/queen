@@ -1,0 +1,27 @@
+DONE
+benchmark.out
+result.json
+start-8080.lines
+start-8082.lines
+worker-8080.slice
+worker-8082.slice
+workers.samples
+INFO WorkloadGenerator - Created 100 topics in 23.827143 ms
+INFO WorkloadGenerator - Created 100 consumers in 14.490808 ms
+INFO WorkloadGenerator - Created 100 producers in 3.142394 ms
+INFO WorkloadGenerator - Waiting for consumers to be ready
+INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 0, Received: 0
+INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 100, Received: 100
+INFO WorkloadGenerator - All consumers are ready
+-- worker 8080
+QueenBenchmarkDriver - Queen: 100 queues configured in 16 ms; partition count 1 in KV omb/omb-2ii7ir
+QueenBenchmarkDriver - Queen: 100 producers on 100 topics, 16 lanes, in 0 ms
+QueenBenchmarkDriver - Queen driver closed: pushes 1539233 (failed 0, 2.4 groups each), messages pushed 3640031 (failed 0), 0 failed at once on a full buffer; pops 0 (empty 0, errors 0, JSON answers 0, after close 0), messages delivered 0; acks 0 (failed 0), messages acked 0 (refused 0); lease extensions 0 (failed 0); doorbell fetches 0 (found data 0, failed 0); pop pool {subscriptions=0, totalWant=0, maxPops=4096, share=-1, rotating=false, peakPopsInFlight=0, doorbells=0, subscriptionsInDoorbells=0, consumerGroups=0}
+QueenBenchmarkDriver - Queen verify: 0 subscriptions, 0 partitions, 0 distinct messages, 0 delivered again, 0 holes between the first and the last offset delivered; 0 subscriptions with duplicates or holes
+-- worker 8082
+QueenBenchmarkDriver - Queen: 100 consumers on 100 topics in 9 ms; pop pool {subscriptions=100, totalWant=100, maxPops=4096, share=40, rotating=false, peakPopsInFlight=100, doorbells=0, subscriptionsInDoorbells=0, consumerGroups=1}
+QueenBenchmarkDriver - Queen driver closed: pushes 0 (failed 0, 0.0 groups each), messages pushed 0 (failed 0), 0 failed at once on a full buffer; pops 3611092 (empty 395, errors 0, JSON answers 0, after close 0), messages delivered 3640012; acks 1429386 (failed 0), messages acked 3640012 (refused 0); lease extensions 0 (failed 0); doorbell fetches 0 (found data 0, failed 0); pop pool {subscriptions=0, totalWant=0, maxPops=4096, share=40, rotating=false, peakPopsInFlight=100, doorbells=0, subscriptionsInDoorbells=0, consumerGroups=1}
+QueenBenchmarkDriver - Queen verify: 100 subscriptions, 100 partitions, 3640012 distinct messages, 0 delivered again, 0 holes between the first and the last offset delivered; 0 subscriptions with duplicates or holes
+f7-100t-1sub: pub 29994 msg/s, cons 29995 msg/s, pub err 0.0/s, backlog end 28; pub p50/p99/p99.9 1.4/2.4/10.6 ms; e2e p50/p99/p99.9/max 2.0/5.0/585.0/719.0 ms
+  broker peak: rss 2108 MB, threads 149, fds 333, data 5127 MB
+  workers peak: 8080 rss 10832 MB threads 127, 8082 rss 10508 MB threads 112; tcp to broker peak 196

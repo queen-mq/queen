@@ -1,0 +1,7 @@
+[18:57:07] run cf-p1000-r5000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 5000000 | EXTRA= QUEEN_CONSUME_FAST=1 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[18:57:27] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 1000 partitions
+[18:59:35] 5,000,000: last 30 s: offered 5,000,015 pushed 3,996,573 consumed 3,995,064 | run: shed 60,176,400 errors 0 | push p50 1261.6 p99 1376.3 | e2e p50 1261.6 p99 1376.3 worst 1392.6 | cores 16.2 / 8.7 / 9.2 | mem GB 14.2 / 17.3 / 17.4 | loaders 26.4c  NOT CARRIED 
+RUN_DONE

@@ -237,8 +237,9 @@ pub async fn serve(
                             match handshake {
                                 Ok(Ok(stream)) => {
                                     let sni = crate::tls::server_name(&stream);
-                                    connection(stream, Conn::new(&facade, sni, kafka_host(&peer)))
-                                        .await
+                                    let mut conn = Conn::new(&facade, sni, kafka_host(&peer));
+                                    conn.plaintext = false;
+                                    connection(stream, conn).await
                                 }
                                 // Neither is the facade's fault and both are
                                 // client-driven, so both are sampled: a
@@ -319,6 +320,10 @@ pub struct Conn {
     /// rate limiting reads it, so a proxy that rewrites the peer address costs
     /// an operator a column and nothing else.
     pub peer: String,
+    /// Whether this connection came in on the plaintext listener. Only such a
+    /// connection relays its produce to the leader's facade ([`Relay`]): a
+    /// TLS listener's peers would need a TLS client, and the relay is plain.
+    pub plaintext: bool,
     /// This connection's identity inside [`crate::txn::Txns`].
     ///
     /// Minted per accepted connection and never reused, so dropping everything
@@ -342,6 +347,7 @@ impl Conn {
         Conn {
             facade,
             sasl,
+            plaintext: sni.is_none(),
             sni,
             peer,
             id: txn::next_conn_id(),
@@ -498,23 +504,270 @@ async fn dispatch_produces(conn: &mut Conn, frames: Vec<Bytes>) -> Vec<Reply> {
         .collect()
 }
 
-/// One connection, serial: decode a frame, handle it — together with the
-/// Produce requests already buffered behind it, if it is one
-/// ([`dispatch_produces`]) — write the response(s), and only then look for the
-/// next frame. Returns `Ok` on a clean close.
+/// `QUEEN_KAFKA_PIPELINE`: how many produce pushes of one connection may be
+/// in flight at once on the node that leads (2026-10-17). Default 8, 1 to 64;
+/// 1 is the serial connection (one push, answered, then the next). See
+/// [`connection`].
+pub fn pipeline_depth() -> usize {
+    static DEPTH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *DEPTH.get_or_init(|| {
+        std::env::var("QUEEN_KAFKA_PIPELINE")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(8)
+            .clamp(1, 64)
+    })
+}
+
+/// Whether this connection's next produce may go before the one in front of
+/// it is answered: pipelining is on and this node leads, so the push is
+/// planned here, where the log keeps the order it is sent in
+/// ([`queen::QueenApi::push_raw_ordered`]).
+fn pipelines(conn: &Conn) -> bool {
+    pipeline_depth() > 1 && conn.facade.queen.leads()
+}
+
+/// Produce frames decoded for a pipelined push: `(correlation id, version,
+/// request)` each, or `None` when one does not decode (the serial path then
+/// answers each the way [`dispatch`] does).
+fn decode_produces(frames: &[Bytes]) -> Option<Vec<(i32, i16, ProduceRequest)>> {
+    let mut decoded = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let api_version = i16::from_be_bytes([frame[2], frame[3]]);
+        let mut buf = frame.clone();
+        let header_version = ApiKey::Produce.request_header_version(api_version);
+        let header = RequestHeader::decode(&mut buf, header_version).ok()?;
+        let req = ProduceRequest::decode(&mut buf, api_version).ok()?;
+        decoded.push((header.correlation_id, api_version, req));
+    }
+    Some(decoded)
+}
+
+/// A Produce frame's `acks`, when it decodes: an `acks=0` produce has no
+/// answer to wait for.
+fn produce_acks(frame: &Bytes) -> Option<i16> {
+    decode_produces(std::slice::from_ref(frame)).map(|d| d[0].2.acks)
+}
+
+/// What a pipelined request leaves to answer: a relayed one's answer as the
+/// leader wrote it, or a local produce, answered when its turn comes
+/// ([`produce::PushedProduce::answer`]). The produce is boxed: it is some 440
+/// bytes, the replies 24.
+enum Pending {
+    Replies(Vec<Reply>),
+    Produce(Vec<(i32, i16)>, Box<produce::PushedProduce>),
+}
+
+/// A pipelined request, or `None`: it failed, and the connection ends here.
+type Pipelined = tokio::task::JoinHandle<Option<Pending>>;
+
+/// `QUEEN_KAFKA_RELAY` (default on; `0`/`false`/`off` turns it off): whether
+/// a follower's facade relays its clients' produce to the facade on the raft
+/// leader ([`Relay`]) instead of pushing it here, one at a time, through the
+/// broker's forwarding.
+fn relay_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("QUEEN_KAFKA_RELAY").as_deref().map(str::trim),
+            Ok("0") | Ok("false") | Ok("off") | Ok("no")
+        )
+    })
+}
+
+/// Where this connection's produce goes when this node follows: the
+/// advertised address of the live facade on the raft node that leads, when
+/// this facade is clustered, in process, on a plaintext listener without SASL,
+/// knows the leader and is not it.
+fn relay_target(conn: &Conn) -> Option<(String, u16)> {
+    if !relay_enabled() || !conn.plaintext || conn.facade.policy.sasl_plain {
+        return None;
+    }
+    let state = conn.facade.cluster.state()?;
+    let leader = conn.facade.queen.leader_node()?;
+    let view = state.view()?;
+    view.nodes
+        .iter()
+        .find(|n| n.raft_node == Some(leader) && n.id != state.me.id)
+        .map(|n| (n.host.clone(), n.port))
+}
+
+/// A follower's relay of ONE client connection's produce to the facade on the
+/// raft leader, over one connection of its own (2026-10-17): the requests
+/// reach the leader in the order the client sent them, that facade pipelines
+/// them as its own clients' ([`pipelines`]), and the answers come back in the
+/// same order, each handed to the oldest request still waiting. The frames go
+/// as the client wrote them, so an answer is the leader's, correlation id and
+/// all. Pushed here instead, a follower's produce would travel through the
+/// broker's forwarding, whose streams do not keep one connection's order, and
+/// so one at a time.
+struct Relay {
+    to: (String, u16),
+    wr: tokio::net::tcp::OwnedWriteHalf,
+    waiting: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<Bytes>>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl Relay {
+    async fn open(to: (String, u16)) -> std::io::Result<Relay> {
+        let stream = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect((to.0.as_str(), to.1)),
+        )
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "relay connect"))??;
+        stream.set_nodelay(true).ok();
+        let (mut rd, wr) = stream.into_split();
+        let (waiting, mut queue) =
+            tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<Bytes>>();
+        let reader = tokio::spawn(async move {
+            let mut codec = codec();
+            let mut buf = BytesMut::with_capacity(READ_BUF_BYTES);
+            loop {
+                match tokio_util::codec::Decoder::decode(&mut codec, &mut buf) {
+                    Ok(Some(frame)) => match queue.recv().await {
+                        Some(tx) => {
+                            let _ = tx.send(frame.freeze());
+                        }
+                        // An answer nobody waits for: the leader and this
+                        // relay disagree about the stream, so it ends.
+                        None => return,
+                    },
+                    Ok(None) => match rd.read_buf(&mut buf).await {
+                        Ok(n) if n > 0 => {}
+                        _ => return,
+                    },
+                    Err(_) => return,
+                }
+            }
+        });
+        Ok(Relay {
+            to,
+            wr,
+            waiting,
+            reader,
+        })
+    }
+
+    /// Send one frame (the bytes after its length prefix). `None` when it
+    /// gets no answer (acks=0); otherwise the answer arrives on the receiver,
+    /// which fails if the relay breaks first.
+    async fn send(
+        &mut self,
+        frame: Bytes,
+        answered: bool,
+    ) -> std::io::Result<Option<tokio::sync::oneshot::Receiver<Bytes>>> {
+        let rx = if answered {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.waiting
+                .send(tx)
+                .map_err(|_| std::io::Error::other("the relay's reader ended"))?;
+            Some(rx)
+        } else {
+            None
+        };
+        let mut out = BytesMut::with_capacity(frame.len() + LENGTH_PREFIX);
+        out.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+        out.extend_from_slice(&frame);
+        self.wr.write_all(&out).await?;
+        Ok(rx)
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+/// Write the answers of the oldest pipelined produce. A produce that failed,
+/// or ran behind one that did, ends the connection: the client sends again,
+/// in order, everything it has not been answered.
+async fn answer_pipelined<W>(
+    done: Result<Option<Pending>, tokio::task::JoinError>,
+    wr: &mut W,
+    codec: &mut LengthDelimitedCodec,
+    outbuf: &mut BytesMut,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match done {
+        Ok(Some(pending)) => {
+            let replies: Vec<Reply> = match pending {
+                Pending::Replies(replies) => replies,
+                Pending::Produce(ids, pushed) => ids
+                    .into_iter()
+                    .zip(pushed.answer())
+                    .map(|((correlation_id, version), answer)| match answer {
+                        Some(body) => respond(ApiKey::Produce, correlation_id, &body, version),
+                        None => Reply::Silent,
+                    })
+                    .collect(),
+            };
+            for reply in replies {
+                write_reply(wr, codec, outbuf, reply).await?;
+            }
+            Ok(())
+        }
+        Ok(None) | Err(_) => Err(std::io::Error::other(
+            "a pipelined produce failed; the connection ends so the client sends again in order",
+        )),
+    }
+}
+
+/// Every pipelined produce in flight, answered oldest first.
+async fn drain_pipelined<W>(
+    inflight: &mut std::collections::VecDeque<Pipelined>,
+    wr: &mut W,
+    codec: &mut LengthDelimitedCodec,
+    outbuf: &mut BytesMut,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(h) = inflight.pop_front() {
+        answer_pipelined(h.await, wr, codec, outbuf).await?;
+    }
+    Ok(())
+}
+
+/// One connection: decode a frame, handle it — together with the Produce
+/// requests already buffered behind it, if it is one ([`dispatch_produces`])
+/// — write the response(s), and only then look for the next frame. Returns
+/// `Ok` on a clean close.
+///
+/// Produce is the one exception, on the node that leads ([`pipelines`]): a
+/// produce (with the ones buffered behind it) is staged in arrival order here
+/// and pushed as soon as the push before it is IN THE LOG, without waiting for
+/// that one to be answered ([`produce::push_staged`]), up to
+/// [`pipeline_depth`] pushes in flight. The answers are still written in
+/// request order, and any other request waits until every produce before it is
+/// answered, so everything but produce-after-produce is as serial as before.
+/// Kafka's own broker answers a connection one request at a time too; here a
+/// push waits for two disks, and a connection served one push at a time spent
+/// most of a request's time queued behind the one before it (produce p50 7.4
+/// ms against 2.1 ms for the push itself, OMB at 500,000 msg/s, 2026-10-17).
 ///
 /// Generic over the stream so the plaintext and TLS listeners are the same
 /// loop: everything above the socket — framing, muting, dispatch — is
 /// identical, and a second copy of it would be a second place for the two to
 /// drift.
-async fn connection<S>(mut stream: S, mut conn: Conn) -> std::io::Result<()>
+async fn connection<S>(stream: S, mut conn: Conn) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let mut codec = codec();
     let mut inbuf = BytesMut::with_capacity(READ_BUF_BYTES);
     let mut outbuf = BytesMut::new();
-    loop {
+    // The pipelined produces in flight, oldest first, and the gate the next
+    // one waits on: open once the newest is in the log or answered.
+    let mut inflight: std::collections::VecDeque<Pipelined> = std::collections::VecDeque::new();
+    let mut gate: Option<tokio::sync::oneshot::Receiver<()>> = None;
+    // On a follower: this connection's relay to the leader's facade.
+    let mut relay: Option<Relay> = None;
+    let result: std::io::Result<()> = 'conn: loop {
         // The ceiling this connection is held to right now. A connection that
         // has not authenticated gets the small one — see
         // [`PRE_AUTH_MAX_FRAME_BYTES`] — and earns the full one by presenting a
@@ -524,12 +777,121 @@ where
         } else {
             PRE_AUTH_MAX_FRAME_BYTES
         };
-        let Some(frame) = next_frame(&mut stream, &mut inbuf, limit).await? else {
-            return Ok(());
+        // The next frame or, with produces in flight, the oldest one's
+        // answers, whichever comes first.
+        let next = if inflight.is_empty() {
+            next_frame(&mut rd, &mut inbuf, limit).await
+        } else if inflight.len() >= pipeline_depth() {
+            let h = inflight.pop_front().expect("in flight");
+            if let Err(e) = answer_pipelined(h.await, &mut wr, &mut codec, &mut outbuf).await {
+                break 'conn Err(e);
+            }
+            continue;
+        } else {
+            tokio::select! {
+                biased;
+                done = inflight.front_mut().expect("in flight") => {
+                    inflight.pop_front();
+                    if let Err(e) = answer_pipelined(done, &mut wr, &mut codec, &mut outbuf).await {
+                        break 'conn Err(e);
+                    }
+                    continue;
+                }
+                next = next_frame(&mut rd, &mut inbuf, limit) => next,
+            }
         };
+        let frame = match next {
+            Ok(Some(frame)) => frame,
+            // A clean close between requests: what is in flight is answered
+            // first, as a serial connection would have.
+            Ok(None) => {
+                break 'conn drain_pipelined(&mut inflight, &mut wr, &mut codec, &mut outbuf).await
+            }
+            Err(e) => break 'conn Err(e),
+        };
+        let max = coalesce_limit();
+        // On a follower, a produce goes to the leader's facade as it came,
+        // its answer queued behind what is already in flight ([`Relay`]).
+        if pipeline_depth() > 1 && coalescible(&conn, &frame) && !pipelines(&conn) {
+            if let Some(to) = relay_target(&conn) {
+                if relay.as_ref().is_some_and(|r| r.to != to) {
+                    // The leader moved: what went to the old one is answered
+                    // first.
+                    if let Err(e) =
+                        drain_pipelined(&mut inflight, &mut wr, &mut codec, &mut outbuf).await
+                    {
+                        break 'conn Err(e);
+                    }
+                    relay = None;
+                }
+                if relay.is_none() {
+                    relay = Relay::open(to).await.ok();
+                }
+                if let Some(r) = relay.as_mut() {
+                    let answered = produce_acks(&frame) != Some(0);
+                    match r.send(frame.clone(), answered).await {
+                        Ok(Some(rx)) => {
+                            inflight.push_back(tokio::spawn(async move {
+                                rx.await
+                                    .ok()
+                                    .map(|answer| Pending::Replies(vec![Reply::Send(answer)]))
+                            }));
+                            continue;
+                        }
+                        Ok(None) => continue,
+                        Err(e) => break 'conn Err(e),
+                    }
+                }
+                // No relay could be opened: served here, as before.
+            }
+        }
+        if coalescible(&conn, &frame) && pipelines(&conn) {
+            let mut frames = vec![frame];
+            while frames.len() < max {
+                match buffered_frame(&mut inbuf, limit, |f| coalescible(&conn, f)) {
+                    Some(next) => frames.push(next),
+                    None => break,
+                }
+            }
+            if let Some(decoded) = decode_produces(&frames) {
+                let mut ids = Vec::with_capacity(decoded.len());
+                let mut reqs = Vec::with_capacity(decoded.len());
+                for (correlation_id, version, req) in decoded {
+                    ids.push((correlation_id, version));
+                    reqs.push(req);
+                }
+                let staged =
+                    produce::stage_coalesced(&conn.facade, reqs, conn.facade.token()).await;
+                let (in_log, next_gate) = tokio::sync::oneshot::channel();
+                let after = gate.replace(next_gate);
+                let facade = conn.facade.clone();
+                let token = conn.facade.token().map(str::to_string);
+                inflight.push_back(tokio::spawn(async move {
+                    let pushed = produce::push_staged(facade, staged, token, after, in_log).await?;
+                    Some(Pending::Produce(ids, Box::new(pushed)))
+                }));
+                continue;
+            }
+            // One of them does not decode: answered one by one, in order,
+            // after everything in flight.
+            if let Err(e) = drain_pipelined(&mut inflight, &mut wr, &mut codec, &mut outbuf).await {
+                break 'conn Err(e);
+            }
+            gate = None;
+            for reply in dispatch_produces(&mut conn, frames).await {
+                if let Err(e) = write_reply(&mut wr, &mut codec, &mut outbuf, reply).await {
+                    break 'conn Err(e);
+                }
+            }
+            continue;
+        }
+        // Anything else is handled once every produce before it is answered.
+        if let Err(e) = drain_pipelined(&mut inflight, &mut wr, &mut codec, &mut outbuf).await {
+            break 'conn Err(e);
+        }
+        gate = None;
         // Produce requests the client already sent behind this one are written
         // to Queen together with it ([`produce::handle_coalesced`]).
-        let max = coalesce_limit();
         if max > 1 && coalescible(&conn, &frame) {
             let mut frames = vec![frame];
             while frames.len() < max {
@@ -540,46 +902,38 @@ where
             }
             if frames.len() > 1 {
                 for reply in dispatch_produces(&mut conn, frames).await {
-                    write_reply(&mut stream, &mut codec, &mut outbuf, reply).await?;
+                    if let Err(e) = write_reply(&mut wr, &mut codec, &mut outbuf, reply).await {
+                        break 'conn Err(e);
+                    }
                 }
                 continue;
             }
             let frame = frames.pop().expect("one frame");
-            match dispatch(&mut conn, frame).await {
-                Reply::Send(body) => {
-                    outbuf.clear();
-                    codec.encode(body, &mut outbuf)?;
-                    stream.write_all(&outbuf).await?;
-                    stream.flush().await?;
-                }
-                other => write_reply(&mut stream, &mut codec, &mut outbuf, other).await?,
+            let reply = dispatch(&mut conn, frame).await;
+            if let Err(e) = write_reply(&mut wr, &mut codec, &mut outbuf, reply).await {
+                break 'conn Err(e);
             }
             continue;
         }
         match dispatch(&mut conn, frame).await {
-            Reply::Send(body) => {
-                outbuf.clear();
-                codec.encode(body, &mut outbuf)?;
-                stream.write_all(&outbuf).await?;
-                stream.flush().await?;
-            }
             // Straight on to the next frame: the client is already writing it.
             Reply::Silent => {}
             // The answer is written FIRST and the connection dies after it: a
             // client that never receives the error code cannot tell a refused
             // credential from an unreachable broker.
-            Reply::SendThenClose(body, why) => {
-                outbuf.clear();
-                codec.encode(body, &mut outbuf)?;
-                stream.write_all(&outbuf).await?;
-                stream.flush().await?;
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, why));
-            }
-            Reply::Close(why) => {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, why));
+            reply => {
+                if let Err(e) = write_reply(&mut wr, &mut codec, &mut outbuf, reply).await {
+                    break 'conn Err(e);
+                }
             }
         }
+    };
+    // Whatever is still in flight is not answered on this connection: its
+    // staged records leave the in-flight list as each task is dropped.
+    for h in inflight {
+        h.abort();
     }
+    result
 }
 
 /// The next whole request frame — the bytes AFTER the length prefix — or `None`
@@ -2379,6 +2733,235 @@ mod tests {
 
     /// The whole loop, over a real socket: two pipelined requests in one write
     /// come back as two responses, in order, on one connection.
+    /// A facade on a node that leads, over a real socket, with an ordered push
+    /// that is in the log at once and answered after `delay`.
+    async fn pipelining_facade(
+        delay: Duration,
+        fail_at: Option<usize>,
+    ) -> (std::net::SocketAddr, Arc<crate::queen::testing::FakeQueen>) {
+        let (facade, queen) = crate::handlers::testing::facade_and_queen(&[("orders", 2)]);
+        queen
+            .leads
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *queen.ordered_delay.lock().unwrap() = delay;
+        *queen.ordered_fail_at.lock().unwrap() = fail_at;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve(listener, Arc::new(facade), None));
+        (addr, queen)
+    }
+
+    /// The correlation id of every response the server writes until it has
+    /// written `n` or closed the connection.
+    async fn correlation_ids(client: &mut TcpStream, n: usize) -> Vec<i32> {
+        let mut codec = codec();
+        let mut buf = BytesMut::new();
+        let mut ids = Vec::new();
+        while ids.len() < n {
+            match codec.decode(&mut buf).unwrap() {
+                Some(f) => ids.push(i32::from_be_bytes([f[0], f[1], f[2], f[3]])),
+                None => {
+                    if client.read_buf(&mut buf).await.unwrap() == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        ids
+    }
+
+    async fn send(client: &mut TcpStream, frame: Bytes) {
+        let mut wire = BytesMut::new();
+        codec().encode(frame, &mut wire).unwrap();
+        client.write_all(&wire).await.unwrap();
+    }
+
+    /// On a node that leads, a connection's produce goes to Queen as soon as
+    /// the one before it is in the log, not when it is answered, and the
+    /// answers still come back in request order.
+    #[tokio::test]
+    async fn produces_pipeline_on_a_leader_and_answer_in_order() {
+        let (addr, queen) = pipelining_facade(Duration::from_millis(150), None).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let t = std::time::Instant::now();
+        for id in 1..=3 {
+            send(&mut client, produce_request(9, id, -1)).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(correlation_ids(&mut client, 3).await, vec![1, 2, 3]);
+        let log = queen.ordered_log.lock().unwrap().clone();
+        assert_eq!(
+            &log[..3],
+            &[("sent", 0), ("sent", 1), ("sent", 2)],
+            "each push was sent before the one before it was answered: {log:?}"
+        );
+        assert!(
+            t.elapsed() < Duration::from_millis(400),
+            "three 150 ms pushes took {:?}: they ran one after another",
+            t.elapsed()
+        );
+    }
+
+    /// A pipelined push that fails ends the connection after the answers
+    /// before it: nothing behind it is answered, so the client sends it all
+    /// again, in order.
+    #[tokio::test]
+    async fn a_failed_pipelined_produce_closes_the_connection_after_the_answers_before_it() {
+        let (addr, _queen) = pipelining_facade(Duration::from_millis(50), Some(1)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        for id in 1..=3 {
+            send(&mut client, produce_request(9, id, -1)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            correlation_ids(&mut client, 3).await,
+            vec![1],
+            "only the answer before the failed push"
+        );
+    }
+
+    /// A follower's facade relays its client's produce to the facade on the
+    /// raft leader, over one connection, as the client wrote it: the leader
+    /// pipelines it, the follower pushes nothing itself, and the answers come
+    /// back in request order.
+    #[tokio::test]
+    async fn a_follower_relays_produce_to_the_leaders_facade_in_order() {
+        let (leader_addr, leader) = pipelining_facade(Duration::from_millis(150), None).await;
+        let follower_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let follower_addr = follower_listener.local_addr().unwrap();
+        let (follower, follower_queen) = crate::handlers::testing::clustered_on_raft(
+            &[("orders", 2)],
+            &[
+                (1, "127.0.0.1", leader_addr.port()),
+                (2, "127.0.0.1", follower_addr.port()),
+            ],
+            2,
+        );
+        *follower_queen.leader_node.lock().unwrap() = Some(1);
+        tokio::spawn(serve(follower_listener, Arc::new(follower), None));
+
+        let mut client = TcpStream::connect(follower_addr).await.unwrap();
+        let t = std::time::Instant::now();
+        for id in 1..=3 {
+            send(&mut client, produce_request(9, id, -1)).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(correlation_ids(&mut client, 3).await, vec![1, 2, 3]);
+        let log = leader.ordered_log.lock().unwrap().clone();
+        assert_eq!(
+            &log[..3],
+            &[("sent", 0), ("sent", 1), ("sent", 2)],
+            "the leader pipelined the relayed produce: {log:?}"
+        );
+        assert!(
+            follower_queen.pushes.lock().unwrap().is_empty(),
+            "the follower pushed a relayed produce itself"
+        );
+        assert!(
+            t.elapsed() < Duration::from_millis(400),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+
+    /// An idempotent producer's batch, sequence `seq`, for `orders` 0.
+    fn idempotent_produce(correlation_id: i32, seq: i32) -> Bytes {
+        use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
+        use kafka_protocol::messages::{ProduceRequest, TopicName};
+        use kafka_protocol::records::{
+            Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+        };
+        let record = Record {
+            transactional: false,
+            control: false,
+            delete_horizon: false,
+            partition_leader_epoch: -1,
+            producer_id: 7,
+            producer_epoch: 0,
+            timestamp_type: TimestampType::Creation,
+            offset: 0,
+            sequence: seq,
+            timestamp: 1_756_000_000_000,
+            key: None,
+            value: Some(Bytes::from_static(b"queen")),
+            headers: Default::default(),
+        };
+        let mut records = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut records,
+            [&record],
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::Produce as i16)
+            .with_request_api_version(8)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(&mut out, ApiKey::Produce.request_header_version(8))
+            .unwrap();
+        ProduceRequest::default()
+            .with_acks(-1)
+            .with_timeout_ms(30_000)
+            .with_topic_data(vec![TopicProduceData::default()
+                .with_name(TopicName(StrBytes::from_static_str("orders")))
+                .with_partition_data(vec![PartitionProduceData::default()
+                    .with_index(0)
+                    .with_records(Some(records.freeze()))])])
+            .encode(&mut out, 8)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// An idempotent producer's batches, pipelined: each follows the one
+    /// still in flight before it, so all are accepted, and answered in order.
+    #[tokio::test]
+    async fn an_idempotent_producers_pipelined_batches_are_all_accepted_in_order() {
+        use kafka_protocol::messages::ProduceResponse;
+        let (addr, _queen) = pipelining_facade(Duration::from_millis(100), None).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        for seq in 0..3 {
+            send(&mut client, idempotent_produce(10 + seq, seq)).await;
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let mut codec = codec();
+        let mut buf = BytesMut::new();
+        let mut seen = Vec::new();
+        while seen.len() < 3 {
+            match codec.decode(&mut buf).unwrap() {
+                Some(f) => {
+                    let mut f = f.freeze();
+                    let id = ResponseHeader::decode(&mut f, 0).unwrap().correlation_id;
+                    let r = ProduceResponse::decode(&mut f, 8).unwrap();
+                    seen.push((id, r.responses[0].partition_responses[0].error_code));
+                }
+                None => assert!(
+                    client.read_buf(&mut buf).await.unwrap() > 0,
+                    "server hung up"
+                ),
+            }
+        }
+        assert_eq!(seen, vec![(10, 0), (11, 0), (12, 0)]);
+    }
+
+    /// Any other request waits for the produces in flight before it, so the
+    /// answers keep the order the requests came in.
+    #[tokio::test]
+    async fn a_request_after_pipelined_produces_is_answered_after_them() {
+        let (addr, _queen) = pipelining_facade(Duration::from_millis(100), None).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        send(&mut client, produce_request(9, 1, -1)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        send(&mut client, produce_request(9, 2, -1)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        send(&mut client, api_versions_request(3, 3)).await;
+        assert_eq!(correlation_ids(&mut client, 3).await, vec![1, 2, 3]);
+    }
+
     #[tokio::test]
     async fn serves_pipelined_requests_over_a_socket() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

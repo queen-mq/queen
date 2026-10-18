@@ -145,6 +145,10 @@ verifiedBy:
 # states changes.
 # sourceOfTruth re-read 2026-10-16 (2.4.0): server/Cargo.toml says 2.4.0 (the broker is at 2.4.0),
 # and a pop falls back to JSON only for encrypted messages (c42ea1992).
+# sourceOfTruth re-read 2026-10-16 (openraft 0.10.0-alpha.37, PR 138): server/Cargo.toml only moves openraft; the
+# broker stays 2.4.0. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (2.5.0): server/Cargo.toml says 2.5.0 and the page says the broker is
+# at 2.5.0; the clients' versions are unchanged. Nothing else this page states changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same
@@ -296,7 +300,7 @@ you run Horizon today.
 </Tabs>
 
 The JavaScript, Python, Go, Rust and C++ clients are 2.3.0; the PHP client has its own version
-line and is 2.5.0. All of them talk to any 2.x broker (the broker is at 2.4.0); locks need a 2.1
+line and is 2.5.0. All of them talk to any 2.x broker (the broker is at 2.5.0); locks need a 2.1
 broker, and the [binary forms](#binary-push-push-compression-and-framed-pop) a 2.3 one. The Go
 client's module path ends in `/v2`, as Go requires for a major version above 1.
 

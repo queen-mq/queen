@@ -1,0 +1,27 @@
+Created [https://www.googleapis.com/compute/v1/projects/<gcp-project>/zones/europe-west1-b/instances/queen-load-1].
+Created [https://www.googleapis.com/compute/v1/projects/<gcp-project>/zones/europe-west1-b/instances/queen-load-2].
+Created [https://www.googleapis.com/compute/v1/projects/<gcp-project>/zones/europe-west1-b/instances/queen-load-3].
+WARNING: Some requests generated warnings:
+ - Disk size: '50 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+
+NAME          ZONE            MACHINE_TYPE   PREEMPTIBLE  INTERNAL_IP  EXTERNAL_IP     STATUS
+queen-load-1  europe-west1-b  c4-highcpu-16               10.250.0.41  <host-22>  RUNNING
+queen-load-2  europe-west1-b  c4-highcpu-16               10.250.0.42  <host-33>   RUNNING
+queen-load-3  europe-west1-b  c4-highcpu-16               10.250.0.38  <host-36>    RUNNING
+Created [https://www.googleapis.com/compute/v1/projects/<gcp-project>/zones/europe-west1-b/instances/queen-bench-1].
+Created [https://www.googleapis.com/compute/v1/projects/<gcp-project>/zones/europe-west1-b/instances/queen-bench-2].
+Created [https://www.googleapis.com/compute/v1/projects/<gcp-project>/zones/europe-west1-b/instances/queen-bench-3].
+WARNING: Some requests generated warnings:
+ - Disk size: '30 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+
+NAME           ZONE            MACHINE_TYPE         PREEMPTIBLE  INTERNAL_IP  EXTERNAL_IP     STATUS
+queen-bench-1  europe-west1-b  c4-standard-24-lssd               10.250.0.43  <host-37>   RUNNING
+queen-bench-2  europe-west1-b  c4-standard-24-lssd               10.250.0.39  <host-34>   RUNNING
+queen-bench-3  europe-west1-b  c4-standard-24-lssd               10.250.0.40  <host-35>  RUNNING
+NAME           STATUS   NETWORK_IP   NAT_IP
+queen-bench-1  RUNNING  10.250.0.43  <host-37>
+queen-bench-2  RUNNING  10.250.0.39  <host-34>
+queen-bench-3  RUNNING  10.250.0.40  <host-35>
+queen-load-1   RUNNING  10.250.0.41  <host-22>
+queen-load-2   RUNNING  10.250.0.42  <host-33>
+queen-load-3   RUNNING  10.250.0.38  <host-36>

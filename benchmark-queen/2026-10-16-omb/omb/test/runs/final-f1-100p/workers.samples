@@ -1,0 +1,42 @@
+08:39:00 port 8080 rss_mb 8824 threads 87 cpu_ticks 7467
+08:39:00 port 8082 rss_mb 7962 threads 71 cpu_ticks 34615
+08:39:00 tcp_to_broker 0
+08:39:05 port 8080 rss_mb 8833 threads 100 cpu_ticks 7860
+08:39:05 port 8082 rss_mb 7981 threads 124 cpu_ticks 34994
+08:39:05 tcp_to_broker 47
+08:39:10 port 8080 rss_mb 8833 threads 100 cpu_ticks 8209
+08:39:10 port 8082 rss_mb 7981 threads 124 cpu_ticks 35305
+08:39:10 tcp_to_broker 47
+08:39:15 port 8080 rss_mb 8834 threads 100 cpu_ticks 8568
+08:39:15 port 8082 rss_mb 8107 threads 124 cpu_ticks 35623
+08:39:15 tcp_to_broker 48
+08:39:20 port 8080 rss_mb 8834 threads 100 cpu_ticks 8916
+08:39:20 port 8082 rss_mb 8107 threads 124 cpu_ticks 35933
+08:39:20 tcp_to_broker 48
+08:39:25 port 8080 rss_mb 8843 threads 100 cpu_ticks 9267
+08:39:25 port 8082 rss_mb 8246 threads 124 cpu_ticks 36542
+08:39:25 tcp_to_broker 54
+08:39:30 port 8080 rss_mb 8843 threads 100 cpu_ticks 9611
+08:39:30 port 8082 rss_mb 8242 threads 124 cpu_ticks 36848
+08:39:30 tcp_to_broker 54
+08:39:35 port 8080 rss_mb 8861 threads 100 cpu_ticks 9962
+08:39:35 port 8082 rss_mb 8248 threads 124 cpu_ticks 37154
+08:39:35 tcp_to_broker 54
+08:39:40 port 8080 rss_mb 8862 threads 108 cpu_ticks 10305
+08:39:40 port 8082 rss_mb 8248 threads 124 cpu_ticks 37455
+08:39:40 tcp_to_broker 62
+08:39:45 port 8080 rss_mb 8880 threads 108 cpu_ticks 10653
+08:39:45 port 8082 rss_mb 8253 threads 124 cpu_ticks 37762
+08:39:45 tcp_to_broker 62
+08:39:50 port 8080 rss_mb 8879 threads 96 cpu_ticks 10998
+08:39:50 port 8082 rss_mb 8253 threads 124 cpu_ticks 38066
+08:39:50 tcp_to_broker 62
+08:39:55 port 8080 rss_mb 8897 threads 96 cpu_ticks 11344
+08:39:55 port 8082 rss_mb 8253 threads 124 cpu_ticks 38373
+08:39:55 tcp_to_broker 62
+08:40:00 port 8080 rss_mb 8897 threads 96 cpu_ticks 11687
+08:40:00 port 8082 rss_mb 8253 threads 124 cpu_ticks 38677
+08:40:00 tcp_to_broker 62
+08:40:05 port 8080 rss_mb 9057 threads 75 cpu_ticks 11802
+08:40:05 port 8082 rss_mb 8500 threads 72 cpu_ticks 38785
+08:40:05 tcp_to_broker 0

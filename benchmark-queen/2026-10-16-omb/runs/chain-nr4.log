@@ -1,0 +1,14 @@
+[09:37:28] build nr4
+    Finished `release` profile [optimized] target(s) in 6m 26s
+rc=0
+n1: nr4 ee6b8ea2 44408944 bytes
+n2: nr4 ee6b8ea2 44408944 bytes
+n3: nr4 ee6b8ea2 44408944 bytes
+[09:44:00] point facade-nr4-p100-500k
+[09:44:03] omb: queen nr4: 3 healthy ("role":"follower")
+facade-nr4-p100-500k [queen-facade] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 3,857 | pub p50/p99/p99.9 2.7/4.7/5.6 ms | e2e p50/p99/p99.9 5.0/22.0/58.0 ms (max 119) | brokers 9.4 cores, disk write 253/253/254 MB/s
+[09:49:02] point facade-nr4-p100-1000k
+[09:49:09] omb: queen nr4: 3 healthy ("role":"follower")
+facade-nr4-p100-1000k [queen-facade] 1-topic-100-partitions-1kb-4p-4c-1000k.yaml: pub 945k/s cons 945k/s err 0 backlog max 19,999 | pub p50/p99/p99.9 61.9/331/477 ms | e2e p50/p99/p99.9 76.0/365/508 ms (max 727) | brokers 9.1 cores, disk write 315/315/315 MB/s
+[09:54:37] omb: all stopped
+[09:54:37] chain nr4 done

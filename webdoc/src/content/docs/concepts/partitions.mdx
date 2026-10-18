@@ -53,6 +53,14 @@ verifiedBy:
 # outcome as runs (catalogue version 7) where the cluster reads 7; facade/real.rs keeps the framed
 # forms on for the queues that do not encrypt (c42ea1992) and tells the store whether the queue logs
 # hold the txns hashes. A push still answers one verdict per item. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-16 (windowBuffer cap): consume/pop.rs ends a windowBuffer hold one
+# window after the oldest message waiting for the group, no longer one window after the newest
+# write, so a partition written more often than once a window still delivers. The windowBuffer row
+# says so.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a
@@ -141,7 +149,7 @@ curl -s -X POST http://localhost:6632/api/v1/configure -H 'content-type: applica
 | `deadLetterQueue`, `dlqAfterMaxRetries` | `true` | File a message that ran out of retries in the DLQ. With both off, drop it and move on. |
 | `dedupWindowSeconds` | 3600 | How long a partition remembers `transactionId`s. `0` turns dedup off. It is also how long a push keeps its index row in memory (never less than 900 s): after that the message, if it is still retained, is read through the queue log's own index. |
 | `delayedProcessing` | 0 | Seconds after its push before a message can be delivered. |
-| `windowBuffer` | 0 | A partition delivers nothing until it has been quiet this many seconds, so a burst arrives as one batch. |
+| `windowBuffer` | 0 | Seconds a group's new messages wait in their partition, counted from the oldest of them, so a burst arrives as one batch. Writes that keep coming do not extend the wait. |
 | `retentionEnabled` | `false` | Must be `true` for the two options below to act. |
 | `retentionSeconds` | 0 | Remove messages older than this, consumed or not. |
 | `completedRetentionSeconds` | 0 | Remove messages older than this that every group's cursor has passed. A partition no group reads keeps them. |

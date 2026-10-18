@@ -1,0 +1,13 @@
+name: keyed RANDOM_NANO 1 topic 100 partitions 1kb 4p 4c 50k
+topics: 1
+partitionsPerTopic: 100
+keyDistributor: RANDOM_NANO
+messageSize: 1024
+payloadFile: "payload/payload-1Kb.data"
+subscriptionsPerTopic: 1
+consumerPerSubscription: 4
+producersPerTopic: 4
+producerRate: 50000
+consumerBacklogSizeGB: 0
+warmupDurationMinutes: 0
+testDurationMinutes: 1

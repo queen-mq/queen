@@ -1,0 +1,9 @@
+[2026-10-16T07:01:10Z] run 1x1000-3000k-gcp24: pulsar 4.2.4, 3000000 msg/s total over 9 load processes (3 loaders x 3), topics=1 x partitions=1000 entities=0 mode=batch batch=100 sub=failover consumers=33/process
+[2026-10-16T07:01:13Z] 1. cluster reset: PROFILE=vm JOURNALS=2 BOOKIE_SET=dbStorage_writeCacheMaxSizeMb=4096;dbStorage_readAheadCacheMaxSizeMb=2048 BROKER_SET=managedLedgerCacheSizeMB=4096 MEM_ZK=-Xms2g -Xmx2g MEM_BOOKIE=-Xms6g -Xmx6g -XX:MaxDirectMemorySize=16g MEM_BROKER=-Xms12g -Xmx12g -XX:MaxDirectMemorySize=12g
+[2026-10-16T07:01:13Z] reset: stop all + wipe on 3 nodes (10.250.0.23 10.250.0.22 10.250.0.25)
+  n1  ssh: connect to host <host-05> port 22: Operation timed out
+  n2  [2026-10-16T07:01:18Z] node 2 wiped /root/bench/data/pulsar /root/bench/logs/pulsar
+  n3  [2026-10-16T07:01:18Z] node 3 wiped /root/bench/data/pulsar /root/bench/logs/pulsar
+[2026-10-16T07:01:27Z] ERROR: wipe failed
+[2026-10-16T07:01:27Z] FAILED: cluster reset
+[2026-10-16T07:01:45Z] collect -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/pulsar/1x1000-3000k-gcp24

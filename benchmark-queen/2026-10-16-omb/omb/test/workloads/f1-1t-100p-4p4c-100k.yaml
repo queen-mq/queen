@@ -1,0 +1,14 @@
+name: f1 1 topic 100 partitions 1kb 4p 4c 100k (scaled from 1-topic-100-partitions-1kb-4p-4c-*)
+topics: 1
+partitionsPerTopic: 100
+messageSize: 1024
+useRandomizedPayloads: true
+randomBytesRatio: 0.5
+randomizedPayloadPoolSize: 1000
+subscriptionsPerTopic: 1
+consumerPerSubscription: 4
+producersPerTopic: 4
+producerRate: 100000
+consumerBacklogSizeGB: 0
+warmupDurationMinutes: 0
+testDurationMinutes: 1

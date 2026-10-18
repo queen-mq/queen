@@ -1,0 +1,3 @@
+[07:05:11] omb: run fD-nr0-wait10-DIAG-l1-p100-500k: system queen-facade, driver queen-facade-wait10-diag.yaml, workload 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+[07:05:15] omb: 2 workers up
+fD-nr0-wait10-DIAG-l1-p100-500k [queen-facade] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 5,454 | pub p50/p99/p99.9 7.5/20.8/26.3 ms | e2e p50/p99/p99.9 11.0/39.0/56.0 ms (max 118) | brokers 8.4 cores, disk write 247/247/248 MB/s

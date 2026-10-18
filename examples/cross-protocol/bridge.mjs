@@ -16,7 +16,7 @@
 //
 // Needs a node with the Kafka listener on:
 //   docker run -d -p 6632:6632 -p 9092:9092 -e QUEEN_KAFKA_EMBEDDED=true \
-//     -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 ghcr.io/queen-mq/queen:latest
+//     -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 ghcr.io/queen-mq/queen:2.5.0
 //
 // Run it:
 //   npm install && node bridge.mjs

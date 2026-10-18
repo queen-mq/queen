@@ -1,0 +1,40 @@
+     9.76%  [.] 0x00000000001a19d2
+     7.08%  [.] <queen_kafka::records::Fast>::plain_str
+     6.50%  [k] _copy_to_iter
+     6.11%  [.] <base64::engine::general_purpose::GeneralPurpose as base64::engine::Engine>::internal_decode
+     4.60%  [k] kernel_init_pages
+                                  0x49f31621b80
+     3.38%  [k] finish_task_switch.isra.0
+     1.96%  [k] _raw_spin_unlock_irqrestore
+     1.66%  [k] handle_softirqs
+     1.58%  [.] ZSTD_decompressSequences_bmi2.constprop.0
+     1.33%  [.] tokio::runtime::scheduler::multi_thread::worker::run
+     1.33%  [.] xxhash_rust::xxh3::hash_long_internal_loop
+     1.18%  [.] _mi_page_malloc_zero
+     1.06%  [k] _copy_from_iter
+                          0x49f31621b80
+     0.99%  [k] check_heap_object
+                                  0x1
+     0.89%  [k] _raw_spin_unlock_irq
+     0.78%  [.] mi_free
+     0.75%  [k] __raw_callee_save___pv_queued_spin_unlock
+     0.66%  [.] crc32c::hw_x86_64::crc_u64_append
+     0.55%  [k] do_user_addr_fault
+     0.54%  [k] __skb_datagram_iter
+     0.52%  [k] copy_folio_from_iter_atomic
+     0.52%  [.] 0x00000000001a1efa
+     0.50%  [k] _raw_spin_lock
+     0.48%  [.] queen::rsm::entry::runs_of
+     0.48%  [.] queen_kafka::wire::encode
+     0.47%  [.] crc32c::hw_x86_64::crc_u64_parallel3
+     0.47%  [.] 0x00000000001a1653
+     0.39%  [.] 0x000000000000099a
+     0.37%  [.] bytes::bytes::shared_drop
+     0.36%  [k] futex_hash
+     0.36%  [k] prep_compound_page
+     0.35%  [.] <tokio::runtime::scheduler::multi_thread::worker::Context>::park_internal
+     0.32%  [k] __schedule
+     0.32%  [k] do_syscall_64
+     0.32%  [.] <openraft_rt_tokio::TokioRuntime as openraft_rt::async_runtime::AsyncRuntime>::select4::<&mut tokio::sync::oneshot::Receiver<()>, <openraft_rt::mpsc::peekable_receiver::PeekableReceiver<openraft_rt_tokio::mpsc::TokioMpscReceiver<openraft::core::notification::Notification<queen::rsm::replicator::raft::types::TypeConfig>>, openraft::core::notification::Notification<queen::rsm::replicator::raft::types::TypeConfig>> as openraft_rt::mpsc::MpscReceiver<openraft::core::notification::Notification<queen::rsm::replicator::raft::types::TypeConfig>>>::recv::{closure#0}, <tokio::sync::mpsc::bounded::Receiver<openraft::core::raft_msg::install_full_snapshot_request::InstallFullSnapshotRequest<queen::rsm::replicator::raft::types::TypeConfig, queen::rsm::replicator::raft::state_machine::QueenSm<queen::rsm::store::heed_store::HeedStore>>>>::recv::{closure#0}, <openraft::core::merged_raft_msg_receiver::BatchRaftMsgReceiver<queen::rsm::replicator::raft::types::TypeConfig>>::ensure_buffered::{closure#0}>::{closure#0}
+     0.32%  [.] queen_kafka::handlers::fetch::render
+     0.31%  [.] <parking_lot::condvar::Condvar>::wait_until_internal

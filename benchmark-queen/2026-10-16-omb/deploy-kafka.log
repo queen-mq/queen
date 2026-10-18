@@ -1,0 +1,11 @@
+[19:55:43] deploy harness
+  harness  <host-37>    copied 57M
+  harness  <host-34>    copied 57M
+  harness  <host-35>   copied 57M
+  harness  <host-22>   copied 58M
+  harness  <host-33>    copied 58M
+  harness  <host-36>     copied 58M
+[19:56:03] deploy kafka
+  kafka    <host-37>    rc=0  [2026-10-16T19:56:26Z] install queen-bench-1.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 installed 
+  kafka    <host-34>    rc=0  [2026-10-16T19:56:22Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 installed 
+  kafka    <host-35>   rc=0  [2026-10-16T19:56:25Z] install queen-bench-3.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 installed 

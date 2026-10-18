@@ -1413,6 +1413,7 @@ impl RaftFacade {
             || Some(self.cmd_tx.clone()),
             command,
             ctx.deadline.instant(),
+            ctx.ordered_group.as_ref().map(|g| g.hook()),
         )
         .await
     }
@@ -1433,16 +1434,31 @@ impl RaftFacade {
         let answers_at_commit = Self::answers_at_commit;
         let mut backoff = Duration::from_millis(5);
         let mut body: Option<bytes::Bytes> = None;
+        // One command of an ordered push ([`super::OrderedPush`]): planned
+        // here or not at all, and never retried once proposed.
+        let ordered = ctx.ordered_group.as_ref();
         loop {
             if ctx.deadline.expired() {
                 return Err(RsmError::Timeout);
             }
             if matches!(self.repl.role(), Role::Leader { .. }) {
                 match self.submit_here(ctx, command.clone()).await? {
+                    Reply::Retry { .. } if ordered.is_some_and(|g| g.fired()) => {
+                        return Err(RsmError::InDoubt)
+                    }
+                    Reply::Refused(r)
+                        if Self::retries_refusal(&r) && ordered.is_some_and(|g| g.fired()) =>
+                    {
+                        return Err(RsmError::InDoubt)
+                    }
                     Reply::Retry { .. } => {}
                     Reply::Refused(r) if Self::retries_refusal(&r) => {}
                     reply => return Ok(reply),
                 }
+            } else if ordered.is_some_and(|g| g.fired()) {
+                return Err(RsmError::InDoubt);
+            } else if ordered.is_some() {
+                return Err(RsmError::Retry { leader_hint: None });
             } else {
                 let pop = matches!(
                     command,
@@ -1935,6 +1951,26 @@ fn reply_error(reply: Reply) -> RsmError {
 /// `QUEEN_RAFT_MULTIPUSH` (default on): a push naming several partitions is
 /// submitted as ONE [`Command::MultiPush`] instead of one command per
 /// partition. `0` restores one command per (queue, partition) group.
+/// Answers an [`super::OrderedPush`]'s receiver `false` if nothing answered it
+/// `true` first: the push ended without every command proposed.
+struct SettleOnDrop(std::sync::Arc<super::OrderedPush>);
+
+impl Drop for SettleOnDrop {
+    fn drop(&mut self) {
+        self.0.settle(false);
+    }
+}
+
+/// `ctx` for one command of an ordered push, or `None` (use `ctx` itself)
+/// when the push is not ordered.
+fn ordered_ctx(ctx: &ReqCtx, group: Option<std::sync::Arc<super::OrderedGroup>>) -> Option<ReqCtx> {
+    group.map(|g| {
+        let mut c = ctx.clone();
+        c.ordered_group = Some(g);
+        c
+    })
+}
+
 static MULTIPUSH: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
     !matches!(
         std::env::var("QUEEN_RAFT_MULTIPUSH")
@@ -3816,12 +3852,24 @@ impl RaftFacade {
         let mut rxs = Vec::with_capacity(groups.len());
         let early_codec = self.early_codec() && !preseeded;
         let multi = *MULTIPUSH && groups.len() > 1;
+        // The Kafka facade's pipelined produce ([`super::OrderedPush`]): one
+        // group per command submitted below; the caller's receiver is answered
+        // however this returns.
+        let _settle = ctx.ordered.clone().map(SettleOnDrop);
+        let mut ordered: std::collections::VecDeque<std::sync::Arc<super::OrderedGroup>> =
+            match &ctx.ordered {
+                Some(o) => o.arm(if multi { 1 } else { groups.len() }).into(),
+                None => std::collections::VecDeque::new(),
+            };
         if multi {
             let cmd = self.multi_command(ctx, &groups, &mut resolved, early_codec);
+            let gctx = ordered_ctx(ctx, ordered.pop_front());
+            let ctx = gctx.as_ref().unwrap_or(ctx);
             let reply = if self.offload {
                 self.submit_offloaded(ctx, cmd).await?
             } else {
-                let (sub, rx) = Submission::new(cmd);
+                let (mut sub, rx) = Submission::new(cmd);
+                sub.proposed = ctx.ordered_group.as_ref().map(|g| g.hook());
                 let _t_send = crate::rsm::timing::stamp();
                 let sent =
                     tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await;
@@ -3852,7 +3900,7 @@ impl RaftFacade {
             // A cluster node: every group goes through the offload path (to the
             // leader when another node leads), all in flight together; each
             // answer arrives once this node has applied it.
-            let cmds: Vec<(Vec<usize>, Command)> = groups
+            let cmds: Vec<(Vec<usize>, Command, Option<ReqCtx>)> = groups
                 .iter()
                 .enumerate()
                 .map(|(ordinal, g)| {
@@ -3865,10 +3913,12 @@ impl RaftFacade {
                             &mut resolved,
                             early_codec,
                         )),
+                        ordered_ctx(ctx, ordered.pop_front()),
                     )
                 })
                 .collect();
-            let futs = cmds.into_iter().map(|(members, cmd)| async move {
+            let futs = cmds.into_iter().map(|(members, cmd, gctx)| async move {
+                let ctx = gctx.as_ref().unwrap_or(ctx);
                 (members, self.submit_offloaded(ctx, cmd).await)
             });
             for (members, res) in futures_util::future::join_all(futs).await {
@@ -3888,7 +3938,10 @@ impl RaftFacade {
                 &mut resolved,
                 early_codec,
             ));
-            let (sub, rx) = Submission::new(cmd);
+            let (mut sub, rx) = Submission::new(cmd);
+            if let Some(g) = ordered.pop_front() {
+                sub.proposed = Some(g.hook());
+            }
             let _t_send = crate::rsm::timing::stamp();
             let sent = tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await;
             if let Some(t) = _t_send {
@@ -6592,6 +6645,20 @@ impl Rsm for RaftFacade {
                 Some(addr) => Route::Leader(addr),
                 None => Route::NoLeader,
             },
+        }
+    }
+
+    fn leads(&self, _tenant: &str) -> bool {
+        matches!(
+            self.repl.role(),
+            crate::rsm::replicator::Role::Leader { .. }
+        )
+    }
+
+    fn leader_node(&self, _tenant: &str) -> Option<u64> {
+        match self.repl.role() {
+            crate::rsm::replicator::Role::Follower { leader } => leader.map(|n| n as u64),
+            _ => None,
         }
     }
 

@@ -1,0 +1,453 @@
+[2026-04-21 16:50:24.020] [info] Queen C++ Message Queue Server (Acceptor/Worker Pattern)
+[2026-04-21 16:50:24.020] [info] Configuration:
+[2026-04-21 16:50:24.020] [info]   - Host: 0.0.0.0
+[2026-04-21 16:50:24.020] [info]   - Port: 6632
+[2026-04-21 16:50:24.020] [info]   - Database: 127.0.0.1:5434/queen
+[2026-04-21 16:50:24.020] [warning] Encryption disabled - QUEEN_ENCRYPTION_KEY not set
+[2026-04-21 16:50:24.020] [info] Encryption: disabled
+[2026-04-21 16:50:24.020] [info] JWT Authentication: DISABLED
+[2026-04-21 16:50:24.020] [info] Starting acceptor/worker pattern with 2 workers (hardware cores: 10)
+[2026-04-21 16:50:24.021] [info] Waiting for workers to initialize...
+[2026-04-21 16:50:24.021] [info] [Worker 0] Starting...
+[2026-04-21 16:50:24.021] [info] [Worker 1] Starting...
+[2026-04-21 16:50:24.021] [info] Initializing GLOBAL shared resources (ASYNC-ONLY MODE):
+[2026-04-21 16:50:24.021] [info]   - Total DB connections: 19 (95% of 20) - ALL ASYNC
+[2026-04-21 16:50:24.021] [info]   - DB ThreadPool size: 7 = 2 workers + 5 service
+[2026-04-21 16:50:24.021] [info]     * Queen instances: 2 (one per HTTP worker, each with own event loop)
+[2026-04-21 16:50:24.021] [info]     * Service DB threads: 5 (metrics, retention, eviction)
+[2026-04-21 16:50:24.021] [info]   - System ThreadPool threads: 4 (for background service scheduling)
+[2026-04-21 16:50:24.021] [info]   - Number of HTTP workers: 2
+[2026-04-21 16:50:24.021] [info]   - Creating Async DB Pool (19 connections) for ALL operations
+[2026-04-21 16:50:24.021] [info] [AsyncDbPool] Initializing 19 async connections...
+[2026-04-21 16:50:24.262] [info] [AsyncDbPool] Initialization complete. 19 connections ready.
+[2026-04-21 16:50:24.262] [info]   - Created response queue for worker 0 (poll workers)
+[2026-04-21 16:50:24.262] [info]   - Created response queue for worker 1 (poll workers)
+[2026-04-21 16:50:24.262] [info]   - Per-worker Queen instances will be created in each worker thread
+[2026-04-21 16:50:24.262] [info]   - Created response registry for worker 0 (lock-free across workers)
+[2026-04-21 16:50:24.262] [info]   - Created response registry for worker 1 (lock-free across workers)
+[2026-04-21 16:50:24.262] [info] SharedStateManager: Disabled (no UDP peers or sync disabled)
+[2026-04-21 16:50:24.262] [info] Shared State Manager configured: Sync disabled, queue config cache will be active
+[2026-04-21 16:50:24.262] [info] System info: hostname=alice.local, port=6632
+[2026-04-21 16:50:24.262] [info] Global shared resources initialized successfully
+[2026-04-21 16:50:24.262] [info] [Worker 0] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 16:50:24.262] [info] [Worker 1] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-04-21 16:50:24.262] [info] [Worker 0] Database connection: OK | Pool: 18/19 conn available
+[2026-04-21 16:50:24.262] [info] [Worker 0] Initializing database schema...
+[2026-04-21 16:50:24.262] [info] [Worker 1] Database connection: OK | Pool: 18/19 conn available
+[2026-04-21 16:50:24.262] [info] [Worker 1] Waiting for shared file buffer from Worker 0...
+[2026-04-21 16:50:24.262] [info] Initializing schema: queen
+[2026-04-21 16:50:24.273] [info] Running base schema initialization...
+NOTICE:  schema "queen" already exists, skipping
+NOTICE:  column "producer_sub" of relation "messages" already exists, skipping
+[2026-04-21 16:50:24.403] [info] Base schema applied successfully
+[2026-04-21 16:50:24.403] [info] Loading 15 stored procedure(s)...
+NOTICE:  function queen.is_stats_leader(text) does not exist, skipping
+NOTICE:  trigger "trg_update_worker_metrics_summary" for relation "queen.worker_metrics" does not exist, skipping
+[2026-04-21 16:50:24.457] [info] [Worker 0] Starting Shared State Manager...
+[2026-04-21 16:50:24.457] [info] SharedStateManager: Loading queue configs and maintenance modes from database...
+[2026-04-21 16:50:24.459] [info] SharedStateManager: Sync disabled, but queue config cache is available
+[2026-04-21 16:50:24.459] [info] [Worker 0] Registered MESSAGE_AVAILABLE callback for Queen instances
+[2026-04-21 16:50:24.459] [info] [Worker 0] Starting background metrics collector (sample: 1000ms, aggregate: 60s)...
+[2026-04-21 16:50:24.460] [info] MetricsCollector started: hostname=alice.local, port=6632, worker=cpp-worker-1, sampling every 1000ms, aggregating every 60s
+[2026-04-21 16:50:24.460] [info] [Worker 0] Starting background retention service...
+[2026-04-21 16:50:24.460] [info] RetentionService started: interval=300000ms, batch_size=1000, partition_cleanup_days=30, metrics_retention_days=90
+[2026-04-21 16:50:24.460] [info] [Worker 0] Starting background eviction service...
+[2026-04-21 16:50:24.460] [info] RetentionService: Running cleanup cycle
+[2026-04-21 16:50:24.460] [info] EvictionService started: interval=60000ms, batch_size=1000
+[2026-04-21 16:50:24.460] [info] [Worker 0] Starting background stats service...
+[2026-04-21 16:50:24.460] [info] StatsService started (queue/partition counts only): interval=10000ms, reconcile_interval=120000ms
+[2026-04-21 16:50:24.460] [info] [Worker 0] Creating SHARED file buffer manager (dir=/tmp/queen)...
+[2026-04-21 16:50:24.460] [info] StatsService: Running initial queue/partition stats refresh...
+[2026-04-21 16:50:24.460] [info] FileBufferManager initializing: dir=/tmp/queen, recovery=true
+[2026-04-21 16:50:24.460] [info] Buffer directories ready: /tmp/queen
+[2026-04-21 16:50:24.460] [info] Starting recovery of buffered events...
+[2026-04-21 16:50:24.460] [info] Deleting incomplete buffer file: qos0_019db083-178e-7000-a6cc-4efc7f9e1508.buf.tmp (only 0 bytes)
+[2026-04-21 16:50:24.460] [info] Deleting incomplete buffer file: failover_019db083-178e-7001-8f7a-dbfd89e201ab.buf.tmp (only 0 bytes)
+[2026-04-21 16:50:24.461] [info] Starting recovery (max 3600s to avoid blocking server startup)...
+[2026-04-21 16:50:24.461] [info] Phase 1: Recovering failover events (FIFO order)...
+[2026-04-21 16:50:24.461] [info] Phase 2: Recovering QoS 0 events (batched)...
+[2026-04-21 16:50:24.461] [info] Startup recovery completed in 0ms: failover=0, qos0=0
+[2026-04-21 16:50:24.461] [info] Recovery complete
+[2026-04-21 16:50:24.461] [info] Buffer files initialized successfully
+[2026-04-21 16:50:24.461] [info] RetentionService: cycle completed in 0ms
+[2026-04-21 16:50:24.461] [info] FileBufferManager ready
+[2026-04-21 16:50:24.461] [info] [Worker 0] File buffer ready - Pending: 0, Failed: 0, DB: healthy
+[2026-04-21 16:50:24.461] [info] [Worker 0] Sharing file buffer with other workers...
+[2026-04-21 16:50:24.461] [info] [Worker 0] File buffer shared successfully
+[2026-04-21 16:50:24.461] [info] [Worker 0] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 16:50:24.461] [info] [Worker 0] Creating uWS::App...
+[2026-04-21 16:50:24.461] [info] [Worker 1] Using shared file buffer from Worker 0
+[2026-04-21 16:50:24.461] [info] [Worker 1] File buffer connected to async queue manager for maintenance mode
+[2026-04-21 16:50:24.461] [info] [Worker 1] Creating uWS::App...
+[2026-04-21 16:50:24.461] [info] Background processor thread started
+[2026-04-21 16:50:24.461] [info] [Worker 0] Creating per-worker Queen instance (100 connections, total pool split across 2 workers)...
+[2026-04-21 16:50:24.461] [info] [Worker 1] Creating per-worker Queen instance (100 connections, total pool split across 2 workers)...
+[2026-04-21 16:50:24.464] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 16:50:24.483] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 0}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 0, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 16:50:24.496] [info] StatsService: cycle completed in 13ms
+[2026-04-21 16:50:24.962] [info] [Worker 1] Queen instance ready with 100 connections
+[2026-04-21 16:50:24.962] [info] [Worker 0] Queen instance ready with 100 connections
+[2026-04-21 16:50:24.962] [info] [Worker 0] Registered Queen instance for UDP notifications
+[2026-04-21 16:50:24.962] [info] [Worker 0] Setting up routes...
+[2026-04-21 16:50:24.962] [info] [Worker 1] Registered Queen instance for UDP notifications
+[2026-04-21 16:50:24.962] [info] [Worker 1] Setting up routes...
+[2026-04-21 16:50:24.962] [warning] [Worker 0] Webapp directory not found - Static file serving disabled
+[2026-04-21 16:50:24.962] [warning] [Worker 0] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 16:50:24.962] [warning] [Worker 0] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 16:50:24.962] [info] [Worker 0] Routes configured
+[2026-04-21 16:50:24.962] [info] [Worker 0] Registered with acceptor
+[2026-04-21 16:50:24.962] [warning] [Worker 1] Webapp directory not found - Static file serving disabled
+[2026-04-21 16:50:24.962] [warning] [Worker 1] Searched: ./webapp/dist, ../webapp/dist, ../../webapp/dist
+[2026-04-21 16:50:24.962] [warning] [Worker 1] Set WEBAPP_ROOT environment variable to override
+[2026-04-21 16:50:24.962] [info] [Worker 1] Routes configured
+[2026-04-21 16:50:24.962] [info] [Worker 1] Registered with acceptor
+[2026-04-21 16:50:24.962] [info] [Worker 0] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 16:50:24.962] [info] [Worker 0] Setting up response timer...
+[2026-04-21 16:50:24.962] [info] [Worker 0] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 16:50:24.962] [info] [Worker 1] Event loop ready to receive adopted sockets from acceptor
+[2026-04-21 16:50:24.962] [info] [Worker 1] Setting up response timer...
+[2026-04-21 16:50:24.962] [info] [Worker 1] Response timer configured: 25ms interval, batch size 100-500
+[2026-04-21 16:50:24.968] [info] All 2 workers initialized in 947ms
+[2026-04-21 16:50:24.968] [info] Creating acceptor app...
+[2026-04-21 16:50:24.968] [info] Registered 2 worker apps with acceptor
+[2026-04-21 16:50:24.968] [info] Acceptor listening on 0.0.0.0:6632
+[2026-04-21 16:50:24.968] [info] Round-robin load balancing across 2 workers
+[2026-04-21 16:50:24.968] [info] Starting acceptor event loop...
+[2026-04-21 16:50:24.986] [info] [Worker 1] [libqueen] Reconnection thread started
+[2026-04-21 16:50:24.986] [info] [Worker 0] [libqueen] Reconnection thread started
+[2026-04-21 16:50:25.226] [info] [Worker 1] Configuring queue: perf-test via stored procedure
+[2026-04-21 16:50:25.985] [info] [Worker 1] [libqueen] push(q=33 f=2/2 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=7ms) slots=98/100 jobs/s=329 drains=343 evl=0ms
+[2026-04-21 16:50:25.986] [info] [Worker 0] [libqueen] push(q=48 f=2/2 p99rtt=108ms) slots=98/100 jobs/s=230 drains=317 evl=0ms
+[2026-04-21 16:50:26.985] [info] [Worker 0] [libqueen] push(q=15 f=3/3 p99rtt=108ms) slots=97/100 jobs/s=2438 drains=2156 evl=0ms
+[2026-04-21 16:50:26.992] [info] [Worker 1] [libqueen] push(q=8 f=2/3 p99rtt=95ms) custom(q=0 f=0/1 p99rtt=7ms) slots=98/100 jobs/s=2466 drains=2203 evl=0ms
+[2026-04-21 16:50:27.986] [info] [Worker 0] [libqueen] push(q=4 f=4/4 p99rtt=100ms) slots=96/100 jobs/s=2038 drains=3731 evl=0ms
+[2026-04-21 16:50:27.991] [info] [Worker 1] [libqueen] push(q=8 f=4/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=7ms) slots=96/100 jobs/s=2048 drains=3823 evl=0ms
+[2026-04-21 16:50:28.987] [info] [Worker 0] [libqueen] push(q=9 f=4/4 p99rtt=106ms) slots=96/100 jobs/s=1647 drains=4938 evl=0ms
+[2026-04-21 16:50:29.002] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=95ms) custom(q=0 f=0/1 p99rtt=7ms) slots=96/100 jobs/s=1676 drains=5095 evl=0ms
+[2026-04-21 16:50:29.986] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=166ms) slots=96/100 jobs/s=832 drains=5662 evl=0ms
+[2026-04-21 16:50:30.006] [info] [Worker 1] [libqueen] push(q=1 f=4/4 p99rtt=185ms) custom(q=0 f=0/1 p99rtt=7ms) slots=96/100 jobs/s=832 drains=5775 evl=0ms
+[2026-04-21 16:50:30.987] [info] [Worker 0] [libqueen] push(q=10 f=4/4 p99rtt=168ms) slots=96/100 jobs/s=1317 drains=6730 evl=1ms
+[2026-04-21 16:50:31.006] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=185ms) custom(q=0 f=0/1 p99rtt=7ms) slots=96/100 jobs/s=1340 drains=6788 evl=0ms
+[2026-04-21 16:50:31.987] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=167ms) slots=96/100 jobs/s=1888 drains=8134 evl=2ms
+[2026-04-21 16:50:32.006] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=174ms) custom(q=0 f=0/1 p99rtt=7ms) slots=96/100 jobs/s=1817 drains=8199 evl=0ms
+[2026-04-21 16:50:32.990] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=210ms) custom(q=0 f=0/1 p99rtt=12ms) slots=96/100 jobs/s=202 drains=8337 evl=0ms
+[2026-04-21 16:50:33.012] [info] [Worker 1] [libqueen] push(q=5 f=4/4 p99rtt=223ms) custom(q=0 f=0/1 p99rtt=27ms) slots=96/100 jobs/s=174 drains=8400 evl=0ms
+[2026-04-21 16:50:33.987] [info] [Worker 0] [libqueen] push(q=4 f=4/4 p99rtt=347ms) custom(q=0 f=0/1 p99rtt=12ms) slots=96/100 jobs/s=267 drains=8493 evl=0ms
+[2026-04-21 16:50:34.007] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=366ms) custom(q=0 f=0/1 p99rtt=27ms) slots=96/100 jobs/s=269 drains=8554 evl=0ms
+[2026-04-21 16:50:34.535] [info] StatsService: cycle completed in 51ms
+[2026-04-21 16:50:34.987] [info] [Worker 0] [libqueen] push(q=9 f=3/4 p99rtt=377ms) custom(q=0 f=0/1 p99rtt=12ms) slots=97/100 jobs/s=1097 drains=9341 evl=0ms
+[2026-04-21 16:50:35.009] [info] [Worker 1] [libqueen] push(q=7 f=4/4 p99rtt=366ms) custom(q=0 f=0/1 p99rtt=27ms) slots=96/100 jobs/s=1009 drains=9428 evl=0ms
+[2026-04-21 16:50:35.988] [info] [Worker 0] [libqueen] push(q=0 f=0/4 p99rtt=347ms) custom(q=0 f=0/1 p99rtt=12ms) slots=100/100 jobs/s=1393 drains=10334 evl=0ms
+[2026-04-21 16:50:36.009] [info] [Worker 1] [libqueen] push(q=0 f=0/4 p99rtt=365ms) custom(q=0 f=0/1 p99rtt=27ms) slots=100/100 jobs/s=1320 drains=10319 evl=0ms
+[2026-04-21 16:50:36.526] [info] [Worker 0] Configuring queue: perf-test via stored procedure
+[2026-04-21 16:50:36.989] [info] [Worker 0] [libqueen] push(q=0 f=0/4 p99rtt=347ms) pop(q=0 f=1/2 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=12ms) slots=99/100 jobs/s=26 drains=10339 evl=0ms
+[2026-04-21 16:50:37.081] [info] [Worker 1] [libqueen] push(q=0 f=0/4 p99rtt=365ms) pop(q=0 f=1/2 p99rtt=202ms) custom(q=0 f=0/1 p99rtt=27ms) slots=99/100 jobs/s=50 drains=10323 evl=0ms
+[2026-04-21 16:50:37.989] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=341ms) pop(q=0 f=1/2 p99rtt=220ms) custom(q=0 f=0/1 p99rtt=12ms) slots=95/100 jobs/s=577 drains=10712 evl=0ms
+[2026-04-21 16:50:38.116] [info] [Worker 1] [libqueen] push(q=2 f=4/4 p99rtt=365ms) pop(q=0 f=2/3 p99rtt=202ms) custom(q=0 f=0/1 p99rtt=27ms) slots=94/100 jobs/s=420 drains=10513 evl=0ms
+[2026-04-21 16:50:38.992] [info] [Worker 0] [libqueen] push(q=37 f=4/4 p99rtt=370ms) pop(q=0 f=1/3 p99rtt=427ms) custom(q=0 f=0/1 p99rtt=12ms) slots=95/100 jobs/s=635 drains=11065 evl=0ms
+[2026-04-21 16:50:39.116] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=365ms) pop(q=0 f=3/4 p99rtt=249ms) custom(q=0 f=0/1 p99rtt=27ms) slots=93/100 jobs/s=679 drains=10751 evl=0ms
+[2026-04-21 16:50:40.076] [info] [Worker 0] [libqueen] push(q=38 f=4/4 p99rtt=370ms) pop(q=0 f=1/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=12ms) slots=95/100 jobs/s=642 drains=11496 evl=0ms
+[2026-04-21 16:50:40.126] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=365ms) pop(q=4 f=3/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=27ms) slots=93/100 jobs/s=619 drains=10967 evl=0ms
+[2026-04-21 16:50:41.076] [info] [Worker 0] [libqueen] push(q=22 f=4/4 p99rtt=351ms) pop(q=2 f=1/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=12ms) slots=95/100 jobs/s=654 drains=11845 evl=0ms
+[2026-04-21 16:50:41.127] [info] [Worker 1] [libqueen] push(q=35 f=4/4 p99rtt=365ms) pop(q=4 f=1/4 p99rtt=281ms) custom(q=0 f=0/1 p99rtt=27ms) slots=95/100 jobs/s=575 drains=11335 evl=0ms
+[2026-04-21 16:50:42.076] [info] [Worker 0] [libqueen] push(q=7 f=4/4 p99rtt=351ms) pop(q=0 f=1/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=12ms) slots=95/100 jobs/s=563 drains=12111 evl=0ms
+[2026-04-21 16:50:42.127] [info] [Worker 1] [libqueen] push(q=29 f=4/4 p99rtt=365ms) pop(q=0 f=1/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=27ms) slots=95/100 jobs/s=783 drains=11739 evl=0ms
+[2026-04-21 16:50:43.093] [info] [Worker 0] [libqueen] push(q=48 f=4/4 p99rtt=420ms) pop(q=0 f=1/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=12ms) slots=95/100 jobs/s=342 drains=12323 evl=1ms
+[2026-04-21 16:50:43.127] [info] [Worker 1] [libqueen] push(q=31 f=4/4 p99rtt=400ms) pop(q=13 f=1/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=27ms) slots=95/100 jobs/s=302 drains=11958 evl=0ms
+[2026-04-21 16:50:44.116] [info] [Worker 0] [libqueen] push(q=9 f=2/4 p99rtt=441ms) pop(q=0 f=1/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=12ms) slots=97/100 jobs/s=527 drains=12569 evl=0ms
+[2026-04-21 16:50:44.128] [info] [Worker 1] [libqueen] push(q=0 f=2/4 p99rtt=483ms) pop(q=0 f=3/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=27ms) slots=95/100 jobs/s=613 drains=12131 evl=0ms
+[2026-04-21 16:50:44.589] [info] StatsService: cycle completed in 104ms
+[2026-04-21 16:50:45.117] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=441ms) pop(q=0 f=1/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=12ms) slots=95/100 jobs/s=412 drains=12827 evl=0ms
+[2026-04-21 16:50:45.129] [info] [Worker 1] [libqueen] push(q=13 f=4/4 p99rtt=483ms) pop(q=0 f=3/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=27ms) slots=93/100 jobs/s=671 drains=12450 evl=0ms
+[2026-04-21 16:50:46.117] [info] [Worker 0] [libqueen] push(q=1 f=4/4 p99rtt=508ms) pop(q=0 f=1/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=12ms) slots=95/100 jobs/s=385 drains=13062 evl=0ms
+[2026-04-21 16:50:46.130] [info] [Worker 1] [libqueen] push(q=25 f=4/4 p99rtt=483ms) pop(q=9 f=1/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=27ms) slots=95/100 jobs/s=672 drains=12863 evl=0ms
+[2026-04-21 16:50:47.117] [info] [Worker 0] [libqueen] push(q=10 f=4/4 p99rtt=508ms) pop(q=0 f=3/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=40ms) slots=93/100 jobs/s=398 drains=13300 evl=0ms
+[2026-04-21 16:50:47.130] [info] [Worker 1] [libqueen] push(q=23 f=4/4 p99rtt=483ms) pop(q=0 f=2/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=505 drains=13065 evl=0ms
+[2026-04-21 16:50:48.117] [info] [Worker 0] [libqueen] push(q=37 f=4/4 p99rtt=525ms) pop(q=0 f=1/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=405 drains=13507 evl=0ms
+[2026-04-21 16:50:48.146] [info] [Worker 1] [libqueen] push(q=34 f=4/4 p99rtt=483ms) pop(q=0 f=1/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=642 drains=13357 evl=0ms
+[2026-04-21 16:50:49.117] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=525ms) pop(q=0 f=1/4 p99rtt=450ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=428 drains=13760 evl=0ms
+[2026-04-21 16:50:49.155] [info] [Worker 1] [libqueen] push(q=38 f=4/4 p99rtt=481ms) pop(q=0 f=1/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=546 drains=13677 evl=0ms
+[2026-04-21 16:50:50.117] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=525ms) pop(q=12 f=2/4 p99rtt=427ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=541 drains=14196 evl=0ms
+[2026-04-21 16:50:50.155] [info] [Worker 1] [libqueen] push(q=6 f=4/4 p99rtt=481ms) pop(q=0 f=1/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=590 drains=14232 evl=0ms
+[2026-04-21 16:50:51.117] [info] [Worker 0] [libqueen] push(q=26 f=4/4 p99rtt=517ms) pop(q=0 f=1/4 p99rtt=427ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=608 drains=14834 evl=0ms
+[2026-04-21 16:50:51.156] [info] [Worker 1] [libqueen] push(q=9 f=4/4 p99rtt=481ms) pop(q=0 f=1/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=571 drains=14781 evl=0ms
+[2026-04-21 16:50:52.118] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=517ms) pop(q=0 f=1/4 p99rtt=387ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=640 drains=15481 evl=0ms
+[2026-04-21 16:50:52.162] [info] [Worker 1] [libqueen] push(q=8 f=4/4 p99rtt=481ms) pop(q=0 f=2/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=729 drains=15478 evl=0ms
+[2026-04-21 16:50:53.127] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=517ms) pop(q=0 f=3/4 p99rtt=387ms) custom(q=0 f=0/1 p99rtt=40ms) slots=93/100 jobs/s=526 drains=16050 evl=1ms
+[2026-04-21 16:50:53.161] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=467ms) pop(q=0 f=2/4 p99rtt=249ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=616 drains=16100 evl=1ms
+[2026-04-21 16:50:54.121] [info] [Worker 0] [libqueen] push(q=1 f=4/4 p99rtt=525ms) pop(q=0 f=1/4 p99rtt=359ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=494 drains=16604 evl=0ms
+[2026-04-21 16:50:54.162] [info] [Worker 1] [libqueen] push(q=1 f=3/4 p99rtt=477ms) pop(q=14 f=0/4 p99rtt=249ms) custom(q=0 f=0/1 p99rtt=39ms) slots=97/100 jobs/s=545 drains=16659 evl=0ms
+[2026-04-21 16:50:54.548] [info] StatsService: cycle completed in 60ms
+[2026-04-21 16:50:55.121] [info] [Worker 0] [libqueen] push(q=13 f=4/4 p99rtt=525ms) pop(q=7 f=0/4 p99rtt=359ms) custom(q=0 f=0/1 p99rtt=40ms) slots=96/100 jobs/s=636 drains=17282 evl=0ms
+[2026-04-21 16:50:55.163] [info] [Worker 1] [libqueen] push(q=36 f=4/4 p99rtt=477ms) pop(q=5 f=1/4 p99rtt=247ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=895 drains=17518 evl=0ms
+[2026-04-21 16:50:56.121] [info] [Worker 0] [libqueen] push(q=5 f=4/4 p99rtt=525ms) pop(q=5 f=1/4 p99rtt=343ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=747 drains=18018 evl=0ms
+[2026-04-21 16:50:56.163] [info] [Worker 1] [libqueen] push(q=9 f=4/4 p99rtt=477ms) pop(q=0 f=1/4 p99rtt=234ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=753 drains=18258 evl=0ms
+[2026-04-21 16:50:57.121] [info] [Worker 0] [libqueen] push(q=11 f=4/4 p99rtt=525ms) pop(q=6 f=2/4 p99rtt=343ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=836 drains=18783 evl=0ms
+[2026-04-21 16:50:57.163] [info] [Worker 1] [libqueen] push(q=19 f=4/4 p99rtt=477ms) pop(q=2 f=1/4 p99rtt=234ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=553 drains=18805 evl=0ms
+[2026-04-21 16:50:58.122] [info] [Worker 0] [libqueen] push(q=11 f=4/4 p99rtt=564ms) pop(q=0 f=1/4 p99rtt=387ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=184 drains=18990 evl=0ms
+[2026-04-21 16:50:58.162] [info] [Worker 1] [libqueen] push(q=12 f=4/4 p99rtt=483ms) pop(q=0 f=1/4 p99rtt=263ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=181 drains=19006 evl=0ms
+[2026-04-21 16:50:59.121] [info] [Worker 0] [libqueen] push(q=12 f=4/4 p99rtt=590ms) pop(q=12 f=0/4 p99rtt=368ms) custom(q=0 f=0/1 p99rtt=40ms) slots=96/100 jobs/s=499 drains=19575 evl=0ms
+[2026-04-21 16:50:59.162] [info] [Worker 1] [libqueen] push(q=13 f=4/4 p99rtt=512ms) pop(q=0 f=2/4 p99rtt=249ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=743 drains=19763 evl=0ms
+[2026-04-21 16:51:00.122] [info] [Worker 0] [libqueen] push(q=25 f=4/4 p99rtt=590ms) pop(q=0 f=1/4 p99rtt=368ms) custom(q=2 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=646 drains=20187 evl=0ms
+[2026-04-21 16:51:00.166] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=512ms) pop(q=15 f=0/4 p99rtt=249ms) custom(q=2 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=694 drains=20361 evl=0ms
+[2026-04-21 16:51:01.122] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=590ms) pop(q=6 f=0/4 p99rtt=359ms) custom(q=0 f=0/1 p99rtt=40ms) slots=96/100 jobs/s=825 drains=20929 evl=0ms
+[2026-04-21 16:51:01.169] [info] [Worker 1] [libqueen] push(q=5 f=4/4 p99rtt=512ms) pop(q=3 f=0/4 p99rtt=247ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=661 drains=21007 evl=0ms
+[2026-04-21 16:51:02.123] [info] [Worker 0] [libqueen] push(q=33 f=4/4 p99rtt=590ms) pop(q=0 f=1/4 p99rtt=359ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=1048 drains=21888 evl=0ms
+[2026-04-21 16:51:02.172] [info] [Worker 1] [libqueen] push(q=5 f=4/4 p99rtt=512ms) pop(q=0 f=1/4 p99rtt=247ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=826 drains=21782 evl=0ms
+[2026-04-21 16:51:03.124] [info] [Worker 0] [libqueen] push(q=1 f=4/4 p99rtt=590ms) pop(q=0 f=1/4 p99rtt=343ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=776 drains=22567 evl=0ms
+[2026-04-21 16:51:03.189] [info] [Worker 1] [libqueen] push(q=8 f=4/4 p99rtt=512ms) pop(q=0 f=1/4 p99rtt=234ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=646 drains=22419 evl=0ms
+[2026-04-21 16:51:04.124] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=590ms) pop(q=0 f=2/4 p99rtt=343ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=651 drains=23271 evl=0ms
+[2026-04-21 16:51:04.189] [info] [Worker 1] [libqueen] push(q=0 f=3/4 p99rtt=512ms) pop(q=0 f=1/4 p99rtt=234ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=775 drains=23105 evl=0ms
+[2026-04-21 16:51:04.554] [info] StatsService: cycle completed in 66ms
+[2026-04-21 16:51:05.125] [info] [Worker 0] [libqueen] push(q=10 f=3/4 p99rtt=590ms) pop(q=0 f=2/4 p99rtt=334ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=865 drains=24146 evl=0ms
+[2026-04-21 16:51:05.190] [info] [Worker 1] [libqueen] push(q=26 f=4/4 p99rtt=512ms) pop(q=4 f=0/4 p99rtt=232ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=791 drains=23972 evl=0ms
+[2026-04-21 16:51:06.125] [info] [Worker 0] [libqueen] push(q=29 f=4/4 p99rtt=590ms) pop(q=4 f=1/4 p99rtt=334ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=991 drains=25035 evl=0ms
+[2026-04-21 16:51:06.192] [info] [Worker 1] [libqueen] push(q=10 f=4/4 p99rtt=512ms) pop(q=0 f=1/4 p99rtt=214ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=860 drains=24759 evl=0ms
+[2026-04-21 16:51:07.126] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=590ms) pop(q=0 f=2/4 p99rtt=329ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=722 drains=25796 evl=0ms
+[2026-04-21 16:51:07.192] [info] [Worker 1] [libqueen] push(q=6 f=4/4 p99rtt=512ms) pop(q=0 f=1/4 p99rtt=199ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=496 drains=25308 evl=0ms
+[2026-04-21 16:51:08.126] [info] [Worker 0] [libqueen] push(q=18 f=4/4 p99rtt=611ms) pop(q=0 f=0/4 p99rtt=329ms) custom(q=0 f=0/1 p99rtt=40ms) slots=96/100 jobs/s=388 drains=26262 evl=0ms
+[2026-04-21 16:51:08.192] [info] [Worker 1] [libqueen] push(q=23 f=4/4 p99rtt=528ms) pop(q=0 f=2/4 p99rtt=193ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=470 drains=25857 evl=0ms
+[2026-04-21 16:51:09.126] [info] [Worker 0] [libqueen] push(q=3 f=4/4 p99rtt=611ms) pop(q=0 f=1/4 p99rtt=326ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=587 drains=26874 evl=0ms
+[2026-04-21 16:51:09.191] [info] [Worker 1] [libqueen] push(q=43 f=4/4 p99rtt=528ms) pop(q=15 f=0/4 p99rtt=169ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=686 drains=26540 evl=0ms
+[2026-04-21 16:51:10.128] [info] [Worker 0] [libqueen] push(q=1 f=4/4 p99rtt=572ms) pop(q=10 f=1/4 p99rtt=163ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=797 drains=27686 evl=0ms
+[2026-04-21 16:51:10.192] [info] [Worker 1] [libqueen] push(q=36 f=4/4 p99rtt=528ms) pop(q=2 f=2/4 p99rtt=142ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=596 drains=27164 evl=0ms
+[2026-04-21 16:51:11.127] [info] [Worker 0] [libqueen] push(q=28 f=4/4 p99rtt=572ms) pop(q=0 f=2/4 p99rtt=95ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=564 drains=28291 evl=0ms
+[2026-04-21 16:51:11.191] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=514ms) pop(q=7 f=1/4 p99rtt=99ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=592 drains=27828 evl=0ms
+[2026-04-21 16:51:12.129] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=572ms) pop(q=0 f=1/4 p99rtt=89ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=618 drains=28860 evl=0ms
+[2026-04-21 16:51:12.193] [info] [Worker 1] [libqueen] push(q=12 f=4/4 p99rtt=514ms) pop(q=2 f=1/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=627 drains=28428 evl=0ms
+[2026-04-21 16:51:13.128] [info] [Worker 0] [libqueen] push(q=32 f=4/4 p99rtt=572ms) pop(q=5 f=1/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=469 drains=29371 evl=0ms
+[2026-04-21 16:51:13.192] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=514ms) pop(q=0 f=1/4 p99rtt=85ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=492 drains=28980 evl=0ms
+[2026-04-21 16:51:14.128] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=572ms) pop(q=5 f=1/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=710 drains=30122 evl=0ms
+[2026-04-21 16:51:14.192] [info] [Worker 1] [libqueen] push(q=36 f=4/4 p99rtt=514ms) pop(q=3 f=2/4 p99rtt=85ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=692 drains=29707 evl=0ms
+[2026-04-21 16:51:14.686] [info] StatsService: cycle completed in 192ms
+[2026-04-21 16:51:15.128] [info] [Worker 0] [libqueen] push(q=22 f=4/4 p99rtt=572ms) pop(q=0 f=2/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=455 drains=30667 evl=0ms
+[2026-04-21 16:51:15.192] [info] [Worker 1] [libqueen] push(q=32 f=4/4 p99rtt=514ms) pop(q=0 f=2/4 p99rtt=84ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=484 drains=30261 evl=0ms
+[2026-04-21 16:51:16.128] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=572ms) pop(q=1 f=1/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=579 drains=31255 evl=0ms
+[2026-04-21 16:51:16.193] [info] [Worker 1] [libqueen] push(q=33 f=4/4 p99rtt=527ms) pop(q=0 f=2/4 p99rtt=84ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=443 drains=30786 evl=0ms
+[2026-04-21 16:51:17.128] [info] [Worker 0] [libqueen] push(q=1 f=4/4 p99rtt=572ms) pop(q=0 f=2/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=584 drains=31850 evl=0ms
+[2026-04-21 16:51:17.194] [info] [Worker 1] [libqueen] push(q=32 f=4/4 p99rtt=528ms) pop(q=0 f=2/4 p99rtt=85ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=609 drains=31436 evl=0ms
+[2026-04-21 16:51:18.133] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=572ms) pop(q=0 f=1/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=563 drains=32491 evl=0ms
+[2026-04-21 16:51:18.194] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=528ms) pop(q=0 f=3/4 p99rtt=85ms) custom(q=0 f=0/1 p99rtt=39ms) slots=93/100 jobs/s=552 drains=31997 evl=0ms
+[2026-04-21 16:51:19.133] [info] [Worker 0] [libqueen] push(q=6 f=4/4 p99rtt=572ms) pop(q=0 f=1/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=624 drains=33109 evl=0ms
+[2026-04-21 16:51:19.195] [info] [Worker 1] [libqueen] push(q=22 f=4/4 p99rtt=528ms) pop(q=0 f=2/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=680 drains=32673 evl=0ms
+[2026-04-21 16:51:20.138] [info] [Worker 0] [libqueen] push(q=17 f=4/4 p99rtt=572ms) pop(q=0 f=1/4 p99rtt=93ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=447 drains=33630 evl=0ms
+[2026-04-21 16:51:20.195] [info] [Worker 1] [libqueen] push(q=21 f=4/4 p99rtt=528ms) pop(q=0 f=1/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=452 drains=33177 evl=0ms
+[2026-04-21 16:51:21.134] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=587ms) pop(q=0 f=0/4 p99rtt=93ms) custom(q=0 f=0/1 p99rtt=40ms) slots=96/100 jobs/s=411 drains=34120 evl=0ms
+[2026-04-21 16:51:21.194] [info] [Worker 1] [libqueen] push(q=13 f=4/4 p99rtt=539ms) pop(q=11 f=0/4 p99rtt=82ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=489 drains=33743 evl=0ms
+[2026-04-21 16:51:22.135] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=587ms) pop(q=11 f=1/4 p99rtt=87ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=637 drains=34771 evl=0ms
+[2026-04-21 16:51:22.195] [info] [Worker 1] [libqueen] push(q=24 f=4/4 p99rtt=527ms) pop(q=0 f=1/4 p99rtt=82ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=603 drains=34411 evl=0ms
+[2026-04-21 16:51:23.137] [info] [Worker 0] [libqueen] push(q=25 f=4/4 p99rtt=575ms) pop(q=0 f=2/4 p99rtt=88ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=679 drains=35472 evl=0ms
+[2026-04-21 16:51:23.198] [info] [Worker 1] [libqueen] push(q=18 f=4/4 p99rtt=527ms) pop(q=0 f=3/4 p99rtt=85ms) custom(q=0 f=0/1 p99rtt=39ms) slots=93/100 jobs/s=604 drains=35034 evl=0ms
+[2026-04-21 16:51:24.137] [info] [Worker 0] [libqueen] push(q=21 f=4/4 p99rtt=566ms) pop(q=0 f=1/4 p99rtt=88ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=595 drains=36125 evl=0ms
+[2026-04-21 16:51:24.198] [info] [Worker 1] [libqueen] push(q=19 f=4/4 p99rtt=535ms) pop(q=0 f=3/4 p99rtt=89ms) custom(q=0 f=0/1 p99rtt=39ms) slots=93/100 jobs/s=649 drains=35754 evl=0ms
+[2026-04-21 16:51:24.631] [info] StatsService: cycle completed in 132ms
+[2026-04-21 16:51:25.137] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=564ms) pop(q=5 f=1/4 p99rtt=94ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=375 drains=36553 evl=0ms
+[2026-04-21 16:51:25.199] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=535ms) pop(q=0 f=2/4 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=360 drains=36177 evl=0ms
+[2026-04-21 16:51:26.138] [info] [Worker 0] [libqueen] push(q=20 f=4/4 p99rtt=572ms) pop(q=0 f=2/4 p99rtt=96ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=385 drains=36985 evl=0ms
+[2026-04-21 16:51:26.199] [info] [Worker 1] [libqueen] push(q=36 f=4/4 p99rtt=539ms) pop(q=6 f=0/4 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=360 drains=36588 evl=0ms
+[2026-04-21 16:51:27.138] [info] [Worker 0] [libqueen] push(q=23 f=4/4 p99rtt=572ms) pop(q=1 f=1/4 p99rtt=100ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=541 drains=37588 evl=0ms
+[2026-04-21 16:51:27.202] [info] [Worker 1] [libqueen] push(q=20 f=4/4 p99rtt=543ms) pop(q=0 f=1/4 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=456 drains=37093 evl=0ms
+[2026-04-21 16:51:28.138] [info] [Worker 0] [libqueen] push(q=21 f=4/4 p99rtt=572ms) pop(q=5 f=2/4 p99rtt=103ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=508 drains=38167 evl=0ms
+[2026-04-21 16:51:28.200] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=543ms) pop(q=9 f=0/4 p99rtt=98ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=494 drains=37637 evl=0ms
+[2026-04-21 16:51:29.146] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=572ms) pop(q=0 f=3/4 p99rtt=103ms) custom(q=0 f=0/1 p99rtt=40ms) slots=93/100 jobs/s=559 drains=38847 evl=0ms
+[2026-04-21 16:51:29.201] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=543ms) pop(q=11 f=2/4 p99rtt=103ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=616 drains=38315 evl=0ms
+[2026-04-21 16:51:30.140] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=607ms) pop(q=0 f=1/4 p99rtt=119ms) custom(q=0 f=0/1 p99rtt=40ms) slots=95/100 jobs/s=307 drains=39180 evl=0ms
+[2026-04-21 16:51:30.201] [info] [Worker 1] [libqueen] push(q=13 f=4/4 p99rtt=598ms) pop(q=4 f=1/4 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=254 drains=38639 evl=0ms
+[2026-04-21 16:51:31.141] [info] [Worker 0] [libqueen] push(q=37 f=4/4 p99rtt=607ms) pop(q=0 f=2/4 p99rtt=119ms) custom(q=0 f=0/1 p99rtt=40ms) slots=94/100 jobs/s=536 drains=39792 evl=0ms
+[2026-04-21 16:51:31.200] [info] [Worker 1] [libqueen] push(q=3 f=4/4 p99rtt=598ms) pop(q=2 f=1/4 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=515 drains=39202 evl=0ms
+[2026-04-21 16:51:32.141] [info] [Worker 0] [libqueen] push(q=5 f=4/4 p99rtt=611ms) pop(q=15 f=1/4 p99rtt=119ms) custom(q=0 f=1/1 p99rtt=40ms) slots=94/100 jobs/s=459 drains=40280 evl=0ms
+[2026-04-21 16:51:32.200] [info] [Worker 1] [libqueen] push(q=9 f=4/4 p99rtt=619ms) pop(q=0 f=4/4 p99rtt=115ms) custom(q=0 f=0/1 p99rtt=39ms) slots=92/100 jobs/s=528 drains=39797 evl=0ms
+[2026-04-21 16:51:33.141] [info] [Worker 0] [libqueen] push(q=13 f=4/4 p99rtt=680ms) pop(q=1 f=1/4 p99rtt=133ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=142 drains=40484 evl=0ms
+[2026-04-21 16:51:33.201] [info] [Worker 1] [libqueen] push(q=17 f=4/4 p99rtt=678ms) pop(q=0 f=1/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=147 drains=39997 evl=0ms
+[2026-04-21 16:51:34.140] [info] [Worker 0] [libqueen] push(q=14 f=4/4 p99rtt=683ms) pop(q=1 f=2/4 p99rtt=134ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=356 drains=40918 evl=0ms
+[2026-04-21 16:51:34.203] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=697ms) pop(q=2 f=2/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=382 drains=40450 evl=0ms
+[2026-04-21 16:51:34.585] [info] StatsService: cycle completed in 81ms
+[2026-04-21 16:51:35.140] [info] [Worker 0] [libqueen] push(q=10 f=4/4 p99rtt=683ms) pop(q=0 f=2/4 p99rtt=135ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=515 drains=41510 evl=0ms
+[2026-04-21 16:51:35.203] [info] [Worker 1] [libqueen] push(q=12 f=4/4 p99rtt=697ms) pop(q=0 f=2/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=427 drains=40959 evl=0ms
+[2026-04-21 16:51:36.141] [info] [Worker 0] [libqueen] push(q=14 f=4/4 p99rtt=683ms) pop(q=3 f=1/4 p99rtt=135ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=525 drains=42099 evl=0ms
+[2026-04-21 16:51:36.203] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=697ms) pop(q=0 f=2/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=538 drains=41500 evl=0ms
+[2026-04-21 16:51:37.141] [info] [Worker 0] [libqueen] push(q=23 f=4/4 p99rtt=683ms) pop(q=10 f=2/4 p99rtt=135ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=408 drains=42568 evl=0ms
+[2026-04-21 16:51:37.207] [info] [Worker 1] [libqueen] push(q=19 f=4/4 p99rtt=697ms) pop(q=0 f=3/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=39ms) slots=93/100 jobs/s=386 drains=41954 evl=0ms
+[2026-04-21 16:51:38.143] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=712ms) pop(q=0 f=3/4 p99rtt=179ms) custom(q=0 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=218 drains=42841 evl=0ms
+[2026-04-21 16:51:38.204] [info] [Worker 1] [libqueen] push(q=21 f=4/4 p99rtt=777ms) pop(q=3 f=2/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=200 drains=42247 evl=0ms
+[2026-04-21 16:51:39.142] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=721ms) pop(q=0 f=3/4 p99rtt=179ms) custom(q=0 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=231 drains=43146 evl=0ms
+[2026-04-21 16:51:39.205] [info] [Worker 1] [libqueen] push(q=15 f=4/4 p99rtt=788ms) pop(q=0 f=1/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=173 drains=42538 evl=0ms
+[2026-04-21 16:51:40.142] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=739ms) pop(q=0 f=2/4 p99rtt=179ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=432 drains=43639 evl=0ms
+[2026-04-21 16:51:40.204] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=802ms) pop(q=11 f=1/4 p99rtt=164ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=451 drains=43036 evl=0ms
+[2026-04-21 16:51:41.143] [info] [Worker 0] [libqueen] push(q=14 f=4/4 p99rtt=739ms) pop(q=0 f=1/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=290 drains=44009 evl=0ms
+[2026-04-21 16:51:41.206] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=802ms) pop(q=0 f=2/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=374 drains=43477 evl=0ms
+[2026-04-21 16:51:42.151] [info] [Worker 0] [libqueen] push(q=1 f=4/4 p99rtt=714ms) pop(q=4 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=450 drains=44519 evl=0ms
+[2026-04-21 16:51:42.207] [info] [Worker 1] [libqueen] push(q=19 f=4/4 p99rtt=802ms) pop(q=3 f=1/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=436 drains=44009 evl=0ms
+[2026-04-21 16:51:43.151] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=739ms) pop(q=1 f=1/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=454 drains=45046 evl=0ms
+[2026-04-21 16:51:43.208] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=777ms) pop(q=0 f=2/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=586 drains=44659 evl=0ms
+[2026-04-21 16:51:44.151] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=739ms) pop(q=0 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=396 drains=45537 evl=0ms
+[2026-04-21 16:51:44.208] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=777ms) pop(q=0 f=1/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=585 drains=45241 evl=0ms
+[2026-04-21 16:51:44.592] [info] StatsService: cycle completed in 84ms
+[2026-04-21 16:51:45.151] [info] [Worker 0] [libqueen] push(q=3 f=4/4 p99rtt=739ms) pop(q=0 f=1/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=641 drains=46218 evl=0ms
+[2026-04-21 16:51:45.210] [info] [Worker 1] [libqueen] push(q=19 f=4/4 p99rtt=777ms) pop(q=0 f=1/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=517 drains=45796 evl=0ms
+[2026-04-21 16:51:46.152] [info] [Worker 0] [libqueen] push(q=26 f=4/4 p99rtt=800ms) pop(q=0 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=316 drains=46628 evl=0ms
+[2026-04-21 16:51:46.210] [info] [Worker 1] [libqueen] push(q=20 f=4/4 p99rtt=777ms) pop(q=2 f=2/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=448 drains=46299 evl=0ms
+[2026-04-21 16:51:47.152] [info] [Worker 0] [libqueen] push(q=10 f=4/4 p99rtt=800ms) pop(q=0 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=454 drains=47193 evl=2ms
+[2026-04-21 16:51:47.211] [info] [Worker 1] [libqueen] push(q=25 f=4/4 p99rtt=777ms) pop(q=6 f=0/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=467 drains=46827 evl=0ms
+[2026-04-21 16:51:48.152] [info] [Worker 0] [libqueen] push(q=26 f=4/4 p99rtt=856ms) pop(q=0 f=3/4 p99rtt=193ms) custom(q=0 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=392 drains=47672 evl=0ms
+[2026-04-21 16:51:48.211] [info] [Worker 1] [libqueen] push(q=21 f=4/4 p99rtt=777ms) pop(q=0 f=2/4 p99rtt=171ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=403 drains=47301 evl=0ms
+[2026-04-21 16:51:49.153] [info] [Worker 0] [libqueen] push(q=14 f=4/4 p99rtt=856ms) pop(q=0 f=1/4 p99rtt=193ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=499 drains=48233 evl=0ms
+[2026-04-21 16:51:49.212] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=777ms) pop(q=12 f=1/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=546 drains=47896 evl=0ms
+[2026-04-21 16:51:50.153] [info] [Worker 0] [libqueen] push(q=20 f=4/4 p99rtt=856ms) pop(q=1 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=344 drains=48642 evl=0ms
+[2026-04-21 16:51:50.211] [info] [Worker 1] [libqueen] push(q=22 f=4/4 p99rtt=777ms) pop(q=0 f=3/4 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=39ms) slots=93/100 jobs/s=289 drains=48276 evl=0ms
+[2026-04-21 16:51:51.154] [info] [Worker 0] [libqueen] push(q=23 f=4/4 p99rtt=856ms) pop(q=0 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=411 drains=49115 evl=0ms
+[2026-04-21 16:51:51.212] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=777ms) pop(q=16 f=0/4 p99rtt=169ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=349 drains=48744 evl=0ms
+[2026-04-21 16:51:52.155] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=856ms) pop(q=0 f=2/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=420 drains=49635 evl=0ms
+[2026-04-21 16:51:52.212] [info] [Worker 1] [libqueen] push(q=12 f=4/4 p99rtt=777ms) pop(q=0 f=4/4 p99rtt=169ms) custom(q=0 f=0/1 p99rtt=39ms) slots=92/100 jobs/s=389 drains=49201 evl=0ms
+[2026-04-21 16:51:53.156] [info] [Worker 0] [libqueen] push(q=21 f=4/4 p99rtt=856ms) pop(q=0 f=3/4 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=327 drains=50077 evl=0ms
+[2026-04-21 16:51:53.214] [info] [Worker 1] [libqueen] push(q=15 f=4/4 p99rtt=777ms) pop(q=0 f=3/4 p99rtt=159ms) custom(q=0 f=0/1 p99rtt=39ms) slots=93/100 jobs/s=473 drains=49745 evl=0ms
+[2026-04-21 16:51:54.155] [info] [Worker 0] [libqueen] push(q=3 f=4/4 p99rtt=864ms) pop(q=3 f=1/4 p99rtt=163ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=457 drains=50572 evl=0ms
+[2026-04-21 16:51:54.213] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=788ms) pop(q=3 f=1/4 p99rtt=159ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=476 drains=50272 evl=0ms
+[2026-04-21 16:51:54.554] [info] StatsService: cycle completed in 40ms
+[2026-04-21 16:51:55.156] [info] [Worker 0] [libqueen] push(q=13 f=4/4 p99rtt=864ms) pop(q=0 f=1/4 p99rtt=163ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=673 drains=51304 evl=0ms
+[2026-04-21 16:51:55.214] [info] [Worker 1] [libqueen] push(q=23 f=4/4 p99rtt=788ms) pop(q=0 f=1/4 p99rtt=159ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=558 drains=50890 evl=0ms
+[2026-04-21 16:51:56.157] [info] [Worker 0] [libqueen] push(q=35 f=4/4 p99rtt=864ms) pop(q=0 f=2/4 p99rtt=138ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=668 drains=52001 evl=0ms
+[2026-04-21 16:51:56.215] [info] [Worker 1] [libqueen] push(q=21 f=4/4 p99rtt=788ms) pop(q=8 f=0/4 p99rtt=133ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=697 drains=51639 evl=0ms
+[2026-04-21 16:51:57.158] [info] [Worker 0] [libqueen] push(q=10 f=4/4 p99rtt=864ms) pop(q=8 f=1/4 p99rtt=138ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=640 drains=52607 evl=0ms
+[2026-04-21 16:51:57.216] [info] [Worker 1] [libqueen] push(q=6 f=4/4 p99rtt=788ms) pop(q=0 f=2/4 p99rtt=133ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=523 drains=52207 evl=0ms
+[2026-04-21 16:51:58.158] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=864ms) pop(q=15 f=0/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=62ms) slots=96/100 jobs/s=691 drains=53335 evl=0ms
+[2026-04-21 16:51:58.217] [info] [Worker 1] [libqueen] push(q=39 f=4/4 p99rtt=788ms) pop(q=0 f=2/4 p99rtt=133ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=612 drains=52830 evl=0ms
+[2026-04-21 16:51:59.159] [info] [Worker 0] [libqueen] push(q=5 f=4/4 p99rtt=864ms) pop(q=0 f=1/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=728 drains=54018 evl=0ms
+[2026-04-21 16:51:59.217] [info] [Worker 1] [libqueen] push(q=35 f=4/4 p99rtt=788ms) pop(q=0 f=2/4 p99rtt=133ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=614 drains=53510 evl=0ms
+[2026-04-21 16:52:00.158] [info] [Worker 0] [libqueen] push(q=15 f=4/4 p99rtt=864ms) pop(q=0 f=3/4 p99rtt=120ms) custom(q=2 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=666 drains=54677 evl=0ms
+[2026-04-21 16:52:00.217] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=788ms) pop(q=0 f=1/4 p99rtt=127ms) custom(q=2 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=612 drains=54134 evl=0ms
+[2026-04-21 16:52:01.158] [info] [Worker 0] [libqueen] push(q=17 f=4/4 p99rtt=864ms) pop(q=0 f=2/4 p99rtt=117ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=513 drains=55272 evl=0ms
+[2026-04-21 16:52:01.217] [info] [Worker 1] [libqueen] push(q=15 f=4/4 p99rtt=788ms) pop(q=0 f=2/4 p99rtt=127ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=605 drains=54788 evl=0ms
+[2026-04-21 16:52:02.160] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=864ms) pop(q=0 f=1/4 p99rtt=115ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=620 drains=55966 evl=0ms
+[2026-04-21 16:52:02.217] [info] [Worker 1] [libqueen] push(q=4 f=4/4 p99rtt=788ms) pop(q=0 f=1/4 p99rtt=118ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=747 drains=55486 evl=0ms
+[2026-04-21 16:52:03.161] [info] [Worker 0] [libqueen] push(q=21 f=4/4 p99rtt=864ms) pop(q=1 f=4/4 p99rtt=115ms) custom(q=0 f=0/1 p99rtt=62ms) slots=92/100 jobs/s=218 drains=56228 evl=0ms
+[2026-04-21 16:52:03.250] [info] [Worker 1] [libqueen] push(q=21 f=4/4 p99rtt=788ms) pop(q=0 f=2/4 p99rtt=133ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=235 drains=55794 evl=0ms
+[2026-04-21 16:52:04.159] [info] [Worker 0] [libqueen] push(q=23 f=4/4 p99rtt=899ms) pop(q=0 f=2/4 p99rtt=120ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=202 drains=56503 evl=0ms
+[2026-04-21 16:52:04.218] [info] [Worker 1] [libqueen] push(q=9 f=4/4 p99rtt=863ms) pop(q=11 f=1/4 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=352 drains=56221 evl=0ms
+[2026-04-21 16:52:04.578] [info] StatsService: cycle completed in 61ms
+[2026-04-21 16:52:05.160] [info] [Worker 0] [libqueen] push(q=18 f=4/4 p99rtt=899ms) pop(q=0 f=3/4 p99rtt=123ms) custom(q=0 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=431 drains=56977 evl=0ms
+[2026-04-21 16:52:05.219] [info] [Worker 1] [libqueen] push(q=3 f=4/4 p99rtt=863ms) pop(q=15 f=2/4 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=451 drains=56695 evl=0ms
+[2026-04-21 16:52:06.160] [info] [Worker 0] [libqueen] push(q=18 f=4/4 p99rtt=899ms) pop(q=0 f=2/4 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=343 drains=57359 evl=0ms
+[2026-04-21 16:52:06.220] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=863ms) pop(q=0 f=1/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=407 drains=57147 evl=0ms
+[2026-04-21 16:52:07.162] [info] [Worker 0] [libqueen] push(q=28 f=4/4 p99rtt=899ms) pop(q=4 f=2/4 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=452 drains=57881 evl=0ms
+[2026-04-21 16:52:07.220] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=863ms) pop(q=0 f=2/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=604 drains=57786 evl=0ms
+[2026-04-21 16:52:08.161] [info] [Worker 0] [libqueen] push(q=30 f=4/4 p99rtt=899ms) pop(q=4 f=1/4 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=500 drains=58410 evl=0ms
+[2026-04-21 16:52:08.222] [info] [Worker 1] [libqueen] push(q=19 f=4/4 p99rtt=863ms) pop(q=0 f=1/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=413 drains=58274 evl=0ms
+[2026-04-21 16:52:09.165] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=899ms) pop(q=0 f=2/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=483 drains=58845 evl=0ms
+[2026-04-21 16:52:09.222] [info] [Worker 1] [libqueen] push(q=22 f=4/4 p99rtt=863ms) pop(q=2 f=1/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=403 drains=58764 evl=0ms
+[2026-04-21 16:52:10.166] [info] [Worker 0] [libqueen] push(q=34 f=4/4 p99rtt=899ms) pop(q=0 f=1/4 p99rtt=151ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=554 drains=59444 evl=0ms
+[2026-04-21 16:52:10.222] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=863ms) pop(q=0 f=1/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=576 drains=59376 evl=0ms
+[2026-04-21 16:52:11.165] [info] [Worker 0] [libqueen] push(q=24 f=4/4 p99rtt=899ms) pop(q=0 f=1/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=529 drains=59985 evl=0ms
+[2026-04-21 16:52:11.226] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=863ms) pop(q=9 f=1/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=443 drains=59904 evl=0ms
+[2026-04-21 16:52:12.166] [info] [Worker 0] [libqueen] push(q=23 f=4/4 p99rtt=899ms) pop(q=0 f=1/4 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=404 drains=60486 evl=0ms
+[2026-04-21 16:52:12.227] [info] [Worker 1] [libqueen] push(q=38 f=4/4 p99rtt=863ms) pop(q=0 f=2/4 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=515 drains=60499 evl=0ms
+[2026-04-21 16:52:13.167] [info] [Worker 0] [libqueen] push(q=11 f=4/4 p99rtt=899ms) pop(q=2 f=1/4 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=489 drains=61053 evl=0ms
+[2026-04-21 16:52:13.228] [info] [Worker 1] [libqueen] push(q=17 f=4/4 p99rtt=863ms) pop(q=0 f=1/4 p99rtt=135ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=366 drains=60950 evl=0ms
+[2026-04-21 16:52:14.167] [info] [Worker 0] [libqueen] push(q=0 f=4/4 p99rtt=899ms) pop(q=1 f=1/4 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=422 drains=61536 evl=0ms
+[2026-04-21 16:52:14.229] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=802ms) pop(q=4 f=2/4 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=451 drains=61451 evl=0ms
+[2026-04-21 16:52:14.817] [info] StatsService: cycle completed in 296ms
+[2026-04-21 16:52:15.167] [info] [Worker 0] [libqueen] push(q=20 f=4/4 p99rtt=890ms) pop(q=0 f=2/4 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=373 drains=62007 evl=0ms
+[2026-04-21 16:52:15.228] [info] [Worker 1] [libqueen] push(q=14 f=4/4 p99rtt=802ms) pop(q=0 f=3/4 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=39ms) slots=93/100 jobs/s=333 drains=61848 evl=0ms
+[2026-04-21 16:52:16.168] [info] [Worker 0] [libqueen] push(q=26 f=4/4 p99rtt=890ms) pop(q=0 f=1/4 p99rtt=139ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=367 drains=62417 evl=2ms
+[2026-04-21 16:52:16.229] [info] [Worker 1] [libqueen] push(q=5 f=4/4 p99rtt=802ms) pop(q=18 f=0/4 p99rtt=149ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=349 drains=62287 evl=0ms
+[2026-04-21 16:52:17.168] [info] [Worker 0] [libqueen] push(q=17 f=4/4 p99rtt=890ms) pop(q=3 f=2/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=298 drains=62812 evl=0ms
+[2026-04-21 16:52:17.230] [info] [Worker 1] [libqueen] push(q=5 f=4/4 p99rtt=863ms) pop(q=0 f=2/4 p99rtt=149ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=315 drains=62662 evl=0ms
+[2026-04-21 16:52:18.169] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=890ms) pop(q=0 f=2/4 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=434 drains=63290 evl=0ms
+[2026-04-21 16:52:18.230] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=863ms) pop(q=0 f=1/4 p99rtt=149ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=462 drains=63110 evl=0ms
+[2026-04-21 16:52:19.169] [info] [Worker 0] [libqueen] push(q=14 f=4/4 p99rtt=890ms) pop(q=1 f=1/4 p99rtt=153ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=385 drains=63691 evl=0ms
+[2026-04-21 16:52:19.230] [info] [Worker 1] [libqueen] push(q=23 f=4/4 p99rtt=863ms) pop(q=9 f=1/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=413 drains=63628 evl=0ms
+[2026-04-21 16:52:20.170] [info] [Worker 0] [libqueen] push(q=20 f=4/4 p99rtt=890ms) pop(q=1 f=1/4 p99rtt=153ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=538 drains=64323 evl=1ms
+[2026-04-21 16:52:20.236] [info] [Worker 1] [libqueen] push(q=12 f=4/4 p99rtt=863ms) pop(q=7 f=0/4 p99rtt=150ms) custom(q=0 f=0/1 p99rtt=39ms) slots=96/100 jobs/s=438 drains=64140 evl=0ms
+[2026-04-21 16:52:21.170] [info] [Worker 0] [libqueen] push(q=25 f=4/4 p99rtt=899ms) pop(q=3 f=2/4 p99rtt=153ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=304 drains=64712 evl=0ms
+[2026-04-21 16:52:21.237] [info] [Worker 1] [libqueen] push(q=19 f=4/4 p99rtt=869ms) pop(q=0 f=2/4 p99rtt=152ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=287 drains=64471 evl=0ms
+[2026-04-21 16:52:22.171] [info] [Worker 0] [libqueen] push(q=8 f=4/4 p99rtt=899ms) pop(q=0 f=1/4 p99rtt=153ms) custom(q=0 f=0/1 p99rtt=62ms) slots=95/100 jobs/s=499 drains=65235 evl=0ms
+[2026-04-21 16:52:22.238] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=869ms) pop(q=0 f=1/4 p99rtt=152ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=563 drains=65071 evl=0ms
+[2026-04-21 16:52:23.172] [info] [Worker 0] [libqueen] push(q=4 f=4/4 p99rtt=899ms) pop(q=0 f=2/4 p99rtt=153ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=437 drains=65710 evl=0ms
+[2026-04-21 16:52:23.237] [info] [Worker 1] [libqueen] push(q=21 f=4/4 p99rtt=869ms) pop(q=12 f=1/4 p99rtt=152ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=442 drains=65577 evl=0ms
+[2026-04-21 16:52:24.172] [info] [Worker 0] [libqueen] push(q=18 f=4/4 p99rtt=899ms) pop(q=0 f=3/4 p99rtt=154ms) custom(q=0 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=248 drains=66052 evl=0ms
+[2026-04-21 16:52:24.240] [info] [Worker 1] [libqueen] push(q=15 f=4/4 p99rtt=869ms) pop(q=0 f=2/4 p99rtt=152ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=268 drains=65935 evl=0ms
+[2026-04-21 16:52:24.557] [info] StatsService: Running full reconciliation (stats leader, hostname=alice.local)
+[2026-04-21 16:52:25.173] [info] [Worker 0] [libqueen] push(q=18 f=4/4 p99rtt=915ms) pop(q=0 f=4/4 p99rtt=177ms) custom(q=0 f=0/1 p99rtt=62ms) slots=92/100 jobs/s=148 drains=66276 evl=0ms
+[2026-04-21 16:52:25.240] [info] [Worker 1] [libqueen] push(q=15 f=4/4 p99rtt=869ms) pop(q=0 f=3/4 p99rtt=183ms) custom(q=0 f=0/1 p99rtt=39ms) slots=93/100 jobs/s=68 drains=66097 evl=0ms
+[2026-04-21 16:52:26.174] [info] [Worker 0] [libqueen] push(q=25 f=4/4 p99rtt=915ms) pop(q=4 f=2/4 p99rtt=223ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=93 drains=66479 evl=0ms
+[2026-04-21 16:52:26.242] [info] [Worker 1] [libqueen] push(q=10 f=4/4 p99rtt=909ms) pop(q=0 f=2/4 p99rtt=210ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=97 drains=66293 evl=0ms
+[2026-04-21 16:52:27.174] [info] [Worker 0] [libqueen] push(q=19 f=4/4 p99rtt=940ms) pop(q=0 f=3/4 p99rtt=247ms) custom(q=0 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=39 drains=66566 evl=0ms
+[2026-04-21 16:52:27.241] [info] [Worker 1] [libqueen] push(q=10 f=4/4 p99rtt=909ms) pop(q=0 f=4/4 p99rtt=265ms) custom(q=0 f=0/1 p99rtt=39ms) slots=92/100 jobs/s=4 drains=66350 evl=0ms
+[2026-04-21 16:52:27.922] [info] StatsService: Full reconciliation complete: {"task": {"tasksUpdated": 0}, "queue": {"queuesUpdated": 1}, "system": {"systemUpdated": 1}, "cleanup": {"orphanedDeleted": 0}, "namespace": {"namespacesUpdated": 0}, "partition": {"newPartitions": 455, "partitionsUpdated": 0, "dirtyPartitionsScanned": 0, "partitionsSkippedByWatermark": 0}}
+[2026-04-21 16:52:27.922] [info] StatsService: cycle completed in 3400ms
+[2026-04-21 16:52:28.175] [info] [Worker 0] [libqueen] push(q=23 f=4/4 p99rtt=1005ms) pop(q=0 f=3/4 p99rtt=252ms) custom(q=0 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=240 drains=66896 evl=0ms
+[2026-04-21 16:52:28.242] [info] [Worker 1] [libqueen] push(q=20 f=4/4 p99rtt=959ms) pop(q=0 f=1/4 p99rtt=284ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=166 drains=66588 evl=0ms
+[2026-04-21 16:52:29.176] [info] [Worker 0] [libqueen] push(q=23 f=4/4 p99rtt=1005ms) pop(q=1 f=2/4 p99rtt=226ms) custom(q=0 f=0/1 p99rtt=62ms) slots=94/100 jobs/s=367 drains=67310 evl=0ms
+[2026-04-21 16:52:29.242] [info] [Worker 1] [libqueen] push(q=29 f=4/4 p99rtt=959ms) pop(q=0 f=2/4 p99rtt=231ms) custom(q=0 f=0/1 p99rtt=39ms) slots=94/100 jobs/s=352 drains=67029 evl=0ms
+[2026-04-21 16:52:30.178] [info] [Worker 0] [libqueen] push(q=16 f=4/4 p99rtt=1005ms) pop(q=0 f=3/4 p99rtt=226ms) custom(q=0 f=0/1 p99rtt=62ms) slots=93/100 jobs/s=211 drains=67591 evl=0ms
+[2026-04-21 16:52:30.242] [info] [Worker 1] [libqueen] push(q=10 f=4/4 p99rtt=959ms) pop(q=1 f=3/4 p99rtt=231ms) custom(q=0 f=0/1 p99rtt=39ms) slots=93/100 jobs/s=245 drains=67332 evl=0ms
+[2026-04-21 16:52:31.176] [info] [Worker 0] [libqueen] push(q=12 f=3/4 p99rtt=1005ms) pop(q=13 f=1/4 p99rtt=226ms) custom(q=0 f=0/1 p99rtt=62ms) slots=96/100 jobs/s=373 drains=68008 evl=0ms
+[2026-04-21 16:52:31.243] [info] [Worker 1] [libqueen] push(q=29 f=4/4 p99rtt=1055ms) pop(q=3 f=1/4 p99rtt=231ms) custom(q=0 f=0/1 p99rtt=39ms) slots=95/100 jobs/s=344 drains=67768 evl=1ms
+[2026-04-21 16:52:32.176] [info] [Worker 0] [libqueen] push(q=22 f=4/4 p99rtt=1005ms) pop(q=0 f=2/4 p99rtt=226ms) custom(q=0 f=0/1 p99rtt=80ms) slots=94/100 jobs/s=150 drains=68242 evl=0ms
+[2026-04-21 16:52:32.245] [info] [Worker 1] [libqueen] push(q=11 f=4/4 p99rtt=1055ms) pop(q=0 f=4/4 p99rtt=231ms) custom(q=0 f=0/1 p99rtt=65ms) slots=92/100 jobs/s=205 drains=68026 evl=0ms
+[2026-04-21 16:52:33.176] [info] [Worker 0] [libqueen] push(q=14 f=4/4 p99rtt=1037ms) pop(q=0 f=1/4 p99rtt=227ms) custom(q=0 f=0/1 p99rtt=80ms) slots=95/100 jobs/s=114 drains=68406 evl=0ms
+[2026-04-21 16:52:33.245] [info] [Worker 1] [libqueen] push(q=11 f=4/4 p99rtt=1070ms) pop(q=0 f=3/4 p99rtt=259ms) custom(q=0 f=0/1 p99rtt=65ms) slots=93/100 jobs/s=180 drains=68290 evl=0ms
+[2026-04-21 16:52:34.176] [info] [Worker 0] [libqueen] push(q=13 f=4/4 p99rtt=1046ms) pop(q=1 f=1/4 p99rtt=227ms) custom(q=0 f=0/1 p99rtt=80ms) slots=95/100 jobs/s=354 drains=68830 evl=0ms
+[2026-04-21 16:52:34.245] [info] [Worker 1] [libqueen] push(q=10 f=4/4 p99rtt=1203ms) pop(q=0 f=2/4 p99rtt=259ms) custom(q=0 f=0/1 p99rtt=65ms) slots=94/100 jobs/s=367 drains=68707 evl=0ms
+[2026-04-21 16:52:35.177] [info] [Worker 0] [libqueen] push(q=23 f=4/4 p99rtt=1046ms) pop(q=0 f=3/4 p99rtt=227ms) custom(q=0 f=0/1 p99rtt=80ms) slots=93/100 jobs/s=255 drains=69136 evl=0ms
+[2026-04-21 16:52:35.246] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=1203ms) pop(q=14 f=0/4 p99rtt=259ms) custom(q=0 f=0/1 p99rtt=65ms) slots=96/100 jobs/s=280 drains=69083 evl=0ms
+[2026-04-21 16:52:36.179] [info] [Worker 0] [libqueen] push(q=20 f=4/4 p99rtt=1053ms) pop(q=2 f=1/4 p99rtt=247ms) custom(q=0 f=0/1 p99rtt=80ms) slots=95/100 jobs/s=238 drains=69478 evl=0ms
+[2026-04-21 16:52:36.246] [info] [Worker 1] [libqueen] push(q=0 f=4/4 p99rtt=1203ms) pop(q=2 f=1/4 p99rtt=265ms) custom(q=0 f=0/1 p99rtt=65ms) slots=95/100 jobs/s=260 drains=69383 evl=0ms
+[2026-04-21 16:52:36.848] [info] QPOP: Connection aborted for 3cc4a7ce-559e-4792-9a93-b39d76473a4b
+[2026-04-21 16:52:36.849] [info] QPOP: Connection aborted for aa953657-ce99-4f69-bb73-d617f543b024
+[2026-04-21 16:52:36.849] [info] QPOP: Connection aborted for fe3c19e9-5679-414d-8cf1-c1ab0da43073
+[2026-04-21 16:52:36.849] [info] QPOP: Connection aborted for 6e803c0b-e23d-44e4-b3bf-93a409f86ff5
+[2026-04-21 16:52:36.850] [info] QPOP: Connection aborted for f5497f12-9184-4a1e-b407-9694d06dc32f
+[2026-04-21 16:52:36.850] [info] QPOP: Connection aborted for 509672f9-fd27-465c-ab19-88df50020b02
+[2026-04-21 16:52:36.850] [info] QPOP: Connection aborted for c589a0b2-cc4b-480a-904f-1114c94bdc07
+[2026-04-21 16:52:36.850] [info] QPOP: Connection aborted for c23c9b2b-6ebf-4f43-a3ec-ac59f30f4027
+[2026-04-21 16:52:36.850] [info] QPOP: Connection aborted for 7f1e7221-b6eb-4958-b1e5-0535536524ee
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 575c2d05-dc1d-4660-ba83-eb535176b3f7
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 6b979f7b-8fbc-45e4-b770-4d9069995a22
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 69a4bb03-1967-41be-bc5b-20a9449dd7ef
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 79e6016c-f975-4ca1-a646-517a6cc06c46
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 2a1d0f1b-b7c2-42f8-9d49-14f893d52f22
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 58c66d0f-9a40-48d3-8fd5-5c7b23536e2a
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 9f109b4a-82ed-42fc-b723-89b08f94ec6d
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for ffb9e3e2-04be-48f0-abb1-d14638df55a8
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 72fb9b85-0ed4-47d1-965a-0a02bc52a440
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for d88ef78b-e4a4-49c9-a8c1-78a29d02da05
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 37e83dd4-1d83-40f7-8627-92555b71bb48
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 74fc7fbe-64eb-4eac-9971-9bdb35faab9d
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for e93bb2ed-b9c0-480d-9a12-0212a6544d61
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 4fc1514f-20c7-464e-9e34-9f5b2acd789b
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 6666396d-77fc-4856-8a2b-47aafdbdc504
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 846be23c-2d3c-4b5a-8232-08103f11e88c
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for d329935d-9431-4801-8fbc-49562818587a
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for f072fa85-9901-4821-8e77-bf9d5da99864
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for a6d92d41-d7cf-4b70-8853-8878cbe7fe6a
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for bc974cef-edd5-49bf-8936-6a25d69d6057
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 2d50c952-8068-4b05-9080-0c996f02fb38
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for aca27c41-8ddb-41f2-bedc-52795bed5a99
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 15cd9b7f-9fab-4942-be45-46b421686490
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for d28cc49e-d564-47a1-84d5-1fb67fe0e424
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 7596f3e5-a66a-4aef-bccf-c824e1d2f35c
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 3796a605-3fa6-4c11-be1a-7de254d1cf84
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for fb164e93-ee23-472c-a3c1-8e545488bc86
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 67220748-b66a-4073-9277-5c0f423a0775
+[2026-04-21 16:52:36.851] [info] QPOP: Connection aborted for 5b8de864-8982-4aca-b3a3-6e128ca33f75
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 804b2c02-3790-44c2-91e2-5fa439f33721
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for cc56e7d1-c2e7-41ea-84a4-bb8a724e8cab
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 17e2439b-7a76-4c42-888c-ea217159700f
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 4c58059b-2552-4d32-a64b-b912f315241c
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 12416fd3-2700-444c-9a18-48991b7535ab
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 54b388c6-8c5e-4866-a28e-b8062e06b1ad
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 5417d04e-f002-41bd-80f1-7906e6550ec0
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for b20b7a78-0a8b-4c69-aff5-69f3d33be6be
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 4936576a-c6e8-44b2-b38a-3b80ce59c1cb
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 79154d41-ea35-441f-a26d-d59a4b5204e4
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 95b1952c-78d3-4d82-aeec-64a738e9751a
+[2026-04-21 16:52:36.852] [info] QPOP: Connection aborted for 07ab793c-683d-413e-8789-25a6373da793
+[2026-04-21 16:52:36.954] [info] StatsService: cycle completed in 2430ms
+[2026-04-21 16:52:37.178] [info] [Worker 0] [libqueen] push(q=20 f=4/4 p99rtt=1053ms) pop(q=0 f=0/4 p99rtt=247ms) custom(q=0 f=0/1 p99rtt=80ms) slots=96/100 jobs/s=180 drains=69711 evl=0ms
+[2026-04-21 16:52:37.246] [info] [Worker 1] [libqueen] push(q=16 f=4/4 p99rtt=1203ms) pop(q=0 f=0/4 p99rtt=265ms) custom(q=0 f=0/1 p99rtt=65ms) slots=96/100 jobs/s=230 drains=69668 evl=0ms
+[2026-04-21 16:52:38.180] [info] [Worker 0] [libqueen] push(q=0 f=0/4 p99rtt=1053ms) pop(q=0 f=0/4 p99rtt=247ms) custom(q=0 f=0/1 p99rtt=80ms) slots=100/100 jobs/s=275 drains=69884 evl=0ms
+[2026-04-21 16:52:38.247] [info] [Worker 1] [libqueen] push(q=0 f=0/4 p99rtt=1203ms) pop(q=0 f=0/4 p99rtt=265ms) custom(q=0 f=0/1 p99rtt=65ms) slots=100/100 jobs/s=233 drains=69817 evl=0ms
+[2026-04-21 16:52:40.250] [info] [Worker 1] [libqueen] push(q=0 f=0/4 p99rtt=1203ms) pop(q=0 f=0/4 p99rtt=265ms) custom(q=0 f=0/1 p99rtt=65ms) slots=100/100 jobs/s=1 drains=69819 evl=0ms
+[2026-04-21 16:52:41.623] [info] Received signal 15, shutting down...
+[2026-04-21 16:52:41.623] [info] Exiting (worker threads will be terminated by OS)

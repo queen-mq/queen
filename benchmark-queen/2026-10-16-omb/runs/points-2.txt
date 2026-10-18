@@ -1,0 +1,7 @@
+native-nr0-p100-1000k queen-native queen-native.yaml 1-topic-100-partitions-1kb-4p-4c-1000k.yaml
+facade-nr0-p100-500k-wait10-DIAG queen-facade queen-facade-wait10-diag.yaml 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+facade-nr0-p100-1000k queen-facade queen-facade.yaml 1-topic-100-partitions-1kb-4p-4c-1000k.yaml
+kafka-p100-1000k kafka kafka.yaml 1-topic-100-partitions-1kb-4p-4c-1000k.yaml
+kafka-p10000-500k kafka kafka.yaml 1-topic-10000-partitions-1kb-4p-4c-500k.yaml
+native-nr0-p10000-500k queen-native queen-native.yaml 1-topic-10000-partitions-1kb-4p-4c-500k.yaml
+facade-nr0-p10000-500k queen-facade queen-facade.yaml 1-topic-10000-partitions-1kb-4p-4c-500k.yaml

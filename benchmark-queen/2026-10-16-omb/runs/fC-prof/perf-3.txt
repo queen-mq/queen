@@ -1,0 +1,40 @@
+    13.04%  [.] ZSTD_compressBlock_fast
+     7.97%  [.] 0x00000000001a19d2
+                       0x8948085789481a7e
+     3.15%  [.] HIST_count_parallel_wksp
+     3.08%  [.] HUF_compress1X_usingCTable_internal_bmi2
+     3.07%  [k] finish_task_switch.isra.0
+     2.63%  [k] _copy_to_iter
+                                  0x1
+     2.25%  [k] _raw_spin_unlock_irqrestore
+     1.96%  [k] kernel_init_pages
+     1.89%  [.] <queen_kafka::records::Fast>::plain_str
+     1.75%  [.] <base64::engine::general_purpose::GeneralPurpose as base64::engine::Engine>::internal_decode
+     1.58%  [.] xxhash_rust::xxh3::hash_long_internal_loop
+     1.44%  [.] _mi_page_malloc_zero
+     1.42%  [.] <base64::engine::general_purpose::GeneralPurpose as base64::engine::Engine>::internal_encode
+     1.20%  [.] mi_free
+     1.16%  [.] tokio::runtime::scheduler::multi_thread::worker::run
+     1.12%  [.] <core::marker::PhantomData<queen::rsm::planner::PushCommand> as serde_core::de::DeserializeSeed>::deserialize::<&mut postcard::de::deserializer::Deserializer<postcard::de::flavors::Slice>>
+     1.00%  [.] 0x00000000001a185b
+     0.94%  [k] handle_softirqs
+     0.88%  [.] <queen::rsm::planner::Overlay>::unfold_entry
+     0.79%  [.] 0x00000000001a1653
+     0.78%  [.] _mi_page_free_collect
+     0.73%  [k] _copy_from_iter
+     0.62%  [k] _raw_spin_unlock_irq
+     0.60%  [.] 0x00000000001a180e
+     0.57%  [.] HIST_count_simple
+     0.54%  [.] crc32c::hw_x86_64::crc_u64_parallel3
+     0.54%  [.] HUF_buildCTable_wksp
+     0.53%  [.] syscall
+     0.50%  [.] 0x00000000001a184d
+     0.48%  [.] <queen::rsm::facade::real::RaftFacade>::push_inputs::{closure#0}
+     0.48%  [.] ZSTD_decompressSequences_bmi2.constprop.0
+     0.48%  [.] <queen::rsm::planner::Overlay>::fold_effect
+     0.47%  [k] check_heap_object
+     0.47%  [.] 0x000000000000099a
+     0.47%  [.] 0x00000000001a1846
+     0.44%  [k] futex_wake
+     0.39%  [k] futex_do_wait
+     0.38%  [.] bytes::bytes::shared_drop

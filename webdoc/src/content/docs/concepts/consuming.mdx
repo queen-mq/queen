@@ -84,6 +84,14 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-16 (2.4.0): facade/real.rs keeps the framed forms on for the queues
 # that do not encrypt (c42ea1992) and tells the store whether the queue logs hold the txns hashes.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-16 (windowBuffer cap): consume/pop.rs ends a windowBuffer hold one
+# window after the oldest message waiting for the group instead of one window after the newest
+# write; consume/state.rs only corrects a comment. This page does not describe windowBuffer, and
+# nothing it states changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers

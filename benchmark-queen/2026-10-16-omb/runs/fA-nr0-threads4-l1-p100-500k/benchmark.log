@@ -1,0 +1,126 @@
+07:01:02.679 [main] INFO Benchmark - Starting benchmark with config: {
+  "drivers" : [ "drivers/queen-facade.yaml" ],
+  "workers" : [ "http://10.250.0.41:8080", "http://10.250.0.41:8082" ],
+  "workersFile" : null,
+  "workloads" : [ "workloads-run/1-topic-100-partitions-1kb-4p-4c-500k.yaml" ],
+  "output" : "/root/bench/omb-results/fA-nr0-threads4-l1-p100-500k.json"
+}
+07:01:02.697 [main] INFO Benchmark - Workloads: {
+  "1-topic-100-partitions-1kb-4p-4c-500k" : {
+    "name" : "500k rate 4 producers and 4 consumers on 1 topic / 100 partition",
+    "topics" : 1,
+    "partitionsPerTopic" : 100,
+    "keyDistributor" : "NO_KEY",
+    "messageSize" : 1024,
+    "messageSizeDistribution" : null,
+    "useRandomizedPayloads" : true,
+    "randomBytesRatio" : 0.5,
+    "randomizedPayloadPoolSize" : 1000,
+    "payloadFile" : null,
+    "subscriptionsPerTopic" : 1,
+    "producersPerTopic" : 4,
+    "consumerPerSubscription" : 4,
+    "producerRate" : 500000,
+    "consumerBacklogSizeGB" : 0,
+    "backlogDrainRatio" : 1.0,
+    "testDurationMinutes" : 3,
+    "warmupDurationMinutes" : 1
+  }
+}
+07:01:02.831 [main] INFO DistributedWorkersEnsemble - Workers list - producers: [http://10.250.0.41:8080]
+07:01:02.831 [main] INFO DistributedWorkersEnsemble - Workers list - consumers: http://10.250.0.41:8082
+07:01:02.834 [main] INFO Benchmark - --------------- WORKLOAD : 500k rate 4 producers and 4 consumers on 1 topic / 100 partition --- DRIVER : Queen (Kafka facade)---------------
+07:01:03.276 [main] INFO WorkloadGenerator - Created 1 topics in 139.175807 ms
+07:01:03.326 [main] INFO WorkloadGenerator - Created 4 consumers in 47.644936 ms
+07:01:03.366 [main] INFO WorkloadGenerator - Created 4 producers in 39.723676 ms
+07:01:03.367 [main] INFO WorkloadGenerator - Waiting for consumers to be ready
+07:01:03.400 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 0, Received: 0
+07:01:05.404 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 4, Received: 0
+07:01:07.408 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 4, Received: 0
+07:01:09.412 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 4, Received: 4
+07:01:09.412 [main] INFO WorkloadGenerator - All consumers are ready
+07:01:09.488 [main] INFO WorkloadGenerator - ----- Starting warm-up traffic (1m) ------
+07:01:19.740 [main] INFO WorkloadGenerator - Pub rate 489791.5 msg/s / 478.3 MB/s | Pub err     0.0 err/s | Cons rate 487577.8 msg/s / 476.2 MB/s | Backlog: 22.6 K | Pub Latency (ms) avg: 10.0 - 50%:  8.1 - 99%: 56.7 - 99.9%: 108.0 - Max: 160.7 | Pub Delay Latency (us) avg: 348.0 - 50%: 32.0 - 99%: 17623.0 - 99.9%: 29817.0 - Max: 31615.0
+07:01:29.941 [main] INFO WorkloadGenerator - Pub rate 501971.1 msg/s / 490.2 MB/s | Pub err     0.0 err/s | Cons rate 499207.4 msg/s / 487.5 MB/s | Backlog: 50.9 K | Pub Latency (ms) avg:  8.6 - 50%:  7.7 - 99%: 20.8 - 99.9%: 27.6 - Max: 36.4 | Pub Delay Latency (us) avg: 32.4 - 50%: 32.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 2035.0
+07:01:40.078 [main] INFO WorkloadGenerator - Pub rate 502529.4 msg/s / 490.8 MB/s | Pub err     0.0 err/s | Cons rate 498157.4 msg/s / 486.5 MB/s | Backlog: 95.2 K | Pub Latency (ms) avg:  8.6 - 50%:  7.7 - 99%: 20.8 - 99.9%: 27.7 - Max: 42.0 | Pub Delay Latency (us) avg: 32.1 - 50%: 31.0 - 99%: 68.0 - 99.9%: 76.0 - Max: 2046.0
+07:01:50.182 [main] INFO WorkloadGenerator - Pub rate 501027.7 msg/s / 489.3 MB/s | Pub err     0.0 err/s | Cons rate 507179.0 msg/s / 495.3 MB/s | Backlog: 33.1 K | Pub Latency (ms) avg:  8.6 - 50%:  7.8 - 99%: 21.3 - 99.9%: 26.0 - Max: 29.1 | Pub Delay Latency (us) avg: 31.7 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1805.0
+07:02:00.279 [main] INFO WorkloadGenerator - Pub rate 500354.0 msg/s / 488.6 MB/s | Pub err     0.0 err/s | Cons rate 492537.0 msg/s / 481.0 MB/s | Backlog: 112.0 K | Pub Latency (ms) avg:  8.7 - 50%:  7.8 - 99%: 21.7 - 99.9%: 28.7 - Max: 39.9 | Pub Delay Latency (us) avg: 31.7 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1808.0
+07:02:10.370 [main] INFO WorkloadGenerator - Pub rate 500357.4 msg/s / 488.6 MB/s | Pub err     0.0 err/s | Cons rate 507874.3 msg/s / 496.0 MB/s | Backlog: 36.1 K | Pub Latency (ms) avg:  8.8 - 50%:  8.0 - 99%: 21.3 - 99.9%: 26.9 - Max: 34.2 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 68.0 - 99.9%: 76.0 - Max: 1798.0
+07:02:10.517 [main] INFO WorkloadGenerator - ----- Aggregated Pub Latency (ms) avg:  8.9 - 50%:  7.8 - 95%: 17.0 - 99%: 22.7 - 99.9%: 67.4 - 99.99%: 110.8 - Max: 160.7 | Pub Delay (us)  avg: 84.1 - 50%: 31.0 - 95%: 66.0 - 99%: 69.0 - 99.9%: 24818.0 - 99.99%: 29978.0 - Max: 31615.0
+07:02:10.625 [main] INFO WorkloadGenerator - ----- Starting benchmark traffic (3m)------
+07:02:20.727 [main] INFO WorkloadGenerator - Pub rate 511887.9 msg/s / 499.9 MB/s | Pub err     0.0 err/s | Cons rate 510082.1 msg/s / 498.1 MB/s | Backlog: 54.4 K | Pub Latency (ms) avg:  8.7 - 50%:  7.8 - 99%: 21.5 - 99.9%: 31.1 - Max: 41.7 | Pub Delay Latency (us) avg: 32.2 - 50%: 31.0 - 99%: 68.0 - 99.9%: 76.0 - Max: 1819.0
+07:02:30.822 [main] INFO WorkloadGenerator - Pub rate 500232.3 msg/s / 488.5 MB/s | Pub err     0.0 err/s | Cons rate 503555.9 msg/s / 491.8 MB/s | Backlog: 20.8 K | Pub Latency (ms) avg:  8.5 - 50%:  7.8 - 99%: 20.3 - 99.9%: 25.2 - Max: 33.8 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 76.0 - Max: 2020.0
+07:02:40.913 [main] INFO WorkloadGenerator - Pub rate 500511.2 msg/s / 488.8 MB/s | Pub err     0.0 err/s | Cons rate 497494.0 msg/s / 485.8 MB/s | Backlog: 51.3 K | Pub Latency (ms) avg:  9.2 - 50%:  8.4 - 99%: 22.5 - 99.9%: 28.4 - Max: 50.9 | Pub Delay Latency (us) avg: 32.1 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 2103.0
+07:02:51.007 [main] INFO WorkloadGenerator - Pub rate 499717.1 msg/s / 488.0 MB/s | Pub err     0.0 err/s | Cons rate 501538.2 msg/s / 489.8 MB/s | Backlog: 32.9 K | Pub Latency (ms) avg:  9.0 - 50%:  8.2 - 99%: 21.4 - 99.9%: 27.9 - Max: 33.6 | Pub Delay Latency (us) avg: 31.8 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1734.0
+07:03:01.101 [main] INFO WorkloadGenerator - Pub rate 499846.9 msg/s / 488.1 MB/s | Pub err     0.0 err/s | Cons rate 501046.3 msg/s / 489.3 MB/s | Backlog: 20.8 K | Pub Latency (ms) avg:  8.7 - 50%:  7.8 - 99%: 21.1 - 99.9%: 26.8 - Max: 38.5 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1766.0
+07:03:11.197 [main] INFO WorkloadGenerator - Pub rate 499906.5 msg/s / 488.2 MB/s | Pub err     0.0 err/s | Cons rate 493712.8 msg/s / 482.1 MB/s | Backlog: 83.3 K | Pub Latency (ms) avg:  8.7 - 50%:  7.8 - 99%: 21.6 - 99.9%: 26.6 - Max: 32.8 | Pub Delay Latency (us) avg: 32.2 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1899.0
+07:03:21.287 [main] INFO WorkloadGenerator - Pub rate 500671.6 msg/s / 488.9 MB/s | Pub err     0.0 err/s | Cons rate 502181.8 msg/s / 490.4 MB/s | Backlog: 68.1 K | Pub Latency (ms) avg:  8.9 - 50%:  8.0 - 99%: 21.8 - 99.9%: 27.2 - Max: 32.8 | Pub Delay Latency (us) avg: 31.8 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1666.0
+07:03:31.379 [main] INFO WorkloadGenerator - Pub rate 499549.0 msg/s / 487.8 MB/s | Pub err     0.0 err/s | Cons rate 503291.7 msg/s / 491.5 MB/s | Backlog: 30.3 K | Pub Latency (ms) avg:  8.7 - 50%:  7.8 - 99%: 21.8 - 99.9%: 27.7 - Max: 37.5 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1804.0
+07:03:41.469 [main] INFO WorkloadGenerator - Pub rate 500260.9 msg/s / 488.5 MB/s | Pub err     0.0 err/s | Cons rate 498170.9 msg/s / 486.5 MB/s | Backlog: 51.4 K | Pub Latency (ms) avg:  8.7 - 50%:  7.9 - 99%: 21.4 - 99.9%: 26.8 - Max: 30.9 | Pub Delay Latency (us) avg: 32.1 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1921.0
+07:03:51.572 [main] INFO WorkloadGenerator - Pub rate 499413.7 msg/s / 487.7 MB/s | Pub err     0.0 err/s | Cons rate 502322.4 msg/s / 490.5 MB/s | Backlog: 22.0 K | Pub Latency (ms) avg:  8.7 - 50%:  8.0 - 99%: 20.6 - 99.9%: 24.9 - Max: 30.9 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1727.0
+07:04:01.667 [main] INFO WorkloadGenerator - Pub rate 500312.7 msg/s / 488.6 MB/s | Pub err     0.0 err/s | Cons rate 500185.3 msg/s / 488.5 MB/s | Backlog: 23.3 K | Pub Latency (ms) avg:  8.6 - 50%:  7.9 - 99%: 20.6 - 99.9%: 24.7 - Max: 28.5 | Pub Delay Latency (us) avg: 32.1 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1788.0
+07:04:11.770 [main] INFO WorkloadGenerator - Pub rate 499852.7 msg/s / 488.1 MB/s | Pub err     0.0 err/s | Cons rate 493380.9 msg/s / 481.8 MB/s | Backlog: 88.7 K | Pub Latency (ms) avg:  8.7 - 50%:  7.8 - 99%: 22.1 - 99.9%: 29.2 - Max: 34.8 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1763.0
+07:04:21.865 [main] INFO WorkloadGenerator - Pub rate 500136.0 msg/s / 488.4 MB/s | Pub err     0.0 err/s | Cons rate 506548.9 msg/s / 494.7 MB/s | Backlog: 23.9 K | Pub Latency (ms) avg:  8.8 - 50%:  7.9 - 99%: 21.9 - 99.9%: 27.5 - Max: 33.2 | Pub Delay Latency (us) avg: 32.1 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1831.0
+07:04:31.959 [main] INFO WorkloadGenerator - Pub rate 499967.7 msg/s / 488.2 MB/s | Pub err     0.0 err/s | Cons rate 499552.2 msg/s / 487.8 MB/s | Backlog: 28.1 K | Pub Latency (ms) avg:  8.5 - 50%:  7.7 - 99%: 20.5 - 99.9%: 24.7 - Max: 28.6 | Pub Delay Latency (us) avg: 32.1 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1636.0
+07:04:42.051 [main] INFO WorkloadGenerator - Pub rate 500254.8 msg/s / 488.5 MB/s | Pub err     0.0 err/s | Cons rate 499381.5 msg/s / 487.7 MB/s | Backlog: 37.0 K | Pub Latency (ms) avg:  8.6 - 50%:  7.8 - 99%: 20.8 - 99.9%: 25.5 - Max: 34.3 | Pub Delay Latency (us) avg: 31.7 - 50%: 31.0 - 99%: 68.0 - 99.9%: 77.0 - Max: 1618.0
+07:04:52.150 [main] INFO WorkloadGenerator - Pub rate 125584.4 msg/s / 122.6 MB/s | Pub err     0.0 err/s | Cons rate 126101.0 msg/s / 123.1 MB/s | Backlog: 31.7 K | Pub Latency (ms) avg:  8.8 - 50%:  8.0 - 99%: 21.5 - 99.9%: 29.2 - Max: 33.2 | Pub Delay Latency (us) avg: 32.6 - 50%: 31.0 - 99%: 68.0 - 99.9%: 81.0 - Max: 2090.0
+07:05:02.369 [main] INFO WorkloadGenerator - Pub rate 865068.5 msg/s / 844.8 MB/s | Pub err     0.0 err/s | Cons rate 232566.4 msg/s / 227.1 MB/s | Backlog: 6485.0 K | Pub Latency (ms) avg: 193.4 - 50%: 48.9 - 99%: 7731.8 - 99.9%: 8658.1 - Max: 9079.4 | Pub Delay Latency (us) avg: 3248842.2 - 50%: 3078511.0 - 99%: 7651007.0 - 99.9%: 7665343.0 - Max: 7669375.0
+Exception in thread "Thread-0" java.util.concurrent.CompletionException: java.util.concurrent.CompletionException: java.net.SocketException: Connection reset
+	at java.base/jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance0(Native Method)
+	at java.base/jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance(NativeConstructorAccessorImpl.java:77)
+	at java.base/jdk.internal.reflect.DelegatingConstructorAccessorImpl.newInstance(DelegatingConstructorAccessorImpl.java:45)
+	at java.base/java.lang.reflect.Constructor.newInstanceWithCaller(Constructor.java:500)
+	at java.base/java.lang.reflect.Constructor.newInstance(Constructor.java:481)
+	at java.base/java.util.concurrent.ForkJoinTask.getThrowableException(ForkJoinTask.java:562)
+	at java.base/java.util.concurrent.ForkJoinTask.reportException(ForkJoinTask.java:591)
+	at java.base/java.util.concurrent.ForkJoinTask.invoke(ForkJoinTask.java:689)
+	at java.base/java.util.stream.ForEachOps$ForEachOp.evaluateParallel(ForEachOps.java:159)
+	at java.base/java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateParallel(ForEachOps.java:173)
+	at java.base/java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:233)
+	at java.base/java.util.stream.ReferencePipeline.forEach(ReferencePipeline.java:596)
+	at java.base/java.util.stream.ReferencePipeline$Head.forEach(ReferencePipeline.java:765)
+	at io.openmessaging.benchmark.worker.DistributedWorkersEnsemble.stopAll(DistributedWorkersEnsemble.java:168)
+	at java.base/java.lang.Thread.run(Thread.java:840)
+Caused by: java.util.concurrent.CompletionException: java.net.SocketException: Connection reset
+	at java.base/java.util.concurrent.CompletableFuture.encodeThrowable(CompletableFuture.java:332)
+	at java.base/java.util.concurrent.CompletableFuture.completeThrowable(CompletableFuture.java:347)
+	at java.base/java.util.concurrent.CompletableFuture$UniApply.tryFire(CompletableFuture.java:636)
+	at java.base/java.util.concurrent.CompletableFuture.postComplete(CompletableFuture.java:510)
+	at java.base/java.util.concurrent.CompletableFuture.completeExceptionally(CompletableFuture.java:2162)
+	at org.asynchttpclient.netty.NettyResponseFuture.abort(NettyResponseFuture.java:273)
+	at org.asynchttpclient.netty.request.NettyRequestSender.abort(NettyRequestSender.java:487)
+	at org.asynchttpclient.netty.handler.AsyncHttpClientHandler.exceptionCaught(AsyncHttpClientHandler.java:201)
+	at io.netty.channel.AbstractChannelHandlerContext.invokeExceptionCaught(AbstractChannelHandlerContext.java:302)
+	at io.netty.channel.AbstractChannelHandlerContext.invokeExceptionCaught(AbstractChannelHandlerContext.java:281)
+	at io.netty.channel.AbstractChannelHandlerContext.fireExceptionCaught(AbstractChannelHandlerContext.java:273)
+	at io.netty.channel.CombinedChannelDuplexHandler$DelegatingChannelHandlerContext.fireExceptionCaught(CombinedChannelDuplexHandler.java:424)
+	at io.netty.channel.ChannelHandlerAdapter.exceptionCaught(ChannelHandlerAdapter.java:92)
+	at io.netty.channel.CombinedChannelDuplexHandler$1.fireExceptionCaught(CombinedChannelDuplexHandler.java:145)
+	at io.netty.channel.ChannelInboundHandlerAdapter.exceptionCaught(ChannelInboundHandlerAdapter.java:143)
+	at io.netty.channel.CombinedChannelDuplexHandler.exceptionCaught(CombinedChannelDuplexHandler.java:231)
+	at io.netty.channel.AbstractChannelHandlerContext.invokeExceptionCaught(AbstractChannelHandlerContext.java:302)
+	at io.netty.channel.AbstractChannelHandlerContext.invokeExceptionCaught(AbstractChannelHandlerContext.java:281)
+	at io.netty.channel.AbstractChannelHandlerContext.fireExceptionCaught(AbstractChannelHandlerContext.java:273)
+	at io.netty.channel.DefaultChannelPipeline$HeadContext.exceptionCaught(DefaultChannelPipeline.java:1377)
+	at io.netty.channel.AbstractChannelHandlerContext.invokeExceptionCaught(AbstractChannelHandlerContext.java:302)
+	at io.netty.channel.AbstractChannelHandlerContext.invokeExceptionCaught(AbstractChannelHandlerContext.java:281)
+	at io.netty.channel.DefaultChannelPipeline.fireExceptionCaught(DefaultChannelPipeline.java:907)
+	at io.netty.channel.nio.AbstractNioByteChannel$NioByteUnsafe.handleReadException(AbstractNioByteChannel.java:125)
+	at io.netty.channel.nio.AbstractNioByteChannel$NioByteUnsafe.read(AbstractNioByteChannel.java:177)
+	at io.netty.channel.nio.NioEventLoop.processSelectedKey(NioEventLoop.java:719)
+	at io.netty.channel.nio.NioEventLoop.processSelectedKeysOptimized(NioEventLoop.java:655)
+	at io.netty.channel.nio.NioEventLoop.processSelectedKeys(NioEventLoop.java:581)
+	at io.netty.channel.nio.NioEventLoop.run(NioEventLoop.java:493)
+	at io.netty.util.concurrent.SingleThreadEventExecutor$4.run(SingleThreadEventExecutor.java:989)
+	at io.netty.util.internal.ThreadExecutorMap$2.run(ThreadExecutorMap.java:74)
+	at io.netty.util.concurrent.FastThreadLocalRunnable.run(FastThreadLocalRunnable.java:30)
+	... 1 more
+Caused by: java.net.SocketException: Connection reset
+	at java.base/sun.nio.ch.SocketChannelImpl.throwConnectionReset(SocketChannelImpl.java:394)
+	at java.base/sun.nio.ch.SocketChannelImpl.read(SocketChannelImpl.java:426)
+	at io.netty.buffer.PooledByteBuf.setBytes(PooledByteBuf.java:253)
+	at io.netty.buffer.AbstractByteBuf.writeBytes(AbstractByteBuf.java:1132)
+	at io.netty.channel.socket.nio.NioSocketChannel.doReadBytes(NioSocketChannel.java:350)
+	at io.netty.channel.nio.AbstractNioByteChannel$NioByteUnsafe.read(AbstractNioByteChannel.java:151)
+	... 8 more
+rc=143

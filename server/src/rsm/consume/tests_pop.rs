@@ -1,9 +1,12 @@
 //! Pop parity: the semantic cases of the planner's `tests/planner_pop.rs` and
 //! `tests/pop_bounded.rs` (08050fed), against the engine.
 
+use std::time::{Duration, Instant};
+
 use super::tests::{mode, only, qcfg, H, T};
-use super::Served;
-use crate::rsm::batcher::Command;
+use super::{wall_us, Served};
+use crate::rsm::batcher::{Command, Reply};
+use crate::rsm::entry::Outcome;
 use crate::rsm::planner::AckStatus;
 use crate::rsm::store::Store;
 
@@ -279,6 +282,151 @@ fn window_buffer_debounces_a_partition_just_written() {
         .wildcard("q", "g2", "w")
         .iter()
         .any(|c| c.pid == h.pid_of("q", "p1")));
+}
+
+// windowBuffer caps its hold (2026-10-16). It was a quiet debounce: every
+// write restarted it, so a partition written more often than once a window
+// delivered nothing for as long as the writes went on. The hold now ends one
+// window after the oldest message waiting for the group.
+#[test]
+fn window_buffer_under_steady_writes_delivers_one_window_after_the_oldest_waiting_message() {
+    const W: i64 = 2_000_000;
+    let mut h = H::new("pop-window-steady");
+    let mut cfg = qcfg();
+    cfg.window_buffer = 2;
+    h.queue("q", cfg);
+    let t0 = h.now;
+    // A message every half window for five windows, a pop after each.
+    let mut batches = Vec::new();
+    for k in 0..10 {
+        h.now = t0 + k * W / 2;
+        let pid = h.push_at("q", "p0", &[&format!("m{k}")], h.now);
+        for c in h.wildcard("q", "g", "w1") {
+            batches.push((h.now - t0, c.start_offset, c.end_offset));
+            let n = (c.end_offset - c.start_offset + 1) as i32;
+            h.ack_pos(
+                pid,
+                "q",
+                "g",
+                "w1",
+                Some(c.end_offset as i64),
+                true,
+                true,
+                n,
+            );
+        }
+    }
+    // m0 (0 s) goes at 2 s, m3 (3 s) at 5 s, m6 (6 s) at 8 s, each batch with
+    // what came meanwhile; the message after a release starts the next window.
+    assert_eq!(
+        batches,
+        vec![(W, 0, 2), (W * 5 / 2, 3, 5), (W * 4, 6, 8)],
+        "every message out within one window of the oldest waiting"
+    );
+    // The writes stop: m9 (9 s) waits out its own window, then goes.
+    h.now = t0 + 9 * W / 2 + W - 1;
+    assert!(h.wildcard("q", "g", "w1").is_empty(), "inside m9's window");
+    h.now += 1;
+    let c = only(h.wildcard("q", "g", "w1"));
+    assert_eq!((c.start_offset, c.end_offset), (9, 9));
+}
+
+#[test]
+fn a_burst_shorter_than_the_window_buffer_is_one_batch() {
+    const W: i64 = 2_000_000;
+    let mut h = H::new("pop-window-burst");
+    let mut cfg = qcfg();
+    cfg.window_buffer = 2;
+    h.queue("q", cfg);
+    let t0 = h.now;
+    // Five pushes over 0.8 s, then quiet; a wildcard group and a pinned one
+    // look after each push.
+    for k in 0..5 {
+        h.now = t0 + k * 200_000;
+        h.push_at("q", "p0", &[&format!("m{k}")], h.now);
+        assert!(h.wildcard("q", "g", "w1").is_empty(), "inside the window");
+        assert!(
+            h.pinned("q", "p0", "g2", "w2").is_empty(),
+            "inside the window"
+        );
+    }
+    h.now = t0 + W - 1;
+    assert!(h.wildcard("q", "g", "w1").is_empty());
+    assert!(h.pinned("q", "p0", "g2", "w2").is_empty());
+    // One window after the first message, not after the last: the whole
+    // burst in one batch.
+    h.now = t0 + W;
+    let c = only(h.wildcard("q", "g", "w1"));
+    assert_eq!((c.start_offset, c.end_offset), (0, 4));
+    let c = only(h.pinned("q", "p0", "g2", "w2"));
+    assert_eq!((c.start_offset, c.end_offset), (0, 4));
+}
+
+// The end of a hold is the stored stamp of the oldest waiting message plus
+// the window, so a new leader ends it at the same instant (a start kept in
+// memory would begin the window again at the leader change).
+#[test]
+fn a_new_leader_ends_a_window_hold_at_the_same_instant() {
+    const W: i64 = 2_000_000;
+    let mut h = H::new("pop-window-failover");
+    let mut cfg = qcfg();
+    cfg.window_buffer = 2;
+    h.queue("q", cfg);
+    let t0 = h.now;
+    h.push_at("q", "p0", &["a"], t0);
+    h.now = t0 + W / 2;
+    assert!(h.wildcard("q", "g", "w1").is_empty());
+    h.failover();
+    h.push_at("q", "p0", &["b"], h.now);
+    h.now = t0 + W - 1;
+    assert!(h.wildcard("q", "g", "w1").is_empty(), "inside a's window");
+    h.now = t0 + W;
+    let c = only(h.wildcard("q", "g", "w1"));
+    assert_eq!((c.start_offset, c.end_offset), (0, 1));
+}
+
+// A held partition with nothing written after it and no other pop: only the
+// hold's own timer can arm it again, and it answers the parked pop.
+#[test]
+fn a_parked_pop_gets_a_held_partition_when_its_window_ends() {
+    let mut h = H::new("park-window");
+    let mut cfg = qcfg();
+    cfg.window_buffer = 1;
+    h.queue("q", cfg);
+    // Register the group first (answered empty once durable).
+    assert!(h.wildcard("q", "g", "w1").is_empty());
+    // Stamped 0.7 s ago: its window ends 0.3 s from now.
+    let stamp = wall_us() - 700_000;
+    let pushed = Instant::now();
+    h.now = wall_us();
+    h.push_at("q", "p0", &["a"], stamp);
+    let mut c = h.pop_cmd("q", "g", "w1");
+    c.wait = true;
+    c.deadline_us = wall_us() + 10_000_000;
+    let mut rx = h.later(Command::PopWildcard(c));
+    for _ in 0..5000 {
+        h.checkpoint();
+        if let Ok(r) = rx.try_recv() {
+            let waited = pushed.elapsed();
+            match r {
+                Reply::Done {
+                    outcome: Outcome::Pop(p),
+                    ..
+                } => {
+                    let c = only(p.claims);
+                    assert_eq!((c.start_offset, c.end_offset), (0, 0));
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(
+                waited >= Duration::from_millis(250),
+                "answered inside the window: {waited:?}"
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("the parked pop never got the held partition");
 }
 
 #[test]

@@ -1,0 +1,42 @@
+08:22:38 port 8080 rss_mb 8733 threads 72 cpu_ticks 9300
+08:22:38 port 8082 rss_mb 5222 threads 59 cpu_ticks 4644
+08:22:38 tcp_to_broker 0
+08:22:43 port 8080 rss_mb 10689 threads 124 cpu_ticks 10522
+08:22:43 port 8082 rss_mb 5401 threads 113 cpu_ticks 5551
+08:22:43 tcp_to_broker 196
+08:22:48 port 8080 rss_mb 10750 threads 124 cpu_ticks 12289
+08:22:48 port 8082 rss_mb 5755 threads 112 cpu_ticks 6835
+08:22:48 tcp_to_broker 196
+08:22:53 port 8080 rss_mb 10786 threads 124 cpu_ticks 14060
+08:22:53 port 8082 rss_mb 5771 threads 112 cpu_ticks 8032
+08:22:53 tcp_to_broker 196
+08:22:58 port 8080 rss_mb 10791 threads 124 cpu_ticks 15830
+08:22:58 port 8082 rss_mb 5889 threads 112 cpu_ticks 9222
+08:22:58 tcp_to_broker 196
+08:23:03 port 8080 rss_mb 10795 threads 124 cpu_ticks 17541
+08:23:03 port 8082 rss_mb 6842 threads 112 cpu_ticks 10460
+08:23:03 tcp_to_broker 196
+08:23:08 port 8080 rss_mb 10798 threads 124 cpu_ticks 19315
+08:23:08 port 8082 rss_mb 7359 threads 112 cpu_ticks 11664
+08:23:08 tcp_to_broker 196
+08:23:13 port 8080 rss_mb 10800 threads 124 cpu_ticks 21037
+08:23:13 port 8082 rss_mb 7362 threads 112 cpu_ticks 12842
+08:23:13 tcp_to_broker 196
+08:23:18 port 8080 rss_mb 10810 threads 124 cpu_ticks 22777
+08:23:18 port 8082 rss_mb 7376 threads 112 cpu_ticks 13984
+08:23:18 tcp_to_broker 196
+08:23:23 port 8080 rss_mb 10811 threads 124 cpu_ticks 24506
+08:23:23 port 8082 rss_mb 8173 threads 112 cpu_ticks 15191
+08:23:23 tcp_to_broker 196
+08:23:28 port 8080 rss_mb 10813 threads 124 cpu_ticks 26296
+08:23:28 port 8082 rss_mb 9130 threads 112 cpu_ticks 16382
+08:23:28 tcp_to_broker 196
+08:23:33 port 8080 rss_mb 10809 threads 124 cpu_ticks 27993
+08:23:33 port 8082 rss_mb 10078 threads 112 cpu_ticks 17587
+08:23:33 tcp_to_broker 196
+08:23:38 port 8080 rss_mb 10810 threads 124 cpu_ticks 29775
+08:23:38 port 8082 rss_mb 10428 threads 112 cpu_ticks 18751
+08:23:38 tcp_to_broker 196
+08:23:43 port 8080 rss_mb 10810 threads 123 cpu_ticks 31363
+08:23:43 port 8082 rss_mb 10427 threads 93 cpu_ticks 19710
+08:23:43 tcp_to_broker 80

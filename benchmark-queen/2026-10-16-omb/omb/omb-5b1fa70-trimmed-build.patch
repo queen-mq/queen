@@ -1,0 +1,128 @@
+diff --git a/benchmark-framework/pom.xml b/benchmark-framework/pom.xml
+index 698a79c..8e0d41f 100644
+--- a/benchmark-framework/pom.xml
++++ b/benchmark-framework/pom.xml
+@@ -35,27 +35,6 @@
+             <artifactId>driver-api</artifactId>
+             <version>${project.version}</version>
+         </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-artemis</artifactId>
+-            <version>${project.version}</version>
+-            <exclusions>
+-                <exclusion>
+-                    <groupId>io.netty</groupId>
+-                    <artifactId>*</artifactId>
+-                </exclusion>
+-            </exclusions>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-bookkeeper</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-jms</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+         <dependency>
+             <groupId>${project.groupId}</groupId>
+             <artifactId>driver-kafka</artifactId>
+@@ -63,53 +42,14 @@
+         </dependency>
+         <dependency>
+             <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-kop</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-mqtt5</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-nats</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-nsq</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-pravega</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-pulsar</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-rabbitmq</artifactId>
++            <artifactId>driver-queen</artifactId>
+             <version>${project.version}</version>
+         </dependency>
++        <!-- The framework uses Netty itself (DefaultThreadFactory, ByteBufUtil); it used to arrive through the
++             other drivers, which this build leaves out. -->
+         <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-redis</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-rocketmq</artifactId>
+-            <version>${project.version}</version>
+-        </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-rocketmq5</artifactId>
+-            <version>${project.version}</version>
++            <groupId>io.netty</groupId>
++            <artifactId>netty-all</artifactId>
+         </dependency>
+         <dependency>
+             <groupId>com.beust</groupId>
+@@ -129,6 +69,11 @@
+             <groupId>org.apache.logging.log4j</groupId>
+             <artifactId>log4j-slf4j-impl</artifactId>
+         </dependency>
++        <!-- The log4j2 backend: without it OMB logs nothing (the trimmed build lost it with the other drivers). -->
++        <dependency>
++            <groupId>org.apache.logging.log4j</groupId>
++            <artifactId>log4j-core</artifactId>
++        </dependency>
+         <dependency>
+             <groupId>org.asynchttpclient</groupId>
+             <artifactId>async-http-client</artifactId>
+@@ -150,12 +95,6 @@
+             <artifactId>HdrHistogram</artifactId>
+             <version>2.1.12</version>
+         </dependency>
+-        <dependency>
+-            <groupId>${project.groupId}</groupId>
+-            <artifactId>driver-nats-streaming</artifactId>
+-            <version>${project.version}</version>
+-            <scope>provided</scope>
+-        </dependency>
+         <dependency>
+             <groupId>org.projectlombok</groupId>
+             <artifactId>lombok</artifactId>
+diff --git a/pom.xml b/pom.xml
+index 8ee13b1..4bb3689 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -46,6 +46,7 @@
+         <module>driver-pravega</module>
+         <module>driver-pulsar</module>
+         <module>driver-kafka</module>
++        <module>driver-queen</module>
+         <module>driver-rabbitmq</module>
+         <module>driver-artemis</module>
+         <module>driver-bookkeeper</module>

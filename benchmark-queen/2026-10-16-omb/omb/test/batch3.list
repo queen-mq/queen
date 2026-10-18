@@ -1,0 +1,10 @@
+f3-max-1t-1p-1p1c-100b drivers/queen-test.yaml workloads/f3-max-1t-1p-1p1c-100b.yaml 0 disk
+f3-max-1t-1p-1p1c-1kb drivers/queen-test.yaml workloads/f3-max-1t-1p-1p1c-1kb.yaml 0 disk
+f3-max-1t-1p-1p1c-64kb drivers/queen-test.yaml workloads/f3-max-1t-1p-1p1c-64kb.yaml 0 disk
+f3-max-1t-100p-100p100c-1kb drivers/queen-test.yaml workloads/f3-max-1t-100p-100p100c-1kb.yaml 0 disk
+f3-max-1t-10p-10p10c-64kb drivers/queen-test.yaml workloads/f3-max-1t-10p-10p10c-64kb.yaml 0 disk
+f3-rate0-1t-100p-1p1c-1kb drivers/queen-test.yaml workloads/f3-rate0-1t-100p-1p1c-1kb.yaml 0 disk
+f4-1m-10t-16p-100b drivers/queen-test.yaml workloads/f4-1m-10t-16p-100b.yaml 0 shm
+f4-1m-10t-1p-100b drivers/queen-test.yaml workloads/f4-1m-10t-1p-100b.yaml 0 shm
+f7-100t-1sub drivers/queen-test.yaml workloads/f7-100t-1sub.yaml 16 shm
+f2-100k-bell50 drivers/queen-test-topics-bell50.yaml workloads/f2-100000t-4p4c.yaml 16 shm

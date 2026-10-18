@@ -1,0 +1,18 @@
+# Queen native, popBatch 10000: pops ask batch=10000 without the autopilot, one ack item per claim (its last message).
+name: Queen (native)
+driverClass: io.openmessaging.benchmark.driver.queen.QueenBenchmarkDriver
+urls:
+  - http://10.250.0.43:6632
+  - http://10.250.0.39:6632
+  - http://10.250.0.40:6632
+dedupWindowSeconds: 60
+lingerMs: 1
+batchMaxBytes: 1048576
+maxInFlight: 5
+bufferMaxBytes: 67108864
+compression: none
+pollers: 8
+maxPops: 4096
+popTimeoutMs: 1000
+ackMaxInFlight: 16
+popBatch: 10000

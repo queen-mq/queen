@@ -1,0 +1,35 @@
+[10:06:36] deploy: harness, OS settings, Kafka 4.3.1 + JDK 21 on the brokers
+  kafka    <host-09>   rc=0  [2026-10-13T10:07:26Z] install queen: Kafka 4.3.1 installed in /root/bench/kafka/dist: kafka_2.13-4.3.1.jar
+  kafka    <host-01>   rc=0  [2026-10-13T10:07:29Z] install queen-02: Kafka 4.3.1 installed in /root/bench/kafka/dist: kafka_2.13-4.3.1.jar
+  kafka    <host-04>   rc=0  [2026-10-13T10:07:29Z] install queen-03: Kafka 4.3.1 installed in /root/bench/kafka/dist: kafka_2.13-4.3.1.jar
+  check    <host-09>   rc=0  listening
+  check    <host-01>   rc=0  listening
+  check    <host-04>   rc=0  listening
+[10:07:41] start 1x100-1000k-oct13
+[10:10:41] KAFKA_POINT 1x100-1000k-oct13 DONE | 1x100-1000k-oct13  kafka  1x100 e=0 batch b=100 rr c=11x9 default  1000000   1000k   1000k      0k        8       11         11        11        9.8        9.0          6.5               149              152/151     0       4.4
+[10:10:41] start 1x100-2000k-oct13
+[10:13:40] KAFKA_POINT 1x100-2000k-oct13 DONE | 1x100-2000k-oct13  kafka  1x100 e=0 batch b=100 rr c=11x9 default  2000000   2000k   2000k      0k        8       43         43        40       15.8       14.6          6.6               298              301/300     0       8.1
+[10:13:40] start 1x100-4000k-oct13
+[10:16:43] KAFKA_POINT 1x100-4000k-oct13 DONE | 1x100-4000k-oct13  kafka  1x100 e=0 batch b=100 rr c=11x9 default  4000000   4000k   4000k      0k       13      243        249       173       21.8       19.7          6.6               582              593/593     0      12.0
+[10:16:43] start 1x10-2000k-oct13
+[10:19:48] KAFKA_POINT 1x10-2000k-oct13 DONE | 1x10-2000k-oct13  kafka  1x10 e=0 batch b=100 rr c=1x9 default  2000000   2000k   2000k      0k       11      403        403       202       10.7        9.7          6.6               284              295/295     0       5.5
+[10:19:48] start 1x1000-2000k-oct13
+[10:22:51] KAFKA_POINT 1x1000-2000k-oct13 DONE | 1x1000-2000k-oct13  kafka  1x1000 e=0 batch b=100 rr c=33x9 default  2000000   2000k   2000k      0k        9       25         26        27       19.5       18.5          6.7               306              301/300     0       8.3
+[10:22:51] start 1x10000-2000k-oct13
+[10:26:13] KAFKA_POINT 1x10000-2000k-oct13 DONE | 1x10000-2000k-oct13  kafka  1x10000 e=0 batch b=100 rr c=33x9 default  2000000   1999k   1998k      0k       64      134        140       125       29.8       28.8          6.8               372              298/297     0       9.3
+[10:26:13] start 1x100000-2000k-oct13
+[10:36:23] KAFKA_POINT 1x100000-2000k-oct13 FAILED | 1x100000-2000k-oct13  kafka  1x100000 e=0 batch b=100 rr c=33x9 default  2000000   1743k   1373k    116k    17433    25821      25821      6259       34.6       31.5         12.0               326              220/204     0       3.7
+[10:36:23] 100000 partitions at 2M: not carried, the ladder stops here
+[10:36:23] KAFKA_ALL_DONE
+[11:12:52] rerun of 100,000 partitions with GOMEMLIMIT=9GiB on the loaders (the first run lost 4 of 9 load processes to the OOM killer)
+[11:12:52] start 1x100000-2000k-oct13b
+[11:14:19] KAFKA_POINT 1x100000-2000k-oct13b FAILED | 1x100000-2000k-oct13b  kafka  1x100000 e=0 batch b=100 rr c=33x9 default  2000000      0k      0k      0k        0        0        nan         0        0.0        0.0          0.0                 0                  0/0     0       0.0
+[11:14:19]   load processes' exit codes: 
+[11:14:19] 100,000 partitions at 2M with the loader's memory limit: not carried
+[11:14:19] KAFKA2A_DONE
+[11:17:37] rerun of 100,000 partitions with GOMEMLIMIT=9GiB on the loaders (the first run lost 4 of 9 load processes to the OOM killer)
+[11:17:37] start 1x100000-2000k-oct13b
+[11:28:15] KAFKA_POINT 1x100000-2000k-oct13b DONE | 1x100000-2000k-oct13b  kafka  1x100000 e=0 batch b=100 rr c=33x9 default  2000000   1923k   1672k     12k    10420    15139      15139      3523       33.3       30.2         12.2               354              266/251     0       5.7
+[11:28:15]   load processes' exit codes: 0 0 0 0 0 0 0 0 0 
+[11:28:15] 100,000 partitions at 2M with the loader's memory limit: not carried
+[11:28:15] KAFKA2A_DONE

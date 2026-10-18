@@ -1,0 +1,6 @@
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[20:13:23] omb: run kafka-p100-500k: system kafka, driver kafka.yaml, workload 1-topic-100-partitions-1kb-4p-4c-500k.yaml
+[20:13:27] omb: 6 workers up
+kafka-p100-500k [kafka] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 2,940 | pub p50/p99/p99.9 1.5/3.0/17.2 ms | e2e p50/p99/p99.9 2.0/5.0/54.0 ms (max 237) | brokers 5.0 cores, disk write 518/523/518 MB/s

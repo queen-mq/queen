@@ -1,0 +1,415 @@
+<style>
+/* One column of cards, a section a question. Series colours: Queen blue, Queen's Kafka API teal, Kafka orange. */
+.omb { --omb-q: #2b6cd4; --omb-a: #1a9b8c; --omb-k: #d9622b; display: flex; flex-direction: column; gap: var(--cds-gap-xl); font-family: var(--font-anthropic-sans); color: var(--color-fg); max-width: 72rem; margin-inline: auto; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .omb { --omb-q: #5a96f5; --omb-a: #3fb8a8; --omb-k: #f0854a; } }
+:root[data-theme="dark"] .omb { --omb-q: #5a96f5; --omb-a: #3fb8a8; --omb-k: #f0854a; }
+.omb .omb-head { display: flex; flex-direction: column; gap: var(--cds-gap-sm); }
+.omb .omb-title { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; text-wrap: balance; }
+.omb .omb-take { font-size: var(--cds-font-size-body); margin: 0; max-width: 65ch; line-height: 1.5; }
+.omb .omb-meta { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin: 0; max-width: 80ch; line-height: 1.5; }
+.omb .omb-legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-md); margin: 0; padding: 0; list-style: none; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.omb .omb-legend li { display: flex; align-items: center; gap: var(--cds-gap-xs); }
+.omb .omb-sw { width: 1.5rem; height: 0; border-top: 3px solid currentColor; display: inline-block; }
+.omb .omb-sw.q { color: var(--omb-q); }
+.omb .omb-sw.a { color: var(--omb-a); border-top-style: dashed; }
+.omb .omb-sw.k { color: var(--omb-k); }
+.omb .omb-section { display: flex; flex-direction: column; gap: var(--cds-gap-md); }
+.omb .omb-h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; }
+.omb .omb-lede { font-size: var(--cds-font-size-body); color: var(--color-fg-muted); margin: 0; max-width: 70ch; line-height: 1.5; }
+.omb .omb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); gap: var(--cds-gap-md); }
+.omb .omb-grid.small { grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); }
+.omb .omb-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: flex; flex-direction: column; gap: var(--cds-gap-sm); min-width: 0; position: relative; }
+.omb .omb-h3 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; }
+.omb .omb-note { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin: 0; line-height: 1.45; }
+.omb .omb-chart { position: relative; min-height: 8rem; min-width: 0; }
+.omb .omb-chart svg { display: block; overflow: visible; }
+.omb .omb-chart text { font-family: var(--font-anthropic-sans); font-size: var(--cds-font-size-caption); fill: var(--color-fg-muted); font-variant-numeric: tabular-nums; }
+.omb .omb-chart text.lbl { fill: var(--color-fg); }
+.omb .omb-chart text.grp { fill: var(--color-fg); font-weight: var(--cds-font-weight-medium); }
+.omb .omb-chart text.miss { font-style: italic; }
+.omb .omb-chart .grid { stroke: var(--cds-chart-grid); stroke-width: 1; }
+.omb .omb-chart .ref { stroke: var(--cds-chart-reference); stroke-width: 1; stroke-dasharray: 4 3; }
+.omb .omb-chart .s-queen { stroke: var(--omb-q); fill: var(--omb-q); }
+.omb .omb-chart .s-queen_kafka_api { stroke: var(--omb-a); fill: var(--omb-a); }
+.omb .omb-chart .s-kafka { stroke: var(--omb-k); fill: var(--omb-k); }
+.omb .omb-chart line.span { stroke-width: 6; stroke-linecap: round; }
+.omb .omb-chart line.span.s-queen_kafka_api { stroke-dasharray: 7 4; stroke-linecap: butt; }
+.omb .omb-chart line.p999 { stroke-width: 2; }
+.omb .omb-chart line.made { stroke: var(--color-fg); stroke-width: 2; }
+.omb .omb-chart rect.bar.s-queen_kafka_api { fill-opacity: .75; }
+.omb .omb-chart rect.hit { fill: transparent; cursor: default; }
+.omb .omb-chart g.row.dim { opacity: .35; }
+.omb .omb-fail { display: flex; align-items: center; justify-content: center; gap: var(--cds-gap-xs); min-height: 8rem; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.omb .omb-fail::before { content: ""; width: .375rem; height: .375rem; border-radius: 50%; background: var(--color-bad); }
+.omb .omb-tip { position: absolute; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); border-radius: var(--cds-radius); box-shadow: var(--cds-shadow-popover); padding: var(--cds-pad-xs) var(--cds-pad-sm); font-size: var(--cds-font-size-caption); line-height: 1.45; max-width: 18rem; z-index: 2; font-variant-numeric: tabular-nums; }
+.omb .omb-tip .t-head { color: var(--cds-text-secondary); }
+.omb .omb-tip .t-line { display: flex; gap: var(--cds-gap-sm); justify-content: space-between; }
+.omb .omb-tip .t-note { color: var(--cds-text-secondary); margin-top: var(--cds-gap-xs); }
+.omb .omb-table-wrap { overflow-x: auto; }
+.omb .omb-table { border-collapse: collapse; width: 100%; font-size: var(--cds-font-size-caption); font-variant-numeric: tabular-nums; }
+.omb .omb-table th { text-align: left; font-weight: var(--cds-font-weight-medium); color: var(--color-fg-muted); padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); white-space: nowrap; }
+.omb .omb-table td { padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); white-space: nowrap; }
+.omb .omb-table .num { text-align: right; }
+.omb [data-dash-source-state=empty] { color: transparent; }
+.omb [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+</style>
+
+<div class="omb">
+  <header class="omb-head">
+    <h1 class="omb-title" id="title">Queen on OpenMessaging Benchmark</h1>
+    <p class="omb-take" id="takeaway">On one topic, Queen's native driver carries 1M msg/s on 100 partitions and on 10,000, a topic Kafka 4.3 could not create through OMB. With enough producers Kafka carries 1M too, with lower latency on less CPU. Kafka is far ahead on a single partition; Queen drains a backlog faster and keeps up with 1,000 topics.</p>
+    <p class="omb-take" id="dedup"><b class="omb-strong">Queen's native numbers include deduplication; Kafka has no equivalent.</b> Every Queen message carries its own id, which the broker checks against a 60 s window and records on every push. Kafka's idempotent producer only drops a producer's own retries within one session, so Kafka does less work per message in every comparison on this page.</p>
+    <p class="omb-meta" id="method">Three brokers on GCP (c4-standard-24-lssd, local NVMe) and three benchmark clients, 2026-10-16 and 17. OpenMessaging Benchmark at 5b1fa70: a 1-minute warm-up, then a 3-minute test, a fresh cluster before every point, replication factor 3. Kafka 4.3.1 with acks=all and OMB's kafka-throughput.yaml (1 MB batches) unless a row says otherwise. Queen: builds of its next release; its Kafka API is the same broker, driven by OMB's own Kafka driver. Latency is OMB's end to end, from publish to consume. Queues behind Queen's Kafka API have no dedup window, as a Kafka record carries no id; there, as on Kafka, the producers' idempotence applies.</p>
+    <ul class="omb-legend" aria-label="Series">
+      <li><span class="omb-sw q"></span>Queen, native driver</li>
+      <li><span class="omb-sw a"></span>Queen, Kafka API</li>
+      <li><span class="omb-sw k"></span>Kafka 4.3.1</li>
+    </ul>
+  </header>
+
+  <section class="omb-section" id="fixed">
+    <h2 class="omb-h2">Fixed rate: one topic, 1 KB messages</h2>
+    <p class="omb-lede">Four producers and four consumers unless a row says otherwise. A bar runs from the median to the p99, the tick is the p99.9, on a linear scale. A row whose consumers did not keep up says what they got instead.</p>
+    <div class="omb-grid">
+      <div class="omb-card" id="card-p100">
+        <h3 class="omb-h3">100 partitions</h3>
+        <p class="omb-note">End-to-end latency p50 / p99 / p99.9 in ms, and the brokers' cores (the sum of three).</p>
+        <div class="omb-chart dash-skeleton" id="chart-p100" data-source="points"></div>
+      </div>
+      <div class="omb-card" id="card-p10000">
+        <h3 class="omb-h3">10,000 partitions</h3>
+        <p class="omb-note">Kafka 4.3 refused OMB's single request to create a topic of 10,000 partitions, so it has no latency here.</p>
+        <div class="omb-chart dash-skeleton" id="chart-p10000" data-source="points"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="omb-section" id="maxrate">
+    <h2 class="omb-h2">Max rate</h2>
+    <p class="omb-lede">Producers send as fast as they can. The bar is what the consumers took, the thin tick what the producers sent. A Queen partition is leased to one batch at a time, so on a single partition the pop size sets the pace: popBatch asks for that many messages a pop instead of the broker's autopilot.</p>
+    <div class="omb-grid small dash-skeleton" id="chart-max" data-source="points"></div>
+  </section>
+
+  <section class="omb-section" id="tentopics">
+    <h2 class="omb-h2">1M msg/s on 10 topics, 100 B messages</h2>
+    <div class="omb-card" id="card-10t">
+      <h3 class="omb-h3">End-to-end latency</h3>
+      <p class="omb-note">In ms. With one partition a topic, Queen's autopilot pops fall behind; popBatch 10,000 keeps up at the cost of large batches.</p>
+      <div class="omb-chart dash-skeleton" id="chart-10t" data-source="points"></div>
+    </div>
+  </section>
+
+  <section class="omb-section" id="backlog">
+    <h2 class="omb-h2">Backlog</h2>
+    <div class="omb-grid">
+      <div class="omb-card" id="card-backlog">
+        <h3 class="omb-h3">Time to drain 100 GB</h3>
+        <p class="omb-note">The consumers stop until 100 GB of 1 KB messages are waiting, then start again while the producers keep sending 100k msg/s. Kafka ran with retention off, as Queen keeps every message until it is consumed.</p>
+        <div class="omb-chart dash-skeleton" id="chart-backlog" data-source="backlog"></div>
+      </div>
+      <div class="omb-card" id="card-topics">
+        <h3 class="omb-h3">Many topics at 500k msg/s</h3>
+        <p class="omb-note">What the consumers took, with the target as the dashed line. One partition a topic, 1 KB messages, Queen with 16 shared logs.</p>
+        <div class="omb-chart dash-skeleton" id="chart-topics" data-source="points"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="omb-section" id="api">
+    <h2 class="omb-h2">Queen's Kafka API</h2>
+    <div class="omb-grid">
+      <div class="omb-card" id="card-api-fixes">
+        <h3 class="omb-h3">Before and after this week's fixes</h3>
+        <p class="omb-note">100 partitions, 1 KB, four producers. Builds: nr0 is the 2.4.0 code, nr4 the pipelined produce before the catalog fix, nr6 every fix.</p>
+        <div class="omb-table-wrap">
+          <table class="omb-table" id="table-api" data-source="points" data-row-key="tag">
+            <thead><tr><th data-field="target_msgs" class="num">Target msg/s</th><th data-field="build">Build</th><th data-field="cons_msgs" class="num">Consumed msg/s</th><th data-field="e2e_p50" class="num">e2e p50 ms</th><th data-field="e2e_p99" class="num">p99</th><th data-field="e2e_p999" class="num">p99.9</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="omb-card" id="card-failover">
+        <h3 class="omb-h3">Across a leader change</h3>
+        <p class="omb-note">Four idempotent producers at 200k msg/s through the Kafka API for 90 s, the raft leader stopped at 30 s and back at 50 s, then every partition read back and each producer's records checked.</p>
+        <div class="omb-table-wrap">
+          <table class="omb-table" id="table-failover" data-source="failover" data-row-key="how">
+            <thead><tr><th data-field="how">Leader stopped by</th><th data-field="acked" class="num">Acknowledged</th><th data-field="lost" class="num">Lost</th><th data-field="duplicated" class="num">Written twice</th><th data-field="reordered" class="num">Out of order</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="omb-note">The records written twice are one in-flight batch: the Kafka API keeps its idempotence windows in the leader's memory, and documents that a leader change can write up to five in-flight batches again.</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  const LABEL = { queen: "Queen", queen_kafka_api: "Queen, Kafka API", kafka: "Kafka" };
+  const n = (x) => (x === "" || x == null || isNaN(Number(x)) ? null : Number(x));
+  const comma = d3.format(",");
+  const ms = (v) => (v == null ? "" : v >= 100 ? comma(Math.round(v)) : d3.format(".3~r")(v));
+  const compact = (v) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: v >= 1e6 ? 2 : 0 }).format(v);
+  const rateName = (v) => compact(v) + " msg/s";
+
+  function parse(r) {
+    return Object.assign({}, r, {
+      partitions: n(r.partitions), topics: n(r.topics), producers: n(r.producers), target: n(r.target_msgs),
+      pub: n(r.pub_msgs), cons: n(r.cons_msgs), p50: n(r.e2e_p50), p99: n(r.e2e_p99), p999: n(r.e2e_p999),
+      pub50: n(r.pub_p50), pub99: n(r.pub_p99), cores: n(r.broker_cores), disk: n(r.disk_mb_s),
+      ok: r.carried === "yes",
+    });
+  }
+  function rowLabel(r) {
+    let s = LABEL[r.system];
+    if (r.config === "pop autopilot") return s + ", autopilot";
+    if (r.config && !/^4 producers$|^stock$/.test(r.config)) s += ", " + r.config.replace(/^4 producers, /, "");
+    return s;
+  }
+
+  // a tooltip that stays inside its chart's card
+  function tipFor(el) {
+    const card = el.closest(".omb-card") || el.parentElement;
+    let tip = card.querySelector(":scope > .omb-tip");
+    if (!tip) { tip = document.createElement("div"); tip.className = "omb-tip"; tip.hidden = true; card.appendChild(tip); }
+    return {
+      show(ev, lines) {
+        tip.replaceChildren();
+        lines.forEach(([k, v, cls]) => {
+          const d = document.createElement("div");
+          if (v === undefined) { d.className = cls || "t-head"; d.textContent = k; }
+          else { d.className = "t-line"; const a = document.createElement("span"); a.textContent = k; const b = document.createElement("span"); b.textContent = v; d.append(a, b); }
+          tip.appendChild(d);
+        });
+        tip.hidden = false;
+        const cr = card.getBoundingClientRect();
+        const tw = tip.offsetWidth, th = tip.offsetHeight;
+        let x = ev.clientX - cr.left + 14, y = ev.clientY - cr.top + 14;
+        if (x + tw > cr.width - 8) x = Math.max(8, ev.clientX - cr.left - tw - 14);
+        if (y + th > cr.height - 8) y = Math.max(8, ev.clientY - cr.top - th - 14);
+        tip.style.left = x + "px"; tip.style.top = y + "px";
+      },
+      hide() { tip.hidden = true; },
+    };
+  }
+  function pointTip(r) {
+    const lines = [[rowLabel(r) + (r.target ? " at " + rateName(r.target) : ""), undefined]];
+    if (r.pub != null) lines.push(["Produced", comma(r.pub) + " msg/s"], ["Consumed", comma(r.cons) + " msg/s"]);
+    if (r.p50 != null) lines.push(["e2e p50 / p99 / p99.9", ms(r.p50) + " / " + ms(r.p99) + " / " + ms(r.p999) + " ms"]);
+    if (r.pub50 != null) lines.push(["Publish p50 / p99", ms(r.pub50) + " / " + ms(r.pub99) + " ms"]);
+    if (r.cores != null) lines.push(["Broker cores", d3.format(".1f")(r.cores)]);
+    if (r.disk != null) lines.push(["Disk write a broker", comma(r.disk) + " MB/s"]);
+    if (r.note) lines.push([r.note, undefined, "t-note"]);
+    return lines;
+  }
+  function state(el, id) {
+    const d = dash.data(id);
+    el.replaceChildren();
+    el.classList.toggle("dash-skeleton", d.status === "loading");
+    if (d.status === "error" || d.status === "connect" || d.status === "declined" || d.status === "missing") {
+      const f = document.createElement("div"); f.className = "omb-fail"; f.textContent = "Failed to load"; el.appendChild(f);
+    }
+    return d.status === "ok" ? d.data : null;
+  }
+  function measure(svg, text, cls) {
+    const t = svg.append("text").attr("class", cls || "").attr("x", -9999).attr("y", -9999).text(text);
+    const w = t.node().getComputedTextLength(); t.remove(); return w;
+  }
+
+  // Rows grouped under headings: a bar from p50 to p99, a tick at p99.9; or a line saying what the consumers got.
+  function latencyChart(el, groups, missText) {
+    const W = Math.max(280, Math.floor(el.clientWidth));
+    const svg = d3.select(el).append("svg").attr("width", "100%");
+    const all = groups.flatMap((g) => g.rows);
+    const ok = all.filter((r) => r.ok && r.p999 != null);
+    const x = d3.scaleLinear([0, (d3.max(ok, (r) => r.p999) || 1) * 1.02], [6, W - 8]).nice();
+    const lineH = 17, barH = 16, rowGap = 8, grpH = 22, axisH = 18;
+    // decide each row's lines: label and values side by side when they fit
+    const plan = all.map((r) => {
+      const right = r.ok ? ms(r.p50) + " / " + ms(r.p99) + " / " + ms(r.p999) + " ms" + (r.cores != null ? " · " + d3.format(".1f")(r.cores) + " cores" : "") : "";
+      const wl = measure(svg, rowLabel(r), "lbl"), wr = right ? measure(svg, right) : 0;
+      return { r, right, two: wl + wr + 16 > W };
+    });
+    let H = axisH;
+    groups.forEach((g) => { H += grpH; g.rows.forEach((r) => { const p = plan.find((q) => q.r === r); H += lineH * (p.two ? 2 : 1) + barH + rowGap; }); });
+    svg.attr("viewBox", `0 0 ${W} ${H}`);
+    const ticks = x.ticks(W < 460 ? 4 : 7);
+    svg.append("g").selectAll("line").data(ticks).join("line").attr("class", "grid")
+      .attr("x1", (t) => x(t)).attr("x2", (t) => x(t)).attr("y1", axisH).attr("y2", H);
+    svg.append("g").selectAll("text").data(ticks).join("text")
+      .attr("x", (t) => x(t)).attr("y", 12).attr("text-anchor", (t, i) => (i === 0 ? "start" : i === ticks.length - 1 ? "end" : "middle"))
+      .text((t, i) => comma(t) + (i === ticks.length - 1 ? " ms" : ""));
+    const tip = tipFor(el);
+    let y = axisH;
+    groups.forEach((g) => {
+      svg.append("text").attr("class", "grp").attr("x", 0).attr("y", y + 15).text(g.name);
+      y += grpH;
+      g.rows.forEach((r) => {
+        const p = plan.find((q) => q.r === r);
+        const h = lineH * (p.two ? 2 : 1) + barH;
+        const row = svg.append("g").attr("class", "row").attr("transform", `translate(0,${y})`);
+        row.append("text").attr("class", "lbl").attr("x", 0).attr("y", 12).text(rowLabel(r));
+        if (p.right) row.append("text").attr("x", p.two ? 0 : W).attr("y", p.two ? 12 + lineH : 12).attr("text-anchor", p.two ? "start" : "end").text(p.right);
+        const by = lineH * (p.two ? 2 : 1) + barH / 2;
+        if (r.ok && r.p50 != null) {
+          row.append("line").attr("class", "span s-" + r.system).attr("x1", x(r.p50)).attr("x2", Math.max(x(r.p99), x(r.p50) + 1)).attr("y1", by).attr("y2", by);
+          row.append("line").attr("class", "p999 s-" + r.system).attr("x1", x(r.p999)).attr("x2", x(r.p999)).attr("y1", by - 7).attr("y2", by + 7);
+        } else {
+          row.append("text").attr("class", "miss").attr("x", 0).attr("y", by + 4).text(missText(r));
+        }
+        row.append("rect").attr("class", "hit").attr("x", 0).attr("y", 0).attr("width", W).attr("height", h + rowGap / 2)
+          .on("mousemove", (ev) => { svg.selectAll("g.row").classed("dim", true); row.classed("dim", false); tip.show(ev, pointTip(r)); })
+          .on("mouseleave", () => { svg.selectAll("g.row").classed("dim", false); tip.hide(); });
+        y += h + rowGap;
+      });
+    });
+  }
+  const notCarried = (r) => r.pub == null ? (r.family === "Fixed rate, 1 topic, 1 KB" ? "no result: the topic could not be created" : "no result: OMB's Kafka driver failed")
+    : "not carried: the consumers got " + compact(r.cons) + " of " + compact(r.target) + " msg/s";
+
+  // Horizontal bars of one measure: rows [{label, system, value, made?, missing?, tipLines}]
+  function barChart(el, rows, opts) {
+    const W = Math.max(240, Math.floor(el.clientWidth));
+    const svg = d3.select(el).append("svg").attr("width", "100%");
+    const lineH = 17, barH = 14, gap = 10, grpH = 22, top = opts.ref != null ? 16 : 4;
+    const max = d3.max(rows, (r) => Math.max(r.value || 0, r.made || 0, opts.ref || 0)) || 1;
+    const x = d3.scaleLinear([0, max * 1.04], [0, W - 4]);
+    const H = top + rows.length * (lineH + barH + gap) + rows.filter((r) => r.group).length * grpH;
+    svg.attr("viewBox", `0 0 ${W} ${H}`);
+    if (opts.ref != null) {
+      svg.append("line").attr("class", "ref").attr("x1", x(opts.ref)).attr("x2", x(opts.ref)).attr("y1", top - 4).attr("y2", H);
+      svg.append("text").attr("x", x(opts.ref)).attr("y", 10).attr("text-anchor", "end").text(opts.refLabel);
+    }
+    const tip = tipFor(el);
+    let y = top;
+    rows.forEach((r) => {
+      if (r.group) { svg.append("text").attr("class", "grp").attr("x", 0).attr("y", y + 15).text(r.group); y += grpH; }
+      const row = svg.append("g").attr("class", "row").attr("transform", `translate(0,${y})`);
+      y += lineH + barH + gap;
+      row.append("text").attr("class", "lbl").attr("x", 0).attr("y", 12).text(r.label);
+      if (r.value != null) {
+        row.append("text").attr("x", W).attr("y", 12).attr("text-anchor", "end").text(opts.fmt(r.value));
+        row.append("rect").attr("class", "bar s-" + r.system).attr("x", 0).attr("y", lineH).attr("width", Math.max(2, x(r.value))).attr("height", barH).attr("rx", 4);
+        if (r.made != null) row.append("line").attr("class", "made").attr("x1", x(r.made)).attr("x2", x(r.made)).attr("y1", lineH - 3).attr("y2", lineH + barH + 3);
+      } else {
+        row.append("text").attr("class", "miss").attr("x", 0).attr("y", lineH + 11).text(r.missing);
+      }
+      row.append("rect").attr("class", "hit").attr("x", 0).attr("y", 0).attr("width", W).attr("height", lineH + barH + gap / 2)
+        .on("mousemove", (ev) => { svg.selectAll("g.row").classed("dim", true); row.classed("dim", false); tip.show(ev, r.tipLines); })
+        .on("mouseleave", () => { svg.selectAll("g.row").classed("dim", false); tip.hide(); });
+    });
+  }
+
+  function fillTable(table, rows, cells) {
+    const tb = table.querySelector("tbody");
+    tb.replaceChildren();
+    rows.forEach((r) => {
+      const tr = document.createElement("tr");
+      tr.dataset.key = r.key;
+      cells(r).forEach(([v, num]) => { const td = document.createElement("td"); td.textContent = v; if (num) td.className = "num"; tr.appendChild(td); });
+      tb.appendChild(tr);
+    });
+  }
+
+  const ORDER = { queen: 0, queen_kafka_api: 1, kafka: 2 };
+  const byOrder = (a, b) => ORDER[a.system] - ORDER[b.system] || (a.producers - b.producers) || a.tag.localeCompare(b.tag);
+
+  dash.onData(() => {
+    // fixed rate, 100 and 10,000 partitions
+    ["100 partitions", "10,000 partitions"].forEach((wl, k) => {
+      const el = document.getElementById(k === 0 ? "chart-p100" : "chart-p10000");
+      const data = state(el, "points");
+      if (!data) return;
+      const rows = data.map(parse).filter((r) => r.family === "Fixed rate, 1 topic, 1 KB" && r.workload === wl && r.config !== "before the fixes");
+      const groups = d3.groups(rows, (r) => r.target).sort((a, b) => a[0] - b[0]).map(([t, rs]) => ({ name: rateName(t), rows: rs.sort(byOrder) }));
+      latencyChart(el, groups, notCarried);
+    });
+
+    // max rate: one small panel a workload
+    {
+      const el = document.getElementById("chart-max");
+      const data = state(el, "points");
+      if (data) {
+        const rows = data.map(parse).filter((r) => r.family === "Max rate");
+        const order = ["1 partition, 100 B", "1 partition, 1 KB", "1 partition, 64 KB", "100 partitions, 100 B", "100 partitions, 1 KB", "100 partitions, 64 KB", "10 topics × 1 partition, 1 KB"];
+        const cfg = { "pop autopilot": 0, "popBatch 1,000": 1, "popBatch 10,000": 2, stock: 3 };
+        order.forEach((wl) => {
+          const rs = rows.filter((r) => r.workload === wl).sort((a, b) => cfg[a.config] - cfg[b.config]);
+          if (!rs.length) return;
+          const card = document.createElement("div"); card.className = "omb-card";
+          const h = document.createElement("h3"); h.className = "omb-h3"; h.textContent = wl;
+          const ch = document.createElement("div"); ch.className = "omb-chart";
+          card.append(h, ch); el.appendChild(card);
+          barChart(ch, rs.map((r) => ({
+            label: r.system === "kafka" ? "Kafka" : r.config === "pop autopilot" ? "Queen, autopilot" : "Queen, " + r.config,
+            system: r.system, value: r.cons, made: r.pub, tipLines: pointTip(r),
+          })), { fmt: (v) => compact(v) + " msg/s" });
+        });
+      }
+    }
+
+    // 10 topics at 1M msg/s
+    {
+      const el = document.getElementById("chart-10t");
+      const data = state(el, "points");
+      if (data) {
+        const rows = data.map(parse).filter((r) => r.family === "1M msg/s on 10 topics, 100 B");
+        const groups = d3.groups(rows, (r) => r.workload).map(([w, rs]) => ({ name: w.replace(/^1 partition a topic$/, "One partition a topic").replace(/^16 partitions a topic$/, "16 partitions a topic"), rows: rs.sort(byOrder) }));
+        latencyChart(el, groups, notCarried);
+      }
+    }
+
+    // backlog drain
+    {
+      const el = document.getElementById("chart-backlog");
+      const data = state(el, "backlog");
+      if (data) {
+        const rows = data.map((r) => ({
+          label: (r.system === "kafka" ? "Kafka" : "Queen") + ", " + (Number(r.partitions) === 1 ? "1 partition" : r.partitions + " partitions"),
+          system: r.system, value: n(r.drain_s), missing: r.note,
+          tipLines: [[(r.system === "kafka" ? "Kafka" : "Queen") + ", " + r.partitions + " partitions", undefined]].concat(
+            n(r.drain_s) != null ? [["Built in", comma(Math.round(n(r.build_s))) + " s"], ["Drained in", d3.format(".1f")(n(r.drain_s)) + " s"], ["Messages waiting at most", comma(n(r.backlog_messages))]] : [],
+            r.note ? [[r.note, undefined, "t-note"]] : []),
+        })).sort((a, b) => (a.value == null) - (b.value == null) || a.value - b.value);
+        barChart(el, rows, { fmt: (v) => d3.format(".1f")(v) + " s" });
+      }
+    }
+
+    // many topics
+    {
+      const el = document.getElementById("chart-topics");
+      const data = state(el, "points");
+      if (data) {
+        const rows = data.map(parse).filter((r) => r.family === "Many topics, 500k msg/s, 1 KB").sort((a, b) => a.topics - b.topics || ORDER[a.system] - ORDER[b.system] || a.config.localeCompare(b.config));
+        barChart(el, rows.map((r, i) => ({
+          group: i === 0 || rows[i - 1].topics !== r.topics ? r.workload : null,
+          label: r.system === "kafka" ? "Kafka" : r.config === "pop autopilot" ? "Queen, autopilot" : "Queen, " + r.config,
+          system: r.system, value: r.cons, missing: r.note || "no result", tipLines: pointTip(r),
+        })), { fmt: (v) => compact(v) + " msg/s", ref: 500000, refLabel: "target" });
+      }
+    }
+
+    // the Kafka API before and after
+    {
+      const t = document.getElementById("table-api");
+      const d = dash.data("points");
+      if (d.status === "ok") {
+        const rows = d.data.map(parse).filter((r) => r.system === "queen_kafka_api").sort((a, b) => a.target - b.target || (a.config === "before the fixes" ? -1 : 1));
+        fillTable(t, rows.map((r) => Object.assign(r, { key: r.tag })), (r) => [
+          [comma(r.target), true], [r.build],
+          [comma(r.cons), true], [ms(r.p50), true], [ms(r.p99), true], [ms(r.p999), true],
+        ]);
+      } else t.querySelector("tbody").replaceChildren();
+    }
+    {
+      const t = document.getElementById("table-failover");
+      const d = dash.data("failover");
+      if (d.status === "ok") {
+        fillTable(t, d.data.map((r) => Object.assign({}, r, { key: r.how })), (r) => [
+          [r.how], [comma(n(r.acked)), true], [comma(n(r.lost)), true], [comma(n(r.duplicated)), true], [comma(n(r.reordered)), true],
+        ]);
+      } else t.querySelector("tbody").replaceChildren();
+    }
+  });
+})();
+</script>

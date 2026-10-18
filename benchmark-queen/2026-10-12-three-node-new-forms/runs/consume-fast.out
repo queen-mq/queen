@@ -1,0 +1,31 @@
+[18:35:25] start cf-p1000-r3000000 EXTRA_ENV='QUEEN_CONSUME_FAST=1' (profile n1+n2, seconds 61-67)
+[18:35:25] run cf-p1000-r3000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= QUEEN_CONSUME_FAST=1 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[18:35:47] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[18:37:56] 3,000,000: last 30 s: offered 2,999,876 pushed 3,000,222 consumed 3,000,052 | run: shed 0 errors 0 | push p50 7.0 p99 20.5 | e2e p50 8.3 p99 22.8 worst 23.8 | cores 11.2 / 5.5 / 5.6 | mem GB 9.9 / 9.4 / 9.4 | loaders 18.8c  OK 
+POINT_DONE cf
+[18:38:00] start cs-p1000-r3000000 EXTRA_ENV='' (profile n1+n2, seconds 61-67)
+[18:38:00] run cs-p1000-r3000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[18:38:26] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[18:40:35] 3,000,000: last 30 s: offered 2,999,939 pushed 3,000,175 consumed 3,001,049 | run: shed 0 errors 0 | push p50 8.3 p99 24.3 | e2e p50 19.2 p99 45.6 worst 48.6 | cores 11.3 / 5.5 / 5.5 | mem GB 10.1 / 9.4 / 9.4 | loaders 19.0c  OK 
+POINT_DONE cs
+CF_DONE
+[18:43:13] start cs2-p1000-r3000000 (stock, flat CPU profile n1+n2, seconds 61-67)
+[18:43:13] run cs2-p1000-r3000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[18:43:35] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[18:45:43] 3,000,000: last 30 s: offered 2,999,900 pushed 2,999,764 consumed 2,999,744 | run: shed 0 errors 0 | push p50 8.3 p99 21.2 | e2e p50 19.2 p99 40.4 worst 41.5 | cores 11.2 / 5.5 / 5.5 | mem GB 10.1 / 9.3 / 9.4 | loaders 19.0c  OK 
+POINT_DONE cs2
+[18:57:07] start cf-p1000-r5000000 (QUEEN_CONSUME_FAST=1, flat profile n1+n2, seconds 61-67)
+[18:57:07] run cf-p1000-r5000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 5000000 | EXTRA= QUEEN_CONSUME_FAST=1 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[18:57:27] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[18:59:35] 5,000,000: last 30 s: offered 5,000,015 pushed 3,996,573 consumed 3,995,064 | run: shed 60,176,400 errors 0 | push p50 1261.6 p99 1376.3 | e2e p50 1261.6 p99 1376.3 worst 1392.6 | cores 16.2 / 8.7 / 9.2 | mem GB 14.2 / 17.3 / 17.4 | loaders 26.4c  NOT CARRIED 
+POINT_DONE cf5
+[19:15:21] start cfp16-p1000-r5000000 (QUEEN_CONSUME_FAST=1 + QUEEN_RAFT_PIPELINE=16, flat profile n1+n2, seconds 61-67)
+[19:15:21] run cfp16-p1000-r5000000: binary 230, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 5000000 | EXTRA= QUEEN_CONSUME_FAST=1 QUEEN_RAFT_PIPELINE=16 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[19:15:44] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[19:17:51] 5,000,000: last 30 s: offered 5,000,026 pushed 4,038,369 consumed 4,039,412 | run: shed 57,431,600 errors 0 | push p50 1212.4 p99 1376.3 | e2e p50 1212.4 p99 1376.3 worst 1392.6 | cores 16.6 / 8.7 / 8.6 | mem GB 14.7 / 17.6 / 17.6 | loaders 27.1c  NOT CARRIED 
+POINT_DONE cfp16

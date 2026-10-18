@@ -661,6 +661,16 @@ pub mod testing {
     /// A cluster state whose view is `nodes` and whose own id is `me`, fresh as
     /// of now. What a facade looks like one heartbeat after boot.
     pub fn state(nodes: &[(i32, &str, u16)], me: i32) -> Arc<ClusterState> {
+        state_with(nodes, me, false)
+    }
+
+    /// [`state`] inside a raft broker: every node runs on the raft node of its
+    /// own id.
+    pub fn state_on_raft(nodes: &[(i32, &str, u16)], me: i32) -> Arc<ClusterState> {
+        state_with(nodes, me, true)
+    }
+
+    fn state_with(nodes: &[(i32, &str, u16)], me: i32, raft: bool) -> Arc<ClusterState> {
         let nodes: Vec<Node> = nodes
             .iter()
             .map(|(id, host, port)| Node {
@@ -668,7 +678,7 @@ pub mod testing {
                 host: (*host).to_string(),
                 port: *port,
                 incarnation: format!("incarnation-{id}"),
-                raft_node: None,
+                raft_node: raft.then_some(*id as u64),
             })
             .collect();
         let mine = nodes

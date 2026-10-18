@@ -46,6 +46,10 @@ sidebar:
 # as runs at cluster version 7; facade/real.rs keeps the framed forms on for the queues that do not
 # encrypt (c42ea1992) and tells the store whether the queue logs hold the txns hashes. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 Give every entity its own partition, keep its state in one KV entry, and commit each transition as

@@ -1,0 +1,15 @@
+08:18:31 rss_mb 30 threads 56 fds 38 cpu_ticks 5 data_mb 1
+08:18:36 rss_mb 355 threads 60 fds 48 cpu_ticks 539 data_mb 171
+08:18:41 rss_mb 492 threads 61 fds 50 cpu_ticks 1628 data_mb 447
+08:18:46 rss_mb 583 threads 61 fds 55 cpu_ticks 2542 data_mb 645
+08:18:51 rss_mb 663 threads 62 fds 55 cpu_ticks 3361 data_mb 797
+08:18:56 rss_mb 728 threads 62 fds 57 cpu_ticks 4136 data_mb 931
+08:19:01 rss_mb 785 threads 62 fds 59 cpu_ticks 4881 data_mb 1051
+08:19:06 rss_mb 831 threads 62 fds 61 cpu_ticks 5596 data_mb 1156
+08:19:11 rss_mb 879 threads 62 fds 63 cpu_ticks 6304 data_mb 1260
+08:19:16 rss_mb 923 threads 62 fds 65 cpu_ticks 6989 data_mb 1351
+08:19:21 rss_mb 970 threads 62 fds 65 cpu_ticks 7670 data_mb 1442
+08:19:26 rss_mb 1009 threads 62 fds 67 cpu_ticks 8334 data_mb 1524
+08:19:32 rss_mb 1046 threads 62 fds 68 cpu_ticks 8993 data_mb 1603
+08:19:37 rss_mb 1078 threads 62 fds 67 cpu_ticks 9651 data_mb 1682
+08:19:42 rss_mb 1008 threads 62 fds 62 cpu_ticks 9699 data_mb 1688

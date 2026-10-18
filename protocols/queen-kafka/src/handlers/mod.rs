@@ -99,6 +99,26 @@ pub mod testing {
         (facade, api)
     }
 
+    /// [`clustered`] inside a raft broker: node `id` runs on raft node `id`.
+    pub fn clustered_on_raft(
+        queues: &[(&str, i64)],
+        nodes: &[(i32, &str, u16)],
+        me: i32,
+    ) -> (Facade, Arc<FakeQueen>) {
+        let api = FakeQueen::with(queues);
+        let state = cluster::testing::state_on_raft(nodes, me);
+        let (host, port) = (state.me.host.clone(), state.me.port);
+        let facade = build(
+            Arc::clone(&api) as Arc<dyn QueenApi>,
+            Policy::default(),
+            Cluster::Enabled(state),
+            host,
+            port,
+            Arc::new(Txns::default()),
+        );
+        (facade, api)
+    }
+
     /// The full constructor, for the tests that care about the listener policy
     /// or about the lanes — everything else takes the helpers above.
     pub fn over(api: Arc<dyn QueenApi>, policy: Policy) -> Facade {

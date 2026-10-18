@@ -1,0 +1,76 @@
+08:35:13.307 [main] INFO Benchmark - Starting benchmark with config: {
+  "drivers" : [ "/private/tmp/claude-502/-Users-alice-Work-queen/9a561819-3d85-429b-8a6b-c43fdbb02338/scratchpad/run6/queen-smoke.yaml" ],
+  "workers" : null,
+  "workersFile" : null,
+  "workloads" : [ "/private/tmp/claude-502/-Users-alice-Work-queen/9a561819-3d85-429b-8a6b-c43fdbb02338/scratchpad/run6/smoke-workload.yaml" ],
+  "output" : null
+}
+08:35:13.321 [main] INFO Benchmark - Workloads: {
+  "smoke-workload" : {
+    "name" : "smoke 1 topic 10 partitions 10k msg/s",
+    "topics" : 1,
+    "partitionsPerTopic" : 10,
+    "keyDistributor" : "NO_KEY",
+    "messageSize" : 1024,
+    "messageSizeDistribution" : null,
+    "useRandomizedPayloads" : false,
+    "randomBytesRatio" : 0.0,
+    "randomizedPayloadPoolSize" : 0,
+    "payloadFile" : "payload/payload-1Kb.data",
+    "subscriptionsPerTopic" : 1,
+    "producersPerTopic" : 1,
+    "consumerPerSubscription" : 1,
+    "producerRate" : 10000,
+    "consumerBacklogSizeGB" : 0,
+    "backlogDrainRatio" : 1.0,
+    "testDurationMinutes" : 1,
+    "warmupDurationMinutes" : 1
+  }
+}
+08:35:13.335 [main] INFO Benchmark - --------------- WORKLOAD : smoke 1 topic 10 partitions 10k msg/s --- DRIVER : Queen---------------
+08:35:14.066 [main] INFO LocalWorker - Driver: {
+  "name" : "Queen",
+  "driverClass" : "io.openmessaging.benchmark.driver.queen.QueenBenchmarkDriver"
+}
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by io.netty.util.internal.PlatformDependent0$3 (file:/private/tmp/claude-502/-Users-alice-Work-queen/9a561819-3d85-429b-8a6b-c43fdbb02338/scratchpad/run6/openmessaging-benchmark-0.0.1-SNAPSHOT/lib/io.netty-netty-all-4.1.65.Final.jar)
+WARNING: Please consider reporting this to the maintainers of class io.netty.util.internal.PlatformDependent0$3
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+08:35:14.273 [main] INFO QueenBenchmarkDriver - Queen http://127.0.0.1:47632 /health: HTTP 200 {"status":"healthy","engine":"raft","version":"2.4.0","raft":{"role":"leader","leader":true,"term":2,"applied":5,"commit":5,"lag":0,"quorumAckMs":96,"storageReady":true,"clusterVersion":7,"kinds":7,"apply":{"failure":null,"skipped":[]}}}
+08:35:14.280 [main] INFO QueenBenchmarkDriver - Queen http://127.0.0.1:48632 /health: HTTP 200 {"status":"healthy","engine":"raft","version":"2.4.0","raft":{"role":"follower","leader":true,"term":2,"applied":5,"commit":5,"lag":0,"quorumAckMs":106,"storageReady":true,"clusterVersion":7,"kinds":7,"apply":{"failure":null,"skipped":[]}}}
+08:35:14.284 [main] INFO QueenBenchmarkDriver - Queen http://127.0.0.1:49632 /health: HTTP 200 {"status":"healthy","engine":"raft","version":"2.4.0","raft":{"role":"follower","leader":true,"term":2,"applied":5,"commit":5,"lag":0,"quorumAckMs":110,"storageReady":true,"clusterVersion":7,"kinds":7,"apply":{"failure":null,"skipped":[]}}}
+08:35:14.284 [main] INFO QueenBenchmarkDriver - Queen driver: brokers [http://127.0.0.1:47632, http://127.0.0.1:48632, http://127.0.0.1:49632]; push: lanes auto, linger 1 ms, batch 1048576 B, 5 in flight per lane, compression none; consume: 8 pops per consumer, 4096 pops on this worker, pop timeout 1000 ms (200 ms when rotating), 16 acks in flight per group, lease of the queue s, extended while a batch is not acked; queue dedup window 60 s
+08:35:14.329 [queen-http-4-1] INFO QueenBenchmarkDriver - Queen queue omb-yumoa6-0000000-Dc8WJUc configured (10 partitions): {"configured":true,"namespace":"","options":{"completedRetentionSeconds":0,"deadLetterQueue":true,"dedupWindowSeconds":60,"delayedProcessing":0,"dlqAfterMaxRetries":true,"encryptionEnabled":false,"leaseTime":300,"maxQueueSize":0,"maxSize":0,"maxWaitTimeSeconds":0,"minPopWaitTime":0,"priority":0,"ret...
+08:35:14.350 [queen-http-4-1] INFO QueenBenchmarkDriver - Queen: 1 queues configured in 60 ms; partition count 10 in KV omb/omb-yumoa6
+08:35:14.350 [main] INFO LocalWorker - Created 1 topics in 64.682209 ms
+08:35:14.350 [main] INFO WorkloadGenerator - Created 1 topics in 64.857625 ms
+08:35:14.357 [main] INFO QueenBenchmarkDriver - Queen: 1 consumers on 1 topics in 5 ms; pop pool {subscriptions=1, totalWant=8, maxPops=4096, share=4096, rotating=false, autopilot=none seen, peakPopsInFlight=8, doorbells=0, subscriptionsInDoorbells=0, consumerGroups=1}
+08:35:14.358 [main] INFO LocalWorker - Created 1 consumers in 6.783708 ms
+08:35:14.358 [main] INFO WorkloadGenerator - Created 1 consumers in 6.869417 ms
+08:35:14.362 [main] INFO QueenBenchmarkDriver - Queen: 1 producers on 1 topics, 1 lanes, in 2 ms
+08:35:14.362 [main] INFO LocalWorker - Created 1 producers in 4.23875 ms
+08:35:14.362 [main] INFO WorkloadGenerator - Created 1 producers in 4.646625 ms
+08:35:14.363 [main] INFO WorkloadGenerator - Waiting for consumers to be ready
+08:35:14.367 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 0, Received: 0
+08:35:16.377 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 1, Received: 1
+08:35:16.378 [main] INFO WorkloadGenerator - All consumers are ready
+08:35:16.401 [main] INFO WorkloadGenerator - ----- Starting warm-up traffic (1m) ------
+08:35:26.505 [main] INFO WorkloadGenerator - Pub rate  9912.8 msg/s /  9.7 MB/s | Pub err     0.0 err/s | Cons rate  9907.3 msg/s /  9.7 MB/s | Backlog:  0.1 K | Pub Latency (ms) avg:  6.9 - 50%:  4.1 - 99%: 54.0 - 99.9%: 107.8 - Max: 117.7 | Pub Delay Latency (us) avg: 45.2 - 50%: 36.0 - 99%: 93.0 - 99.9%: 2840.0 - Max: 8708.0
+08:35:36.646 [main] INFO WorkloadGenerator - Pub rate  9952.0 msg/s /  9.7 MB/s | Pub err     0.0 err/s | Cons rate  9952.3 msg/s /  9.7 MB/s | Backlog:  0.1 K | Pub Latency (ms) avg:  4.6 - 50%:  3.8 - 99%: 16.1 - 99.9%: 23.1 - Max: 26.7 | Pub Delay Latency (us) avg: 37.5 - 50%: 36.0 - 99%: 78.0 - 99.9%: 112.0 - Max: 551.0
+08:35:46.784 [main] INFO WorkloadGenerator - Pub rate 10007.6 msg/s /  9.8 MB/s | Pub err     0.0 err/s | Cons rate 10010.2 msg/s /  9.8 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  4.2 - 50%:  3.7 - 99%: 13.6 - 99.9%: 25.8 - Max: 32.4 | Pub Delay Latency (us) avg: 37.0 - 50%: 36.0 - 99%: 73.0 - 99.9%: 104.0 - Max: 204.0
+08:35:56.913 [main] INFO WorkloadGenerator - Pub rate 10007.0 msg/s /  9.8 MB/s | Pub err     0.0 err/s | Cons rate 10005.8 msg/s /  9.8 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  9.6 - 50%:  4.1 - 99%: 124.0 - 99.9%: 213.4 - Max: 219.0 | Pub Delay Latency (us) avg: 335.4 - 50%: 36.0 - 99%: 89.0 - 99.9%: 67505.0 - Max: 77519.0
+08:36:07.000 [main] INFO WorkloadGenerator - Pub rate 10032.4 msg/s /  9.8 MB/s | Pub err     0.0 err/s | Cons rate 10034.7 msg/s /  9.8 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  6.7 - 50%:  3.6 - 99%: 118.1 - 99.9%: 205.2 - Max: 211.8 | Pub Delay Latency (us) avg: 37.0 - 50%: 36.0 - 99%: 68.0 - 99.9%: 98.0 - Max: 290.0
+08:36:17.130 [main] INFO WorkloadGenerator - Pub rate  9973.7 msg/s /  9.7 MB/s | Pub err     0.0 err/s | Cons rate  9972.3 msg/s /  9.7 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg: 38.0 - 50%:  4.7 - 99%: 659.2 - 99.9%: 734.4 - Max: 743.4 | Pub Delay Latency (us) avg: 160.5 - 50%: 36.0 - 99%: 77.0 - 99.9%: 39924.0 - Max: 49990.0
+08:36:17.288 [main] INFO WorkloadGenerator - ----- Aggregated Pub Latency (ms) avg: 11.6 - 50%:  3.9 - 95%: 23.1 - 99%: 201.6 - 99.9%: 699.4 - 99.99%: 737.4 - Max: 743.4 | Pub Delay (us)  avg: 108.7 - 50%: 36.0 - 95%: 54.0 - 99%: 79.0 - 99.9%: 33618.0 - 99.99%: 71592.0 - Max: 77519.0
+08:36:17.649 [main] INFO WorkloadGenerator - ----- Starting benchmark traffic (1m)------
+08:36:27.768 [main] INFO WorkloadGenerator - Pub rate 10516.6 msg/s / 10.3 MB/s | Pub err     0.0 err/s | Cons rate 10516.4 msg/s / 10.3 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg: 10.4 - 50%:  4.4 - 99%: 81.5 - 99.9%: 133.0 - Max: 140.4 | Pub Delay Latency (us) avg: 37.0 - 50%: 36.0 - 99%: 72.0 - 99.9%: 108.0 - Max: 888.0
+08:36:31.599 [queen-deliver-7] WARN QueenBenchmarkDriver - pop omb-yumoa6-0000000-Dc8WJUc: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+08:36:37.902 [main] INFO WorkloadGenerator - Pub rate  9985.0 msg/s /  9.8 MB/s | Pub err     0.0 err/s | Cons rate  7758.7 msg/s /  7.6 MB/s | Backlog: 22.6 K | Pub Latency (ms) avg: 106.2 - 50%:  4.0 - 99%: 1233.9 - 99.9%: 1321.9 - Max: 1327.6 | Pub Delay Latency (us) avg: 36.7 - 50%: 35.0 - 99%: 69.0 - 99.9%: 105.0 - Max: 1021.0
+08:36:48.025 [main] INFO WorkloadGenerator - Pub rate 10019.2 msg/s /  9.8 MB/s | Pub err     0.0 err/s | Cons rate  7083.7 msg/s /  6.9 MB/s | Backlog: 52.3 K | Pub Latency (ms) avg:  8.6 - 50%:  4.0 - 99%: 101.6 - 99.9%: 165.3 - Max: 170.0 | Pub Delay Latency (us) avg: 37.1 - 50%: 35.0 - 99%: 68.0 - 99.9%: 109.0 - Max: 2279.0
+08:36:58.129 [main] INFO WorkloadGenerator - Pub rate 10014.6 msg/s /  9.8 MB/s | Pub err     0.0 err/s | Cons rate  6972.6 msg/s /  6.8 MB/s | Backlog: 83.0 K | Pub Latency (ms) avg: 18.2 - 50%:  3.8 - 99%: 266.8 - 99.9%: 335.1 - Max: 345.1 | Pub Delay Latency (us) avg: 43.6 - 50%: 36.0 - 99%: 68.0 - 99.9%: 2369.0 - Max: 11096.0
+08:37:08.303 [main] INFO WorkloadGenerator - Pub rate  9932.5 msg/s /  9.7 MB/s | Pub err     0.0 err/s | Cons rate  6843.1 msg/s /  6.7 MB/s | Backlog: 114.5 K | Pub Latency (ms) avg:  6.2 - 50%:  3.4 - 99%: 57.9 - 99.9%: 110.9 - Max: 120.9 | Pub Delay Latency (us) avg: 36.6 - 50%: 36.0 - 99%: 67.0 - 99.9%: 98.0 - Max: 173.0
+08:37:18.434 [main] INFO WorkloadGenerator - Pub rate 10036.1 msg/s /  9.8 MB/s | Pub err     0.0 err/s | Cons rate  7089.2 msg/s /  6.9 MB/s | Backlog: 144.3 K | Pub Latency (ms) avg:  7.6 - 50%:  3.8 - 99%: 79.6 - 99.9%: 128.0 - Max: 133.6 | Pub Delay Latency (us) avg: 36.9 - 50%: 36.0 - 99%: 69.0 - 99.9%: 102.0 - Max: 2190.0
+08:37:18.578 [main] INFO WorkloadGenerator - ----- Aggregated Pub Latency (ms) avg: 26.1 - 50%:  3.8 - 95%: 62.9 - 99%: 739.8 - 99.9%: 1274.1 - 99.99%: 1323.5 - Max: 1327.6 | Pub Delay (us)  avg: 38.0 - 50%: 36.0 - 95%: 51.0 - 99%: 69.0 - 99.9%: 108.0 - 99.99%: 5108.0 - Max: 11096.0
+08:37:20.028 [main] INFO QueenBenchmarkDriver - Queen driver closed: pushes 76830 (failed 0, 1.0 groups each), messages pushed 1221865 (failed 0), 0 failed at once on a full buffer; pops 67324 (empty 32, errors 8, JSON answers 0, after close 0), messages delivered 1076857; acks 67284 (failed 0), messages acked 1076857 (refused 0); lease extensions 0 (failed 0); doorbell fetches 0 (found data 0, failed 0); pop pool {subscriptions=0, totalWant=0, maxPops=4096, share=4096, rotating=false, autopilot=partitions 1, batch 1000, peakPopsInFlight=8, doorbells=0, subscriptionsInDoorbells=0, consumerGroups=1}
+08:37:20.033 [main] INFO QueenBenchmarkDriver - Queen verify: 1 subscriptions, 10 partitions, 1076857 distinct messages, 0 delivered again, 0 holes between the first and the last offset delivered; 0 subscriptions with duplicates or holes
+08:37:20.039 [main] INFO Benchmark - Writing test result into smoke-workload-Queen-2026-10-18-08-37-20.json

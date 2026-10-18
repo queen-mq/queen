@@ -1,0 +1,12 @@
+name: backlog 1 topic 16 partitions 1kb, 3 GB (scaled from backlog-1-topic-16-partitions-1kb)
+topics: 1
+partitionsPerTopic: 16
+messageSize: 1024
+payloadFile: "payload/payload-1Kb.data"
+subscriptionsPerTopic: 1
+consumerPerSubscription: 1
+producersPerTopic: 1
+producerRate: 50000
+consumerBacklogSizeGB: 3
+warmupDurationMinutes: 0
+testDurationMinutes: 1

@@ -81,6 +81,12 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-13 (2.3.0, PHP client 2.5.0): phase2/reads.rs gives POST
 # /api/v1/fetch a ceiling for the whole call; the reads this page describes are answered as before.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-16 (windowBuffer cap): consume/pop.rs ends a windowBuffer hold one
+# window after the oldest message waiting for the group instead of one window after the newest
+# write. This page does not describe windowBuffer, and nothing it states changes.
+# sourceOfTruth re-read 2026-10-17 (a parked fetch answers when its topic is written): reads.rs's
+# fetch_wait also watches the topics it reads (QUEEN_FETCH_TOPIC_WAKE_MS), and answers early only a
+# fetch that has read nothing. Nothing this page states changes.
 ---
 
 Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both

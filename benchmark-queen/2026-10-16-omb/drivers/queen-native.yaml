@@ -1,0 +1,19 @@
+# Queen MQ 2.4 over its native HTTP protocol (omb/driver-queen): binary push (QPB1), framed pop (QPF1),
+# pop autopilot. Dedup on (60 s window, as in the 10-11 three-node matrix). No compression, like the
+# stock Kafka driver. 8 pollers per consumer for the 1-2M msg/s points (a pop holds at most ~1000
+# messages of one partition).
+name: Queen (native)
+driverClass: io.openmessaging.benchmark.driver.queen.QueenBenchmarkDriver
+urls:
+  - http://10.250.0.43:6632
+  - http://10.250.0.39:6632
+  - http://10.250.0.40:6632
+dedupWindowSeconds: 60
+lingerMs: 1
+batchMaxBytes: 1048576
+maxInFlight: 5
+bufferMaxBytes: 67108864
+compression: none
+pollers: 8
+popTimeoutMs: 1000
+ackMaxInFlight: 16

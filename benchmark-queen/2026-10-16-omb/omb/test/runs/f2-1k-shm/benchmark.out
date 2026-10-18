@@ -1,0 +1,54 @@
+07:43:06.215 [main] INFO Benchmark - Starting benchmark with config: {
+  "drivers" : [ "test/f2-1k-shm-driver.yaml" ],
+  "workers" : [ "http://10.250.0.38:8080", "http://10.250.0.38:8082" ],
+  "workersFile" : null,
+  "workloads" : [ "test/f2-1k-shm-workload.yaml" ],
+  "output" : "/root/bench/runs/f2-1k-shm/result.json"
+}
+07:43:06.234 [main] INFO Benchmark - Workloads: {
+  "f2-1k-shm-workload" : {
+    "name" : "f2 1000 topics 1kb 4p 4c (scaled from 1000-topic-1kb-4p-4c-*)",
+    "topics" : 1000,
+    "partitionsPerTopic" : 1,
+    "keyDistributor" : "NO_KEY",
+    "messageSize" : 1024,
+    "messageSizeDistribution" : null,
+    "useRandomizedPayloads" : true,
+    "randomBytesRatio" : 0.5,
+    "randomizedPayloadPoolSize" : 1000,
+    "payloadFile" : null,
+    "subscriptionsPerTopic" : 1,
+    "producersPerTopic" : 4,
+    "consumerPerSubscription" : 4,
+    "producerRate" : 20000,
+    "consumerBacklogSizeGB" : 0,
+    "backlogDrainRatio" : 1.0,
+    "testDurationMinutes" : 2,
+    "warmupDurationMinutes" : 0
+  }
+}
+07:43:06.374 [main] INFO DistributedWorkersEnsemble - Workers list - producers: [http://10.250.0.38:8080]
+07:43:06.374 [main] INFO DistributedWorkersEnsemble - Workers list - consumers: http://10.250.0.38:8082
+07:43:06.376 [main] INFO Benchmark - --------------- WORKLOAD : f2 1000 topics 1kb 4p 4c (scaled from 1000-topic-1kb-4p-4c-*) --- DRIVER : Queen---------------
+07:43:06.635 [main] INFO WorkloadGenerator - Created 1000 topics in 55.407752 ms
+07:43:06.725 [main] INFO WorkloadGenerator - Created 4000 consumers in 70.599251 ms
+07:43:06.747 [main] INFO WorkloadGenerator - Created 4000 producers in 20.205648 ms
+07:43:06.747 [main] INFO WorkloadGenerator - Waiting for consumers to be ready
+07:43:06.772 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 1148, Received: 74
+07:43:08.775 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 4000, Received: 4000
+07:43:08.775 [main] INFO WorkloadGenerator - All consumers are ready
+07:43:08.856 [main] INFO WorkloadGenerator - ----- Starting benchmark traffic (2m)------
+07:43:19.049 [main] INFO WorkloadGenerator - Pub rate 19737.9 msg/s / 19.3 MB/s | Pub err     0.0 err/s | Cons rate 20152.6 msg/s / 19.3 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.2 - 50%:  1.4 - 99%:  2.1 - 99.9%:  2.6 - Max:  8.9 | Pub Delay Latency (us) avg: 67.3 - 50%: 68.0 - 99%: 87.0 - 99.9%: 134.0 - Max: 7021.0
+07:43:29.228 [main] INFO WorkloadGenerator - Pub rate 20033.7 msg/s / 19.6 MB/s | Pub err     0.0 err/s | Cons rate 20034.6 msg/s / 19.6 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.2 - 50%:  1.4 - 99%:  2.2 - 99.9%:  4.8 - Max:  6.3 | Pub Delay Latency (us) avg: 64.9 - 50%: 68.0 - 99%: 86.0 - 99.9%: 105.0 - Max: 212.0
+07:43:39.370 [main] INFO WorkloadGenerator - Pub rate 20068.6 msg/s / 19.6 MB/s | Pub err     0.0 err/s | Cons rate 20036.3 msg/s / 19.6 MB/s | Backlog:  0.1 K | Pub Latency (ms) avg:  1.2 - 50%:  1.4 - 99%:  2.1 - 99.9%:  2.4 - Max:  6.1 | Pub Delay Latency (us) avg: 64.8 - 50%: 68.0 - 99%: 86.0 - 99.9%: 103.0 - Max: 2982.0
+07:43:49.509 [main] INFO WorkloadGenerator - Pub rate 20001.5 msg/s / 19.5 MB/s | Pub err     0.0 err/s | Cons rate 20002.6 msg/s / 19.5 MB/s | Backlog:  0.1 K | Pub Latency (ms) avg:  1.2 - 50%:  1.4 - 99%:  2.1 - 99.9%:  2.4 - Max:  3.9 | Pub Delay Latency (us) avg: 64.9 - 50%: 68.0 - 99%: 86.0 - 99.9%: 102.0 - Max: 174.0
+07:43:59.650 [main] INFO WorkloadGenerator - Pub rate 19997.6 msg/s / 19.5 MB/s | Pub err     0.0 err/s | Cons rate 19998.1 msg/s / 19.5 MB/s | Backlog:  0.1 K | Pub Latency (ms) avg:  1.3 - 50%:  1.4 - 99%:  2.2 - 99.9%:  8.7 - Max: 13.2 | Pub Delay Latency (us) avg: 64.8 - 50%: 68.0 - 99%: 85.0 - 99.9%: 104.0 - Max: 327.0
+07:44:09.728 [main] INFO WorkloadGenerator - Pub rate 20100.0 msg/s / 19.6 MB/s | Pub err     0.0 err/s | Cons rate 20103.6 msg/s / 19.6 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.4 - 99%:  2.5 - 99.9%: 11.7 - Max: 13.4 | Pub Delay Latency (us) avg: 64.8 - 50%: 68.0 - 99%: 85.0 - 99.9%: 106.0 - Max: 516.0
+07:44:19.807 [main] INFO WorkloadGenerator - Pub rate 20001.9 msg/s / 19.5 MB/s | Pub err     0.0 err/s | Cons rate 19997.9 msg/s / 19.5 MB/s | Backlog:  0.1 K | Pub Latency (ms) avg:  1.3 - 50%:  1.4 - 99%:  2.5 - 99.9%: 10.9 - Max: 14.5 | Pub Delay Latency (us) avg: 64.8 - 50%: 68.0 - 99%: 86.0 - 99.9%: 106.0 - Max: 488.0
+07:44:29.877 [main] INFO WorkloadGenerator - Pub rate 20008.8 msg/s / 19.5 MB/s | Pub err     0.0 err/s | Cons rate 20015.2 msg/s / 19.5 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.4 - 99%:  2.4 - 99.9%:  2.9 - Max:  5.6 | Pub Delay Latency (us) avg: 65.6 - 50%: 68.0 - 99%: 86.0 - 99.9%: 111.0 - Max: 3852.0
+07:44:39.952 [main] INFO WorkloadGenerator - Pub rate 19990.8 msg/s / 19.5 MB/s | Pub err     0.0 err/s | Cons rate 19989.8 msg/s / 19.5 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.4 - 99%:  2.4 - 99.9%:  4.0 - Max:  9.9 | Pub Delay Latency (us) avg: 64.9 - 50%: 68.0 - 99%: 86.0 - 99.9%: 104.0 - Max: 3085.0
+07:44:50.031 [main] INFO WorkloadGenerator - Pub rate 19992.7 msg/s / 19.5 MB/s | Pub err     0.0 err/s | Cons rate 19993.0 msg/s / 19.5 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.4 - 99%:  2.4 - 99.9%:  4.3 - Max: 12.8 | Pub Delay Latency (us) avg: 64.9 - 50%: 68.0 - 99%: 86.0 - 99.9%: 105.0 - Max: 403.0
+07:45:00.095 [main] INFO WorkloadGenerator - Pub rate 20026.3 msg/s / 19.6 MB/s | Pub err     0.0 err/s | Cons rate 20027.3 msg/s / 19.6 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.4 - 99%:  2.6 - 99.9%: 10.9 - Max: 13.8 | Pub Delay Latency (us) avg: 64.9 - 50%: 68.0 - 99%: 86.0 - 99.9%: 106.0 - Max: 1039.0
+07:45:10.165 [main] INFO WorkloadGenerator - Pub rate 19998.5 msg/s / 19.5 MB/s | Pub err     0.0 err/s | Cons rate 19995.8 msg/s / 19.5 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.3 - 50%:  1.4 - 99%:  2.6 - 99.9%: 11.3 - Max: 14.5 | Pub Delay Latency (us) avg: 64.9 - 50%: 68.0 - 99%: 86.0 - 99.9%: 106.0 - Max: 292.0
+07:45:10.232 [main] INFO WorkloadGenerator - ----- Aggregated Pub Latency (ms) avg:  1.3 - 50%:  1.4 - 95%:  2.0 - 99%:  2.3 - 99.9%:  8.2 - 99.99%: 12.7 - Max: 14.5 | Pub Delay (us)  avg: 65.1 - 50%: 68.0 - 95%: 78.0 - 99%: 86.0 - 99.9%: 106.0 - 99.99%: 201.0 - Max: 7021.0
+07:45:11.374 [main] INFO Benchmark - Writing test result into /root/bench/runs/f2-1k-shm/result.json

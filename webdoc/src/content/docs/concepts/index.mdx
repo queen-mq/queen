@@ -46,6 +46,13 @@ digest: >-
 # outcome as runs (catalogue version 7) where the cluster reads 7; facade/real.rs keeps the framed
 # forms on for the queues that do not encrypt (c42ea1992) and tells the store whether the queue logs
 # hold the txns hashes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-16 (windowBuffer cap): consume/pop.rs ends a windowBuffer hold one
+# window after the oldest message waiting for the group instead of one window after the newest
+# write. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 Queen has one idea, and every concept page zooms into a part of it. Every entity gets an ordered

@@ -1,0 +1,13 @@
+[07:46:25] matrix: kafka-l1-p100-500k (kafka, kafka.yaml, 1-topic-100-partitions-1kb-4p-4c-500k.yaml, 100 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[07:51:00] matrix: done kafka-l1-p100-500k [kafka] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 501k/s cons 501k/s err 0 backlog max 751 | pub p50/p99/p99.9 1.5/3.1/12.4 ms | e2e p50/p99/p99.9 2.0/4.0/50.0 ms (max 186) | brokers 4.9 cores, disk write 519/521/518 MB/s
+[07:51:00] matrix: native-nr2-l1-p100-500k (queen-native, queen-native.yaml, 1-topic-100-partitions-1kb-4p-4c-500k.yaml, 100 partitions)
+[07:51:12] omb: queen nr2: 3 healthy ("role":"follower")
+[07:55:30] matrix: done native-nr2-l1-p100-500k [queen-native] 1-topic-100-partitions-1kb-4p-4c-500k.yaml: pub 500k/s cons 500k/s err 0 backlog max 1,208 | pub p50/p99/p99.9 2.8/4.3/5.6 ms | e2e p50/p99/p99.9 5.0/7.0/9.0 ms (max 20.0) | brokers 11.9 cores, disk write 308/312/308 MB/s
+[07:55:30] matrix: facade-nr2-l1-p100-1000k (queen-facade, queen-facade.yaml, 1-topic-100-partitions-1kb-4p-4c-1000k.yaml, 100 partitions)
+[07:55:37] omb: queen nr2: 3 healthy ("role":"leader")
+[08:01:57] matrix: done facade-nr2-l1-p100-1000k [queen-facade] 1-topic-100-partitions-1kb-4p-4c-1000k.yaml: pub 1,002k/s cons 1,002k/s err 0 backlog max 97,376 | pub p50/p99/p99.9 28.2/132/217 ms | e2e p50/p99/p99.9 47.0/472/1,111 ms (max 2,133) | brokers 5.2 cores, disk write 138/138/138 MB/s
+[08:01:59] omb: all stopped
+[08:01:59] matrix: all points done

@@ -1,0 +1,30 @@
+DONE
+benchmark.out
+result.json
+start-8080.lines
+start-8082.lines
+worker-8080.slice
+worker-8082.slice
+workers.samples
+INFO WorkloadGenerator - Created 1 topics in 6.816342 ms
+INFO WorkloadGenerator - Created 4 consumers in 6.932964 ms
+INFO WorkloadGenerator - Created 4 producers in 1.886618 ms
+INFO WorkloadGenerator - Waiting for consumers to be ready
+INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 0, Received: 0
+INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 4, Received: 4
+INFO WorkloadGenerator - All consumers are ready
+INFO WorkloadGenerator - --- Completed backlog build in 63.132418246 s ---
+INFO WorkloadGenerator - --- Completed backlog draining in 2.384760038 s ---
+-- worker 8080
+QueenBenchmarkDriver - Queen: 1 queues configured in 1 ms; partition count 100 in KV omb/omb-notkj2
+QueenBenchmarkDriver - Queen: 4 producers on 1 topics, 4 lanes, in 0 ms
+QueenBenchmarkDriver - Queen driver closed: pushes 479740 (failed 0, 1.0 groups each), messages pushed 6577573 (failed 0), 0 failed at once on a full buffer; pops 0 (empty 0, errors 0, JSON answers 0, after close 0), messages delivered 0; acks 0 (failed 0), messages acked 0 (refused 0); lease extensions 0 (failed 0); pop pool {subscriptions=0, totalWant=0, maxPops=4096, share=-1, rotating=false, peakPopsInFlight=0, consumerGroups=0}
+QueenBenchmarkDriver - Queen verify: 0 subscriptions, 0 partitions, 0 distinct messages, 0 delivered again, 0 holes between the first and the last offset delivered; 0 subscriptions with duplicates or holes
+-- worker 8082
+QueenBenchmarkDriver - Queen: 4 consumers on 1 topics in 3 ms; pop pool {subscriptions=1, totalWant=32, maxPops=4096, share=4096, rotating=false, peakPopsInFlight=32, consumerGroups=1}
+QueenBenchmarkDriver - 15 of 15 acks (group sub-000) refused: {"count":15,"success":0,"failed":15,"error":"invalid or expired lease"} (and 7 more like it in the last seconds)
+QueenBenchmarkDriver - Queen driver closed: pushes 0 (failed 0, 0.0 groups each), messages pushed 0 (failed 0), 0 failed at once on a full buffer; pops 244544 (empty 96, errors 0, JSON answers 0, after close 0), messages delivered 6577795; acks 244434 (failed 0), messages acked 6577573 (refused 222); lease extensions 144 (failed 0); pop pool {subscriptions=0, totalWant=0, maxPops=4096, share=4096, rotating=false, peakPopsInFlight=32, consumerGroups=1}
+QueenBenchmarkDriver - Queen verify: 1 subscriptions, 100 partitions, 6577573 distinct messages, 222 delivered again, 0 holes between the first and the last offset delivered; 1 subscriptions with duplicates or holes; omb-notkj2-0000000-rH4_vYA / sub-000: 100 partitions, 6577573 distinct messages, 222 delivered again, 0 holes between the first and the last offset delivered
+f5-backlog-100p-4p4c: pub 49993 msg/s, cons 50110 msg/s, pub err 0.0/s, backlog end 0; pub p50/p99/p99.9 0.9/1.5/2.1 ms; e2e p50/p99/p99.9/max 1568.0/62763.0/63898.1/64035.1 ms
+  broker peak: rss 722 MB, threads 116, fds 166, data 4014 MB
+  workers peak: 8080 rss 12048 MB threads 95, 8082 rss 12334 MB threads 128; tcp to broker peak 68

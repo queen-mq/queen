@@ -35,6 +35,14 @@ sidebar:
 # kafka_inproc.rs carries that ceiling to the in-process read, which reads the partitions in order
 # while any of it is left. What a client sees is as the page says; Performance and the last overload
 # limit follow the 2.3.0-beta.1 measurement of 2026-10-13.
+# sourceOfTruth re-read 2026-10-17 (produce stage timings): handlers/produce.rs records produceStage,
+# producePush and produceRender in /status; nothing a produce does changes. Nothing this page states
+# changes.
+# sourceOfTruth re-read 2026-10-17 (the catalog behind a plain mutex): queen.rs's queue-list cache
+# takes a std mutex instead of an async one, and produce reports its staging parts in /status.
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (conn.rs, 19b024495): the pipelined produce a connection waits on is
+# boxed (a clippy size lint); the pipelining, its order and its limits are unchanged. Nothing this page states changes.
 ---
 
 Your Kafka producers, consumers and admin tools can use Queen as they are: change
@@ -49,7 +57,7 @@ docker run -d --name queen -p 6632:6632 -p 9092:9092 \
   -v queen-data:/var/lib/queen/raft \
   -e QUEEN_KAFKA_EMBEDDED=true \
   -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 \
-  ghcr.io/queen-mq/queen:latest
+  ghcr.io/queen-mq/queen:2.5.0
 ```
 
 `QUEEN_KAFKA_EMBEDDED=true` starts the Kafka listener inside the broker, on port 9092.
@@ -161,9 +169,13 @@ to one partition can never hand out the same offset.
 `acks=1` and `acks=all` take the same path: a produce is answered when its push is committed to the
 raft log, which on a cluster means a majority of the voters have it. `acks=0` writes the same way
 and sends nothing back. Kafka clients keep several produce requests in flight on a connection (five
-by default in Java), and the facade writes the ones already waiting in the socket as one push, then
-answers each in order (`QUEEN_KAFKA_COALESCE`, default 5). One push also keeps them in order on
-every node, which is what an idempotent producer counts on.
+by default in Java). On the node that leads, the facade writes the ones already waiting in the
+socket as one push (`QUEEN_KAFKA_COALESCE`, default 5) and sends the next push as soon as the one
+before it is in the raft log, without waiting for it to commit, up to `QUEEN_KAFKA_PIPELINE` (8) in
+flight. The answers keep request order, and so does the log, which is what an idempotent producer
+counts on. A follower sends its clients' produce, as it came, to the facade on the leader over one
+connection per client connection (`QUEEN_KAFKA_RELAY`). A push that fails ends the connection, and
+the client sends again, in order, what it was not answered.
 
 Topics created through Kafka get no dedup window (`dedupWindowSeconds: 0`). A Kafka record carries
 no Queen `transactionId`, so the broker gives each one a fresh id, and a dedup check could only ever
@@ -244,12 +256,12 @@ at all is an idempotent one, and the facade keeps Kafka's contract with it. A ba
 a lost answer is answered with the offsets it got the first time and is not written twice. A batch
 that would leave a gap in the sequence is refused, and nothing is written.
 
-The sequence windows live in the memory of the node a producer writes to, one per producer and
-partition, up to `QUEEN_KAFKA_MAX_PRODUCER_STATES` (4,194,304 of them, about 210 bytes each). Kafka
-keeps producer state in its log. Doing that here would put a dedup key on every record of every
-idempotent producer, a cost on the write path we have not taken, so after a node restart, an
-eviction or a connection that moves to another node, the producer's next batch is refused as out of
-sequence. The client recovers by bumping its epoch (KIP-360), and at most the five batches it had in
+The sequence windows live in the memory of the node whose facade writes the producer's batches,
+the leader on a cluster, one per producer and partition, up to `QUEEN_KAFKA_MAX_PRODUCER_STATES`
+(4,194,304 of them, about 210 bytes each). Kafka keeps producer state in its log. Doing that here
+would put a dedup key on every record of every idempotent producer, a cost on the write path we have
+not taken, so after a node restart, a leader change, an eviction or a connection that moves to
+another node, the producer's next batch is refused as out of sequence. The client recovers by bumping its epoch (KIP-360), and at most the five batches it had in
 flight can be written twice.
 
 ### Transactions

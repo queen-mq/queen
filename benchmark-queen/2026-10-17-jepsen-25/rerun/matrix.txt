@@ -1,0 +1,1 @@
+p11-w1-corrupt-all      --workload log --nemesis corrupt --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 10

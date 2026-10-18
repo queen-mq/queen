@@ -1,0 +1,40 @@
+    10.24%  [.] 0x00000000001a19d2
+     8.25%  [.] <queen_kafka::records::Fast>::plain_str
+     7.29%  [.] <base64::engine::general_purpose::GeneralPurpose as base64::engine::Engine>::internal_decode
+     7.03%  [k] _copy_to_iter
+     4.95%  [k] kernel_init_pages
+     2.03%  [k] _raw_spin_unlock_irqrestore
+     1.91%  [k] finish_task_switch.isra.0
+     1.77%  [.] ZSTD_decompressSequences_bmi2.constprop.0
+     1.73%  [k] handle_softirqs
+     1.26%  [.] xxhash_rust::xxh3::hash_long_internal_loop
+     1.24%  [k] _copy_from_iter
+                          0x4c6ece21b80
+     1.10%  [.] tokio::runtime::scheduler::multi_thread::worker::run
+     1.08%  [k] check_heap_object
+                                  0x1
+     0.90%  [.] _mi_page_malloc_zero
+     0.77%  [.] mi_free
+     0.71%  [.] queen_kafka::wire::encode
+     0.66%  [k] _raw_spin_unlock_irq
+     0.64%  [k] __raw_callee_save___pv_queued_spin_unlock
+     0.63%  [.] crc32c::hw_x86_64::crc_u64_append
+     0.62%  [k] copy_folio_from_iter_atomic
+     0.59%  [.] crc32c::hw_x86_64::crc_u64_parallel3
+     0.59%  [k] __skb_datagram_iter
+     0.59%  [k] do_user_addr_fault
+     0.50%  [.] bytes::bytes::shared_drop
+     0.48%  [k] _raw_spin_lock
+     0.45%  [.] 0x000000000000099a
+     0.43%  [.] 0x00000000001a1653
+     0.41%  [.] 0x00000000001a1efa
+     0.37%  [.] queen_kafka::handlers::fetch::render
+     0.36%  [.] <queen::rsm::entry::PushOutcome>::decode_runs
+     0.31%  [.] core::ptr::drop_glue::<queen::rsm::entry::Outcome>
+     0.31%  [k] do_syscall_64
+     0.31%  [k] prep_compound_page
+     0.31%  [.] bytes::bytes::shared_clone
+     0.30%  [.] queen::rsm::entry::runs_of
+     0.29%  [.] bytes::bytes_mut::shared_v_drop
+     0.25%  [.] queen_kafka::records::decode_bytes
+     0.25%  [.] tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<queen::rsm::facade::real::RaftFacade>::fetch_once::{closure#0}::{closure#2}>, tokio::runtime::blocking::schedule::BlockingSchedule>

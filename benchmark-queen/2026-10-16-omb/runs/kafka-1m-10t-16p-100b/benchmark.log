@@ -1,0 +1,70 @@
+12:58:49.516 [main] INFO Benchmark - Starting benchmark with config: {
+  "drivers" : [ "drivers/kafka.yaml" ],
+  "workers" : [ "http://10.250.0.41:8080", "http://10.250.0.42:8080", "http://10.250.0.38:8080", "http://10.250.0.41:8082", "http://10.250.0.42:8082", "http://10.250.0.38:8082" ],
+  "workersFile" : null,
+  "workloads" : [ "workloads-run/1m-10-topics-16-partitions-100b.yaml" ],
+  "output" : "/root/bench/omb-results/kafka-1m-10t-16p-100b.json"
+}
+12:58:49.534 [main] INFO Benchmark - Workloads: {
+  "1m-10-topics-16-partitions-100b" : {
+    "name" : "1m-10-topics-16-partitions-100b",
+    "topics" : 10,
+    "partitionsPerTopic" : 16,
+    "keyDistributor" : "NO_KEY",
+    "messageSize" : 100,
+    "messageSizeDistribution" : null,
+    "useRandomizedPayloads" : true,
+    "randomBytesRatio" : 0.5,
+    "randomizedPayloadPoolSize" : 1000,
+    "payloadFile" : null,
+    "subscriptionsPerTopic" : 1,
+    "producersPerTopic" : 1,
+    "consumerPerSubscription" : 1,
+    "producerRate" : 1000000,
+    "consumerBacklogSizeGB" : 0,
+    "backlogDrainRatio" : 1.0,
+    "testDurationMinutes" : 3,
+    "warmupDurationMinutes" : 1
+  }
+}
+12:58:49.674 [main] INFO DistributedWorkersEnsemble - Workers list - producers: [http://10.250.0.38:8080,http://10.250.0.42:8080,http://10.250.0.41:8080]
+12:58:49.674 [main] INFO DistributedWorkersEnsemble - Workers list - consumers: http://10.250.0.38:8082,http://10.250.0.42:8082,http://10.250.0.41:8082
+12:58:49.676 [main] INFO Benchmark - --------------- WORKLOAD : 1m-10-topics-16-partitions-100b --- DRIVER : Kafka---------------
+12:58:50.184 [main] INFO WorkloadGenerator - Created 10 topics in 175.647792 ms
+12:58:50.342 [main] INFO WorkloadGenerator - Created 10 consumers in 155.780671 ms
+12:58:50.424 [main] INFO WorkloadGenerator - Created 10 producers in 81.611829 ms
+12:58:50.425 [main] INFO WorkloadGenerator - Waiting for consumers to be ready
+12:58:50.506 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 0, Received: 0
+12:58:52.510 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 10, Received: 0
+12:58:54.514 [main] INFO WorkloadGenerator - Waiting for topics to be ready -- Sent: 10, Received: 10
+12:58:54.514 [main] INFO WorkloadGenerator - All consumers are ready
+12:58:54.558 [main] INFO WorkloadGenerator - ----- Starting warm-up traffic (1m) ------
+12:59:04.865 [main] INFO WorkloadGenerator - Pub rate 975196.9 msg/s / 93.0 MB/s | Pub err     0.0 err/s | Cons rate 969812.7 msg/s / 92.5 MB/s | Backlog: 55.5 K | Pub Latency (ms) avg:  1.7 - 50%:  1.1 - 99%: 17.2 - 99.9%: 40.4 - Max: 64.1 | Pub Delay Latency (us) avg: 198.1 - 50%: 32.0 - 99%: 2827.0 - 99.9%: 30526.0 - Max: 32525.0
+12:59:15.014 [main] INFO WorkloadGenerator - Pub rate 1012767.0 msg/s / 96.6 MB/s | Pub err     0.0 err/s | Cons rate 1017059.2 msg/s / 97.0 MB/s | Backlog: 11.9 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  3.8 - Max:  7.1 | Pub Delay Latency (us) avg: 32.3 - 50%: 32.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1460.0
+12:59:25.142 [main] INFO WorkloadGenerator - Pub rate 1002787.2 msg/s / 95.6 MB/s | Pub err     0.0 err/s | Cons rate 997280.8 msg/s / 95.1 MB/s | Backlog: 67.6 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  3.9 - Max:  8.9 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 72.0 - Max: 351.0
+12:59:35.240 [main] INFO WorkloadGenerator - Pub rate 1001565.6 msg/s / 95.5 MB/s | Pub err     0.0 err/s | Cons rate 1008343.7 msg/s / 96.2 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  4.3 - Max:  7.3 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1636.0
+12:59:45.334 [main] INFO WorkloadGenerator - Pub rate 1000279.3 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 999285.9 msg/s / 95.3 MB/s | Backlog:  9.2 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  4.7 - Max:  8.0 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 2392.0
+12:59:55.426 [main] INFO WorkloadGenerator - Pub rate 1000217.3 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 1001030.9 msg/s / 95.5 MB/s | Backlog:  1.0 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  5.6 - Max:  9.3 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1520.0
+12:59:55.537 [main] INFO WorkloadGenerator - ----- Aggregated Pub Latency (ms) avg:  1.2 - 50%:  1.0 - 95%:  1.9 - 99%:  3.1 - 99.9%: 24.2 - 99.99%: 50.4 - Max: 64.1 | Pub Delay (us)  avg: 59.4 - 50%: 31.0 - 95%: 66.0 - 99%: 67.0 - 99.9%: 14414.0 - 99.99%: 31165.0 - Max: 32525.0
+12:59:55.629 [main] INFO WorkloadGenerator - ----- Starting benchmark traffic (3m)------
+13:00:05.747 [main] INFO WorkloadGenerator - Pub rate 1017419.1 msg/s / 97.0 MB/s | Pub err     0.0 err/s | Cons rate 1017166.7 msg/s / 97.0 MB/s | Backlog:  3.5 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  6.1 - Max:  9.9 | Pub Delay Latency (us) avg: 32.1 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1644.0
+13:00:15.860 [main] INFO WorkloadGenerator - Pub rate 1000724.3 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 1000409.8 msg/s / 95.4 MB/s | Backlog:  6.7 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  6.0 - Max:  9.7 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 348.0
+13:00:25.947 [main] INFO WorkloadGenerator - Pub rate 1002464.6 msg/s / 95.6 MB/s | Pub err     0.0 err/s | Cons rate 1003268.2 msg/s / 95.7 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  5.4 - Max:  9.3 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1759.0
+13:00:36.037 [main] INFO WorkloadGenerator - Pub rate 999806.4 msg/s / 95.3 MB/s | Pub err     0.0 err/s | Cons rate 999241.0 msg/s / 95.3 MB/s | Backlog:  4.3 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  6.2 - Max: 10.7 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1474.0
+13:00:46.126 [main] INFO WorkloadGenerator - Pub rate 1000034.9 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 1000452.6 msg/s / 95.4 MB/s | Backlog:  0.1 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  6.2 - Max:  9.8 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1606.0
+13:00:56.225 [main] INFO WorkloadGenerator - Pub rate 999379.2 msg/s / 95.3 MB/s | Pub err     0.0 err/s | Cons rate 998987.9 msg/s / 95.3 MB/s | Backlog:  4.1 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  5.8 - Max: 10.3 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1472.0
+13:01:06.317 [main] INFO WorkloadGenerator - Pub rate 1000285.0 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 1000594.9 msg/s / 95.4 MB/s | Backlog:  0.9 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  5.7 - Max:  9.4 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1429.0
+13:01:16.412 [main] INFO WorkloadGenerator - Pub rate 1000072.7 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 1000120.7 msg/s / 95.4 MB/s | Backlog:  0.4 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  5.9 - Max:  9.9 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1479.0
+13:01:26.500 [main] INFO WorkloadGenerator - Pub rate 1000381.6 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 997827.4 msg/s / 95.2 MB/s | Backlog: 26.2 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%: 15.6 - Max: 44.4 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 74.0 - Max: 1398.0
+13:01:36.593 [main] INFO WorkloadGenerator - Pub rate 999473.4 msg/s / 95.3 MB/s | Pub err     0.0 err/s | Cons rate 1002059.7 msg/s / 95.6 MB/s | Backlog:  0.1 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  4.9 - Max:  8.5 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1440.0
+13:01:46.683 [main] INFO WorkloadGenerator - Pub rate 1000353.9 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 997840.4 msg/s / 95.2 MB/s | Backlog: 25.5 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  4.9 - Max:  9.8 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1791.0
+13:01:56.772 [main] INFO WorkloadGenerator - Pub rate 1000112.3 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 997170.5 msg/s / 95.1 MB/s | Backlog: 55.1 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.1 - 99.9%:  7.5 - Max: 11.1 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1901.0
+13:02:06.866 [main] INFO WorkloadGenerator - Pub rate 999444.0 msg/s / 95.3 MB/s | Pub err     0.0 err/s | Cons rate 1003928.1 msg/s / 95.7 MB/s | Backlog:  9.9 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  5.6 - Max:  9.9 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1416.0
+13:02:16.956 [main] INFO WorkloadGenerator - Pub rate 1000388.2 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 998449.1 msg/s / 95.2 MB/s | Backlog: 29.4 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  5.1 - Max:  9.2 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1784.0
+13:02:27.045 [main] INFO WorkloadGenerator - Pub rate 1000156.8 msg/s / 95.4 MB/s | Pub err     0.0 err/s | Cons rate 1002732.0 msg/s / 95.6 MB/s | Backlog:  3.5 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  4.7 - Max:  7.6 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 72.0 - Max: 1444.0
+13:02:37.144 [main] INFO WorkloadGenerator - Pub rate 998885.5 msg/s / 95.3 MB/s | Pub err     0.0 err/s | Cons rate 999237.0 msg/s / 95.3 MB/s | Backlog:  0.0 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  5.4 - Max:  8.9 | Pub Delay Latency (us) avg: 32.0 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1974.0
+13:02:47.234 [main] INFO WorkloadGenerator - Pub rate 1001093.3 msg/s / 95.5 MB/s | Pub err     0.0 err/s | Cons rate 1000228.3 msg/s / 95.4 MB/s | Backlog:  8.6 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  4.0 - Max:  7.1 | Pub Delay Latency (us) avg: 31.9 - 50%: 31.0 - 99%: 67.0 - 99.9%: 72.0 - Max: 1565.0
+13:02:57.331 [main] INFO WorkloadGenerator - Pub rate 999180.8 msg/s / 95.3 MB/s | Pub err     0.0 err/s | Cons rate 998256.5 msg/s / 95.2 MB/s | Backlog: 18.0 K | Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 99%:  2.0 - 99.9%:  5.3 - Max:  9.5 | Pub Delay Latency (us) avg: 32.1 - 50%: 31.0 - 99%: 67.0 - 99.9%: 73.0 - Max: 1551.0
+13:02:57.429 [main] INFO WorkloadGenerator - ----- Aggregated Pub Latency (ms) avg:  1.1 - 50%:  1.0 - 95%:  1.8 - 99%:  2.0 - 99.9%:  5.7 - 99.99%:  9.1 - Max: 44.4 | Pub Delay (us)  avg: 32.0 - 50%: 31.0 - 95%: 66.0 - 99%: 67.0 - 99.9%: 73.0 - 99.99%: 102.0 - Max: 1974.0
+13:02:59.446 [main] INFO Benchmark - Writing test result into /root/bench/omb-results/kafka-1m-10t-16p-100b.json
+rc=0

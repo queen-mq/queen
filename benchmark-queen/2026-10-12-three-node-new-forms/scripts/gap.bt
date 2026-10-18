@@ -1,0 +1,49 @@
+#!/usr/bin/env bpftrace
+// gap.bt <pid> : one window of the broker (2026-10-14, gapprobe.sh). (1) Off-CPU time of every thread that is not a
+// tokio worker, by thread name + id, and by thread name + kernel stack (the pipeline's waits: file syncs, condvars,
+// channels); (2) every fsync / fdatasync / sync_file_range and every file write by thread name: count, total time,
+// a histogram of the syncs; (3) the delay from wake-up to running, by thread name (CPU contention). Stop with SIGINT.
+BEGIN { printf("BEGIN %llu\n", nsecs); }
+
+tracepoint:sched:sched_switch /pid == $1 && strncmp(args->prev_comm, "tokio", 5) != 0/
+{
+  @off[args->prev_pid] = nsecs; @st[args->prev_pid] = kstack(8); @cm[args->prev_pid] = args->prev_comm;
+}
+tracepoint:sched:sched_switch /@off[args->next_pid]/
+{
+  $us = (nsecs - @off[args->next_pid]) / 1000;
+  @off_us[@cm[args->next_pid], args->next_pid] = sum($us);
+  @off_stack_us[@cm[args->next_pid], @st[args->next_pid]] = sum($us);
+  delete(@off[args->next_pid]);
+}
+
+tracepoint:sched:sched_wakeup, tracepoint:sched:sched_wakeup_new { @wk[args->pid] = nsecs; }
+tracepoint:sched:sched_switch /@wk[args->next_pid]/
+{
+  @runq_us[args->next_comm] = hist((nsecs - @wk[args->next_pid]) / 1000);
+  @runq_total_us[args->next_comm] = sum((nsecs - @wk[args->next_pid]) / 1000);
+  delete(@wk[args->next_pid]);
+}
+
+tracepoint:syscalls:sys_enter_fsync, tracepoint:syscalls:sys_enter_fdatasync, tracepoint:syscalls:sys_enter_sync_file_range
+/pid == $1/ { @t[tid] = nsecs; }
+tracepoint:syscalls:sys_exit_fsync, tracepoint:syscalls:sys_exit_fdatasync, tracepoint:syscalls:sys_exit_sync_file_range
+/@t[tid]/
+{
+  $us = (nsecs - @t[tid]) / 1000;
+  @sync_n[comm, probe] = count(); @sync_total_us[comm, probe] = sum($us); @sync_max_us[comm, probe] = max($us);
+  @sync_hist_us[comm] = hist($us);
+  delete(@t[tid]);
+}
+
+tracepoint:syscalls:sys_enter_pwrite64, tracepoint:syscalls:sys_enter_pwritev, tracepoint:syscalls:sys_enter_pwritev2
+/pid == $1/ { @wt[tid] = nsecs; }
+tracepoint:syscalls:sys_exit_pwrite64, tracepoint:syscalls:sys_exit_pwritev, tracepoint:syscalls:sys_exit_pwritev2
+/@wt[tid]/
+{
+  $us = (nsecs - @wt[tid]) / 1000;
+  @pwrite_n[comm] = count(); @pwrite_total_us[comm] = sum($us); @pwrite_bytes[comm] = sum(args->ret > 0 ? args->ret : 0);
+  delete(@wt[tid]);
+}
+
+END { printf("END %llu\n", nsecs); clear(@off); clear(@st); clear(@cm); clear(@wk); clear(@t); clear(@wt); }

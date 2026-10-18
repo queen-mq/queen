@@ -1,0 +1,7 @@
+[2026-10-16T06:47:04Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: openjdk version "21.0.12.1" 2026-08-18 (JDK 21 at /usr/lib/jvm/java-21-openjdk-amd64)
+[2026-10-16T06:47:04Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: downloading https://downloads.apache.org/pulsar/pulsar-4.2.4/apache-pulsar-4.2.4-bin.tar.gz
+[2026-10-16T06:47:09Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: published sha512 from https://downloads.apache.org/pulsar/pulsar-4.2.4
+[2026-10-16T06:47:09Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: published sha512: 8c0a63cc6421c8eb3c4a55b8895ca08a38a1c6771758251fc7a82edbc4c6a42bb8ba5c956066b637ec7e049149d467c034e854b571a4cb000f42a47ae6105971
+[2026-10-16T06:47:10Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: computed  sha512: 8c0a63cc6421c8eb3c4a55b8895ca08a38a1c6771758251fc7a82edbc4c6a42bb8ba5c956066b637ec7e049149d467c034e854b571a4cb000f42a47ae6105971
+[2026-10-16T06:47:10Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: SHA512 OK (252870141 bytes)
+[2026-10-16T06:47:11Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: Pulsar 4.2.4 installed in /root/bench/pulsar/dist (261 MB): org.apache.bookkeeper-bookkeeper-server-4.17.3.jar org.apache.pulsar-pulsar-broker-4.2.4.jar org.apache.zookeeper-zookeeper-jute-3.9.5.jar 

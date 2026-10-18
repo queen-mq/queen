@@ -14,6 +14,9 @@ sourceOfTruth:
   - deploy/terraform-provider-queen/examples/main.tf
   - server/src/handlers/queues.rs
   - proxy/src/cp.rs
+# sourceOfTruth re-read 2026-10-16 (windowBuffer cap): queue_resource.go rewords the window_buffer
+# description for the capped hold. This page names no option's meaning and links the queue options,
+# so nothing it states changes.
 ---
 
 A queue's retention and a cluster's S3 sink are settings of the broker, and they usually belong

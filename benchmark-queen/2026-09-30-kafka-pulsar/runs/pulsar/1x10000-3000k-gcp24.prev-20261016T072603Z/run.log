@@ -1,0 +1,24 @@
+[2026-10-16T07:02:07Z] run 1x10000-3000k-gcp24: pulsar 4.2.4, 3000000 msg/s total over 9 load processes (3 loaders x 3), topics=1 x partitions=10000 entities=0 mode=batch batch=100 sub=failover consumers=33/process
+[2026-10-16T07:02:09Z] 1. cluster reset: PROFILE=vm JOURNALS=2 BOOKIE_SET=dbStorage_writeCacheMaxSizeMb=4096;dbStorage_readAheadCacheMaxSizeMb=2048 BROKER_SET=managedLedgerCacheSizeMB=4096 MEM_ZK=-Xms2g -Xmx2g MEM_BOOKIE=-Xms6g -Xmx6g -XX:MaxDirectMemorySize=16g MEM_BROKER=-Xms12g -Xmx12g -XX:MaxDirectMemorySize=12g
+  n1  [2026-10-16T07:02:13Z] mkconf node 1 (10.250.0.23) PROFILE=vm JOURNALS=2: 51 overrides -> /root/bench/pulsar/node | zk -Xms2g -Xmx2g | bookie -Xms6g -Xmx6g -XX:MaxDirectMemorySize=16g wcache=1536M rcache=1024M rocksdb=512M | broker -Xms12g -Xmx12g -XX:MaxDirectMemorySize=12g mlcache=2048M
+  n2  [2026-10-16T07:02:13Z] mkconf node 2 (10.250.0.22) PROFILE=vm JOURNALS=2: 51 overrides -> /root/bench/pulsar/node | zk -Xms2g -Xmx2g | bookie -Xms6g -Xmx6g -XX:MaxDirectMemorySize=16g wcache=1536M rcache=1024M rocksdb=512M | broker -Xms12g -Xmx12g -XX:MaxDirectMemorySize=12g mlcache=2048M
+  n3  [2026-10-16T07:02:13Z] mkconf node 3 (10.250.0.25) PROFILE=vm JOURNALS=2: 51 overrides -> /root/bench/pulsar/node | zk -Xms2g -Xmx2g | bookie -Xms6g -Xmx6g -XX:MaxDirectMemorySize=16g wcache=1536M rcache=1024M rocksdb=512M | broker -Xms12g -Xmx12g -XX:MaxDirectMemorySize=12g mlcache=2048M
+  n1  [2026-10-16T07:02:14Z] node 1 (10.250.0.23) zk started pid 30096 _MEM="-Xms2g -Xmx2g" nofile=1048576
+  n2  [2026-10-16T07:02:14Z] node 2 (10.250.0.22) zk started pid 26183 _MEM="-Xms2g -Xmx2g" nofile=1048576
+  n3  [2026-10-16T07:02:14Z] node 3 (10.250.0.25) zk started pid 25893 _MEM="-Xms2g -Xmx2g" nofile=1048576
+[2026-10-16T07:02:18Z] zk quorum: zk states: follower follower leader leader=1 followers=2 synced=2
+[2026-10-16T07:02:18Z] initialize-cluster-metadata (once, node 1)
+[2026-10-16T07:02:19Z] initialize-cluster-metadata --cluster bench --metadata-store zk:10.250.0.23:2181,10.250.0.22:2181,10.250.0.25:2181 --web-service-url http://10.250.0.23:8080,http://10.250.0.22:8080,http://10.250.0.25:8080 --broker-service-url pulsar://10.250.0.23:6650,pulsar://10.250.0.22:6650,pulsar://10.250.0.25:6650
+Cluster metadata for 'bench' setup correctly
+  n1  [2026-10-16T07:02:22Z] node 1 (10.250.0.23) bookie started pid 30689 _MEM="-Xms6g -Xmx6g -XX:MaxDirectMemorySize=16g" nofile=1048576
+  n2  [2026-10-16T07:02:22Z] node 2 (10.250.0.22) bookie started pid 26491 _MEM="-Xms6g -Xmx6g -XX:MaxDirectMemorySize=16g" nofile=1048576
+  n3  [2026-10-16T07:02:22Z] node 3 (10.250.0.25) bookie started pid 26209 _MEM="-Xms6g -Xmx6g -XX:MaxDirectMemorySize=16g" nofile=1048576
+[2026-10-16T07:02:25Z] bookies writable: bookies rw=3 ro=0 writable=[10.250.0.22:3181 10.250.0.23:3181 10.250.0.25:3181]
+  n1  [2026-10-16T07:02:27Z] node 1 (10.250.0.23) broker started pid 31208 _MEM="-Xms12g -Xmx12g -XX:MaxDirectMemorySize=12g" nofile=1048576
+  n2  [2026-10-16T07:02:27Z] node 2 (10.250.0.22) broker started pid 26925 _MEM="-Xms12g -Xmx12g -XX:MaxDirectMemorySize=12g" nofile=1048576
+  n3  [2026-10-16T07:02:27Z] node 3 (10.250.0.25) broker started pid 26569 _MEM="-Xms12g -Xmx12g -XX:MaxDirectMemorySize=12g" nofile=1048576
+[2026-10-16T07:02:34Z] brokers healthy: brokers active=3 10.250.0.22:8080=ok 10.250.0.23:8080=ok 10.250.0.25:8080=ok
+  ssh: connect to host <host-05> port 22: Operation timed out
+[2026-10-16T07:02:44Z] ERROR: namespace setup failed (rc 255)
+[2026-10-16T07:02:44Z] FAILED: cluster reset
+[2026-10-16T07:03:02Z] collect -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/pulsar/1x10000-3000k-gcp24

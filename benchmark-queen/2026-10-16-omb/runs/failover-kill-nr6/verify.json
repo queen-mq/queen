@@ -1,0 +1,18 @@
+{
+  "acked": 17784150,
+  "duplicate_examples": [
+    "p0 seq 1494612 again in partition 76 at offset 60707 (after 1494649)",
+    "p0 seq 1494613 again in partition 76 at offset 60708 (after 1494649)",
+    "p0 seq 1494614 again in partition 76 at offset 60709 (after 1494649)",
+    "p0 seq 1494615 again in partition 76 at offset 60710 (after 1494649)",
+    "p0 seq 1494616 again in partition 76 at offset 60711 (after 1494649)"
+  ],
+  "duplicates": 38,
+  "foreign": 0,
+  "lost": 0,
+  "lost_examples": null,
+  "partitions": 100,
+  "records_read": 17784188,
+  "reorder_examples": null,
+  "reorders": 0
+}

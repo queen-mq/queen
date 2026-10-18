@@ -1,0 +1,336 @@
+[23:28:50] C2 starts
+[23:28:50] run rl-p1000-r2000000: binary p3, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[23:33:37] start 1: the cluster did not become healthy, starting it again
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[23:38:25] start 2: the cluster did not become healthy, starting it again
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[23:43:12] start 3: the cluster did not become healthy, starting it again
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+[23:48:00] start 4: the cluster did not become healthy, starting it again
+[23:48:00] FAILED: the cluster did not become healthy in four starts
+[23:48:00] run rl-p100000-r2000000: binary p3, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+[23:52:47] start 1: the cluster did not become healthy, starting it again
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[23:57:35] start 2: the cluster did not become healthy, starting it again
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+[00:02:22] start 3: the cluster did not become healthy, starting it again
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[00:07:10] start 4: the cluster did not become healthy, starting it again
+[00:07:10] FAILED: the cluster did not become healthy in four starts
+[00:07:10] run rl-p1000000-r2000000: binary p3, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+[00:11:57] start 1: the cluster did not become healthy, starting it again
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[00:16:44] start 2: the cluster did not become healthy, starting it again
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[00:21:31] start 3: the cluster did not become healthy, starting it again
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+[00:26:17] start 4: the cluster did not become healthy, starting it again
+[00:26:17] FAILED: the cluster did not become healthy in four starts
+[00:26:18] run rl-p10000-r2000000: binary p3, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 10000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[00:31:04] start 1: the cluster did not become healthy, starting it again
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+[00:35:51] start 2: the cluster did not become healthy, starting it again
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+[00:40:38] start 3: the cluster did not become healthy, starting it again
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+[00:45:25] start 4: the cluster did not become healthy, starting it again
+[00:45:25] FAILED: the cluster did not become healthy in four starts
+[00:45:25] run rl-p100-r2000000: binary p3, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100, consumers 11 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+[00:50:12] start 1: the cluster did not become healthy, starting it again
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+[00:54:59] start 2: the cluster did not become healthy, starting it again
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[00:59:46] start 3: the cluster did not become healthy, starting it again
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[01:04:33] start 4: the cluster did not become healthy, starting it again
+[01:04:33] FAILED: the cluster did not become healthy in four starts
+REAL_DONE
+[01:04:33] run rl-p10-r1000000: binary p3, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 10, consumers 1 per process, retention completed 60s, dedup 60s, steps of 360s at: 1000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+[01:09:20] start 1: the cluster did not become healthy, starting it again
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+[01:14:07] start 2: the cluster did not become healthy, starting it again
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+[01:18:54] start 3: the cluster did not become healthy, starting it again
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+[01:23:41] start 4: the cluster did not become healthy, starting it again
+[01:23:41] FAILED: the cluster did not become healthy in four starts
+REAL_DONE
+[01:23:41] run rl-p10000000-r2000000: binary p3, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 10000000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_CONSUME_IDLE_UNLOAD_S=30 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+[01:28:28] start 1: the cluster did not become healthy, starting it again
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+[01:33:15] start 2: the cluster did not become healthy, starting it again
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[01:38:02] start 3: the cluster did not become healthy, starting it again
+ssh: connect to host <host-11> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+ssh: connect to host <host-10> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-21> port 22: Network is unreachable
+ssh: connect to host <host-09> port 22: Network is unreachable
+ssh: connect to host <host-01> port 22: Network is unreachable
+ssh: connect to host <host-04> port 22: Network is unreachable
+[01:42:49] start 4: the cluster did not become healthy, starting it again
+[01:42:49] FAILED: the cluster did not become healthy in four starts
+REAL_DONE
+[01:42:49] C2_DONE
+[05:18:38] C2 starts on p4
+[05:18:38] run rl-p1000-r2000000: binary p4, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+[05:18:49] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[06:27:39] C2 continues on p5
+[06:27:39] run rl-p100000-r2000000: binary p5, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+[06:28:09] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 100000 partitions
+[06:34:49] 2,000,000: last 30 s: offered 1,999,983 pushed 1,998,498 consumed 1,999,888 | run: shed 537,500 errors 0 | push p50 1753.1 p99 2228.2 | e2e p50 2064.4 p99 2490.4 worst 2490.4 | cores 10.4 / 7.1 / 7.1 | mem GB 11.2 / 12.7 / 12.8 | loaders 15.8c  NOT CARRIED 
+[06:34:56] run rl-p1000000-r2000000: binary p5, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+[06:35:06] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000000 partitions
+[06:41:56] 2,000,000: last 30 s: offered 1,999,973 pushed 1,958,564 consumed 1,962,562 | run: shed 4,689,200 errors 0 | push p50 1998.8 p99 2490.4 | e2e p50 2261.0 p99 2785.3 worst 2785.3 | cores 10.4 / 6.8 / 6.7 | mem GB 13.6 / 13.1 / 13.0 | loaders 16.0c  NOT CARRIED 
+[06:42:03] run rl-p10000-r2000000: binary p5, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 10000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 2000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+[06:42:08] the 2M line stops here (not carried from 100,000 partitions); 100,000 partitions at 1.5M next
+[06:42:08] run rl-p100000-r1500000: binary p5, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 1500000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+[06:42:18] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 100000 partitions
+[06:48:59] 1,500,000: last 30 s: offered 1,499,995 pushed 1,499,752 consumed 1,499,500 | run: shed 0 errors 0 | push p50 14.1 p99 30.2 | e2e p50 33.8 p99 69.6 worst 73.7 | cores 8.3 / 5.4 / 5.3 | mem GB 8.2 / 6.0 / 6.0 | loaders 12.0c  OK 
+REAL_DONE
+[06:56:03] C2 at 1.5M on p5
+[06:56:03] run rl-p1000-r1500000: binary p5, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 1500000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+[06:56:16] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[07:02:56] 1,500,000: last 30 s: offered 1,499,988 pushed 1,499,916 consumed 1,499,836 | run: shed 0 errors 0 | push p50 9.2 p99 17.4 | e2e p50 20.2 p99 33.8 worst 34.8 | cores 8.0 / 5.0 / 4.9 | mem GB 6.3 / 5.0 / 5.0 | loaders 12.2c  OK 
+[07:03:00] run rl-p1000000-r1500000: binary p5, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 1500000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+[07:03:12] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000000 partitions
+[07:10:02] 1,500,000: last 30 s: offered 1,500,001 pushed 1,499,998 consumed 1,500,294 | run: shed 0 errors 0 | push p50 10.1 p99 31.7 | e2e p50 24.3 p99 147.5 worst 149.5 | cores 8.3 / 5.2 / 5.0 | mem GB 9.7 / 6.3 / 6.3 | loaders 12.2c  OK 
+[07:10:09] run rl-p10000-r1500000: binary p5, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 10000, consumers 33 per process, retention completed 60s, dedup 60s, steps of 360s at: 1500000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+[07:10:33] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 10000 partitions
+[07:17:15] 1,500,000: last 30 s: offered 1,499,979 pushed 1,499,982 consumed 1,499,917 | run: shed 0 errors 0 | push p50 12.4 p99 26.9 | e2e p50 26.9 p99 52.7 worst 53.8 | cores 7.9 / 5.0 / 5.0 | mem GB 6.4 / 5.3 / 5.3 | loaders 12.0c  OK 
+[07:17:19] run rl-p100-r1500000: binary p5, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100, consumers 11 per process, retention completed 60s, dedup 60s, steps of 360s at: 1500000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 60s
+[07:17:44] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 100 partitions
+[07:21:05] the realistic line stopped by Alice after 10,000 partitions (4 of 7 points at 1.5M); retention first

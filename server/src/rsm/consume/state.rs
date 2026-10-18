@@ -324,7 +324,7 @@ pub(crate) struct PidInfo {
     /// Where the partition's `txns` rows begin (catalogue version 6): the
     /// retained messages below it are read from the queue log.
     pub rows_start: u64,
-    /// When the newest append was applied here (the window buffer), µs.
+    /// When the newest append was applied here (the idle-part unloader), µs.
     pub last_append_us: i64,
     /// The groups holding this partition. A watcher's part may be missing: a
     /// whole-queue group's part the unloader dropped ([`super::unload`]); the

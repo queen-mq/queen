@@ -1,0 +1,12 @@
+[15:01:10] matrix: kafka-backlog-1t-16p-ret (kafka, kafka.yaml, backlog-1-topic-16-partitions-1kb.yaml, 16 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[15:25:33] matrix: done kafka-backlog-1t-16p-ret [kafka] backlog-1-topic-16-partitions-1kb.yaml: pub 100k/s cons 100k/s err 0 backlog max 105,040,569 | pub p50/p99/p99.9 1.4/2.9/7.1 ms | e2e p50/p99/p99.9 443,978/1,041,162/1,052,131 ms (max 1,053,577) | brokers 0.9 cores, disk write 103/102/105 MB/s
+[15:25:33] matrix: kafka-backlog-1t-1p-ret (kafka, kafka.yaml, backlog-1-topic-1-partition-1kb.yaml, 1 partitions)
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"
+[15:53:14] matrix: done kafka-backlog-1t-1p-ret [kafka] backlog-1-topic-1-partition-1kb.yaml: pub 100k/s cons 100k/s err 0 backlog max 105,036,235 | pub p50/p99/p99.9 1.2/2.5/7.0 ms | e2e p50/p99/p99.9 457,179/1,041,347/1,052,086 ms (max 1,053,274) | brokers 0.9 cores, disk write 104/104/104 MB/s
+[15:53:20] omb: all stopped
+[15:53:20] matrix: all points done

@@ -1,0 +1,52 @@
+[15:53:59] OMB matrix done; cleaning the VMs
+[15:53:59] omb: all stopped
+[15:54:01] VMs clean; A/B starts
+[15:54:01] start ab25-a1-240
+[15:54:01] run ab25-a1-240: binary 240, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[15:54:30] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+scp: /root/p3/runs/ab25-a1-240-3000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-a1-240-3000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-a1-240-3000000/q*.json: No such file or directory
+[15:56:19] 3,000,000: only 0 of 9 load processes reported  FAIL
+[15:56:23] done ab25-a1-240
+[15:56:23] start ab25-a1-250
+[15:56:23] run ab25-a1-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[15:56:45] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+scp: /root/p3/runs/ab25-a1-250-3000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-a1-250-3000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-a1-250-3000000/q*.json: No such file or directory
+[15:58:34] 3,000,000: only 0 of 9 load processes reported  FAIL
+[15:58:40] done ab25-a1-250
+[15:58:40] start ab25-a2-240
+[15:58:40] run ab25-a2-240: binary 240, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[15:59:03] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+scp: /root/p3/runs/ab25-a2-240-3000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-a2-240-3000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-a2-240-3000000/q*.json: No such file or directory
+[16:00:51] 3,000,000: only 0 of 9 load processes reported  FAIL
+[16:00:55] done ab25-a2-240
+[16:00:55] start ab25-a2-250
+[16:00:55] run ab25-a2-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[16:01:20] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+scp: /root/p3/runs/ab25-a2-250-3000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-a2-250-3000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-a2-250-3000000/q*.json: No such file or directory
+[16:03:09] 3,000,000: only 0 of 9 load processes reported  FAIL
+[16:03:15] done ab25-a2-250
+[16:03:15] start ab25-b1-240
+[16:03:15] run ab25-b1-240: binary 240, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100, consumers 33 per process, retention completed 1800s, dedup 60s, steps of 70s at: 1000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -ack-counts -pop-frames -tail 30s
+[16:03:41] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 100 partitions
+scp: /root/p3/runs/ab25-b1-240-1000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-b1-240-1000000/q*.json: No such file or directory
+scp: /root/p3/runs/ab25-b1-240-1000000/q*.json: No such file or directory
+[16:05:30] 1,000,000: only 0 of 9 load processes reported  FAIL
+[16:05:34] done ab25-b1-240
+[16:05:34] start ab25-b1-250
+[16:05:34] run ab25-b1-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100, consumers 33 per process, retention completed 1800s, dedup 60s, steps of 70s at: 1000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -ack-counts -pop-frames -tail 30s
+[16:06:13] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 100 partitions

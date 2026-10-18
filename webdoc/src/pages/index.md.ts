@@ -18,20 +18,23 @@ import { figureMarkdown } from "@/lib/figure-markdown";
 import {
   HOME_SUMMARY as SUMMARY,
   hero,
+  paradigm,
+  shifts,
   step,
   stepSection,
   roles,
-  partitionSection,
-  primitives,
-  doorsSection,
-  doors,
-  dashboardSection,
+  removeSection,
+  removals,
+  includedSection,
+  included,
+  dashboardShot,
   proofSection,
   proof,
-  runSection,
-  differentiators,
-  limits,
+  provenSection,
+  proven,
+  trySection,
   start,
+  closing,
 } from "@/lib/home";
 
 export const prerender = true;
@@ -60,38 +63,40 @@ export function homepageBody(): string {
   );
   lines.push("```bash", hero.run, "```", "", hero.runNote, "");
 
+  lines.push(`## ${paradigm.oldTitle}`, "");
+  for (const t of paradigm.old) lines.push(t, "");
+  lines.push(`## ${paradigm.newTitle}`, "");
+  for (const x of shifts) lines.push(`**[${x.title}](${url(x.href)})** ${x.body}`, "");
+  lines.push(figureMarkdown("concepts/four-systems"), "");
+
   lines.push(`## ${stepSection.title}`, "", stepSection.lead, "", "```js", step, "```", "");
   for (const r of roles) lines.push(`- **${r.role}**: ${r.primitive} ([${r.role.toLowerCase()}](${url(r.href)}))`);
-  lines.push("- **One entry**: committed whole, or not at all", "");
-  lines.push(figureMarkdown("concepts/four-systems"), "");
-  lines.push(stepSection.after, "", link(stepSection.link), "");
+  lines.push("- **One entry**: committed whole, or not at all", "", link(stepSection.link), "");
 
-  lines.push(`## ${partitionSection.title}`, "", partitionSection.lead, "", partitionSection.after, "");
-  lines.push(figureMarkdown("benchmarks/partitions-p99"), "", link(partitionSection.link), "");
-
-  lines.push("## The pieces a step needs, sharing one commit", "");
-  for (const p of primitives) lines.push(`- **[${p.title}](${url(p.href)})**: ${p.body}`);
+  lines.push(`## ${removeSection.title}`, "");
+  for (const r of removals) lines.push(`- **${r.title}.** ${r.body}`);
   lines.push("");
 
-  lines.push(`## ${doorsSection.title}`, "", doorsSection.lead, "");
-  for (const d of doors) lines.push(`- **[${d.title}](${url(d.href)})**: ${d.body}`);
-  lines.push("", `${doorsSection.snippetTitle}:`, "", "```bash", doorsSection.snippet, "```", "");
-
-  lines.push(`## ${dashboardSection.title}`, "", dashboardSection.lead, "");
-  lines.push(`**Screenshot.** ${dashboardSection.alt}`, "", link(dashboardSection.link), "");
+  lines.push(`## ${includedSection.title}`, "");
+  for (const c of included) lines.push(`- **[${c.title}](${url(c.href)})**: ${c.body}`);
+  lines.push("", `**Screenshot.** ${dashboardShot.alt} ${dashboardShot.caption}`, "");
 
   lines.push(`## ${proofSection.title}`, "", proofSection.lead, "");
-  for (const p of proof) lines.push(`- **${p.figure}** ${p.unit}: ${p.body} ([details](${url(p.href)}))`);
-  lines.push("", link(proofSection.link), "");
+  for (const p of proof) {
+    const more = p.href ? ` ([details](${url(p.href)}))` : "";
+    lines.push(`- **${p.figure}** ${p.unit}: ${p.body}${more}`);
+  }
+  lines.push("", figureMarkdown("benchmarks/partitions-p99"), "", link(proofSection.link), "");
 
-  lines.push(`## ${runSection.title}`, "");
-  for (const d of differentiators) lines.push(`- **[${d.title}](${url(d.href)})**: ${d.body}`);
+  lines.push(`## ${provenSection.title}`, "");
+  for (const d of proven) lines.push(`- **[${d.title}](${d.href.startsWith("http") ? d.href : url(d.href)})**: ${d.body}`);
   lines.push("");
 
-  lines.push("## Limits", "", `${limits} [The full list](${url("/reference/limits/")}).`, "");
-
-  lines.push("## Start here", "");
+  lines.push(`## ${trySection.title}`, "", "```bash", hero.run, "```", "", trySection.pushNote, "");
+  lines.push("```bash", trySection.push, "```", "", trySection.after, "", trySection.mcpNote, "");
+  lines.push("```bash", trySection.mcp, "```", "");
   for (const s of start) lines.push(`- [${s.title}](${url(s.href)}): ${s.body}`);
+  lines.push("", `**${closing}**`);
 
   return lines.join("\n").trim();
 }

@@ -447,6 +447,14 @@ impl Rsm for GroupRouter {
 
     /// Ready only when every group is: a tenant on a group without a leader
     /// cannot be served.
+    fn leads(&self, tenant: &str) -> bool {
+        self.pick(tenant).leads(tenant)
+    }
+
+    fn leader_node(&self, tenant: &str) -> Option<u64> {
+        self.pick(tenant).leader_node(tenant)
+    }
+
     fn health(&self) -> RaftHealth {
         let mut all: Vec<RaftHealth> = self.groups.iter().map(|g| g.health()).collect();
         let applies: Vec<serde_json::Value> = all

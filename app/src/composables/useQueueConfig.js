@@ -172,10 +172,9 @@ export const OPTIONS = [
     default: 0,
     group: 'advanced',
     help:
-      'Quiet-period debounce, per partition: while the partition has been written to inside this ' +
-      'window it delivers nothing. With the hotlist on (the default) the broker promotes a held ' +
-      'partition early at 100 accumulated messages; with QUEEN_HOTLIST=0 a continuously written ' +
-      'partition is never delivered at all.',
+      'Per partition and consumer group: new messages wait this many seconds, counted from the ' +
+      'oldest of them, then go out together, so a burst arrives as one batch. Writes that keep ' +
+      'coming do not extend the wait.',
   },
   {
     key: 'retentionEnabled',

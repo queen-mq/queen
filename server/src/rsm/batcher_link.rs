@@ -678,6 +678,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         Some(Launched {
             rx,
             replies: reply.into_iter().collect(),
+            hooks: vec![None; n],
             received: vec![None; n],
             arrivals: Vec::new(),
             txn_ids: vec![None; n],

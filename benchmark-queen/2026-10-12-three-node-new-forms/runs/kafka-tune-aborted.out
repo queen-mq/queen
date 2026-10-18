@@ -1,0 +1,8 @@
+[15:07:01] reformat md0 as XFS on the brokers
+  kafka    <ip>     rc=0  [2026-10-14T15:07:31Z] install queen-bench-1.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 already in
+  kafka    <ip>     rc=0  [2026-10-14T15:07:31Z] install queen-bench-2.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 already in
+  kafka    <ip>     rc=0  [2026-10-14T15:07:31Z] install queen-bench-3.europe-west1-b.c.<gcp-project>.internal: Kafka 4.3.1 already in
+  check    <ip>     rc=0  listening
+  check    <ip>     rc=0  listening
+  check    <ip>     rc=0  listening
+[15:07:32] start 1x100-3000k-gcp24-xfs-t24 3000000 TOPICS=1 PARTITIONS=100 CONSUMERS=11 KPROPS=num.io.threads=24,num.network.threads=12,num.replica.fetchers=12 (brokers fs/dirty_background_bytes: ext4:::rw,noatime,lazytime,stripe=512/1073741824 ext4:::rw,noatime,lazytime,stripe=512/1073741824 ext4:::rw,noatime,lazytime,stripe=512/1073741824)

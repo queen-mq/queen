@@ -382,6 +382,8 @@ impl RaftFacade {
                 stored_forms: None,
                 pop_frames: false,
                 fetch_max_bytes: None,
+                ordered: None,
+                ordered_group: None,
             };
             self.submit_effects(
                 &chunk_ctx,

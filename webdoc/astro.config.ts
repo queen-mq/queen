@@ -23,7 +23,7 @@ import { sitemapLastmod } from "./src/lib/sitemap-lastmod";
 // homepage) and every page's isPartOf carry, through patches/ and
 // DocsLayout.astro, so consumers merge them into one site.
 const DESCRIPTION =
-  "A transactional event broker in one binary: one ordered partition per entity, and the ack, the state change, the next events and the timer of each step commit as one entry, replicated with Raft.";
+  "An open-source distributed message broker where partitions are for ordering, not scaling: one ordered partition per entity, and every step one commit, replicated with Raft.";
 
 const structuredData = {
   "@context": "https://schema.org",
