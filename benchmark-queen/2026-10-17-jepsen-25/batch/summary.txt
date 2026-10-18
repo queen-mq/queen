@@ -1,0 +1,28 @@
+2026-10-18T13:58:42Z start b-w1-kill: --workload log --batch-sends 8 --nemesis kill --time-limit 300 --rate 200
+2026-10-18T14:04:32Z done  b-w1-kill: valid store=/root/jepsen-25/store/queen-log-kill_t=one,primaries,majority,all_batch=8_offload=on_lanes=16/2026-10-18T13:58:50.061860549Z log=/root/runs-25-batch/b-w1-kill.log
+2026-10-18T14:04:32Z start b-w1-part: --workload log --batch-sends 8 --nemesis partition --time-limit 300 --rate 200
+2026-10-18T14:10:32Z done  b-w1-part: valid store=/root/jepsen-25/store/queen-log-partition_p=one,primaries,majority,majorities-ring_batch=8_offload=on_lanes=16/2026-10-18T14:04:39.345448982Z log=/root/runs-25-batch/b-w1-part.log
+2026-10-18T14:10:32Z start b-w1-pause: --workload log --batch-sends 8 --nemesis pause --time-limit 300 --rate 200
+2026-10-18T14:22:33Z done  b-w1-pause: valid store=/root/jepsen-25/store/queen-log-pause_t=one,primaries,majority,all_batch=8_offload=on_lanes=16/2026-10-18T14:10:40.561696907Z log=/root/runs-25-batch/b-w1-pause.log
+2026-10-18T14:22:33Z start b-w1-lz-kill: --workload log --batch-sends 8 --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+2026-10-18T14:28:23Z done  b-w1-lz-kill: valid store=/root/jepsen-25/store/queen-log-kill_t=one,primaries,majority,all_batch=8_lazyfs_offload=on_lanes=16/2026-10-18T14:22:40.426045014Z log=/root/runs-25-batch/b-w1-lz-kill.log
+2026-10-18T14:28:23Z start b-w1-leader-deaf: --workload log --batch-sends 8 --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-18T14:34:23Z done  b-w1-leader-deaf: valid store=/root/jepsen-25/store/queen-log-leader-deaf_batch=8_offload=on_lanes=16/2026-10-18T14:28:31.281859942Z log=/root/runs-25-batch/b-w1-leader-deaf.log
+2026-10-18T14:34:23Z start b-w1-restart: --workload log --batch-sends 8 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-18T14:40:23Z done  b-w1-restart: valid store=/root/jepsen-25/store/queen-log-restart_batch=8_offload=on_lanes=16/2026-10-18T14:34:31.388184407Z log=/root/runs-25-batch/b-w1-restart.log
+2026-10-18T14:40:23Z start b-w1-member-snap: --workload log --batch-sends 8 --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+2026-10-18T14:46:23Z done  b-w1-member-snap: valid store=/root/jepsen-25/store/queen-log-kill,membership_t=one,primaries,majority,all_batch=8_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=5/2026-10-18T14:40:31.077124823Z log=/root/runs-25-batch/b-w1-member-snap.log
+2026-10-18T14:46:23Z start b-w1-clock: --workload log --batch-sends 8 --nemesis clock --time-limit 300 --rate 200
+2026-10-18T14:52:29Z done  b-w1-clock: valid store=/root/jepsen-25/store/queen-log-clock_t=one,primaries,majority,all_batch=8_offload=on_lanes=16/2026-10-18T14:46:30.819515827Z log=/root/runs-25-batch/b-w1-clock.log
+2026-10-18T14:52:29Z start b-w1-rw-kill: --workload log --batch-sends 8 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-18T14:58:09Z done  b-w1-rw-kill: valid store=/root/jepsen-25/store/queen-log-kill_t=one,primaries,majority,all_batch=8_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-18T14:52:36.910215633Z log=/root/runs-25-batch/b-w1-rw-kill.log
+2026-10-18T14:58:09Z start b-w6-kill: --workload dedup --batch-sends 6 --nemesis kill --time-limit 300 --rate 200
+2026-10-18T15:03:44Z done  b-w6-kill: valid store=/root/jepsen-25/store/queen-dedup-kill_t=one,primaries,majority,all_batch=6_offload=on_lanes=16/2026-10-18T14:58:16.629925344Z log=/root/runs-25-batch/b-w6-kill.log
+2026-10-18T15:03:44Z start b-w6-part: --workload dedup --batch-sends 6 --nemesis partition --time-limit 300 --rate 200
+2026-10-18T15:09:19Z done  b-w6-part: valid store=/root/jepsen-25/store/queen-dedup-partition_p=one,primaries,majority,majorities-ring_batch=6_offload=on_lanes=16/2026-10-18T15:03:52.516619232Z log=/root/runs-25-batch/b-w6-part.log
+2026-10-18T15:09:19Z start b-w6-restart: --workload dedup --batch-sends 6 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-18T15:14:54Z done  b-w6-restart: valid store=/root/jepsen-25/store/queen-dedup-restart_batch=6_offload=on_lanes=16/2026-10-18T15:09:26.650447438Z log=/root/runs-25-batch/b-w6-restart.log
+2026-10-18T15:14:54Z start b-w6-lz-kill: --workload dedup --batch-sends 6 --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+2026-10-18T15:20:30Z done  b-w6-lz-kill: valid store=/root/jepsen-25/store/queen-dedup-kill_t=one,primaries,majority,all_batch=6_lazyfs_offload=on_lanes=16/2026-10-18T15:15:01.978569667Z log=/root/runs-25-batch/b-w6-lz-kill.log
+2026-10-18T15:20:30Z matrix matrix-24-batch.txt finished
+2026-10-18T15:20:30Z ALL DONE matrix-24-batch.txt

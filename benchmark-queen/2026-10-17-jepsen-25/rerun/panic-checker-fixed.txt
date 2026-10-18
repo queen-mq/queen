@@ -1,0 +1,46 @@
+== store/queen-log-corrupt_c=qlog,store,state_mix_offload=on_lanes=16/2026-10-18T02:48:19.525840455Z
+{:fixed
+ {:valid? true,
+  :count 0,
+  :matches [],
+  :excused
+  [{:node "n2",
+    :line
+    "2026-10-18T02:50:21.838455521Z ERROR boot: FATAL: raft storage failed to open: open the openraft replicator at /opt/queen/data: queue logs' durable tail 10062 is BEHIND the store's qlog-durable index 10069: a committed record is missing (NA-QLOG-I1)"}
+   {:node "n2",
+    :line
+    "2026-10-18T02:51:46.44275018Z ERROR boot: FATAL: raft storage failed to open: open the openraft replicator at /opt/queen/data: queue logs' durable tail 17976 is BEHIND the store's qlog-durable index 17982: a committed record is missing (NA-QLOG-I1)"}
+   {:node "n2",
+    :line
+    "2026-10-18T02:52:48.755688545Z ERROR boot: FATAL: raft storage failed to open: open the openraft replicator at /opt/queen/data: queue logs' durable tail 23505 is BEHIND the store's qlog-durable index 23508: a committed record is missing (NA-QLOG-I1)"}]},
+ :without-corrupt-ops
+ {:valid? false,
+  :count 3,
+  :matches
+  [{:node "n2",
+    :line
+    "2026-10-18T02:50:21.838455521Z ERROR boot: FATAL: raft storage failed to open: open the openraft replicator at /opt/queen/data: queue logs' durable tail 10062 is BEHIND the store's qlog-durable index 10069: a committed record is missing (NA-QLOG-I1)"}
+   {:node "n2",
+    :line
+    "2026-10-18T02:51:46.44275018Z ERROR boot: FATAL: raft storage failed to open: open the openraft replicator at /opt/queen/data: queue logs' durable tail 17976 is BEHIND the store's qlog-durable index 17982: a committed record is missing (NA-QLOG-I1)"}
+   {:node "n2",
+    :line
+    "2026-10-18T02:52:48.755688545Z ERROR boot: FATAL: raft storage failed to open: open the openraft replicator at /opt/queen/data: queue logs' durable tail 23505 is BEHIND the store's qlog-durable index 23508: a committed record is missing (NA-QLOG-I1)"}],
+  :excused []}}
+== store/queen-log-corrupt_c=qlog,store,state_mix_offload=on_lanes=16/2026-10-18T15:21:43.888969923Z
+{:fixed
+ {:valid? true,
+  :count 0,
+  :matches [],
+  :excused
+  [{:node "n5",
+    :line
+    "2026-10-18T15:25:29.410069038Z ERROR boot: FATAL: raft storage failed to open: open the openraft replicator at /opt/queen/data: queue logs' durable tail 19279 is BEHIND the store's qlog-durable index 19280: a committed record is missing (NA-QLOG-I1)"}]},
+ :without-corrupt-ops
+ {:valid? false,
+  :count 1,
+  :matches
+  [{:node "n5",
+    :line
+    "2026-10-18T15:25:29.410069038Z ERROR boot: FATAL: raft storage failed to open: open the openraft replicator at /opt/queen/data: queue logs' durable tail 19279 is BEHIND the store's qlog-durable index 19280: a committed record is missing (NA-QLOG-I1)"}],
+  :excused []}}
