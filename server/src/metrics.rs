@@ -218,6 +218,12 @@ pub struct QueueCounters {
     // attribution happens at flush time in syscollect.rs.
     pub conflated_count: AtomicU64,
     pub conflation_conflict_count: AtomicU64,
+    // Records the in-process Kafka facade's Fetch answers carried from this
+    // queue: a Kafka consumer's reads, which no pop counts. A fetch takes no lease and
+    // is acked by nothing, so this is NOT a delivery: two Kafka groups reading
+    // one topic read every record twice, and a client that re-reads (a seek, a
+    // rebalance) counts again.
+    pub fetched: AtomicU64,
 }
 
 /// A per-queue snapshot the collector diffs into per-minute deltas.
@@ -238,6 +244,9 @@ pub struct QueueSnap {
     /// PLAN_CONFLATION §6.1: the per-queue top-N `rates` line reports this as a
     /// windowed rate for a conflating queue (0 everywhere else).
     pub conflated: u64,
+    /// Records served to the in-process Kafka facade's fetches
+    /// ([`PerQueue::add_fetched`]).
+    pub fetched: u64,
 }
 
 #[derive(Default)]
@@ -272,6 +281,23 @@ impl PerQueue {
         self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
             .pop_count
             .fetch_add(msgs, Ordering::Relaxed);
+    }
+    /// Records one Kafka Fetch answer of the in-process facade carried from
+    /// `queue`, told by the facade once its answer is built
+    /// (`LocalDispatch::note_fetched` in kafka_inproc.rs): one call per queue
+    /// per Fetch, never per record. Not the broker's read — the facade asks for
+    /// more than its answer may hold and reads what it trimmed again on the
+    /// next poll. Nothing else feeds it: the HTTP `/api/v1/fetch` route is what
+    /// supervisors and watchers probe, and the S3 sink reads its own copy of
+    /// the log; counting either would bury the consumers' reads under
+    /// housekeeping.
+    pub fn add_fetched(&self, tenant: &str, queue: &str, n: u64) {
+        if n == 0 {
+            return;
+        }
+        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+            .fetched
+            .fetch_add(n, Ordering::Relaxed);
     }
     pub fn add_pop_empty(&self, tenant: &str, queue: &str) {
         self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
@@ -359,6 +385,7 @@ impl PerQueue {
                         lag_sum_ms: c.lag_sum_ms.load(Ordering::Relaxed),
                         lag_count: c.lag_count.load(Ordering::Relaxed),
                         conflated: c.conflated_count.load(Ordering::Relaxed),
+                        fetched: c.fetched.load(Ordering::Relaxed),
                     },
                 )
             })
@@ -2188,5 +2215,29 @@ mod kv_timers_tests {
         let (rows, _bytes, pending) = m.kvt.usage_totals();
         assert_eq!(rows, 1_000_900);
         assert_eq!(pending, 990);
+    }
+}
+
+#[cfg(test)]
+mod per_queue_tests {
+    use super::*;
+
+    /// A Kafka fetch's records land on their own counter of their (tenant,
+    /// queue), apart from the pops: a fetch is not a delivery, and the views
+    /// that read `pop_messages` as one must not see it there.
+    #[test]
+    fn fetched_records_are_their_own_counter() {
+        let pq = PerQueue::default();
+        pq.add_fetched("t", "orders", 500);
+        pq.add_fetched("t", "orders", 12);
+        pq.add_fetched("t", "idle", 0);
+        pq.add_pop("t", "orders", 3);
+        let snap = pq.snapshot();
+        let orders = snap[&crate::handlers::tenant_queue_key("t", "orders")];
+        assert_eq!(orders.fetched, 512);
+        assert_eq!(orders.pop_count, 3);
+        // An empty fetch is no key: a queue a consumer only polls stays out of
+        // the collector's rows.
+        assert!(!snap.contains_key(&crate::handlers::tenant_queue_key("t", "idle")));
     }
 }

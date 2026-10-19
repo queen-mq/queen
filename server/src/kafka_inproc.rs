@@ -420,6 +420,22 @@ impl LocalDispatch for RouterDispatch {
                 .map_err(|e| format!("the broker task serving an in-process call ended: {e}"))?
         })
     }
+
+    /// The dashboard's count of Kafka reads (`QueueRow::fetch_messages`): the
+    /// records one Fetch answer CARRIED, per queue, as the facade tells them
+    /// once its answer is built. Not counted at [`Self::fetch_records`]: the
+    /// facade asks for more than its answer may hold and reads the rest again
+    /// on the next poll, so a count there would grow with the re-reads. The
+    /// tenant is the one [`Self::fetch_records`] reads under.
+    fn note_fetched(&self, _bearer: Option<&str>, counts: &[(String, u64)]) {
+        let Some(m) = crate::metrics::global() else {
+            return;
+        };
+        let tenant = crate::tenant::Tenant::default_tenant();
+        for (queue, n) in counts {
+            m.per_queue.add_fetched(tenant.as_str(), queue, *n);
+        }
+    }
 }
 
 /// `QUEEN_KAFKA_OFFSET_STORE`: where the IN-PROCESS facade keeps committed
@@ -889,6 +905,41 @@ mod tests {
             role_read_only: "read-only".into(),
             role_write_only: "write-only".into(),
         })
+    }
+
+    /// What a Fetch answer carried, as the facade tells it
+    /// ([`queen_kafka::queen::QueenApi::note_fetched`]), is the dashboard's
+    /// count of Kafka reads: per queue, under the tenant the record path reads
+    /// with, through the client the facade holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fetch_answer_is_counted_as_the_facade_tells_it() {
+        if crate::metrics::global().is_none() {
+            crate::metrics::install_global(Arc::new(crate::metrics::Metrics::new()));
+        }
+        let fetched = |q: &str| {
+            crate::metrics::global()
+                .expect("process metrics")
+                .per_queue
+                .snapshot()
+                .get(&crate::handlers::tenant_queue_key(
+                    crate::tenant::Tenant::default_tenant().as_str(),
+                    q,
+                ))
+                .map_or(0, |c| c.fetched)
+        };
+        let client = HttpQueen::local(Arc::new(RouterDispatch {
+            // Nothing reaches the router: a note is a counter, not a call.
+            router: axum::Router::new(),
+            broker: tokio::runtime::Handle::current(),
+            kv: None,
+        }));
+        client.note_fetched(
+            &[("kinproc-noted-a".into(), 5), ("kinproc-noted-b".into(), 2)],
+            Some("token"),
+        );
+        client.note_fetched(&[("kinproc-noted-a".into(), 3)], None);
+        assert_eq!(fetched("kinproc-noted-a"), 8);
+        assert_eq!(fetched("kinproc-noted-b"), 2);
     }
 
     /// The facade's own KV goes straight to the state machine — no router,

@@ -141,6 +141,14 @@ pub struct QueueNow {
 /// always `null`: nothing has ever written that column. Rates divide by the
 /// NOMINAL bucket width, and the six-hour width (ranges over 7 days) floors
 /// to the hour (`EXTRACT(minute FROM t) % 360` is the minute itself).
+///
+/// `fetchMessages` / `fetchPerSecond` are a raft-mode addition: the records
+/// the in-process Kafka facade's fetches read, which is how a Kafka consumer
+/// reads and which `popMessages` never counted. They are reads, not
+/// deliveries — no lease, no ack, and one record read by two Kafka groups
+/// counts twice — so they are their own keys, outside `popMessages` and the
+/// pop-weighted lag. The served answer also carries `backlog` and
+/// `nodesMissing`, added by the facade around this view.
 pub fn queue_ops_json(
     filters: &Map<String, Value>,
     now_us: i64,
@@ -179,6 +187,7 @@ pub fn queue_ops_json(
                 "ackSuccess": int(r.ack_ok),
                 "ackFailed": int(r.ack_fail),
                 "transactions": int(r.trx),
+                "fetchMessages": int(r.fetch),
                 "partitionsCreated": int(r.created),
                 "partitionsDeleted": int(r.deleted),
                 "partitionCount": Value::Null,
@@ -190,6 +199,7 @@ pub fn queue_ops_json(
                 "popPerSecond": win.per_second(r.pop),
                 "ackPerSecond": win.per_second(r.ack_ok + r.ack_fail),
                 "emptyPerSecond": win.per_second(r.pop_empty),
+                "fetchPerSecond": win.per_second(r.fetch),
                 "parkedCount": avg_2dp(r.parked_sum, r.rows),
             })
         })
@@ -452,6 +462,11 @@ pub fn workload_json(
 
 /// The `base` object of one workload group (`built`, 019:1876-1921):
 /// `{queues, window, series, now}` over the member queues.
+///
+/// Raft-mode additions: `window.fetchMessages` and `series.fetch`, the
+/// records Kafka clients fetched (see [`queue_ops_json`]); and a queue counts
+/// in `queuesActive` when it was fetched from, so a topic only Kafka
+/// consumers read is not reported as idle.
 fn group_base(
     members: &[usize],
     per_queue: &[BTreeMap<i64, Rolled>],
@@ -486,7 +501,9 @@ fn group_base(
         if !buckets.is_empty() {
             touched += 1;
         }
-        if qw.push_msg + qw.pop > 0 {
+        // A topic only Kafka clients read is active too: its reads are
+        // fetches, which no pop counts.
+        if qw.push_msg + qw.pop + qw.fetch > 0 {
             active += 1;
         }
         w.merge(&qw);
@@ -494,6 +511,7 @@ fn group_base(
 
     let mut s_push = Vec::with_capacity(axis.len());
     let mut s_pop = Vec::with_capacity(axis.len());
+    let mut s_fetch = Vec::with_capacity(axis.len());
     let mut s_empty = Vec::with_capacity(axis.len());
     let mut s_fail = Vec::with_capacity(axis.len());
     let mut s_parked = Vec::with_capacity(axis.len());
@@ -506,6 +524,7 @@ fn group_base(
                 for s in [
                     &mut s_push,
                     &mut s_pop,
+                    &mut s_fetch,
                     &mut s_empty,
                     &mut s_fail,
                     &mut s_parked,
@@ -518,6 +537,7 @@ fn group_base(
             Some(e) => {
                 s_push.push(int(e.push_msg));
                 s_pop.push(int(e.pop));
+                s_fetch.push(int(e.fetch));
                 s_empty.push(int(e.pop_empty));
                 s_fail.push(int(e.ack_fail));
                 s_parked.push(e.parked.round(2).to_json());
@@ -554,6 +574,7 @@ fn group_base(
             "pushMessages": int(w.push_msg),
             "pushRequests": int(w.push_req),
             "popMessages": int(w.pop),
+            "fetchMessages": int(w.fetch),
             "popEmpty": int(w.pop_empty),
             "ackRequests": int(w.ack_req),
             "ackSuccess": int(w.ack_ok),
@@ -572,6 +593,7 @@ fn group_base(
         json!({
             "push": s_push,
             "pop": s_pop,
+            "fetch": s_fetch,
             "popEmpty": s_empty,
             "ackFailed": s_fail,
             "parked": s_parked,
@@ -818,6 +840,8 @@ struct LagRow {
     ack_fail: i64,
     trx: i64,
     conflated: i64,
+    /// `fetch_messages`: records the Kafka facade's fetches read.
+    fetch: i64,
     created: i64,
     deleted: i64,
     avg_lag: i64,
@@ -837,6 +861,7 @@ impl LagRow {
             ack_fail: r.ack_failed,
             trx: r.transactions,
             conflated: r.conflated,
+            fetch: r.fetch_messages,
             created: 0,
             deleted: 0,
             avg_lag: r.avg_lag_ms,
@@ -908,6 +933,10 @@ struct Rolled {
     ack_fail: i128,
     trx: i128,
     conflated: i128,
+    /// Kafka-fetched records ([`QueueRow::fetch_messages`]). Never part of
+    /// `pop` nor of the lag: a fetch is no pop, measures no lag at delivery,
+    /// and is counted once per Kafka group that reads the record.
+    fetch: i128,
     created: i128,
     deleted: i128,
     /// `SUM(avg_lag_ms * pop_count)`.
@@ -934,6 +963,7 @@ impl Rolled {
         self.ack_fail += i128::from(r.ack_fail);
         self.trx += i128::from(r.trx);
         self.conflated += i128::from(r.conflated);
+        self.fetch += i128::from(r.fetch);
         self.created += i128::from(r.created);
         self.deleted += i128::from(r.deleted);
         self.lag_weight += i128::from(r.avg_lag) * i128::from(r.pop);
@@ -956,6 +986,7 @@ impl Rolled {
         self.ack_fail += o.ack_fail;
         self.trx += o.trx;
         self.conflated += o.conflated;
+        self.fetch += o.fetch;
         self.created += o.created;
         self.deleted += o.deleted;
         self.lag_weight += o.lag_weight;
@@ -1877,12 +1908,14 @@ mod tests {
                 "bucket": "2026-09-24T09:00:00Z", "queueName": "a",
                 "pushRequests": 3, "pushMessages": 30, "popMessages": 30, "popEmpty": 5,
                 "ackRequests": 4, "ackSuccess": 18, "ackFailed": 2, "transactions": 1,
+                "fetchMessages": 0,
                 "partitionsCreated": 1, "partitionsDeleted": 2, "partitionCount": null,
                 // pop-weighted: (100·20 + 200·10) / 30
                 "avgLagMs": pg("133.3333333333333333"),
                 "maxLagMs": 900,
                 "pushPerSecond": pg("0.10"), "popPerSecond": pg("0.10"),
                 "ackPerSecond": pg("0.07"), "emptyPerSecond": pg("0.02"),
+                "fetchPerSecond": pg("0.00"),
                 // AVG over three rows: 4, 6 and the churn-only minute's 0.
                 "parkedCount": pg("3.33"),
             })
@@ -2113,6 +2146,7 @@ mod tests {
             t["window"],
             json!({
                 "pushMessages": 45, "pushRequests": 10, "popMessages": 70, "popEmpty": 56,
+                "fetchMessages": 0,
                 "ackRequests": 7, "ackSuccess": 68, "ackFailed": 2, "transactions": 8,
                 "conflated": 0, "partitionsCreated": 1, "partitionsDeleted": 2,
                 // Per queue AVG across time, then SUM: (4+6)/2 + (2+10)/2.
@@ -2418,6 +2452,67 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
     }
 
+    /// A topic only Kafka clients read: its reads are fetches, their own keys
+    /// and series, never pops (no lag sample, no share of the deliveries), and
+    /// the queue is active rather than idle. The fetches of two nodes add.
+    #[test]
+    fn kafka_fetches_are_reads_of_their_own() {
+        let (mut queues, mut rows, lifecycle) = ops_tenant();
+        queues.push(QueueNow {
+            meta: meta("kafka.topic", Some("kafka"), None),
+            pending: 3,
+            ..Default::default()
+        });
+        rows.extend(merge_queue_rows([
+            QueueRow {
+                fetch_messages: 1_200,
+                ..qrow("2026-09-09T08:05:00Z", "kafka.topic")
+            },
+            QueueRow {
+                fetch_messages: 300,
+                ..qrow("2026-09-09T08:05:00Z", "kafka.topic")
+            },
+        ]));
+        let v = workload_json(&ops_window(), now(), &rows, &lifecycle, &[], &queues).expect("200");
+        let t = &v["tenant"];
+        assert_eq!(t["window"]["fetchMessages"], json!(1500));
+        // The deliveries and their lag are the pops' alone.
+        assert_eq!(t["window"]["popMessages"], json!(70));
+        assert_eq!(t["window"]["avgLagMs"], json!(86));
+        assert_eq!(t["now"]["queuesActive"], json!(3));
+        assert_eq!(t["now"]["queuesTouched"], json!(3));
+        assert_eq!(t["series"]["fetch"][5], json!(1500));
+
+        let kafka = v["rows"]
+            .as_array()
+            .and_then(|r| r.iter().find(|r| r["key"] == "kafka"))
+            .cloned()
+            .expect("the kafka namespace row");
+        assert_eq!(kafka["window"]["fetchMessages"], json!(1500));
+        assert_eq!(kafka["window"]["popMessages"], json!(0));
+        assert_eq!(kafka["window"]["avgLagMs"], Value::Null);
+        assert_eq!(kafka["now"]["queuesActive"], json!(1));
+        let at = |s: &str, i: usize| kafka["series"][s][i].clone();
+        assert_eq!(
+            [at("fetch", 0), at("fetch", 5), at("pop", 5)],
+            [Value::Null, json!(1500), json!(0)]
+        );
+
+        let metas: Vec<QueueMeta> = queues.iter().map(|q| q.meta.clone()).collect();
+        let ops = queue_ops_json(&ops_window(), now(), &rows, &lifecycle, &metas);
+        let row = ops["series"]
+            .as_array()
+            .and_then(|s| s.iter().find(|r| r["queueName"] == "kafka.topic"))
+            .cloned()
+            .expect("the topic's bucket");
+        assert_eq!(row["fetchMessages"], json!(1500));
+        // 1500 over a one-minute bucket.
+        assert_eq!(row["fetchPerSecond"], pg("25.00"));
+        assert_eq!(row["popMessages"], json!(0));
+        assert_eq!(row["popPerSecond"], pg("0.00"));
+        assert_eq!(row["avgLagMs"], Value::Null);
+    }
+
     fn keys(v: &Value) -> BTreeSet<String> {
         v.as_object()
             .map(|o| o.keys().cloned().collect())
@@ -2504,6 +2599,7 @@ mod tests {
                 "pushMessages",
                 "pushRequests",
                 "popMessages",
+                "fetchMessages",
                 "popEmpty",
                 "ackRequests",
                 "ackSuccess",
@@ -2522,6 +2618,7 @@ mod tests {
             set(&[
                 "push",
                 "pop",
+                "fetch",
                 "popEmpty",
                 "ackFailed",
                 "parked",
@@ -2600,6 +2697,7 @@ mod tests {
                 "ackSuccess",
                 "ackFailed",
                 "transactions",
+                "fetchMessages",
                 "partitionsCreated",
                 "partitionsDeleted",
                 "partitionCount",
@@ -2609,6 +2707,7 @@ mod tests {
                 "popPerSecond",
                 "ackPerSecond",
                 "emptyPerSecond",
+                "fetchPerSecond",
                 "parkedCount",
             ])
         );

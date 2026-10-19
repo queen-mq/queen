@@ -92,6 +92,25 @@ pub struct QueueRow {
     /// Minute-average of the node's 1 Hz parked long-poll samples.
     pub parked_count: i32,
     pub conflated: i64,
+    /// Records the in-process Kafka facade's Fetch answers carried from the
+    /// queue ([`crate::metrics::PerQueue::add_fetched`]): a Kafka consumer's reads,
+    /// which no pop counts. Not a delivery — a fetch takes no lease and nothing
+    /// acks it, and two Kafka groups reading one topic count its records twice.
+    ///
+    /// `#[serde(default)]`, as [`BacklogRow::queue`]: rows are journaled in
+    /// each node's dash.db and gathered from peers as JSON, so during a
+    /// rolling upgrade a new binary reads an old node's rows (no field: 0) and
+    /// an old binary a new node's (an unknown field, which serde skips — no row
+    /// here denies unknown fields, and none may). Left out when 0: most queues
+    /// are never fetched from, and their rows keep the size they had in
+    /// dash.db and in every gather.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fetch_messages: i64,
+}
+
+/// `skip_serializing_if` for a counter that is usually 0.
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 /// `queen.queue_parked_replica`: one row per node, queue and minute with any
@@ -167,6 +186,8 @@ pub struct RetentionRow {
 /// `(bucket_us, tenant, queue)`: counters add, `avg_lag_ms` is the
 /// `lag_count`-weighted mean, `max_lag_ms` the max,
 /// `parked_count` adds (each node's minute-average of its own long-polls).
+/// `fetch_messages` adds too: a Kafka fetch is served by whichever node the
+/// consumer is connected to, so one queue's fetches are spread across nodes.
 /// The result is sorted by `(bucket_us, tenant, queue)`.
 pub fn merge_queue_rows(rows: impl IntoIterator<Item = QueueRow>) -> Vec<QueueRow> {
     use std::collections::BTreeMap;
@@ -196,6 +217,7 @@ pub fn merge_queue_rows(rows: impl IntoIterator<Item = QueueRow>) -> Vec<QueueRo
                 m.ack_failed += r.ack_failed;
                 m.parked_count += r.parked_count;
                 m.conflated += r.conflated;
+                m.fetch_messages += r.fetch_messages;
             }
         }
     }
@@ -387,5 +409,96 @@ mod tests {
         assert_eq!(m[0].avg_lag_ms, (100 + 400 * 3) / 4);
         assert_eq!(m[0].max_lag_ms, 500);
         assert_eq!(m[0].lag_count, 4);
+    }
+
+    #[test]
+    fn merge_adds_the_kafka_fetches_of_every_node() {
+        let a = QueueRow {
+            bucket_us: 60_000_000,
+            tenant: "t".into(),
+            queue: "topic".into(),
+            fetch_messages: 1_200,
+            ..Default::default()
+        };
+        let b = QueueRow {
+            fetch_messages: 300,
+            push_messages: 9,
+            ..a.clone()
+        };
+        let m = merge_queue_rows([a, b]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].fetch_messages, 1_500);
+        assert_eq!(m[0].pop_messages, 0, "a fetch is not a pop");
+    }
+
+    /// A rolling upgrade, both ways: the dash.db journal and the peer gather
+    /// carry rows as JSON between binaries of two versions.
+    #[test]
+    fn queue_rows_cross_a_rolling_upgrade() {
+        // An old node's row, as it wrote it: no `fetch_messages`.
+        let old = r#"{"bucket_us":60000000,"tenant":"t","queue":"q","pop_messages":4,
+            "push_requests":1,"push_messages":4,"pop_empty":0,"transactions":0,
+            "ack_requests":1,"ack_success":4,"ack_failed":0,"avg_lag_ms":7,
+            "max_lag_ms":9,"lag_count":4,"parked_count":0,"conflated":0}"#;
+        let r: QueueRow = serde_json::from_str(old).expect("an old row reads");
+        assert_eq!(r.fetch_messages, 0);
+        assert_eq!(r.pop_messages, 4);
+
+        // A new node's row, read by the old binary: its QueueRow is this one
+        // without the field (copied here as it stood).
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        struct OldQueueRow {
+            bucket_us: i64,
+            tenant: String,
+            queue: String,
+            pop_messages: i64,
+            push_requests: i64,
+            push_messages: i64,
+            pop_empty: i64,
+            transactions: i64,
+            ack_requests: i64,
+            ack_success: i64,
+            ack_failed: i64,
+            avg_lag_ms: i64,
+            max_lag_ms: i64,
+            lag_count: i64,
+            parked_count: i32,
+            conflated: i64,
+        }
+        let new = QueueRow {
+            bucket_us: 60_000_000,
+            tenant: "t".into(),
+            queue: "q".into(),
+            push_messages: 4,
+            fetch_messages: 1_500,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&new).expect("encode");
+        assert!(json.contains("\"fetch_messages\":1500"));
+        let o: OldQueueRow = serde_json::from_str(&json).expect("a new row reads on an old binary");
+        assert_eq!((o.queue.as_str(), o.push_messages), ("q", 4));
+        // And a whole gathered answer, the way a peer's rows arrive.
+        let rows = serde_json::json!({ "queue": [serde_json::from_str::<serde_json::Value>(old).unwrap()] });
+        let back: crate::rsm::dashboard::store::Rows =
+            serde_json::from_value(rows).expect("old rows gather");
+        assert_eq!(back.queue[0].fetch_messages, 0);
+    }
+
+    /// A row nobody fetched from is written as it was before the field: the
+    /// same bytes in dash.db and in a gather, and the same row read back.
+    #[test]
+    fn a_row_without_kafka_fetches_keeps_its_old_shape() {
+        let row = QueueRow {
+            bucket_us: 60_000_000,
+            tenant: "t".into(),
+            queue: "q".into(),
+            push_messages: 4,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&row).expect("encode");
+        assert!(!json.contains("fetch_messages"), "{json}");
+        let back: QueueRow = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, row);
     }
 }

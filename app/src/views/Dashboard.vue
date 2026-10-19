@@ -39,10 +39,18 @@
           <p class="hero-sum">
             <template v-if="pushNow !== null">{{ formatNumber(queues.length) }} {{ queues.length === 1 ? 'queue takes' : 'queues take' }} in <b>{{ fmtMsgRate(pushNow) }}</b> and deliver <b>{{ fmtMsgRate(popNow) }}</b> to {{ formatNumber(consumers.length) }} consumer {{ consumers.length === 1 ? 'group' : 'groups' }}.</template>
             <template v-else>No traffic samples in the last {{ selectedRange }}.</template>
+            <!-- Kafka consumers read by fetch, which is no delivery: a clause of its own. -->
+            <template v-if="fetchNow !== null"> Kafka clients fetch <b>{{ fmtMsgRate(fetchNow) }}</b>.</template>
             <template v-if="pendingNow !== null"> The latest overview reports <b>{{ formatNumber(pendingNow) }} pending</b>, excluding in-flight work.</template>
             <template v-if="lagMaxSeconds !== null"> The oldest message has waited <b>{{ fmtLagSeconds(lagMaxSeconds) }}</b>.</template>
             <template v-if="ackAttempts > 0">{{ ' ' }}<b>{{ ackFailPct }}</b> of acks failed in this window.</template>
           </p>
+          <!-- The rates above are queue-ops'; a node that did not answer the
+               broker's gather took its share out of them (usePartial). The one
+               live region for it: the repeat by the Delivery tiles is quiet. -->
+          <div v-if="opsPartial" class="hero-partial">
+            <span class="chip chip-warn" role="status" :title="PARTIAL_TITLE"><span class="dot" />{{ opsPartial }}</span>
+          </div>
         </div>
 
         <QueueTriage
@@ -137,7 +145,7 @@
         :value-format="fmtRate"
         :loading="loadingOps"
         :error="opsError"
-        tooltip="Push / pop / ack rates for this tenant, summed across its queues (from queue-ops)."
+        tooltip="Push / pop / ack rates for this tenant, summed across its queues (from queue-ops). Kafka consumers read by fetch, charted as Fetch (Kafka): a fetch takes no lease and is never acked, and two Kafka groups reading one topic count its records twice."
         :selected="selectedMetric === 'throughput'"
         @select="selectMetric('throughput')"
       />
@@ -225,6 +233,7 @@
       <div class="sect-head">
         <h3 id="sect-tenant">Delivery and housekeeping</h3>
         <span>{{ actingTenantSlug || 'this tenant' }} · every queue</span>
+        <span v-if="opsPartial" class="chip chip-warn" aria-hidden="true" :title="PARTIAL_TITLE"><span class="dot" />{{ opsPartial }}</span>
       </div>
       <div class="tile-grid tile-grid-4">
         <MetricTile
@@ -301,6 +310,7 @@
         <h3 id="sect-cell">Cell</h3>
         <span class="mono">{{ actingCellSlug || 'unknown cell' }}</span>
         <span class="sect-scope">Shared by every tenant on this cell, not just {{ actingTenantSlug || 'this tenant' }}</span>
+        <span v-if="cellPartial" class="chip chip-warn" role="status" :title="PARTIAL_TITLE"><span class="dot" />{{ cellPartial }}</span>
       </div>
       <div class="tile-grid tile-grid-3">
         <MetricTile
@@ -520,6 +530,7 @@ import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
+import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
 import MetricTile from '@/components/MetricTile.vue'
 import PartitionSunflower, { MAX_SEEDS } from '@/components/PartitionSunflower.vue'
 import { routeSupport } from '@/stores/routeSupport'
@@ -610,6 +621,11 @@ const statusFailed    = computed(() => statusQ.error.value !== null)
 const queuesErrorText    = computed(() => describeApiError(queuesQ.error.value))
 const consumersErrorText = computed(() => describeApiError(consumersQ.error.value))
 
+// A node that did not answer the broker's gather (usePartial): queue-ops
+// feeds the tenant rows, status and system-metrics the cell's.
+const opsPartial  = computed(() => partialText(missingNodes(opsQ.data.value)))
+const cellPartial = computed(() => partialText(missingNodes(statusQ.data.value, sysQ.data.value)))
+
 // ---------------------------------------------------------------------------
 // TENANT history — queue-ops rolled up from one row per (queue, bucket) to one
 // row per bucket. This is the source for every unlabelled row on the page.
@@ -626,6 +642,10 @@ const history = computed(() => {
       b = {
         bucket: row.bucket,
         pushPerSecond: 0, popPerSecond: 0, ackPerSecond: 0,
+        // Kafka consumers' reads (queue-ops fetchMessages, a raft broker from
+        // 2.5.x): records fetched, not delivered — no lease, no ack, and once
+        // per Kafka group. Never folded into pop, nor into the lag or fill.
+        fetchPerSecond: 0, fetchMessages: 0,
         pushMessages: 0, popMessages: 0, ackSuccess: 0, ackFailed: 0, popEmpty: 0,
         partitionsCreated: 0, partitionsDeleted: 0,
         // parkedCount is already SUM-ed across workers per (queue, bucket);
@@ -639,6 +659,8 @@ const history = computed(() => {
     b.pushPerSecond += toNum(row.pushPerSecond) || 0
     b.popPerSecond  += toNum(row.popPerSecond)  || 0
     b.ackPerSecond  += toNum(row.ackPerSecond)  || 0
+    b.fetchPerSecond += toNum(row.fetchPerSecond) || 0
+    b.fetchMessages += toNum(row.fetchMessages) || 0
     b.pushMessages  += toNum(row.pushMessages)  || 0
     b.popMessages   += toNum(row.popMessages)   || 0
     b.ackSuccess    += toNum(row.ackSuccess)    || 0
@@ -701,6 +723,10 @@ const throughputSeries = computed(() => {
     { label: 'Push', data: h.map(x => toNum(x.pushPerSecond)) },
     { label: 'Pop',  data: h.map(x => toNum(x.popPerSecond)) },
     { label: 'Ack',  data: h.map(x => toNum(x.ackPerSecond)), color: semanticColors.ok.line },
+    // Only once a fetch is counted: a tenant without Kafka keeps three lines.
+    ...(h.some(x => x.fetchMessages > 0)
+      ? [{ label: 'Fetch (Kafka)', data: h.map(x => toNum(x.fetchPerSecond)) }]
+      : []),
   ]
 })
 const throughputPeak = computed(() => {
@@ -1275,7 +1301,7 @@ const focus = computed(() => {
     case 'retention': return { title: 'Retention', sub: 'messages removed by retention and eviction', series: retentionSeriesData.value, labels: retentionLabels.value, valueFormat: fmtCount, unit: 'msgs', error: retentionError.value }
     case 'eventLoop': return { title: 'Event loop', sub: 'scheduling delay, every tenant on this cell', series: elSeriesData.value, labels: statusChartLabels.value, valueFormat: (v) => v + ' ms', unit: 'ms', error: statusError.value }
     case 'cpu': return { title: 'Queen CPU', sub: 'the whole cell', series: cpuSeriesData.value, labels: cpuLabels.value, valueFormat: (v) => v.toFixed(1) + '%', unit: '%', error: cpuError.value }
-    default: return { title: 'Throughput', sub: 'push, pop and ack per second, summed across queues', series: throughputSeries.value, labels: chartLabels.value, valueFormat: fmtRate, unit: 'msgs / sec', error: opsError.value }
+    default: return { title: 'Throughput', sub: 'push, pop, ack and Kafka fetch per second, summed across queues', series: throughputSeries.value, labels: chartLabels.value, valueFormat: fmtRate, unit: 'msgs / sec', error: opsError.value }
   }
 })
 
@@ -1347,6 +1373,10 @@ const headline = computed(() => {
 // The sentence under the headline: only numbers the page already has.
 const pushNow = computed(() => latestFinite(history.value.map(x => x.pushPerSecond)))
 const popNow = computed(() => latestFinite(history.value.map(x => x.popPerSecond)))
+// Only when Kafka clients read in the window: a 0 would say nothing new.
+const fetchNow = computed(() => (
+  history.value.some(x => x.fetchMessages > 0) ? latestFinite(history.value.map(x => x.fetchPerSecond)) : null
+))
 const pendingNow = computed(() => (overviewFailed.value ? null : toNum(overview.value?.messages?.pending)))
 const ackAttempts = computed(() => ackSuccessTotal.value + ackFailedTotal.value)
 const ackFailPct = computed(() =>
@@ -1514,6 +1544,11 @@ onMounted(fetchAll)
   margin-right: 4px;
 }
 .meta-tag-cfl { color: var(--text-hi); }
+
+/* The partial-gather chip (usePartial): under the hero's sentence, and in a
+   section head the chip's ink rather than the head's grey. */
+.hero-partial { margin-top: 10px; }
+.sect-head > .chip-warn { color: var(--warn-400); font-size: 11px; }
 
 .card-foot {
   border-top: 1px solid var(--bd);

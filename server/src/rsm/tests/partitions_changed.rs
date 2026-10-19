@@ -1056,6 +1056,69 @@ async fn fetch_log_carries_the_routes_transaction_ids() {
     close(f, dir).await;
 }
 
+/// No read of the broker counts the dashboard's Kafka reads
+/// (`QueueRow::fetch_messages`): not the route (what supervisors and watchers
+/// probe), not `fetch_log` (the S3 sink's), and not `fetch_records` either —
+/// the Kafka facade's read, which asks for more than the facade's answer may
+/// carry and is asked again for what was trimmed. The facade tells the broker
+/// what its answer carried (`LocalDispatch::note_fetched`, kafka_inproc.rs,
+/// tested there).
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn no_read_of_the_broker_counts_kafka_fetches() {
+    if crate::metrics::global().is_none() {
+        crate::metrics::install_global(Arc::new(crate::metrics::Metrics::new()));
+    }
+    let fetched = |q: &str| {
+        crate::metrics::global()
+            .expect("process metrics")
+            .per_queue
+            .snapshot()
+            .get(&crate::handlers::tenant_queue_key(
+                crate::config::DEFAULT_TENANT,
+                q,
+            ))
+            .map_or(0, |c| c.fetched)
+    };
+    let dir = scratch("fetched");
+    let f = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let mut items: Vec<Value> = (0..4)
+        .map(|i| json!({"queue":"fetched-count","partition":"0","payload":{"i":i}}))
+        .collect();
+    items
+        .extend((4..7).map(|i| json!({"queue":"fetched-count","partition":"1","payload":{"i":i}})));
+    push(&f, items).await;
+
+    let (status, v) = api(
+        &f,
+        "POST",
+        "/api/v1/fetch",
+        None,
+        json!({"entries":[{"queue":"fetched-count","partition":"0","offset":0}]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    f.fetch_log(ctx(), from_zero("fetched-count", &["0", "1"]), 0, 1)
+        .await
+        .expect("fetch_log");
+    assert_eq!(
+        fetched("fetched-count"),
+        0,
+        "the route and fetch_log count nothing"
+    );
+
+    let read = f
+        .fetch_records(ctx(), from_zero("fetched-count", &["0", "1"]), 0, 1)
+        .await
+        .expect("fetch_records");
+    assert_eq!(read.iter().map(|e| e.records.len()).sum::<usize>(), 7);
+    assert_eq!(
+        fetched("fetched-count"),
+        0,
+        "a read is not what the facade's client was handed"
+    );
+    close(f, dir).await;
+}
+
 // ---------------------------------------------------------------------------
 // The fetch long poll's topic wake (2026-10-17)
 // ---------------------------------------------------------------------------

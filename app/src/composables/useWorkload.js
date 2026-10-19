@@ -19,11 +19,31 @@
 // a finding nobody can act on — the verdict useAttention gives it everywhere
 // else on the console. A Kafka topic is never read in queue mode either, so its
 // messages are not "pending with no consumer group".
+//
+// A Kafka consumer reads by FETCH, not by pop: `window.fetchMessages` and
+// `series.fetch` are the records the broker's Kafka facade handed to fetches
+// (a raft broker from 2.5.x; absent on an older one, read as 0). A fetch is a
+// read, not a delivery — no lease, no ack, and two Kafka groups reading one
+// topic count its records twice — so it never folds into `popMessages`, the
+// lag at pop or the fill. What it does change is whether a row was READ: a
+// topic only Kafka clients consume has no pops and must not look unread. That
+// is `reads` (deliveries + fetches), which the share, the ordering and the
+// fan-out use.
 
 /** Severity ladder. Higher wins; `mute` is "nothing to say". */
 import { THRESHOLDS, groupActivity } from './useSeverity.js'
 
 export const SEV_RANK = { bad: 3, warn: 2, ok: 1, ice: 0.5, mute: 0 }
+
+/** Records a Kafka client fetched in a window; 0 on a broker that does not count them. */
+export const fetchedOf = (w) => (Number.isFinite(w?.fetchMessages) ? w.fetchMessages : 0)
+
+/**
+ * Everything read off a row in a window: pop deliveries plus Kafka fetches.
+ * Both count once per consumer group that reads a message, so the sum is a
+ * like-for-like "how much was read", never "how many messages there were".
+ */
+export const readsOf = (w) => (w?.popMessages || 0) + fetchedOf(w)
 
 // A group's age against the two lag lines of its queue. `linesFor` is the
 // settings store's lookup (queue → the lines in force); without one, as in
@@ -148,7 +168,7 @@ export function severity(row) {
   else if (row.acks >= 20 && row.ackOk < 0.9) up('warn')
   if (w.maxLagMs !== null && w.maxLagMs >= 60000) up('warn')
   if (sev === 'mute') {
-    if (w.pushMessages + w.popMessages > 0) sev = 'ok'
+    if (w.pushMessages + readsOf(w) > 0) sev = 'ok'
     else if (w.popEmpty > 0 || w.parkedAvg > 0) sev = 'ice'
   }
   return sev
@@ -158,8 +178,12 @@ export function severity(row) {
  * Enrich the endpoint's rows with everything the page derives.
  *
  * Derived fields, and what each is honest about:
- *   share   — popMessages against `payload.tenant.window.popMessages`, so the
- *             number means "of the tenant" even when the rows are filtered.
+ *   share   — reads (deliveries + Kafka fetches, {@link readsOf}) against the
+ *             tenant's, so the number means "of the tenant" even when the rows
+ *             are filtered, and a topic only Kafka clients read is not 0%.
+ *   fetched — Kafka-fetched records (0 where the broker does not count them)
+ *   kafkaOnly — read only by Kafka fetches: no pop and no empty poll, so a
+ *             fill cannot exist, which is not the same as "nobody reads it"
  *   ackOk   — null under 5 acks (a 1-of-1 failure is not a 0% success rate)
  *   fill    — null under 5 polls, else pops / (pops + empty polls)
  *   oldest  — seconds, the MAX `maxTimeLag` over the groups of this row's
@@ -171,7 +195,7 @@ export function severity(row) {
  * @param {Map<string, {namespace: string, task: string, kafkaTopic?: boolean}>} queueMeta queue -> its namespace/task, and whether the Kafka facade created it
  * @param {'namespace'|'task'|'queue'} level how the rows are keyed
  * @param {(queue: string) => object} [linesFor] the lines in force for a queue
- * @returns {Array<object>} the payload rows plus name/level/acks/share/ackOk/fill/oldest/lagSev/noGroupExpected/groupsLagging/groupsN/groupsInactive/laggingGroups/touched/sev
+ * @returns {Array<object>} the payload rows plus name/level/acks/fetched/reads/kafkaOnly/share/ackOk/fill/oldest/lagSev/noGroupExpected/groupsLagging/groupsN/groupsInactive/laggingGroups/touched/sev
  */
 export function enrichRows(payload, groupsByQueue, queueMeta, level, linesFor) {
   if (!payload || !Array.isArray(payload.rows)) return []
@@ -203,19 +227,24 @@ export function enrichRows(payload, groupsByQueue, queueMeta, level, linesFor) {
     const queues = groupless.get(key) || []
     return queues.length > 0 && queues.every(expected)
   }
-  const tenantPop = payload.tenant?.window?.popMessages || 0
+  const tenantReads = readsOf(payload.tenant?.window)
   const fallbackName = level === 'task' ? '(no task)' : '(no namespace)'
   return payload.rows.map((r) => {
     const w = r.window
     const n = r.now
     const acks = w.ackSuccess + w.ackFailed
     const gl = groupLag(groups, keyOfQueue, r.key, linesFor)
+    const fetched = fetchedOf(w)
+    const reads = readsOf(w)
     const e = {
       ...r,
       name: level === 'queue' ? r.key : (r.key || fallbackName),
       level,
       acks,
-      share: tenantPop ? w.popMessages / tenantPop : 0,
+      fetched,
+      reads,
+      kafkaOnly: fetched > 0 && w.popMessages + w.popEmpty === 0,
+      share: tenantReads ? reads / tenantReads : 0,
       ackOk: acks >= 5 ? w.ackSuccess / acks : null,
       fill: (w.popMessages + w.popEmpty) >= 5 ? w.popMessages / (w.popMessages + w.popEmpty) : null,
       oldest: gl.groups ? gl.maxLag : null,
@@ -316,19 +345,19 @@ export function findings(rows, level, rangeLabel, options = {}) {
 }
 
 /**
- * Stacked-area series for "Work over time": the four biggest rows by
- * deliveries, then one `Other (n)` series that sums the rest. A bucket with
- * no row stays null in every series (a gap, never a zero); `Other` is only
- * non-null where at least one of its rows had a value.
+ * Stacked-area series for "Work over time": the four biggest rows by reads
+ * (deliveries + Kafka fetches), then one `Other (n)` series that sums the
+ * rest. A bucket with no row stays null in every series (a gap, never a
+ * zero); `Other` is only non-null where at least one of its rows had a value.
  *
  * @param {Array<object>} rows output of {@link enrichRows}
  * @param {Array<string>} buckets payload.buckets
- * @param {'push'|'pop'|'popEmpty'|'ackFailed'|'parked'} metric series key
+ * @param {'push'|'pop'|'fetch'|'popEmpty'|'ackFailed'|'parked'} metric series key
  * @returns {Array<{label: string, data: Array<number|null>, index: number, key: string|null}>}
  *          at most 5 entries; `index` is the palette slot, `key` is null for `Other`.
  */
 export function flowSeries(rows, buckets, metric) {
-  const sorted = [...rows].sort((a, b) => b.window.popMessages - a.window.popMessages)
+  const sorted = [...rows].sort((a, b) => readsOf(b.window) - readsOf(a.window))
   const top = sorted.slice(0, 4)
   const rest = sorted.slice(4)
   const series = top.map((r, i) => ({
@@ -340,7 +369,7 @@ export function flowSeries(rows, buckets, metric) {
       key: null,
       index: 4,
       data: (buckets || []).map((_, i) => rest.reduce((s, r) => {
-        const v = r.series[metric][i]
+        const v = (r.series[metric] || [])[i]
         return v === null || v === undefined ? s : (s === null ? v : s + v)
       }, null)),
     })
@@ -420,7 +449,7 @@ export function comparisonRange({ from, to }, mode) {
   return { from: new Date(f - back), to: new Date(t - back) }
 }
 
-const WINDOW_KEYS = ['pushMessages', 'popMessages', 'ackSuccess', 'ackFailed', 'popEmpty']
+const WINDOW_KEYS = ['pushMessages', 'popMessages', 'fetchMessages', 'ackSuccess', 'ackFailed', 'popEmpty']
 
 /**
  * Per-counter change of a window against its comparison window. `pct` is
@@ -599,9 +628,11 @@ export function sameHourBaseline(payload7d) {
  *
  * Every ratio has a denominator that can be zero and a meaning that dies with
  * it, so each is null rather than 0:
- *   fanout         deliveries per pushed message — null with 0 pushes, which
- *                  is the /transaction case (the collector bumps
- *                  transaction_count and attributes no push)
+ *   fanout         reads (deliveries + Kafka fetches) per pushed message — null
+ *                  with 0 pushes, which is the /transaction case (the
+ *                  collector bumps transaction_count and attributes no push).
+ *                  A topic only Kafka clients read fans out by its fetches: by
+ *                  deliveries alone it would read as pushed and never read
  *   ackPerDelivery acks the counters attribute, per delivery — an ack made
  *                  inside /transaction is NOT counted here, so a low value
  *                  can mean "acked elsewhere", not "not acked"
@@ -610,7 +641,7 @@ export function sameHourBaseline(payload7d) {
  *
  * @param {object} payload24h workload response, groupBy=queue, ~24h
  * @param {Map<string, Array<object>>} [groupsByQueue] queue -> consumer-group rows
- * @returns {Array<object>} one row per queue, deliveries desc
+ * @returns {Array<object>} one row per queue, reads desc
  */
 export function efficiency(payload24h, groupsByQueue) {
   if (!payload24h || !Array.isArray(payload24h.rows)) return []
@@ -618,6 +649,7 @@ export function efficiency(payload24h, groupsByQueue) {
   return payload24h.rows.map((r) => {
     const w = r.window
     const pop = w.popMessages
+    const fetch = fetchedOf(w)
     const ack = w.ackSuccess
     const acks = w.ackSuccess + w.ackFailed
     const known = gs.size ? (gs.get(r.key) || []).length : (r.now?.groups ?? 0)
@@ -627,6 +659,7 @@ export function efficiency(payload24h, groupsByQueue) {
       push: w.pushMessages,
       pushReq: w.pushRequests,
       pop,
+      fetch,
       popEmpty: w.popEmpty,
       ack,
       ackf: w.ackFailed,
@@ -642,14 +675,14 @@ export function efficiency(payload24h, groupsByQueue) {
       deadLetter: r.now?.deadLetter ?? null,
       retainedBytes: r.now?.retainedBytes ?? null,
       partitions: r.now?.partitions ?? null,
-      fanout: w.pushMessages > 0 ? round(pop / w.pushMessages, 2) : null,
+      fanout: w.pushMessages > 0 ? round((pop + fetch) / w.pushMessages, 2) : null,
       ackPerDelivery: pop > 0 ? round(ack / pop, 3) : null,
       pushBatch: w.pushRequests > 0 ? round(w.pushMessages / w.pushRequests, 1) : null,
       ackBatch: w.ackRequests > 0 ? round(acks / w.ackRequests, 1) : null,
       emptyPerDelivery: pop > 0 ? round(w.popEmpty / pop, 2) : null,
       lagBudget: lagBudget(r),
     }
-  }).sort((a, b) => b.pop - a.pop)
+  }).sort((a, b) => (b.pop + b.fetch) - (a.pop + a.fetch))
 }
 
 /**
@@ -854,13 +887,14 @@ export function rollupFromQueueOps(input = {}) {
   const bucketIndex = new Map(buckets.map((b, i) => [b, i]))
 
   const blankWindow = () => ({
-    pushMessages: 0, pushRequests: 0, popMessages: 0, popEmpty: 0, ackRequests: 0,
+    pushMessages: 0, pushRequests: 0, popMessages: 0, fetchMessages: 0, popEmpty: 0, ackRequests: 0,
     ackSuccess: 0, ackFailed: 0, transactions: 0, conflated: 0,
     partitionsCreated: 0, partitionsDeleted: 0, parkedAvg: 0, avgLagMs: null, maxLagMs: null,
   })
   const blankSeries = () => ({
     push: new Array(buckets.length).fill(null),
     pop: new Array(buckets.length).fill(null),
+    fetch: new Array(buckets.length).fill(null),
     popEmpty: new Array(buckets.length).fill(null),
     ackFailed: new Array(buckets.length).fill(null),
     parked: new Array(buckets.length).fill(null),
@@ -903,6 +937,7 @@ export function rollupFromQueueOps(input = {}) {
     w.pushMessages += num(row.pushMessages)
     w.pushRequests += num(row.pushRequests)
     w.popMessages += num(row.popMessages)
+    w.fetchMessages += num(row.fetchMessages)
     w.popEmpty += num(row.popEmpty)
     w.ackRequests += num(row.ackRequests)
     w.ackSuccess += num(row.ackSuccess)
@@ -912,7 +947,7 @@ export function rollupFromQueueOps(input = {}) {
     w.partitionsDeleted += num(row.partitionsDeleted)
     acc.touched.add(row.queueName)
     acc.active.set(row.queueName,
-      (acc.active.get(row.queueName) || 0) + num(row.pushMessages) + num(row.popMessages))
+      (acc.active.get(row.queueName) || 0) + num(row.pushMessages) + num(row.popMessages) + num(row.fetchMessages))
     const parked = acc.parked.get(row.queueName) || { sum: 0, n: 0 }
     parked.sum += num(row.parkedCount)
     parked.n += 1
@@ -921,6 +956,7 @@ export function rollupFromQueueOps(input = {}) {
     const s = acc.series
     s.push[i] = num(s.push[i]) + num(row.pushMessages)
     s.pop[i] = num(s.pop[i]) + num(row.popMessages)
+    s.fetch[i] = num(s.fetch[i]) + num(row.fetchMessages)
     s.popEmpty[i] = num(s.popEmpty[i]) + num(row.popEmpty)
     s.ackFailed[i] = num(s.ackFailed[i]) + num(row.ackFailed)
     // parked is a gauge: per-queue average within the bucket, summed across
@@ -989,7 +1025,7 @@ export function rollupFromQueueOps(input = {}) {
       return { key, namespace: m.namespace, task: m.task, ...done }
     }
     return row
-  }).sort((a, b) => b.window.popMessages - a.window.popMessages)
+  }).sort((a, b) => readsOf(b.window) - readsOf(a.window))
 
   const capturedAt = input.capturedAt ? new Date(input.capturedAt) : new Date()
   const from = input.ops?.timeRange?.from || (buckets.length ? buckets[0] : capturedAt.toISOString())
@@ -1001,6 +1037,10 @@ export function rollupFromQueueOps(input = {}) {
     buckets,
     rows,
     tenant: finish(tenant),
+    // queue-ops says which nodes its gather lacked, and the rollup lacks them
+    // too. Passed on only when said: a broker that does not say is not one
+    // that answered completely.
+    ...(Array.isArray(input.ops?.nodesMissing) ? { nodesMissing: input.ops.nodesMissing } : {}),
     computedClientSide: true,
   }
 }

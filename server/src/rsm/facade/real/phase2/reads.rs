@@ -345,6 +345,11 @@ impl RaftFacade {
     /// /api/v1/fetch`, answered as records. The entries are already bounded
     /// (`partition`, a non-negative offset, a clamped `max_bytes`); the count
     /// ceiling of the route applies the same.
+    ///
+    /// Nothing is counted here: this is the Kafka facade's read, and the facade
+    /// trims it to its client's budget and reads the rest again on the next
+    /// poll. Its reads are counted where its answer is final
+    /// (`queen_kafka::queen::LocalDispatch::note_fetched`, crate::kafka_inproc).
     pub(in crate::rsm::facade::real) async fn fetch_records_impl(
         &self,
         ctx: ReqCtx,

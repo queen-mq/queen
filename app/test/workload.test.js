@@ -553,3 +553,89 @@ test('trimOpenBucket: drops the bucket that contains now, keeps a closed one, le
   assert.equal(trimOpenBucket(p, new Date('2026-09-09T10:03:00Z').getTime()), p, 'closed: untouched')
   assert.equal(trimOpenBucket(null), null)
 })
+
+// ---------------------------------------------------------------------------
+// Kafka consumers read by fetch (window.fetchMessages / series.fetch)
+// ---------------------------------------------------------------------------
+
+import { fetchedOf, readsOf } from '../src/composables/useWorkload.js'
+
+const kafkaPayload = () => {
+  const w = (o) => ({
+    pushMessages: 0, pushRequests: 0, popMessages: 0, fetchMessages: 0, popEmpty: 0, ackRequests: 0,
+    ackSuccess: 0, ackFailed: 0, transactions: 0, parkedAvg: 0, maxLagMs: null, avgLagMs: null, ...o,
+  })
+  const n = { pending: 0, pendingWithoutGroup: 0, queuesWithoutGroup: 0, queuesTouched: 1, queuesActive: 1, partitions: 1, deadLetter: 0, groups: 1 }
+  const row = (key, win, series) => ({ key, queues: 1, window: w(win), now: { ...n }, series })
+  return {
+    buckets: ['2026-10-19T21:00:00Z', '2026-10-19T21:01:00Z'],
+    tenant: { window: w({ pushMessages: 3000, popMessages: 100, fetchMessages: 2900 }) },
+    rows: [
+      // Native: pops only.
+      row('native', { pushMessages: 100, popMessages: 100, popEmpty: 20, ackSuccess: 100 },
+        { pop: [60, 40], fetch: [0, 0], push: [50, 50] }),
+      // A Kafka topic: no pop, no poll, read by two groups' fetches.
+      row('topic', { pushMessages: 1450, fetchMessages: 2900 },
+        { pop: [0, 0], fetch: [1500, 1400], push: [700, 750] }),
+    ],
+  }
+}
+
+test('a topic only Kafka clients read is read: share, severity and order count its fetches', () => {
+  const [topic, native] = enrichRows(kafkaPayload(), new Map(), new Map(), 'queue')
+    .sort((a, b) => b.reads - a.reads)
+  assert.equal(topic.key, 'topic')
+  assert.equal(topic.fetched, 2900)
+  assert.equal(topic.reads, 2900)
+  assert.equal(topic.kafkaOnly, true)
+  assert.equal(topic.share, 2900 / 3000)
+  assert.equal(native.share, 100 / 3000)
+  // No poll is no fill, and no pop is no lag: never a 0% fill nor a 0 ms lag.
+  assert.equal(topic.fill, null)
+  assert.equal(topic.window.avgLagMs, null)
+  assert.equal(topic.sev, 'ok')
+  assert.equal(native.kafkaOnly, false)
+  // The four biggest by reads lead the flow chart, and a fetch is its own metric.
+  const flow = flowSeries(enrichRows(kafkaPayload(), new Map(), new Map(), 'queue'), kafkaPayload().buckets, 'fetch')
+  assert.deepEqual(flow.map((s) => s.key), ['topic', 'native'])
+  assert.deepEqual(flow[0].data, [1500, 1400])
+})
+
+test('a broker that does not count fetches reads as 0, never as NaN', () => {
+  assert.equal(fetchedOf({ popMessages: 5 }), 0)
+  assert.equal(readsOf({ popMessages: 5 }), 5)
+  assert.equal(readsOf(undefined), 0)
+  const rows = enrichRows(NS, groupsByQueue(), queueMeta(), 'namespace')
+  for (const r of rows) assert.equal(r.reads, r.window.popMessages + (r.window.fetchMessages || 0))
+  // Old payload shape, no fetch key at all: unchanged share and no fetch series.
+  const legacy = structuredClone(NS)
+  for (const g of [legacy.tenant, ...legacy.rows]) { delete g.window.fetchMessages; delete g.series.fetch }
+  const before = enrichRows(NS, groupsByQueue(), queueMeta(), 'namespace').map((r) => r.share)
+  assert.deepEqual(enrichRows(legacy, groupsByQueue(), queueMeta(), 'namespace').map((r) => r.share), before)
+  assert.ok(flowSeries(enrichRows(legacy, new Map(), queueMeta(), 'namespace'), legacy.buckets, 'fetch')
+    .every((s) => s.data.every((v) => v === null)))
+})
+
+test('efficiency: a Kafka topic fans out by its fetches, and is ordered by reads', () => {
+  const eff = efficiency({ rows: kafkaPayload().rows })
+  assert.equal(eff[0].queue, 'topic')
+  assert.equal(eff[0].fetch, 2900)
+  assert.equal(eff[0].fanout, 2, 'two Kafka groups read every record once each')
+  assert.equal(eff[0].ackPerDelivery, null, 'nothing a fetch reads is acked')
+  assert.equal(eff[1].fanout, 1)
+})
+
+test('rollupFromQueueOps: fetches fold in as their own counter, and nodesMissing passes through', () => {
+  const ops = structuredClone(OPS.ops)
+  ops.series.push({ bucket: '2026-09-09T08:15:00Z', queueName: 'gamma.q3', fetchMessages: 900, fetchPerSecond: 1 })
+  ops.nodesMissing = [2]
+  const p = rollupFromQueueOps({ ...OPS, ops, groupBy: 'namespace' })
+  assert.equal(p.tenant.window.fetchMessages, 900)
+  assert.equal(p.tenant.window.popMessages, 70, 'a fetch is not a delivery')
+  assert.equal(p.tenant.now.queuesActive, 3, 'a topic read only by fetch is active')
+  const gamma = p.rows.find((r) => r.key === 'gamma')
+  assert.deepEqual(gamma.series.fetch, [null, 900, null])
+  assert.deepEqual(p.nodesMissing, [2])
+  // A queue-ops answer that does not say is not "complete".
+  assert.equal('nodesMissing' in rollupFromQueueOps({ ...OPS, groupBy: 'namespace' }), false)
+})

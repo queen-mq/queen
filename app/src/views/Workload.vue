@@ -19,6 +19,11 @@
           <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
         </div>
       </template>
+      <!-- A node that did not answer the broker's gather took its counts out
+           of every number below: said once, here, for the whole page. -->
+      <template v-if="partial" #actions>
+        <span class="chip chip-warn" role="status" :title="PARTIAL_TITLE"><span class="dot" />{{ partial }}</span>
+      </template>
     </PageHead>
 
     <PageTools>
@@ -101,11 +106,12 @@
         <span class="wl-counts-head">{{ rangeLabel }}<template v-if="deltas"><br />vs {{ compareLabel }}</template></span>
         <div class="count-tile"><span class="k">Pushed</span><span class="v">{{ fmt.n(tenant.window.pushMessages) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.pushMessages.pct) }}</em></span></div>
         <div class="count-tile"><span class="k">Delivered</span><span class="v">{{ fmt.n(tenant.window.popMessages) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.popMessages.pct) }}</em></span></div>
+        <!-- Its own tile, never added to Delivered: see FETCHED_TITLE. -->
+        <div class="count-tile" :title="FETCHED_TITLE"><span class="k">Fetched (Kafka)</span><span class="v">{{ fmt.n(tenant.window.fetchMessages) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.fetchMessages.pct) }}</em></span></div>
         <div class="count-tile"><span class="k">Acked</span><span class="v">{{ fmt.n(tenant.window.ackSuccess) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackSuccess.pct) }}</em></span></div>
         <div class="count-tile"><span class="k">Ack failures</span><span class="v" :class="ackFailedTone">{{ fmt.n(tenant.window.ackFailed) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackFailed.pct) }}</em></span></div>
         <div class="count-tile"><span class="k">Empty polls</span><span class="v">{{ fmt.n(tenant.window.popEmpty) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.popEmpty.pct) }}</em></span></div>
         <div class="count-tile"><span class="k">Fill</span><span class="v">{{ fmt.pct(tenantFill) }}</span></div>
-        <div class="count-tile wl-counts-rest" aria-hidden="true" />
       </div>
     </div>
 
@@ -137,7 +143,7 @@
       <div class="card">
         <div class="card-header">
           <h3>{{ `Share of the work by ${level === 'queue' ? 'queue' : groupBy}` }}</h3>
-          <span class="card-sub">delivered, with pushed under it · share is of the tenant</span>
+          <span class="card-sub" :title="FETCHED_TITLE">delivered and fetched (Kafka), with pushed under it · share is of the tenant's reads</span>
           <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
@@ -291,7 +297,7 @@
       <div class="card">
         <div class="card-header">
           <h3>Fill</h3>
-          <span class="card-sub">deliveries per poll · blank under 5 polls</span>
+          <span class="card-sub">deliveries per poll · blank under 5 polls · a Kafka consumer fetches and never polls</span>
           <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
@@ -366,6 +372,9 @@
       <span class="eyebrow-text">Deeper</span>
       <span class="eyebrow-rule"></span>
       <span class="eyebrow-sub">a 7 day profile and a 24 hour queue-level read · loaded on open and on a range or group-by change, not on every refresh</span>
+      <!-- Its own reads, at their own time: a node missing from them is said
+           here, not by the page's chip, which speaks for the panels above. -->
+      <span v-if="deeperPartial" class="chip chip-warn" role="status" :title="PARTIAL_TITLE"><span class="dot" />{{ deeperPartial }}</span>
     </div>
 
     <div class="card">
@@ -411,8 +420,8 @@
     <div class="wl-grid-2">
       <div class="card">
         <div class="card-header">
-          <h3>Deliveries per pushed message</h3>
-          <span class="card-sub">top 12 queues by deliveries</span>
+          <h3>Reads per pushed message</h3>
+          <span class="card-sub" :title="FETCHED_TITLE">deliveries + Kafka fetches · top 12 queues by reads</span>
           <span class="muted">last 24h</span>
         </div>
         <div class="card-body">
@@ -647,8 +656,10 @@ import PageTools from '@/components/PageTools.vue'
 import { stamp } from '@/composables/useStamp'
 import {
   comparisonRange, deeperFindings, efficiency, enrichRows, findings, flowSeries, formatters as fmt,
-  heatCells, rollupFromQueueOps, sameHourBaseline, totalSeries, trimOpenBucket, weeklyProfile, windowDeltas,
+  heatCells, readsOf, rollupFromQueueOps, sameHourBaseline, totalSeries, trimOpenBucket, weeklyProfile,
+  windowDeltas,
 } from '@/composables/useWorkload'
+import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
 import { onClusterChange } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -827,15 +838,22 @@ watch([groupBy, focus], () => { if (restoringRoute.value) fetchWorkload() })
 
 const metrics = [
   { label: 'delivered', value: 'pop' },
+  { label: 'fetched (Kafka)', value: 'fetch' },
   { label: 'pushed', value: 'push' },
   { label: 'empty polls', value: 'popEmpty' },
   { label: 'ack failures', value: 'ackFailed' },
   { label: 'parked', value: 'parked' },
 ]
 const METRIC_LABEL = {
-  pop: 'deliveries', push: 'pushes', popEmpty: 'empty polls',
+  pop: 'deliveries', fetch: 'Kafka-fetched records', push: 'pushes', popEmpty: 'empty polls',
   ackFailed: 'ack failures', parked: 'parked long-polls',
 }
+// A Kafka consumer reads by fetch, which the broker counts apart from pops
+// (useWorkload's header): said wherever the page shows it, because the number
+// is honest only with its two caveats.
+const FETCHED_TITLE = 'Records Kafka clients fetched through the broker\'s Kafka facade. A fetch is a '
+  + 'read, not a delivery: it takes no lease and nothing acks it, a client that seeks back reads '
+  + 'again, and two Kafka consumer groups reading one topic count every record twice.'
 
 function currentRange() {
   if (customMode.value && appliedCustom.value) return appliedCustom.value
@@ -1063,6 +1081,13 @@ const workloadErrorText = computed(() => (
 ))
 const groupsFailed = computed(() => consumerGroups.failed.value)
 const groupsErrorText = computed(() => describeApiError(consumerGroups.error.value))
+// The nodes the broker's gather lacked (usePartial), for this window and the
+// one it is compared with: both feed the panels down to the Deeper eyebrow.
+// The deeper reads (7d, 24h) are fetched on their own schedule, so they carry
+// a chip of their own on that eyebrow (`deeperPartial`, defined with them).
+const partial = computed(() => partialText(missingNodes(
+  workload.data.value, compare.value === 'off' ? null : workloadPrev.data.value,
+)))
 
 // ---------------------------------------------------------------------------
 // Derived state
@@ -1125,12 +1150,12 @@ const deltas = computed(() => windowDeltas(tenant.value?.window, prevPayload.val
 // read as five things to look at. The flow chart tells its series apart by
 // the grey ramp (and names each one at its right edge); the activity map's
 // swatch is that same grey, so a row can be found in the chart above it. The
-// four biggest by deliveries get a step each, in flowSeries' own order; the
+// four biggest by reads get a step each, in flowSeries' own order; the
 // rest share the fifth, as they share "Other". Every bar chart is one ink.
 const entityInk = computed(() => {
   const m = new Map()
   ;[...rows.value]
-    .sort((a, b) => b.window.popMessages - a.window.popMessages)
+    .sort((a, b) => readsOf(b.window) - readsOf(a.window))
     .slice(0, 4)
     .forEach((r, i) => { m.set(r.key, chartPalette[i].line) })
   return m
@@ -1156,7 +1181,13 @@ const attention = computed(() => findings(
 
 const summary = computed(() => {
   const total = rows.value.reduce((s, r) => s + r.window.popMessages, 0)
-  if (!total) return 'Nothing was delivered in this window.'
+  const fetched = rows.value.reduce((s, r) => s + r.fetched, 0)
+  const kafka = fetched ? ` Kafka clients fetched ${fmt.n(fetched)} records besides.` : ''
+  if (!total) {
+    return fetched
+      ? `Nothing was delivered by pop in the ${rangeLabel.value}; Kafka clients fetched ${fmt.n(fetched)} records.`
+      : 'Nothing was delivered in this window.'
+  }
   const top = [...rows.value]
     .sort((a, b) => b.window.popMessages - a.window.popMessages)
     .filter((r) => r.window.popMessages > 0)
@@ -1164,7 +1195,7 @@ const summary = computed(() => {
   const who = level.value === 'queue' ? `${focusName.value} delivered` : 'the tenant delivered'
   const parts = top.map((r) => `${r.name} ${fmt.pct(r.window.popMessages / total)}`
     + (level.value === 'queue' ? '' : ` on ${fmt.plural(r.now.queuesActive, 'active queue')}`))
-  return `In the ${rangeLabel.value} ${who} ${fmt.n(total)} messages: ${parts.join(', ')}.`
+  return `In the ${rangeLabel.value} ${who} ${fmt.n(total)} messages: ${parts.join(', ')}.${kafka}`
 })
 
 const rootCrumb = computed(() => (groupBy.value === 'namespace' ? 'all namespaces' : 'all tasks'))
@@ -1397,7 +1428,7 @@ function renderFlow() {
 }
 
 function renderShare() {
-  const sorted = [...rows.value].sort((a, b) => b.window.popMessages - a.window.popMessages)
+  const sorted = [...rows.value].sort((a, b) => b.reads - a.reads)
   const labels = sorted.map((r) => r.name)
   const options = barBase(labels, drillOn(sorted))
   options.scales.x.ticks.callback = (v) => fmt.k(v)
@@ -1406,7 +1437,9 @@ function renderShare() {
     tooltip: {
       callbacks: {
         label: (c) => ` ${c.dataset.label}: ${fmt.n(c.parsed.x)}`
-          + (c.datasetIndex === 0 ? ` (${fmt.pct(sorted[c.dataIndex].share)} of the tenant)` : ''),
+          + (c.datasetIndex === 0 ? ` (${fmt.pct(sorted[c.dataIndex].share)} of the tenant's reads)` : ''),
+        // The fetch bar's two caveats, under it: it is not a delivery.
+        afterLabel: (c) => (c.dataset.fetch && c.parsed.x > 0 ? '  no lease, no ack · counted once per Kafka group' : ''),
       },
     },
     endLabels: { format: (i) => fmt.pct(sorted[i].share) },
@@ -1417,9 +1450,14 @@ function renderShare() {
       labels,
       datasets: [
         { label: 'delivered', data: sorted.map((r) => r.window.popMessages), backgroundColor: barInkLead(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        // Only where the broker counts fetches and a row has some: a tenant
+        // without Kafka keeps its two bars.
+        ...(sorted.some((r) => r.fetched > 0) ? [{
+          label: 'fetched (Kafka)', fetch: true, data: sorted.map((r) => r.fetched), backgroundColor: alpha(chartPalette[0].line, 0.45), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8,
+        }] : []),
         { label: 'pushed', data: sorted.map((r) => r.window.pushMessages), backgroundColor: barInk(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
         ...(prevPayload.value ? [{
-          label: `delivered, ${compareLabel.value}`, data: sorted.map((r) => prevByKey.value.get(r.key)?.window.popMessages ?? null),
+          label: `delivered + fetched, ${compareLabel.value}`, data: sorted.map((r) => prevByKey.value.get(r.key)?.reads ?? null),
           backgroundColor: 'transparent', borderColor: chartTheme.tick, borderWidth: 1, borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8,
         }] : []),
       ],
@@ -1663,6 +1701,7 @@ function renderFill() {
       callbacks: {
         label: (c) => {
           const r = sorted[c.dataIndex]
+          if (r.kafkaOnly) return ` read by Kafka fetches only · ${fmt.n(r.fetched)} fetched · a fetch is no poll, so there is no fill`
           return ` ${fmt.pct(r.fill)} · ${fmt.n(r.window.popMessages)} delivered · ${fmt.n(r.window.popEmpty)} empty polls · ${fmt.n(Math.round(r.window.parkedAvg))} parked`
         },
       },
@@ -1670,6 +1709,8 @@ function renderFill() {
     endLabels: {
       format: (i) => {
         const r = sorted[i]
+        // Blank is "too few polls"; a topic Kafka clients read is not that.
+        if (r.kafkaOnly) return `Kafka · ${fmt.k(r.fetched)} fetched`
         return r.fill === null ? '—' : `${fmt.pct(r.fill)} · ${fmt.k(r.window.popEmpty)} empty`
       },
     },
@@ -1864,6 +1905,7 @@ const deepWeek = useApi((params, config) => (
 const deepEff = useApi((params, config) => (
   fallbackMode.value ? rollupWorkload(params, config) : getWorkload(params, config)
 ), { immediate: false })
+const deeperPartial = computed(() => partialText(missingNodes(deepWeek.data.value, deepEff.data.value)))
 const retention = useApi((params, config) => system.getRetention(params, config), { immediate: false })
 // Neither route has a client-side stand-in, so on an older broker the verdict
 // IS the panel; guarded so it is established once per cluster, not once per
@@ -1964,7 +2006,8 @@ const baselineSub = computed(() => (
 const effRows = computed(() => (
   deepEff.data.value ? efficiency(deepEff.data.value, groupsByQueue.value) : []
 ))
-const topQueues = computed(() => effRows.value.filter((e) => e.pop > 0).slice(0, 12))
+// Read by pop or by Kafka fetch: a topic only Kafka clients consume is read.
+const topQueues = computed(() => effRows.value.filter((e) => e.pop + e.fetch > 0).slice(0, 12))
 const budgetRows = computed(() => topQueues.value.filter((e) => e.lagBudget.buckets > 0))
 
 const byteRows = computed(() => {
@@ -2117,9 +2160,10 @@ function renderFan() {
       callbacks: {
         label: (c) => {
           const r = rows[c.dataIndex]
+          const reads = r.fetch > 0 ? `${fmt.n(r.pop)} deliveries + ${fmt.n(r.fetch)} Kafka fetches` : `${fmt.n(r.pop)} deliveries`
           return r.fanout === null
-            ? ` ${fmt.n(r.pop)} deliveries, 0 pushes counted, ${fmt.n(r.trx)} transactions`
-            : ` ${fmt.n(r.pop)} deliveries for ${fmt.n(r.push)} pushes · ${fmt.plural(r.groups, 'group')}`
+            ? ` ${reads}, 0 pushes counted, ${fmt.n(r.trx)} transactions`
+            : ` ${reads} for ${fmt.n(r.push)} pushes · ${fmt.plural(r.groups, 'group')}`
         },
       },
     },
@@ -2136,7 +2180,7 @@ function renderFan() {
     data: {
       labels,
       datasets: [{
-        label: 'deliveries per push',
+        label: 'reads per push',
         data: rows.map((r) => r.fanout),
         backgroundColor: rows.map((r) => alpha(toneColor(tone(r)), 0.85)),
         borderRadius: 2, barPercentage: 0.7,
@@ -2167,7 +2211,8 @@ function renderAckd() {
     endLabels: {
       format: (i) => {
         const r = rows[i]
-        if (r.ackPerDelivery === null) return '—'
+        // A Kafka consumer commits offsets; nothing it reads is acked.
+        if (r.ackPerDelivery === null) return r.pop === 0 && r.fetch > 0 ? 'Kafka · no acks' : '—'
         return fmt.pct(r.ackPerDelivery)
           + (r.ack === 0 && r.trx > 0 ? ' · acked elsewhere' : '')
       },
@@ -2508,7 +2553,6 @@ onUnmounted(() => {
   .wl-counts-row > .count-tile { flex: 1 1 150px; }
   .wl-counts-head { flex: 1 1 100%; padding: 8px 16px; }
   .wl-counts-head br { display: none; }
-  .wl-counts-rest { display: none; }
 }
 
 /* Findings: glyph · sentence · evidence, one hairline per row. */
@@ -2552,7 +2596,7 @@ onUnmounted(() => {
 .seg-sm button { font-size: 11px; padding: 2px 8px; }
 
 /* Section label between the two layers: the app's uppercase label, a rule, a note. */
-.wl-eyebrow { display: flex; align-items: center; gap: 12px; margin: 28px 2px 14px; }
+.wl-eyebrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 28px 2px 14px; }
 .eyebrow-text { font-size: 13px; font-weight: 600; color: var(--text-hi); }
 .eyebrow-rule { height: 1px; background: var(--bd); flex: 0 0 48px; }
 .eyebrow-sub { font-size: 12px; color: var(--text-low); }

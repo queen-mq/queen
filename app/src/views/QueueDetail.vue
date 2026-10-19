@@ -122,6 +122,11 @@
            Metrics — the eight rows of the old table as tiles. A tile hands its
            series to the chart below; same sources and verdicts as before.
            ==================================================================== -->
+      <!-- The tiles below are queue-ops': a node that did not answer the
+           broker's gather took its share out of them (usePartial). -->
+      <div v-if="opsPartial" class="qd-partial">
+        <span class="chip chip-warn" role="status" :title="PARTIAL_TITLE"><span class="dot" />{{ opsPartial }}</span>
+      </div>
       <div class="tile-grid tile-grid-4">
         <MetricTile
           label="Throughput"
@@ -467,6 +472,7 @@ import {
 } from '@/composables/useConflation'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
+import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import { useGroupsStore } from '@/stores/groupsStore'
@@ -507,6 +513,7 @@ const detailStale = ref(null)
 const statusData = ref(null)
 const opsData = ref(null)
 const opsError = ref(null)
+const opsPartial = computed(() => (opsError.value ? '' : partialText(missingNodes(opsData.value))))
 
 const loadingOps = ref(true)
 

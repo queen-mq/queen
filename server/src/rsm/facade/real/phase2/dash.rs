@@ -2,16 +2,90 @@
 //! gather every node's rows ([`crate::rsm::dashboard`]), then serve them
 //! through the ported dashboard views.
 
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
 use serde_json::Value;
 
 use super::{ApiOut, RaftFacade, RsmError};
+use crate::rsm::dashboard::model::{BacklogRow, ChurnRow, ParkedRow, QueueRow};
 use crate::rsm::dashboard::store::Rows;
 
 /// What a gather collected: the rows of every node that answered, and the
 /// nodes that did not (their rows are simply absent).
+///
+/// Dashboard rows are node-local and never replicated, so a node that does
+/// not answer takes its traffic out of the numbers, and not a small share of
+/// it: a Kafka produce is relayed to and counted on the raft leader's
+/// process, so while the node that led during the window restarts, every
+/// Kafka push of that window is gone (stage, 2026-10-19 21:29, a rolling
+/// restart: the Overview read ~1 push/s for ~1,500/s). Every analytics answer
+/// built on a gather therefore says which nodes it lacks (`nodesMissing`,
+/// empty when complete) and the console says so beside the numbers.
 pub(super) struct Gathered {
     pub(super) rows: Rows,
     pub(super) missing: Vec<u64>,
+}
+
+/// How often one peer's failed gather is said at WARN. A dashboard read
+/// gathers on every refresh of every open page (a 30 s tick per tab), so a
+/// node down for a restart would otherwise fill the log; the misses between
+/// two lines stay at debug and the next line counts them.
+const GATHER_MISS_WARN_EVERY: Duration = Duration::from_secs(60);
+
+/// Per peer: when its miss was last said at WARN, and the misses since.
+static GATHER_MISS_SAID: std::sync::Mutex<BTreeMap<u64, (Instant, u64)>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Whether a miss of `node` at `now` is said at WARN: `Some(n)` with the
+/// misses left unsaid since the last line, or `None` inside the minute (the
+/// miss is then counted for the next line).
+fn gather_miss_turn(
+    said: &mut BTreeMap<u64, (Instant, u64)>,
+    node: u64,
+    now: Instant,
+    every: Duration,
+) -> Option<u64> {
+    match said.get_mut(&node) {
+        Some((at, unsaid)) if now.saturating_duration_since(*at) < every => {
+            *unsaid += 1;
+            None
+        }
+        Some((at, unsaid)) => {
+            let n = *unsaid;
+            *at = now;
+            *unsaid = 0;
+            Some(n)
+        }
+        None => {
+            said.insert(node, (now, 0));
+            Some(0)
+        }
+    }
+}
+
+/// A peer did not answer a gather: WARN at most once a minute per peer.
+fn note_gather_miss(node: u64, error: &str) {
+    let turn = {
+        let mut said = GATHER_MISS_SAID.lock().unwrap_or_else(|p| p.into_inner());
+        gather_miss_turn(&mut said, node, Instant::now(), GATHER_MISS_WARN_EVERY)
+    };
+    match turn {
+        Some(unsaid) => tracing::warn!(
+            target: "rsm",
+            node,
+            error,
+            missed_since_last_line = unsaid,
+            "dashboard gather: a peer did not answer; its rows are missing from the analytics \
+             answers (nodesMissing) until it does"
+        ),
+        None => tracing::debug!(
+            target: "rsm",
+            node,
+            error,
+            "dashboard gather: peer did not answer"
+        ),
+    }
 }
 
 impl RaftFacade {
@@ -55,7 +129,7 @@ impl RaftFacade {
                         rows.backlog.extend(peer.backlog);
                     }
                     Err(e) => {
-                        tracing::debug!(target: "rsm", node = id, error = %e, "dashboard gather: peer did not answer");
+                        note_gather_miss(id, &e);
                         missing.push(id);
                     }
                 }
@@ -103,6 +177,18 @@ fn answer(v: Value) -> Result<ApiOut, RsmError> {
     ok(v)
 }
 
+/// A gathered view's answer: [`answer`], with the nodes whose rows it lacks
+/// as `nodesMissing` (an empty array when every node answered, so a reader
+/// can tell "complete" from "a broker that does not say"). Only on an object
+/// answer: an error keeps its shape, and a bare array (`queue-lag`) has
+/// nowhere to carry it.
+fn answer_gathered(mut v: Value, missing: &[u64]) -> Result<ApiOut, RsmError> {
+    if let Some(o) = v.as_object_mut().filter(|o| !o.contains_key("error")) {
+        o.insert("nodesMissing".into(), serde_json::json!(missing));
+    }
+    answer(v)
+}
+
 impl RaftFacade {
     /// `GET /api/v1/analytics/system-metrics` — `get_system_metrics_v1`
     /// over every node's system rows.
@@ -116,7 +202,7 @@ impl RaftFacade {
         let now = super::super::wall_micros();
         let (from, to) = window(&f, now, 0);
         let g = self.gather_rows(from, to, false).await;
-        answer(nv::system_metrics_json(&f, now, &g.rows.system))
+        answer_gathered(nv::system_metrics_json(&f, now, &g.rows.system), &g.missing)
     }
 
     /// `GET /api/v1/analytics/worker-metrics` — `get_worker_metrics_timeseries_v1`
@@ -133,7 +219,10 @@ impl RaftFacade {
         let (from, to) = window(&f, now, 0);
         let g = self.gather_rows(from, to, true).await;
         let queues = crate::rsm::dashboard::model::merge_queue_rows(g.rows.queue);
-        answer(nv::worker_metrics_json(&f, now, &g.rows.worker, &queues))
+        answer_gathered(
+            nv::worker_metrics_json(&f, now, &g.rows.worker, &queues),
+            &g.missing,
+        )
     }
 
     /// `GET /api/v1/status` — `get_status_v3`: the node rows of every node
@@ -156,11 +245,8 @@ impl RaftFacade {
         let mut v = nv::status_json(&f, now, &g.rows.worker, &g.rows.system, &state);
         if let Some(o) = v.as_object_mut() {
             o.insert("engine".into(), Value::String("raft".into()));
-            if !g.missing.is_empty() {
-                o.insert("nodesMissing".into(), serde_json::json!(g.missing));
-            }
         }
-        answer(v)
+        answer_gathered(v, &g.missing)
     }
 
     /// The replicated half of `get_status_v3`: the tenant's queues with their
@@ -265,6 +351,20 @@ impl RaftFacade {
     }
 }
 
+/// The tenant's slice of a gather ([`RaftFacade::tenant_queue_rows`]).
+struct TenantRows {
+    /// Every node's queue rows of the tenant, merged.
+    queue: Vec<QueueRow>,
+    parked: Vec<ParkedRow>,
+    /// This node's: apply records them identically on every node.
+    churn: Vec<ChurnRow>,
+    /// The window read, `[from, to]` before the minute's widening.
+    window: (i64, i64),
+    backlog: Vec<BacklogRow>,
+    /// The nodes that did not answer: their rows are not in the above.
+    missing: Vec<u64>,
+}
+
 /// The raw query as the queue views read it: every key, empty values
 /// included (`namespace=` filters on the empty namespace in `get_workload_v1`).
 fn raw_filters(query: Option<&str>) -> serde_json::Map<String, Value> {
@@ -356,18 +456,12 @@ impl RaftFacade {
 
     /// Every node's queue rows of the tenant in the window, merged (see
     /// [`crate::rsm::dashboard::model::merge_queue_rows`]), plus this node's
-    /// churn rows.
+    /// churn rows, and the nodes whose rows are not in them.
     async fn tenant_queue_rows(
         &self,
         tenant: &str,
         f: &serde_json::Map<String, Value>,
-    ) -> (
-        Vec<crate::rsm::dashboard::model::QueueRow>,
-        Vec<crate::rsm::dashboard::model::ParkedRow>,
-        Vec<crate::rsm::dashboard::model::ChurnRow>,
-        (i64, i64),
-        Vec<crate::rsm::dashboard::model::BacklogRow>,
-    ) {
+    ) -> TenantRows {
         use crate::rsm::dashboard::model::{merge_queue_rows, US_PER_MIN};
         let now = super::super::wall_micros();
         // A bucket is the flush minute: widen by one on each side so a bucket
@@ -388,7 +482,14 @@ impl RaftFacade {
             .into_iter()
             .filter(|r| r.tenant == tenant)
             .collect();
-        (queue, parked, churn, (from, to), backlog)
+        TenantRows {
+            queue,
+            parked,
+            churn,
+            window: (from, to),
+            backlog,
+            missing: g.missing,
+        }
     }
 
     /// `GET /api/v1/analytics/queue-ops` — `get_queue_ops_v1`.
@@ -398,18 +499,18 @@ impl RaftFacade {
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
         let f = raw_filters(query);
-        let (rows, _, churn, _, backlog) = self.tenant_queue_rows(&ctx.tenant, &f).await;
+        let t = self.tenant_queue_rows(&ctx.tenant, &f).await;
         let (metas, _) = self.queue_catalog(&ctx.tenant).await?;
         let now = super::super::wall_micros();
         let mut v =
-            crate::rsm::dashboard::queue_views::queue_ops_json(&f, now, &rows, &churn, &metas);
+            crate::rsm::dashboard::queue_views::queue_ops_json(&f, now, &t.queue, &t.churn, &metas);
         if let Some(o) = v.as_object_mut().filter(|o| !o.contains_key("error")) {
             o.insert(
                 "backlog".into(),
-                crate::rsm::dashboard::queue_views::backlog_json(&f, now, &backlog),
+                crate::rsm::dashboard::queue_views::backlog_json(&f, now, &t.backlog),
             );
         }
-        answer(v)
+        answer_gathered(v, &t.missing)
     }
 
     /// `GET /api/v1/analytics/queue-parked-replicas` —
@@ -420,11 +521,12 @@ impl RaftFacade {
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
         let f = raw_filters(query);
-        let (_, parked, _, _, _) = self.tenant_queue_rows(&ctx.tenant, &f).await;
+        let t = self.tenant_queue_rows(&ctx.tenant, &f).await;
         let now = super::super::wall_micros();
-        answer(crate::rsm::dashboard::queue_views::parked_replicas_json(
-            &f, now, &parked,
-        ))
+        answer_gathered(
+            crate::rsm::dashboard::queue_views::parked_replicas_json(&f, now, &t.parked),
+            &t.missing,
+        )
     }
 
     /// `GET /api/v1/analytics/workload` — `get_workload_v1` (400 on an
@@ -435,14 +537,15 @@ impl RaftFacade {
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
         let f = raw_filters(query);
-        let (rows, _, churn, (from, to), _) = self.tenant_queue_rows(&ctx.tenant, &f).await;
+        let t = self.tenant_queue_rows(&ctx.tenant, &f).await;
+        let (from, to) = t.window;
         let (_, nows) = self.queue_catalog(&ctx.tenant).await?;
         let retention = self.local_metrics.retention_rows(&ctx.tenant, from, to + 1);
         let now = super::super::wall_micros();
         match crate::rsm::dashboard::queue_views::workload_json(
-            &f, now, &rows, &churn, &retention, &nows,
+            &f, now, &t.queue, &t.churn, &retention, &nows,
         ) {
-            Ok(v) => answer(v),
+            Ok(v) => answer_gathered(v, &t.missing),
             Err(e) => Ok(ApiOut::json(
                 400,
                 serde_json::json!({"error":e}).to_string(),
@@ -477,7 +580,8 @@ impl RaftFacade {
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
         let f = raw_filters(query);
-        let (rows, _, churn, _, _) = self.tenant_queue_rows(&ctx.tenant, &f).await;
+        // A bare array: it cannot carry `nodesMissing` (see `answer_gathered`).
+        let t = self.tenant_queue_rows(&ctx.tenant, &f).await;
         let (metas, _) = self.queue_catalog(&ctx.tenant).await?;
         let get = |k: &str| f.get(k).and_then(Value::as_str).filter(|v| !v.is_empty());
         let now = super::super::wall_micros();
@@ -486,9 +590,60 @@ impl RaftFacade {
             get("to"),
             get("queue"),
             now,
-            &rows,
-            &churn,
+            &t.queue,
+            &t.churn,
             &metas,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_peer_that_does_not_answer_is_said_once_a_minute() {
+        let mut said = BTreeMap::new();
+        let t0 = Instant::now();
+        let every = Duration::from_secs(60);
+        assert_eq!(gather_miss_turn(&mut said, 2, t0, every), Some(0));
+        // Every refresh inside the minute is counted, not said.
+        for s in 1..=3 {
+            assert_eq!(
+                gather_miss_turn(&mut said, 2, t0 + Duration::from_secs(s * 10), every),
+                None
+            );
+        }
+        // Another peer has its own minute.
+        assert_eq!(
+            gather_miss_turn(&mut said, 3, t0 + Duration::from_secs(5), every),
+            Some(0)
+        );
+        assert_eq!(
+            gather_miss_turn(&mut said, 2, t0 + Duration::from_secs(61), every),
+            Some(3),
+            "the next line counts the misses it did not say"
+        );
+        assert_eq!(
+            gather_miss_turn(&mut said, 2, t0 + Duration::from_secs(62), every),
+            None
+        );
+    }
+
+    #[test]
+    fn a_gathered_answer_names_the_missing_nodes() {
+        let body = |out: ApiOut| serde_json::from_str::<Value>(&out.body).expect("json");
+        let complete = answer_gathered(serde_json::json!({"series": []}), &[]).expect("200");
+        assert_eq!(complete.status, 200);
+        assert_eq!(body(complete)["nodesMissing"], serde_json::json!([]));
+        let partial = answer_gathered(serde_json::json!({"series": []}), &[2, 3]).expect("200");
+        assert_eq!(body(partial)["nodesMissing"], serde_json::json!([2, 3]));
+        // An error keeps its shape and its 500.
+        let bad = answer_gathered(serde_json::json!({"error": "nope"}), &[2]).expect("500");
+        assert_eq!(bad.status, 500);
+        assert!(body(bad).get("nodesMissing").is_none());
+        // A bare array has nowhere to carry it.
+        let arr = answer_gathered(serde_json::json!([1]), &[2]).expect("200");
+        assert_eq!(body(arr), serde_json::json!([1]));
     }
 }

@@ -3,6 +3,9 @@
 
     <PageHead title="Queues" :sub="headSub" :live="refreshAgo">
       <template #actions>
+        <!-- The throughput and lag columns are queue-ops': a node that did not
+             answer the broker's gather took its share out of them (usePartial). -->
+        <span v-if="opsPartial" class="chip chip-warn" role="status" :title="`Throughput and lag columns. ${PARTIAL_TITLE}`"><span class="dot" />{{ opsPartial }}</span>
         <button v-if="can('queueAdmin')" class="btn btn-primary" @click="showCreate = true">Create queue</button>
       </template>
     </PageHead>
@@ -165,6 +168,7 @@ import { queueAttention } from '@/composables/useAttention'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
+import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
 import { useToast } from '@/composables/useToast'
 import { useGroupsStore } from '@/stores/groupsStore'
 import { useIdentity } from '@/stores/identity'
@@ -206,6 +210,9 @@ const refreshAgo = useRefreshAgo(lastFetched)
 
 const opsByQueue = ref(new Map())
 const opsError = ref(null)
+// The nodes the last good queue-ops read lacked (usePartial).
+const opsMissing = ref([])
+const opsPartial = computed(() => (opsError.value ? '' : partialText(opsMissing.value)))
 const searchQuery = ref('')
 const filterNamespace = ref(ALL)
 const filterTask = ref(ALL)
@@ -354,6 +361,7 @@ const fetchQueueOps = async () => {
       })
     }
     opsByQueue.value = result
+    opsMissing.value = missingNodes(r.data)
     opsError.value = null
   } catch (err) {
     // The global surface already announced it; this drives the inline state.

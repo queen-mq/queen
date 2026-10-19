@@ -123,6 +123,21 @@ without one nothing changes.
 
 ## Unreleased
 
+**Console: a queue read by Kafka consumers shows its reads, and a chart missing a node says so.** The
+records the in-process Kafka facade serves to Fetch requests were counted nowhere, so a topic read
+only by Kafka consumer groups showed pushes and no consumption on the Overview, and Workload showed
+nothing for Kafka topics at all. Each node now counts the records its facade's fetches return, per
+queue and minute, beside the pops it already counted: `/api/v1/analytics/queue-ops` answers them as
+`fetchMessages` and `fetchPerSecond`, `/api/v1/analytics/workload` as `window.fetchMessages` and
+`series.fetch`, and the console charts a "Fetch (Kafka)" line on the Overview and a "Fetched (Kafka)"
+figure in Workload. A fetch takes no lease and is never acked, so two Kafka groups reading one topic
+count its records twice, as two native groups' pops do. Dashboard rows are kept by the node that
+served the traffic and gathered from the others on every read; a node that did not answer within the
+gather's 1.5 s, as during a rolling restart, used to leave its rows out without a word, and on stage
+(2026-10-19) the Overview read about 1 push a second instead of 1,500 while the leader restarted.
+Gathered answers now name the nodes that did not answer in `nodesMissing`, the node logs it at most
+once a minute per peer, and the console shows a "Partial" chip naming them.
+
 **Kafka facade: an idempotent producer survives a rolling restart of a cluster, and a batch behind a
 failed one is never acknowledged in its place.** In a cluster, a producer's batches for one partition
 reach whichever facade serves them at the moment: the raft leader's through the followers' relays, a

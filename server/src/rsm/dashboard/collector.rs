@@ -5,8 +5,9 @@
 //! Every `METRICS_FLUSH_MS` (default 60 s) it diffs the process counters the
 //! raft facade feeds ([`crate::metrics::global`]) into one [`WorkerRow`], one
 //! [`SystemRow`] (CPU, RSS, and the raft family), and a [`QueueRow`] /
-//! [`ParkedRow`] per queue with activity; and it reads each tenant's backlog
-//! through the facades' [`BacklogSampler`]s into one [`BacklogRow`] per tenant.
+//! [`ParkedRow`] per queue with activity (a Kafka fetch is activity); and it
+//! reads each tenant's backlog through the facades' [`BacklogSampler`]s into
+//! one [`BacklogRow`] per tenant.
 //!
 //! One thread per process, started by the first facade that opens.
 
@@ -236,6 +237,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
                 lag_count: cur.lag_count.saturating_sub(prev.lag_count) as i64,
                 parked_count: parked_avg,
                 conflated: cur.conflated.saturating_sub(prev.conflated) as i64,
+                fetch_messages: cur.fetched.saturating_sub(prev.fetched) as i64,
             };
             // Every queue this process has served, idle ones at 0: a series
             // that disappears when a queue goes quiet cannot resolve an alert.
@@ -254,6 +256,10 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
                 || row.ack_success != 0
                 || row.ack_failed != 0
                 || row.conflated != 0
+                // A node that only serves Kafka fetches (the consumers are
+                // connected to it, the producers to another) still writes the
+                // queue's row, or those reads vanish from the views.
+                || row.fetch_messages != 0
                 || parked_avg != 0;
             if !active {
                 continue;
@@ -281,11 +287,14 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
                 continue;
             }
             let (tenant, queue) = crate::handlers::split_tenant_queue(&key);
+            // Every counter 0, `fetch_messages` included: the queues with any
+            // counted activity were written by the loop above.
             queue_rows.push(QueueRow {
                 bucket_us,
                 tenant: tenant.to_string(),
                 queue: queue.to_string(),
                 parked_count: parked_avg,
+                fetch_messages: 0,
                 ..Default::default()
             });
             parked_rows.push(ParkedRow {
