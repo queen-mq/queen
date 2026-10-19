@@ -589,6 +589,7 @@ const toISOString = (dateTimeLocal) => {
 // Custom opens the two dates and waits for Apply.
 const RANGE_PRESETS = [
   { value: '1h', hours: 1 },
+  { value: '12h', hours: 12 },
   { value: '24h', hours: 24 },
   { value: '7d', hours: 168 },
 ]

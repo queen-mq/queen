@@ -805,10 +805,11 @@ Chart.register(endLabels, refLines, edgeLabels)
 const timeRanges = [
   { label: '1h', value: '1h' },
   { label: '6h', value: '6h' },
+  { label: '12h', value: '12h' },
   { label: '24h', value: '24h' },
   { label: '7d', value: '7d' },
 ]
-const QUICK_MINUTES = { '1h': 60, '6h': 360, '24h': 1440, '7d': 10080 }
+const QUICK_MINUTES = { '1h': 60, '6h': 360, '12h': 720, '24h': 1440, '7d': 10080 }
 
 const selectedRange = ref('1h')
 const customMode = ref(false)

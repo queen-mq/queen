@@ -549,6 +549,7 @@ const lagPresets = [
   { value: 1800,  label: '30m' },
   { value: 3600,  label: '1h'  },
   { value: 21600, label: '6h'  },
+  { value: 43200, label: '12h' },
   { value: 86400, label: '24h' },
 ]
 

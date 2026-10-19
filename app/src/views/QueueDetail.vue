@@ -531,6 +531,7 @@ const linkedWindow = computed(() => validWindow(contextFrom.value, contextTo.val
 const timeRanges = [
   { label: '1h',  value: '1h',  minutes: 60 },
   { label: '6h',  value: '6h',  minutes: 360 },
+  { label: '12h', value: '12h', minutes: 720 },
   { label: '24h', value: '24h', minutes: 1440 },
 ]
 // Preserve an investigation window received from another view.

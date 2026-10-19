@@ -14,6 +14,7 @@ const usageLoading = ref(true)
 const HOUR_CHOICES = [
   { hours: 1, label: 'Last hour' },
   { hours: 6, label: 'Last 6h' },
+  { hours: 12, label: 'Last 12h' },
   { hours: 24, label: 'Last 24h' },
   { hours: 72, label: 'Last 3 days' },
   { hours: 168, label: 'Last 7 days' },
