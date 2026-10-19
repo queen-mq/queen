@@ -1212,6 +1212,20 @@ pub trait QueenApi: Send + Sync + 'static {
         })
     }
 
+    /// The records one Kafka Fetch put in its answer, per topic (a topic is
+    /// its queue), told once per Fetch after the answer is built: what the
+    /// client was handed, not what was read. The read asks for more than the
+    /// answer may carry ([`crate::handlers::fetch`] asks in stored bytes and
+    /// trims to the client's budget), and a record trimmed off is read again
+    /// on the next poll: counted at the read, it would be counted twice.
+    ///
+    /// In-process this is the broker's per-queue dashboard count of Kafka
+    /// reads ([`LocalDispatch::note_fetched`]); over HTTP there is nobody to
+    /// tell, and the default — what every double inherits — says nothing.
+    fn note_fetched(&self, counts: &[(String, u64)], token: Option<&str>) {
+        let _ = (counts, token);
+    }
+
     /// `POST /api/v1/kv` — one answer per operation, aligned to `ops` by the
     /// `index` each answer carries. `ops` must already be within
     /// [`MAX_KV_OPS_PER_CALL`] and [`MAX_KV_KEYS_PER_CALL`], because exceeding
@@ -1567,6 +1581,14 @@ pub trait LocalDispatch: Send + Sync + 'static {
     ) -> BoxFuture<'static, std::result::Result<LocalAnswer<Vec<RawFetched>>, String>> {
         let _ = (bearer, entries, max_wait_ms, min_bytes, max_bytes);
         Box::pin(async { Err("this broker does not serve records in-process".to_string()) })
+    }
+
+    /// [`QueenApi::note_fetched`] for the broker this facade runs in: the
+    /// records one Fetch answer carried, per queue, to count where the broker
+    /// counts its pops. Synchronous and cheap — it is a counter, called on
+    /// every Fetch. The default counts nothing.
+    fn note_fetched(&self, bearer: Option<&str>, counts: &[(String, u64)]) {
+        let _ = (bearer, counts);
     }
 }
 
@@ -2325,6 +2347,14 @@ impl QueenApi for HttpQueen {
 
     fn native_positions(&self) -> bool {
         self.native_positions
+    }
+
+    fn note_fetched(&self, counts: &[(String, u64)], token: Option<&str>) {
+        // Over HTTP the broker counts nothing a Fetch read (its route is the
+        // one probes use), and there is no call to tell it with.
+        if let Transport::Local(local) = &self.transport {
+            local.note_fetched(token, counts);
+        }
     }
 
     fn transaction_positions<'a>(
@@ -3757,6 +3787,9 @@ pub mod testing {
         pub fetch_reply: Mutex<Option<Vec<Fetched>>>,
         /// When set, the next fetch fails with exactly this error.
         pub fetch_error: Mutex<Option<Error>>,
+        /// Every [`QueenApi::note_fetched`], as it was told: per Fetch, the
+        /// records its answer carried per topic.
+        pub noted_fetches: Mutex<Vec<Vec<(String, u64)>>>,
         /// The log itself, per (queue, partition): the payloads in offset order
         /// and the retention watermark below them. This is what makes the
         /// double behave like a log rather than a script — a push appends here
@@ -3946,6 +3979,7 @@ pub mod testing {
                 fetch_ceilings: Mutex::new(Vec::new()),
                 fetch_reply: Mutex::new(None),
                 fetch_error: Mutex::new(None),
+                noted_fetches: Mutex::new(Vec::new()),
                 logs: Mutex::new(HashMap::new()),
                 kv_calls: Mutex::new(Vec::new()),
                 kv_error: Mutex::new(None),
@@ -4079,6 +4113,17 @@ pub mod testing {
         }
 
         /// Everything one push carried, flattened.
+        /// How many records are IN the log of `queue`-`partition`: what
+        /// landed, unlike [`FakeQueen::pushed`], which also holds pushes that
+        /// failed.
+        pub fn landed(&self, queue: &str, partition: &str) -> usize {
+            self.logs
+                .lock()
+                .unwrap()
+                .get(&(queue.to_string(), partition.to_string()))
+                .map_or(0, |lane| lane.payloads.len())
+        }
+
         pub fn pushed(&self) -> Vec<PushItem> {
             self.pushes
                 .lock()
@@ -4330,6 +4375,10 @@ pub mod testing {
 
         fn native_positions(&self) -> bool {
             self.inner.native_positions()
+        }
+
+        fn note_fetched(&self, counts: &[(String, u64)], token: Option<&str>) {
+            self.inner.note_fetched(counts, token)
         }
 
         fn transaction_positions<'a>(
@@ -4789,6 +4838,10 @@ pub mod testing {
 
         fn native_positions(&self) -> bool {
             self.native.load(Ordering::SeqCst)
+        }
+
+        fn note_fetched(&self, counts: &[(String, u64)], _token: Option<&str>) {
+            self.noted_fetches.lock().unwrap().push(counts.to_vec());
         }
 
         fn transaction_positions<'a>(

@@ -271,7 +271,10 @@ reader, since Kafka clients never read in queue mode.
 Java clients since 3.0 and franz-go turn idempotence on by default, so a producer with no settings
 at all is an idempotent one, and the facade keeps Kafka's contract with it. A batch sent again after
 a lost answer is answered with the offsets it got the first time and is not written twice. A batch
-that would leave a gap in the sequence is refused, and nothing is written.
+that would leave a gap in the sequence is refused, and nothing is written. When a batch is not
+written, for any reason but being a duplicate, the facade answers it and closes the connection, so the
+client sends again, in order, from its oldest unanswered batch, and nothing it sent behind the failed
+one can be written ahead of it.
 
 The sequence windows live in the memory of the node whose facade writes the producer's batches,
 the leader on a cluster, one per producer and partition, up to `QUEEN_KAFKA_MAX_PRODUCER_STATES`
@@ -281,6 +284,15 @@ not taken, so a node restart, a leader change, an eviction or a connection that 
 node loses the producer's window. Its next batch is then accepted whatever its sequence, and the
 window starts again from it: Kafka's own rule for a producer whose state the broker no longer holds.
 The producer sees no error, and at most the five batches it had in flight can be written twice.
+
+On a cluster a window can also fall behind rather than disappear: a producer's batches for one
+partition reach whichever facade serves them at the moment, the leader's through the followers'
+relays, a follower's own for the second after a restart before it knows the leader, the next
+leader's after a change. A facade that held the window earlier then sees the producer's next batch
+as a gap. A clustered facade restarts the window there, exactly as for a lost one, with the same
+bound, and `/status` counts it as `producers.resynced`. For the same reason it writes a batch below
+its window that it did not append itself rather than answering it as a duplicate: at-least-once, and
+during a leader change possibly behind a later batch of the same producer, but never lost.
 
 Refusing that batch would be worse. Until 2.5.1 the facade answered it
 `OUT_OF_ORDER_SEQUENCE_NUMBER`, expecting the client to bump its epoch (KIP-360). The Java client

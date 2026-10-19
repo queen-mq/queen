@@ -53,8 +53,8 @@ QUEEN_KAFKA_ADVERTISED_ADDR=kafka-1.example.internal:9092   # required: what cli
 ## Settings
 
 Read once, when the node starts. An empty value counts as unset, and a value that does not parse
-stops the node with the variable's name, except for `QUEEN_KAFKA_THREADS`, `QUEEN_KAFKA_COALESCE` and
-`QUEEN_KAFKA_SHUTDOWN_GRACE_MS`, which fall back to their defaults.
+stops the node with the variable's name, except for `QUEEN_KAFKA_THREADS`, `QUEEN_KAFKA_COALESCE`,
+`QUEEN_KAFKA_COMMIT_COALESCE` and `QUEEN_KAFKA_SHUTDOWN_GRACE_MS`, which fall back to their defaults.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -66,6 +66,7 @@ stops the node with the variable's name, except for `QUEEN_KAFKA_THREADS`, `QUEE
 | `QUEEN_KAFKA_DEFAULT_PARTITIONS` | `1024` | The width of a topic created without one, 1 to `QUEEN_KAFKA_MAX_PARTITIONS`. Give every node the same value, or nodes advertise different widths for the same topic. |
 | `QUEEN_KAFKA_MAX_PARTITIONS` | `1000000` | The widest a topic may be created, grown or advertised, 1 to 1,500,000, which is what one metadata answer can carry. |
 | `QUEEN_KAFKA_COALESCE` | `5` | The most produce requests of one connection, already received, that are written as one push, 1 to 64. `1` turns it off. |
+| `QUEEN_KAFKA_COMMIT_COALESCE` | `64` | The most OffsetCommit requests of one connection, already received, that are answered from one write per group, 1 to 256. `1` writes every commit on its own. |
 | `QUEEN_KAFKA_PIPELINE` | `8` | Produce pushes of one connection in flight at once on the node that leads, 1 to 64: the next is sent once the one before it is in the raft log, and the answers keep request order. `1` serves a connection one push at a time. |
 | `QUEEN_KAFKA_RELAY` | `true` | On a follower, sends its clients' produce to the facade on the leader, over one connection per client connection, instead of pushing it through the broker's forwarding one push at a time. Plaintext listeners without SASL only. |
 | `QUEEN_FETCH_TOPIC_WAKE_MS` | `5` | How long a parked fetch that has read nothing waits at least before it answers, empty, because another partition of its topic was written on the node, 0 to 30,000. `0` parks it on its own partitions only. Read by the broker, so `POST /api/v1/fetch` behaves the same. |

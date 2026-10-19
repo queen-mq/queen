@@ -139,6 +139,11 @@ pub struct Facade {
     /// at most [`idempotent::WINDOW`] batches of a producer that was mid-stream
     /// ([`idempotent`]).
     pub producers: Arc<idempotent::Producers>,
+    /// THIS connection's "close after this answer" ([`idempotent::ResendInOrder`]):
+    /// an idempotent batch that was not written ends the connection once it is
+    /// answered. Per connection — a fresh one in [`Facade::for_connection`],
+    /// the same one in the connection's own re-scoped copies.
+    pub resend_in_order: Arc<idempotent::ResendInOrder>,
     /// The transactional producers this facade is holding a STAGE for (M9,
     /// [`txn`]), shared by every connection for three reasons `txn::Txns` names
     /// and one that is visible from here: the InitProducerId fence has to drop
@@ -254,6 +259,8 @@ impl Facade {
             // be the same object on every connection of the process, or the
             // window would be lost at the one moment it is needed.
             producers: Arc::clone(&self.producers),
+            // A NEW one: it is about this connection's answers only.
+            resend_in_order: Arc::new(idempotent::ResendInOrder::new()),
             // The Arc, for the same reason as the window above and one more:
             // the byte cap on staged records is a budget for the PROCESS, so a
             // per-connection copy would be one budget per connection.
@@ -294,6 +301,8 @@ impl Facade {
             // container, because the map is process-wide and its LRU has to be
             // one budget for the whole process.
             producers: Arc::clone(&self.producers),
+            // The same connection.
+            resend_in_order: Arc::clone(&self.resend_in_order),
             // NOT re-scoped either, and for the same reason: the tenant is
             // inside the stage's own key ([`txn`]) rather than around the
             // container.
@@ -492,6 +501,10 @@ impl Facade {
         policy: Policy,
     ) -> Facade {
         let catalog = Arc::new(queen::Catalog::new(Arc::clone(&queen)));
+        let producers = idempotent::Producers::new();
+        // Only a cluster of facades can hold a window another facade has moved
+        // past ([`idempotent`], "A window can be OUT OF DATE, too").
+        producers.restart_windows_on_gaps(cluster.state().is_some());
         Facade {
             advertised_host,
             advertised_port,
@@ -506,7 +519,8 @@ impl Facade {
             // Built here rather than passed in, because there is exactly one
             // right answer (an empty tracker) and a caller that could choose
             // would be a caller that could give two connections two windows.
-            producers: Arc::new(idempotent::Producers::new()),
+            producers: Arc::new(producers),
+            resend_in_order: Arc::new(idempotent::ResendInOrder::new()),
             // PASSED, unlike the producer window above, because this one
             // carries the caps of §5.2 and those are configuration: a caller
             // that could not choose them would be a facade whose memory bound
@@ -529,7 +543,9 @@ impl Facade {
     /// replaced, so this belongs at boot, before any connection shares it.
     pub fn with_limits(mut self, max_partitions: u32, max_producer_states: usize) -> Facade {
         self.max_partitions = max_partitions;
-        self.producers = Arc::new(idempotent::Producers::with_capacity(max_producer_states));
+        let producers = idempotent::Producers::with_capacity(max_producer_states);
+        producers.restart_windows_on_gaps(self.producers.restarts_windows_on_gaps());
+        self.producers = Arc::new(producers);
         self
     }
 

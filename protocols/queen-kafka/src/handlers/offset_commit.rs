@@ -174,20 +174,212 @@ pub async fn handle(
     req: &OffsetCommitRequest,
     token: Option<&str>,
 ) -> OffsetCommitResponse {
-    let started = std::time::Instant::now();
-    let answer = commit(facade, req, token).await;
-    crate::stats::COMMIT.record(started.elapsed());
-    answer
+    handle_many(facade, std::slice::from_ref(req), token)
+        .await
+        .pop()
+        .expect("one answer per request")
 }
 
+/// Several OffsetCommit requests of ONE connection, sent back to back and read
+/// together, answered in order from ONE write per group.
+///
+/// Why: a consumer that commits asynchronously (`commitMessage`, `commitAsync`)
+/// keeps sending commits without waiting for their answers, a connection is
+/// answered one request at a time, and every commit of a group waits for that
+/// group's fenced write ([`fence::commit`]). At 80 commits a second from one
+/// member — prod's own rate, replayed on stage 2026-10-19 — a few milliseconds
+/// more per write at the traffic peak made the queue in the socket grow
+/// without bound, the member's Heartbeat waited behind it past
+/// `session.timeout.ms`, and the group fell out twice for a minute each
+/// (21:51 and 21:55 CEST). Read together, the commits queued behind one write
+/// are the next write: the longer the queue, the bigger the write, so a
+/// backlog drains instead of growing.
+///
+/// Each request is checked on its own (its group, its member, its generation)
+/// and answered on its own; only the WRITE is shared. Within it the LAST commit
+/// of a partition wins, exactly as the same commits written one by one would
+/// leave it. Requests for different groups are written group by group, in
+/// order.
+pub async fn handle_many(
+    facade: &Facade,
+    reqs: &[OffsetCommitRequest],
+    token: Option<&str>,
+) -> Vec<OffsetCommitResponse> {
+    let started = std::time::Instant::now();
+    let mut answers = Vec::with_capacity(reqs.len());
+    let mut at = 0;
+    while at < reqs.len() {
+        let group = reqs[at].group_id.0.as_str();
+        let run = reqs[at..]
+            .iter()
+            .take_while(|r| r.group_id.0.as_str() == group)
+            .count();
+        answers.extend(commit(facade, &reqs[at..at + run], token).await);
+        at += run;
+    }
+    let elapsed = started.elapsed();
+    for _ in reqs {
+        crate::stats::COMMIT.record(elapsed);
+    }
+    answers
+}
+
+/// One group's run of requests ([`handle_many`]), in order.
 async fn commit(
     facade: &Facade,
-    req: &OffsetCommitRequest,
+    reqs: &[OffsetCommitRequest],
     token: Option<&str>,
-) -> OffsetCommitResponse {
+) -> Vec<OffsetCommitResponse> {
+    let mut answers: Vec<Option<OffsetCommitResponse>> = reqs.iter().map(|_| None).collect();
+    // `retention_time_ms` (v2..=v4) is accepted and not acted on, and that is
+    // the honest shape of this store rather than an oversight: offsets here
+    // never expire (see `crate::offsets`), so there is no retention for a
+    // client to shorten. Ignoring it can only keep offsets LONGER than asked,
+    // which is the safe direction — the unsafe one would be a group resuming
+    // from `auto.offset.reset` because a number in a request expired its
+    // progress.
+    let mut writes: Vec<(String, Committed)> = Vec::new();
+    let mut staged: Vec<(usize, Vec<Vec<Slot>>)> = Vec::new();
+    let mut generation: Option<i32> = None;
+    let now = now_millis();
+    for (i, req) in reqs.iter().enumerate() {
+        if let Err(refused) = admit(facade, req).await {
+            answers[i] = Some(refused);
+            continue;
+        }
+        generation = generation.max(Some(req.generation_id_or_member_epoch));
+        let group = req.group_id.0.as_str();
+        let slots = req
+            .topics
+            .iter()
+            .map(|topic| {
+                let name = topic.name.0.as_str();
+                topic
+                    .partitions
+                    .iter()
+                    .map(|p| {
+                        stage(
+                            &mut writes,
+                            group,
+                            name,
+                            p.partition_index,
+                            p.committed_offset,
+                            p.committed_metadata.as_ref().map(|m| m.as_str()),
+                            now,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        staged.push((i, slots));
+    }
+    if let Some(&(first, _)) = staged.first() {
+        if staged.len() > 1 {
+            // Requests that really share this write.
+            crate::stats::COMMIT_COALESCED.add(staged.len() as u64);
+        }
+        let group = reqs[first].group_id.0.as_str();
+        // The last write of each key, in the order the keys first appeared:
+        // what the same commits written one by one would leave behind.
+        let (unique, of) = last_per_key(writes);
+        // The fenced write. In single mode this is exactly the call it always
+        // was; in cluster mode the batch carries the group's fence at index 0
+        // and a lost one writes nothing.
+        let verdict = fence::commit(
+            facade.queen.as_ref(),
+            &facade.cluster,
+            // The tenant this connection's credential resolves to — the same
+            // key the coordinator files the group's actor under, read from the
+            // catalog rather than resolved here (it is a synchronous cache read;
+            // see [`Facade::authenticated_as`]). The fence CELL is per (tenant,
+            // group) so that two tenants' groups of one name do not fight over
+            // one remembered version; the fence KEY needs no tenant, because
+            // `queen.kv` is keyed by one.
+            &facade.catalog.tenant_key(token),
+            group,
+            generation.unwrap_or(crate::coordinator::NO_GENERATION),
+            &unique,
+            token,
+        )
+        .await;
+        match verdict {
+            fence::Verdict::Stored(stored) => {
+                // Every staged write's result is its key's.
+                let stored: Vec<crate::queen::Result<()>> = of
+                    .iter()
+                    .map(|&u| {
+                        stored.get(u).cloned().unwrap_or_else(|| {
+                            Err(crate::queen::Error::Body(
+                                "the offset store answered fewer results than it was given"
+                                    .to_string(),
+                            ))
+                        })
+                    })
+                    .collect();
+                if stored.iter().any(|r| r.is_ok()) {
+                    remember(facade, group, token).await;
+                    // The one proof of life a group with no members gives
+                    // ([`crate::presence`]).
+                    crate::presence::note(facade, group, crate::presence::Source::Commit, token)
+                        .await;
+                }
+                for (i, slots) in &staged {
+                    answers[*i] = Some(render(&reqs[*i], slots, &stored));
+                }
+            }
+            // Both of these wrote NOTHING, and both are per-partition codes a
+            // client retries — the first after re-running FindCoordinator, the
+            // second after a backoff.
+            fence::Verdict::NotCoordinator => {
+                for (i, _) in &staged {
+                    answers[*i] = Some(refuse_all(&reqs[*i], ResponseError::NotCoordinator));
+                }
+            }
+            fence::Verdict::Unavailable => {
+                for (i, _) in &staged {
+                    answers[*i] = Some(refuse_all(
+                        &reqs[*i],
+                        ResponseError::CoordinatorNotAvailable,
+                    ));
+                }
+            }
+        }
+    }
+    answers
+        .into_iter()
+        .map(|a| a.expect("every request is refused or staged"))
+        .collect()
+}
+
+/// `writes` reduced to the last write of each key, in the order keys first
+/// appear, and for every original write the index of its key's survivor.
+fn last_per_key(writes: Vec<(String, Committed)>) -> (Vec<(String, Committed)>, Vec<usize>) {
+    let mut index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(writes.len());
+    let mut unique: Vec<(String, Committed)> = Vec::with_capacity(writes.len());
+    let mut of = Vec::with_capacity(writes.len());
+    for (key, committed) in writes {
+        match index.get(&key) {
+            Some(&u) => {
+                unique[u].1 = committed;
+                of.push(u);
+            }
+            None => {
+                index.insert(key.clone(), unique.len());
+                of.push(unique.len());
+                unique.push((key, committed));
+            }
+        }
+    }
+    (unique, of)
+}
+
+/// The group-wide checks of one request, before anything is staged: its group
+/// id, cluster mode's ownership guard, and the coordinator's membership fence.
+async fn admit(facade: &Facade, req: &OffsetCommitRequest) -> Result<(), OffsetCommitResponse> {
     let group = req.group_id.0.as_str();
     if let Some(e) = crate::coordinator::invalid_group_id(group) {
-        return refuse_all(req, e);
+        return Err(refuse_all(req, e));
     }
     // Cluster mode's ownership guard, before the coordinator is touched — so a
     // node that does not own this group never spawns an actor for it. In single
@@ -199,7 +391,7 @@ async fn commit(
             error = ?e,
             "offset commit refused: this node does not coordinate the group"
         );
-        return refuse_all(req, e);
+        return Err(refuse_all(req, e));
     }
     // The membership fence, before anything is written.
     // `generation_id_or_member_epoch` is
@@ -225,76 +417,9 @@ async fn commit(
             error = ?e,
             "offset commit refused"
         );
-        return refuse_all(req, e);
+        return Err(refuse_all(req, e));
     }
-
-    // `retention_time_ms` (v2..=v4) is accepted and not acted on, and that is
-    // the honest shape of this store rather than an oversight: offsets here
-    // never expire (see `crate::offsets`), so there is no retention for a
-    // client to shorten. Ignoring it can only keep offsets LONGER than asked,
-    // which is the safe direction — the unsafe one would be a group resuming
-    // from `auto.offset.reset` because a number in a request expired its
-    // progress.
-    let mut writes: Vec<(String, Committed)> = Vec::new();
-    let mut slots: Vec<Vec<Slot>> = Vec::with_capacity(req.topics.len());
-    let now = now_millis();
-    for topic in &req.topics {
-        let name = topic.name.0.as_str();
-        slots.push(
-            topic
-                .partitions
-                .iter()
-                .map(|p| {
-                    stage(
-                        &mut writes,
-                        group,
-                        name,
-                        p.partition_index,
-                        p.committed_offset,
-                        p.committed_metadata.as_ref().map(|m| m.as_str()),
-                        now,
-                    )
-                })
-                .collect(),
-        );
-    }
-
-    // The fenced write. In single mode this is exactly the call it always was;
-    // in cluster mode the batch carries the group's fence at index 0 and a lost
-    // one writes nothing.
-    match fence::commit(
-        facade.queen.as_ref(),
-        &facade.cluster,
-        // The tenant this connection's credential resolves to — the same key
-        // the coordinator files the group's actor under, read from the catalog
-        // rather than resolved here (it is a synchronous cache read; see
-        // [`Facade::authenticated_as`]). The fence CELL is per (tenant, group)
-        // so that two tenants' groups of one name do not fight over one
-        // remembered version; the fence KEY needs no tenant, because
-        // `queen.kv` is keyed by one.
-        &facade.catalog.tenant_key(token),
-        group,
-        req.generation_id_or_member_epoch,
-        &writes,
-        token,
-    )
-    .await
-    {
-        fence::Verdict::Stored(stored) => {
-            if stored.iter().any(|r| r.is_ok()) {
-                remember(facade, group, token).await;
-                // The one proof of life a group with no members gives
-                // ([`crate::presence`]).
-                crate::presence::note(facade, group, crate::presence::Source::Commit, token).await;
-            }
-            render(req, &slots, &stored)
-        }
-        // Both of these wrote NOTHING, and both are per-partition codes a
-        // client retries — the first after re-running FindCoordinator, the
-        // second after a backoff.
-        fence::Verdict::NotCoordinator => refuse_all(req, ResponseError::NotCoordinator),
-        fence::Verdict::Unavailable => refuse_all(req, ResponseError::CoordinatorNotAvailable),
-    }
+    Ok(())
 }
 
 /// Record that this group exists, once per (tenant, group) per process.
@@ -583,6 +708,155 @@ mod tests {
         .await;
         assert_eq!(api.kv_calls.lock().unwrap().len(), 1);
         assert_eq!(api.kv_ops().len(), 72);
+    }
+
+    // ------------------------------------------- commits read together
+
+    /// Commits a connection sent back to back are answered from ONE write, and
+    /// the last commit of a partition is what is left — exactly what the same
+    /// commits written one by one would leave (stage, 2026-10-19 21:51: an
+    /// asynchronous committer's queue starved its own heartbeats).
+    #[tokio::test]
+    async fn commits_read_together_are_one_write_and_the_last_one_wins() {
+        let (f, api) = facade_and_queen(&[]);
+        let reqs = vec![
+            request("g", &[("orders", &[(0, 10, "a"), (1, 5, "")])]),
+            request("g", &[("orders", &[(0, 20, "b")])]),
+            request("g", &[("orders", &[(0, 30, "c"), (2, 7, "")])]),
+        ];
+        let answers = handle_many(&f, &reqs, None).await;
+        assert_eq!(answers.len(), 3);
+        for (resp, req) in answers.iter().zip(&reqs) {
+            for t in &req.topics {
+                for part in &t.partitions {
+                    assert_eq!(code(resp, "orders", part.partition_index), 0);
+                }
+            }
+        }
+        // The offset writes, leaving out the group's one-time index row, which
+        // depends on whether another test indexed "g" first in this process.
+        let offsets: Vec<_> = api
+            .kv_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| {
+                call.iter().any(|op| {
+                    matches!(op, crate::queen::KvOp::Put { key, .. } if key.starts_with("qk:group:"))
+                })
+            })
+            .cloned()
+            .collect();
+        assert_eq!(offsets.len(), 1, "not one write");
+        // One write per KEY, the last of each.
+        let keys = offsets[0]
+            .iter()
+            .filter(|op| matches!(op, crate::queen::KvOp::Put { key, .. } if key.starts_with("qk:group:")))
+            .count();
+        assert_eq!(keys, 3);
+        let p0 = api
+            .kv_get(offsets::NAMESPACE, "qk:group:g:orders:0")
+            .unwrap();
+        assert_eq!(
+            (p0["offset"].clone(), p0["metadata"].clone()),
+            (30.into(), "c".into())
+        );
+        assert_eq!(
+            api.kv_get(offsets::NAMESPACE, "qk:group:g:orders:1")
+                .unwrap()["offset"],
+            5
+        );
+        assert_eq!(
+            api.kv_get(offsets::NAMESPACE, "qk:group:g:orders:2")
+                .unwrap()["offset"],
+            7
+        );
+    }
+
+    /// Each request is still checked on its own: one from a member of a
+    /// generation that ended is refused, the ones around it are written.
+    #[tokio::test]
+    async fn a_refused_commit_among_others_is_refused_alone() {
+        let (f, api) = facade_and_queen(&[]);
+        let (member, generation) = one_member_group(&f, "g").await;
+        let as_member = |offset: i64, gen: i32| {
+            request("g", &[("orders", &[(0, offset, "")])])
+                .with_member_id(StrBytes::from_string(member.clone()))
+                .with_generation_id_or_member_epoch(gen)
+        };
+        let reqs = vec![
+            as_member(10, generation),
+            as_member(99, generation + 7),
+            as_member(20, generation),
+        ];
+        let answers = handle_many(&f, &reqs, None).await;
+        assert_eq!(code(&answers[0], "orders", 0), 0);
+        assert_eq!(
+            code(&answers[1], "orders", 0),
+            ResponseError::IllegalGeneration.code()
+        );
+        assert_eq!(code(&answers[2], "orders", 0), 0);
+        assert_eq!(
+            api.kv_get(offsets::NAMESPACE, "qk:group:g:orders:0")
+                .unwrap()["offset"],
+            20,
+            "the refused commit's offset was written"
+        );
+    }
+
+    /// Commits for different groups are written group by group, in order.
+    #[tokio::test]
+    async fn commits_of_different_groups_are_written_per_group() {
+        let (f, api) = facade_and_queen(&[]);
+        let reqs = vec![
+            request("a", &[("orders", &[(0, 1, "")])]),
+            request("a", &[("orders", &[(0, 2, "")])]),
+            request("b", &[("orders", &[(0, 3, "")])]),
+            request("a", &[("orders", &[(0, 4, "")])]),
+        ];
+        let answers = handle_many(&f, &reqs, None).await;
+        assert!(answers.iter().all(|r| code(r, "orders", 0) == 0));
+        // The offset writes, leaving out each group's one-time index row.
+        let offset_writes = api
+            .kv_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| {
+                call.iter().any(|op| {
+                    matches!(op, crate::queen::KvOp::Put { key, .. } if key.starts_with("qk:group:"))
+                })
+            })
+            .count();
+        assert_eq!(offset_writes, 3, "a, b, a");
+        assert_eq!(
+            api.kv_get(offsets::NAMESPACE, "qk:group:a:orders:0")
+                .unwrap()["offset"],
+            4
+        );
+        assert_eq!(
+            api.kv_get(offsets::NAMESPACE, "qk:group:b:orders:0")
+                .unwrap()["offset"],
+            3
+        );
+    }
+
+    /// A failed write fails every commit it carried, and each is answered
+    /// with its own partitions.
+    #[tokio::test]
+    async fn a_failed_shared_write_fails_every_commit_in_it() {
+        let (f, api) = facade_and_queen(&[]);
+        api.fail_kv(Error::Transport("the broker restarted".into()));
+        let reqs = vec![
+            request("g", &[("orders", &[(0, 1, "")])]),
+            request("g", &[("clicks", &[(3, 2, "")])]),
+        ];
+        let answers = handle_many(&f, &reqs, None).await;
+        assert_ne!(code(&answers[0], "orders", 0), 0);
+        assert_ne!(code(&answers[1], "clicks", 3), 0);
+        assert!(api
+            .kv_get(offsets::NAMESPACE, "qk:group:g:orders:0")
+            .is_none());
     }
 
     // ------------------------------------------------------------- the fence

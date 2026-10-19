@@ -123,6 +123,56 @@ without one nothing changes.
 
 ## Unreleased
 
+**Kafka facade: an idempotent producer survives a rolling restart of a cluster, and a batch behind a
+failed one is never acknowledged in its place.** In a cluster, a producer's batches for one partition
+reach whichever facade serves them at the moment: the raft leader's through the followers' relays, a
+follower's own for the second after a restart in which it does not know the leader yet, the next
+leader's after a change. So a facade can hold a sequence window another facade has since moved past,
+and the producer's next batch then looks like a gap in it. Stage, 2026-10-19: node 0 came back, served
+one producer's batches 18556 to 18600 itself, learned the leader a second later and relayed 18601 to
+node 2, whose window from before still expected 18556. Node 2 refused the gap
+`OUT_OF_ORDER_SEQUENCE_NUMBER`, which librdkafka treats as fatal for the oldest batch it waits on, and
+four producers of the load test stopped for good. A clustered facade now restarts a held window on a
+gap, as it already did for a lost one, and writes a batch below its window that it did not append
+itself rather than answering it `DUPLICATE_SEQUENCE_NUMBER` (a success to every client, for records
+that may never have been written). A facade on its own keeps Apache Kafka's answers to both, because
+nothing else writes its partitions. What keeps a gap that IS one from being read as a window that fell
+behind is the connection: an idempotent batch that is not written, for any reason but being a
+duplicate, is answered and the connection is closed after the answer, so nothing the client sent
+behind it is read, relayed or served anywhere, and the client sends again, in order, from its oldest
+unanswered batch. Requests read together with it (a coalesced or pipelined group) are staged up to it
+and no further, and a follower that relayed it reads the leader's answer and ends its client's
+connection with the relay, so the next batch cannot reach a new leader, or the follower itself, ahead
+of the resend. A transaction's batch is exempt: it is staged rather than written, and closing its
+connection would orphan the transaction; instead a transaction's window never starts past sequence 0
+on a single facade, so the batch behind a refused one is refused too, rather than starting a window
+under which the refused batch's retry would be answered as a duplicate. A batch that follows one still
+in flight on another connection (a client that reconnected while its old connection's push runs) is
+refused retriably rather than pushed with nothing ordering it behind that push. A late batch the
+window writes from below goes where its sequence puts it rather than becoming the newest, and a late
+commit of a session the producer has since bumped past no longer enters the new session's window. This
+also closes a hole the earlier fix opened: a facade with no window whose first push for a producer
+failed accepted the batch behind it, and then answered the failed batch's resend as a duplicate, which
+the client counts as delivered. A connection that switches between relaying its produce and serving it
+locally now drains what is in flight first, and a pipelined produce dropped before its push no longer
+leaves batches in the in-flight list. `/status` counts the restarts (`producers.resynced`) and the
+connections closed after a batch that was not written (`consume.produceResendCloses`). Measured on
+`compat/cluster/rig-embedded.sh` (three raft brokers with the facade in process) under eight
+idempotent librdkafka producers: the code on stage reproduced the fatal error (one producer stopped
+for good); this one, over six runs of rolling restarts and leader kills, lost nothing, kept every
+producer's order and never failed a send fatally.
+
+**Kafka facade: a consumer that commits asynchronously no longer starves its own heartbeats.** A
+connection is answered one request at a time, and every commit of a group waits for that group's
+fenced write. A member committing with `commitMessage`/`commitAsync` at prod's own rate, 80 commits a
+second, queued commits faster than they were written at the stage traffic peak. Its heartbeats waited
+behind the queue past `session.timeout.ms`, and the group fell out for a minute, twice (2026-10-19
+21:51 and 21:55). OffsetCommit requests already buffered on a connection are now answered from one
+write per group, in order, each checked on its own, the last commit of a partition winning as it
+would one by one. The longer the queue, the bigger the write, so a backlog drains instead of growing.
+`QUEEN_KAFKA_COMMIT_COALESCE` (default 64, 1 to 256) bounds how many are read together, and 1 restores
+one write per commit. `/status` counts them (`consume.commitCoalesced`).
+
 **Kafka facade: an idempotent librdkafka producer survives a restart or a leader change.** The
 facade keeps each producer's sequence window in the memory of the node that writes its batches, so
 a restart, a leader change, an eviction or a connection that moves to another node loses it. The

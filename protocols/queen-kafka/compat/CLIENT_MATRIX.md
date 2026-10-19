@@ -150,7 +150,14 @@ What the facade actually promises, and it is Kafka's own promise:
 * a batch resent after a lost response is answered `error_code = 0` with the
   offsets the original got, and is **not written twice**;
 * a batch that would leave a gap in the sequence is refused
-  `OUT_OF_ORDER_SEQUENCE_NUMBER` and **nothing is written**;
+  `OUT_OF_ORDER_SEQUENCE_NUMBER` and **nothing is written** — on a single
+  facade; a clustered one restarts its window there (below);
+* an idempotent batch that is not written, for any reason but being a
+  duplicate, is answered and the connection is closed after the answer, so
+  the client resends in order and nothing behind it is written first — not
+  the requests read together with it, and not, through a follower's relay,
+  anything after it (a transaction's batch, staged rather than written, keeps
+  its connection);
 * an epoch below the highest seen is refused `INVALID_PRODUCER_EPOCH`.
 
 All three were measured against `apache/kafka:3.9.1` side by side and the
@@ -178,6 +185,26 @@ rolling restart of stage stopped every librdkafka producer of a load test that
 way (2026-10-19). `UNKNOWN_PRODUCER_ID` would not have saved it: librdkafka
 recovers from it only for a batch it has not sent before, and a node that stops
 with requests on the wire turns all of them into resends.
+
+**On a cluster a window can also fall BEHIND.** A producer's batches for one
+partition reach whichever facade serves them at that moment — the raft
+leader's through the followers' relays, a follower's own for the second after a
+restart before it knows the leader, the next leader's after a change — so a
+facade can hold a window another facade has moved past, and the producer's next
+batch looks like a gap in it. Refusing it is the same fatal answer for
+librdkafka (stage, 2026-10-19 21:31: four producers stopped during a rolling
+restart). A clustered facade restarts the window at that batch, as for a lost
+one, and counts it (`/status` `producers.resynced`), and it writes a batch
+below its window that it did not append rather than answering it
+`DUPLICATE_SEQUENCE_NUMBER` — a success for records nobody may have written.
+A real gap cannot reach a window at all: the connection that answered a batch
+it did not write is closed, so the batches behind it are resent after it.
+At-least-once at a leader change, and for a client that sends to a new leader
+before an older batch to the old one has failed (Java), possibly out of order
+across that change; never lost. Measured:
+`compat/node-librdkafka/rolling_cluster.mjs` against
+`compat/cluster/rig-embedded.sh` (three raft brokers with the facade in
+process, rolling restarts and a leader SIGKILL under six idempotent producers).
 
 What each client does with idempotence left ON, measured before F3 and after:
 

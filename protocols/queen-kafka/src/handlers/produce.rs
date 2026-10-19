@@ -210,6 +210,9 @@ struct Idem<'a> {
     /// EndTxn.
     txn: Option<&'a str>,
     txns: &'a crate::txn::Txns,
+    /// This connection's "close after this answer" ([`idempotent::ResendInOrder`]):
+    /// required when an idempotent batch of the request is not written.
+    resend: &'a idempotent::ResendInOrder,
 }
 
 /// Handle one Produce request. `None` means "write no response frame", which is
@@ -296,6 +299,7 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
         tenant: &tenant,
         txn: transactional,
         txns: facade.txns.as_ref(),
+        resend: &facade.resend_in_order,
     };
     let (items, slots) = stage_request(req, &plans, &idem);
     crate::stats::PRODUCE_STAGE.record(started.elapsed());
@@ -382,6 +386,9 @@ fn stage_into(
 /// which is what a write that never happened is.
 ///
 /// One answer per request, in request order; `None` is acks=0's "no frame".
+/// FEWER answers than requests when an idempotent batch is not written: the
+/// requests behind it are not staged and get no answer, and the connection
+/// closes after the ones it has ([`idempotent::ResendInOrder`]).
 pub async fn handle_coalesced(
     facade: &Facade,
     reqs: &[ProduceRequest],
@@ -407,12 +414,23 @@ pub async fn handle_coalesced(
             tenant: &tenant,
             txn: transactional,
             txns: facade.txns.as_ref(),
+            resend: &facade.resend_in_order,
         };
-        staged.push(Ok(stage_into(&mut items, req, &plans, &idem)));
+        let slots = stage_into(&mut items, req, &plans, &idem);
+        let stop = refuses_idempotent(req, &slots, &idem);
+        staged.push(Ok(slots));
+        if stop {
+            // Nothing behind an idempotent batch that is not written is
+            // staged: its answer ends the connection ([`render`]), and a
+            // batch of the same producer behind it would be written ahead of
+            // its resend. The requests left are never answered.
+            facade.resend_in_order.require();
+            break;
+        }
     }
     crate::stats::PRODUCE_STAGE.record(started.elapsed());
     crate::stats::PRODUCE_PUSHES.add(1);
-    crate::stats::PRODUCE_REQUESTS.add(reqs.len() as u64);
+    crate::stats::PRODUCE_REQUESTS.add(staged.len() as u64);
     crate::stats::PRODUCE_RECORDS.add(items.len() as u64);
     let pushing = std::time::Instant::now();
     let pushed = if items.is_empty() {
@@ -437,6 +455,7 @@ pub async fn handle_coalesced(
                         tenant: &tenant,
                         txn: transactional,
                         txns: facade.txns.as_ref(),
+                        resend: &facade.resend_in_order,
                     };
                     let response = render(req, &slots, pushed.as_ref(), &idem);
                     end_inflight(&slots, &idem);
@@ -458,11 +477,56 @@ pub async fn handle_coalesced(
 /// One coalesced Produce staged in arrival order and not pushed yet
 /// ([`stage_coalesced`], [`push_staged`]): the connection's pipelined produce.
 pub struct StagedProduce {
+    /// `None` once [`push_staged`] has taken it over.
+    inner: Option<StagedInner>,
+    facade: Facade,
+    /// An idempotent batch of the last request staged is not written: the
+    /// requests behind it were not staged, and the connection stages nothing
+    /// more — it answers what it has in flight and closes ([`render`]).
+    ends_connection: bool,
+}
+
+impl StagedProduce {
+    /// [`StagedProduce::ends_connection`]: the connection reads no request
+    /// past this one.
+    pub fn ends_connection(&self) -> bool {
+        self.ends_connection
+    }
+}
+
+struct StagedInner {
     reqs: Vec<ProduceRequest>,
     /// Per request: its slots, or the answer it already has (an invalid acks).
     staged: Vec<Result<Vec<Vec<Slot>>, ProduceResponse>>,
     items: Vec<RawPush>,
     tenant: crate::identity::TenantKey,
+}
+
+/// A staged produce dropped before [`push_staged`] took it — the connection
+/// ended and its tasks were aborted — leaves the in-flight list here, as a
+/// [`PushedProduce`] dropped unanswered does. Left there, its runs would read
+/// as batches still in flight for ever, and every later batch of the producer
+/// past them as a gap ([`idempotent::Producers::check`]).
+impl Drop for StagedProduce {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
+        for (req, staged) in inner.reqs.iter().zip(inner.staged.iter()) {
+            if let Ok(slots) = staged {
+                let idem = Idem {
+                    producers: &self.facade.producers,
+                    tenant: &inner.tenant,
+                    txn: idempotent::transactional_id(
+                        req.transactional_id.as_ref().map(|id| id.0.as_str()),
+                    ),
+                    txns: self.facade.txns.as_ref(),
+                    resend: &self.facade.resend_in_order,
+                };
+                end_inflight(slots, &idem);
+            }
+        }
+    }
 }
 
 /// [`handle_coalesced`]'s first half: every request's topics resolved and its
@@ -473,13 +537,14 @@ pub struct StagedProduce {
 /// coalesced push).
 pub async fn stage_coalesced(
     facade: &Facade,
-    reqs: Vec<ProduceRequest>,
+    mut reqs: Vec<ProduceRequest>,
     token: Option<&str>,
 ) -> StagedProduce {
     let started = std::time::Instant::now();
     let tenant = facade.catalog.tenant_key(token);
     let mut items: Vec<RawPush> = Vec::new();
     let mut staged: Vec<Result<Vec<Vec<Slot>>, ProduceResponse>> = Vec::with_capacity(reqs.len());
+    let mut ends_connection = false;
     for req in &reqs {
         if !matches!(req.acks, ACKS_NONE | ACKS_LEADER | ACKS_ALL) {
             staged.push(Err(build(facade, req, token).await));
@@ -495,18 +560,32 @@ pub async fn stage_coalesced(
             tenant: &tenant,
             txn: transactional,
             txns: facade.txns.as_ref(),
+            resend: &facade.resend_in_order,
         };
-        staged.push(Ok(stage_into(&mut items, req, &plans, &idem)));
+        let slots = stage_into(&mut items, req, &plans, &idem);
+        let stop = refuses_idempotent(req, &slots, &idem);
+        staged.push(Ok(slots));
+        if stop {
+            // As in [`handle_coalesced`]: nothing behind it is staged, and the
+            // connection stages nothing more ([`StagedProduce::ends_connection`]).
+            ends_connection = true;
+            break;
+        }
     }
+    reqs.truncate(staged.len());
     crate::stats::PRODUCE_STAGE.record(started.elapsed());
     crate::stats::PRODUCE_PUSHES.add(1);
     crate::stats::PRODUCE_REQUESTS.add(reqs.len() as u64);
     crate::stats::PRODUCE_RECORDS.add(items.len() as u64);
     StagedProduce {
-        reqs,
-        staged,
-        items,
-        tenant,
+        inner: Some(StagedInner {
+            reqs,
+            staged,
+            items,
+            tenant,
+        }),
+        facade: facade.clone(),
+        ends_connection,
     }
 }
 
@@ -533,10 +612,19 @@ impl PushedProduce {
                 req.transactional_id.as_ref().map(|id| id.0.as_str()),
             ),
             txns: self.facade.txns.as_ref(),
+            resend: &self.facade.resend_in_order,
         }
     }
 
     /// Every request's answer, `None` for an `acks=0` one.
+    /// Every request's answer, `None` for an `acks=0` one, and whether the
+    /// connection must close after writing them ([`idempotent::ResendInOrder`]).
+    pub fn answer_and_close(self) -> (Vec<Option<ProduceResponse>>, bool) {
+        let resend = std::sync::Arc::clone(&self.facade.resend_in_order);
+        let answers = self.answer();
+        (answers, resend.take())
+    }
+
     pub fn answer(mut self) -> Vec<Option<ProduceResponse>> {
         let rendering = std::time::Instant::now();
         let answers = self
@@ -597,12 +685,14 @@ pub async fn push_staged(
     after: Option<tokio::sync::oneshot::Receiver<()>>,
     in_log: tokio::sync::oneshot::Sender<()>,
 ) -> Option<PushedProduce> {
-    let StagedProduce {
+    let mut p = p;
+    let StagedInner {
         reqs,
         staged,
         items,
         tenant,
-    } = p;
+    } = p.inner.take().expect("a staged produce is pushed once");
+    drop(p);
     let mut out = PushedProduce {
         facade,
         reqs,
@@ -834,7 +924,13 @@ fn stage(
     // decoding a byte of it and a gap is refused without decoding a byte of it.
     // This is the place `refuse` used to answer UNSUPPORTED_FOR_MESSAGE_FORMAT
     // from ([`crate::idempotent`]).
-    let seq = match idem.producers.check(idem.tenant, topic, p.index, &infos) {
+    let seq = match idem.producers.check_on(
+        idem.tenant,
+        topic,
+        p.index,
+        &infos,
+        idem.resend.connection(),
+    ) {
         idempotent::Verdict::NotIdempotent => None,
         idempotent::Verdict::Accept(pending) => Some(pending),
         idempotent::Verdict::Duplicate(base) => {
@@ -1161,92 +1257,18 @@ fn render(
             .partition_data
             .iter()
             .zip(row)
-            .map(|(p, slot)| match slot {
-                Slot::Reject(e, why) => rejected(p.index, *e, why),
-                // Nothing was appended, so there is no base offset to report and
-                // nothing failed either: the entry asked for no work.
-                Slot::Empty => appended(p.index, NO_OFFSET),
-                // Already in the log, at these offsets. Nothing was pushed and
-                // nothing is committed: the window already remembers this batch.
-                Slot::Duplicate(base) => appended(p.index, *base),
-                // Staged, not written. -1 is the offset, and it is the same -1
-                // a duplicate of a staged batch is answered with, because the
-                // window remembers the sentinel rather than a place in a log
-                // nothing has been appended to.
-                Slot::Staged => appended(p.index, NO_OFFSET),
-                Slot::Push { start, len, seq } => match pushed {
-                    // `get` and not an index: a handler must not panic on
-                    // anything a broker answered, however wrong it is.
-                    Some(Ok(results)) => match results
-                        .get(*start..*start + *len)
-                        .ok_or_else(|| {
-                            NoBase::Broken(format!(
-                                "the push answered {} results for {} items",
-                                results.len(),
-                                start + len
-                            ))
-                        })
-                        .and_then(base_offset)
-                    {
-                        Ok(base) => {
-                            // The window advances HERE and nowhere else: only a
-                            // run that came back with contiguous offsets is a
-                            // run whose sequences this facade may claim to have
-                            // appended. A partially failed push leaves the entry
-                            // untouched, so the client's retry is new work
-                            // rather than a skipped duplicate.
-                            if let Some(pending) = seq {
-                                idem.producers.commit(pending, base, *len);
-                            }
-                            appended(p.index, base)
-                        }
-                        // The records are in the spool and will be numbered when
-                        // maintenance ends: retriable, never a delivery failure.
-                        // See the module header.
-                        Err(NoBase::Spooled(why)) => {
-                            tracing::warn!(
-                                target: "kafka",
-                                topic = name,
-                                partition = p.index,
-                                %why,
-                                "the broker spooled this produce; answering it retriable"
-                            );
-                            rejected(p.index, ResponseError::RequestTimedOut, &why)
-                        }
-                        Err(NoBase::Broken(why)) => {
-                            // The broker did not answer what the whole offset
-                            // mapping rests on. Loud, and never guessed.
-                            tracing::error!(
-                                target: "kafka",
-                                topic = name,
-                                partition = p.index,
-                                %why,
-                                "the push response cannot be turned into a base offset"
-                            );
-                            rejected(p.index, ResponseError::UnknownServerError, &why)
-                        }
-                    },
-                    Some(Err(e)) => {
-                        let mapped = kafka_error(e);
-                        // Produce v8+ carries this to the application. Bounded
-                        // and scrubbed (queen.rs `wire_reason_of`), so a 403's
-                        // own sentence — the proxy's "operation not permitted
-                        // for this credential" — reaches the producer's
-                        // exception instead of only the facade's log.
-                        rejected(
-                            p.index,
-                            mapped,
-                            &queen::wire_reason_of(&format!("push failed: {e}")),
-                        )
-                    }
-                    // Unreachable: a Push slot exists only when items were
-                    // staged, and staged items are always pushed.
-                    None => rejected(
-                        p.index,
-                        ResponseError::UnknownServerError,
-                        "records were staged but never pushed",
-                    ),
-                },
+            .map(|(p, slot)| (p, slot, answer_slot(name, p, slot, pushed, idem)))
+            .map(|(p, slot, answer)| {
+                // An idempotent batch that was not written ends the connection
+                // once it is answered ([`crate::idempotent`], "What keeps a gap
+                // that IS one"): nothing the client sent behind it is read.
+                if answer.error_code != 0
+                    && answer.error_code != ResponseError::DuplicateSequenceNumber.code()
+                    && closes_on_failure(slot, p, idem)
+                {
+                    idem.resend.require();
+                }
+                answer
             })
             .collect();
         responses.push(
@@ -1270,6 +1292,148 @@ fn render(
     ProduceResponse::default()
         .with_responses(responses)
         .with_throttle_time_ms(throttle.unwrap_or(0))
+}
+
+/// Whether a failure of this entry ends the connection after its answer: an
+/// idempotent producer's batch outside a transaction.
+///
+/// A TRANSACTIONAL batch is staged, not written, and its producer's sequence
+/// is fenced by its own transaction and epoch; the connection is what binds
+/// the transaction ([`crate::txn::Txns::drop_connection`]), so closing it on a
+/// retriable refusal (the process stage is full) would orphan a transaction
+/// the client is about to retry into.
+fn closes_on_failure(slot: &Slot, p: &PartitionProduceData, idem: &Idem<'_>) -> bool {
+    idem.txn.is_none() && idempotent_slot(slot, p)
+}
+
+/// Whether a staged request refused an idempotent batch that ends the
+/// connection ([`closes_on_failure`]); a duplicate's refusal is a success.
+fn refuses_idempotent(req: &ProduceRequest, slots: &[Vec<Slot>], idem: &Idem<'_>) -> bool {
+    req.topic_data.iter().zip(slots).any(|(topic, row)| {
+        topic.partition_data.iter().zip(row).any(|(p, slot)| {
+            matches!(slot, Slot::Reject(e, _) if *e != ResponseError::DuplicateSequenceNumber)
+                && closes_on_failure(slot, p, idem)
+        })
+    })
+}
+
+/// Whether a partition's entry is an idempotent producer's: a run the window
+/// accepted, or a refused entry whose batch carries a producer id (read off
+/// the batch header — only on the refusal path). A refused batch whose header
+/// does not decode counts as one: nothing says it is not, and the cost of the
+/// wrong guess is a reconnect.
+fn idempotent_slot(slot: &Slot, p: &PartitionProduceData) -> bool {
+    match slot {
+        Slot::Push { seq, .. } => seq.is_some(),
+        Slot::Reject(..) => match p.records.as_ref().filter(|r| !r.is_empty()) {
+            None => false,
+            Some(r) => {
+                RecordBatchDecoder::decode_batch_info(&mut r.clone()).map_or(true, |infos| {
+                    infos
+                        .iter()
+                        .any(|i| i.producer_id != idempotent::NO_PRODUCER_ID)
+                })
+            }
+        },
+        Slot::Empty | Slot::Duplicate(_) | Slot::Staged => false,
+    }
+}
+
+/// One partition's answer, from its slot and the push.
+fn answer_slot(
+    name: &str,
+    p: &PartitionProduceData,
+    slot: &Slot,
+    pushed: Option<&queen::Result<Vec<Pushed>>>,
+    idem: &Idem<'_>,
+) -> PartitionProduceResponse {
+    match slot {
+        Slot::Reject(e, why) => rejected(p.index, *e, why),
+        // Nothing was appended, so there is no base offset to report and
+        // nothing failed either: the entry asked for no work.
+        Slot::Empty => appended(p.index, NO_OFFSET),
+        // Already in the log, at these offsets. Nothing was pushed and
+        // nothing is committed: the window already remembers this batch.
+        Slot::Duplicate(base) => appended(p.index, *base),
+        // Staged, not written. -1 is the offset, and it is the same -1
+        // a duplicate of a staged batch is answered with, because the
+        // window remembers the sentinel rather than a place in a log
+        // nothing has been appended to.
+        Slot::Staged => appended(p.index, NO_OFFSET),
+        Slot::Push { start, len, seq } => match pushed {
+            // `get` and not an index: a handler must not panic on
+            // anything a broker answered, however wrong it is.
+            Some(Ok(results)) => match results
+                .get(*start..*start + *len)
+                .ok_or_else(|| {
+                    NoBase::Broken(format!(
+                        "the push answered {} results for {} items",
+                        results.len(),
+                        start + len
+                    ))
+                })
+                .and_then(base_offset)
+            {
+                Ok(base) => {
+                    // The window advances HERE and nowhere else: only a
+                    // run that came back with contiguous offsets is a
+                    // run whose sequences this facade may claim to have
+                    // appended. A partially failed push leaves the entry
+                    // untouched, so the client's retry is new work
+                    // rather than a skipped duplicate.
+                    if let Some(pending) = seq {
+                        idem.producers.commit(pending, base, *len);
+                    }
+                    appended(p.index, base)
+                }
+                // The records are in the spool and will be numbered when
+                // maintenance ends: retriable, never a delivery failure.
+                // See the module header.
+                Err(NoBase::Spooled(why)) => {
+                    tracing::warn!(
+                        target: "kafka",
+                        topic = name,
+                        partition = p.index,
+                        %why,
+                        "the broker spooled this produce; answering it retriable"
+                    );
+                    rejected(p.index, ResponseError::RequestTimedOut, &why)
+                }
+                Err(NoBase::Broken(why)) => {
+                    // The broker did not answer what the whole offset
+                    // mapping rests on. Loud, and never guessed.
+                    tracing::error!(
+                        target: "kafka",
+                        topic = name,
+                        partition = p.index,
+                        %why,
+                        "the push response cannot be turned into a base offset"
+                    );
+                    rejected(p.index, ResponseError::UnknownServerError, &why)
+                }
+            },
+            Some(Err(e)) => {
+                let mapped = kafka_error(e);
+                // Produce v8+ carries this to the application. Bounded
+                // and scrubbed (queen.rs `wire_reason_of`), so a 403's
+                // own sentence — the proxy's "operation not permitted
+                // for this credential" — reaches the producer's
+                // exception instead of only the facade's log.
+                rejected(
+                    p.index,
+                    mapped,
+                    &queen::wire_reason_of(&format!("push failed: {e}")),
+                )
+            }
+            // Unreachable: a Push slot exists only when items were
+            // staged, and staged items are always pushed.
+            None => rejected(
+                p.index,
+                ResponseError::UnknownServerError,
+                "records were staged but never pushed",
+            ),
+        },
+    }
 }
 
 /// Answer every partition of every topic in the request with one error. For the
@@ -1500,6 +1664,7 @@ mod tests {
         /// is what every produce this facade has ever served carries.
         txns: crate::txn::Txns,
         txn: Option<String>,
+        resend: idempotent::ResendInOrder,
     }
 
     impl Window {
@@ -1509,6 +1674,7 @@ mod tests {
                 tenant: crate::identity::TenantKey::Tenant("test".into()),
                 txns: crate::txn::Txns::default(),
                 txn: None,
+                resend: idempotent::ResendInOrder::new(),
             }
         }
 
@@ -1547,6 +1713,7 @@ mod tests {
                 tenant: &self.tenant,
                 txn: self.txn.as_deref(),
                 txns: &self.txns,
+                resend: &self.resend,
             }
         }
     }
@@ -1935,6 +2102,31 @@ mod tests {
         );
     }
 
+    /// A transaction's batch that is refused keeps its connection: it is staged,
+    /// not written, its producer's order is the transaction's, and the
+    /// connection is what binds the transaction — closing it on a retriable
+    /// refusal would orphan the transaction the client retries into.
+    #[tokio::test]
+    async fn a_refused_transactional_batch_keeps_the_connection() {
+        let (f, _api) = facade(&[("orders", 1)], 4);
+        let c = f.for_connection(None);
+        let req = simple("orders", 0, &[idempotent_record(7, 0, 0)])
+            .with_transactional_id(Some(StrBytes::from_static_str("tx-1").into()));
+        let resp = handle(&c, &req, None).await.unwrap();
+        assert_ne!(answer(&resp, "orders", 0).error_code, 0);
+        assert!(
+            !c.resend_in_order.take(),
+            "a transaction's refusal closed its connection"
+        );
+        let answers = handle_coalesced(&c, &[req.clone(), req], None).await;
+        assert_eq!(
+            answers.len(),
+            2,
+            "a transaction's refusal stopped the group"
+        );
+        assert!(!c.resend_in_order.take());
+    }
+
     /// The shape every Erlang producer sends. `kafka_protocol` encodes a NULL
     /// transactional id as a zero-length string (compat/brod/README.md), so the
     /// field arrives PRESENT and EMPTY on a produce that has nothing
@@ -2098,14 +2290,18 @@ mod tests {
         assert_eq!(api.pushed().len(), 3, "a duplicate was written again");
     }
 
-    /// The other half, and just as load-bearing: a batch that would leave a hole
-    /// is refused and NOTHING is written, which is what makes the Java client
-    /// re-drain and resend in order.
+    /// A gap in the window this facade holds is a producer that wrote through
+    /// another facade since (a leader change, a relay that came up — stage,
+    /// 2026-10-19 21:31): the batch is written and the window restarts at it.
+    /// Refusing it was fatal to librdkafka ([`crate::idempotent`]).
     #[tokio::test]
-    async fn an_idempotent_gap_is_refused_and_nothing_is_written() {
+    async fn a_gap_in_a_window_another_facade_moved_past_is_written() {
         let (f, api) = facade(&[("orders", 1)], 4);
+        // What a clustered facade sets at boot (`Facade::new`).
+        f.producers.restart_windows_on_gaps(true);
+        let c = f.for_connection(None);
         handle(
-            &f,
+            &c,
             &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
             None,
         )
@@ -2114,26 +2310,284 @@ mod tests {
         assert_eq!(api.pushed().len(), 1);
 
         let resp = handle(
-            &f,
+            &c,
             &simple("orders", 0, &[idempotent_record(7, 0, 5)]),
             None,
         )
         .await
         .unwrap();
+        assert_eq!(answer(&resp, "orders", 0).error_code, 0);
         assert_eq!(
-            answer(&resp, "orders", 0).error_code,
-            ResponseError::OutOfOrderSequenceNumber.code()
+            api.pushed().len(),
+            2,
+            "the batch past the gap was not written"
         );
-        assert_eq!(api.pushed().len(), 1, "a gapped batch was written");
-        // ...and the batch that WAS next still is.
+        assert_eq!(f.producers.resynced(), 1);
+        // From there the window is an ordinary one: a resend is a duplicate...
+        let again = handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 5)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer(&again, "orders", 0).error_code, 0);
+        assert_eq!(api.pushed().len(), 2, "a duplicate was written again");
+        // ...and the next batch follows it.
         let next = handle(
-            &f,
-            &simple("orders", 0, &[idempotent_record(7, 0, 1)]),
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 6)]),
             None,
         )
         .await
         .unwrap();
         assert_eq!(answer(&next, "orders", 0).error_code, 0);
+        assert_eq!(api.pushed().len(), 3);
+    }
+
+    /// The gap that IS one starts here: an idempotent batch whose push failed.
+    /// It is answered, and the connection is told to close after the answer
+    /// ([`idempotent::ResendInOrder`]), so nothing the client sent behind it on
+    /// this connection is read. The client sends again, in order, on a new one.
+    #[tokio::test]
+    async fn a_failed_idempotent_push_ends_the_connection_and_the_resend_is_written() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        let c = f.for_connection(None);
+        handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !c.resend_in_order.take(),
+            "a written batch closed the connection"
+        );
+        api.fail_push(queen::Error::Transport("the broker restarted".into()));
+        let failed = handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 1)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_ne!(answer(&failed, "orders", 0).error_code, 0);
+        assert!(
+            c.resend_in_order.take(),
+            "the connection was not told to close"
+        );
+        assert_eq!(api.landed("orders", "0"), 1);
+        // The client's resend, in order, on its next connection.
+        let again = f.for_connection(None);
+        for seq in [1, 2] {
+            let ok = handle(
+                &again,
+                &simple("orders", 0, &[idempotent_record(7, 0, seq)]),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer(&ok, "orders", 0).error_code, 0, "sequence {seq}");
+        }
+        assert_eq!(api.landed("orders", "0"), 3);
+        assert!(!again.resend_in_order.take());
+    }
+
+    /// The hole the close shuts: a facade with NO window (just started) whose
+    /// first push for a producer fails. Were the batch behind it read on the
+    /// same connection, it would start a window, and the failed batch's resend
+    /// would be answered as a duplicate — a record counted delivered that never
+    /// was. The connection ends instead, and the resend comes first.
+    #[tokio::test]
+    async fn a_fresh_window_never_starts_behind_a_batch_that_failed() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        let c = f.for_connection(None);
+        api.fail_push(queen::Error::Transport("the broker is not ready".into()));
+        let failed = handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 40)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_ne!(answer(&failed, "orders", 0).error_code, 0);
+        assert!(c.resend_in_order.take());
+        assert_eq!(api.landed("orders", "0"), 0);
+        let again = f.for_connection(None);
+        for seq in [40, 41] {
+            let ok = handle(
+                &again,
+                &simple("orders", 0, &[idempotent_record(7, 0, seq)]),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer(&ok, "orders", 0).error_code, 0, "sequence {seq}");
+        }
+        assert_eq!(api.landed("orders", "0"), 2);
+        // The failed batch, resent once more, is the duplicate it now is.
+        let dup = handle(
+            &again,
+            &simple("orders", 0, &[idempotent_record(7, 0, 40)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer(&dup, "orders", 0).error_code, 0);
+        assert_eq!(api.landed("orders", "0"), 2);
+    }
+
+    /// Any refusal of an idempotent batch ends the connection after the
+    /// answer — a batch failed for good, refused before the push, or refused by
+    /// the window — except the duplicates a client takes as success. A failed
+    /// push of an ordinary producer keeps the connection, as it always did.
+    #[tokio::test]
+    async fn which_answers_end_the_connection() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        let c = f.for_connection(None);
+        // Failed for good.
+        api.fail_push(queen::Error::Status {
+            code: 413,
+            body: "too large".into(),
+            retry_after_ms: None,
+        });
+        let big = handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            answer(&big, "orders", 0).error_code,
+            ResponseError::MessageTooLarge.code()
+        );
+        assert!(c.resend_in_order.take(), "a batch failed for good");
+        // Refused before the push: a partition the topic does not have.
+        let off = handle(
+            &c,
+            &simple("orders", 9, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_ne!(answer(&off, "orders", 9).error_code, 0);
+        assert!(c.resend_in_order.take(), "a refused idempotent batch");
+        // Written, then resent: a duplicate is a success, nothing closes.
+        handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !c.resend_in_order.take(),
+            "a duplicate closed the connection"
+        );
+        // An ordinary producer's failed push.
+        api.fail_push(queen::Error::Transport("gone".into()));
+        let plain = handle(&c, &simple("orders", 0, &[record(None, b"v")]), None)
+            .await
+            .unwrap();
+        assert_ne!(answer(&plain, "orders", 0).error_code, 0);
+        assert!(
+            !c.resend_in_order.take(),
+            "a non-idempotent failure closed the connection"
+        );
+    }
+
+    /// In a CLUSTER a batch below the window that is not one this facade
+    /// appended is WRITTEN, not answered DUPLICATE_SEQUENCE_NUMBER: the window
+    /// may have restarted past it while it travelled through another facade,
+    /// and a duplicate answer is a success for records nobody wrote.
+    #[tokio::test]
+    async fn a_clustered_facade_writes_a_batch_below_its_window_it_cannot_vouch_for() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        f.producers.restart_windows_on_gaps(true);
+        let c = f.for_connection(None);
+        handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        // The window restarts at 10 (another facade wrote 1..9)...
+        handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 10)]),
+            None,
+        )
+        .await
+        .unwrap();
+        // ...and 5, which this facade never saw, arrives late.
+        let late = handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 5)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer(&late, "orders", 0).error_code, 0);
+        assert_eq!(
+            api.landed("orders", "0"),
+            3,
+            "the late batch was not written"
+        );
+        // An exact resend of a batch it DID append is still its duplicate.
+        handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(api.landed("orders", "0"), 3);
+    }
+
+    /// What one connection saw fail says nothing about another: a producer that
+    /// resent the failed batch elsewhere and moved on is served on the next.
+    #[tokio::test]
+    async fn a_failure_on_one_connection_does_not_hold_back_another() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        f.producers.restart_windows_on_gaps(true);
+        let a = f.for_connection(None);
+        let b = f.for_connection(None);
+        handle(
+            &a,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        api.fail_push(queen::Error::Transport("gone".into()));
+        handle(
+            &a,
+            &simple("orders", 0, &[idempotent_record(7, 0, 1)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(a.resend_in_order.take());
+        let moved = handle(
+            &b,
+            &simple("orders", 0, &[idempotent_record(7, 0, 5)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer(&moved, "orders", 0).error_code, 0);
+        assert!(!b.resend_in_order.take());
+        assert_eq!(api.landed("orders", "0"), 2);
     }
 
     /// A window this facade does not have — a restart, a leader change, an
@@ -2222,7 +2676,7 @@ mod tests {
     /// unchecked one.
     #[tokio::test]
     async fn producer_id_zero_is_a_producer_id() {
-        let (f, _) = facade(&[("orders", 1)], 4);
+        let (f, api) = facade(&[("orders", 1)], 4);
         // Producer 0 at sequence 5, with no window: checked, so a window is
         // started and tracked for it...
         let resp = handle(
@@ -2234,18 +2688,17 @@ mod tests {
         .unwrap();
         assert_eq!(answer(&resp, "orders", 0).error_code, 0);
         assert_eq!(f.producers.tracked(), 1);
-        // ...and a gap after it is refused.
-        let gap = handle(
+        // ...and a resend of it is answered from the window, not written.
+        let pushed = api.pushed().len();
+        let again = handle(
             &f,
-            &simple("orders", 0, &[idempotent_record(0, 0, 9)]),
+            &simple("orders", 0, &[idempotent_record(0, 0, 5)]),
             None,
         )
         .await
         .unwrap();
-        assert_eq!(
-            answer(&gap, "orders", 0).error_code,
-            ResponseError::OutOfOrderSequenceNumber.code()
-        );
+        assert_eq!(answer(&again, "orders", 0).error_code, 0);
+        assert_eq!(api.pushed().len(), pushed, "a resend was written");
 
         // ...while -1 with the same sequence is not an idempotent produce at
         // all, and is written without a word or a window.

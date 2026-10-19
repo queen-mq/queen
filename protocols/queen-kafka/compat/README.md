@@ -13,6 +13,7 @@ not one broker and one facade:
 | Suite | Shape | Ports |
 | --- | --- | --- |
 | [`cluster/`](cluster) | **cluster mode**: a raft cluster of three Queen brokers, three clustered facades (one in front of each broker), one facade with the cluster config absent, and two unclustered facades. 11 scenarios, run by `cluster/rig-cluster.sh` | 32401-32415 |
+| [`cluster/rig-embedded.sh`](cluster/rig-embedded.sh) + [`node-librdkafka/rolling_cluster.mjs`](node-librdkafka/rolling_cluster.mjs) | **the deployed shape**: three raft brokers with the facade IN PROCESS (`QUEEN_KAFKA_EMBEDDED=true`, follower relays and all, as `helm_v2/broker`), under six idempotent librdkafka producers at a steady rate, through rolling restarts (SIGTERM and SIGKILL) and a leader SIGKILL. Asserts no fatal send, every acknowledged record read back, and every producer's records in send order per partition; reports the records written twice | 56632-56634, 57400-57402, 59092-59094 |
 | [`transactions/`](transactions) | **M9 transactions**: one broker and THREE facades — the one under test, one with `QUEEN_KAFKA_NODE_ID` set so the cluster-mode refusal can be measured, and one with the transaction caps at their floor. Nine scenarios over Java kafka-clients 4.3.1 and franz-go, run by `transactions/run.sh` | 32911-32914 |
 | [`embedded/`](embedded) | **embedded mode** (`QUEEN_KAFKA_EMBEDDED=true` on the BROKER, which then runs the facade in-process), run by `embedded/rig-embedded.sh` | see its own README |
 

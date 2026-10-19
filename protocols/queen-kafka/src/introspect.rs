@@ -66,6 +66,7 @@ pub fn snapshot() -> Option<serde_json::Value> {
             "capacity": producers.capacity(),
             "evictions": producers.evictions(),
             "resumed": producers.resumed(),
+            "resynced": producers.resynced(),
         },
         "cluster": cluster,
         "consume": crate::stats::snapshot(),

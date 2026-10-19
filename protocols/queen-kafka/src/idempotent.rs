@@ -65,8 +65,66 @@
 //! answer never came, is **written a second time** — at-least-once for at most
 //! [`WINDOW`] batches per partition, once per lost window.
 //!
-//! Both refusals are worse, and the first one was what this facade answered
-//! until it stopped a fleet (stage, 2026-10-19: a rolling restart under
+//! ## A window can be OUT OF DATE, too
+//!
+//! In a cluster a producer's batches for one partition reach whichever facade
+//! serves them at that moment: the raft leader's, through the followers'
+//! relays (`conn::Relay`); a follower's own, for the second after a restart in
+//! which it does not know the leader yet; the next leader's after a change. So
+//! a facade can hold a window another facade has since moved past, and the
+//! producer's next batch then looks like a GAP in it. Stage, 2026-10-19 21:31:
+//! node 0 came back, served one producer's batches 18556..18600 itself, learned
+//! the leader a second later and relayed 18601 to node 2 — whose window, from
+//! before node 0 returned, still expected 18556. Refusing that gap killed four
+//! librdkafka producers, exactly as a lost window did before 2026-10-19.
+//!
+//! So a gap in a held window is read as what it almost always is here: a window
+//! this facade fell behind on. It restarts at the batch, like a lost window,
+//! with the same bounded cost, and is counted ([`Producers::resynced`]).
+//!
+//! Below the window the same holds in reverse: a batch this facade cannot match
+//! exactly may be one that was still travelling through another facade when the
+//! window restarted (a client that sent its next batch to a new leader before an
+//! older one to the old leader failed — the Java client does). Answering it
+//! DUPLICATE_SEQUENCE_NUMBER would be a SUCCESS for records nobody wrote, so a
+//! clustered facade writes it: at-least-once, possibly behind a later batch,
+//! never lost. A facade on its own keeps Apache Kafka's answers to both: nothing
+//! else writes its partitions, so its window is never behind.
+//!
+//! What keeps a gap that IS one — a batch accepted here that was not written,
+//! and the batches the client had already sent behind it — from being read as a
+//! window that fell behind is the CONNECTION: an idempotent batch that is not
+//! written, for any reason but being a duplicate, is answered and the connection
+//! is closed after the answer (`handlers::produce`, `conn`). Nothing the client
+//! sent behind it on that connection is read, relayed or served anywhere, and the
+//! client sends again, in order, from its oldest unanswered batch — what a failed
+//! pipelined push already did. Without that, a facade with no window whose first
+//! push for a producer failed would start a window at the batch behind it, and
+//! the failed batch's resend would be answered as a duplicate: a record reported
+//! delivered that never was. (librdkafka also counts a batch it is retrying as
+//! delivered once a LATER batch of the partition succeeds.) Three places make
+//! "nothing behind it" true:
+//!
+//!   * requests read together — a coalesced group, a pipelined one — are staged
+//!     up to the one that refused the batch and no further: the rest are never
+//!     written or answered (`handlers::produce::handle_coalesced`,
+//!     `stage_coalesced`), and the pipelined connection stages nothing more;
+//!   * a follower that RELAYED the batch reads the leader's answer the way the
+//!     leader did and ends its client's connection with the relay
+//!     (`conn::relayed_answer_ends`), so the next batch cannot reach a new
+//!     leader, or the follower itself, ahead of the resend;
+//!   * a TRANSACTION's batch is exempt: it is staged, not written, and its
+//!     connection binds the transaction, which a close would orphan. What
+//!     stops the batch behind a refused one there is the window: a
+//!     transaction's window never starts past sequence 0 on a facade on its
+//!     own (`transaction_starts_past_zero`).
+//!
+//! And a batch follows a batch in flight only on the connection that sent it
+//! (`Producers::check_on`): after a reconnect, the old connection's push may
+//! still be running, and nothing would order a push of the new one behind it.
+//!
+//! For a lost or out-of-date window both refusals are worse, and the first one
+//! was what this facade answered until it stopped a fleet (stage, 2026-10-19: a rolling restart under
 //! librdkafka 2.15.1 producers, the library under the Node, Python, Go, .NET,
 //! Ruby and PHP clients of the matrix):
 //!
@@ -158,6 +216,10 @@ static TRACK_CAP: obs::Sampler = obs::Sampler::new(60_000);
 /// One line a minute for windows started mid-sequence ([`Producers::resumed`]):
 /// after a restart every producer-partition of the fleet starts one at once.
 static RESUMED: obs::Sampler = obs::Sampler::new(60_000);
+
+/// One line a minute for held windows restarted on a gap
+/// ([`Producers::resynced`]): a leader change moves a fleet at once.
+static RESYNCED: obs::Sampler = obs::Sampler::new(60_000);
 
 /// A `transactional.id` as the FACADE reads it, with Erlang's encoding defect
 /// filtered out in one place so the two sites that care cannot drift.
@@ -299,6 +361,8 @@ pub struct Pending {
     key: Key,
     epoch: i16,
     batches: Vec<PendingBatch>,
+    /// The connection the run was accepted on ([`Producers::check_on`]).
+    conn: u64,
 }
 
 impl Pending {
@@ -382,6 +446,12 @@ pub struct Producers {
     evictions: AtomicU64,
     /// Windows started at a sequence other than 0 ([`Producers::resumed`]).
     resumed: AtomicU64,
+    /// Held windows restarted on a gap ([`Producers::resynced`]).
+    resynced: AtomicU64,
+    /// Whether a gap in a held window restarts it rather than being refused
+    /// ([`Producers::restart_windows_on_gaps`]): only a CLUSTER of facades can
+    /// hold a window another one has moved past.
+    gaps_restart: std::sync::atomic::AtomicBool,
     /// Batches accepted and not yet answered, per key, in the order they were
     /// accepted ([`Producers::begin`]): what a producer's next batch follows
     /// when both are written in ONE push — the requests a client sent back to
@@ -390,12 +460,29 @@ pub struct Producers {
     inflight: Mutex<HashMap<Key, Vec<InFlight>>>,
 }
 
+/// How a batch relates to its key's batches in flight ([`Producers::begin`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InFlightFit {
+    /// The next batch after the newest in flight: accepted, coalesced or
+    /// pipelined behind it.
+    Follows,
+    /// At or past the next batch after the newest in flight, which is in
+    /// flight on ANOTHER connection: nothing orders this push behind that one,
+    /// and that connection's evidence is no gap's ([`fit`]).
+    Elsewhere,
+    /// A batch still in flight, sent again.
+    Repeats,
+    /// Past the newest in flight, which ends before this sequence.
+    Gap(i32),
+}
+
 /// One batch accepted and not yet answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InFlight {
     epoch: i16,
     base_seq: i32,
     last_seq: i32,
+    conn: u64,
 }
 
 /// At most this many shards: past it the contention is already gone and the
@@ -445,10 +532,6 @@ impl Slot {
         }
     }
 
-    fn recent(&self) -> &[Batch] {
-        &self.recent[..usize::from(self.len)]
-    }
-
     /// Remember one more batch, dropping the oldest once [`WINDOW`] are kept.
     fn push(&mut self, batch: Batch) {
         let len = usize::from(self.len);
@@ -459,6 +542,39 @@ impl Slot {
             self.recent[len] = batch;
             self.len += 1;
         }
+    }
+
+    /// Remember one more batch IN SEQUENCE ORDER, so the newest stays last.
+    ///
+    /// Nearly always that is [`Slot::push`]: a producer's batches are written
+    /// in order. A clustered facade also writes a batch from below its window
+    /// (`decide`); appended last, it would become the "newest", the producer's
+    /// next sequence would be read from it, and a resend of a batch already
+    /// written after it would be taken as the next one and written again. So it
+    /// goes where its sequence puts it, and when the window is full and it is
+    /// older than every batch kept, it is not kept.
+    fn insert(&mut self, batch: Batch) {
+        let len = usize::from(self.len);
+        let at = self.recent[..len]
+            .iter()
+            .rposition(|b| !is_before(batch.base_seq, b.base_seq))
+            .map_or(0, |i| i + 1);
+        if at == len {
+            self.push(batch);
+            return;
+        }
+        if len == WINDOW {
+            if at == 0 {
+                return;
+            }
+            // Drop the oldest, then slide the ones before the new place down.
+            self.recent.copy_within(1..at, 0);
+            self.recent[at - 1] = batch;
+            return;
+        }
+        self.recent.copy_within(at..len, at + 1);
+        self.recent[at] = batch;
+        self.len += 1;
     }
 }
 
@@ -773,6 +889,8 @@ impl Producers {
             len: AtomicUsize::new(0),
             evictions: AtomicU64::new(0),
             resumed: AtomicU64::new(0),
+            resynced: AtomicU64::new(0),
+            gaps_restart: std::sync::atomic::AtomicBool::new(false),
             inflight: Mutex::new(HashMap::new()),
         }
     }
@@ -791,6 +909,7 @@ impl Producers {
             epoch: pending.epoch,
             base_seq: b.base_seq,
             last_seq: b.last_seq,
+            conn: pending.conn,
         }));
     }
 
@@ -813,28 +932,29 @@ impl Producers {
         }
     }
 
-    /// How a batch starting at `base_seq` relates to the key's batches in
-    /// flight: `Some(true)` when it follows the last one (the producer's next
-    /// batch, coalesced with it), `Some(false)` when it repeats one still in
-    /// flight (a retransmission of a push not yet answered), `None` when no
-    /// batch of this epoch is in flight and the committed window decides.
-    fn after_inflight(&self, key: &Key, epoch: i16, base_seq: i32) -> Option<bool> {
+    /// What the in-flight list holds for a key at one epoch, read under its
+    /// lock. Read BEFORE the committed window ([`Producers::check_on`]): a run
+    /// is committed before it leaves the list ([`Producers::end`]), so a batch
+    /// missing from this view was already in the window when that is read.
+    fn inflight_view(&self, key: &Key, epoch: i16, base_seq: i32) -> Option<InFlightView> {
         let inflight = self
             .inflight
             .lock()
             .expect("the in-flight map lock is never held across a panic");
-        let entry = inflight.get(key)?;
-        let last = entry.iter().rev().find(|f| f.epoch == epoch)?;
-        if base_seq == increment_sequence(last.last_seq, 1) {
-            return Some(true);
+        let mut newest: Option<InFlight> = None;
+        let mut repeats = false;
+        for f in inflight.get(key)?.iter().filter(|f| f.epoch == epoch) {
+            repeats |= f.base_seq == base_seq;
+            // The batch furthest AHEAD, not the one begun last.
+            newest = match newest {
+                Some(n) if !is_before(n.last_seq, f.last_seq) => Some(n),
+                _ => Some(*f),
+            };
         }
-        if entry
-            .iter()
-            .any(|f| f.epoch == epoch && f.base_seq == base_seq)
-        {
-            return Some(false);
-        }
-        None
+        Some(InFlightView {
+            newest: newest?,
+            repeats,
+        })
     }
 
     /// The shard a key lives in. The same tuple TYPE is hashed on every path,
@@ -882,6 +1002,30 @@ impl Producers {
         self.resumed.load(Ordering::Relaxed)
     }
 
+    /// Restart a held window on a gap instead of refusing the batch: what a
+    /// CLUSTERED facade does, because there a producer can write through
+    /// another facade and leave this one's window behind (the module header).
+    /// A facade on its own keeps Apache Kafka's answer, OUT_OF_ORDER_SEQUENCE_NUMBER:
+    /// nothing else writes its partitions, so a gap in a window it holds is
+    /// a real gap. Set once, at boot.
+    pub fn restart_windows_on_gaps(&self, on: bool) {
+        self.gaps_restart.store(on, Ordering::Relaxed);
+    }
+
+    /// [`Producers::restart_windows_on_gaps`].
+    pub fn restarts_windows_on_gaps(&self) -> bool {
+        self.gaps_restart.load(Ordering::Relaxed)
+    }
+
+    /// How many held windows have been restarted on a gap since the process
+    /// started: windows this facade fell behind on while the producer wrote
+    /// through another facade (the module header). Like a resumed window, each
+    /// may have had a batch in flight that is written twice. It rises when
+    /// partitions move between facades and stays flat otherwise.
+    pub fn resynced(&self) -> u64 {
+        self.resynced.load(Ordering::Relaxed)
+    }
+
     /// Forget everything about one producer id under one tenant.
     ///
     /// Called by [`crate::handlers::init_producer_id`] on KIP-360's epoch bump:
@@ -905,15 +1049,34 @@ impl Producers {
         }
     }
 
-    /// What to do with one `(topic, partition)` entry's batches, decided on the
-    /// batch HEADERS — the place [`crate::handlers::produce::refuse`] already
-    /// stands, so a batch this refuses is never decompressed.
+    /// [`Producers::check_on`] outside any connection (connection 0).
     pub fn check(
         &self,
         tenant: &TenantKey,
         topic: &str,
         partition: i32,
         infos: &[BatchDecodeInfo],
+    ) -> Verdict {
+        self.check_on(tenant, topic, partition, infos, 0)
+    }
+
+    /// What to do with one `(topic, partition)` entry's batches, decided on the
+    /// batch HEADERS — the place [`crate::handlers::produce::refuse`] already
+    /// stands, so a batch this refuses is never decompressed.
+    ///
+    /// `conn` is the connection it arrived on ([`ResendInOrder::connection`]):
+    /// a batch follows a batch in flight only on the same connection, which is
+    /// what orders its push behind that one. The next batch after a batch in
+    /// flight on ANOTHER connection — a client that reconnected while its old
+    /// connection's push is still running — is refused retriably: its resend
+    /// comes after that push has answered.
+    pub fn check_on(
+        &self,
+        tenant: &TenantKey,
+        topic: &str,
+        partition: i32,
+        infos: &[BatchDecodeInfo],
+        conn: u64,
     ) -> Verdict {
         let idempotent = infos
             .iter()
@@ -985,18 +1148,46 @@ impl Producers {
                 batch
             })
             .collect();
+        // The in-flight list FIRST, then the committed window, copied out so
+        // its lock is not held with the other ([`Producers::inflight_view`]).
+        let view = self.inflight_view(&key, epoch, first.base_sequence);
+        let window: Option<(i16, [Batch; WINDOW], u8)> = {
+            let shard = self.shard(tenant, first.producer_id, topic, partition);
+            shard
+                .find(tenant, first.producer_id, topic, partition)
+                .map(|i| {
+                    let s = &shard.slots[i as usize];
+                    (s.epoch, s.recent, s.len)
+                })
+        };
+        let entry = window
+            .as_ref()
+            .map(|(epoch, recent, len)| (*epoch, &recent[..usize::from(*len)]));
+        let window_next = entry
+            .filter(|(entry_epoch, _)| *entry_epoch == epoch)
+            .and_then(|(_, recent)| recent.last())
+            .map(|b| increment_sequence(b.last_seq, 1));
         // The producer's previous batches are accepted and their push not yet
         // answered (a coalesced run), so the committed window does not hold
         // them yet and would read this one as a gap.
-        let follows = self.after_inflight(&key, epoch, first.base_sequence);
+        let follows = view.and_then(|v| fit(&v, first.base_sequence, window_next, conn));
         let accept = Verdict::Accept(Pending {
             key,
             epoch,
             batches,
+            conn,
         });
         match follows {
-            Some(true) => return accept,
-            Some(false) => {
+            Some(InFlightFit::Follows) => return accept,
+            Some(InFlightFit::Elsewhere) => {
+                return Verdict::Reject(
+                    ResponseError::RequestTimedOut,
+                    "a batch of this producer is still in flight on another connection; this \
+                     one is answered once that push is"
+                        .to_string(),
+                )
+            }
+            Some(InFlightFit::Repeats) => {
                 return Verdict::Reject(
                     ResponseError::RequestTimedOut,
                     "a retransmission of a batch whose push has not answered yet; it is \
@@ -1004,16 +1195,19 @@ impl Producers {
                         .to_string(),
                 )
             }
+            Some(InFlightFit::Gap(next)) => {
+                return Verdict::Reject(
+                    ResponseError::OutOfOrderSequenceNumber,
+                    format!(
+                        "sequence {} for producer {} on {topic}-{partition} would leave a gap \
+                         behind the batches in flight here, which end before {next}",
+                        first.base_sequence, first.producer_id
+                    ),
+                )
+            }
             None => {}
         }
 
-        let shard = self.shard(tenant, first.producer_id, topic, partition);
-        let entry = shard
-            .find(tenant, first.producer_id, topic, partition)
-            .map(|i| {
-                let s = &shard.slots[i as usize];
-                (s.epoch, s.recent())
-            });
         if entry.is_none() && first.base_sequence != 0 {
             // A producer already mid-sequence that this facade holds nothing
             // for: its window starts here (`decide`). Counted, and said once a
@@ -1035,7 +1229,32 @@ impl Producers {
                 );
             }
         }
-        decide(entry, infos, topic, partition, accept)
+        let gaps_restart = self.restarts_windows_on_gaps();
+        if let Some((entry_epoch, recent)) = entry {
+            if gaps_restart && is_gap(entry_epoch, recent, infos) {
+                // A window another facade moved past (the module header):
+                // restarted at this batch by `decide`, counted and said once
+                // a minute, as a resumed one is.
+                let total = self.resynced.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(suppressed) = RESYNCED.tick_now() {
+                    tracing::info!(
+                        target: "kafka",
+                        producer_id = first.producer_id,
+                        topic,
+                        partition,
+                        base_sequence = first.base_sequence,
+                        expected = recent.last().map(|b| increment_sequence(b.last_seq, 1)),
+                        resynced_total = total,
+                        suppressed,
+                        "an idempotent producer is past the sequence window this facade holds \
+                         (it wrote through another facade since: a leader change, a relay \
+                         that came up); the window restarts at this batch, and a batch it had \
+                         in flight may be written twice"
+                    );
+                }
+            }
+        }
+        decide(entry, infos, topic, partition, accept, gaps_restart)
     }
 
     /// Remember an accepted run, now that the push has told us where it landed.
@@ -1078,12 +1297,19 @@ impl Producers {
         let mut shard = self.shard(&key.tenant, key.producer_id, &key.topic, key.partition);
         if let Some(i) = shard.find(&key.tenant, key.producer_id, &key.topic, key.partition) {
             let slot = &mut shard.slots[i as usize];
+            if pending.epoch < slot.epoch {
+                // A run of a session the producer has since bumped past, whose
+                // push answered late. Remembered in the new epoch's window it
+                // would move that window's next sequence, and the new session's
+                // own batches would be answered as duplicates of it.
+                return;
+            }
             if pending.epoch > slot.epoch {
                 slot.epoch = pending.epoch;
                 slot.len = 0;
             }
             for batch in batches {
-                slot.push(batch);
+                slot.insert(batch);
             }
             shard.touch(i);
             return;
@@ -1130,6 +1356,106 @@ impl Producers {
     }
 }
 
+/// One connection's "close after this answer" (the module header): set when an
+/// idempotent batch of the request being answered was not written for any
+/// reason but being a duplicate, so that nothing the client sent behind it on
+/// this connection is read, and the client sends again, in order.
+///
+/// Per connection, a fresh one in `Facade::for_connection`; taken by the
+/// connection once the answers are written.
+///
+/// It also names the connection ([`ResendInOrder::connection`]): the batches a
+/// connection has in flight are its own ([`Producers::check_on`]).
+#[derive(Debug)]
+pub struct ResendInOrder {
+    required: std::sync::atomic::AtomicBool,
+    connection: u64,
+}
+
+impl Default for ResendInOrder {
+    fn default() -> ResendInOrder {
+        ResendInOrder::new()
+    }
+}
+
+impl ResendInOrder {
+    pub fn new() -> ResendInOrder {
+        // 0 is the connection of a check made outside one ([`Producers::check`]).
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        ResendInOrder {
+            required: std::sync::atomic::AtomicBool::new(false),
+            connection: NEXT.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    /// This connection's id, unique in the process.
+    pub fn connection(&self) -> u64 {
+        self.connection
+    }
+
+    /// The answer being built leaves an idempotent batch unwritten.
+    pub fn require(&self) {
+        self.required.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the connection must close after the answers it just wrote; it
+    /// is cleared by asking.
+    pub fn take(&self) -> bool {
+        self.required.swap(false, Ordering::Relaxed)
+    }
+
+    /// Whether it is required, without clearing it.
+    pub fn is_required(&self) -> bool {
+        self.required.load(Ordering::Relaxed)
+    }
+}
+
+/// What the in-flight list holds for one key at one epoch
+/// ([`Producers::inflight_view`]).
+#[derive(Clone, Copy, Debug)]
+struct InFlightView {
+    /// The batch furthest ahead.
+    newest: InFlight,
+    /// Whether the batch being checked starts where one in flight starts.
+    repeats: bool,
+}
+
+/// How a batch starting at `base_seq`, arriving on connection `conn`, relates
+/// to the batches in flight, or `None` when the committed window decides.
+///
+/// `window_next` is the next sequence of the committed window at this epoch.
+/// A newest batch in flight that ends BEHIND it is one a clustered facade
+/// accepted from below its window (`decide`): it is not where the producer
+/// is, so nothing follows it or is a gap behind it. A newest batch in flight
+/// on ANOTHER connection orders nothing on this one: a batch at or past its
+/// next sequence waits for it ([`InFlightFit::Elsewhere`], retriable) and is
+/// never refused as a gap on its evidence — that connection may be one the
+/// client already left (a relay drained at a restart, a push still running),
+/// and the producer may have moved on through another facade since.
+fn fit(
+    view: &InFlightView,
+    base_seq: i32,
+    window_next: Option<i32>,
+    conn: u64,
+) -> Option<InFlightFit> {
+    if view.repeats {
+        return Some(InFlightFit::Repeats);
+    }
+    let next = increment_sequence(view.newest.last_seq, 1);
+    if window_next.is_some_and(|w| is_before(next, w)) || is_before(base_seq, next) {
+        return None;
+    }
+    if view.newest.conn != conn {
+        return Some(InFlightFit::Elsewhere);
+    }
+    if base_seq == next {
+        return Some(InFlightFit::Follows);
+    }
+    // Past the newest batch this connection has in flight: a real gap, on
+    // this facade's own evidence, unlike a stale window's.
+    Some(InFlightFit::Gap(next))
+}
+
 /// The verdict for one produce entry, given what is remembered for its key:
 /// `entry` is `(epoch, the remembered batches)`, or `None` when nothing is.
 /// `accept` is the answer for the batches being the next ones.
@@ -1139,6 +1465,7 @@ fn decide(
     topic: &str,
     partition: i32,
     accept: Verdict,
+    gaps_restart: bool,
 ) -> Verdict {
     let first = &infos[0];
     let epoch = first.producer_epoch;
@@ -1149,7 +1476,8 @@ fn decide(
         // the window starts at this batch, at whatever sequence it carries:
         // Kafka's rule for a producer it holds no state for, and the module
         // header says why both refusals are worse.
-        return accept;
+        return transaction_starts_past_zero(first, gaps_restart, topic, partition)
+            .unwrap_or(accept);
     };
     if epoch < entry_epoch {
         // Fenced. Not the transactional fencing this facade refuses: a
@@ -1169,13 +1497,14 @@ fn decide(
         // (`TransactionManager.resetSequenceNumbers`, called on exactly this
         // transition), so every remembered range belongs to a session that
         // no longer exists.
-        return accept;
+        return transaction_starts_past_zero(first, gaps_restart, topic, partition)
+            .unwrap_or(accept);
     }
     let Some(newest) = recent.last() else {
-        // An entry with an epoch and no batches: the epoch was raised by a
-        // bump and nothing has been written since. Same rule as an absent
-        // entry, minus the eviction.
-        return if base_seq == 0 {
+        // An entry with an epoch and no batches: nothing this facade appended
+        // at this epoch. At sequence 0 a new run; past it, in a cluster, a
+        // producer that wrote through another facade.
+        return if base_seq == 0 || gaps_restart {
             accept
         } else {
             Verdict::Reject(
@@ -1188,18 +1517,31 @@ fn decide(
             )
         };
     };
-    let expected = increment_sequence(newest.last_seq, 1);
-    if base_seq == expected {
-        return accept;
-    }
     // A RESEND of exactly what was appended is a success carrying the
     // offsets the original got. This row is what makes idempotence real, and
     // it is Kafka's own behaviour rather than a convenience: a producer
     // whose response was lost retries, and the retry must be invisible.
+    // Asked FIRST: within one epoch a sequence is never sent twice as new
+    // work, so a batch the window holds is a resend wherever it sits.
     if let Some(offset) = exact_match(recent, infos) {
         return Verdict::Duplicate(offset);
     }
+    let expected = increment_sequence(newest.last_seq, 1);
+    if base_seq == expected {
+        return accept;
+    }
     if is_before(base_seq, expected) {
+        if gaps_restart {
+            // In a CLUSTER this facade cannot vouch for what is below its
+            // window: the window may have restarted past batches that were
+            // still on their way through another facade (a client that sends
+            // the next batch to a new leader before an older one to the old
+            // leader has failed — Java does). Answering such a batch
+            // DUPLICATE_SEQUENCE_NUMBER is a SUCCESS to every client, for
+            // records that may never have been written. So it is written:
+            // at-least-once, and possibly behind a later batch, never lost.
+            return accept;
+        }
         // Inside or below the remembered range, but not a batch that was
         // appended as sent — a producer that re-batched its retry, or one
         // reaching past the five batches that are kept.
@@ -1212,11 +1554,21 @@ fn decide(
             ),
         );
     }
-    // The gap. Refusing it and writing NOTHING is the other half of
-    // idempotence: without it, a batch that failed followed by a batch that
-    // succeeded would leave a hole, and the guarantee would be about
-    // duplicates only. This is what makes the Java client re-drain and
-    // resend in order.
+    // A gap in the held window. The gap a failed batch leaves — the batch the
+    // client had already sent behind it — never reaches this point: the
+    // connection that answered the failure is closed after it, so nothing
+    // behind it is read (the module header). What is left, in a CLUSTER, is a
+    // window another facade moved past while the
+    // producer wrote through it (a leader change, a relay that came up), and
+    // refusing THAT is fatal to librdkafka for the head of its queue — the
+    // module header. So there the window restarts at this batch, like a lost
+    // one; `commit` drops the ranges it has fallen behind.
+    if gaps_restart {
+        return accept;
+    }
+    // A facade on its own: nothing else writes these partitions, so the gap is
+    // real. Refusing it and writing NOTHING is the other half of idempotence,
+    // and Apache Kafka's answer.
     Verdict::Reject(
         ResponseError::OutOfOrderSequenceNumber,
         format!(
@@ -1225,6 +1577,56 @@ fn decide(
             first.producer_id
         ),
     )
+}
+
+/// A TRANSACTION's window that would start past sequence 0, on a facade on
+/// its own: refused OUT_OF_ORDER_SEQUENCE_NUMBER.
+///
+/// A transactional producer's sequences start at 0 with every epoch this
+/// facade grants it, and its transaction lives in this process (a restart
+/// loses the transaction, not just the window), so its first batch of an
+/// epoch past 0 is one whose earlier batches were refused — a full stage, a
+/// partition not added — and are being retried behind it. A transaction's
+/// refusal does not end the connection (`handlers::produce`), so this is
+/// where that batch is stopped: started at it, the window would answer the
+/// retry of the batches before it DUPLICATE_SEQUENCE_NUMBER, a success for
+/// records the transaction never staged. The Java client retries the refusal
+/// after the batches before it; a window lost to an eviction mid-transaction
+/// is an abortable error for it, which is the truth.
+fn transaction_starts_past_zero(
+    first: &BatchDecodeInfo,
+    gaps_restart: bool,
+    topic: &str,
+    partition: i32,
+) -> Option<Verdict> {
+    (first.transactional && first.base_sequence != 0 && !gaps_restart).then(|| {
+        Verdict::Reject(
+            ResponseError::OutOfOrderSequenceNumber,
+            format!(
+                "transactional producer {} starts epoch {} on {topic}-{partition} at sequence {} \
+                 rather than 0: the batches before it were not staged here",
+                first.producer_id, first.producer_epoch, first.base_sequence
+            ),
+        )
+    })
+}
+
+/// Does `infos` leave a gap in a held window of the same epoch: past its next
+/// sequence (or past 0 in a window with no batches) rather than at or below it?
+fn is_gap(entry_epoch: i16, recent: &[Batch], infos: &[BatchDecodeInfo]) -> bool {
+    let Some(first) = infos.first() else {
+        return false;
+    };
+    if first.producer_epoch != entry_epoch {
+        return false;
+    }
+    match recent.last() {
+        None => first.base_sequence != 0,
+        Some(newest) => {
+            let expected = increment_sequence(newest.last_seq, 1);
+            first.base_sequence != expected && !is_before(first.base_sequence, expected)
+        }
+    }
 }
 
 /// The base offset of a remembered run that matches `infos` batch for batch, or
@@ -1248,13 +1650,17 @@ fn exact_match(recent: &[Batch], infos: &[BatchDecodeInfo]) -> Option<i64> {
 
 /// Is `seq` behind `expected` in Kafka's wrapping sequence space?
 ///
-/// The comparison is made on the DISTANCE rather than on the values, so a
-/// producer whose sequence has wrapped through `i32::MAX` is still read as
-/// moving forwards. Half the space is the boundary, which is the same
-/// convention TCP uses for the same problem and the only one available without
-/// remembering how many times the counter went round.
+/// Kafka sequences are non-negative and wrap from `i32::MAX` to 0
+/// ([`increment_sequence`]), so the comparison is made on the DISTANCE modulo
+/// 2^31 rather than on the values or on `i32` subtraction: a producer whose
+/// sequence has wrapped is still read as moving forwards. Half the space is
+/// the boundary, which is the same convention TCP uses for the same problem
+/// and the only one available without remembering how many times the counter
+/// went round.
 fn is_before(seq: i32, expected: i32) -> bool {
-    (seq.wrapping_sub(expected)) < 0
+    const SPACE: i64 = 1 << 31;
+    let behind = (i64::from(expected) - i64::from(seq)).rem_euclid(SPACE);
+    behind != 0 && behind < SPACE / 2
 }
 
 #[cfg(test)]
@@ -1426,19 +1832,327 @@ mod tests {
 
     // ------------------------------------------------------------- the refusals
 
+    /// A gap in a held window is a window another facade moved past while the
+    /// producer wrote through it (stage, 2026-10-19 21:31, the module header):
+    /// it restarts at the batch instead of killing the producer, is counted,
+    /// and the ranges it fell behind are dropped.
     #[test]
-    fn a_gap_is_refused_and_nothing_is_remembered() {
+    fn a_gap_in_a_held_window_restarts_it() {
+        let p = Producers::new();
+        p.restart_windows_on_gaps(true);
+        let first = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 0, 3)]));
+        landed(&p, &first, 100);
+        // 3 is the next sequence here; 5 is a producer that wrote 3 and 4
+        // through another facade.
+        let resynced = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 5, 2)]));
+        assert_eq!(resynced.base_sequence(), 5);
+        assert_eq!(p.resynced(), 1);
+        assert_eq!(p.resumed(), 0, "a held window is not a lost one");
+        landed(&p, &resynced, 200);
+        // The window is the new one: a resend of 5 is its duplicate...
+        assert_eq!(
+            p.check(&tenant(), "orders", 0, &[batch(7, 0, 5, 2)]),
+            Verdict::Duplicate(200)
+        );
+        // ...the ranges before it are KEPT, so an exact resend of a batch this
+        // facade appended before the gap is still its duplicate...
+        assert_eq!(
+            p.check(&tenant(), "orders", 0, &[batch(7, 0, 0, 3)]),
+            Verdict::Duplicate(100)
+        );
+        // ...a batch below the window it cannot vouch for (3, written through
+        // the other facade or still on its way) is written, never answered as
+        // a duplicate of nothing...
+        let late = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 3, 2)]));
+        assert_eq!(late.base_sequence(), 3);
+        // ...and the next batch follows the new window.
+        accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 7, 1)]));
+        assert_eq!(p.resynced(), 1);
+    }
+
+    /// A late batch a clustered facade writes from below its window is not
+    /// where the producer is. In flight, the producer's real next batch is not
+    /// a gap behind it; committed, it does not become the window's newest, so
+    /// an exact resend of a batch after it is still that batch's duplicate.
+    #[test]
+    fn a_late_batch_below_the_window_does_not_move_it() {
+        let p = Producers::new();
+        p.restart_windows_on_gaps(true);
+        for (seq, offset) in [(0, 100), (6, 106), (10, 110)] {
+            let run = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, seq, 1)]));
+            landed(&p, &run, offset);
+        }
+        // 5 arrives late and is written; while it is in flight...
+        let late = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 5, 1)]));
+        p.begin(&late);
+        // ...the producer's next batch follows the WINDOW, not the late one...
+        let next = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 11, 1)]));
+        p.begin(&next);
+        // ...a resend of the late one is still answered from in flight...
+        assert_eq!(
+            rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 5, 1)])),
+            ResponseError::RequestTimedOut
+        );
+        // ...and a batch the window holds is its duplicate.
+        assert_eq!(
+            p.check(&tenant(), "orders", 0, &[batch(7, 0, 6, 1)]),
+            Verdict::Duplicate(106)
+        );
+        landed(&p, &late, 111);
+        p.end(&late);
+        landed(&p, &next, 112);
+        p.end(&next);
+        // Committed in sequence order: 6 is a duplicate (it was answered
+        // `expected` and written twice before), 12 is next, and the late 5 is
+        // remembered too.
+        assert_eq!(
+            p.check(&tenant(), "orders", 0, &[batch(7, 0, 6, 1)]),
+            Verdict::Duplicate(106)
+        );
+        assert_eq!(
+            p.check(&tenant(), "orders", 0, &[batch(7, 0, 5, 1)]),
+            Verdict::Duplicate(111)
+        );
+        accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 12, 1)]));
+    }
+
+    /// A batch follows a batch in flight only on the connection that sent that
+    /// one: on another — a client that reconnected while its old connection's
+    /// push still runs — nothing orders the two pushes, so it waits, refused
+    /// retriably, for that push to answer.
+    #[test]
+    fn the_batch_after_one_in_flight_on_another_connection_waits_for_it() {
+        let p = Producers::new();
+        p.restart_windows_on_gaps(true);
+        let old = accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 0, 5)], 1));
+        p.begin(&old);
+        assert_eq!(
+            rejection(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 5, 5)], 2)),
+            ResponseError::RequestTimedOut
+        );
+        // The resend of the batch in flight is refused on any connection...
+        assert_eq!(
+            rejection(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 0, 5)], 2)),
+            ResponseError::RequestTimedOut
+        );
+        // ...the old connection pipelines behind its own batch...
+        accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 5, 5)], 1));
+        // ...and once the push answered, the new connection goes on from it.
+        landed(&p, &old, 0);
+        p.end(&old);
+        accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 5, 5)], 2));
+    }
+
+    /// A batch in flight on another connection is no evidence of a gap: that
+    /// connection may be one the client left (a relay drained at a restart)
+    /// while the producer moved on through another facade. A batch past it
+    /// waits, refused retriably — never OUT_OF_ORDER_SEQUENCE_NUMBER, which is
+    /// fatal to librdkafka for its head batch. On its own connection the same
+    /// batch IS a gap.
+    #[test]
+    fn another_connections_batch_in_flight_is_no_gap() {
+        let p = Producers::new();
+        p.restart_windows_on_gaps(true);
+        let first = accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 0, 1)], 1));
+        landed(&p, &first, 0);
+        let stale = accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 1, 1)], 1));
+        p.begin(&stale);
+        assert_eq!(
+            rejection(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 4, 1)], 2)),
+            ResponseError::RequestTimedOut
+        );
+        assert_eq!(
+            rejection(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 4, 1)], 1)),
+            ResponseError::OutOfOrderSequenceNumber
+        );
+        p.end(&stale);
+        // Once it answered, the window decides: a gap restarts it here.
+        accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 4, 1)], 2));
+    }
+
+    /// A run is committed before it leaves the in-flight list, so a check that
+    /// reads the list first and the window second sees every begun batch in
+    /// one or the other: its resend is never taken for new work, however the
+    /// two interleave. Two threads, one writing a producer's batches through
+    /// begin → commit → end, the other resending the newest one begun.
+    #[test]
+    fn a_resend_racing_its_commit_is_never_new_work() {
+        use std::sync::atomic::AtomicI32;
+        let p = Arc::new(Producers::new());
+        let begun = Arc::new(AtomicI32::new(-1));
+        const N: i32 = 20_000;
+        let writer = {
+            let (p, begun) = (Arc::clone(&p), Arc::clone(&begun));
+            std::thread::spawn(move || {
+                for seq in 0..N {
+                    let run =
+                        accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, seq, 1)], 1));
+                    p.begin(&run);
+                    begun.store(seq, Ordering::SeqCst);
+                    std::thread::yield_now();
+                    landed(&p, &run, i64::from(seq));
+                    p.end(&run);
+                }
+            })
+        };
+        let mut checked = 0u64;
+        while !writer.is_finished() {
+            let seq = begun.load(Ordering::SeqCst);
+            if seq < 0 {
+                continue;
+            }
+            let v = p.check_on(&tenant(), "orders", 0, &[batch(7, 0, seq, 1)], 2);
+            assert!(
+                !matches!(v, Verdict::Accept(_)),
+                "the resend of {seq} was taken for new work"
+            );
+            checked += 1;
+        }
+        writer.join().unwrap();
+        assert!(checked > 0);
+    }
+
+    /// A transaction's window never starts past 0 on a facade on its own: its
+    /// first batch of an epoch there is one whose earlier batches were refused
+    /// and are being retried behind it, and starting at it would answer their
+    /// retry as duplicates of records never staged.
+    #[test]
+    fn a_transactions_window_never_starts_past_zero() {
+        let txn = |epoch: i16, seq: i32| BatchDecodeInfo {
+            transactional: true,
+            ..batch(7, epoch, seq, 5)
+        };
+        let p = Producers::new();
+        assert_eq!(
+            rejection(p.check(&tenant(), "orders", 0, &[txn(0, 5)])),
+            ResponseError::OutOfOrderSequenceNumber
+        );
+        let first = accepted(p.check(&tenant(), "orders", 0, &[txn(0, 0)]));
+        landed(&p, &first, -1);
+        accepted(p.check(&tenant(), "orders", 0, &[txn(0, 5)]));
+        // A new epoch starts at 0 too.
+        assert_eq!(
+            rejection(p.check(&tenant(), "orders", 0, &[txn(1, 5)])),
+            ResponseError::OutOfOrderSequenceNumber
+        );
+        accepted(p.check(&tenant(), "orders", 0, &[txn(1, 0)]));
+        // An idempotent producer outside a transaction resumes mid-sequence,
+        // as after any lost window.
+        accepted(p.check(&tenant(), "orders", 1, &[batch(7, 0, 5, 5)]));
+    }
+
+    /// The window keeps its batches in sequence order whatever order they are
+    /// committed in, and a full window does not take one older than all of it.
+    #[test]
+    fn the_window_is_kept_in_sequence_order() {
+        let mut slot = Slot::new(
+            SlotKey {
+                owner: 0,
+                topic: 0,
+                partition: 0,
+            },
+            0,
+        );
+        let b = |seq: i32| Batch {
+            base_seq: seq,
+            last_seq: seq,
+            base_offset: i64::from(seq),
+        };
+        for seq in [10, 30, 20, 50, 40] {
+            slot.insert(b(seq));
+        }
+        let seqs = |s: &Slot| -> Vec<i32> {
+            s.recent[..usize::from(s.len)]
+                .iter()
+                .map(|x| x.base_seq)
+                .collect()
+        };
+        assert_eq!(seqs(&slot), vec![10, 20, 30, 40, 50]);
+        slot.insert(b(5));
+        assert_eq!(seqs(&slot), vec![10, 20, 30, 40, 50], "older than all kept");
+        slot.insert(b(25));
+        assert_eq!(seqs(&slot), vec![20, 25, 30, 40, 50]);
+        slot.insert(b(60));
+        assert_eq!(seqs(&slot), vec![25, 30, 40, 50, 60]);
+    }
+
+    /// A run of an epoch the producer has since bumped past, committed late,
+    /// is not remembered in the new epoch's window: it would move its next
+    /// sequence, and the new session's own batches would be taken for
+    /// duplicates of it.
+    #[test]
+    fn a_late_run_of_an_old_epoch_does_not_enter_the_new_window() {
+        let p = Producers::new();
+        let old = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 500, 5)]));
+        p.begin(&old);
+        // The producer bumps its epoch and starts again at 0.
+        let fresh = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 1, 0, 5)]));
+        landed(&p, &fresh, 0);
+        // The old push answers now.
+        landed(&p, &old, 5);
+        p.end(&old);
+        accepted(p.check(&tenant(), "orders", 0, &[batch(7, 1, 5, 5)]));
+        assert_eq!(
+            rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 505, 5)])),
+            ResponseError::InvalidProducerEpoch
+        );
+    }
+
+    /// Kafka sequences wrap from i32::MAX to 0, and "behind" is decided in that
+    /// space: a producer that wrapped is moving forwards, not resending.
+    #[test]
+    fn sequences_compare_across_the_wrap() {
+        assert!(is_before(i32::MAX - 2, i32::MAX));
+        assert!(
+            is_before(i32::MAX, 3),
+            "MAX is behind 3 once the counter wrapped"
+        );
+        assert!(!is_before(3, i32::MAX), "3 after the wrap is AHEAD of MAX");
+        assert!(!is_before(5, 5));
+        assert!(is_before(0, 1));
+        assert!(!is_before(1, 0));
+        // A window at the top of the space is extended by the wrapped batch.
+        let p = Producers::new();
+        let top = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, i32::MAX - 1, 2)]));
+        landed(&p, &top, 100);
+        let wrapped = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 0, 1)]));
+        assert_eq!(wrapped.base_sequence(), 0);
+    }
+
+    /// A facade on its OWN keeps Apache Kafka's answer: nothing else writes
+    /// its partitions, so a gap in a window it holds is a real one, refused,
+    /// and the window does not move.
+    #[test]
+    fn a_single_facade_refuses_a_gap_and_remembers_nothing() {
         let p = Producers::new();
         let first = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 0, 3)]));
         landed(&p, &first, 100);
-        // 3 is the next sequence; 5 would leave a hole.
         assert_eq!(
             rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 5, 2)])),
             ResponseError::OutOfOrderSequenceNumber
         );
-        // ...and the window did not move, so the batch that WAS next still is.
+        assert_eq!(p.resynced(), 0);
         let next = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 3, 2)]));
         assert_eq!(next.base_sequence(), 3);
+    }
+
+    /// The gap this facade has its own evidence for is still refused: a batch
+    /// past the newest one IN FLIGHT here. The client sent them in order on
+    /// one connection, so the one between them was refused or failed here.
+    #[test]
+    fn a_gap_behind_batches_in_flight_here_is_refused() {
+        let p = Producers::new();
+        let run = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 0, 3)]));
+        p.begin(&run);
+        assert_eq!(
+            rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 5, 2)])),
+            ResponseError::OutOfOrderSequenceNumber
+        );
+        assert_eq!(p.resynced(), 0);
+        // The batch that follows the one in flight is accepted, pipelined.
+        let next = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 3, 2)]));
+        assert_eq!(next.base_sequence(), 3);
+        p.end(&run);
     }
 
     /// The module header's caveat, as a test: a restart, a leader change, an
@@ -1449,6 +2163,7 @@ mod tests {
     #[test]
     fn a_lost_window_starts_again_at_the_batch_that_finds_it() {
         let p = Producers::new();
+        p.restart_windows_on_gaps(true);
         let resumed = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 42, 3)]));
         assert_eq!(resumed.base_sequence(), 42);
         assert_eq!(p.resumed(), 1);
@@ -1461,11 +2176,10 @@ mod tests {
         // ...the next batch follows it...
         let next = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 45, 2)]));
         assert_eq!(next.base_sequence(), 45);
-        // ...and a gap after it is still a gap.
-        assert_eq!(
-            rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 50, 1)])),
-            ResponseError::OutOfOrderSequenceNumber
-        );
+        // ...and a gap after it restarts it again: the producer wrote 47-49
+        // elsewhere.
+        accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 50, 1)]));
+        assert_eq!(p.resynced(), 1);
         // A producer starting at 0 is a new one, not a resumed one.
         accepted(p.check(&tenant(), "orders", 0, &[batch(8, 0, 0, 1)]));
         assert_eq!(p.resumed(), 1);
@@ -1889,6 +2603,16 @@ mod tests {
     /// for the coldest entry — is driven with the same random operations.
     #[test]
     fn the_tracker_answers_exactly_what_a_plain_lru_table_answers() {
+        tracker_against_model(false);
+    }
+
+    /// The same, for a CLUSTERED facade, which restarts a window on a gap.
+    #[test]
+    fn a_clustered_tracker_answers_exactly_what_a_plain_lru_table_answers() {
+        tracker_against_model(true);
+    }
+
+    fn tracker_against_model(gaps_restart: bool) {
         use std::collections::HashMap as Map;
 
         #[derive(Clone)]
@@ -1901,6 +2625,7 @@ mod tests {
             cap: usize,
             clock: u64,
             entries: Map<(i64, String, i32), ModelEntry>,
+            gaps_restart: bool,
         }
         impl Model {
             fn check(&self, topic: &str, partition: i32, infos: &[BatchDecodeInfo]) -> Verdict {
@@ -1913,6 +2638,7 @@ mod tests {
                         partition,
                     },
                     epoch: infos[0].producer_epoch,
+                    conn: 0,
                     batches: {
                         let mut delta = 0;
                         infos
@@ -1935,7 +2661,14 @@ mod tests {
                     .entries
                     .get(&key)
                     .map(|e| (e.epoch, e.recent.as_slice()));
-                decide(entry, infos, topic, partition, Verdict::Accept(pending))
+                decide(
+                    entry,
+                    infos,
+                    topic,
+                    partition,
+                    Verdict::Accept(pending),
+                    self.gaps_restart,
+                )
             }
             fn commit(&mut self, pending: &Pending, base: i64) {
                 self.clock += 1;
@@ -2002,10 +2735,12 @@ mod tests {
         };
         let cap = MIN_MAX_TRACKED;
         let p = Producers::with_capacity(cap);
+        p.restart_windows_on_gaps(gaps_restart);
         let mut model = Model {
             cap,
             clock: 0,
             entries: Map::new(),
+            gaps_restart,
         };
         // Per (producer, topic, partition): the sequence the producer is at.
         let mut at: Map<(i64, &str, i32), (i16, i32)> = Map::new();

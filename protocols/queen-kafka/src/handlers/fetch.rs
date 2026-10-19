@@ -254,7 +254,14 @@ async fn fetch(facade: &Facade, req: &FetchRequest, token: Option<&str>) -> Fetc
         crate::stats::FETCH_EMPTY.add(1);
     }
 
-    render(req, &slots, &read, budget)
+    let (response, sent) = render(req, &slots, &read, budget);
+    // What the client was handed, per topic, told once and only now: the read
+    // above may have carried more than the answer had room for, and what was
+    // trimmed off is read again on the next poll ([`queen::QueenApi::note_fetched`]).
+    if !sent.is_empty() {
+        facade.queen.note_fetched(&sent, token);
+    }
+    response
 }
 
 /// How many record bytes this response may carry: what the client asked for,
@@ -595,12 +602,16 @@ fn carried_bytes(f: &RawFetched) -> usize {
 /// keeps the fact (which topic, how many lanes, what the log said, where its
 /// bounds are) and drops only the repetition — the rule the broker's own
 /// logging layer already follows.
+///
+/// Beside the response, the records it carries per topic (topics that carry
+/// none left out), counted as [`batch`] encodes them: the only count of a
+/// Fetch that is not more than the client got.
 fn render(
     req: &FetchRequest,
     slots: &[Vec<Slot>],
     read: &[queen::Result<RawFetched>],
     budget: usize,
-) -> FetchResponse {
+) -> (FetchResponse, Vec<(String, u64)>) {
     // Spent in request order across every topic of the response, because the
     // frame the codec refuses is the whole response and not one topic of it.
     let mut left = budget;
@@ -608,9 +619,11 @@ fn render(
     // to Queen answers the longest wait any of them was told to take.
     let mut throttle: Option<i32> = None;
     let mut responses = Vec::with_capacity(req.topics.len());
+    let mut sent: Vec<(String, u64)> = Vec::new();
     for (topic, row) in req.topics.iter().zip(slots) {
         let name = topic.topic.0.as_str();
         let mut failures = Failures::default();
+        let mut carried = 0u64;
         let partitions = topic
             .partitions
             .iter()
@@ -628,7 +641,7 @@ fn render(
                             failures.refused_by_log(p.partition, marker, f);
                             rejected(p.partition, entry_error(marker))
                         }
-                        None => served(name, p.partition, f, &mut left),
+                        None => served(name, p.partition, f, &mut left, &mut carried),
                     },
                     Some(Err(e)) => match throttle::for_error(e) {
                         // Cloud back-pressure. NOT an error to the consumer:
@@ -651,15 +664,24 @@ fn render(
             })
             .collect();
         failures.log(name);
+        // A client may name one topic twice in a request; one count per
+        // name is what the broker adds up anyway.
+        if carried > 0 {
+            match sent.iter_mut().find(|(t, _)| t == name) {
+                Some((_, n)) => *n += carried,
+                None => sent.push((name.to_string(), carried)),
+            }
+        }
         responses.push(
             FetchableTopicResponse::default()
                 .with_topic(TopicName(StrBytes::from_string(name.to_string())))
                 .with_partitions(partitions),
         );
     }
-    FetchResponse::default()
+    let response = FetchResponse::default()
         .with_responses(responses)
-        .with_throttle_time_ms(throttle.unwrap_or(0))
+        .with_throttle_time_ms(throttle.unwrap_or(0));
+    (response, sent)
 }
 
 /// One topic's failures, kept as counts plus one worked example each, so a wide
@@ -799,14 +821,21 @@ impl Failures {
 /// `left` is the whole response's remaining budget and is spent here. At zero
 /// the partition is answered as an empty read — error-free, with its true
 /// watermarks, so the consumer knows exactly where it stands and comes back for
-/// the records on its next poll.
-fn served(topic: &str, index: i32, f: &RawFetched, left: &mut usize) -> PartitionData {
-    let records = if *left == 0 {
-        Bytes::new()
+/// the records on its next poll. `carried` gains the records the batch holds.
+fn served(
+    topic: &str,
+    index: i32,
+    f: &RawFetched,
+    left: &mut usize,
+    carried: &mut u64,
+) -> PartitionData {
+    let (records, n) = if *left == 0 {
+        (Bytes::new(), 0)
     } else {
         batch(topic, index, &f.records, *left)
     };
     *left = left.saturating_sub(records.len());
+    *carried += n as u64;
     PartitionData::default()
         .with_partition_index(index)
         .with_error_code(0)
@@ -895,9 +924,12 @@ fn rejected(index: i32, error: ResponseError) -> PartitionData {
 /// for ever. Truncating is safe for the same reason the gap handling above is:
 /// records are contiguous from the fetch offset, so the consumer resumes at the
 /// first offset it did not get.
-fn batch(topic: &str, index: i32, records: &[RawRecord], budget: usize) -> Bytes {
+///
+/// Answered with the number of records the batch holds (0 with no batch),
+/// which is what [`render`] reports as fetched.
+fn batch(topic: &str, index: i32, records: &[RawRecord], budget: usize) -> (Bytes, usize) {
     if records.is_empty() {
-        return Bytes::new();
+        return (Bytes::new(), 0);
     }
     let mut room = budget.saturating_sub(BATCH_HEADER_BYTES);
     // The base is the LOWEST offset rather than the first, so every delta is
@@ -960,10 +992,10 @@ fn batch(topic: &str, index: i32, records: &[RawRecord], budget: usize) -> Bytes
         });
     }
     if out.is_empty() {
-        return Bytes::new();
+        return (Bytes::new(), 0);
     }
     match wire::encode(&out, &headers) {
-        Ok(bytes) => bytes,
+        Ok(bytes) => (bytes, out.len()),
         Err(e) => {
             // Nothing in the loop above can produce a record the encoder
             // refuses, so this is a bug rather than a client's doing. An empty
@@ -977,7 +1009,7 @@ fn batch(topic: &str, index: i32, records: &[RawRecord], budget: usize) -> Bytes
                 records = out.len(),
                 "cannot encode a record batch"
             );
-            Bytes::new()
+            (Bytes::new(), 0)
         }
     }
 }
@@ -2151,6 +2183,46 @@ mod tests {
         );
     }
 
+    /// The records a Fetch tells the broker it read
+    /// ([`queen::QueenApi::note_fetched`], the dashboard's count of Kafka
+    /// reads) are the ones its answer CARRIES. The read asks for more than the
+    /// answer may hold, and a record trimmed off is read again on the next
+    /// poll: counted at the read, each of those would count twice. One note
+    /// per Fetch, per topic, and none for a Fetch that carried nothing.
+    #[tokio::test]
+    async fn only_the_records_an_answer_carries_are_noted_as_fetched() {
+        let (f, api) = facade(&[("orders", 1), ("clicks", 1)]);
+        let value = vec![b'x'; 8 * 1024];
+        let payloads: Vec<serde_json::Value> = (0..4)
+            .map(|_| envelope_of(None, &value, 1_756_000_000_000))
+            .collect();
+        api.seed("orders", "0", 0, &payloads);
+        api.seed("clicks", "0", 0, &payloads[..2]);
+
+        // Room for two of orders' records, and then the first of clicks'
+        // (a batch's first record always goes): six read, three carried.
+        let req =
+            request(&[("orders", &[(0, 0)]), ("clicks", &[(0, 0)])]).with_max_bytes(20 * 1024);
+        let resp = handle(&f, &req, None).await;
+        let orders = records(answer(&resp, "orders", 0)).len() as u64;
+        let clicks = records(answer(&resp, "clicks", 0)).len() as u64;
+        assert!(orders > 0, "the first batch is never empty");
+        assert!(
+            orders + clicks < 6,
+            "the answer was not trimmed: {orders} + {clicks} of the 6 read"
+        );
+        let want: Vec<(String, u64)> = [("orders", orders), ("clicks", clicks)]
+            .into_iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(t, n)| (t.to_string(), n))
+            .collect();
+        assert_eq!(*api.noted_fetches.lock().unwrap(), vec![want]);
+
+        // From the end of the log: nothing carried, nothing told.
+        handle(&f, &request(&[("orders", &[(0, 4)])]), None).await;
+        assert_eq!(api.noted_fetches.lock().unwrap().len(), 1);
+    }
+
     #[test]
     fn the_response_budget_is_the_clients_ask_under_the_hard_ceiling() {
         assert_eq!(response_budget(4096), 4096);
@@ -2255,7 +2327,7 @@ mod tests {
             ..Fetched::default()
         })
         .records;
-        let encoded = batch("orders", 0, &raw, usize::MAX);
+        let (encoded, _) = batch("orders", 0, &raw, usize::MAX);
         assert!(
             encoded.len() <= estimate,
             "the estimate ({estimate}) is below the encoding ({})",

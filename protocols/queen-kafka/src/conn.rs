@@ -438,6 +438,80 @@ fn coalescible(conn: &Conn, frame: &[u8]) -> bool {
         )
 }
 
+/// `QUEEN_KAFKA_COMMIT_COALESCE`: how many OffsetCommit requests already
+/// buffered on a connection are answered from one write
+/// ([`offset_commit::handle_many`]). Default 64, 1 to 256; 1 answers every
+/// commit with a write of its own, as before 2026-10-20.
+pub fn commit_coalesce_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("QUEEN_KAFKA_COMMIT_COALESCE")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(64)
+            .clamp(1, 256)
+    })
+}
+
+/// Whether `frame` is an OffsetCommit this connection may answer together with
+/// the ones behind it: an admitted connection, an advertised version.
+fn commit_coalescible(conn: &Conn, frame: &[u8]) -> bool {
+    conn.sasl != SaslState::AwaitingRawToken
+        && conn.sasl.admitted()
+        && frame.len() >= 4
+        && i16::from_be_bytes([frame[0], frame[1]]) == ApiKey::OffsetCommit as i16
+        && matches!(
+            versions::classify(
+                ApiKey::OffsetCommit as i16,
+                i16::from_be_bytes([frame[2], frame[3]])
+            ),
+            Support::Advertised(ApiKey::OffsetCommit)
+        )
+}
+
+/// OffsetCommit frames ([`commit_coalescible`]) answered in order. One frame, or
+/// one that does not decode, is answered exactly as [`dispatch`] answers it.
+async fn dispatch_commits(conn: &mut Conn, frames: Vec<Bytes>) -> Vec<Reply> {
+    let mut decoded = Vec::with_capacity(frames.len());
+    if frames.len() > 1 {
+        for frame in &frames {
+            let api_version = i16::from_be_bytes([frame[2], frame[3]]);
+            let mut buf = frame.clone();
+            let header_version = ApiKey::OffsetCommit.request_header_version(api_version);
+            let Ok(header) = RequestHeader::decode(&mut buf, header_version) else {
+                break;
+            };
+            let Ok(req) = OffsetCommitRequest::decode(&mut buf, api_version) else {
+                break;
+            };
+            decoded.push((header.correlation_id, api_version, req));
+        }
+    }
+    if decoded.len() < frames.len() {
+        let mut replies = Vec::with_capacity(frames.len());
+        for frame in frames {
+            let reply = dispatch(conn, frame).await;
+            let close = matches!(reply, Reply::Close(_) | Reply::SendThenClose(..));
+            replies.push(reply);
+            if close {
+                break;
+            }
+        }
+        return replies;
+    }
+    let (ids, reqs): (Vec<(i32, i16)>, Vec<OffsetCommitRequest>) = decoded
+        .into_iter()
+        .map(|(correlation_id, version, req)| ((correlation_id, version), req))
+        .unzip();
+    let answers = offset_commit::handle_many(&conn.facade, &reqs, conn.facade.token()).await;
+    ids.into_iter()
+        .zip(answers)
+        .map(|((correlation_id, version), body)| {
+            respond(ApiKey::OffsetCommit, correlation_id, &body, version)
+        })
+        .collect()
+}
+
 /// The next whole frame ALREADY in `inbuf`, when `take` accepts it; the socket
 /// is not read. A frame past `limit` is left for [`next_frame`] to refuse.
 fn buffered_frame(
@@ -484,7 +558,9 @@ async fn dispatch_produces(conn: &mut Conn, frames: Vec<Bytes>) -> Vec<Reply> {
             let reply = dispatch(conn, frame).await;
             let close = matches!(reply, Reply::Close(_) | Reply::SendThenClose(..));
             replies.push(reply);
-            if close {
+            // A produce that left an idempotent batch unwritten is the last
+            // one read ([`RESEND_IN_ORDER`]).
+            if close || conn.facade.resend_in_order.is_required() {
                 break;
             }
         }
@@ -680,6 +756,159 @@ impl Drop for Relay {
     }
 }
 
+/// The entries a Produce answer (v3..=9, [`versions`]) refused with an error
+/// other than a duplicate's, as `(topic, partition)`; `None` when the answer
+/// does not decode. Read by hand: the shipped build has kafka-protocol's
+/// broker half, which writes answers and does not read them.
+fn produce_refusals(answer: &Bytes, version: i16) -> Option<Vec<(String, i32)>> {
+    fn int(buf: &mut Bytes, width: usize) -> Option<i64> {
+        if buf.remaining() < width {
+            return None;
+        }
+        Some(match width {
+            2 => i64::from(buf.get_i16()),
+            4 => i64::from(buf.get_i32()),
+            _ => buf.get_i64(),
+        })
+    }
+    fn varint(buf: &mut Bytes) -> Option<u32> {
+        let mut value = 0u32;
+        for shift in (0..35).step_by(7) {
+            if !buf.has_remaining() {
+                return None;
+            }
+            let byte = buf.get_u8();
+            value |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    }
+    fn skip(buf: &mut Bytes, n: usize) -> Option<()> {
+        (buf.remaining() >= n).then(|| buf.advance(n))
+    }
+    // An array's length; null reads as empty.
+    fn len(buf: &mut Bytes, flexible: bool) -> Option<usize> {
+        if flexible {
+            Some(varint(buf)?.saturating_sub(1) as usize)
+        } else {
+            Some(int(buf, 4)?.max(0) as usize)
+        }
+    }
+    // A nullable string's bytes, `Some(None)` for null.
+    fn string(buf: &mut Bytes, flexible: bool) -> Option<Option<Bytes>> {
+        let n = if flexible {
+            i64::from(varint(buf)?) - 1
+        } else {
+            int(buf, 2)?
+        };
+        if n < 0 {
+            return Some(None);
+        }
+        let n = n as usize;
+        (buf.remaining() >= n).then(|| Some(buf.split_to(n)))
+    }
+    fn tagged(buf: &mut Bytes) -> Option<()> {
+        for _ in 0..varint(buf)? {
+            varint(buf)?;
+            let size = varint(buf)? as usize;
+            skip(buf, size)?;
+        }
+        Some(())
+    }
+    if !(3..=9).contains(&version) {
+        return None;
+    }
+    let flexible = version >= 9;
+    let duplicate = kafka_protocol::error::ResponseError::DuplicateSequenceNumber.code();
+    let mut buf = answer.clone();
+    ResponseHeader::decode(&mut buf, ApiKey::Produce.response_header_version(version)).ok()?;
+    let mut refused = Vec::new();
+    for _ in 0..len(&mut buf, flexible)? {
+        let name = string(&mut buf, flexible)??;
+        let name = std::str::from_utf8(&name).ok()?.to_string();
+        for _ in 0..len(&mut buf, flexible)? {
+            let index = int(&mut buf, 4)? as i32;
+            let error = int(&mut buf, 2)? as i16;
+            // base offset, log append time, and from v5 the log start offset
+            skip(&mut buf, if version >= 5 { 24 } else { 16 })?;
+            if version >= 8 {
+                for _ in 0..len(&mut buf, flexible)? {
+                    skip(&mut buf, 4)?;
+                    string(&mut buf, flexible)?;
+                    if flexible {
+                        tagged(&mut buf)?;
+                    }
+                }
+                string(&mut buf, flexible)?;
+            }
+            if flexible {
+                tagged(&mut buf)?;
+            }
+            if error != 0 && error != duplicate {
+                refused.push((name.clone(), index));
+            }
+        }
+        if flexible {
+            tagged(&mut buf)?;
+        }
+    }
+    Some(refused)
+}
+
+/// Whether the leader's answer to a relayed produce ends the client's
+/// connection, as the leader ended the relay after writing it
+/// ([`RESEND_IN_ORDER`]): an entry of a non-transactional idempotent producer
+/// answered with an error other than a duplicate's. An answer that does not
+/// decode ends it too — nothing can be said about what it refused.
+///
+/// The answer is decoded on every relayed produce (a few partitions, a few
+/// hundred nanoseconds); the request only when the answer carries an error.
+fn relayed_answer_ends(frame: &Bytes, answer: &Bytes) -> bool {
+    if frame.len() < 4 {
+        return true;
+    }
+    let version = i16::from_be_bytes([frame[2], frame[3]]);
+    let Some(failed) = produce_refusals(answer, version) else {
+        return true;
+    };
+    if failed.is_empty() {
+        return false;
+    }
+    let Some(decoded) = decode_produces(std::slice::from_ref(frame)) else {
+        return true;
+    };
+    let req = &decoded[0].2;
+    if crate::idempotent::transactional_id(req.transactional_id.as_ref().map(|id| id.0.as_str()))
+        .is_some()
+    {
+        return false;
+    }
+    req.topic_data.iter().any(|t| {
+        t.partition_data.iter().any(|p| {
+            failed
+                .iter()
+                .any(|(name, index)| name == t.name.0.as_str() && *index == p.index)
+                && p.records
+                    .as_ref()
+                    .filter(|r| !r.is_empty())
+                    .is_some_and(|r| {
+                        // A header that does not decode counts as an idempotent
+                        // producer's, as on the leader (`produce::idempotent_slot`).
+                        kafka_protocol::records::RecordBatchDecoder::decode_batch_info(
+                            &mut r.clone(),
+                        )
+                        .map_or(true, |infos| {
+                            infos
+                                .iter()
+                                .any(|i| i.producer_id != crate::idempotent::NO_PRODUCER_ID)
+                        })
+                    })
+        })
+    })
+}
+
 /// Write the answers of the oldest pipelined produce. A produce that failed,
 /// or ran behind one that did, ends the connection: the client sends again,
 /// in order, everything it has not been answered.
@@ -694,19 +923,26 @@ where
 {
     match done {
         Ok(Some(pending)) => {
-            let replies: Vec<Reply> = match pending {
-                Pending::Replies(replies) => replies,
-                Pending::Produce(ids, pushed) => ids
-                    .into_iter()
-                    .zip(pushed.answer())
-                    .map(|((correlation_id, version), answer)| match answer {
-                        Some(body) => respond(ApiKey::Produce, correlation_id, &body, version),
-                        None => Reply::Silent,
-                    })
-                    .collect(),
+            let (replies, close): (Vec<Reply>, bool) = match pending {
+                Pending::Replies(replies) => (replies, false),
+                Pending::Produce(ids, pushed) => {
+                    let (answers, close) = pushed.answer_and_close();
+                    let replies = ids
+                        .into_iter()
+                        .zip(answers)
+                        .map(|((correlation_id, version), answer)| match answer {
+                            Some(body) => respond(ApiKey::Produce, correlation_id, &body, version),
+                            None => Reply::Silent,
+                        })
+                        .collect();
+                    (replies, close)
+                }
             };
             for reply in replies {
                 write_reply(wr, codec, outbuf, reply).await?;
+            }
+            if close {
+                return Err(std::io::Error::other(RESEND_IN_ORDER));
             }
             Ok(())
         }
@@ -715,6 +951,13 @@ where
         )),
     }
 }
+
+/// Why a connection ends after answering an idempotent batch that was not
+/// written ([`crate::idempotent`]): nothing the client sent behind it may be
+/// read, and the client sends again, in order, from its oldest unanswered batch.
+const RESEND_IN_ORDER: &str =
+    "an idempotent batch was not written; the connection ends after its answer so the \
+     client sends again, in order";
 
 /// Every pipelined produce in flight, answered oldest first.
 async fn drain_pipelined<W>(
@@ -767,6 +1010,9 @@ where
     let mut gate: Option<tokio::sync::oneshot::Receiver<()>> = None;
     // On a follower: this connection's relay to the leader's facade.
     let mut relay: Option<Relay> = None;
+    // Whether what is in flight went through the relay (rather than being
+    // pushed here): produce switches between the two only once it is answered.
+    let mut inflight_relayed = false;
     let result: std::io::Result<()> = 'conn: loop {
         // The ceiling this connection is held to right now. A connection that
         // has not authenticated gets the small one — see
@@ -827,15 +1073,38 @@ where
                 if relay.is_none() {
                     relay = Relay::open(to).await.ok();
                 }
+                if relay.is_some() && !inflight.is_empty() && !inflight_relayed {
+                    // This node served the produce before it (as the leader,
+                    // or before it knew one): what it has in flight is
+                    // answered first, so the leader never sees a batch ahead
+                    // of the ones before it.
+                    if let Err(e) =
+                        drain_pipelined(&mut inflight, &mut wr, &mut codec, &mut outbuf).await
+                    {
+                        break 'conn Err(e);
+                    }
+                    gate = None;
+                }
                 if let Some(r) = relay.as_mut() {
                     let answered = produce_acks(&frame) != Some(0);
                     match r.send(frame.clone(), answered).await {
                         Ok(Some(rx)) => {
                             inflight.push_back(tokio::spawn(async move {
-                                rx.await
-                                    .ok()
-                                    .map(|answer| Pending::Replies(vec![Reply::Send(answer)]))
+                                rx.await.ok().map(|answer| {
+                                    // The leader ended the relay after this
+                                    // answer, and the client's connection ends
+                                    // with it: its next batch must not reach
+                                    // a new relay, or this facade, ahead of
+                                    // the resend.
+                                    let reply = if relayed_answer_ends(&frame, &answer) {
+                                        Reply::SendThenClose(answer, RESEND_IN_ORDER.to_string())
+                                    } else {
+                                        Reply::Send(answer)
+                                    };
+                                    Pending::Replies(vec![reply])
+                                })
                             }));
+                            inflight_relayed = true;
                             continue;
                         }
                         Ok(None) => continue,
@@ -846,6 +1115,15 @@ where
             }
         }
         if coalescible(&conn, &frame) && pipelines(&conn) {
+            if !inflight.is_empty() && inflight_relayed {
+                // The produce before this one went to another facade (this
+                // node just became the leader): it is answered first.
+                if let Err(e) =
+                    drain_pipelined(&mut inflight, &mut wr, &mut codec, &mut outbuf).await
+                {
+                    break 'conn Err(e);
+                }
+            }
             let mut frames = vec![frame];
             while frames.len() < max {
                 match buffered_frame(&mut inbuf, limit, |f| coalescible(&conn, f)) {
@@ -862,6 +1140,7 @@ where
                 }
                 let staged =
                     produce::stage_coalesced(&conn.facade, reqs, conn.facade.token()).await;
+                let ends_connection = staged.ends_connection();
                 let (in_log, next_gate) = tokio::sync::oneshot::channel();
                 let after = gate.replace(next_gate);
                 let facade = conn.facade.clone();
@@ -870,6 +1149,18 @@ where
                     let pushed = produce::push_staged(facade, staged, token, after, in_log).await?;
                     Some(Pending::Produce(ids, Box::new(pushed)))
                 }));
+                inflight_relayed = false;
+                if ends_connection {
+                    // An idempotent batch of it is not written: nothing more is
+                    // read, what is in flight is answered, and the connection
+                    // ends after the answer that refused it ([`RESEND_IN_ORDER`]).
+                    if let Err(e) =
+                        drain_pipelined(&mut inflight, &mut wr, &mut codec, &mut outbuf).await
+                    {
+                        break 'conn Err(e);
+                    }
+                    break 'conn Err(std::io::Error::other(RESEND_IN_ORDER));
+                }
                 continue;
             }
             // One of them does not decode: answered one by one, in order,
@@ -883,6 +1174,9 @@ where
                     break 'conn Err(e);
                 }
             }
+            if conn.facade.resend_in_order.take() {
+                break 'conn Err(std::io::Error::other(RESEND_IN_ORDER));
+            }
             continue;
         }
         // Anything else is handled once every produce before it is answered.
@@ -890,6 +1184,25 @@ where
             break 'conn Err(e);
         }
         gate = None;
+        // OffsetCommit requests the client already sent behind this one are
+        // answered from one write per group ([`offset_commit::handle_many`]):
+        // an asynchronous committer outruns one write per commit, and its
+        // heartbeats wait behind the queue it builds.
+        if commit_coalescible(&conn, &frame) {
+            let mut frames = vec![frame];
+            while frames.len() < commit_coalesce_limit() {
+                match buffered_frame(&mut inbuf, limit, |f| commit_coalescible(&conn, f)) {
+                    Some(next) => frames.push(next),
+                    None => break,
+                }
+            }
+            for reply in dispatch_commits(&mut conn, frames).await {
+                if let Err(e) = write_reply(&mut wr, &mut codec, &mut outbuf, reply).await {
+                    break 'conn Err(e);
+                }
+            }
+            continue;
+        }
         // Produce requests the client already sent behind this one are written
         // to Queen together with it ([`produce::handle_coalesced`]).
         if max > 1 && coalescible(&conn, &frame) {
@@ -906,12 +1219,18 @@ where
                         break 'conn Err(e);
                     }
                 }
+                if conn.facade.resend_in_order.take() {
+                    break 'conn Err(std::io::Error::other(RESEND_IN_ORDER));
+                }
                 continue;
             }
             let frame = frames.pop().expect("one frame");
             let reply = dispatch(&mut conn, frame).await;
             if let Err(e) = write_reply(&mut wr, &mut codec, &mut outbuf, reply).await {
                 break 'conn Err(e);
+            }
+            if conn.facade.resend_in_order.take() {
+                break 'conn Err(std::io::Error::other(RESEND_IN_ORDER));
             }
             continue;
         }
@@ -927,11 +1246,21 @@ where
                 }
             }
         }
+        // A produce answered with an idempotent batch it did not write.
+        if conn.facade.resend_in_order.take() {
+            break 'conn Err(std::io::Error::other(RESEND_IN_ORDER));
+        }
     };
     // Whatever is still in flight is not answered on this connection: its
     // staged records leave the in-flight list as each task is dropped.
     for h in inflight {
         h.abort();
+    }
+    if result
+        .as_ref()
+        .is_err_and(|e| e.to_string() == RESEND_IN_ORDER)
+    {
+        crate::stats::PRODUCE_RESEND_CLOSES.add(1);
     }
     result
 }
@@ -2864,6 +3193,81 @@ mod tests {
         );
     }
 
+    /// The leader answers a relayed idempotent batch it did not write and
+    /// ends the relay; the follower ends the client's connection with it. The
+    /// client's next batch must not be served anywhere ahead of the resend —
+    /// here the follower no longer knows a leader, and would have served it
+    /// itself.
+    #[tokio::test]
+    async fn a_follower_ends_the_connection_when_the_leader_refused_an_idempotent_batch() {
+        let (leader_facade, leader) = crate::handlers::testing::facade_and_queen(&[("orders", 2)]);
+        leader
+            .leads
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        leader_facade.producers.restart_windows_on_gaps(true);
+        // Sequence 40 in flight on another connection to the leader: the
+        // relayed 40 is refused as a resend of it.
+        let tenant = leader_facade.catalog.tenant_key(None);
+        let crate::idempotent::Verdict::Accept(twin) = leader_facade.producers.check(
+            &tenant,
+            "orders",
+            0,
+            &batch_infos(&idempotent_produce(9, 40)),
+        ) else {
+            panic!("the twin was not accepted");
+        };
+        leader_facade.producers.begin(&twin);
+        let leader_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader_addr = leader_listener.local_addr().unwrap();
+        tokio::spawn(serve(
+            leader_listener,
+            Arc::new(leader_facade.clone()),
+            None,
+        ));
+
+        let follower_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let follower_addr = follower_listener.local_addr().unwrap();
+        let (follower, follower_queen) = crate::handlers::testing::clustered_on_raft(
+            &[("orders", 2)],
+            &[
+                (1, "127.0.0.1", leader_addr.port()),
+                (2, "127.0.0.1", follower_addr.port()),
+            ],
+            2,
+        );
+        follower.producers.restart_windows_on_gaps(true);
+        *follower_queen.leader_node.lock().unwrap() = Some(1);
+        tokio::spawn(serve(follower_listener, Arc::new(follower), None));
+
+        let mut peer = Peer::new(TcpStream::connect(follower_addr).await.unwrap());
+        peer.send(idempotent_produce(1, 40)).await;
+        let mut first = peer.recv().await.expect("the refusal is relayed back");
+        ResponseHeader::decode(&mut first, ApiKey::Produce.response_header_version(8)).unwrap();
+        let body = kafka_protocol::messages::ProduceResponse::decode(&mut first, 8).unwrap();
+        assert_eq!(
+            body.responses[0].partition_responses[0].error_code,
+            ResponseError::RequestTimedOut.code()
+        );
+        // The leader is gone from the follower's view.
+        *follower_queen.leader_node.lock().unwrap() = None;
+        let mut wire = BytesMut::new();
+        peer.codec
+            .encode(idempotent_produce(2, 41), &mut wire)
+            .unwrap();
+        if peer.stream.write_all(&wire).await.is_ok() {
+            assert!(
+                peer.recv().await.is_none(),
+                "the batch behind the refusal was answered"
+            );
+        }
+        assert!(
+            follower_queen.pushes.lock().unwrap().is_empty(),
+            "the follower served the batch behind the refusal"
+        );
+        assert_eq!(leader.landed("orders", "0"), 0);
+        leader_facade.producers.end(&twin);
+    }
+
     /// An idempotent producer's batch, sequence `seq`, for `orders` 0.
     fn idempotent_produce(correlation_id: i32, seq: i32) -> Bytes {
         use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
@@ -2915,6 +3319,256 @@ mod tests {
             .encode(&mut out, 8)
             .unwrap();
         out.freeze()
+    }
+
+    /// An idempotent batch whose push failed is ANSWERED, and then the
+    /// connection ends ([`crate::idempotent`]): the batch the client had
+    /// already sent behind it is never read, so it can neither start a window
+    /// past the failed one nor be relayed anywhere. On the next connection the
+    /// client sends again, in order, and both are written.
+    #[tokio::test]
+    async fn a_failed_idempotent_push_is_answered_and_the_connection_ends() {
+        use kafka_protocol::messages::ProduceResponse;
+        let (f, api) = crate::handlers::testing::facade_and_queen(&[("orders", 1)]);
+        api.fail_push(crate::queen::Error::Transport(
+            "the broker restarted".into(),
+        ));
+        let (client, server) = tokio::io::duplex(1 << 20);
+        tokio::spawn(connection(
+            server,
+            Conn::new(&f, None, TEST_PEER.to_string()),
+        ));
+        let mut peer = Peer::new(client);
+        peer.send(idempotent_produce(1, 40)).await;
+        let mut first = peer.recv().await.expect("the failure is answered");
+        let header =
+            ResponseHeader::decode(&mut first, ApiKey::Produce.response_header_version(8)).unwrap();
+        let body = ProduceResponse::decode(&mut first, 8).unwrap();
+        assert_eq!(header.correlation_id, 1);
+        assert_ne!(body.responses[0].partition_responses[0].error_code, 0);
+        // The batch behind it: the connection is gone — the write fails, or
+        // nothing is ever answered.
+        let mut wire = BytesMut::new();
+        peer.codec
+            .encode(idempotent_produce(2, 41), &mut wire)
+            .unwrap();
+        if peer.stream.write_all(&wire).await.is_ok() {
+            assert!(peer.recv().await.is_none(), "the connection stayed open");
+        }
+        assert_eq!(
+            api.landed("orders", "0"),
+            0,
+            "a batch behind the failed one was written"
+        );
+
+        // The client's next connection, in order.
+        let (client, server) = tokio::io::duplex(1 << 20);
+        tokio::spawn(connection(
+            server,
+            Conn::new(&f, None, TEST_PEER.to_string()),
+        ));
+        let mut peer = Peer::new(client);
+        for (id, seq) in [(3, 40), (4, 41)] {
+            peer.send(idempotent_produce(id, seq)).await;
+            let mut b = peer.recv().await.expect("answered");
+            ResponseHeader::decode(&mut b, ApiKey::Produce.response_header_version(8)).unwrap();
+            let body = ProduceResponse::decode(&mut b, 8).unwrap();
+            assert_eq!(
+                body.responses[0].partition_responses[0].error_code, 0,
+                "sequence {seq}"
+            );
+        }
+        assert_eq!(api.landed("orders", "0"), 2);
+    }
+
+    /// The batch headers of a produce frame built by [`idempotent_produce`].
+    fn batch_infos(frame: &Bytes) -> Vec<kafka_protocol::records::BatchDecodeInfo> {
+        let decoded = decode_produces(std::slice::from_ref(frame)).unwrap();
+        let records = decoded[0].2.topic_data[0].partition_data[0]
+            .records
+            .clone()
+            .unwrap();
+        kafka_protocol::records::RecordBatchDecoder::decode_batch_info(&mut records.clone())
+            .unwrap()
+    }
+
+    /// A coalesced group stops at an idempotent batch it refuses: the batch
+    /// behind it, read in the same pass, is neither written nor answered, and
+    /// the connection ends after the refusal. Were it staged, it would follow
+    /// the refused batch's twin in flight on another connection and be
+    /// written; if that push then failed, the refused batch's resend would
+    /// land behind it, and its success would count the refused one delivered
+    /// in librdkafka. On a node that leads (pipelined) and one that does not.
+    #[tokio::test]
+    async fn a_coalesced_group_stops_at_a_refused_idempotent_batch() {
+        use kafka_protocol::messages::ProduceResponse;
+        for leads in [false, true] {
+            let (f, api) = crate::handlers::testing::facade_and_queen(&[("orders", 1)]);
+            api.leads.store(leads, std::sync::atomic::Ordering::Relaxed);
+            f.producers.restart_windows_on_gaps(true);
+            // Sequence 40 in flight on another connection of the producer.
+            let tenant = f.catalog.tenant_key(None);
+            let crate::idempotent::Verdict::Accept(twin) = f.producers.check(
+                &tenant,
+                "orders",
+                0,
+                &batch_infos(&idempotent_produce(9, 40)),
+            ) else {
+                panic!("the twin was not accepted");
+            };
+            f.producers.begin(&twin);
+
+            let (client, server) = tokio::io::duplex(1 << 20);
+            let task = tokio::spawn(connection(
+                server,
+                Conn::new(&f, None, TEST_PEER.to_string()),
+            ));
+            let mut peer = Peer::new(client);
+            let closes = crate::stats::PRODUCE_RESEND_CLOSES.get();
+            // Both in one write, so they are read in one pass.
+            let mut wire = BytesMut::new();
+            peer.codec
+                .encode(idempotent_produce(1, 40), &mut wire)
+                .unwrap();
+            peer.codec
+                .encode(idempotent_produce(2, 41), &mut wire)
+                .unwrap();
+            peer.stream.write_all(&wire).await.unwrap();
+            let mut first = peer.recv().await.expect("the refusal is answered");
+            let header =
+                ResponseHeader::decode(&mut first, ApiKey::Produce.response_header_version(8))
+                    .unwrap();
+            let body = ProduceResponse::decode(&mut first, 8).unwrap();
+            assert_eq!(header.correlation_id, 1);
+            assert_eq!(
+                body.responses[0].partition_responses[0].error_code,
+                ResponseError::RequestTimedOut.code(),
+                "leads={leads}"
+            );
+            assert!(
+                peer.recv().await.is_none(),
+                "leads={leads}: the batch behind the refusal was answered"
+            );
+            assert!(task.await.unwrap().is_err(), "leads={leads}");
+            assert!(
+                crate::stats::PRODUCE_RESEND_CLOSES.get() > closes,
+                "leads={leads}: the close was not counted"
+            );
+            assert_eq!(
+                api.landed("orders", "0"),
+                0,
+                "leads={leads}: the batch behind the refusal was written"
+            );
+            f.producers.end(&twin);
+        }
+    }
+
+    /// The follower reads the leader's answers to its relay the way the
+    /// leader decided to close it: an idempotent batch refused for anything
+    /// but a duplicate ends the client's connection; an ordinary producer's
+    /// refusal, a duplicate, a success and a transaction's refusal do not.
+    #[test]
+    fn a_relayed_answer_ends_the_connection_when_the_leader_closed_the_relay() {
+        use kafka_protocol::messages::produce_response::{
+            PartitionProduceResponse, TopicProduceResponse,
+        };
+        use kafka_protocol::messages::{ProduceResponse, TopicName};
+        let answer = |code: i16| -> Bytes {
+            let body =
+                ProduceResponse::default().with_responses(vec![TopicProduceResponse::default()
+                    .with_name(TopicName(StrBytes::from_static_str("orders")))
+                    .with_partition_responses(vec![PartitionProduceResponse::default()
+                        .with_index(0)
+                        .with_error_code(code)])]);
+            match respond(ApiKey::Produce, 1, &body, 8) {
+                Reply::Send(bytes) => bytes,
+                _ => unreachable!(),
+            }
+        };
+        let idem = idempotent_produce(1, 40);
+        let timed_out = ResponseError::RequestTimedOut.code();
+        assert!(relayed_answer_ends(&idem, &answer(timed_out)));
+        assert!(relayed_answer_ends(
+            &idem,
+            &answer(ResponseError::OutOfOrderSequenceNumber.code())
+        ));
+        assert!(!relayed_answer_ends(&idem, &answer(0)));
+        assert!(!relayed_answer_ends(
+            &idem,
+            &answer(ResponseError::DuplicateSequenceNumber.code())
+        ));
+        // An ordinary producer's refusal keeps the connection.
+        let plain = produce_request(8, 1, -1);
+        assert!(!relayed_answer_ends(&plain, &answer(timed_out)));
+        // An answer that does not read ends it: nothing can be said about it.
+        assert!(relayed_answer_ends(
+            &idem,
+            &Bytes::from_static(b"\0\0\0\x01\0")
+        ));
+    }
+
+    /// [`produce_refusals`] reads every advertised Produce version the way
+    /// kafka-protocol's own decoder does, through the parts a refusal carries
+    /// (record errors, an error message) and the flexible versions' tags.
+    #[test]
+    fn produce_refusals_reads_every_advertised_version() {
+        use kafka_protocol::messages::produce_response::{
+            BatchIndexAndErrorMessage, PartitionProduceResponse, TopicProduceResponse,
+        };
+        use kafka_protocol::messages::{ProduceResponse, TopicName};
+        let partition = |index: i32, code: i16| {
+            PartitionProduceResponse::default()
+                .with_index(index)
+                .with_error_code(code)
+                .with_base_offset(41)
+                .with_log_append_time_ms(7)
+        };
+        let timed_out = ResponseError::RequestTimedOut.code();
+        let duplicate = ResponseError::DuplicateSequenceNumber.code();
+        for version in 3..=9i16 {
+            let mut refused = partition(2, timed_out);
+            if version >= 8 {
+                refused = refused
+                    .with_record_errors(vec![BatchIndexAndErrorMessage::default()
+                        .with_batch_index(3)
+                        .with_batch_index_error_message(Some(StrBytes::from_static_str(
+                            "bad record",
+                        )))])
+                    .with_error_message(Some(StrBytes::from_static_str("retry")));
+            }
+            let body = ProduceResponse::default()
+                .with_throttle_time_ms(5)
+                .with_responses(vec![
+                    TopicProduceResponse::default()
+                        .with_name(TopicName(StrBytes::from_static_str("orders")))
+                        .with_partition_responses(vec![
+                            partition(0, 0),
+                            refused,
+                            partition(4, duplicate),
+                        ]),
+                    TopicProduceResponse::default()
+                        .with_name(TopicName(StrBytes::from_static_str("audit")))
+                        .with_partition_responses(vec![partition(1, timed_out)]),
+                ]);
+            let Reply::Send(bytes) = respond(ApiKey::Produce, 9, &body, version) else {
+                unreachable!()
+            };
+            assert_eq!(
+                produce_refusals(&bytes, version),
+                Some(vec![("orders".to_string(), 2), ("audit".to_string(), 1)]),
+                "v{version}"
+            );
+            // Cut short anywhere, it does not read.
+            for cut in [5, bytes.len() / 2, bytes.len() - 5] {
+                if version < 9 || cut < bytes.len() - 5 {
+                    assert_eq!(
+                        produce_refusals(&bytes.slice(..cut), version),
+                        None,
+                        "v{version} cut at {cut}"
+                    );
+                }
+            }
+        }
     }
 
     /// An idempotent producer's batches, pipelined: each follows the one
@@ -3036,6 +3690,59 @@ mod tests {
         assert_eq!(decode_response(peer.recv().await.unwrap(), 3).0, 4);
         assert_eq!(api.pushes.lock().unwrap().len(), 1, "not one push");
         assert_eq!(api.pushed().len(), 3);
+    }
+
+    /// OffsetCommit requests a client sent back to back — an asynchronous
+    /// committer — are answered one by one, in order, from ONE write; the
+    /// request behind them that is not a commit is answered after.
+    #[tokio::test]
+    async fn buffered_commits_are_one_write_answered_in_order() {
+        use kafka_protocol::messages::OffsetCommitResponse;
+        let (f, api) = crate::handlers::testing::facade_and_queen(&[("orders", 2)]);
+        let (client, server) = tokio::io::duplex(1 << 20);
+        tokio::spawn(connection(
+            server,
+            Conn::new(&f, None, TEST_PEER.to_string()),
+        ));
+        let mut peer = Peer::new(client);
+        let mut wire = BytesMut::new();
+        let mut codec = codec();
+        for frame in [
+            offset_commit_request(6, 11),
+            offset_commit_request(6, 12),
+            offset_commit_request(6, 13),
+            api_versions_request(3, 14),
+        ] {
+            codec.encode(frame, &mut wire).unwrap();
+        }
+        peer.stream.write_all(&wire).await.unwrap();
+
+        let committed = |mut b: Bytes| {
+            let header =
+                ResponseHeader::decode(&mut b, ApiKey::OffsetCommit.response_header_version(6))
+                    .unwrap();
+            let body = OffsetCommitResponse::decode(&mut b, 6).unwrap();
+            (
+                header.correlation_id,
+                body.topics[0].partitions[0].error_code,
+            )
+        };
+        for id in [11, 12, 13] {
+            assert_eq!(committed(peer.recv().await.unwrap()), (id, 0));
+        }
+        assert_eq!(decode_response(peer.recv().await.unwrap(), 3).0, 14);
+        let offset_writes = api
+            .kv_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| {
+                call.iter().any(|op| {
+                    matches!(op, crate::queen::KvOp::Put { key, .. } if key.starts_with("qk:group:"))
+                })
+            })
+            .count();
+        assert_eq!(offset_writes, 1, "not one write");
     }
 
     // ------------------------------------------------- M5: TLS, SNI and SASL

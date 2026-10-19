@@ -42,6 +42,9 @@ pub static COMMIT_WRITTEN: Timing = Timing::new();
 pub static COMMIT_KV: Timing = Timing::new();
 /// Commit writes, and the commits and offsets they carried.
 pub static COMMIT_BATCHES: Counter = Counter::new();
+/// OffsetCommit requests answered from a write shared with the requests
+/// queued behind them on their connection (`offset_commit::handle_many`).
+pub static COMMIT_COALESCED: Counter = Counter::new();
 pub static COMMIT_BATCH_JOBS: Counter = Counter::new();
 pub static COMMIT_BATCH_PAIRS: Counter = Counter::new();
 
@@ -74,6 +77,10 @@ pub static PRODUCE_RENDER: Timing = Timing::new();
 pub static PRODUCE_PUSHES: Counter = Counter::new();
 pub static PRODUCE_REQUESTS: Counter = Counter::new();
 pub static PRODUCE_RECORDS: Counter = Counter::new();
+/// Connections ended after answering an idempotent batch that was not written
+/// (`conn::RESEND_IN_ORDER`), on the node that refused it or on a follower
+/// that relayed it. Each is a client that reconnects and resends in order.
+pub static PRODUCE_RESEND_CLOSES: Counter = Counter::new();
 
 /// The whole report.
 pub fn snapshot() -> serde_json::Value {
@@ -88,11 +95,13 @@ pub fn snapshot() -> serde_json::Value {
         "producePushes": PRODUCE_PUSHES.get(),
         "produceRequests": PRODUCE_REQUESTS.get(),
         "produceRecords": PRODUCE_RECORDS.get(),
+        "produceResendCloses": PRODUCE_RESEND_CLOSES.get(),
         "commit": COMMIT.snapshot(),
         "commitCheck": COMMIT_CHECK.snapshot(),
         "commitWritten": COMMIT_WRITTEN.snapshot(),
         "commitKv": COMMIT_KV.snapshot(),
         "commitBatches": COMMIT_BATCHES.get(),
+        "commitCoalesced": COMMIT_COALESCED.get(),
         "commitBatchJobs": COMMIT_BATCH_JOBS.get(),
         "commitBatchPairs": COMMIT_BATCH_PAIRS.get(),
         "fetch": FETCH.snapshot(),
