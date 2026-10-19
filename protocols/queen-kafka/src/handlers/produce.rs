@@ -1303,7 +1303,17 @@ fn render(
 /// retriable refusal (the process stage is full) would orphan a transaction
 /// the client is about to retry into.
 fn closes_on_failure(slot: &Slot, p: &PartitionProduceData, idem: &Idem<'_>) -> bool {
-    idem.txn.is_none() && idempotent_slot(slot, p)
+    if idem.txn.is_some() {
+        return false;
+    }
+    match slot {
+        // A run the window accepted knows whether its own failure needs the
+        // close ([`idempotent::Pending::closes_on_failure`]).
+        Slot::Push {
+            seq: Some(pending), ..
+        } => pending.closes_on_failure(),
+        _ => idempotent_slot(slot, p),
+    }
 }
 
 /// Whether a staged request refused an idempotent batch that ends the
@@ -2346,12 +2356,14 @@ mod tests {
     }
 
     /// The gap that IS one starts here: an idempotent batch whose push failed.
-    /// It is answered, and the connection is told to close after the answer
-    /// ([`idempotent::ResendInOrder`]), so nothing the client sent behind it on
-    /// this connection is read. The client sends again, in order, on a new one.
+    /// In a CLUSTER it is answered and the connection is told to close after
+    /// the answer ([`idempotent::ResendInOrder`]), so nothing the client sent
+    /// behind it on this connection is read: there the window would restart
+    /// at the batch behind it. The client sends again, in order, on a new one.
     #[tokio::test]
-    async fn a_failed_idempotent_push_ends_the_connection_and_the_resend_is_written() {
+    async fn a_failed_idempotent_push_ends_a_clustered_connection_and_the_resend_is_written() {
         let (f, api) = facade(&[("orders", 1)], 4);
+        f.producers.restart_windows_on_gaps(true);
         let c = f.for_connection(None);
         handle(
             &c,
@@ -2392,6 +2404,64 @@ mod tests {
         }
         assert_eq!(api.landed("orders", "0"), 3);
         assert!(!again.resend_in_order.take());
+    }
+
+    /// A facade on its own that holds the producer's window keeps the
+    /// connection when a push fails (a throttle, a blip): the batch the client
+    /// sent behind the failed one is a gap in that window, refused
+    /// OUT_OF_ORDER_SEQUENCE_NUMBER and not written — Kafka's own answer, which
+    /// every client retries behind the failed batch — so no reconnect is needed.
+    #[tokio::test]
+    async fn a_single_facade_holding_the_window_keeps_the_connection_when_a_push_fails() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        let c = f.for_connection(None);
+        handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        api.fail_push(queen::Error::Status {
+            code: 429,
+            body: "slow down".into(),
+            retry_after_ms: Some(100),
+        });
+        let failed = handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 1)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_ne!(answer(&failed, "orders", 0).error_code, 0);
+        assert!(
+            !c.resend_in_order.take(),
+            "a throttled push under a held window closed the connection"
+        );
+        let behind = handle(
+            &c,
+            &simple("orders", 0, &[idempotent_record(7, 0, 2)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            answer(&behind, "orders", 0).error_code,
+            ResponseError::OutOfOrderSequenceNumber.code()
+        );
+        assert_eq!(api.landed("orders", "0"), 1, "the batch behind was written");
+        for seq in [1, 2] {
+            let ok = handle(
+                &c,
+                &simple("orders", 0, &[idempotent_record(7, 0, seq)]),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer(&ok, "orders", 0).error_code, 0, "sequence {seq}");
+        }
+        assert_eq!(api.landed("orders", "0"), 3);
     }
 
     /// The hole the close shuts: a facade with NO window (just started) whose

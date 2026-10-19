@@ -159,6 +159,8 @@ relayed or served anywhere, and the client sends again, in order, from its oldes
 Requests read together with it (a coalesced or pipelined group) are staged up to it and no further,
 and a follower that relayed it reads the leader's answer and ends its client's connection with the
 relay, so the next batch cannot reach a new leader, or the follower itself, ahead of the resend. A
+single facade that held the producer's window keeps the connection when a push fails, since the batch
+behind is then refused as a gap, as Kafka refuses it (no reconnect per throttled produce). A
 transaction's batch is exempt: it is staged rather than written, and closing its connection would
 orphan the transaction; instead a transaction's window never starts past sequence 0 on a single
 facade, so the batch behind a refused one is refused too, rather than starting a window under which
@@ -180,7 +182,10 @@ past every client's request timeout), and opens a new relay when the leader clos
 of failing the client's next produce. Measured on `compat/cluster/rig-embedded.sh` (three raft brokers
 with the facade in process) under eight idempotent librdkafka producers: the code on stage reproduced
 the fatal error (one producer stopped for good); this one, over six runs of rolling restarts and
-leader kills, lost nothing, kept every producer's order and never failed a send fatally.
+leader kills, lost nothing, kept every producer's order and never failed a send fatally. Upgrading a
+cluster from 2.5.1 or earlier is itself a rolling restart in which not-yet-upgraded nodes still refuse
+a gap: stop or pause librdkafka producers during that one rollout, or accept that some may stop and
+need a restart; the rollouts after it are covered.
 
 **Kafka facade: a consumer that commits asynchronously no longer starves its own heartbeats.** A
 connection is answered one request at a time, and every commit of a group waits for that group's

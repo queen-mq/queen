@@ -98,7 +98,10 @@
 //! window that fell behind is the CONNECTION: an idempotent batch that is not
 //! written, for any reason but being a duplicate, is answered and the connection
 //! is closed after the answer (`handlers::produce`, `conn`; a push that failed
-//! on the leader's pipelined path closes it without an answer). Nothing the client
+//! on the leader's pipelined path closes it without an answer). A facade on its
+//! own that held the producer's window when the batch was accepted keeps the
+//! connection for a failed push: the batch behind it is a gap in that window,
+//! refused as Kafka refuses it ([`Pending::closes_on_failure`]). Nothing the client
 //! sent behind it on that connection is read, relayed or served anywhere, and the
 //! client sends again, in order, from its oldest unanswered batch — what a failed
 //! pipelined push already did. Without that, a facade with no window whose first
@@ -366,6 +369,9 @@ pub struct Pending {
     batches: Vec<PendingBatch>,
     /// The connection the run was accepted on ([`Producers::check_on`]).
     conn: u64,
+    /// Whether the connection must close if this run is not written
+    /// ([`Pending::closes_on_failure`]).
+    close_on_failure: bool,
 }
 
 impl Pending {
@@ -383,6 +389,18 @@ impl Pending {
     /// The last sequence of the run. For log lines and tests.
     pub fn last_sequence(&self) -> i32 {
         self.batches.last().map_or(-1, |b| b.last_seq)
+    }
+
+    /// Whether a failure to write this run ends the connection (the module
+    /// header, "What keeps a gap that IS one"). Not on a facade on its own that
+    /// held this producer's window when the run was accepted: there the batch
+    /// the client sent behind it is a gap in that window, refused
+    /// OUT_OF_ORDER_SEQUENCE_NUMBER — which every client retries behind the
+    /// failed one — exactly as Kafka answers it, and the connection is spared a
+    /// reconnect (and its SASL handshake) per throttled produce. In a cluster,
+    /// or with no window to refuse the gap, the connection closes.
+    pub fn closes_on_failure(&self) -> bool {
+        self.close_on_failure
     }
 }
 
@@ -488,7 +506,20 @@ struct InFlight {
     base_seq: i32,
     last_seq: i32,
     conn: u64,
+    /// When it was begun: an entry older than [`INFLIGHT_STALE`] is one that
+    /// leaked ([`Producers::inflight_view`]).
+    since: std::time::Instant,
 }
+
+/// How long a batch can be in flight. Far past any push: one has the facade's
+/// 10-second budget for a call to Queen, and a pipelined one waits for at most
+/// [`crate::conn::pipeline_depth`] before it. An entry this old was never ended
+/// (a bug: a panic between `begin` and `end`), and left there it would refuse
+/// its producer's batches for ever (Repeats, Elsewhere); it is dropped instead.
+const INFLIGHT_STALE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// One line a minute for dropped stale in-flight entries.
+static STALE_INFLIGHT: obs::Sampler = obs::Sampler::new(60_000);
 
 /// At most this many shards: past it the contention is already gone and the
 /// per-shard LRU sample only gets smaller.
@@ -910,11 +941,13 @@ impl Producers {
             .lock()
             .expect("the in-flight map lock is never held across a panic");
         let entry = inflight.entry(pending.key.clone()).or_default();
+        let since = std::time::Instant::now();
         entry.extend(pending.batches.iter().map(|b| InFlight {
             epoch: pending.epoch,
             base_seq: b.base_seq,
             last_seq: b.last_seq,
             conn: pending.conn,
+            since,
         }));
     }
 
@@ -942,13 +975,35 @@ impl Producers {
     /// is committed before it leaves the list ([`Producers::end`]), so a batch
     /// missing from this view was already in the window when that is read.
     fn inflight_view(&self, key: &Key, epoch: i16, base_seq: i32) -> Option<InFlightView> {
-        let inflight = self
+        let mut inflight = self
             .inflight
             .lock()
             .expect("the in-flight map lock is never held across a panic");
+        let entry = inflight.get_mut(key)?;
+        let before = entry.len();
+        entry.retain(|f| f.since.elapsed() < INFLIGHT_STALE);
+        if entry.len() < before {
+            if let Some(suppressed) = STALE_INFLIGHT.tick_now() {
+                tracing::error!(
+                    target: "kafka",
+                    producer_id = key.producer_id,
+                    topic = %key.topic,
+                    partition = key.partition,
+                    dropped = before - entry.len(),
+                    suppressed,
+                    "batches in flight for longer than any push can take were never ended; \
+                     they are dropped so their producer is not refused for ever"
+                );
+            }
+            if entry.is_empty() {
+                inflight.remove(key);
+                return None;
+            }
+        }
+        let entry = inflight.get(key)?;
         let mut newest: Option<InFlight> = None;
         let mut repeats = false;
-        for f in inflight.get(key)?.iter().filter(|f| f.epoch == epoch) {
+        for f in entry.iter().filter(|f| f.epoch == epoch) {
             repeats |= f.base_seq == base_seq;
             // The batch furthest AHEAD, not the one begun last.
             newest = match newest {
@@ -1176,11 +1231,18 @@ impl Producers {
         // answered (a coalesced run), so the committed window does not hold
         // them yet and would read this one as a gap.
         let follows = view.and_then(|v| fit(&v, first.base_sequence, window_next, conn));
+        let gaps_restart = self.restarts_windows_on_gaps();
+        // A window that will refuse the gap a failure of this run leaves:
+        // held at this epoch, with batches, on a facade that refuses gaps.
+        let window_refuses_gaps = !gaps_restart
+            && entry
+                .is_some_and(|(entry_epoch, recent)| entry_epoch == epoch && !recent.is_empty());
         let accept = Verdict::Accept(Pending {
             key,
             epoch,
             batches,
             conn,
+            close_on_failure: !window_refuses_gaps,
         });
         match follows {
             Some(InFlightFit::Follows) => return accept,
@@ -1234,7 +1296,6 @@ impl Producers {
                 );
             }
         }
-        let gaps_restart = self.restarts_windows_on_gaps();
         if let Some((entry_epoch, recent)) = entry {
             if gaps_restart && is_gap(entry_epoch, recent, infos) {
                 // A window another facade moved past (the module header):
@@ -1949,6 +2010,30 @@ mod tests {
         accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 5, 5)], 2));
     }
 
+    /// A batch in flight for longer than any push can take was never ended — a
+    /// bug, not a push — and must not refuse its producer for ever: it is
+    /// dropped, and the producer's batch is judged by the window.
+    #[test]
+    fn a_batch_in_flight_for_too_long_is_dropped() {
+        let p = Producers::new();
+        let leaked = accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 0, 5)], 1));
+        p.begin(&leaked);
+        assert_eq!(
+            rejection(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 0, 5)], 2)),
+            ResponseError::RequestTimedOut
+        );
+        for f in p.inflight.lock().unwrap().values_mut().flatten() {
+            f.since = std::time::Instant::now()
+                .checked_sub(INFLIGHT_STALE + std::time::Duration::from_secs(1))
+                .unwrap();
+        }
+        accepted(p.check_on(&tenant(), "orders", 0, &[batch(7, 0, 0, 5)], 2));
+        assert!(
+            p.inflight.lock().unwrap().is_empty(),
+            "the stale entry was kept"
+        );
+    }
+
     /// A batch in flight on another connection is no evidence of a gap: that
     /// connection may be one the client left (a relay drained at a restart)
     /// while the producer moved on through another facade. A batch past it
@@ -2636,6 +2721,10 @@ mod tests {
         impl Model {
             fn check(&self, topic: &str, partition: i32, infos: &[BatchDecodeInfo]) -> Verdict {
                 let key = (infos[0].producer_id, topic.to_string(), partition);
+                let held = self
+                    .entries
+                    .get(&key)
+                    .is_some_and(|e| e.epoch == infos[0].producer_epoch && !e.recent.is_empty());
                 let pending = Pending {
                     key: Key {
                         tenant: tenant(),
@@ -2645,6 +2734,7 @@ mod tests {
                     },
                     epoch: infos[0].producer_epoch,
                     conn: 0,
+                    close_on_failure: self.gaps_restart || !held,
                     batches: {
                         let mut delta = 0;
                         infos

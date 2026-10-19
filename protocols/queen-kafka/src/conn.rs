@@ -745,7 +745,12 @@ impl Relay {
         let mut out = BytesMut::with_capacity(frame.len() + LENGTH_PREFIX);
         out.extend_from_slice(&(frame.len() as u32).to_be_bytes());
         out.extend_from_slice(&frame);
-        self.wr.write_all(&out).await?;
+        // Bounded like the answer ([`RELAY_ANSWER_TIMEOUT`]): a leader that
+        // stopped reading fills the socket's buffer, and the write would wait
+        // for it for ever.
+        tokio::time::timeout(RELAY_ANSWER_TIMEOUT, self.wr.write_all(&out))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "relay write"))??;
         Ok(rx)
     }
 }

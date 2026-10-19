@@ -703,7 +703,25 @@ pub async fn serve(
     // own predecessor's row.
     let mut registration: Option<registry::Registration> = None;
     let cluster = match cfg.node_id {
-        None => Cluster::Single,
+        None => {
+            // A facade on its own is the only writer of its partitions, and
+            // answers idempotent producers as Kafka does (a gap is refused).
+            // Inside a raft broker of several voters that is never true: the
+            // other nodes' facades write them too, a window here falls behind,
+            // and the refusal of the gap is fatal to librdkafka. Said loudly,
+            // because nothing else does (crate::idempotent).
+            if cfg.raft.as_ref().is_some_and(|r| r.voters > 1) {
+                tracing::warn!(
+                    target: "boot",
+                    voters = cfg.raft.as_ref().map_or(1, |r| r.voters),
+                    "this broker has more than one raft voter but QUEEN_KAFKA_NODE_ID is not set, \
+                     so its Kafka facade runs on its own: it will refuse an idempotent producer's \
+                     batch that another node's facade moved past, which librdkafka treats as \
+                     fatal. Set QUEEN_KAFKA_NODE_ID (and QUEEN_TOKEN) on every node"
+                );
+            }
+            Cluster::Single
+        }
         Some(id) => {
             let me = cluster::Node {
                 id,
