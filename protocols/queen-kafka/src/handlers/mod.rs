@@ -77,6 +77,31 @@ pub mod testing {
         over(api as Arc<dyn QueenApi>, Policy::default())
     }
 
+    /// [`facade_and_queen`] writing presence rows ([`crate::presence`]) every
+    /// `every`, which every other fixture leaves off.
+    pub fn facade_with_presence(
+        queues: &[(&str, i64)],
+        every: Duration,
+    ) -> (Facade, Arc<FakeQueen>) {
+        let api = FakeQueen::with(queues);
+        let facade = Facade::new(
+            "kafka.example.com".into(),
+            9092,
+            Cluster::Single,
+            4,
+            None,
+            Arc::clone(&api) as Arc<dyn QueenApi>,
+            Coordinator::new(GroupConfig {
+                join_delay: Duration::ZERO,
+                presence: every,
+                ..GroupConfig::default()
+            }),
+            Arc::new(Txns::default()),
+            Policy::default(),
+        );
+        (facade, api)
+    }
+
     /// A CLUSTERED facade: `nodes` are the live set as `(id, host, port)` and
     /// `me` is which of them this process is. The view is fresh, which is what
     /// a facade looks like from its boot call onwards.

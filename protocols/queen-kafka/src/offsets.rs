@@ -987,7 +987,8 @@ pub async fn load_index(
 }
 
 /// Delete everything the store holds for `group`: every committed offset under
-/// its prefix, and then its index row. Answers how many keys were removed.
+/// its prefix, and then its index row and its presence row
+/// ([`crate::presence`]). Answers how many keys were removed.
 ///
 /// ## Order, and what a failure part-way through leaves behind
 ///
@@ -1011,11 +1012,7 @@ pub async fn delete_group(
         // The broker's own group delete: the registration and every position,
         // on every queue. Then the index row, last, for the reason above.
         let mut removed = api.forget_group(group, token).await?;
-        if let Some(key) = index_key(group) {
-            let ops = [KvOp::delete(NAMESPACE, &key, None)];
-            let applied = api.kv(&ops, token).await?;
-            removed += applied.iter().filter(|a| a.applied == Some(true)).count();
-        }
+        removed += delete_index(api, group, token).await?;
         return Ok(removed);
     }
     let prefix = group_prefix(group);
@@ -1059,12 +1056,27 @@ pub async fn delete_group(
     }
 
     // The index row last: see the header above.
-    if let Some(key) = index_key(group) {
-        let ops = [KvOp::delete(NAMESPACE, &key, None)];
-        let applied = api.kv(&ops, token).await?;
-        removed += applied.iter().filter(|a| a.applied == Some(true)).count();
-    }
+    removed += delete_index(api, group, token).await?;
     Ok(removed)
+}
+
+/// [`delete_group`]'s last step: the index row, and with it, in the same call,
+/// the presence row — liveness of a group that no longer exists.
+async fn delete_index(
+    api: &dyn QueenApi,
+    group: &str,
+    token: Option<&str>,
+) -> queen::Result<usize> {
+    let ops: Vec<KvOp> = [index_key(group), crate::presence::key(group)]
+        .into_iter()
+        .flatten()
+        .map(|key| KvOp::delete(NAMESPACE, &key, None))
+        .collect();
+    if ops.is_empty() {
+        return Ok(0);
+    }
+    let applied = api.kv(&ops, token).await?;
+    Ok(applied.iter().filter(|a| a.applied == Some(true)).count())
 }
 
 /// Delete a NAMED list of offset keys, chunked against the broker's op ceiling

@@ -36,6 +36,17 @@ pub async fn handle(facade: &Facade, req: &LeaveGroupRequest) -> LeaveGroupRespo
             .leave(group, req.member_id.as_str())
             .await
     };
+    // The last member leaving is a group the console should see stop now,
+    // not a freshness window later ([`crate::presence`]).
+    if error.is_none() {
+        crate::presence::note(
+            facade,
+            group,
+            crate::presence::Source::Leave,
+            facade.token(),
+        )
+        .await;
+    }
     LeaveGroupResponse::default().with_error_code(error.map_or(0, |e| e.code()))
 }
 

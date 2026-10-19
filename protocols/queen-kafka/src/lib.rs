@@ -36,6 +36,7 @@ pub mod identity;
 pub mod introspect;
 pub mod obs;
 pub mod offsets;
+pub mod presence;
 pub mod queen;
 pub mod records;
 pub mod sasl;

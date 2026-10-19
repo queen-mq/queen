@@ -48,6 +48,10 @@ pub async fn handle(facade: &Facade, req: &SyncGroupRequest) -> SyncGroupRespons
             },
         )
         .await;
+    // A generation completed: the membership the console shows has changed.
+    if answer.error.is_none() {
+        crate::presence::note(facade, group, crate::presence::Source::Sync, facade.token()).await;
+    }
     render(answer)
 }
 

@@ -341,6 +341,15 @@ pub struct GroupConfig {
     /// facade that has served a million short-lived group ids is not holding a
     /// million tasks.
     pub empty_reap: Duration,
+    /// `QUEEN_KAFKA_GROUP_PRESENCE_MS` — how often a live group's presence row
+    /// is rewritten for the console ([`crate::presence`]); zero writes none.
+    ///
+    /// Zero in [`Default`], which is what this crate's tests build their
+    /// coordinators from: a test about a heartbeat or a commit is not about a
+    /// KV write it did not ask for. [`GroupConfig::resolve`] — the only way a
+    /// deployed facade gets its config — starts from
+    /// [`crate::presence::DEFAULT_INTERVAL`].
+    pub presence: Duration,
 }
 
 impl Default for GroupConfig {
@@ -350,6 +359,7 @@ impl Default for GroupConfig {
             min_session_timeout: Duration::from_millis(6_000),
             max_session_timeout: Duration::from_millis(300_000),
             empty_reap: Duration::from_secs(300),
+            presence: Duration::ZERO,
         }
     }
 }
@@ -399,6 +409,28 @@ impl GroupConfig {
             def.max_session_timeout,
             1,
         )?;
+        // Zero is off; anything else is at least a second
+        // ([`crate::presence::MIN_INTERVAL_MS`]).
+        let presence = match get("QUEEN_KAFKA_GROUP_PRESENCE_MS")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            None => crate::presence::DEFAULT_INTERVAL,
+            Some(v) => match v.parse::<u64>() {
+                Ok(0) => Duration::ZERO,
+                Ok(n) if (crate::presence::MIN_INTERVAL_MS..=MAX_CONFIGURABLE_MS).contains(&n) => {
+                    Duration::from_millis(n)
+                }
+                _ => {
+                    return Err(format!(
+                        "QUEEN_KAFKA_GROUP_PRESENCE_MS={v} is not an interval in milliseconds — give \
+                         it 0 (off) or an integer in {}..={MAX_CONFIGURABLE_MS}, or unset it for {}",
+                        crate::presence::MIN_INTERVAL_MS,
+                        crate::presence::DEFAULT_INTERVAL.as_millis()
+                    ))
+                }
+            },
+        };
         if min_session_timeout > max_session_timeout {
             return Err(format!(
                 "QUEEN_KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS={} is above \
@@ -413,6 +445,7 @@ impl GroupConfig {
             min_session_timeout,
             max_session_timeout,
             empty_reap: def.empty_reap,
+            presence,
         })
     }
 }
@@ -984,6 +1017,38 @@ mod tests {
         // ...and a multi-byte client id is cut on a character boundary rather
         // than panicking on one.
         assert!(new_member_id(&"é".repeat(50_000)).starts_with("é"));
+    }
+
+    /// Presence is on unless it is turned off, and an interval that would
+    /// write on nearly every heartbeat is refused rather than taken. The
+    /// in-crate default stays off: a test about a heartbeat is not about a KV
+    /// write.
+    #[test]
+    fn group_presence_defaults_on_and_is_loud_when_wrong() {
+        let resolve = |v: Option<&str>| {
+            GroupConfig::resolve(&|k: &str| {
+                (k == "QUEEN_KAFKA_GROUP_PRESENCE_MS")
+                    .then(|| v.map(str::to_string))
+                    .flatten()
+            })
+        };
+        assert_eq!(
+            resolve(None).unwrap().presence,
+            crate::presence::DEFAULT_INTERVAL
+        );
+        assert!(resolve(Some("0")).unwrap().presence.is_zero());
+        assert_eq!(
+            resolve(Some("60000")).unwrap().presence,
+            Duration::from_secs(60)
+        );
+        for bad in ["500", "fifteen", "-1"] {
+            let err = resolve(Some(bad)).unwrap_err();
+            assert!(
+                err.contains("QUEEN_KAFKA_GROUP_PRESENCE_MS"),
+                "{bad}: {err}"
+            );
+        }
+        assert!(GroupConfig::default().presence.is_zero());
     }
 
     /// The rule every group-addressed API applies, in one place so they cannot

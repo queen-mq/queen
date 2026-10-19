@@ -283,6 +283,9 @@ async fn commit(
         fence::Verdict::Stored(stored) => {
             if stored.iter().any(|r| r.is_ok()) {
                 remember(facade, group, token).await;
+                // The one proof of life a group with no members gives
+                // ([`crate::presence`]).
+                crate::presence::note(facade, group, crate::presence::Source::Commit, token).await;
             }
             render(req, &slots, &stored)
         }

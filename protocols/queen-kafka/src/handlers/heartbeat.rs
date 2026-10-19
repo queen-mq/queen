@@ -11,6 +11,7 @@
 //! All of that is [`crate::coordinator`]'s decision. This file is the
 //! translation, and it is the shortest one in the milestone.
 
+use kafka_protocol::error::ResponseError;
 use kafka_protocol::messages::{HeartbeatRequest, HeartbeatResponse};
 
 use crate::Facade;
@@ -32,6 +33,17 @@ pub async fn handle(facade: &Facade, req: &HeartbeatRequest) -> HeartbeatRespons
             .heartbeat(group, req.member_id.as_str(), req.generation_id)
             .await
     };
+    // A member told to rejoin is still a member: a rebalance is not a group
+    // going away ([`crate::presence`]).
+    if matches!(error, None | Some(ResponseError::RebalanceInProgress)) {
+        crate::presence::note(
+            facade,
+            group,
+            crate::presence::Source::Heartbeat,
+            facade.token(),
+        )
+        .await;
+    }
     HeartbeatResponse::default().with_error_code(error.map_or(0, |e| e.code()))
 }
 
