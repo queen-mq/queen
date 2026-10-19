@@ -390,18 +390,6 @@ var deliberate = []classification{
 			"refuse every Elixir producer a producer id. Kafka never meets the bug because brod does not send " +
 			"InitProducerId to it either; the facade does, and this is the same filter produce.rs already " +
 			"applies to the same field (compat/brod/README.md)"},
-	{regexp.MustCompile(`^idempotent/idempotent\.unknown_producer\.error_code$`),
-		"MEASURED and DELIBERATE, and it is the one row worth arguing with. Apache Kafka 3.9.1 ACCEPTS a batch " +
-			"at sequence 42 from a producer id it holds no state for (error NONE): it persists producer state in " +
-			"the log, so an absent entry means the state was aged out, which is rare and benign. This facade " +
-			"holds no durable producer state by design, so an absent entry is COMMON — every restart produces " +
-			"one — and accepting would mean the sequence window is silently unenforced for exactly as long as a " +
-			"producer keeps running after a restart. It answers OUT_OF_ORDER_SEQUENCE_NUMBER (45) instead, and " +
-			"the cost of that choice was measured rather than assumed: " +
-			"compat/go/idempotent_test.go TestAnIdempotentProducerSurvivesAFacadeRestart SIGKILLs the facade " +
-			"under a live default-idempotence producer and the producer keeps running, every record accounted " +
-			"for. UNKNOWN_PRODUCER_ID (59) is not used for the reason Kafka retired it: some clients answer it " +
-			"by reasoning about log_start_offset, which this facade answers as -1"},
 
 	// ------------------------------------------------ M7 F1: topics admin
 	{regexp.MustCompile(`^createtopics/create\.\w+\.num_partitions$`),

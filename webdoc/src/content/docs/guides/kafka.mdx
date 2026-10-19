@@ -277,9 +277,18 @@ The sequence windows live in the memory of the node whose facade writes the prod
 the leader on a cluster, one per producer and partition, up to `QUEEN_KAFKA_MAX_PRODUCER_STATES`
 (4,194,304 of them, about 210 bytes each). Kafka keeps producer state in its log. Doing that here
 would put a dedup key on every record of every idempotent producer, a cost on the write path we have
-not taken, so after a node restart, a leader change, an eviction or a connection that moves to
-another node, the producer's next batch is refused as out of sequence. The client recovers by bumping its epoch (KIP-360), and at most the five batches it had in
-flight can be written twice.
+not taken, so a node restart, a leader change, an eviction or a connection that moves to another
+node loses the producer's window. Its next batch is then accepted whatever its sequence, and the
+window starts again from it: Kafka's own rule for a producer whose state the broker no longer holds.
+The producer sees no error, and at most the five batches it had in flight can be written twice.
+
+Refusing that batch would be worse. Until 2.5.1 the facade answered it
+`OUT_OF_ORDER_SEQUENCE_NUMBER`, expecting the client to bump its epoch (KIP-360). The Java client
+does; librdkafka, under the Node, Python, Go, .NET, Ruby and PHP clients, treats that answer as fatal
+when it lands on the oldest batch it is waiting for, which after a lost window it always does, and
+the producer fails every send from then on. `UNKNOWN_PRODUCER_ID` is no better: librdkafka recovers
+from it only for a batch it has never sent, and a node that stops with requests on the wire makes
+every one of them a resend.
 
 ### Transactions
 

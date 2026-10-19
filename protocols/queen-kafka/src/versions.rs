@@ -210,12 +210,12 @@ pub struct Api {
 ///
 ///   * **v3 is load-bearing and not optional.** It is KIP-360's epoch bump,
 ///     where the request carries the producer's current `(producer_id, epoch)`
-///     so a producer can ask for a new epoch and reset its own sequences. Every
-///     way this facade can lose a sequence window — a restart, an eviction, a
-///     connection landing on another facade — reaches the client as
+///     so a producer can ask for a new epoch and reset its own sequences. A
+///     lost sequence window no longer needs it (the next batch starts a new
+///     window, [`crate::idempotent`]), but a real gap is still answered
 ///     OUT_OF_ORDER_SEQUENCE_NUMBER, and OUT_OF_ORDER is FATAL in the Java
-///     producer unless it can bump. Without v3 in this window, a lost window is
-///     a dead producer; with it, it is a bump and a reset.
+///     producer unless it can bump. Without v3 in this window, a gap is a dead
+///     producer; with it, it is a bump and a reset.
 ///   * v4 adds PRODUCER_FENCED to the error taxonomy the client will accept on
 ///     this API, which costs nothing and is true.
 ///   * Ceiling: v5 exists for KIP-890's transaction protocol 2, and transactions

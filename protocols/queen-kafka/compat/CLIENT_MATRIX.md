@@ -158,13 +158,26 @@ answers are identical (`compat/differential`, scenario `idempotent`).
 
 **The caveat, and it is real: the window is in memory and per facade.** A real
 Kafka broker persists producer state in the log; this one does not. After a
-facade restart, an eviction (65 536 tracked producer-partitions), or a
-connection landing on another facade, the next batch of a producer that is not
-at sequence 0 is answered `OUT_OF_ORDER_SEQUENCE_NUMBER`. The client's recovery
-is KIP-360's epoch bump — which is why v3 is inside the advertised window — and
-the cost is **at-least-once for at most the five in-flight batches**. Measured:
-`compat/go/idempotent_test.go` SIGKILLs the facade under a live default
-producer and the producer keeps running with every record accounted for.
+facade restart, a leader change, an eviction, or a connection landing on
+another facade, the producer's next batch meets no window. It is ACCEPTED at
+whatever sequence it carries and the window starts again from it, which is what
+Apache Kafka does for a producer whose state it no longer holds (measured:
+`compat/differential`, scenario `idempotent`, row `unknown_producer`). The cost
+is **at-least-once for at most the five in-flight batches**. Measured twice:
+`compat/go/idempotent_test.go` SIGKILLs the facade under a live franz-go
+producer, and `compat/node-librdkafka` (confluent suite, with
+`QUEEN_KAFKA_RESTART_CMD`) restarts it under an idempotent librdkafka producer
+with four requests in flight; both keep running with every record accounted
+for.
+
+Until 2.5.1 that batch was answered `OUT_OF_ORDER_SEQUENCE_NUMBER`, expecting a
+KIP-360 epoch bump. franz-go and Java bump; librdkafka (2.15.1) declares a fatal
+error when that code lands on the oldest batch it is waiting for, which after a
+lost window it always does, and every later send fails `Local: Fatal error`. A
+rolling restart of stage stopped every librdkafka producer of a load test that
+way (2026-10-19). `UNKNOWN_PRODUCER_ID` would not have saved it: librdkafka
+recovers from it only for a batch it has not sent before, and a node that stops
+with requests on the wire turns all of them into resends.
 
 What each client does with idempotence left ON, measured before F3 and after:
 
@@ -701,16 +714,14 @@ request entry** where Kafka collapses a duplicated name to one (both answer
 and it answers **DeleteTopics in request order** where Kafka's controller answers
 in its own (every per-name code matches).
 
-One is behavioural and is Alice's to ratify. **A batch at sequence 42 from a
-producer the facade has never seen** is answered `OUT_OF_ORDER_SEQUENCE_NUMBER`
-(45); Apache Kafka 3.9.1 **accepts it** with `error_code = 0`. The design
-predicted the opposite and the measurement refuted it. The refusal was kept on a
-different argument than the one the design gave: in Kafka an absent producer
-entry means "aged out", which is rare, while here it means "this facade
-restarted", which is common, so accepting would leave the sequence window
-silently unenforced after every restart. The cost of refusing was measured
-rather than assumed: the producer recovers via KIP-360's epoch bump and nothing
-is lost. It is one line in `idempotent.rs::check()` to reverse.
+One was behavioural and was Alice's to ratify. **A batch at sequence 42 from a
+producer the facade has never seen** was answered `OUT_OF_ORDER_SEQUENCE_NUMBER`
+(45); Apache Kafka 3.9.1 **accepts it** with `error_code = 0`. The refusal was
+kept because an absent entry is common here (every restart) and the cost of
+refusing had been measured as an epoch bump and nothing lost — with franz-go.
+librdkafka, measured later, dies on it instead (above), so it was ratified the
+other way on 2026-10-19: the facade now accepts it like Kafka, and the
+differential row no longer differs.
 
 F4 adds five more, all of them classified `deliberate` in the differential and
 none of them a defect:

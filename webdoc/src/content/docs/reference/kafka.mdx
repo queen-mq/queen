@@ -125,9 +125,11 @@ speaks only those. This is that answer, with the reason each window stops where 
   the Java client keeps the `-1` and invents nothing. There are no commit markers, so a committed
   transaction of N records advances the log by N and an aborted one by 0, and `read_committed` and
   `read_uncommitted` read the same records.
-- A batch at a nonzero sequence from a producer id the node has not seen is refused with
-  `OUT_OF_ORDER_SEQUENCE_NUMBER`, where Kafka 3.9 accepts it. Here an unknown producer usually
-  means the node restarted, and the producer recovers by bumping its epoch.
+- Idempotent producer state lives in the memory of the node that writes the producer's batches, where
+  Kafka keeps it in the log. A node restart, a leader change or an eviction loses it; the producer's
+  next batch is then accepted at whatever sequence it carries, as Kafka accepts a producer whose state
+  it no longer holds, and up to the five batches it had in flight can be written twice
+  ([guide](/guides/kafka/#idempotent-producers)).
 - `acks=1` is `acks=all`. `acks=0` gets no answer, so its errors exist only in the node's log.
 - A produce's `timeout_ms` is not acted on. A call into the broker is bounded at 10 seconds, below
   every client's 30-second request timeout.

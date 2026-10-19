@@ -31,8 +31,12 @@
 //     the deliberate surface, not a gap: a client that reads ApiVersions fails
 //     fast and legibly. Where this suite touches admin it says which key it
 //     needed and treats an UNSUPPORTED as information.
-//   * Idempotent produce needs InitProducerId, which is M7. `idempotent: false`
-//     everywhere; RUN_IDEMPOTENCE=1 records the failure mode of turning it on.
+//   * The matrix produces with `idempotent: false`. Idempotence has its own
+//     scenario: with QUEEN_KAFKA_RESTART_CMD set (rig.sh's hook, or any command
+//     that kills and restarts the facade, e.g. `docker restart -t 0 queen`), an
+//     idempotent producer with batches in flight is taken across a restart,
+//     which is what a rolling deploy or a leader change does to it.
+import { execSync } from 'node:child_process'
 import Confluent from '@confluentinc/kafka-javascript'
 import {
   PARTITIONS, COUNT, fixture, ok, bad, info, say, check, finish,
@@ -457,6 +461,95 @@ async function scenarioSasl() {
   }
 }
 
+// An idempotent producer across a facade restart, with produce requests IN
+// FLIGHT when the facade dies. The facade loses its sequence windows
+// (src/idempotent.rs) and has to answer the producer's next batch in a way
+// librdkafka survives: OUT_OF_ORDER on it is fatal ("sequence
+// desynchronization"), and from then on every send fails "Local: Fatal error"
+// for the life of the producer — which stopped a whole fleet on a rolling
+// restart (stage, 2026-10-19). What may happen, and is the documented cost, is
+// that a batch in flight at the restart is written twice; that is counted.
+async function scenarioIdempotentRestart(restart) {
+  say('idempotent producer across a facade restart, with batches in flight')
+  const topic = `${TAG}-idem-restart`
+  const kafka = client({ debug: 'eos,broker' })
+  const producer = kafka.producer({
+    'linger.ms': 5,
+    'max.in.flight.requests.per.connection': 5,
+    'message.timeout.ms': 120000,
+    kafkaJS: { acks: -1, idempotent: true, allowAutoTopicCreation: true },
+  })
+  await deadline(producer.connect(), 45000, 'idempotent producer connect')
+
+  // Four senders, one send() each in flight, so several produce requests are on
+  // the wire whenever the facade is killed.
+  const acked = []
+  const failed = []
+  let next = 0
+  let stop = false
+  const lane = async (n) => {
+    while (!stop) {
+      const values = Array.from({ length: 20 }, () => `idem-${String(next++).padStart(7, '0')}`)
+      try {
+        await producer.send({
+          topic,
+          messages: values.map((v) => ({ value: Buffer.from(v), partition: n % 2 })),
+        })
+        acked.push(...values)
+      } catch (e) {
+        failed.push(e.message)
+        if (/fatal/i.test(e.message)) return // a fatal producer never comes back
+      }
+    }
+  }
+  const lanes = [0, 1, 2, 3].map(lane)
+  await sleep(3000)
+  const before = acked.length
+  info(`${before} records acknowledged before the restart`)
+  const out = execSync(restart, { encoding: 'utf8', timeout: 90000 })
+  info(`restarted the facade: ${out.trim().split('\n').pop() || '(no output)'}`)
+  await sleep(8000)
+  stop = true
+  await deadline(Promise.all(lanes), 150000, 'idempotent senders to stop')
+
+  const fatal = failed.filter((m) => /fatal/i.test(m))
+  check(
+    fatal.length === 0,
+    `no send failed fatally (${fatal.length}${fatal.length ? `, first: ${fatal[0].slice(0, 160)}` : ''})`,
+  )
+  check(
+    acked.length > before,
+    `the producer kept producing after the restart (${acked.length - before} records acknowledged after it)`,
+  )
+  if (failed.length > fatal.length) info(`${failed.length - fatal.length} send(s) failed and were not fatal`)
+  // A send AFTER everything, on the same producer: it is alive, not merely
+  // finishing what it had queued.
+  const final = await producer
+    .send({ topic, messages: [{ value: Buffer.from('idem-final'), partition: 0 }] })
+    .then(() => 'ok', (e) => e.message)
+  check(final === 'ok', `a new send on the same producer succeeds after the restart (${final})`)
+  await deadline(producer.disconnect(), 30000, 'idempotent producer disconnect')
+
+  // Every acknowledged record is there at least once; a second copy of one is
+  // the documented cost, counted rather than refused.
+  const written = final === 'ok' ? [...acked, 'idem-final'] : acked
+  const want = written.length
+  const consumer = newConsumer(`${GROUP}-idem-restart`)
+  await deadline(consumer.connect(), 45000, 'idempotent restart consumer connect')
+  await consumer.subscribe({ topics: [topic] })
+  const seen = await drain(consumer, want, { timeoutMs: 180000, linger: 3000 })
+  await deadline(consumer.disconnect(), 30000, 'idempotent restart consumer disconnect')
+  const copies = new Map()
+  for (const m of seen) {
+    const v = String(m.value)
+    copies.set(v, (copies.get(v) || 0) + 1)
+  }
+  const missing = written.filter((v) => !copies.has(v))
+  const twice = [...copies.values()].filter((n) => n > 1).length
+  check(missing.length === 0, `every acknowledged record was read back (${missing.length} missing)`)
+  info(`${twice} record(s) were written twice across the restart (at most the batches in flight)`)
+}
+
 // The idempotence footgun, recorded not asserted.
 async function scenarioIdempotence() {
   say('idempotent: true (unsupported: InitProducerId is M7)')
@@ -501,6 +594,12 @@ async function main() {
   await scenarioResume(topic)
   await scenarioFreshGroup(topic, COUNT + 32)
   await scenarioSasl()
+  if (process.env.QUEEN_KAFKA_RESTART_CMD) {
+    await scenarioIdempotentRestart(process.env.QUEEN_KAFKA_RESTART_CMD)
+  } else {
+    say('idempotent producer across a facade restart')
+    info('skipped: set QUEEN_KAFKA_RESTART_CMD to a command that kills and restarts the facade')
+  }
   if (process.env.RUN_IDEMPOTENCE === '1') await scenarioIdempotence()
   trace.report()
   trace.reportErrors()

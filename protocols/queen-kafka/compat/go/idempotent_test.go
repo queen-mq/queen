@@ -277,38 +277,41 @@ func TestAGapInTheProducerSequenceIsRefusedAndWritesNothing(t *testing.T) {
 	}
 }
 
-// A producer this facade holds no window for — a restart, an eviction, a
-// connection that landed on another facade. OUT_OF_ORDER and never
-// UNKNOWN_PRODUCER_ID (59), because OUT_OF_ORDER is the code whose recovery
-// (KIP-360's epoch bump) every idempotent client implements.
-func TestAProducerThisFacadeNeverSawIsOutOfOrder(t *testing.T) {
+// A producer this facade holds no window for, already mid-sequence — a
+// restart, a leader change, an eviction, a connection that landed on another
+// facade. The batch is written and the window starts at it: Kafka's own rule
+// for a producer whose state the broker no longer holds. Answering
+// OUT_OF_ORDER (45) instead is fatal to librdkafka, and UNKNOWN_PRODUCER_ID
+// (59) is fatal to it for any batch it had already sent once
+// (`protocols/queen-kafka/src/idempotent.rs`).
+func TestAProducerThisFacadeLostResumesItsWindow(t *testing.T) {
 	cl := newClient(t)
 	topic := newTopic(t)
 	ensureTopic(t, cl, topic)
 
 	pid := grantedProducerID(t, cl)
-	r := produceOnce(t, cl, idempotentProduce(topic, 0, pid, 0, 42, []string{"stranded"}))
-	if r.ErrorCode != 45 {
-		t.Fatalf("a producer with no window answered error %d, want 45: %s", r.ErrorCode, errMsg(r))
+	r := produceOnce(t, cl, idempotentProduce(topic, 0, pid, 0, 42, []string{"resumed"}))
+	if r.ErrorCode != 0 {
+		t.Fatalf("a producer with no window answered error %d, want 0: %s", r.ErrorCode, errMsg(r))
 	}
-	t.Logf("a lost window answered error 45 (not 59): %s", errMsg(r))
+	t.Logf("a lost window at sequence 42 was written at offset %d", r.BaseOffset)
 
-	// And the recovery a client would make: bump the epoch, reset to sequence 0.
-	bump := kmsg.NewPtrInitProducerIDRequest()
-	bump.ProducerID = pid
-	bump.ProducerEpoch = 0
-	after := initProducerID(t, cl, bump)
-	if after.ErrorCode != 0 {
-		t.Fatalf("the epoch bump answered error %d", after.ErrorCode)
+	// From there it is an ordinary window: the resend is a duplicate...
+	again := produceOnce(t, cl, idempotentProduce(topic, 0, pid, 0, 42, []string{"resumed"}))
+	if again.ErrorCode != 0 || again.BaseOffset != r.BaseOffset {
+		t.Fatalf("the resend answered error %d at offset %d, want 0 at %d (%s)",
+			again.ErrorCode, again.BaseOffset, r.BaseOffset, errMsg(again))
 	}
-	ok := produceOnce(t, cl,
-		idempotentProduce(topic, 0, after.ProducerID, after.ProducerEpoch, 0, []string{"recovered"}))
-	if ok.ErrorCode != 0 {
-		t.Fatalf("the producer did not recover after the bump: error %d (%s)",
-			ok.ErrorCode, errMsg(ok))
+	// ...and the next sequence follows it.
+	next := produceOnce(t, cl, idempotentProduce(topic, 0, pid, 0, 43, []string{"next"}))
+	if next.ErrorCode != 0 {
+		t.Fatalf("the next batch answered error %d: %s", next.ErrorCode, errMsg(next))
 	}
-	t.Logf("after the bump to epoch %d the producer wrote at offset %d",
-		after.ProducerEpoch, ok.BaseOffset)
+	recs := consumeFrom(t, topic, kgo.NewOffset().AtStart(), 2, 60*time.Second)
+	got := []string{string(recs[0].Value), string(recs[1].Value)}
+	if fmt.Sprint(got) != fmt.Sprint([]string{"resumed", "next"}) {
+		t.Fatalf("the partition holds %v, want [resumed next] — the duplicate was written", got)
+	}
 }
 
 // An OLD epoch after a bump is fenced. Not the transactional fencing this
@@ -427,9 +430,8 @@ func TestAnIdempotentProducerSurvivesAFacadeRestart(t *testing.T) {
 	t.Logf("facade restarted mid-stream: pid %s -> %s (the sequence window is gone)", old, fresh)
 
 	// THE assertion: the producer keeps going. Every send after the restart
-	// must succeed from the caller's point of view — the OUT_OF_ORDER the
-	// facade answers is the client's own KIP-360 bump, not an error the
-	// application sees.
+	// must succeed from the caller's point of view: the facade starts a new
+	// window at the producer's next batch, so there is nothing to recover from.
 	for i := 0; i < after; i++ {
 		r := &kgo.Record{Topic: topic, Partition: 0, Value: []byte(fmt.Sprintf("post-%02d", i))}
 		if err := cl.ProduceSync(ctx, r).FirstErr(); err != nil {

@@ -18,6 +18,9 @@
 #   KAFKA_SSL_CA           PEM to verify the listener with; verification stays ON
 #   KAFKA_SSL_INSECURE=1   skip verification (an advertised name with no SAN)
 #   RUN_IDEMPOTENCE=1      also record how enable.idempotence=true dies
+#   QUEEN_KAFKA_RESTART_CMD  a command that kills and restarts the facade; set, the
+#                          confluent suite takes an idempotent producer with batches
+#                          in flight across it (e.g. `docker restart -t 0 queen`)
 #   TRACE_DIR              where to keep each run's full librdkafka debug stream
 #
 # NOTE ON THE SASL LANE. node-rdkafka builds librdkafka from source at install

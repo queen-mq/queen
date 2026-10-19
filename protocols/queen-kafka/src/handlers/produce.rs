@@ -2136,11 +2136,13 @@ mod tests {
         assert_eq!(answer(&next, "orders", 0).error_code, 0);
     }
 
-    /// A window this facade never had — a restart, an eviction, a facade switch.
-    /// OUT_OF_ORDER and not UNKNOWN_PRODUCER_ID, because OUT_OF_ORDER is the
-    /// code whose recovery (KIP-360's epoch bump) every client implements.
+    /// A window this facade does not have — a restart, a leader change, an
+    /// eviction, a facade switch — for a producer already mid-sequence. The
+    /// batch is written and the window starts at it, Kafka's rule for a
+    /// producer it holds no state for: refusing it is fatal to librdkafka
+    /// ([`crate::idempotent`]). From there a resend is a duplicate again.
     #[tokio::test]
-    async fn a_producer_this_facade_never_saw_is_out_of_order_not_unknown() {
+    async fn a_producer_this_facade_lost_is_written_and_its_window_starts_there() {
         let (f, api) = facade(&[("orders", 1)], 4);
         let resp = handle(
             &f,
@@ -2149,11 +2151,34 @@ mod tests {
         )
         .await
         .unwrap();
+        let first = answer(&resp, "orders", 0);
+        assert_eq!(first.error_code, 0);
+        assert_eq!(api.pushed().len(), 1);
+        assert_eq!(f.producers.resumed(), 1);
+
+        let again = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 42)]),
+            None,
+        )
+        .await
+        .unwrap();
+        let resend = answer(&again, "orders", 0);
         assert_eq!(
-            answer(&resp, "orders", 0).error_code,
-            ResponseError::OutOfOrderSequenceNumber.code()
+            (resend.error_code, resend.base_offset),
+            (0, first.base_offset)
         );
-        assert!(api.pushed().is_empty());
+        assert_eq!(api.pushed().len(), 1, "a duplicate was written again");
+
+        let next = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 43)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer(&next, "orders", 0).error_code, 0);
+        assert_eq!(api.pushed().len(), 2);
     }
 
     /// A producer that bumped its epoch (KIP-360) resets its own sequences, and
@@ -2198,7 +2223,8 @@ mod tests {
     #[tokio::test]
     async fn producer_id_zero_is_a_producer_id() {
         let (f, _) = facade(&[("orders", 1)], 4);
-        // Producer 0 at sequence 5, with no window: checked, and refused.
+        // Producer 0 at sequence 5, with no window: checked, so a window is
+        // started and tracked for it...
         let resp = handle(
             &f,
             &simple("orders", 0, &[idempotent_record(0, 0, 5)]),
@@ -2206,20 +2232,30 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(answer(&resp, "orders", 0).error_code, 0);
+        assert_eq!(f.producers.tracked(), 1);
+        // ...and a gap after it is refused.
+        let gap = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(0, 0, 9)]),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            answer(&resp, "orders", 0).error_code,
+            answer(&gap, "orders", 0).error_code,
             ResponseError::OutOfOrderSequenceNumber.code()
         );
 
         // ...while -1 with the same sequence is not an idempotent produce at
-        // all, and is written without a word.
+        // all, and is written without a word or a window.
         let mut plain = record(None, b"v");
         plain.sequence = 5;
         let ok = handle(&f, &simple("orders", 0, &[plain]), None)
             .await
             .unwrap();
         assert_eq!(answer(&ok, "orders", 0).error_code, 0);
-        assert_eq!(f.producers.tracked(), 0);
+        assert_eq!(f.producers.tracked(), 1);
     }
 
     #[tokio::test]
@@ -2336,9 +2372,12 @@ mod tests {
     #[tokio::test]
     async fn one_bad_partition_does_not_poison_the_request() {
         let (f, api) = facade(&[("orders", 2), ("clicks", 2)], 4);
-        // An idempotent batch this facade holds no window for: refused
-        // OUT_OF_ORDER_SEQUENCE_NUMBER, and its neighbours are still written.
-        let stranded = idempotent_record(12, 0, 9);
+        // An idempotent entry whose two batches are not contiguous: refused
+        // OUT_OF_ORDER_SEQUENCE_NUMBER whatever the window holds, and its
+        // neighbours are still written.
+        let mut stranded = BytesMut::new();
+        stranded.extend_from_slice(&batch(&[idempotent_record(12, 0, 0)], Compression::None));
+        stranded.extend_from_slice(&batch(&[idempotent_record(12, 0, 9)], Compression::None));
         let mut corrupt = BytesMut::from(&batch(&[record(None, b"bad")], Compression::None)[..]);
         let last = corrupt.len() - 1;
         corrupt[last] ^= 0xff;
@@ -2348,7 +2387,7 @@ mod tests {
                 "orders",
                 &[
                     (0, batch(&[record(None, b"good-0")], Compression::None)),
-                    (1, batch(&[stranded], Compression::None)),
+                    (1, stranded.freeze()),
                     (2, corrupt.freeze()),
                     (
                         9,

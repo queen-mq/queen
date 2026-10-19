@@ -123,6 +123,23 @@ without one nothing changes.
 
 ## Unreleased
 
+**Kafka facade: an idempotent librdkafka producer survives a restart or a leader change.** The
+facade keeps each producer's sequence window in the memory of the node that writes its batches, so
+a restart, a leader change, an eviction or a connection that moves to another node loses it. The
+producer's next batch was answered `OUT_OF_ORDER_SEQUENCE_NUMBER`, for the client to bump its epoch
+(KIP-360). Java and franz-go do; librdkafka (2.15.1), under the Node, Python, Go, .NET, Ruby and PHP
+clients, treats that answer on the oldest batch it is waiting for as fatal, and every send after it
+failed `Local: Fatal error` until the application restarted the producer (stage, 2026-10-19: a
+rolling restart stopped every producer of a load test). The batch is now accepted whatever its
+sequence and the window starts again from it, which is what Apache Kafka does for a producer whose
+state it no longer holds (measured against 3.9.1: the differential's `unknown_producer` row no
+longer differs). The producer sees no error; up to the five batches it had in flight can be written
+twice, the bound the docs already stated. A gap inside a window the facade holds is still refused.
+The facade's `/status` counts these restarts per producer-partition (`producers.resumed`) and the
+node logs one line a minute while they happen. `compat/node-librdkafka` now restarts the facade
+under an idempotent producer with four requests in flight when `QUEEN_KAFKA_RESTART_CMD` is set:
+0 fatal errors, nothing lost.
+
 **Kafka facade: a consumer group's members are visible to the broker.** A Kafka consumer commits
 positions and takes no lease, so nothing the broker keeps said it was there: the consumer-group
 listing called every Kafka group `Dead` while it read, and the console reported its topic as having

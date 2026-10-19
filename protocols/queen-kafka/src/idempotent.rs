@@ -51,33 +51,45 @@
 //! ## THE CAVEAT, stated at the top because it is the honest one
 //!
 //! A real Kafka broker persists producer state in the log (producer snapshots),
-//! so a broker restart does not lose a sequence window. This facade holds no
-//! durable state by design, so after a **facade restart**, after a connection
-//! **moves to another facade** behind one advertised address, or after the LRU
-//! **evicted** an idle producer's entry, the next batch of a producer that is
-//! not at sequence 0 meets an absent entry.
+//! so a broker restart or a leader change does not lose a sequence window. This
+//! facade holds no durable state by design, so after a **facade restart**, a
+//! **leader change**, a connection that **moves to another facade** behind one
+//! advertised address, or an LRU **eviction** of an idle producer's entry, the
+//! next batch of a producer meets an absent entry.
 //!
-//! That is answered OUT_OF_ORDER_SEQUENCE_NUMBER (45), which is what a modern
-//! Kafka broker answers for a missing entry, and the client's recovery is
-//! KIP-360's epoch bump — which is exactly why `InitProducerId` v3 is inside the
-//! advertised window ([`crate::versions`]) rather than a nicety. The cost is
-//! bounded and it is real: **the in-flight window may be written twice**, i.e.
-//! at-least-once for at most [`WINDOW`] batches, exactly as Kafka degrades when
-//! producer state has expired.
+//! That batch is ACCEPTED, whatever its sequence, and the window starts at it.
+//! It is Kafka's own rule for a producer whose state the broker no longer holds:
+//! with no producer epoch on record, `ProducerAppendInfo.checkSequence` accepts
+//! writes with any sequence number. The cost is bounded and it is real: a batch
+//! the producer had in flight when the state was lost, and resends because its
+//! answer never came, is **written a second time** — at-least-once for at most
+//! [`WINDOW`] batches per partition, once per lost window.
 //!
-//! UNKNOWN_PRODUCER_ID (59) is deliberately NOT used. Kafka moved away from it
-//! for the same reason it is wrong here: some clients answer it by reasoning
-//! about `log_start_offset`, which the produce path answers as -1, and a client
-//! that cannot reason about it may fail the batch fatally. OUT_OF_ORDER is the
-//! code whose recovery path is implemented in every client that sets the flag.
+//! Both refusals are worse, and the first one was what this facade answered
+//! until it stopped a fleet (stage, 2026-10-19: a rolling restart under
+//! librdkafka 2.15.1 producers, the library under the Node, Python, Go, .NET,
+//! Ruby and PHP clients of the matrix):
+//!
+//!   * OUT_OF_ORDER_SEQUENCE_NUMBER (45) on the batch at the head of the
+//!     producer's queue is FATAL in librdkafka ("sequence desynchronization",
+//!     `rd_kafka_handle_idempotent_Produce_error` in `rdkafka_request.c`), and
+//!     after a lost window that batch is always the first one the facade sees.
+//!     Every producer stopped for good within a second of the leader moving.
+//!     Java answers the same code with a KIP-360 epoch bump, which is what the
+//!     2.5.0 leader-kill runs exercised.
+//!   * UNKNOWN_PRODUCER_ID (59) is recovered by librdkafka only for a batch it
+//!     has not sent before, and a connection that drops with a request on the
+//!     wire counts as a send (the retry count rises on a transport error) —
+//!     which is what a stopping node does to every request in flight.
 //!
 //! The durable cure exists and is recorded rather than taken: `PushItem`'s
 //! `transactionId` is a broker-side dedup key, and
 //! `"qk:<pid>:<epoch>:<partition>:<seq>"` would move this whole window into
-//! Queen. It is not done here because the guarantee would silently depend on a
-//! per-queue `dedupWindowSeconds` a Kafka client cannot see, and because it puts
-//! a dedup key on every record of every idempotent producer — a cost on the hot
-//! write path that needs a measurement before it is a design.
+//! Queen, making a resend across a lost window the duplicate it is. It is not
+//! done here because the guarantee would silently depend on a per-queue
+//! `dedupWindowSeconds` a Kafka client cannot see, and because it puts a dedup
+//! key on every record of every idempotent producer — a cost on the hot write
+//! path that needs a measurement before it is a design.
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
@@ -112,11 +124,12 @@ pub const WINDOW: usize = 5;
 /// one. A 3-node cluster at 1M partitions with three producer fleets is ~1M
 /// pairs per node steady and ~3M on a node that briefly leads everything; 4Mi
 /// covers that with room. Past the cap the least recently WRITTEN entry is
-/// evicted, and an evicted entry behaves exactly like one that was never there,
-/// which the module header shows is a recoverable state rather than a silent
-/// one — but it costs the producer an epoch bump and a resend, so the cap is
-/// set where a healthy cluster never reaches it (the old 65,536 was reached by
-/// a 100k-partition benchmark ~30,000 times a minute).
+/// evicted, and an evicted entry behaves exactly like one that was never there:
+/// the producer's next batch starts a new window (the module header), and a
+/// resend of a batch from before the eviction is written again rather than
+/// answered as the duplicate it is. So the cap is set where a healthy cluster
+/// never reaches it (the old 65,536 was reached by a 100k-partition benchmark
+/// ~30,000 times a minute).
 ///
 /// Memory is paid per entry that EXISTS, not per unit of cap: [`ENTRY_BYTES`].
 pub const DEFAULT_MAX_TRACKED: usize = 4_194_304;
@@ -141,6 +154,10 @@ pub const ENTRY_BYTES: usize = 210;
 /// cap is reached by a fleet, so a line per eviction is a line per producer per
 /// batch. See [`obs::Sampler`]. The total is [`Producers::evictions`].
 static TRACK_CAP: obs::Sampler = obs::Sampler::new(60_000);
+
+/// One line a minute for windows started mid-sequence ([`Producers::resumed`]):
+/// after a restart every producer-partition of the fleet starts one at once.
+static RESUMED: obs::Sampler = obs::Sampler::new(60_000);
 
 /// A `transactional.id` as the FACADE reads it, with Erlang's encoding defect
 /// filtered out in one place so the two sites that care cannot drift.
@@ -363,6 +380,8 @@ pub struct Producers {
     len: AtomicUsize,
     /// Entries evicted for room since the process started.
     evictions: AtomicU64,
+    /// Windows started at a sequence other than 0 ([`Producers::resumed`]).
+    resumed: AtomicU64,
     /// Batches accepted and not yet answered, per key, in the order they were
     /// accepted ([`Producers::begin`]): what a producer's next batch follows
     /// when both are written in ONE push — the requests a client sent back to
@@ -753,6 +772,7 @@ impl Producers {
             cap,
             len: AtomicUsize::new(0),
             evictions: AtomicU64::new(0),
+            resumed: AtomicU64::new(0),
             inflight: Mutex::new(HashMap::new()),
         }
     }
@@ -845,11 +865,21 @@ impl Producers {
     }
 
     /// How many entries have been evicted to make room since the process
-    /// started. Each one is a producer whose next batch may be answered
-    /// OUT_OF_ORDER_SEQUENCE_NUMBER and resent after an epoch bump, so on a
-    /// healthy node this stays at 0.
+    /// started. Each one is a producer whose next batch starts a new window, so
+    /// a resend from before the eviction would be written twice; on a healthy
+    /// node this stays at 0.
     pub fn evictions(&self) -> u64 {
         self.evictions.load(Ordering::Relaxed)
+    }
+
+    /// How many windows have been started at a sequence other than 0 since the
+    /// process started: producers this facade held no state for that were
+    /// already mid-sequence — after a restart, a leader change or an eviction.
+    /// Each one may have had a batch in flight that is written twice (the
+    /// module header). It rises once per producer-partition on a restart and
+    /// stays flat otherwise.
+    pub fn resumed(&self) -> u64 {
+        self.resumed.load(Ordering::Relaxed)
     }
 
     /// Forget everything about one producer id under one tenant.
@@ -984,6 +1014,27 @@ impl Producers {
                 let s = &shard.slots[i as usize];
                 (s.epoch, s.recent())
             });
+        if entry.is_none() && first.base_sequence != 0 {
+            // A producer already mid-sequence that this facade holds nothing
+            // for: its window starts here (`decide`). Counted, and said once a
+            // minute rather than per partition — a restart says it for every
+            // producer-partition of the fleet at once.
+            let total = self.resumed.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(suppressed) = RESUMED.tick_now() {
+                tracing::info!(
+                    target: "kafka",
+                    producer_id = first.producer_id,
+                    topic,
+                    partition,
+                    base_sequence = first.base_sequence,
+                    resumed_total = total,
+                    suppressed,
+                    "an idempotent producer this facade holds no sequence state for is already \
+                     mid-sequence (a restart, a leader change, an eviction); its window starts \
+                     at this batch, and a batch it had in flight may be written twice"
+                );
+            }
+        }
         decide(entry, infos, topic, partition, accept)
     }
 
@@ -1056,8 +1107,8 @@ impl Producers {
                     suppressed,
                     "more idempotent producers than this facade keeps sequence state for \
                      (QUEEN_KAFKA_MAX_PRODUCER_STATES); the least recently written are being \
-                     dropped and their next batch will be answered OUT_OF_ORDER_SEQUENCE_NUMBER \
-                     so the client bumps its epoch"
+                     dropped, their next batch starts a new sequence window, and a resend of a \
+                     batch from before the drop would be written twice"
                 );
             }
         }
@@ -1093,23 +1144,12 @@ fn decide(
     let epoch = first.producer_epoch;
     let base_seq = first.base_sequence;
     let Some((entry_epoch, recent)) = entry else {
-        // No entry: a fresh producer, an evicted one, or one whose facade
-        // restarted. Sequence 0 is the first of those and is accepted;
-        // anything else is the module header's caveat, and the code is
-        // chosen for the recovery it triggers rather than for its wording.
-        return if base_seq == 0 {
-            accept
-        } else {
-            Verdict::Reject(
-                ResponseError::OutOfOrderSequenceNumber,
-                format!(
-                    "this facade holds no sequence state for producer {} on {topic}-{partition}, \
-                     and the batch starts at sequence {base_seq} rather than 0 — bump the \
-                     producer epoch and resend (KIP-360)",
-                    first.producer_id
-                ),
-            )
-        };
+        // No entry: a fresh producer, or one whose window this facade lost —
+        // a restart, a leader change, a facade switch, an eviction. Either way
+        // the window starts at this batch, at whatever sequence it carries:
+        // Kafka's rule for a producer it holds no state for, and the module
+        // header says why both refusals are worse.
+        return accept;
     };
     if epoch < entry_epoch {
         // Fenced. Not the transactional fencing this facade refuses: a
@@ -1301,11 +1341,15 @@ mod tests {
     fn a_coalesced_batch_follows_the_batch_in_flight() {
         let p = Producers::new();
         let first = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 0, 3)]));
-        // Without `begin` the next batch is a gap: the window holds nothing.
-        assert_eq!(
-            rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 3, 2)])),
-            ResponseError::OutOfOrderSequenceNumber
-        );
+        // Without `begin` the window holds nothing, so the next batch reads as
+        // a producer this facade lost and would start a window of its own:
+        // `begin` is what places it AFTER the batch in flight.
+        assert_eq!(p.resumed(), 0);
+        assert!(matches!(
+            p.check(&tenant(), "orders", 0, &[batch(7, 0, 3, 2)]),
+            Verdict::Accept(_)
+        ));
+        assert_eq!(p.resumed(), 1);
         p.begin(&first);
         let second = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 3, 2)]));
         p.begin(&second);
@@ -1397,16 +1441,34 @@ mod tests {
         assert_eq!(next.base_sequence(), 3);
     }
 
-    /// The module header's caveat, as a test: a restart, an eviction or a facade
-    /// switch is an absent entry, and an absent entry answers the code whose
-    /// recovery every idempotent client implements.
+    /// The module header's caveat, as a test: a restart, a leader change, an
+    /// eviction or a facade switch is an absent entry, and an absent entry
+    /// starts the window at the batch that finds it, whatever its sequence —
+    /// Kafka's rule for a producer it holds no state for. Refusing it is fatal
+    /// to librdkafka. From there the window is an ordinary one.
     #[test]
-    fn a_lost_window_answers_out_of_order_rather_than_unknown_producer_id() {
+    fn a_lost_window_starts_again_at_the_batch_that_finds_it() {
         let p = Producers::new();
+        let resumed = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 42, 3)]));
+        assert_eq!(resumed.base_sequence(), 42);
+        assert_eq!(p.resumed(), 1);
+        landed(&p, &resumed, 100);
+        // A resend of it is a duplicate again, with the offset it got...
         assert_eq!(
-            rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 42, 3)])),
+            p.check(&tenant(), "orders", 0, &[batch(7, 0, 42, 3)]),
+            Verdict::Duplicate(100)
+        );
+        // ...the next batch follows it...
+        let next = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 45, 2)]));
+        assert_eq!(next.base_sequence(), 45);
+        // ...and a gap after it is still a gap.
+        assert_eq!(
+            rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 50, 1)])),
             ResponseError::OutOfOrderSequenceNumber
         );
+        // A producer starting at 0 is a new one, not a resumed one.
+        accepted(p.check(&tenant(), "orders", 0, &[batch(8, 0, 0, 1)]));
+        assert_eq!(p.resumed(), 1);
     }
 
     #[test]
@@ -1689,24 +1751,25 @@ mod tests {
             seq += 1;
             first_batch(&p, &tenant(), 100_000 + newcomer, "orders", 0);
         }
-        // Producer 1 was never evicted: its next batch is the next sequence,
-        // not the OUT_OF_ORDER a lost window would answer.
+        // Producer 1 was never evicted: a resend of its last batch is still
+        // the duplicate it is.
+        assert_eq!(
+            p.check(&tenant(), "orders", 0, &[batch(1, 0, seq - 1, 1)]),
+            Verdict::Duplicate(i64::from(seq - 1))
+        );
+        // Producer 2, the least recently written, went first — its resend is
+        // no longer a duplicate this facade can place, and starts a window.
         assert!(matches!(
-            p.check(&tenant(), "orders", 0, &[batch(1, 0, seq, 1)]),
+            p.check(&tenant(), "orders", 0, &[batch(2, 0, 0, 1)]),
             Verdict::Accept(_)
         ));
-        // Producer 2, the least recently written, went first — its resend is
-        // no longer a duplicate this facade can place.
-        assert_eq!(
-            rejection(p.check(&tenant(), "orders", 0, &[batch(2, 0, 1, 1)])),
-            ResponseError::OutOfOrderSequenceNumber
-        );
     }
 
     /// THE property the cap exists to keep: below it, nothing is evicted — not
-    /// in any shard, however the keys hash — so an active producer is never
-    /// answered OUT_OF_ORDER for want of room. A sharded tracker filled to
-    /// exactly its cap and written again, entry by entry, evicts nothing.
+    /// in any shard, however the keys hash — so an active producer never loses
+    /// its window (and its duplicate detection) for want of room. A sharded
+    /// tracker filled to exactly its cap and written again, entry by entry,
+    /// evicts nothing.
     #[test]
     fn an_active_producer_below_the_cap_is_never_evicted() {
         let cap = 65_536;
@@ -1746,10 +1809,13 @@ mod tests {
         p.forget(&tenant(), 7);
         assert_eq!(p.tracked(), 2_000);
         for partition in [0, 999, 1_999] {
+            // 7's windows are gone: its resend of sequence 0 starts a new one
+            // rather than being answered as a duplicate...
             assert!(matches!(
-                p.check(&tenant(), "orders", partition, &[batch(7, 0, 1, 1)]),
-                Verdict::Reject(ResponseError::OutOfOrderSequenceNumber, _)
+                p.check(&tenant(), "orders", partition, &[batch(7, 0, 0, 1)]),
+                Verdict::Accept(_)
             ));
+            // ...while 8's are untouched.
             assert_eq!(
                 p.check(&tenant(), "orders", partition, &[batch(8, 0, 0, 1)]),
                 Verdict::Duplicate(0)

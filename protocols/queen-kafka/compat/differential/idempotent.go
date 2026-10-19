@@ -207,10 +207,11 @@ func scenIdempotent(c *runctx) {
 	c.rec.add("idempotent.after_gap.error_code", "%s", errName(next.code))
 
 	// 6. A producer id nobody granted, at a sequence that is not 0. This is the
-	//    shape a facade restart, an eviction or an expired producer snapshot
-	//    leaves behind, and the code decides whether the client recovers or
-	//    dies. Kafka's own answer moved from UNKNOWN_PRODUCER_ID to
-	//    OUT_OF_ORDER_SEQUENCE_NUMBER, and this records which one each gives.
+	//    shape a facade restart, a leader change, an eviction or an expired
+	//    producer snapshot leaves behind, and the answer decides whether the
+	//    client carries on or dies. Kafka accepts it (NONE) and starts the
+	//    window there; the facade does the same since it stopped answering
+	//    OUT_OF_ORDER_SEQUENCE_NUMBER, which librdkafka treats as fatal.
 	stranded := idempotentProduceOnce(k, topic, pid+7_777_777, 0, 42, []string{"stranded"})
 	c.rec.add("idempotent.unknown_producer.error_code", "%s", errName(stranded.code))
 

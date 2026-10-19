@@ -55,13 +55,15 @@
 //!
 //! v3 is KIP-360, where the request carries the producer's CURRENT
 //! `(producer_id, epoch)` so a producer that met OUT_OF_ORDER_SEQUENCE_NUMBER
-//! can ask for a bump and reset its own sequences rather than dying. Without
-//! that version in the window, a sequence window this facade lost — a restart,
-//! an evicted entry — would be a fatal `OutOfOrderSequenceException` in the Java
-//! producer. With it, the same loss is a bump, a reset, and a producer that
-//! keeps running. That is why the version is load-bearing rather than a nicety,
-//! and it is measured rather than trusted: `compat/go/idempotent_test.go`
-//! restarts the facade under a live producer.
+//! can ask for a bump and reset its own sequences rather than dying. A sequence
+//! window this facade LOST — a restart, a leader change, an evicted entry — is
+//! no longer answered that way: the producer's next batch starts a new window
+//! ([`crate::idempotent`]), because librdkafka dies on OUT_OF_ORDER where Java
+//! bumps. A real gap still is, and without this version in the window it would
+//! be a fatal `OutOfOrderSequenceException` in the Java producer. With it, it
+//! is a bump, a reset, and a producer that keeps running.
+//! `compat/go/idempotent_test.go` and `compat/node-librdkafka` restart the
+//! facade under a live producer.
 //!
 //! Apache Kafka's own non-transactional path answers a bump request with a
 //! BRAND NEW producer id at epoch 0 (`TransactionCoordinator.handleInitProducerId`

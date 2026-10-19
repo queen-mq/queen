@@ -158,7 +158,7 @@ const WINDOW_REASON = {
   DeleteGroups:
     "The whole schema; v2 only changes the encoding. Deleting a group deletes the Queen consumer group of that name, with its position on every queue.",
   InitProducerId:
-    "Ceiling: v5 exists for KIP-890's transaction protocol 2, which the facade does not run. v3 matters: it is KIP-360's epoch bump, which lets a producer recover when a node has lost its sequence window (a restart, an eviction). A transactional id is refused in cluster mode.",
+    "Ceiling: v5 exists for KIP-890's transaction protocol 2, which the facade does not run. v3 matters: it is KIP-360's epoch bump, which lets a Java producer recover from a gap in its sequence instead of failing. A transactional id is refused in cluster mode.",
   DescribeAcls:
     "The whole window, and what it advertises is Kafka's own refusal: SECURITY_DISABLED, the answer of a Kafka broker with no authorizer. Authorization here is Queen's, on the token.",
   CreateAcls: "The same window and the same refusal, one result per creation.",
