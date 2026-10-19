@@ -259,6 +259,12 @@ seen gets no account unless you turn on `QUEEN_PROXY_AUTOPROVISION=true` and nam
 joins with `QUEEN_PROXY_AUTOPROVISION_TENANT`; it then gets `QUEEN_PROXY_DEFAULT_ROLE` (`viewer`)
 on every cluster of that tenant.
 
+The sign-in page offers **Continue with Google** when both Google credentials are configured.
+If Google sign-in is cancelled or fails, the browser shows the sign-in page with a message and
+lets you try again or use your email and password. If the attempt has expired when you return
+from Google, a successful retry opens the dashboard. If your Google account is refused, try an
+account with access or contact your administrator.
+
 Operators are the people who run the deployment itself:
 
 ```bash
