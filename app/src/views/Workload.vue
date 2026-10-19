@@ -635,6 +635,7 @@ import { analytics, consumers, describeApiError, system } from '@/api'
 import { useApi } from '@/composables/useApi'
 import { alpha, chartPalette, chartTheme, legendLabels, semanticColors, themeVersion } from '@/composables/useChartTheme'
 import { ackFailureSeverity, backlogSeverity, groupActivity } from '@/composables/useSeverity'
+import { byLagInactiveLast } from '@/composables/useAttention'
 import {
   formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc, formatTimestampUtc,
   validateRange,
@@ -1082,7 +1083,9 @@ const groupsByQueue = computed(() => {
 
 const queueMetaMap = computed(() => {
   const m = new Map()
-  for (const [name, q] of queuesStore.queueMeta.value) m.set(name, { namespace: q.namespace, task: q.task })
+  for (const [name, q] of queuesStore.queueMeta.value) {
+    m.set(name, { namespace: q.namespace, task: q.task, kafkaTopic: q.kafkaTopic === true })
+  }
   return m
 })
 
@@ -1193,11 +1196,8 @@ function pickFocus(v) {
   fetchWorkload()
 }
 
-const queueGroups = computed(() => (
-  (groupsByQueue.value.get(selectedQueue.value) || [])
-    .slice()
-    .sort((a, b) => (b.maxTimeLag || 0) - (a.maxTimeLag || 0))
-))
+// Worst lag first, inactive Kafka groups last (useAttention byLagInactiveLast).
+const queueGroups = computed(() => byLagInactiveLast(groupsByQueue.value.get(selectedQueue.value) || [], linesFor))
 // The broker's state words, except for an inactive Kafka group (groupActivity):
 // its Dead or Lagging is its cursors' story, and a client that commits offsets
 // and takes no lease leaves them nothing to tell. It is counted as inactive.
@@ -1594,8 +1594,10 @@ function renderOldest() {
       callbacks: {
         label: (c) => {
           const r = sorted[c.dataIndex]
-          return r.oldest === null ? ' no consumer group'
-            : ` ${fmt.sec(r.oldest)} · ${r.groupsLagging} of ${r.groupsN} groups lagging`
+          // An inactive Kafka group is counted, and none of the lag (useWorkload groupLag).
+          const gone = r.groupsInactive ? ` · ${r.groupsInactive} inactive` : ''
+          if (r.oldest === null) return r.groupsN ? ` ${fmt.plural(r.groupsN, 'group')}, all inactive` : ' no consumer group'
+          return ` ${fmt.sec(r.oldest)} · ${r.groupsLagging} of ${r.groupsN} groups lagging${gone}`
         },
       },
     },
@@ -1603,6 +1605,7 @@ function renderOldest() {
       format: (i) => {
         const r = sorted[i]
         if (r.oldest !== null) return fmt.sec(r.oldest)
+        if (r.groupsN) return 'inactive groups'
         return r.now.pending > 0 ? `no group · ${fmt.n(r.now.pending)} pending` : 'no group'
       },
     },
@@ -1787,10 +1790,16 @@ function renderGroups() {
   }
   const labels = gs.map((g) => (g.name === '__QUEUE_MODE__' ? 'queue mode' : g.name))
   const lines = linesFor(selectedQueue.value)
-  const tone = (s) => s >= lines.lagBadSeconds ? 'bad' : s >= lines.lagWarnSeconds ? 'warn' : 'mute'
+  // An inactive Kafka group keeps its bar, in plain ink, and does not set the
+  // scale: its lag grows for as long as nobody runs it, and an axis drawn to
+  // it would flatten every group that is behind now. Its bar is cut at the
+  // edge; the label beside it says how far behind it is.
+  const gone = gs.map((g) => groupActivity(g, lines) === 'inactive')
+  const tone = (s, i) => gone[i] ? 'mute' : s >= lines.lagBadSeconds ? 'bad' : s >= lines.lagWarnSeconds ? 'warn' : 'mute'
   const options = barBase(labels, null)
   options.layout.padding.right = 240
-  options.scales.x.max = Math.max(lines.lagBadSeconds * 1.2, ...gs.map((g) => g.maxTimeLag || 0)) * 1.15
+  const scaled = gs.filter((_, i) => !gone[i])
+  options.scales.x.max = Math.max(lines.lagBadSeconds * 1.2, ...(scaled.length ? scaled : gs).map((g) => g.maxTimeLag || 0)) * 1.15
   options.scales.x.ticks.callback = (v) => fmt.sec(v)
   options.plugins = {
     legend: { display: false },
@@ -1799,6 +1808,7 @@ function renderGroups() {
         label: (c) => {
           const g = gs[c.dataIndex]
           return ` ${fmt.sec(g.maxTimeLag || 0)} · ${fmt.n(g.partitionsWithLag)} of ${fmt.n(g.members)} partitions lagging · offset lag ${fmt.n(g.totalLag || 0)}`
+            + (gone[c.dataIndex] ? ' · inactive, not judged' : '')
         },
       },
     },
@@ -1807,6 +1817,7 @@ function renderGroups() {
         const g = gs[i]
         return `${g.maxTimeLag ? fmt.sec(g.maxTimeLag) : '0s'} · ${fmt.n(g.partitionsWithLag)}/${fmt.n(g.members)} lagging`
           + (g.conflation ? ' · conflation' : '') + (g.kind === 'kafka' ? ' · kafka' : '')
+          + (gone[i] ? ' · inactive' : '')
           + ` · mode ${g.subscriptionMode || '—'}`
       },
     },
@@ -1819,7 +1830,7 @@ function renderGroups() {
       datasets: [{
         label: 'time lag',
         data: gs.map((g) => g.maxTimeLag || 0),
-        backgroundColor: gs.map((g) => alpha(toneColor(tone(g.maxTimeLag || 0)), 0.85)),
+        backgroundColor: gs.map((g, i) => alpha(toneColor(tone(g.maxTimeLag || 0, i)), 0.85)),
         borderRadius: 2, barPercentage: 0.7,
       }],
     },

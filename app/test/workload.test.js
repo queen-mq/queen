@@ -7,6 +7,7 @@ import {
   deeperFindings, efficiency, enrichRows, findings, flowSeries, heatCells, lagBudget,
   rollupFromQueueOps, sameHourBaseline, severity, weeklyProfile,
 } from '../src/composables/useWorkload.js'
+import { THRESHOLDS } from '../src/composables/useSeverity.js'
 
 const fixture = (name) =>
   JSON.parse(readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8'))
@@ -154,6 +155,68 @@ test('messages with no consumer group are not an alarm where no reader is expect
   assert.deepEqual(findings(all, 'namespace', 'last 1h', { linesFor: flagged('archive', 'spool') }), [])
   // With no settings at all the rule is what it was.
   assert.equal(enrichRows(payload(['ns']), groups, meta, 'namespace')[0].sev, 'bad')
+})
+
+test('an inactive Kafka group is a group of its row and none of its lag', () => {
+  // As the broker lists a group read through the Kafka facade: inactiveSeconds
+  // 0 while it is there, the seconds since it was last seen, or null undated.
+  const kafka = (name, queueName, maxTimeLag, inactiveSeconds) => ({
+    name, queueName, maxTimeLag, inactiveSeconds, kind: 'kafka', state: inactiveSeconds === 0 ? 'Stable' : 'Empty',
+    partitionsWithLag: maxTimeLag > 0 ? 1 : 0, members: 1,
+  })
+  const groups = new Map([
+    ['orders', [
+      { name: 'native', queueName: 'orders', maxTimeLag: 90, partitionsWithLag: 1, members: 1, state: 'Stable' },
+      kafka('gone', 'orders', 90_000, 3600),
+    ]],
+    ['old', [kafka('undated', 'old', 50_000, null)]],
+    ['restart', [kafka('away', 'restart', 400, 120)]],
+  ])
+  const meta = new Map([['orders', { namespace: 'ns', task: '' }], ['old', { namespace: 'ns', task: '' }], ['restart', { namespace: 'r', task: '' }]])
+  const w = { pushMessages: 0, popMessages: 0, popEmpty: 0, parkedAvg: 0, ackSuccess: 0, ackFailed: 0, maxLagMs: null, avgLagMs: null }
+  const n = { pending: 0, pendingWithoutGroup: 0, queuesTouched: 1, partitions: 1, deadLetter: 0 }
+  const payload = (keys) => ({ tenant: { window: w }, rows: keys.map((key) => ({ key, window: { ...w }, now: { ...n }, series: {} })) })
+
+  const rows = enrichRows(payload(['orders', 'old', 'restart']), groups, meta, 'queue')
+  assert.deepEqual(
+    rows.map((r) => [r.key, r.oldest, r.lagSev, r.groupsN, r.groupsInactive, r.groupsLagging, r.sev]),
+    [
+      ['orders', 90, 'warn', 2, 1, 1, 'warn'],
+      // Only an inactive group: nothing waits for anyone, and the row is not "no group".
+      ['old', null, null, 1, 1, 0, 'mute'],
+      // No member for two minutes is inside the grace: still judged by its lag.
+      ['restart', 400, 'bad', 1, 0, 1, 'bad'],
+    ],
+  )
+  assert.deepEqual(findings(rows, 'queue', 'last 1h').map((f) => f.text), [
+    'away on restart is 6m 40s behind',
+    'native on orders is 1m 30s behind',
+  ])
+  // A namespace row holding both queues: the oldest message is the live group's.
+  const ns = enrichRows(payload(['ns']), groups, meta, 'namespace')
+  assert.deepEqual([ns[0].oldest, ns[0].groupsN, ns[0].groupsInactive], [90, 3, 2])
+  // A queue's own grace decides: two minutes away is inactive under a one-minute line.
+  const short = (queue) => (queue === 'restart' ? { ...THRESHOLDS, inactiveAfterSeconds: 60 } : undefined)
+  const r = enrichRows(payload(['restart']), groups, meta, 'queue', short)[0]
+  assert.deepEqual([r.oldest, r.lagSev, r.groupsInactive], [null, null, 1])
+})
+
+test("a Kafka topic's messages are not pending with no consumer group", () => {
+  const meta = new Map([
+    ['topic', { namespace: 'k', task: '', kafkaTopic: true }],
+    ['events', { namespace: 'k', task: '', kafkaTopic: true }],
+    ['spool', { namespace: 'mixed', task: '' }],
+    ['stream', { namespace: 'mixed', task: '', kafkaTopic: true }],
+  ])
+  const w = { pushMessages: 5, popMessages: 0, popEmpty: 0, parkedAvg: 0, ackSuccess: 0, ackFailed: 0, maxLagMs: null, avgLagMs: null }
+  const n = { pending: 9, pendingWithoutGroup: 9, queuesWithoutGroup: 2, queuesTouched: 1, partitions: 1, deadLetter: 0 }
+  const payload = (keys) => ({ tenant: { window: w }, rows: keys.map((key) => ({ key, queues: 2, window: { ...w }, now: { ...n }, series: {} })) })
+
+  // One queue: the facade created it, so nobody on it yet is not news.
+  assert.deepEqual(enrichRows(payload(['topic', 'spool']), new Map(), meta, 'queue').map((r) => r.sev), ['ok', 'bad'])
+  // A namespace of Kafka topics only is let off; one with a native queue too is not.
+  assert.deepEqual(enrichRows(payload(['k', 'mixed']), new Map(), meta, 'namespace').map((r) => r.sev), ['ok', 'bad'])
+  assert.deepEqual(findings(enrichRows(payload(['k']), new Map(), meta, 'namespace'), 'namespace', 'last 1h'), [])
 })
 
 test('flowSeries: at most five series, Other last, gaps preserved', () => {

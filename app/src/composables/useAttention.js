@@ -137,6 +137,25 @@ export function queueAttention(queues = [], groups = [], linesFor) {
   return out
 }
 
+/**
+ * Groups worst lag first, with the inactive Kafka groups (groupActivity) after
+ * all the others. Their lag grows for as long as nobody runs them, so at the
+ * top of a list sorted by lag they would push the groups that are behind now
+ * out of sight. Each part keeps its lag order, and equal lags their given
+ * order. `groups` is not modified.
+ */
+export function byLagInactiveLast(groups = [], linesFor) {
+  return (groups || [])
+    .map((g, i) => ({
+      g,
+      i,
+      gone: groupActivity(g, linesOf(linesFor, g?.queueName)) === 'inactive',
+      lag: num(g?.maxTimeLag) || 0,
+    }))
+    .sort((a, b) => (a.gone - b.gone) || (b.lag - a.lag) || (a.i - b.i))
+    .map((x) => x.g)
+}
+
 /** Worst severity and how many: { sev: 'bad'|'warn'|null, count }. */
 export function summarize(sevs = []) {
   let sev = null

@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  groupAttention, groupPresence, groupState, queueAttention, summarize,
+  byLagInactiveLast, groupAttention, groupPresence, groupState, queueAttention, summarize,
 } from '../src/composables/useAttention.js'
 import { THRESHOLDS } from '../src/composables/useSeverity.js'
 
@@ -172,6 +172,24 @@ test('a missing pending count is not a backlog', () => {
 test('the input order is kept, so a caller can sort by depth first', () => {
   const out = queueAttention([q('b', 9), q('a', 1)], [])
   assert.deepEqual(out.map((i) => i.name), ['b', 'a'])
+})
+
+test('a list by lag puts the inactive Kafka groups last, each part still by lag', () => {
+  const gone = { ...kafka('orders', 90_000, THRESHOLDS.inactiveAfterSeconds), name: 'gone' }
+  const undated = { ...kafka('audit', 50_000, null, { state: 'Dead', liveMembers: null }), name: 'undated' }
+  const behind = { ...g('orders', 400), name: 'behind' }
+  const away = { ...kafka('orders', 120, 600), name: 'away' } // inside the grace: still judged
+  const fine = { ...kafka('audit', 2, 0), name: 'fine' }
+  const tie = { ...g('audit', 2), name: 'tie' }
+  const input = [gone, fine, undated, behind, tie, away]
+  const sorted = byLagInactiveLast(input)
+  assert.deepEqual(sorted.map((x) => x.name), ['behind', 'away', 'fine', 'tie', 'gone', 'undated'])
+  assert.deepEqual(input.map((x) => x.name), ['gone', 'fine', 'undated', 'behind', 'tie', 'away'], 'the input is not reordered')
+  // A queue's own grace decides which part a group is in.
+  const short = (queue) => (queue === 'orders' ? { ...THRESHOLDS, inactiveAfterSeconds: 300 } : undefined)
+  assert.deepEqual(byLagInactiveLast([away, behind], short).map((x) => x.name), ['behind', 'away'])
+  assert.deepEqual(byLagInactiveLast([fine, away], short).map((x) => x.name), ['fine', 'away'])
+  assert.deepEqual(byLagInactiveLast(undefined), [])
 })
 
 test('summarize reports the worst and counts only what needs you', () => {

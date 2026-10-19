@@ -12,9 +12,16 @@
 // "oldest waiting" number and the lagging-group findings only exist once the
 // consumer-groups panel has loaded. When it has NOT, `oldest` must stay null
 // and the caller must say so rather than render a zero.
+//
+// An inactive Kafka group (useSeverity groupActivity: no live member past the
+// grace) is a group of its row and none of its lag: nobody runs it, so its
+// oldest message ages for ever and would be every row's "oldest waiting" and
+// a finding nobody can act on — the verdict useAttention gives it everywhere
+// else on the console. A Kafka topic is never read in queue mode either, so its
+// messages are not "pending with no consumer group".
 
 /** Severity ladder. Higher wins; `mute` is "nothing to say". */
-import { THRESHOLDS } from './useSeverity.js'
+import { THRESHOLDS, groupActivity } from './useSeverity.js'
 
 export const SEV_RANK = { bad: 3, warn: 2, ok: 1, ice: 0.5, mute: 0 }
 
@@ -78,8 +85,11 @@ const { n: fmtN, pct: fmtPct, ms: fmtMs, sec: fmtSec, plural } = formatters
  * @param {(queue: string) => (string|null)} keyOfQueue maps a queue to the row key
  * @param {string} key the row's key
  * @param {(queue: string) => object} [linesFor] the lines in force for a queue
- * @returns {{lagging: number, maxLag: number|null, groups: number, bad: Array<{group: object, queue: string}>, sev: 'bad'|'warn'|null}}
- *          `maxLag` is seconds (the list's `maxTimeLag`), null when no group matched.
+ * @returns {{lagging: number, maxLag: number|null, groups: number, inactive: number, bad: Array<{group: object, queue: string}>, sev: 'bad'|'warn'|null}}
+ *          `maxLag` is seconds (the list's `maxTimeLag`), null when no group
+ *          matched or every one that did is an inactive Kafka group.
+ *          `groups` counts every group, `inactive` those; an inactive group
+ *          is in none of the other figures (see the header).
  *          `sev` is the worst group, each judged by the lag lines of ITS queue:
  *          a row may hold several queues, and the oldest message of the row
  *          may sit on the one that is expected to run behind.
@@ -88,6 +98,7 @@ export function groupLag(groupsByQueue, keyOfQueue, key, linesFor) {
   let lagging = 0
   let maxLag = null
   let groups = 0
+  let inactive = 0
   let sev = null
   const bad = []
   for (const [q, gs] of groupsByQueue) {
@@ -95,6 +106,7 @@ export function groupLag(groupsByQueue, keyOfQueue, key, linesFor) {
     const lines = lagLines(linesFor, q)
     for (const g of gs) {
       groups++
+      if (groupActivity(g, lines) === 'inactive') { inactive++; continue }
       const isLag = g.state === 'Lagging' || (g.partitionsWithLag || 0) > 0
       if (isLag) { lagging++; bad.push({ group: g, queue: q }) }
       const t = g.maxTimeLag || 0
@@ -103,7 +115,7 @@ export function groupLag(groupsByQueue, keyOfQueue, key, linesFor) {
       if (v && (SEV_RANK[v] > (SEV_RANK[sev] || 0))) sev = v
     }
   }
-  return { lagging, maxLag, groups, bad, sev }
+  return { lagging, maxLag, groups, inactive, bad, sev }
 }
 
 /**
@@ -151,14 +163,15 @@ export function severity(row) {
  *   ackOk   — null under 5 acks (a 1-of-1 failure is not a 0% success rate)
  *   fill    — null under 5 polls, else pops / (pops + empty polls)
  *   oldest  — seconds, the MAX `maxTimeLag` over the groups of this row's
- *             queues; null when the row has no group at all (nothing to know)
+ *             queues; null when the row has no group at all (nothing to know),
+ *             or none but inactive Kafka groups (`groupsInactive` says so)
  *
  * @param {object} payload GET /api/v1/analytics/workload response
  * @param {Map<string, Array<object>>} groupsByQueue queue -> consumer-group rows ('' / empty map when unknown)
- * @param {Map<string, {namespace: string, task: string}>} queueMeta queue -> its namespace/task
+ * @param {Map<string, {namespace: string, task: string, kafkaTopic?: boolean}>} queueMeta queue -> its namespace/task, and whether the Kafka facade created it
  * @param {'namespace'|'task'|'queue'} level how the rows are keyed
  * @param {(queue: string) => object} [linesFor] the lines in force for a queue
- * @returns {Array<object>} the payload rows plus name/level/acks/share/ackOk/fill/oldest/lagSev/noGroupExpected/groupsLagging/groupsN/laggingGroups/touched/sev
+ * @returns {Array<object>} the payload rows plus name/level/acks/share/ackOk/fill/oldest/lagSev/noGroupExpected/groupsLagging/groupsN/groupsInactive/laggingGroups/touched/sev
  */
 export function enrichRows(payload, groupsByQueue, queueMeta, level, linesFor) {
   if (!payload || !Array.isArray(payload.rows)) return []
@@ -171,10 +184,11 @@ export function enrichRows(payload, groupsByQueue, queueMeta, level, linesFor) {
       return m ? (level === 'task' ? m.task : m.namespace) : null
     }
   // Messages on a queue with no consumer group are an alarm, unless Settings
-  // says no reader is expected there. A row may hold several queues and the
-  // payload does not say which ones are without a group, so the row is let
-  // off only when EVERY group-less queue of it is one of those.
-  const expected = (q) => lagLines(linesFor, q).noReaderOk === true
+  // says no reader is expected there or the Kafka facade created the queue
+  // (see the header). A row may hold several queues and the payload does not
+  // say which ones are without a group, so the row is let off only when EVERY
+  // group-less queue of it is one of those.
+  const expected = (q) => lagLines(linesFor, q).noReaderOk === true || meta.get(q)?.kafkaTopic === true
   const groupless = new Map()
   if (level !== 'queue') {
     for (const q of meta.keys()) {
@@ -209,6 +223,7 @@ export function enrichRows(payload, groupsByQueue, queueMeta, level, linesFor) {
       noGroupExpected: noGroupExpected(r.key),
       groupsLagging: gl.lagging,
       groupsN: gl.groups,
+      groupsInactive: gl.inactive,
       laggingGroups: gl.bad,
       touched: n.queuesTouched > 0,
     }

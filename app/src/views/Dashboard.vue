@@ -446,7 +446,7 @@
               <span
                 v-if="isConflating(g)"
                 class="entity-right num"
-                :class="{ warn: (g.partitionsWithLag || 0) > 0 }"
+                :class="{ warn: !isInactive(g) && (g.partitionsWithLag || 0) > 0 }"
               >
                 {{ (g.partitionsWithLag || 0) > 0 ? `${g.partitionsWithLag} behind` : '—' }}
               </span>
@@ -471,7 +471,8 @@
                 {{ formatNumber(g.members || 0) }} {{ (g.members || 0) === 1 ? 'partition' : 'partitions' }} assigned
                 <template v-if="!isConflating(g) && (g.partitionsWithLag || 0) > 0">
                   <span class="meta-sep">·</span>
-                  <span class="num warn">{{ formatNumber(g.partitionsWithLag) }} lagging</span>
+                  <!-- Plain ink on an inactive Kafka group, as its lag is. -->
+                  <span class="num" :class="{ warn: !isInactive(g) }">{{ formatNumber(g.partitionsWithLag) }} lagging</span>
                 </template>
               </span>
             </div>
@@ -511,7 +512,7 @@ import {
   ackFailureSeverity, backlogSeverity, eventLoopSeverity, groupActivity, numTone,
   pendingDriftSeverity, timeLagSeverity,
 } from '@/composables/useSeverity'
-import { groupAttention, queueAttention } from '@/composables/useAttention'
+import { byLagInactiveLast, groupAttention, queueAttention } from '@/composables/useAttention'
 import { useGroupsStore } from '@/stores/groupsStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { LINE_META, formatLine, formatSpan } from '@/composables/settingsDoc'
@@ -1193,9 +1194,10 @@ const enrichedQueues = computed(() => {
 // Top 6 by pending depth — the operational priority for "what's piling up".
 const topPendingQueues = computed(() => enrichedQueues.value.slice(0, 6))
 
-const sortedConsumers = computed(() =>
-  [...consumers.value].sort((a, b) => (b.maxTimeLag || 0) - (a.maxTimeLag || 0))
-)
+// Worst lag first, inactive Kafka groups last: a consumer nobody runs any
+// more has the oldest message of all, and would take the panel's six rows
+// from the groups that are behind now.
+const sortedConsumers = computed(() => byLagInactiveLast(consumers.value, linesFor))
 const laggingCount = computed(() =>
   consumers.value.filter(c => !isInactive(c) && ((c.maxTimeLag || 0) >= 60 || (c.partitionsWithLag || 0) > 0)).length
 )
