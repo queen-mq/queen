@@ -670,9 +670,52 @@ async fn google_callback(
     headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
-    if let Some(e) = q.error {
-        return err_400("invalid_request", &format!("provider returned error: {e}"));
+    // Only carry a destination from a verified, browser-bound state. Expired
+    // or foreign callbacks can retry from home, never from an untrusted URL.
+    let next = q.state.as_deref()
+        .and_then(|state| verify_state(state_key(), state))
+        .filter(|(nonce, _)| state_bound(&st, &headers, nonce))
+        .map(|(_, next)| next)
+        .unwrap_or_else(|| "/".to_string());
+    let browser = header_str(&headers, "accept").is_some_and(|v| v.contains("text/html"));
+    let cancelled = q.error.as_deref() == Some("access_denied");
+    let response = google_callback_result(State(st.clone()), headers, Query(q)).await;
+    if browser {
+        google_browser_response(&st, &next, cancelled, response).await
+    } else {
+        response
     }
+}
+
+// Keep the JSON error contract for non-browser clients. Browsers get the same
+// status and a retryable sign-in page, without provider diagnostics or codes.
+async fn google_browser_response(st: &St, next: &str, cancelled: bool, mut response: Response) -> Response {
+    if !response.status().is_client_error() && !response.status().is_server_error() {
+        return response;
+    }
+    let body = std::mem::replace(response.body_mut(), axum::body::Body::empty());
+    let body = axum::body::to_bytes(body, 8192).await.unwrap_or_default();
+    let error: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let message = match error.get("code").and_then(Value::as_str).unwrap_or("") {
+        "invalid_state" => "Your sign-in attempt expired or belongs to another browser. Please try again.",
+        "invalid_request" if cancelled => "Google sign-in was cancelled. You can try again or use your email and password.",
+        "domain_not_allowed" => "This Google account is not allowed. Try your organization’s account or contact your administrator.",
+        "not_provisioned" => "This Google account does not have access to Queen. Try another account or contact your administrator.",
+        "email_unverified" => "Verify your email address with Google before signing in.",
+        "not_configured" => "Sign-in is currently unavailable. Contact your administrator.",
+        _ => "We couldn’t complete Google sign-in. Please try again in a moment.",
+    };
+    *response.body_mut() = axum::body::Body::from(render_login(st, next, Some(message)));
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    response.headers_mut().remove(header::CONTENT_LENGTH);
+    no_store(response)
+}
+
+async fn google_callback_result(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Query(q): Query<CallbackQuery>,
+) -> Response {
     let Some(cid) = st.cfg.google_client_id.clone() else {
         return errors::err_404("not_configured", "google login not configured");
     };
@@ -687,6 +730,9 @@ async fn google_callback(
     };
     if !state_bound(&st, &headers, &nonce) {
         return err_400("invalid_state", "state was not issued to this browser");
+    }
+    if let Some(e) = q.error {
+        return err_400("invalid_request", &format!("provider returned error: {e}"));
     }
     let Some(code) = q.code else {
         return err_400("invalid_request", "missing authorization code");
@@ -1738,30 +1784,41 @@ fn login_html(
     let next_e = esc(next);
     let next_q = pct(next);
     let err_html = match error {
-        Some(e) => format!("<div class=\"err\">{}</div>", esc(e)),
+        Some(e) => format!("<div class=\"err\" role=\"alert\" tabindex=\"-1\">{}</div>", esc(e)),
         None => String::new(),
     };
     let panel = match sign_in {
         SignIn::Here => {
             let mut buttons = String::new();
             for (slug, label) in providers {
+                let (class, icon) = if *slug == "google" {
+                    // https://developers.google.com/static/identity/images/g-logo.png
+                    // Embedded because the app's static routes require a session.
+                    let logo = B64.encode(include_bytes!("assets/google-g.png"));
+                    ("oauth oauth-google", format!("<img src=\"data:image/png;base64,{logo}\" width=\"20\" height=\"20\" alt=\"\">"))
+                } else {
+                    ("oauth", String::new())
+                };
                 buttons.push_str(&format!(
-                    "<a class=\"oauth\" href=\"/auth/{slug}?next={next_q}\">Continue with {label}</a>"
+                    "<a class=\"{class}\" data-provider=\"{label}\" href=\"/auth/{slug}?next={next_q}\">{icon}<span>Continue with {label}</span></a>"
                 ));
             }
             let divider = if buttons.is_empty() {
                 String::new()
             } else {
-                format!("<div class=\"providers\">{buttons}</div><div class=\"sep\">or</div>")
+                format!("<div class=\"providers\">{buttons}</div><div class=\"sep\">or sign in with email</div>")
             };
+            let autofocus = if providers.is_empty() && error.is_none() { " autofocus" } else { "" };
             format!(
                 "{divider}<form method=\"post\" action=\"/auth/login\">\
 <input type=\"hidden\" name=\"next\" value=\"{next_e}\">\
 <label class=\"field\"><span>Email</span>\
-<input id=\"email\" name=\"email\" type=\"email\" autocomplete=\"username\" required autofocus></label>\
-<label class=\"field\"><span>Password</span>\
-<input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" required></label>\
-<button type=\"submit\">Sign in</button></form>"
+<input id=\"email\" name=\"email\" type=\"email\" autocomplete=\"username\" autocapitalize=\"none\" spellcheck=\"false\" placeholder=\"you@company.com\" required{autofocus}></label>\
+<div class=\"field\"><label for=\"password\">Password</label><div class=\"password-field\">\
+<input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" required>\
+<button class=\"password-toggle\" type=\"button\" aria-controls=\"password\" aria-label=\"Show password\" aria-pressed=\"false\" hidden>Show</button></div></div>\
+<button class=\"submit\" type=\"submit\">Sign in with email</button></form>\
+<p class=\"sign-in-status\" role=\"status\" aria-live=\"polite\" hidden></p>"
             )
         }
         // No `next` on the link: it names a path on THIS host, and the portal is
@@ -1791,11 +1848,12 @@ Sign in through the control plane that operates it, then return here.</p>{link}"
 <link rel=\"icon\" type=\"image/svg+xml\" href=\"{favicon}\">\
 <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\
 <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\
-<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap\" rel=\"stylesheet\">\
+<link href=\"https://fonts.googleapis.com/css2?family=Google+Sans:wght@500&amp;family=Inter:wght@100..900&amp;display=swap\" rel=\"stylesheet\">\
 <script>{SIGN_IN_THEME}</script><style>{SIGN_IN_CSS}</style></head><body><main class=\"sign\">\
 <div class=\"brand\">{mark}</div>\
-<div class=\"card\"><div class=\"card-header\"><h1>Sign in</h1></div>\
-<div class=\"card-body\">{err_html}{panel}</div></div></main></body></html>"
+<div class=\"card\"><div class=\"card-header\"><h1>Welcome to Queen</h1><p>Sign in to your account to continue.</p></div>\
+<div class=\"card-body\">{err_html}{panel}</div></div>\
+<p class=\"help\">Need access? Contact your administrator.</p></main><script>{SIGN_IN_SCRIPT}</script></body></html>"
     )
 }
 
@@ -1809,18 +1867,44 @@ if(s==='light'||s==='dark')t=s;else if(window.matchMedia('(prefers-color-scheme:
 catch(e){}var r=document.documentElement;r.classList.toggle('light',t==='light');\
 r.classList.toggle('dark',t!=='light');r.style.colorScheme=t})();";
 
+// Progressive enhancement: both sign-in methods work without JavaScript.
+// Reset pending UI on pageshow, including when Back restores the page from BFCache.
+const SIGN_IN_SCRIPT: &str = r#"(function(){
+var form=document.querySelector('form'),toggle=document.querySelector('.password-toggle');
+var password=document.getElementById('password'),status=document.querySelector('.sign-in-status');
+var links=document.querySelectorAll('[data-provider]'),pending=false;
+if(toggle&&password){toggle.hidden=false;toggle.addEventListener('click',function(){
+var show=password.type==='password';password.type=show?'text':'password';
+toggle.textContent=show?'Hide':'Show';toggle.setAttribute('aria-label',show?'Hide password':'Show password');
+toggle.setAttribute('aria-pressed',String(show));});}
+function busy(message){pending=true;if(status){status.hidden=false;status.textContent=message;}
+links.forEach(function(link){link.setAttribute('aria-disabled','true');});
+if(form){form.setAttribute('aria-busy','true');form.querySelector('[type=submit]').disabled=true;}}
+links.forEach(function(link){link.addEventListener('click',function(event){
+if(event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||event.button!==0)return;
+if(pending){event.preventDefault();return;}busy('Opening '+link.dataset.provider+'…');});});
+if(form)form.addEventListener('submit',function(event){if(pending){event.preventDefault();return;}
+busy('Signing in…');form.querySelector('[type=submit]').textContent='Signing in…';});
+window.addEventListener('pageshow',function(){pending=false;
+links.forEach(function(link){link.removeAttribute('aria-disabled');});
+if(form){form.removeAttribute('aria-busy');var submit=form.querySelector('[type=submit]');
+submit.disabled=false;submit.textContent='Sign in with email';}
+if(status){status.hidden=true;status.textContent='';}
+if(password&&toggle){password.type='password';toggle.textContent='Show';
+toggle.setAttribute('aria-label','Show password');toggle.setAttribute('aria-pressed','false');}});
+var error=document.querySelector('[role=alert]');if(error)error.focus();
+})();"#;
+
 /// The sign-in page's stylesheet. The page is plain server-rendered HTML: it
 /// exists BEFORE the SPA (and, under mandatory auth, before any of its assets
 /// are reachable), so it cannot import the webapp's stylesheet. It restates it
-/// instead, and reads as one of the dashboard's own dialogs: the same tokens in
-/// both schemes, the card with its header, a field as its name over its input,
-/// the primary button, the error block, the focus rings.
+/// instead: the same tokens in both schemes, with more room for the standalone
+/// sign-in card, labelled fields, provider choices and keyboard focus rings.
 ///
 /// THE TOKENS ARE A COPY BY NECESSITY, NOT BY CHOICE. `:root` and `html.light`
 /// here repeat the blocks of the same name in app/src/style.css, value for
 /// value; `the_sign_in_tokens_are_the_dashboards` fails when one of them drifts.
-/// The rules under them are the dashboard's `.card`, `.card-header`, `.input`,
-/// `.btn`, `.btn-primary` and `.panel-err`, kept in step by hand.
+/// Google's button uses its official light palette and logo in both schemes.
 ///
 /// What is this page's own: the buttons run the width of the card, since they
 /// are its one action and its provider choices, not a row at the foot of a
@@ -1848,37 +1932,53 @@ font-feature-settings:'cv11','ss01','ss03','cv02';-webkit-font-smoothing:antiali
 text-rendering:optimizeLegibility;letter-spacing:-.005em;background:var(--ink-0);color:var(--text-hi)}\
 ::selection{background:color-mix(in srgb,var(--accent) 12%,transparent)}\
 :focus-visible{outline:2px solid var(--ring);outline-offset:2px}\
-.sign{width:100%;max-width:340px}\
-.brand{display:flex;justify-content:center;margin-bottom:24px}\
-.mark svg{display:block;height:96px;width:auto}\
+.sign{width:100%;max-width:400px}\
+.brand{display:flex;justify-content:center;margin-bottom:28px}\
+.mark svg{display:block;height:88px;max-width:100%;width:auto}\
 .word{font-size:15px;font-weight:600;line-height:1;letter-spacing:-.015em}\
-.card{border:1px solid var(--bd);border-radius:8px;background:var(--ink-2);overflow:hidden}\
-.card-header{padding:10px 14px;border-bottom:1px solid var(--bd)}\
-h1{margin:0;font-size:14px;font-weight:600}\
-.card-body{padding:14px}\
-.card-body,form{display:grid;gap:14px}\
+.card{border:1px solid var(--bd);border-radius:16px;background:var(--ink-2);box-shadow:0 12px 40px rgba(0,0,0,.06)}\
+.card-header{padding:28px 28px 0;text-align:center}\
+h1{margin:0;font-size:24px;font-weight:600;letter-spacing:-.035em;line-height:1.25}\
+.card-header p{margin:8px 0 0;color:var(--text-mid);font-size:13px}\
+.card-body{padding:24px 28px 28px}\
+.card-body,form{display:grid;gap:18px}\
 .field{display:grid;gap:6px}\
 .providers{display:grid;gap:8px}\
-.field span{font-weight:500}\
-input{width:100%;padding:5px 9px;border:1px solid var(--bd-hi);border-radius:6px;font:inherit;font-size:12.5px;\
+.field span,.field label{font-weight:500}\
+input{width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--bd-hi);border-radius:8px;font:inherit;font-size:14px;\
 background:var(--ink-3);color:var(--text-hi);transition:box-shadow .12s cubic-bezier(.2,.7,.2,1)}\
 input:focus{outline:none;box-shadow:0 0 0 1px var(--ring)}\
 input:-webkit-autofill{-webkit-text-fill-color:var(--text-hi);caret-color:var(--text-hi);\
 box-shadow:0 0 0 100px var(--ink-3) inset}\
 input:-webkit-autofill:focus{box-shadow:0 0 0 100px var(--ink-3) inset,0 0 0 1px var(--ring)}\
 input:autofill{filter:none}\
-button,.oauth{display:flex;justify-content:center;width:100%;padding:5px 10px;border:1px solid var(--bd-hi);\
-border-radius:6px;font:inherit;font-size:12px;font-weight:500;text-decoration:none;cursor:pointer;\
+input::placeholder{color:var(--text-low);opacity:1}\
+.submit,.oauth{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--bd-hi);\
+border-radius:8px;font:inherit;font-size:14px;font-weight:500;text-decoration:none;cursor:pointer;\
 color:var(--text-hi);background:color-mix(in srgb,var(--text-hi) 3%,transparent);\
 transition:.12s cubic-bezier(.2,.7,.2,1)}\
 .oauth:hover{border-color:var(--text-faint)}\
-button{margin-top:4px;border-color:var(--accent);background:var(--accent);color:var(--on-accent)}\
-button:hover{border-color:var(--accent-dim);background:var(--accent-dim)}\
+.oauth-google{background:#fff;border-color:#747775;color:#1f1f1f;font-family:'Google Sans',ui-sans-serif,system-ui,sans-serif;letter-spacing:.25px}\
+.oauth-google img{object-fit:contain;flex-shrink:0}\
+.oauth-google:hover{background:#f2f2f2;border-color:#747775}\
+.submit{margin-top:2px;border-color:var(--accent);background:var(--accent);color:var(--on-accent)}\
+.submit:hover{border-color:var(--accent-dim);background:var(--accent-dim)}\
+.submit:disabled,.oauth[aria-disabled=true]{opacity:.65;cursor:wait}\
+.password-field{position:relative;display:flex;align-items:center}\
+.password-field:has(.password-toggle:not([hidden])) input{padding-right:64px}\
+.password-toggle{position:absolute;right:4px;min-height:36px;padding:6px 10px;border:0;border-radius:5px;\
+font:inherit;font-size:12px;font-weight:500;background:transparent;color:var(--text-mid);cursor:pointer}\
+.password-toggle:hover{color:var(--text-hi);background:var(--ink-2)}\
+[hidden]{display:none!important}\
 .sep{display:flex;align-items:center;gap:10px;color:var(--text-low);font-size:12px;line-height:1}\
 .sep:before,.sep:after{content:'';flex:1;height:1px;background:var(--bd)}\
 .err{padding:12px 14px;border:1px solid var(--ember-bd);border-radius:8px;background:var(--ember-glow);\
 color:var(--ember-400);font-size:12.5px;line-height:1.45}\
-.note{margin:0;color:var(--text-mid)}";
+.note{margin:0;color:var(--text-mid)}\
+.help{margin:20px 0 0;text-align:center;color:var(--text-low);font-size:12px}\
+.sign-in-status{margin:0;text-align:center;color:var(--text-mid);font-size:12px}\
+@media(max-width:480px){body{padding:24px 16px}.card-header{padding:24px 20px 0}.card-body{padding:22px 20px 24px}input{font-size:16px}}\
+@media(prefers-reduced-motion:reduce){input,.submit,.oauth{transition:none}}";
 
 /// The brand: the wordmark with its line, as SVG markup
 /// (`app/public/queen-wordmark.svg`, written by `assets/logo.py` with the
@@ -2451,6 +2551,95 @@ mod tests {
     /// Both providers configured, so any test that renders the `Here` panel
     /// shows the whole thing.
     const BOTH: &[(&str, &str)] = &[("google", "Google"), ("github", "GitHub")];
+
+    fn google_test_state() -> St {
+        let mut cfg = crate::config::test_config(&[]);
+        cfg.google_client_id = Some("test-client".into());
+        cfg.google_client_secret = Some("test-secret".into());
+        cfg.jwt_hs_secret = Some("test-session-secret".into());
+        cfg.public_base_url = Some("http://localhost".into());
+        std::sync::Arc::new(crate::state::AppState {
+            cache: crate::cache::ClusterCache::new(&cfg, crate::store::Store::None),
+            limits: crate::limits::Limits::new(&cfg),
+            meter: std::sync::Arc::new(crate::meter::Meter::new(&cfg)),
+            registry: crate::registry::Registry::new(crate::store::Store::None),
+            keys: crate::auth::Keys::from_config(&cfg),
+            upstream: crate::upstream::Upstream::InProcess(Router::new()),
+            store: crate::store::Store::None,
+            cfg,
+            s3: None,
+        })
+    }
+
+    async fn response_text(response: Response) -> String {
+        String::from_utf8(axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap().to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn google_cancellation_renders_a_retry_and_preserves_only_a_bound_destination() {
+        let st = google_test_state();
+        for (cookie_nonce, ttl, expected_next) in [("nonce", STATE_TTL_S, "/queues?range=12h"), ("foreign", STATE_TTL_S, "/"), ("nonce", -1, "/")] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
+            headers.insert(header::COOKIE, HeaderValue::from_str(&format!("{}={cookie_nonce}", state_cookie_name(&st, false))).unwrap());
+            let response = google_callback(State(st.clone()), headers, Query(CallbackQuery {
+                code: None,
+                state: Some(sign_state(state_key(), "nonce", "/queues?range=12h", ttl)),
+                error: Some("access_denied".into()),
+            })).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let body = response_text(response).await;
+            assert!(body.contains(&format!("href=\"/auth/google?next={}\"", pct(expected_next))));
+            if expected_next == "/" {
+                assert!(body.contains("expired or belongs to another browser"));
+                assert!(!body.contains("/queues?range=12h"));
+            } else {
+                assert!(body.contains("Google sign-in was cancelled"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_callback_keeps_the_json_contract_for_api_clients() {
+        let st = google_test_state();
+        let response = google_callback(State(st), HeaderMap::new(), Query(CallbackQuery {
+            code: None, state: None, error: None,
+        })).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
+        assert_eq!(body["code"], "invalid_state");
+    }
+
+    #[tokio::test]
+    async fn google_browser_errors_keep_the_status_and_hide_provider_diagnostics() {
+        let st = google_test_state();
+        for (code, status, message) in [
+            ("domain_not_allowed", StatusCode::FORBIDDEN, "This Google account is not allowed"),
+            ("not_provisioned", StatusCode::FORBIDDEN, "does not have access to Queen"),
+            ("bad_gateway", StatusCode::BAD_GATEWAY, "try again in a moment"),
+        ] {
+            let response = google_browser_response(&st, "/queues", false,
+                errors::json_error(status, code, "<script>private provider detail</script>")).await;
+            assert_eq!(response.status(), status);
+            let body = response_text(response).await;
+            assert!(body.contains(message));
+            assert!(body.contains("role=\"alert\""));
+            assert!(!body.contains("private provider detail"));
+        }
+    }
+
+    #[tokio::test]
+    async fn google_browser_success_keeps_the_redirect_and_session_cookie() {
+        let st = google_test_state();
+        let response = google_browser_response(&st, "/", false,
+            redirect(StatusCode::SEE_OTHER, "/queues", Some("session=test; HttpOnly"))).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/queues");
+        assert_eq!(response.headers()[header::SET_COOKIE], "session=test; HttpOnly");
+    }
 
     #[test]
     fn verify_only_is_the_host_that_verifies_and_cannot_mint() {
