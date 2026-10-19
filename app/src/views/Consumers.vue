@@ -265,7 +265,7 @@
       <span><i class="g ok" aria-hidden="true" />stable</span>
       <span><i class="g warn" aria-hidden="true" />lagging</span>
       <span><i class="g bad" aria-hidden="true" />stuck</span>
-      <span><i class="g idle" aria-hidden="true" />never consumed</span>
+      <span><i class="g idle" aria-hidden="true" />never consumed, or inactive</span>
     </div>
 
     <!-- ===================== Detail modal ===================== -->
@@ -285,6 +285,7 @@
                  the two tiles below — without it "Backlog: 4.0M" reads as an
                  incident on a queue that is doing exactly what it was told. -->
             <span v-if="isConflating(selectedConsumer)" class="cfl-tag">conflation</span>
+            <span v-if="selectedConsumer.kind === 'kafka'" class="cfl-tag kind-tag">kafka</span>
             <button @click="selectedConsumer = null" class="btn btn-ghost btn-icon modal-close">
               <svg style="width:18px; height:18px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -303,6 +304,7 @@
                 <div class="stat-value cg-verdict" :class="verdictTone(selectedConsumer)">
                   <span class="g" :class="verdictGlyph(selectedConsumer)" aria-hidden="true" />{{ verdictWord(selectedConsumer) }}
                 </div>
+                <div v-if="presence?.said" class="stat-foot">{{ presence.said }}</div>
               </div>
               <div class="stat">
                 <!-- Partitions behind. On a conflating group this is the WHOLE
@@ -335,6 +337,11 @@
               </div>
             </div>
 
+            <!-- A Kafka group's state said plainly: the row's word is one
+                 word, and "No members" or "Inactive" each need the clock
+                 they are judged by. -->
+            <p v-if="presence?.note" class="cg-presence">{{ presence.note }}</p>
+
             <RouterLink v-if="selectedConsumer.queueName" class="btn btn-ghost" :to="queueLocation(selectedConsumer.queueName, route, 'supervisors')">Supervisors for this queue →</RouterLink>
             <ul class="detail-list">
               <li>
@@ -342,6 +349,16 @@
                 <RouterLink v-if="selectedConsumer.queueName" :to="queueLocation(selectedConsumer.queueName, route)">{{ selectedConsumer.queueName }} →</RouterLink>
                 <span v-else>—</span>
               </li>
+              <template v-if="presence">
+                <li>
+                  <span class="detail-note">Live members</span>
+                  <span class="tabular-nums">{{ presence.members }}</span>
+                </li>
+                <li>
+                  <span class="detail-note">Last seen</span>
+                  <span class="tabular-nums" :title="presence.seenAt ? formatTimestampUtc(presence.seenAt) : null">{{ presence.seen }}</span>
+                </li>
+              </template>
               <li v-for="topic in selectedConsumer.topics || []" :key="topic">
                 <span class="detail-note">Topic</span>
                 <span class="cg-topic">
@@ -473,7 +490,9 @@ import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import Autocomplete from '@/components/Autocomplete.vue'
-import { groupAttention } from '@/composables/useAttention'
+import { groupPresence, groupState } from '@/composables/useAttention'
+import { formatSpan } from '@/composables/settingsDoc'
+import { groupActivity } from '@/composables/useSeverity'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 import { useQueuesStore } from '@/stores/queuesStore'
@@ -665,18 +684,55 @@ watch([filterNamespace, filterTask], () => {
 // ---------------------------------------------------------------------------
 const getStatusText = (g) => g.state || 'Unknown'
 // The panel's verdict is the grid's (useAttention), not the broker's raw
-// state word: a group 1d behind is "Stuck" in both places.
+// state word: a group 1d behind is "Stuck" in both places. Mute is two states
+// with one shape: a native group that has never consumed, and a Kafka group
+// that is inactive — which may well have consumed, so it is never called the
+// first.
 const VERDICT = {
   bad: { glyph: 'bad', word: 'Stuck', tone: 'bad' },
   warn: { glyph: 'warn', word: 'Lagging', tone: 'warn' },
   mute: { glyph: 'idle', word: 'Never consumed', tone: '' },
+  inactive: { glyph: 'idle', word: 'Inactive', tone: '' },
+  empty: { glyph: 'ok', word: 'No members', tone: '' },
   ok: { glyph: 'ok', word: 'Stable', tone: '' },
 }
 const { linesFor } = useSettingsStore()
-const verdictOf = (g) => VERDICT[groupAttention(g, linesFor)] || VERDICT.ok
+const verdictOf = (g) => VERDICT[groupState(g, linesFor)] || VERDICT.ok
 const verdictGlyph = (g) => verdictOf(g).glyph
 const verdictWord = (g) => verdictOf(g).word
 const verdictTone = (g) => verdictOf(g).tone
+
+// A Kafka group's presence as the facade reports it, for the detail: its live
+// members, when it was last seen, and what its state means. Every age here is
+// `inactiveSeconds`, measured on the broker's clock — never this browser's.
+const presence = computed(() => {
+  const g = selectedConsumer.value
+  if (g?.kind !== 'kafka') return null
+  const lines = linesFor(g.queueName)
+  const activity = groupActivity(g, lines)
+  const away = toNum(g.inactiveSeconds)
+  const members = toNum(g.liveMembers)
+  const grace = formatSpan(lines.inactiveAfterSeconds)
+  let seen = '—'
+  if (activity === 'live') seen = 'now'
+  else if (g.lastSeenAt) seen = formatTimestamp(g.lastSeenAt) + (away > 0 ? ` · ${formatSpan(away)} ago` : '')
+  let note = ''
+  if (activity === 'live' && members === 0) {
+    note = 'Live with no members: its client assigns its own partitions and commits offsets.'
+  } else if (activity === 'idle') {
+    note = `No live member right now, which is also what a restart or a rebalance looks like for a while. It is judged by its lag until it has been away ${grace}, then shown as inactive.`
+  } else if (activity === 'inactive') {
+    note = (away !== null ? `No live member for longer than ${grace}. ` : '')
+      + 'An inactive group is not judged by its lag and raises no issue.'
+  }
+  return {
+    members: members === null ? '—' : formatNumber(members),
+    seen,
+    seenAt: activity === 'live' ? null : g.lastSeenAt || null,
+    said: groupPresence(g, linesFor),
+    note,
+  }
+})
 const stateClass = (g) => {
   const s = getStatusText(g)
   if (s === 'Stable') return 'cg-state-ok'
@@ -1044,6 +1100,13 @@ onMounted(() => {
   text-transform: uppercase;
   color: var(--text-low);
 }
+/* The client kind is identity, not a policy: the tag's shape, in neutral ink
+   rather than conflation's ice. */
+.kind-tag {
+  border-color: var(--bd);
+  background: var(--ink-3);
+  color: var(--text-low);
+}
 .lp-cell-code {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px;
@@ -1061,6 +1124,7 @@ onMounted(() => {
 .cg-verdict.warn { color: var(--warn-400); }
 .cg-verdict.bad { color: var(--ember-400); }
 .cg-topic { display: inline-flex; align-items: center; gap: 12px; }
+.cg-presence { margin: 0 0 16px; font-size: 12px; line-height: 1.6; color: var(--text-mid); }
 .cg-state-ok { color: var(--ok-500); }
 .cg-state-warn { color: var(--warn-400); }
 .cg-state-mute { color: var(--text-mid); }

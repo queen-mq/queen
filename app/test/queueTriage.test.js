@@ -16,13 +16,30 @@ test('priority is severity then unread age, with the same verdict as the rest of
 })
 
 test('evidence names the lagging groups and excludes groups that never read', () => {
-  const rows = buildQueueTriage([q('a', 12), q('b', 7)], [g('a', 4), g('a', 301, 'Stable', 'slow'), g('a', 9000, 'Dead'), g('b', 8000, 'Dead')])
+  const rows = buildQueueTriage([q('a', 12), q('b', 7)], [g('a', 4), g('a', 301, 'Stable', 'slow'), g('a', 9000, 'Dead'), g('b', 8000, 'Dead', '__QUEUE_MODE__')])
   assert.equal(rows[0].lag, 301)
   assert.deepEqual(rows[0].affected.map(g => g.name), ['slow'])
   assert.equal(rows[0].groupCount, 3)
+  assert.equal(rows[1].reason, 'noReader')
   assert.equal(rows[1].deadOnly, true)
   assert.equal(rows[1].readerCount, 0)
   assert.equal(rows[1].lag, null)
+  // A named group that never read is its own story: the queue raises nothing.
+  const named = buildQueueTriage([q('c', 7)], [g('c', 8000, 'Dead')])
+  assert.deepEqual([named[0].sev, named[0].reason, named[0].readerCount, named[0].groupCount], [null, null, 0, 1])
+})
+
+test('an inactive Kafka group is neither a reader nor evidence, and a live one is both', () => {
+  const kafka = (name, lag, inactiveSeconds) => ({ queueName: 'k', name, maxTimeLag: lag, kind: 'kafka', state: inactiveSeconds ? 'Empty' : 'Stable', inactiveSeconds })
+  const rows = buildQueueTriage([q('k', 40)], [kafka('gone', 86_400, 7200), kafka('billing', 2, 0), kafka('restarting', 400, 120)])
+  assert.equal(rows[0].sev, 'bad')
+  assert.equal(rows[0].lag, 400)
+  assert.deepEqual(rows[0].affected.map(g => g.name), ['restarting'])
+  assert.equal(rows[0].readerCount, 2)
+  assert.equal(rows[0].groupCount, 3)
+  const quiet = buildQueueTriage([{ ...q('t', 40), kafkaTopic: true }], [kafka('gone', 86_400, 7200)].map(g => ({ ...g, queueName: 't' })))
+  assert.deepEqual([quiet[0].sev, quiet[0].lag, quiet[0].readerCount], [null, null, 0])
+  assert.equal(filterQueueTriage(quiet).length, 0)
 })
 
 test('zero waiting with in-flight work does not hide unconfirmed consumer lag', () => {

@@ -634,7 +634,7 @@ import Heatmap from '@/components/Heatmap.vue'
 import { analytics, consumers, describeApiError, system } from '@/api'
 import { useApi } from '@/composables/useApi'
 import { alpha, chartPalette, chartTheme, legendLabels, semanticColors, themeVersion } from '@/composables/useChartTheme'
-import { ackFailureSeverity, backlogSeverity } from '@/composables/useSeverity'
+import { ackFailureSeverity, backlogSeverity, groupActivity } from '@/composables/useSeverity'
 import {
   formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc, formatTimestampUtc,
   validateRange,
@@ -1198,10 +1198,17 @@ const queueGroups = computed(() => (
     .slice()
     .sort((a, b) => (b.maxTimeLag || 0) - (a.maxTimeLag || 0))
 ))
+// The broker's state words, except for an inactive Kafka group (groupActivity):
+// its Dead or Lagging is its cursors' story, and a client that commits offsets
+// and takes no lease leaves them nothing to tell. It is counted as inactive.
 const groupsSub = computed(() => {
+  const lines = linesFor(selectedQueue.value)
   const gs = queueGroups.value
-  return `${fmt.plural(gs.length, 'group')} · ${gs.filter((g) => g.state === 'Lagging').length} Lagging`
-    + ` · ${gs.filter((g) => g.state === 'Dead').length} Dead`
+  const inactive = gs.filter((g) => groupActivity(g, lines) === 'inactive')
+  const rest = gs.filter((g) => !inactive.includes(g))
+  return `${fmt.plural(gs.length, 'group')} · ${rest.filter((g) => g.state === 'Lagging').length} Lagging`
+    + ` · ${rest.filter((g) => g.state === 'Dead').length} Dead`
+    + (inactive.length ? ` · ${inactive.length} inactive` : '')
 })
 
 const toneClass = (t) => (t ? `wl-${t}` : '')

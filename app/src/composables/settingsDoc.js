@@ -38,6 +38,10 @@ export const LINES = Object.freeze([
     help: 'Older than this, the group is failing to keep up.',
   },
   {
+    key: 'inactiveAfterSeconds', group: 'Consumer lag', label: 'Inactive after', unit: 's', perQueue: true,
+    help: 'A Kafka consumer group with no live member is still judged by its lag for this long, then shown as inactive instead of behind.',
+  },
+  {
     key: 'backlogWarnSeconds', group: 'Backlog', label: 'Attention at', unit: 's', perQueue: true, below: 'backlogBadSeconds',
     help: 'Pending messages, counted as seconds of work at the rate they are being acked.',
   },
@@ -160,16 +164,22 @@ export function formatSpan(seconds) {
 
 /**
  * One queue's own settings as short phrases, for a list:
- * ['Consumer lag 10m / 30m', 'Backlog 5m / —', 'no reader expected']. A pair
- * is named by its heading, attention first; '—' is the side left to the tenant.
+ * ['Consumer lag 10m / 30m', 'Inactive after 1h', 'Backlog 5m / —', 'no reader expected'].
+ * A pair is named by its heading, attention first; '—' is the side left to the
+ * tenant. A line that is no one's pair is named by its own label.
  */
 export function summarizeQueue(own) {
   const set = plain(own)
   const said = (meta) => (set[meta.key] === undefined ? '—'
     : meta.unit === 's' ? formatSpan(set[meta.key]) : formatLine(meta, set[meta.key]))
+  const paired = new Set(QUEUE_LINES.flatMap((m) => (m.below ? [m.key, m.below] : [])))
   const out = []
   for (const group of lineGroups(QUEUE_LINES)) {
-    if (group.lines.some((m) => set[m.key] !== undefined)) out.push(`${group.name} ${group.lines.map(said).join(' / ')}`)
+    const pair = group.lines.filter((m) => paired.has(m.key))
+    if (pair.some((m) => set[m.key] !== undefined)) out.push(`${group.name} ${pair.map(said).join(' / ')}`)
+    for (const meta of group.lines) {
+      if (!paired.has(meta.key) && set[meta.key] !== undefined) out.push(`${meta.label} ${said(meta)}`)
+    }
   }
   for (const flag of QUEUE_FLAGS) if (set[flag.key] === true) out.push(flag.said)
   return out

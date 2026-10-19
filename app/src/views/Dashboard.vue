@@ -62,8 +62,11 @@
                 <code>queue-ops</code>. A queue needs you when a consumer group on it is
                 more than {{ formatSpan(lines.lagWarnSeconds) }} behind
                 ({{ formatSpan(lines.lagBadSeconds) }}: failing), or when it holds
-                messages and no consumer group reads it — a group that has never
-                consumed does not count as a reader. Ack failures count when their
+                messages and nothing is set up to read them — no consumer group,
+                and no queue-mode consumer that has ever consumed; a queue Kafka
+                clients created is exempt. A Kafka group with no live member for
+                {{ formatSpan(lines.inactiveAfterSeconds) }} is inactive, not an
+                issue. Ack failures count when their
                 share of the window's acks crosses
                 {{ formatLine(LINE_META.ackWarnRate, lines.ackWarnRate) }}. The
                 sidebar, Queues and Consumer groups use the same rule, and the lines
@@ -447,7 +450,7 @@
               >
                 {{ (g.partitionsWithLag || 0) > 0 ? `${g.partitionsWithLag} behind` : '—' }}
               </span>
-              <span v-else class="entity-right num" :class="lagNumClass(g.maxTimeLag, g.queueName)">
+              <span v-else class="entity-right num" :class="groupLagClass(g)">
                 {{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '—' }}
               </span>
             </div>
@@ -460,7 +463,7 @@
                   <span class="meta-sep">·</span>
                   <span class="num">{{ formatNumber(g.totalLag || 0) }} log lag</span>
                   <span class="meta-sep">·</span>
-                  <span class="num" :class="lagNumClass(g.maxTimeLag, g.queueName)">{{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '0s' }} time lag</span>
+                  <span class="num" :class="groupLagClass(g)">{{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '0s' }} time lag</span>
                 </template>
                 <span class="meta-sep">·</span>
                 <!-- One row per (partition, group) cursor — NOT a consumer
@@ -505,7 +508,7 @@ import { formatChartLabel } from '@/composables/useFormat'
 import { isConflating } from '@/composables/useConflation'
 import { semanticColors } from '@/composables/useChartTheme'
 import {
-  ackFailureSeverity, backlogSeverity, eventLoopSeverity, numTone,
+  ackFailureSeverity, backlogSeverity, eventLoopSeverity, groupActivity, numTone,
   pendingDriftSeverity, timeLagSeverity,
 } from '@/composables/useSeverity'
 import { groupAttention, queueAttention } from '@/composables/useAttention'
@@ -812,6 +815,11 @@ const lagSeriesData = computed(() => {
 // else the tenant's.
 const { lines, linesFor } = useSettingsStore()
 const lagNumClass = (s, queue) => numTone(timeLagSeverity(s, queue === undefined ? undefined : linesFor(queue)))
+// An inactive Kafka group (groupActivity): a consumer nobody runs any more,
+// whose lag grows forever. Its figure is plain ink, as on Consumer groups, and
+// it is no part of its queue's lag.
+const isInactive = (g) => groupActivity(g, linesFor(g.queueName)) === 'inactive'
+const groupLagClass = (g) => (isInactive(g) ? '' : lagNumClass(g.maxTimeLag, g.queueName))
 const lagSeverity = computed(() => lagNumClass(lagMaxSeconds.value || 0))
 const lagContext = computed(() => {
   const sampled = history.value.some(x => x.avgLagMs !== null)
@@ -1148,12 +1156,13 @@ const pendingNumClass = (n) => backlogSeverity({ pending: n, drainPerSec: drainP
 // ---------------------------------------------------------------------------
 
 // Per-queue worst-lag rollup, keyed off consumer-group lag (the queue itself
-// doesn't carry a lag; it's a property of its consumer groups).
+// doesn't carry a lag; it's a property of its consumer groups — of the ones
+// still there, so not of an inactive Kafka group).
 const queueLagMap = computed(() => {
   const m = {}
   for (const c of consumers.value) {
     const q = c.queueName
-    if (!q) continue
+    if (!q || isInactive(c)) continue
     const lag = c.maxTimeLag || 0
     if (!m[q] || lag > m[q]) m[q] = lag
   }
@@ -1188,7 +1197,7 @@ const sortedConsumers = computed(() =>
   [...consumers.value].sort((a, b) => (b.maxTimeLag || 0) - (a.maxTimeLag || 0))
 )
 const laggingCount = computed(() =>
-  consumers.value.filter(c => (c.maxTimeLag || 0) >= 60 || (c.partitionsWithLag || 0) > 0).length
+  consumers.value.filter(c => !isInactive(c) && ((c.maxTimeLag || 0) >= 60 || (c.partitionsWithLag || 0) > 0)).length
 )
 
 
@@ -1276,7 +1285,8 @@ const focus = computed(() => {
 //   bad   a consumer group on the queue is past the queue's second lag line
 //   warn  a consumer group on the queue is past its first (5 min and 1 min
 //         unless Settings moved them)
-//   warn  the queue holds messages and no live consumer group reads it
+//   warn  the queue holds messages and nothing is set up to read them: no
+//         live group and no named one, on a queue Kafka clients did not create
 //   warn/bad  the tenant's ack failures, by ackFailureSeverity (useSeverity)
 //
 // The first three are composables/useAttention — the sidebar, Queues and
@@ -1290,7 +1300,7 @@ const issues = computed(() => {
   for (const a of queueAttention(enrichedQueues.value, consumers.value, linesFor)) {
     const why = a.reason === 'lag'
       ? `A consumer group is ${fmtLagSeconds(a.lag)} behind · ${formatNumber(a.pending)} pending`
-      : `${a.deadOnly ? 'Its consumer group has never read' : 'No consumer group reads it'} · ${formatNumber(a.pending)} waiting`
+      : `${a.deadOnly ? 'Queue mode has never consumed from it' : 'No consumer group reads it'} · ${formatNumber(a.pending)} waiting`
     out.push({ key: `q:${a.name}`, sev: a.sev, name: a.name, why, to: queuePath(a.name) })
   }
   const es = errorSeverity.value

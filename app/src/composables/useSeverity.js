@@ -19,6 +19,16 @@
 //     seconds, an event-loop lag in ms), or
 //   * a fallback used only when the denominator is missing, and marked as one.
 //
+// One verdict is about presence, not about a number. A Kafka client reads
+// through the broker's Kafka facade: it commits offsets and never takes a
+// lease, so the cursors that tell a native group's story cannot tell a Kafka
+// group that reads from one that stopped (the broker's own `state` called
+// every one of them Dead). The facade says when it last saw the group
+// instead, and groupActivity turns that into a verdict: a group gone for
+// longer than a grace is INACTIVE — a consumer someone switched off, whose lag
+// grows forever and says nothing about the queue — and a red that never goes
+// out is the same wolf as an amber tied to `> 0`.
+//
 // The thresholds are collected in THRESHOLDS so the test file can pin the
 // numbers rather than re-typing them, and so a future argument about "is 1%
 // the right line?" happens in one place and moves every surface at once.
@@ -83,6 +93,12 @@ export const THRESHOLDS = Object.freeze({
   // --- Message age (already proportional: it is a duration) ---------------
   lagWarnSeconds: 60,           // under a minute old = fresh
   lagBadSeconds: 300,
+
+  // --- Kafka consumer groups (a duration too) -----------------------------
+  // How long a Kafka group may have no live member and still be judged by its
+  // lag: a restart, a rebalance, a crash the coordinator has not called yet.
+  // Past it the group is inactive, and its lag is no longer anybody's alarm.
+  inactiveAfterSeconds: 900,
 
   // --- Queue-level average lag, in ms -------------------------------------
   lagMsFresh: 1000,
@@ -348,6 +364,9 @@ export function lossSeverity({ dropped, delivered } = {}) {
  * on a busy queue a partition is momentarily behind all the time, and that is
  * what "working" looks like.
  *
+ * A Kafka group is asked groupActivity first (useAttention groupAttention):
+ * this judges only the lag of one that is still there.
+ *
  * @returns {'mute'|'ok'|'warn'|'bad'}
  */
 export function consumerGroupSeverity({ state, maxTimeLag } = {}, lines) {
@@ -357,6 +376,34 @@ export function consumerGroupSeverity({ state, maxTimeLag } = {}, lines) {
   if (lag >= T.lagBadSeconds) return SEV_BAD
   if (lag >= T.lagWarnSeconds) return SEV_WARN
   return SEV_OK
+}
+
+/**
+ * Is a Kafka consumer group still there? Its cursors cannot say — a Kafka
+ * client commits offsets and never takes a lease — so the facade's group
+ * coordinator does, as `inactiveSeconds` on the broker's clock: 0 while the
+ * group is live (members heartbeat, or a client that assigns its own
+ * partitions commits offsets), else the seconds since it was last seen.
+ *
+ *   'live'      a reader, judged by its lag like any group
+ *   'idle'      no live member, inside the grace (`inactiveAfterSeconds` of
+ *               its queue): still judged by its lag, since a restart or a
+ *               rebalance looks exactly like this for a while
+ *   'inactive'  past the grace, or with nothing to date it by (`null`: a
+ *               facade that reports no presence, or members that no longer
+ *               subscribe to this queue): shown, never alerted on
+ *   null        a native group (kind 'queen' or none), which this does not judge
+ *
+ * @returns {'live'|'idle'|'inactive'|null}
+ */
+export function groupActivity(g, lines) {
+  if (g?.kind !== 'kafka') return null
+  const away = n(g.inactiveSeconds)
+  if (away === null) return 'inactive'
+  if (away <= 0) return 'live'
+  // A hand-made table may carry only the lag lines; the grace is then the tenant's.
+  const grace = n(linesOr(lines).inactiveAfterSeconds) ?? current().inactiveAfterSeconds
+  return away < grace ? 'idle' : 'inactive'
 }
 
 /**

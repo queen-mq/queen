@@ -20,6 +20,7 @@ import {
   diskSeverity,
   dlqGrowthSeverity,
   eventLoopSeverity,
+  groupActivity,
   keepUpSeverity,
   lagMsSeverity,
   laggingPartitionsSeverity,
@@ -247,6 +248,39 @@ test('the lines in force are the built-in ones until a reader is installed', () 
   }
   assert.equal(memoryShareSeverity(0.85), 'warn')
   assert.equal(timeLagSeverity(120), 'warn')
+})
+
+test('a Kafka group is judged by its presence before its lag, and a native one is not', () => {
+  const k = (inactiveSeconds) => ({ kind: 'kafka', inactiveSeconds })
+  assert.equal(THRESHOLDS.inactiveAfterSeconds, 900)
+  assert.equal(groupActivity(k(0)), 'live')
+  assert.equal(groupActivity(k(1)), 'idle')
+  assert.equal(groupActivity(k(899)), 'idle')
+  assert.equal(groupActivity(k(900)), 'inactive')     // the grace line itself is past it
+  assert.equal(groupActivity(k(86_400)), 'inactive')
+  // Nothing to date it by — no presence reported, or no member subscribed here.
+  assert.equal(groupActivity(k(null)), 'inactive')
+  assert.equal(groupActivity(k(undefined)), 'inactive')
+  assert.equal(groupActivity(k('x')), 'inactive')
+  // Native groups keep their cursors' story: not judged here, whatever they carry.
+  assert.equal(groupActivity({ kind: 'queen', inactiveSeconds: null }), null)
+  assert.equal(groupActivity({ state: 'Dead' }), null)
+  assert.equal(groupActivity(undefined), null)
+})
+
+test("a Kafka group's grace is its queue's, then the tenant's", () => {
+  const k = { kind: 'kafka', inactiveSeconds: 1200 }
+  assert.equal(groupActivity(k, { ...THRESHOLDS, inactiveAfterSeconds: 3600 }), 'idle')
+  assert.equal(groupActivity(k, THRESHOLDS), 'inactive')
+  setLinesReader(() => ({ ...THRESHOLDS, inactiveAfterSeconds: 1800 }))
+  try {
+    assert.equal(groupActivity(k), 'idle')
+    // A table with only the lag lines in it does not make every group inactive.
+    assert.equal(groupActivity(k, { lagWarnSeconds: 600, lagBadSeconds: 1800 }), 'idle')
+  } finally {
+    setLinesReader()
+  }
+  assert.equal(groupActivity(k), 'inactive')
 })
 
 test('one partition momentarily behind is what working looks like', () => {

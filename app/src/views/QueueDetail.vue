@@ -376,7 +376,8 @@
           <!-- Not broker configuration: the lines the console judges this queue
                by (Settings). They are here because this is where one looks
                when a queue is amber and should not be. The two lag lines are
-               always stated; the others only when this queue has its own. -->
+               always stated, and the Kafka grace where Kafka clients read; the
+               others only when this queue has its own. -->
           <div class="qd-lines-head">
             <h4>Console settings</h4>
             <span class="qd-lines-sub">{{ ownLines ? 'this queue has its own' : 'the tenant’s lines' }} · <router-link to="/settings">Settings</router-link></span>
@@ -469,6 +470,7 @@ import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { QUEUE_FLAGS, QUEUE_LINES, formatLine, formatSpan } from '@/composables/settingsDoc'
 import { queueAttention } from '@/composables/useAttention'
@@ -779,7 +781,20 @@ const lagLatest = computed(() => {
 const settingsStore = useSettingsStore()
 const queueLines = computed(() => settingsStore.linesFor(queueName.value))
 const ownLines = computed(() => settingsStore.settings.value.queues.get(queueName.value) || null)
-const shownLines = computed(() => QUEUE_LINES.filter((m) => m.group === 'Consumer lag' || ownLines.value?.[m.key] !== undefined))
+// A queue Kafka clients created (the queue listing says so; the status route
+// this page reads does not, so the shared listing the sidebar keeps is asked).
+const queuesStore = useQueuesStore()
+const kafkaTopic = computed(() => queueData.value?.kafkaTopic === true
+  || queuesStore.queueMeta.value.get(queueName.value)?.kafkaTopic === true)
+// The tenant's consumer groups: the shared listing the sidebar keeps (this page
+// never pays for a scan of its own), read here and by the queue's verdict.
+const groupsStore = useGroupsStore()
+// The Kafka grace means something only where Kafka clients read: a topic they
+// created, or a queue one of their groups is on.
+const readByKafka = computed(() => kafkaTopic.value
+  || (groupsStore.groups.value || []).some((g) => g.queueName === queueName.value && g.kind === 'kafka'))
+const shownLines = computed(() => QUEUE_LINES.filter((m) => ownLines.value?.[m.key] !== undefined
+  || (m.group === 'Consumer lag' && (m.key !== 'inactiveAfterSeconds' || readByKafka.value))))
 const shownFlags = computed(() => QUEUE_FLAGS.filter((f) => ownLines.value?.[f.key] === true))
 // The capability that configures a queue, on a document that was read.
 const canSetLines = computed(() => can('queueAdmin') && settingsStore.state.value === 'ready')
@@ -1099,11 +1114,10 @@ const nameParts = computed(() => {
 // verdict — useAttention, the rule the Overview, Queues and the sidebar use —
 // colours only the partitions that hold work. It reads the shared listing the
 // sidebar keeps; this page never pays for a consumer-group scan of its own.
-const groupsStore = useGroupsStore()
 const queueSev = computed(() => {
   const groups = groupsStore.groups.value
   if (groups === null || groupsStore.error.value !== null) return 'ok'
-  const here = { name: queueName.value, messages: { pending: totalMessages.value.pending } }
+  const here = { name: queueName.value, messages: { pending: totalMessages.value.pending }, kafkaTopic: kafkaTopic.value }
   return queueAttention([here], groups, settingsStore.linesFor)[0]?.sev || 'ok'
 })
 // Each seed's lag — the age of the oldest message its slowest reader has not

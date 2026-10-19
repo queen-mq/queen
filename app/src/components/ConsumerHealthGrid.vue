@@ -45,7 +45,7 @@
         :class="`sev-${cardSev(g)}`"
         @click="$emit('select', g)"
       >
-        <span class="g" :class="glyph(cardSev(g))" aria-hidden="true"></span>
+        <span class="g" :class="glyph(rowState(g))" aria-hidden="true"></span>
 
         <span class="cname">
           <!-- Queue mode: queue name leads (the meaningful identifier);
@@ -56,11 +56,14 @@
                partitions to visit either way, but for a conflating group that
                is the whole of the work and its message backlog is not. -->
           <span class="cname-tag cname-tag-cfl" v-if="isConflating(g)">conflation</span>
+          <!-- Read through the Kafka facade: its presence, not its cursors,
+               says whether anyone is there (the status beside it). -->
+          <span class="cname-tag" v-if="g.kind === 'kafka'">kafka</span>
           <span class="nm">{{ primaryName(g) }}</span>
           <span class="ns" v-if="g.name !== '__QUEUE_MODE__'"> · {{ g.queueName }}</span>
         </span>
 
-        <span class="cstatus" :class="`sev-${cardSev(g)}`">{{ statusWord(cardSev(g)) }}</span>
+        <span class="cstatus" :class="`sev-${cardSev(g)}`" :title="presence(g) || null">{{ statusWord(rowState(g)) }}</span>
 
         <span class="cell-c">
           <!-- "members" in the API = partitions assigned to this consumer group;
@@ -142,18 +145,21 @@
 <script setup>
 import { computed } from 'vue'
 
+import { groupAttention, groupPresence, groupState } from '@/composables/useAttention'
 import { isConflating } from '@/composables/useConflation'
-import { consumerGroupSeverity, laggingPartitionsSeverity, timeLagSeverity } from '@/composables/useSeverity'
+import { groupActivity, laggingPartitionsSeverity, timeLagSeverity } from '@/composables/useSeverity'
 import { useSettingsStore } from '@/stores/settingsStore'
 
 const props = defineProps({
   /**
    * Consumer-group rows. Each entry should expose:
    *   { name, queueName, members, maxTimeLag, partitionsWithLag, state,
-   *     conflation }
+   *     conflation, kind, liveMembers, lastSeenAt, inactiveSeconds }
    * `name === '__QUEUE_MODE__'` indicates the synthetic queue-mode group;
    * the grid surfaces the queue name as the lead in that case.
    * `conflation` is the group's last-value delivery policy (absent = off).
+   * `kind === 'kafka'` is a group read through the Kafka facade, and the last
+   * three are its presence (null when the facade reports none).
    */
   consumers: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
@@ -180,34 +186,54 @@ defineEmits(['select', 'view', 'move-now', 'seek', 'delete'])
  * whole row amber, and on a busy queue some partition is a second behind at
  * every sample: that is not a group falling behind, it is a group working.
  * Lag is now judged by its AGE, and the partition count by its SHARE of the
- * group's partitions. Dead groups stay mute — informational, not an alert. */
+ * group's partitions. Dead groups stay mute — informational, not an alert —
+ * and so do inactive Kafka groups, whose figures are then plain ink too: the
+ * lag of a consumer nobody runs any more grows forever, and painting it would
+ * be the alarm the verdict has just declined to raise. */
 const SEV_RANK = { ok: 0, ice: 0, mute: 1, warn: 2, bad: 3 }
 
 // A group's age is judged by the lines of its queue (Settings).
 const { linesFor } = useSettingsStore()
 
+// The verdict, useAttention's, as every other surface gives it.
 function cardSev(g) {
-  return consumerGroupSeverity({ state: g.state, maxTimeLag: g.maxTimeLag }, linesFor(g.queueName))
+  return groupAttention(g, linesFor)
 }
 
+// What the row names: the verdict, or where a Kafka group's members are.
+function rowState(g) {
+  return groupState(g, linesFor)
+}
+
+function presence(g) {
+  const said = groupPresence(g, linesFor)
+  return said && said.charAt(0).toUpperCase() + said.slice(1)
+}
+
+const inactive = (g) => groupActivity(g, linesFor(g.queueName)) === 'inactive'
+
 function timeLagSev(g) {
-  return timeLagSeverity(g.maxTimeLag, linesFor(g.queueName))
+  return inactive(g) ? 'mute' : timeLagSeverity(g.maxTimeLag, linesFor(g.queueName))
 }
 
 function lagPartsSev(g) {
-  return laggingPartitionsSeverity({ behind: g.partitionsWithLag, total: g.members })
+  return inactive(g) ? 'mute' : laggingPartitionsSeverity({ behind: g.partitionsWithLag, total: g.members })
 }
 
 /* ---------------- naming -----------------
  * Queue-mode groups have a synthetic `__QUEUE_MODE__` name that's pure
  * noise to the operator — the meaningful identifier is the queue. Named
  * groups put the group name first with the queue as muted subtitle. */
-// The row verdict as a shape and a word, in the page legend's vocabulary.
-function glyph(sev) {
-  return sev === 'bad' ? 'bad' : sev === 'warn' ? 'warn' : sev === 'mute' ? 'idle' : 'ok'
+// The row state (groupState) as a shape and a word, in the page legend's
+// vocabulary. A Kafka group with no member right now that is not behind keeps
+// the healthy shape and says so; past the grace it is inactive.
+const GLYPH = { bad: 'bad', warn: 'warn', mute: 'idle', inactive: 'idle' }
+const WORD = { bad: 'Stuck', warn: 'Lagging', mute: 'Never consumed', inactive: 'Inactive', empty: 'No members' }
+function glyph(state) {
+  return GLYPH[state] || 'ok'
 }
-function statusWord(sev) {
-  return sev === 'bad' ? 'Stuck' : sev === 'warn' ? 'Lagging' : sev === 'mute' ? 'Never consumed' : 'Stable'
+function statusWord(state) {
+  return WORD[state] || 'Stable'
 }
 
 const primaryName = (g) => g.name === '__QUEUE_MODE__' ? g.queueName : g.name

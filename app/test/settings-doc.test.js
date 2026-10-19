@@ -18,8 +18,14 @@ test('every line that may be moved is a built-in line, and its pair exists', () 
   }
   // Per queue: what is judged with a queue in hand. The broker's lines are not.
   assert.deepEqual(QUEUE_LINES.map((m) => m.key), [
-    'lagWarnSeconds', 'lagBadSeconds', 'backlogWarnSeconds', 'backlogBadSeconds', 'ackWarnRate', 'ackBadRate',
+    'lagWarnSeconds', 'lagBadSeconds', 'inactiveAfterSeconds',
+    'backlogWarnSeconds', 'backlogBadSeconds', 'ackWarnRate', 'ackBadRate',
   ])
+  // The Kafka grace is a consumer-group line, listed with the two lag lines,
+  // and no one's pair: a grace shorter or longer than either is a choice.
+  assert.equal(LINE_META.inactiveAfterSeconds.group, 'Consumer lag')
+  assert.equal(LINE_META.inactiveAfterSeconds.below, undefined)
+  assert.ok(!LINES.some((m) => m.below === 'inactiveAfterSeconds'))
   assert.deepEqual(QUEUE_FLAGS.map((f) => f.key), ['noReaderOk'])
 })
 
@@ -122,7 +128,29 @@ test("a queue's own settings read as short phrases", () => {
     summarizeQueue({ backlogWarnSeconds: 90, ackBadRate: 0.1, noReaderOk: true }),
     ['Backlog 1m 30s / —', 'Ack failures — / 10%', 'no reader expected'],
   )
+  // A line outside a pair is named by its label, beside its heading's pair.
+  assert.deepEqual(summarizeQueue({ inactiveAfterSeconds: 3600 }), ['Inactive after 1h'])
+  assert.deepEqual(
+    summarizeQueue({ lagBadSeconds: 1800, inactiveAfterSeconds: 7200 }),
+    ['Consumer lag — / 30m', 'Inactive after 2h'],
+  )
   assert.deepEqual(summarizeQueue(undefined), [])
+})
+
+test('the Kafka grace is read, merged and checked like any line, for the tenant or one queue', () => {
+  const s = readSettings({
+    defaults: { inactiveAfterSeconds: 1800 },
+    queues: { nightly: { inactiveAfterSeconds: 7200 }, bad: { inactiveAfterSeconds: 90.5 } },
+  })
+  assert.equal(resolveLines(THRESHOLDS, s, 'nightly').inactiveAfterSeconds, 7200)
+  assert.equal(resolveLines(THRESHOLDS, s, 'orders').inactiveAfterSeconds, 1800)
+  assert.equal(resolveLines(THRESHOLDS, s, 'bad').inactiveAfterSeconds, 1800)
+  assert.equal(resolveLines(THRESHOLDS, readSettings(null)).inactiveAfterSeconds, 900)
+  // Shorter than the lag lines is allowed: a tenant may not want stopped Kafka groups called behind at all.
+  assert.deepEqual(validateLines(THRESHOLDS, { inactiveAfterSeconds: 30 }), {})
+  assert.deepEqual(validateLines(THRESHOLDS, { inactiveAfterSeconds: 86_400 }, { perQueue: true }), {})
+  assert.deepEqual(Object.keys(validateLines(THRESHOLDS, { inactiveAfterSeconds: 0 }, { perQueue: true })), ['inactiveAfterSeconds'])
+  assert.deepEqual(withQueue(undefined, 'nightly', { inactiveAfterSeconds: 7200 }), { queues: { nightly: { inactiveAfterSeconds: 7200 } } })
 })
 
 test('a save replaces the lines it knows and keeps everything else', () => {
