@@ -548,10 +548,11 @@ impl RaftFacade {
         if query_value(query, "stats").as_deref() == Some("lanes") {
             return self.api_list_queue_lanes(ctx).await;
         }
-        let rows = self.queue_snapshots(&ctx.tenant).await?;
+        let mut rows = self.queue_snapshots(&ctx.tenant).await?;
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
-        let (kv_rows, kv_bytes) = tokio::task::spawn_blocking(move || {
+        let now = super::wall_micros();
+        let (kv_rows, kv_bytes, kafka_topics) = tokio::task::spawn_blocking(move || {
             store.read(|r| {
                 let mut kv_rows = 0i64;
                 let mut kv_bytes = 0i64;
@@ -560,12 +561,28 @@ impl RaftFacade {
                     kv_bytes += key.len() as i64 + row.value.len() as i64;
                     true
                 })?;
-                Ok((kv_rows, kv_bytes))
+                Ok((kv_rows, kv_bytes, reads::kafka_topics(r, &tenant, now)?))
             })
         })
         .await
         .map_err(|e| RsmError::Internal(format!("kv usage read: {e}")))?
         .map_err(read_error)?;
+        // `kafkaTopic`: the queue was created through the Kafka facade (its
+        // topic record is pinned to this queue's id). The console reads it
+        // to know that pending no consumer group holds is not "unread": a
+        // Kafka topic is never read in queue mode.
+        for row in &mut rows {
+            let kafka = match (
+                row.get("name").and_then(Value::as_str),
+                row.get("id").and_then(Value::as_str),
+            ) {
+                (Some(name), Some(id)) => reads::is_kafka_topic(&kafka_topics, name, id),
+                _ => false,
+            };
+            if let Some(o) = row.as_object_mut() {
+                o.insert("kafkaTopic".to_string(), Value::Bool(kafka));
+            }
+        }
         Ok(ApiOut::json(
             200,
             json!({"queues": rows, "kvRows":kv_rows, "kvBytes":kv_bytes, "timerRows":0, "timerBytes":0}).to_string(),

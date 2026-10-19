@@ -16,7 +16,10 @@ use crate::rsm::store::keys;
 use crate::rsm::store::rows::{self, DlqRow, PartitionRow};
 use crate::rsm::store::{Keyspace, Reads, Store, TypedReads};
 
+mod kafka_groups;
 mod messages;
+
+pub(super) use kafka_groups::{is_kafka_topic, kafka_topics};
 
 #[derive(Clone)]
 pub(super) struct Part {
@@ -2070,7 +2073,8 @@ fn subscription_ts_json(us: i64) -> Value {
 }
 
 /// `GET /api/v1/consumer-groups/:group`:
-/// `{ queue: { conflation, kind, partitions: [...] } }`.
+/// `{ queue: { conflation, kind, liveMembers, lastSeenAt, inactiveSeconds,
+/// partitions: [...] } }`, the reader fields as the listing's ([`Readers`]).
 fn group_detail<R: Reads + ?Sized>(
     r: &R,
     qlog: Option<&QLogReader>,
@@ -2085,9 +2089,11 @@ fn group_detail<R: Reads + ?Sized>(
     for l in &lags {
         by_queue.entry(l.queue.clone()).or_default().push(l);
     }
+    let kafka = kafka_groups::kafka_groups(r, tenant, [group], now)?;
     let mut answer = serde_json::Map::new();
     for (queue, mut rows) in by_queue {
         rows.sort_by(|a, b| a.partition.cmp(&b.partition));
+        let readers = Readers::of(&kafka, group, &queue, now);
         let conflation = r
             .group(tenant, &queue, group)?
             .is_some_and(|m| m.meta.conflation);
@@ -2105,10 +2111,11 @@ fn group_detail<R: Reads + ?Sized>(
                 })
             })
             .collect();
-        answer.insert(
-            queue,
-            json!({"conflation":conflation,"kind":"queen","partitions":partitions}),
-        );
+        let mut entry = serde_json::Map::new();
+        entry.insert("conflation".into(), json!(conflation));
+        readers.insert_into(&mut entry, now);
+        entry.insert("partitions".into(), Value::Array(partitions));
+        answer.insert(queue, Value::Object(entry));
     }
     Ok(Value::Object(answer))
 }
@@ -2124,13 +2131,16 @@ fn lagging_partitions<R: Reads + ?Sized>(
     min_lag_seconds: i64,
     now: i64,
 ) -> crate::rsm::store::Result<Vec<Value>> {
-    let mut rows: Vec<(i64, Value)> = cursor_lags(r, qlog, reader, tenant, None, now)?
+    let lagging: Vec<CursorLag> = cursor_lags(r, qlog, reader, tenant, None, now)?
+        .into_iter()
+        .filter(|l| l.lag_seconds(now).is_some_and(|lag| lag > min_lag_seconds))
+        .collect();
+    let kafka =
+        kafka_groups::kafka_groups(r, tenant, lagging.iter().map(|l| l.group.as_str()), now)?;
+    let mut rows: Vec<(i64, Value)> = lagging
         .into_iter()
         .filter_map(|l| {
             let lag = l.lag_seconds(now)?;
-            if lag <= min_lag_seconds {
-                return None;
-            }
             let oldest = l.oldest_unconsumed_us?;
             Some((
                 lag,
@@ -2140,7 +2150,7 @@ fn lagging_partitions<R: Reads + ?Sized>(
                     "partition_name":l.partition,
                     "partition_id":uuid_bytes_to_string(&l.partition_uuid),
                     "worker_id":l.worker,
-                    "kind":"queen",
+                    "kind":if kafka.contains_key(&l.group) { "kafka" } else { "queen" },
                     "offset_lag":l.pending,
                     "time_lag_seconds":lag,
                     "lag_hours":(lag as f64 / 36.0).round() / 100.0,
@@ -2161,10 +2171,67 @@ pub(super) fn iso_ms(us: i64) -> String {
     format!("{}Z", &s[..s.len() - 4])
 }
 
+/// Who reads a queue for a group, as every group row reports it: `kind`
+/// (`kafka` for a group the Kafka facade's rows name, else `queen`), and for
+/// a Kafka group whose facade reports presence ([`kafka_groups`])
+/// `liveMembers` (members subscribed to the queue that heartbeat),
+/// `lastSeenAt` and `inactiveSeconds` (0 while the queue is read for the
+/// group, else seconds since it was last seen read, on this broker's clock;
+/// null when nothing dates it). All three are null on a native group, which
+/// has no membership to report: a native consumer is seen only through its
+/// leases.
+struct Readers {
+    kind: &'static str,
+    live: Option<kafka_groups::Liveness>,
+}
+
+impl Readers {
+    fn of(
+        kafka: &HashMap<String, kafka_groups::KafkaGroup>,
+        group: &str,
+        queue: &str,
+        now: i64,
+    ) -> Readers {
+        match kafka.get(group) {
+            Some(k) => Readers {
+                kind: "kafka",
+                live: k.on(queue, now),
+            },
+            None => Readers {
+                kind: "queen",
+                live: None,
+            },
+        }
+    }
+
+    fn insert_into(&self, row: &mut serde_json::Map<String, Value>, now: i64) {
+        let live = self.live;
+        row.insert("kind".into(), json!(self.kind));
+        row.insert(
+            "liveMembers".into(),
+            live.map_or(Value::Null, |l| json!(l.live_members)),
+        );
+        row.insert(
+            "lastSeenAt".into(),
+            live.and_then(|l| l.last_seen_us)
+                .map_or(Value::Null, |us| json!(iso_ms(us))),
+        );
+        row.insert(
+            "inactiveSeconds".into(),
+            live.and_then(|l| l.inactive_seconds(now))
+                .map_or(Value::Null, |s| json!(s)),
+        );
+    }
+}
+
 /// `GET /api/v1/consumer-groups`: one row per `(group, queue)` with at least
-/// one cursor, ordered by group
-/// then queue. `members` counts partition cursors, `state` is `Lagging` past
-/// 300 s of time lag, else `Stable` once anything was consumed, else `Dead`.
+/// one cursor, ordered by group then queue. `members` counts partition
+/// cursors. `state` is `Lagging` past 300 s of time lag, else `Stable` once
+/// anything was consumed, else `Dead` — except for a Kafka group whose facade
+/// reports presence ([`Readers`]): a Kafka consumer commits positions and
+/// consumes nothing the cursor counts, so its state is its membership —
+/// `Lagging` or `Stable` by the same 300 s while the queue is read for it,
+/// `Empty` (Kafka's word for a group with no members) when it is not.
 fn group_view<R: Reads + ?Sized>(
     r: &R,
     qlog: Option<&QLogReader>,
@@ -2194,6 +2261,7 @@ fn group_view<R: Reads + ?Sized>(
         a.max_time_lag = a.max_time_lag.max(l.lag_seconds(now).unwrap_or(0));
         a.max_consumed = a.max_consumed.max(l.total_consumed);
     }
+    let kafka = kafka_groups::kafka_groups(r, tenant, groups.keys().map(|(g, _)| g.as_str()), now)?;
     let mut out = Vec::with_capacity(groups.len());
     for ((group, queue), a) in groups {
         let meta = if group == "__QUEUE_MODE__" {
@@ -2201,14 +2269,16 @@ fn group_view<R: Reads + ?Sized>(
         } else {
             r.group(tenant, &queue, &group)?
         };
-        let state = if a.max_time_lag > 300 {
-            "Lagging"
-        } else if a.max_consumed > 0 {
-            "Stable"
-        } else {
-            "Dead"
+        let readers = Readers::of(&kafka, &group, &queue, now);
+        let state = match readers.live {
+            Some(l) if !l.live => "Empty",
+            Some(_) if a.max_time_lag > 300 => "Lagging",
+            Some(_) => "Stable",
+            None if a.max_time_lag > 300 => "Lagging",
+            None if a.max_consumed > 0 => "Stable",
+            None => "Dead",
         };
-        out.push(json!({
+        let mut row = json!({
             "name":group,
             "topics":[queue],
             "queueName":queue,
@@ -2219,12 +2289,15 @@ fn group_view<R: Reads + ?Sized>(
             "maxTimeLag":a.max_time_lag,
             "state":state,
             "storage":"segments",
-            "kind":"queen",
             "subscriptionMode":meta.as_ref().map(|m| format!("{:?}", m.meta.mode).to_lowercase()),
             "subscriptionTimestamp":meta.as_ref().map(|m| subscription_ts_json(m.meta.subscription_timestamp_us)),
             "subscriptionCreatedAt":meta.as_ref().map(|m| crate::rsm::planner::timers::iso_us(m.meta.registered_at_us)),
             "conflation":meta.as_ref().is_some_and(|m| m.meta.conflation)
-        }));
+        });
+        if let Some(o) = row.as_object_mut() {
+            readers.insert_into(o, now);
+        }
+        out.push(row);
     }
     Ok(out)
 }

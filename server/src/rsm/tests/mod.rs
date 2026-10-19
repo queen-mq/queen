@@ -62,6 +62,7 @@ mod fetch_offsets;
 mod fuzz;
 mod gates;
 mod golden;
+mod kafka_groups;
 mod keep_overlay;
 mod kv;
 mod kv_crash;
