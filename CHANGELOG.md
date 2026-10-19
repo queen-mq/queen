@@ -123,6 +123,38 @@ without one nothing changes.
 
 ## Unreleased
 
+**Kafka facade: a consumer group's members are visible to the broker.** A Kafka consumer commits
+positions and takes no lease, so nothing the broker keeps said it was there: the consumer-group
+listing called every Kafka group `Dead` while it read, and the console reported its topic as having
+no reader (stage, 2026-10-19: about 70 groups reading through the facade with a 2 s lag, every one
+`Dead`). While a group's members heartbeat, the facade now writes the group's presence to the
+tenant's key-value store (`queen-kafka` / `qk:live:<group>`): its members and the topics they
+subscribe to, every `QUEEN_KAFKA_GROUP_PRESENCE_MS` (15 s), at once when a rebalance completes or
+the last member leaves, and, for a group of `assign()` consumers, which has no members, while it
+commits. It is one KV write per live group per interval; `0` turns it off. DeleteGroups removes the
+row with the group.
+
+**Server: the consumer-group listing reports a Kafka group by its members.**
+`GET /api/v1/consumer-groups` gives a group the Kafka facade's rows name `kind: "kafka"`, and every
+row three new fields, null on a native group: `liveMembers`, `lastSeenAt` and `inactiveSeconds` (0
+while the queue is read for the group, else the seconds since it was last seen read). With presence, a
+Kafka group's `state` is `Stable` or `Lagging` (past 300 s of lag) while members read the queue and
+`Empty` when none does; a group whose members died is `Empty` three intervals after its last
+presence write, judged on the broker's clock. A Kafka group without presence (an older facade, or
+presence off) is reported as before. The group detail and the lagging list carry the same `kind`,
+and `GET /api/v1/resources/queues` marks a queue the facade created with `kafkaTopic: true`. The
+broker reads the facade's rows when it answers: no replicated row or command changes, and a native
+group's row only gains the three null fields.
+
+**Console: a Kafka group is a reader while it has members, and inactive after a grace.** A Kafka
+group with live members counts as its topic's reader and is judged by its lag like any group. One
+with no member is still judged by its lag for 15 minutes (a restart, a rebalance, a crash not yet
+called), then shown as inactive on Consumer groups, with when it was last seen, and no longer
+reported as an issue; Settings moves the grace (**Inactive after**) for the tenant or one queue.
+A queue is flagged "No reader" only when no consumer group is on it and it is not a topic the Kafka
+facade created: on a queue with groups, each group answers for itself. "No reader is expected"
+still silences a queue that holds messages nobody is meant to read.
+
 **Server: `retryDelay` is enforced.** After a `failed` ack that leaves retries, the message comes
 back once the queue's `retryDelay` (milliseconds) has passed, and its partition waits with it for
 that consumer group, so nothing behind the message overtakes it; a pop that names the partition
