@@ -427,7 +427,7 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRouteState, replaceQueryFields } from '@/composables/useRouteState'
 import { contextQuery, queueLocation } from '@/composables/navigation'
-import { rangeMinutes } from '@/composables/useRouteRange'
+import { DEFAULT_TIME_RANGE, EXTENDED_TIME_RANGES as RANGE_PRESETS, relativeTimeRange } from '../../../shared/timeRanges.mjs'
 import { messages as messagesApi, queues as queuesApi, describeApiError } from '@/api'
 import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
 import { filtersForPushedMessage, isEncryptedEnvelope } from '@/composables/usePushVerdict'
@@ -587,30 +587,23 @@ const toISOString = (dateTimeLocal) => {
 
 // The window, as a range like every other page's: a preset applies at once;
 // Custom opens the two dates and waits for Apply.
-const RANGE_PRESETS = [
-  { value: '1h', hours: 1 },
-  { value: '12h', hours: 12 },
-  { value: '24h', hours: 24 },
-  { value: '7d', hours: 168 },
-]
 const incomingPreset = () => route.query.from || route.query.to ? 'custom'
-  : !route.query.range ? '1h' : RANGE_PRESETS.some(r => r.value === route.query.range) ? route.query.range : 'custom'
+  : !route.query.range ? DEFAULT_TIME_RANGE : RANGE_PRESETS.some(r => r.value === route.query.range) ? route.query.range : 'custom'
 const rangePreset = ref(incomingPreset())
 const pickRange = (preset) => {
   rangePreset.value = preset.value
-  setTimeRange(preset.hours)
+  setTimeRange(preset.value)
   applyFilters()
 }
 
 // Set time range preset
-const setTimeRange = (hours) => {
-  const now = new Date()
-  const from = new Date(now.getTime() - hours * 60 * 60 * 1000)
+const setTimeRange = (value) => {
+  const { from, to } = relativeTimeRange(value)
 
   filterFrom.value = formatDateTimeLocal(from, true)
-  filterTo.value = formatDateTimeLocal(now, true)
+  filterTo.value = formatDateTimeLocal(to, true)
   appliedFrom.value = from.toISOString()
-  appliedTo.value = now.toISOString()
+  appliedTo.value = to.toISOString()
 }
 
 // Clear all filters
@@ -621,8 +614,8 @@ const clearFilters = () => {
   filterStatus.value = ''
 
   // Reset to default last 1 hour
-  rangePreset.value = '1h'
-  setTimeRange(1)
+  rangePreset.value = DEFAULT_TIME_RANGE
+  setTimeRange(DEFAULT_TIME_RANGE)
 
   applyFilters()
 }
@@ -836,11 +829,11 @@ const restoreDateInputs = () => {
   filterTo.value = appliedTo.value ? formatDateTimeLocal(new Date(appliedTo.value), true) : ''
 }
 restoreDateInputs()
-if (!appliedFrom.value && !appliedTo.value) setTimeRange(rangeMinutes(route.query.range || '1h') / 60)
+if (!appliedFrom.value && !appliedTo.value) setTimeRange(route.query.range || DEFAULT_TIME_RANGE)
 watch(() => route.query.range, () => {
   if (!route.query.from && !route.query.to) {
     rangePreset.value = incomingPreset()
-    setTimeRange(rangeMinutes(route.query.range || '1h') / 60)
+    setTimeRange(route.query.range || DEFAULT_TIME_RANGE)
     fetchMessages()
   }
 })

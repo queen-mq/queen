@@ -621,7 +621,8 @@
 <script setup>
 import { useRoute } from 'vue-router'
 import { useRouteState } from '@/composables/useRouteState'
-import { useRouteRange, rangeMinutes } from '@/composables/useRouteRange'
+import { useRouteRange } from '@/composables/useRouteRange'
+import { DEFAULT_TIME_RANGE, EXTENDED_TIME_RANGES as timeRanges, rangeSeconds, relativeTimeRange } from '../../../shared/timeRanges.mjs'
 import { queueLocation, windowQuery } from '@/composables/navigation'
 const route = useRoute()
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
@@ -802,16 +803,7 @@ Chart.register(endLabels, refLines, edgeLabels)
 // ---------------------------------------------------------------------------
 // Range — the same contract as Analytics, including Custom.
 // ---------------------------------------------------------------------------
-const timeRanges = [
-  { label: '1h', value: '1h' },
-  { label: '6h', value: '6h' },
-  { label: '12h', value: '12h' },
-  { label: '24h', value: '24h' },
-  { label: '7d', value: '7d' },
-]
-const QUICK_MINUTES = { '1h': 60, '6h': 360, '12h': 720, '24h': 1440, '7d': 10080 }
-
-const selectedRange = ref('1h')
+const selectedRange = ref(DEFAULT_TIME_RANGE)
 const customMode = ref(false)
 const customFrom = ref('')
 const customTo = ref('')
@@ -839,9 +831,7 @@ const METRIC_LABEL = {
 
 function currentRange() {
   if (customMode.value && appliedCustom.value) return appliedCustom.value
-  const to = new Date()
-  const from = new Date(to.getTime() - (QUICK_MINUTES[selectedRange.value] || rangeMinutes(selectedRange.value)) * 60_000)
-  return { from, to }
+  return relativeTimeRange(selectedRange.value)
 }
 
 const rangeLabel = computed(() => {
@@ -870,9 +860,8 @@ const selectQuickRange = (value) => {
 const toggleCustomMode = () => {
   customMode.value = !customMode.value
   if (customMode.value) {
-    const now = new Date()
-    const from = new Date(now.getTime() - (QUICK_MINUTES[selectedRange.value] || rangeMinutes(selectedRange.value)) * 60_000)
-    customTo.value = formatDateTimeLocal(now)
+    const { from, to } = relativeTimeRange(selectedRange.value)
+    customTo.value = formatDateTimeLocal(to)
     customFrom.value = formatDateTimeLocal(from)
   } else {
     appliedCustom.value = null
@@ -1220,8 +1209,7 @@ const windowSeconds = computed(() => {
     const s = (new Date(to).getTime() - new Date(from).getTime()) / 1000
     return Number.isFinite(s) && s > 0 ? s : null
   }
-  const minutes = QUICK_MINUTES[selectedRange.value]
-  return minutes ? minutes * 60 : null
+  return rangeSeconds(selectedRange.value)
 })
 // Acks per second across the window: the rate a backlog would drain at.
 const tenantDrainPerSec = computed(() => {

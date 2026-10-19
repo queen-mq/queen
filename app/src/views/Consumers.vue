@@ -117,8 +117,8 @@
             <button
               v-for="preset in lagPresets"
               :key="preset.value"
-              :class="{ on: lagThreshold === preset.value }"
-              @click="lagThreshold = preset.value; loadLaggingPartitions()"
+              :class="{ on: lagThreshold === preset.seconds }"
+              @click="lagThreshold = preset.seconds; loadLaggingPartitions()"
             >{{ preset.label }}</button>
           </div>
           <button
@@ -478,6 +478,7 @@ import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { DEFAULT_TIME_RANGE, LAG_THRESHOLDS as lagPresets, rangeSeconds } from '../../../shared/timeRanges.mjs'
 
 // TENANT PAGE. /api/v1/consumer-groups* is tenant-scoped broker-side; the
 // mutating routes (delete / seek) are RouteClass::QueueAdmin at the proxy, so
@@ -531,7 +532,7 @@ const seekError = ref('')
 const pendingConfirm = ref(null)
 
 const showLaggingSection = ref(false)
-const lagThreshold = ref(3600)
+const lagThreshold = ref(rangeSeconds(DEFAULT_TIME_RANGE))
 const skippingPartition = ref(null)
 
 const sortOptions = [
@@ -539,18 +540,6 @@ const sortOptions = [
   { value: 'lag',     label: 'Lag' },
   { value: 'members', label: 'Partitions' },  // sort key kept for back-compat with grid
   { value: 'name',    label: 'Name' },
-]
-
-// Wider time-range presets are kept for power users; the defaults
-// (1m → 24h) cover everything from "subtle drift" to "stuck for a day".
-const lagPresets = [
-  { value: 60,    label: '1m'  },
-  { value: 300,   label: '5m'  },
-  { value: 1800,  label: '30m' },
-  { value: 3600,  label: '1h'  },
-  { value: 21600, label: '6h'  },
-  { value: 43200, label: '12h' },
-  { value: 86400, label: '24h' },
 ]
 
 // ---------------------------------------------------------------------------

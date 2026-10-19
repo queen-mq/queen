@@ -7,6 +7,8 @@ sidebar:
   label: "Quickstart"
   order: 2
 sourceOfTruth:
+# sourceOfTruth re-read 2026-10-19: Dockerfile copies shared time-range code into both
+# frontend builds. The image, startup commands and quickstart workflow are unchanged.
   - Dockerfile
   - server/src/config.rs
   - server/src/handlers/raft.rs

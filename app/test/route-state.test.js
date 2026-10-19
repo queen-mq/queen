@@ -93,5 +93,15 @@ test('analysis periods restore across views without applying unfinished custom i
   assert.equal(state.appliedCustom.value.from.toISOString(), from.toISOString())
   assert.equal(state.customMode.value, true)
   assert.equal(reloads, 2)
+  state.customMode.value = false
+  state.range.value = 720
+  await settle()
+  assert.equal(router.currentRoute.value.query.range, '12h')
+  assert.equal(router.currentRoute.value.query.from, undefined)
+  await router.push('/analysis?range=6h'); await settle()
+  assert.equal(state.range.value, 360)
+  router.back(); await settle()
+  assert.equal(state.range.value, 720)
+  assert.equal(state.customMode.value, false)
   app.unmount()
 })

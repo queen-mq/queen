@@ -6,6 +6,8 @@ tier: operate
 sidebar:
   order: 1
 sourceOfTruth:
+# sourceOfTruth re-read 2026-10-19: Dockerfile copies shared time-range code into both
+# frontend builds. Runtime paths, ports, embedded assets and startup commands are unchanged.
   - Dockerfile
   - app/vite.config.js
   - server/Cargo.toml

@@ -522,6 +522,7 @@ import { routeSupport } from '@/stores/routeSupport'
 import PageHead from '@/components/PageHead.vue'
 import RowChart from '@/components/RowChart.vue'
 import QueueTriage from '@/components/QueueTriage.vue'
+import { DEFAULT_TIME_RANGE, TIME_RANGES as timeRanges, relativeTimeRange } from '../../../shared/timeRanges.mjs'
 
 // The scope strip states all three slugs, so it is built from identity and
 // never from a fetch — it must survive a failed load and an empty tenant.
@@ -531,22 +532,15 @@ const { can, actingTenantSlug, actingClusterSlug, actingCellSlug, epoch } = useI
 // Range. Quick ranges only — this view has no Custom mode, so there is no
 // custom sub-row and no applied/typed split to keep.
 // ---------------------------------------------------------------------------
-const selectedRange = ref('1h')
-const timeRanges = [
-  { label: '1h',  value: '1h',  minutes: 60 },
-  { label: '6h',  value: '6h',  minutes: 360 },
-  { label: '12h', value: '12h', minutes: 720 },
-  { label: '24h', value: '24h', minutes: 1440 },
-]
+const selectedRange = ref(DEFAULT_TIME_RANGE)
 const selectQuickRange = (value) => { selectedRange.value = value }
 // Resolved range, for the scope strip's free slot.
 const rangeLabel = computed(() => `last ${selectedRange.value}`)
 const getTimeRangeParams = () => {
-  const r = timeRanges.find(x => x.value === selectedRange.value) || timeRanges[0]
-  const now = new Date()
+  const { from, to } = relativeTimeRange(selectedRange.value)
   return {
-    from: new Date(now.getTime() - r.minutes * 60 * 1000).toISOString(),
-    to: now.toISOString(),
+    from: from.toISOString(),
+    to: to.toISOString(),
   }
 }
 

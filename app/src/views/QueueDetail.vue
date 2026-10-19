@@ -454,7 +454,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRouteState } from '@/composables/useRouteState'
 import { queueLocation, safeReturnTo, validWindow } from '@/composables/navigation'
-import { rangeMinutes } from '@/composables/useRouteRange'
+import { DEFAULT_TIME_RANGE, TIME_RANGES as timeRanges, relativeTimeRange } from '../../../shared/timeRanges.mjs'
 import {
   analytics, queues as queuesApi, system as systemApi,
   consumers as consumersApi, describeApiError,
@@ -524,16 +524,10 @@ const pushOpen = ref(false)
 // what the queue is.
 const configOpen = ref(false)
 
-const selectedRange = ref('1h')
+const selectedRange = ref(DEFAULT_TIME_RANGE)
 const contextFrom = ref(''), contextTo = ref('')
 useRouteState({ range: selectedRange, from: contextFrom, to: contextTo })
 const linkedWindow = computed(() => validWindow(contextFrom.value, contextTo.value))
-const timeRanges = [
-  { label: '1h',  value: '1h',  minutes: 60 },
-  { label: '6h',  value: '6h',  minutes: 360 },
-  { label: '12h', value: '12h', minutes: 720 },
-  { label: '24h', value: '24h', minutes: 1440 },
-]
 // Preserve an investigation window received from another view.
 const rangeLabel = computed(() => {
   if (linkedWindow.value) return `${formatTimestamp(linkedWindow.value.from)} → ${formatTimestamp(linkedWindow.value.to)}`
@@ -560,10 +554,10 @@ const selectedMetric = ref('throughput')
 // Time range helpers
 // ---------------------------------------------------------------------------
 const getTimeRangeParams = () => {
-  const now = new Date()
+  const { from, to } = linkedWindow.value || relativeTimeRange(selectedRange.value)
   return {
-    from: (linkedWindow.value?.from || new Date(now.getTime() - rangeMinutes(selectedRange.value) * 60_000)).toISOString(),
-    to: (linkedWindow.value?.to || now).toISOString(),
+    from: from.toISOString(),
+    to: to.toISOString(),
     queue: queueName.value,
   }
 }

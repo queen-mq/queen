@@ -30,6 +30,7 @@ RUN npm ci
 
 # Copy frontend source
 COPY app/ ./
+COPY shared/ /app/shared/
 
 # Build frontend. vite writes to ../server/webapp/dist relative to the app
 # source root (app/vite.config.js) — the one path both Rust binaries embed —
@@ -45,13 +46,14 @@ RUN npm run build
 # .dockerignore keeps the local dist out of the context — so it is built here.
 FROM node:24-alpine AS console-builder
 
-WORKDIR /build/console
+WORKDIR /app/proxy/console
 
 COPY proxy/console/package*.json ./
 
 RUN npm ci
 
 COPY proxy/console/ ./
+COPY shared/ /app/shared/
 
 RUN npm run build
 
@@ -122,7 +124,7 @@ COPY connectors/queen-pg/src /usr/build/connectors/queen-pg/src
 # The broker embeds the same dashboard (server/src/handlers/static_files.rs),
 # so that COPY is a build dependency of both, not packaging.
 COPY proxy/src /usr/build/proxy/src
-COPY --from=console-builder /build/console/dist /usr/build/proxy/console/dist
+COPY --from=console-builder /app/proxy/console/dist /usr/build/proxy/console/dist
 COPY --from=frontend-builder /app/server/webapp/dist ./webapp/dist
 
 # `touch`: COPY keeps every file's own modification time and cargo decides by

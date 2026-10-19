@@ -7,6 +7,8 @@ sidebar:
   label: "Clients"
   order: 3
 sourceOfTruth:
+# sourceOfTruth re-read 2026-10-19: Dockerfile copies shared time-range code into both
+# frontend builds. The bundled queenctl and client interfaces are unchanged.
   - clients/client-js/package.json
   - clients/client-py/pyproject.toml
   - clients/client-go/go.mod
