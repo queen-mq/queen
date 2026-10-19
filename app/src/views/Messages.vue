@@ -384,13 +384,29 @@
         <div v-if="messageDetail">
           <div class="detail-section-header">
             <label class="label-xs">Payload</label>
-            <button
-              v-if="payloadAvailable"
-              class="btn btn-ghost detail-copy-button"
-              @click="copyPayload"
-            >
-              {{ payloadCopied ? 'Copied!' : 'Copy' }}
-            </button>
+            <div class="payload-tools">
+              <!-- Only for a record the Kafka facade wrote: its key, value and
+                   headers are stored base64, which reads as noise. -->
+              <div v-if="kafkaRecord" class="seg payload-view" role="group" aria-label="Payload view">
+                <button
+                  :class="{ on: showDecoded }"
+                  :aria-pressed="showDecoded ? 'true' : 'false'"
+                  @click="payloadView = 'decoded'"
+                >Decoded</button>
+                <button
+                  :class="{ on: !showDecoded }"
+                  :aria-pressed="showDecoded ? 'false' : 'true'"
+                  @click="payloadView = 'raw'"
+                >Raw</button>
+              </div>
+              <button
+                v-if="payloadAvailable"
+                class="btn btn-ghost detail-copy-button"
+                @click="copyPayload"
+              >
+                {{ payloadCopied ? 'Copied!' : 'Copy' }}
+              </button>
+            </div>
           </div>
           <!-- payloadAvailable:false means the segment is gone. An empty
                payload box would read as "this message carried nothing". -->
@@ -399,6 +415,7 @@
               Payload unavailable — the covering log segment was removed by retention.
             </p>
           </div>
+          <KafkaRecordView v-else-if="showDecoded" :record="kafkaRecord" />
           <JsonViewer v-else :value="messageDetail.payload" />
         </div>
       </template>
@@ -440,6 +457,8 @@ import Autocomplete from '@/components/Autocomplete.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
+import KafkaRecordView from '@/components/KafkaRecordView.vue'
+import { kafkaRecordOf, kafkaRecordPlain } from '@/composables/kafkaRecord'
 import PushMessageModal from '@/components/PushMessageModal.vue'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
@@ -571,6 +590,15 @@ const payloadAvailable = computed(() => messageDetail.value?.payloadAvailable !=
 // re-wrapped into an envelope of an envelope. So the copy is refused here, in
 // the only place that can tell the difference.
 const payloadIsEnvelope = computed(() => isEncryptedEnvelope(messageDetail.value?.payload))
+
+// A record the Kafka facade wrote stores its key, value and headers base64
+// (protocols/queen-kafka/src/records.rs): shown decoded unless the reader asks
+// for the stored form. The choice holds from one message to the next.
+const kafkaRecord = computed(() =>
+  payloadAvailable.value ? kafkaRecordOf(messageDetail.value?.payload) : null
+)
+const payloadView = ref('decoded')
+const showDecoded = computed(() => Boolean(kafkaRecord.value) && payloadView.value === 'decoded')
 
 // 047 emits id/transactionId as NULL for log entries and the broker backfills
 // them from the frame — which it cannot do once retention removed the segment.
@@ -807,7 +835,10 @@ const copyPayload = async () => {
   if (!messageDetail.value) return
 
   try {
-    const text = formatPayload(messageDetail.value.payload)
+    // What is on screen: the decoded record, or the payload as stored.
+    const text = showDecoded.value
+      ? JSON.stringify(kafkaRecordPlain(kafkaRecord.value), null, 2)
+      : formatPayload(messageDetail.value.payload)
     await navigator.clipboard.writeText(text)
     payloadCopied.value = true
     setTimeout(() => {
@@ -875,4 +906,6 @@ fetchMessages()
 .msg-status { font-size: 12px; color: var(--text-low); }
 .msg-status.is-live { color: var(--text-hi); }
 .msg-groups { font-size: 12px; color: var(--text-low); }
+.payload-tools { display: flex; align-items: center; gap: 8px; }
+.payload-view button { padding: 2px 8px; font-size: 11px; }
 </style>
