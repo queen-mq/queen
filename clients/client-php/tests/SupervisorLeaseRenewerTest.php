@@ -173,7 +173,16 @@ PHP;
         $socket = $this->startMaster('unsafe');
         $renewer = new SupervisorLeaseRenewer($socket, ['url' => 'http://queen:6632'], 120, 30, 1, 1);
         try {
+            // The master writes `unsafe` right after `tracked`, in a second
+            // write: whether track() or a later check reads it first is
+            // timing (in the Linux runner, track() returned between the two
+            // in 7 runs of 10). The check that reads it must fail.
             $renewer->track('doomed', $this->monotonicMillis() + 120_000);
+            $deadline = microtime(true) + 5;
+            while (microtime(true) < $deadline) {
+                $renewer->assertHealthy('doomed');
+                usleep(10_000);
+            }
             $this->fail('An unsafe lease was reported healthy.');
         } catch (\RuntimeException $exception) {
             $this->assertStringContainsString('became unsafe for [doomed]: lease not found', $exception->getMessage());
