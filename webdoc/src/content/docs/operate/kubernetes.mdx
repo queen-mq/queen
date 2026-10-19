@@ -60,6 +60,9 @@ sourceOfTruth:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
+# waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
+# parks wakes it instead of its timeout. Nothing this page states changes.
 ---
 
 On Kubernetes a Queen cluster is a StatefulSet of three (or five) pods. Each pod gets its own

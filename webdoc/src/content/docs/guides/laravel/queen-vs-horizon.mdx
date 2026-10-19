@@ -87,6 +87,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-17 (a parked fetch answers when its topic is written): reads.rs's
 # fetch_wait also watches the topics it reads (QUEEN_FETCH_TOPIC_WAKE_MS), and answers early only a
 # fetch that has read nothing. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (retryDelay enforced): the consumption engine (consume/ack.rs,
+# txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
+# and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
+# from the commit. The Laravel driver acks completed or dlq, never failed, so nothing this page
+# states changes.
 ---
 
 Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both

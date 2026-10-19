@@ -71,6 +71,9 @@ sourceOfTruth:
 # facade/real.rs add no other setting.
 # sourceOfTruth re-read 2026-10-17 (the fetch topic wake and the Kafka facade's pipelined produce):
 # QUEEN_FETCH_TOPIC_WAKE_MS gets its row; the facade's pipelining settings are the Kafka reference's.
+# sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
+# waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
+# parks wakes it instead of its timeout. Nothing this page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

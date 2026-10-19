@@ -69,6 +69,9 @@ verifiedBy:
 # else takes the path it always took. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-17 (2.5.0): the upgrade paragraphs add 2.5.0, which leaves the cluster at
 # version 7.
+# sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
+# waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
+# parks wakes it instead of its timeout. Nothing this page states changes.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They

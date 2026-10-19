@@ -92,6 +92,11 @@ verifiedBy:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (retryDelay enforced): the consumption engine (consume/ack.rs,
+# txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
+# and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
+# from the commit. The `failed` row of the ack statuses now says the message comes back once
+# retryDelay has passed.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers
@@ -163,7 +168,7 @@ curl -s -X POST http://localhost:6632/api/v1/ack -H 'content-type: application/j
 | Status | Effect |
 |---|---|
 | `completed` | Moves the cursor to this message. The earlier messages of the batch are done with it. |
-| `failed` | Releases the lease and spends one retry: the message comes back from this point, with `deliveryAttempt` one higher. With `retryLimit` spent, files it in the dead-letter queue, or drops it when the DLQ is off. |
+| `failed` | Releases the lease and spends one retry: the message comes back from this point, with `deliveryAttempt` one higher, once the queue's `retryDelay` has passed (1000 ms by default; the partition waits with it, for this group). With `retryLimit` spent, files it in the dead-letter queue, or drops it when the DLQ is off. |
 | `retry` | Releases the lease and redelivers from this message, without spending a retry. |
 | `dlq` | Files the message in the dead-letter queue now and moves on. |
 

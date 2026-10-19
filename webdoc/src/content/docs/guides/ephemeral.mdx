@@ -12,6 +12,7 @@ sourceOfTruth:
   - clients/client-js/client-v2/ephemeral/Ephemeral.js
 verifiedBy:
   - server/src/tests_unit/ephemeral_engine.rs
+  - server/src/tests_unit/ephemeral_wake.rs
   - clients/client-js/test-v2/ephemeral-unit/ephemeralWire.test.js
 sidebar:
   label: "Ephemeral queues"
@@ -26,6 +27,11 @@ sidebar:
 # sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs gains
 # QUEEN_RAFT_READY_QUORUM_MS (5000), the window of /health's new majority test. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
+# waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
+# parks wakes it instead of its timeout. The opening paragraph's parked consumer now always gets the
+# message at once; verifiedBy gains tests_unit/ephemeral_wake.rs. Nothing else this page states
+# changes.
 ---
 
 An ephemeral queue keeps its messages in memory and nowhere else. A push is a memory write and a

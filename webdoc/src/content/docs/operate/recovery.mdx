@@ -98,6 +98,9 @@ digest: >-
 # else takes the path it always took. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-17 (2.5.0): the rollback paragraph adds that 2.5.0 does not raise the
 # cluster version.
+# sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
+# waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
+# parks wakes it instead of its timeout. Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and

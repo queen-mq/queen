@@ -2,7 +2,7 @@ import { flow } from "@/lib/figure-spec";
 
 // concepts/consuming.mdx, "Ack, nack and the retry budget".
 export default flow({
-  alt: "What happens to a delivered message. Acked completed, it moves the group's cursor past it. Acked failed with retries left, it releases the lease, spends one retry and comes back from that point with deliveryAttempt one higher. Acked failed with the retry budget spent, or acked dlq, it is filed in the dead-letter queue with its payload, error, retry count and group. A replay pushes a copy to the end of the partition under the transactionId dlq:<id>.",
+  alt: "What happens to a delivered message. Acked completed, it moves the group's cursor past it. Acked failed with retries left, it releases the lease, spends one retry and comes back from that point with deliveryAttempt one higher, once the queue's retryDelay has passed. Acked failed with the retry budget spent, or acked dlq, it is filed in the dead-letter queue with its payload, error, retry count and group. A replay pushes a copy to the end of the partition under the transactionId dlq:<id>.",
   caption: "Only an explicit failed spends the budget; a lease that expires delivers again without spending it. A replay is a new message, so every group reading the partition sees it.",
   cols: 3,
   rows: 2,

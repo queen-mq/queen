@@ -61,6 +61,11 @@ verifiedBy:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (retryDelay enforced): the consumption engine (consume/ack.rs,
+# txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
+# and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
+# from the commit. The queue options table gains its retryDelay row, and the stored-and-ignored list
+# loses it.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a
@@ -146,6 +151,7 @@ curl -s -X POST http://localhost:6632/api/v1/configure -H 'content-type: applica
 |---|---|---|
 | `leaseTime` | 60 s (300 s if `/configure` created the queue) | How long a pop's lease lasts unless the pop sends `leaseSeconds`. |
 | `retryLimit` | 3 | How many `failed` acks redeliver a message. The next `failed` files it in the dead-letter queue. |
+| `retryDelay` | 1000 ms | How long a message waits after a `failed` ack before it comes back. Its partition waits with it, for that consumer group only, since nothing behind the message may overtake it. `0` redelivers at once. A `retry` ack and an expired lease do not wait. The wait is kept in the leader's memory: after a leader change the message comes back at once. |
 | `deadLetterQueue`, `dlqAfterMaxRetries` | `true` | File a message that ran out of retries in the DLQ. With both off, drop it and move on. |
 | `dedupWindowSeconds` | 3600 | How long a partition remembers `transactionId`s. `0` turns dedup off. It is also how long a push keeps its index row in memory (never less than 900 s): after that the message, if it is still retained, is read through the queue log's own index. |
 | `delayedProcessing` | 0 | Seconds after its push before a message can be delivered. |
@@ -161,8 +167,8 @@ A queue created by a push takes its labels from the first two dotted parts of it
 `billing.invoices` gets namespace `billing` and task `invoices`, and an undotted `orders` gets
 namespace `orders` and no task. A queue created by `/configure` has no labels unless you send them.
 
-`priority`, `retryDelay`, `ttl`, `maxSize` and `minPopWaitTime` are accepted and stored, and have
-no effect in 2.0.
+`priority`, `ttl`, `maxSize` and `minPopWaitTime` are accepted and stored, and have no effect in
+2.0. `retryDelay` had none either up to 2.5.0.
 
 <Aside type="caution">
 The JS SDK's `queen.queue(name).config(options).create()` sends your options merged over nine SDK

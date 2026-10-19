@@ -66,6 +66,12 @@ sourceOfTruth:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up, and retryDelay enforced):
+# handlers/ephemeral.rs's waiting pop takes its queue's gate and arms its wake before it looks, so a
+# push that lands as it parks wakes it instead of its timeout. And the consumption engine
+# (consume/ack.rs, txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released,
+# for that group and a pop naming it too, until the queue's retryDelay ends; a transaction's failed
+# ack holds it from the commit. No error code changes. Nothing this page states changes.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code

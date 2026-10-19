@@ -86,6 +86,9 @@ digest: >-
 # else takes the path it always took. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-17 (2.5.0): server/Cargo.toml says 2.5.0; the /health example is a
 # fresh 2.5.0 node's (cluster version 7, which 2.5.0 does not raise). Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
+# waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
+# parks wakes it instead of its timeout. Nothing this page states changes.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its

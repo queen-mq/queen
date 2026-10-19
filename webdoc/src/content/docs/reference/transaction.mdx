@@ -48,6 +48,11 @@ sourceOfTruth:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (retryDelay enforced): the consumption engine (consume/ack.rs,
+# txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
+# and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
+# from the commit. The status paragraph now says a failed redelivery waits retryDelay from the
+# commit and a retry does not.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
@@ -112,9 +117,10 @@ dedup window rolls the whole transaction back** with `reason: "duplicate"`.
 | `status` | no | `completed` (default), `failed`, `retry` or `dlq`. Any other value reads as `completed`. |
 | `error` | no | The reason recorded on a dead letter (`failed`, `dlq`). |
 
-`failed` counts one attempt: the message is redelivered while the queue's `retryLimit` lasts, then
-dead-lettered (or dropped with `deadLetterQueue: false`). `retry` releases it for redelivery
-without counting an attempt. `dlq` dead-letters it now.
+`failed` counts one attempt: the message is redelivered while the queue's `retryLimit` lasts, each
+time once the queue's `retryDelay` has passed from the commit, then dead-lettered (or dropped with
+`deadLetterQueue: false`). `retry` releases it for redelivery at once, without counting an
+attempt. `dlq` dead-letters it now.
 
 <Aside type="caution">
 Set `consumerGroup` on every ack of a message popped for a group. Left out, the ack targets queue
