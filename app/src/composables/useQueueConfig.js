@@ -74,10 +74,11 @@ export const IDENTITY_OPTIONS = [
  * time invites an operator to skim past one.
  *
  * `inert: true` marks an option the broker STORES, ECHOES and never READS
- * (decision D2, re-confirmed against the raft code on 2026-09-26: `ttl`,
- * `max_queue_size` and `retry_delay` are written to the queue row
- * (rsm/store/rows.rs) and echoed (phase2.rs config_options), and read by no
- * push, pop, ack or maintenance path). The editor hides them rather
+ * (decision D2, re-confirmed against the raft code on 2026-09-26: `ttl` and
+ * `max_queue_size` are written to the queue row (rsm/store/rows.rs) and echoed
+ * (phase2.rs config_options), and read by no push, pop, ack or maintenance
+ * path; `retry_delay` was the third until the consume engine enforced it, after
+ * 2.5.0). The editor hides them rather
  * than offering a back-pressure cap and a TTL that do nothing; Queue Detail
  * still shows the stored values, labelled as declared and not enforced, because
  * a value that IS on the row must not vanish from the page that documents it.
@@ -107,6 +108,18 @@ export const OPTIONS = [
       'Explicit failed acks a batch may accumulate before the message is dead-lettered or ' +
       'dropped. A retry ack and a lease expiry do not charge it, so this is a budget for ' +
       'reported failures, not for delivery attempts. Existing counters are not reset.',
+  },
+  {
+    key: 'retryDelay',
+    label: 'Retry delay',
+    type: 'int',
+    unit: 'ms',
+    default: 1000,
+    group: 'common',
+    help:
+      'How long a message waits after a failed ack before it comes back; its partition waits ' +
+      'with it, for that consumer group. A retry ack and a lease expiry do not wait. 0 ' +
+      'redelivers at once.',
   },
   {
     key: 'deadLetterQueue',
@@ -290,16 +303,6 @@ export const OPTIONS = [
     help:
       'Declared, not enforced by this broker: there is no push back-pressure cap. Storage is ' +
       'bounded by retention and, on the cloud, by the plan’s retained-bytes quota.',
-  },
-  {
-    key: 'retryDelay',
-    label: 'Retry delay',
-    type: 'int',
-    unit: 'ms',
-    default: 1000,
-    group: 'advanced',
-    inert: true,
-    help: 'Declared, not enforced by this broker: a retry ack releases the lease immediately.',
   },
 ]
 

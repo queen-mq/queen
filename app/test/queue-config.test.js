@@ -26,6 +26,7 @@ import {
   EDITABLE_OPTIONS,
   INERT_OPTIONS,
   OPTION_DEFAULTS,
+  OPTION_META,
   buildBody,
   configDiff,
   describeConfigureRefusal,
@@ -91,15 +92,22 @@ test('the catalogue carries every option /configure accepts, and its default', (
   })
 })
 
-test('the three knobs the broker never reads are hidden from the editor (D2)', () => {
-  assert.deepEqual(INERT_OPTIONS.map(o => o.key).sort(), ['maxSize', 'retryDelay', 'ttl'])
-  for (const key of ['ttl', 'maxSize', 'retryDelay']) {
+test('the two knobs the broker never reads are hidden from the editor (D2)', () => {
+  assert.deepEqual(INERT_OPTIONS.map(o => o.key).sort(), ['maxSize', 'ttl'])
+  for (const key of ['ttl', 'maxSize']) {
     assert.equal(EDITABLE_OPTIONS.some(o => o.key === key), false, `${key} must not be editable`)
     assert.equal(optionsInGroup('common').some(o => o.key === key), false)
     assert.equal(optionsInGroup('advanced').some(o => o.key === key), false)
   }
   // …and they are still described, because Queue Detail renders them read-only.
   for (const meta of INERT_OPTIONS) assert.match(meta.help, /not enforced by this broker/)
+})
+
+test('retry delay is editable beside the retry limit, now that the broker enforces it', () => {
+  const common = optionsInGroup('common').map(o => o.key)
+  assert.equal(common.indexOf('retryDelay'), common.indexOf('retryLimit') + 1)
+  assert.equal(EDITABLE_OPTIONS.some(o => o.key === 'retryDelay'), true)
+  assert.doesNotMatch(OPTION_META.retryDelay.help, /not enforced/)
 })
 
 test('every editable option sits in exactly one rendered group', () => {

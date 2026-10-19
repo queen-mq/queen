@@ -336,7 +336,7 @@ const existingWarn = ref(null)
 const edited = computed(() => readFormValues(form.value))
 const diff = computed(() => configDiff(current.value, edited.value))
 // VALIDATED: the diff, not the whole form. `readFormValues` walks all 21
-// options — the three inert ones included, which this form does not render — so
+// options — the two inert ones included, which this form does not render — so
 // validating `edited` let a queue holding a negative `maxSize` (reachable from
 // the JS SDK or raw HTTP; the SP bounds none of them) disable "Save changes"
 // for good, with the message pinned to a field that has no DOM node to show it

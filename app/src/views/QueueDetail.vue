@@ -325,6 +325,10 @@
             <b>{{ queueData.config.retryLimit || 0 }}</b>
           </li>
           <li>
+            <span title="How long a message waits after a failed ack before it comes back">Retry delay</span>
+            <b>{{ queueData.config.retryDelay || 0 }} ms</b>
+          </li>
+          <li>
             <span title="Where a message that exhausts its retries lands">Dead-letter queue</span>
             <b>{{ queueData.config.deadLetterQueue ? 'On' : 'Off' }}</b>
           </li>
@@ -332,10 +336,10 @@
             <span title="Scheduler priority">Priority</span>
             <b>{{ queueData.priority ?? 0 }}</b>
           </li>
-          <!-- The three the broker STORES and never READS (D2, re-confirmed
-               against the raft code 2026-09-26: `ttl`, `max_queue_size` and
-               `retry_delay` are written to the queue row and echoed, and read by
-               no push, pop, ack or maintenance path). They stay because the
+          <!-- The two the broker STORES and never READS (D2, re-confirmed
+               against the raft code 2026-09-26: `ttl` and `max_queue_size` are
+               written to the queue row and echoed, and read by no push, pop, ack
+               or maintenance path). They stay because the
                values are really on the row — hiding them would make the page
                disagree with the API — but dimmed, and saying so, rather than
                describing an enforcement that does not happen. The editor omits
@@ -347,10 +351,6 @@
           <li class="is-inert">
             <span>Max queue size</span>
             <b>{{ queueData.config.maxQueueSize ? formatNumber(queueData.config.maxQueueSize) : '∞' }}<i>not enforced</i></b>
-          </li>
-          <li class="is-inert">
-            <span>Retry delay</span>
-            <b>{{ queueData.config.retryDelay || 0 }} ms<i>not enforced</i></b>
           </li>
           <li>
             <span>Created</span>
