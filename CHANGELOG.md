@@ -123,6 +123,24 @@ without one nothing changes.
 
 ## Unreleased
 
+**Server: `retryDelay` is enforced.** After a `failed` ack that leaves retries, the message comes
+back once the queue's `retryDelay` (milliseconds) has passed, and its partition waits with it for
+that consumer group, so nothing behind the message overtakes it; a pop that names the partition
+waits too. Every version up to 2.5.0 stored the option, echoed it, and redelivered at once. A queue
+created by a push, or by `/configure` without the option, stores 1000: after the upgrade a failed
+message comes back about a second later there, and `retryDelay: 0` keeps the old behaviour. A
+`retry` ack, an expired lease and a dead-lettered message do not wait, and a `failed` ack inside a
+transaction waits from the commit. The wait lives in the leader's memory: after a leader change the
+message comes back at once. The console's queue editor now offers the option beside the retry
+limit, and the queue page no longer marks it as not enforced.
+
+**Server: an ephemeral pop no longer sleeps through a push that lands as it parks.** A waiting
+`/api/v1/ephemeral/pop` looked at its partitions and only then registered for a wake, so a push
+landing between the two woke nothing and the pop answered at its own timeout, with the message
+there all along. On 2.5.0, with 16 requesters and a new inbox per request, about one reply in 950
+came back at the pop's 2 s timeout; with one inbox per requester, one in 28,000. The pop now
+registers before it looks. Durable pops wait in the consumption engine and were not affected.
+
 **Laravel: a job whose timeout its lease cannot cover fails alone.** Without lease renewal, a job
 whose own `$timeout` is 0 or at least `retry_after` was refused at every delivery: it never ran,
 never reached `tries` and held its partition, and since PHP client 2.4.2 every supervised worker
