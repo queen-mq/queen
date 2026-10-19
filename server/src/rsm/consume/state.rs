@@ -252,6 +252,11 @@ pub(crate) struct Part {
     /// Not claimable before this instant (delayed processing, window buffer);
     /// `0` = no hold.
     pub ready_at: i64,
+    /// Not claimable before this instant by ANY pop, a named one included:
+    /// the queue's `retryDelay` after a `failed` ack released the batch for
+    /// redelivery ([`Part::hold_retry`]). `0` = no hold. In the leader's
+    /// memory only: a new leader redelivers at once.
+    pub retry_at: i64,
     /// In the group shard's ready list.
     pub queued: bool,
     /// Changed since the last checkpoint took it.
@@ -290,6 +295,7 @@ impl Part {
             has_row,
             seed_ts: None,
             ready_at: 0,
+            retry_at: 0,
             queued: false,
             dirty: false,
             delete_row: false,
@@ -311,6 +317,16 @@ impl Part {
     /// A row is in a checkpoint that has not resolved.
     pub fn in_flight(&self) -> bool {
         self.sent_ver > self.durable_ver
+    }
+
+    /// Hold the part until `at`, the end of the `retryDelay` after a `failed`
+    /// ack released its batch ([`super::ack::retry_hold`]): no claim takes it
+    /// before then ([`super::pop::claim_one`]), and its `ready_at` makes
+    /// [`super::pop::arm`] time it instead of queueing it, and keeps the idle
+    /// unloader off it until the hold ends.
+    pub fn hold_retry(&mut self, at: i64) {
+        self.retry_at = at;
+        self.ready_at = self.ready_at.max(at);
     }
 }
 

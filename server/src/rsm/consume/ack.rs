@@ -46,6 +46,14 @@ fn signal_rank(s: AckStatus) -> u8 {
     }
 }
 
+/// When a part that a `failed` ack released for redelivery may be claimed
+/// again: the queue's `retryDelay` (milliseconds) after `now_us`. `None` for a
+/// delay of 0: redelivered at once, as every queue was up to 2.5.0, which
+/// stored the option and read it nowhere.
+pub(crate) fn retry_hold(cfg: &crate::rsm::effect::QueueConfig, now_us: i64) -> Option<i64> {
+    (cfg.retry_delay > 0).then(|| now_us + i64::from(cfg.retry_delay) * 1_000)
+}
+
 /// Whether an `Effects` command is a seek: whole cursor rows an admin wrote.
 pub(crate) fn is_seek(c: &EffectsCommand) -> bool {
     !c.effects.is_empty()
@@ -853,6 +861,15 @@ impl Engine {
                     if let Some(v) = self.commit_cur(sh, g.id, t.pid, cur, acked.dlq, now) {
                         deps.rows.push((t.pid, g.id, v));
                     }
+                    if let Some(at) = retry_hold(&cfg.queue, now).filter(|_| acked.released) {
+                        if let Some(p) = sh
+                            .groups
+                            .get_mut(&g.id)
+                            .and_then(|gs| gs.parts.get_mut(&t.pid))
+                        {
+                            p.hold_retry(at);
+                        }
+                    }
                     if super::pop::arm(sh, g.id, t.pid, now, self.grace()) {
                         woken.push(g.id);
                     }
@@ -1270,6 +1287,7 @@ impl Engine {
                 {
                     p.seed_ts = None;
                     p.ready_at = 0;
+                    p.retry_at = 0;
                 }
                 if let Some(v) = self.commit_cur(sh, g.id, *pid, cur, Vec::new(), now) {
                     deps.rows.push((*pid, g.id, v));

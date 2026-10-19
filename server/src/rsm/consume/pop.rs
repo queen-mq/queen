@@ -148,6 +148,13 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
     if part.cur.leased(now, grace) {
         return Ok(Claimed::Nothing);
     }
+    // A `failed` ack's `retryDelay`: the part's next batch starts with the
+    // failed message, and none of it goes out before the delay ends, to a
+    // named pop either (`ready_at` times only the ready list).
+    if part.retry_at > now {
+        return Ok(Claimed::Hold(part.retry_at));
+    }
+    part.retry_at = 0;
 
     // A first contact whose seed moves (an instant in the future).
     if let Some(ts) = part.seed_ts {

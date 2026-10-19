@@ -1698,3 +1698,147 @@ fn the_engine_clock_only_moves_forward_and_anchors_at_or_above_the_log() {
     h.e.anchor_clock(0);
     assert!(h.e.now_us() >= b);
 }
+
+// ---------------------------------------------------------------------------
+// Retry delay
+// ---------------------------------------------------------------------------
+
+/// A queue with `retry_delay` `ms` and `retry_limit` `limit`, and `txns`
+/// pushed to its `p0` and leased to `w1` by group `g`.
+fn leased_with_retry_delay(h: &mut H, ms: i32, limit: i32, txns: &[&str]) -> Pid {
+    let mut cfg = qcfg();
+    cfg.retry_delay = ms;
+    cfg.retry_limit = limit;
+    h.queue("q", cfg);
+    let pid = h.push("q", "p0", txns);
+    only(h.wildcard("q", "g", "w1"));
+    pid
+}
+
+/// A `failed` ack that leaves retries holds its partition for the queue's
+/// `retryDelay`, for that group: no pop takes it before the delay ends, a pop
+/// that names the partition included, and then the failed message comes back
+/// first. Up to 2.5.0 the option was stored and the message came back at once.
+#[test]
+fn a_failed_ack_holds_its_partition_for_the_retry_delay() {
+    let mut h = H::new("retry-delay");
+    let pid = leased_with_retry_delay(&mut h, 2_000, 3, &["a", "b"]);
+    let r = h.ack(pid, "q", "g", "w1", &[("a", AckStatus::Failed)]);
+    assert!(r.lease_released);
+    assert_eq!(r.batch_retry_count, 1);
+    h.advance(1_999_000);
+    assert!(h.wildcard("q", "g", "w2").is_empty(), "a pop of the queue");
+    assert!(
+        h.pinned("q", "p0", "g", "w2").is_empty(),
+        "a pop of the partition"
+    );
+    // Another group reading the partition does not wait.
+    let other = only(h.wildcard("q", "g2", "w3"));
+    assert_eq!((other.start_offset, other.end_offset), (0, 1));
+    h.advance(1_000);
+    let c = only(h.wildcard("q", "g", "w2"));
+    assert_eq!(
+        (c.start_offset, c.end_offset),
+        (0, 1),
+        "the failed message first"
+    );
+}
+
+#[test]
+fn a_retry_delay_of_zero_redelivers_at_once() {
+    let mut h = H::new("retry-delay-zero");
+    let pid = leased_with_retry_delay(&mut h, 0, 3, &["a"]);
+    h.ack(pid, "q", "g", "w1", &[("a", AckStatus::Failed)]);
+    only(h.pinned("q", "p0", "g", "w2"));
+}
+
+/// Only a `failed` ack that leaves retries waits: a `retry` ack redelivers at
+/// once, and a `failed` that spends the budget dead-letters the message and
+/// lets the rest of the partition go on at once.
+#[test]
+fn a_retry_ack_and_a_dead_letter_do_not_wait() {
+    let mut h = H::new("retry-delay-retry");
+    let pid = leased_with_retry_delay(&mut h, 60_000, 3, &["a"]);
+    h.ack(pid, "q", "g", "w1", &[("a", AckStatus::Retry)]);
+    only(h.wildcard("q", "g", "w2"));
+
+    let mut h = H::new("retry-delay-dlq");
+    let pid = leased_with_retry_delay(&mut h, 60_000, 0, &["a", "b"]);
+    let r = h.ack(pid, "q", "g", "w1", &[("a", AckStatus::Failed)]);
+    assert_eq!(r.dlq, 1);
+    let c = only(h.wildcard("q", "g", "w2"));
+    assert_eq!(
+        (c.start_offset, c.end_offset),
+        (1, 1),
+        "the message after it"
+    );
+}
+
+/// A `failed` ack inside a transaction holds the partition from the commit.
+#[test]
+fn a_failed_ack_in_a_transaction_holds_its_partition_too() {
+    let mut h = H::new("retry-delay-txn");
+    let pid = leased_with_retry_delay(&mut h, 2_000, 3, &["a"]);
+    let id = h.rid();
+    let mut txn = h.txn(id);
+    txn.acks
+        .push(h.ack_target(pid, "q", "g", "w1", &[("a", AckStatus::Failed)]));
+    let part =
+        h.e.txn_prepare(&txn, h.now)
+            .expect("prepare")
+            .expect("a part");
+    h.apply(&part.effects);
+    h.e.txn_resolve(id, true);
+    assert!(h.wildcard("q", "g", "w2").is_empty());
+    assert!(h.pinned("q", "p0", "g", "w2").is_empty());
+    h.advance(2_000_000);
+    only(h.wildcard("q", "g", "w2"));
+}
+
+/// A pop parked on a held partition is answered when the hold ends, with no
+/// push or other pop to wake it.
+#[test]
+fn a_parked_pop_is_answered_when_the_retry_delay_ends() {
+    let mut h = H::new("retry-delay-park");
+    h.now = wall_us();
+    let pid = leased_with_retry_delay(&mut h, 300, 3, &["a"]);
+    h.now = wall_us();
+    h.ack(pid, "q", "g", "w1", &[("a", AckStatus::Failed)]);
+    let start = std::time::Instant::now();
+    let mut c = h.pop_cmd("q", "g", "w2");
+    c.wait = true;
+    c.deadline_us = wall_us() + 10_000_000;
+    h.now = wall_us();
+    let mut rx = h.later(Command::PopWildcard(c));
+    for _ in 0..5000 {
+        h.checkpoint();
+        if let Ok(r) = rx.try_recv() {
+            let took = start.elapsed();
+            match r {
+                Reply::Done {
+                    outcome: Outcome::Pop(p),
+                    ..
+                } => assert_eq!(p.claims.len(), 1, "the failed message"),
+                other => panic!("{other:?}"),
+            }
+            assert!(
+                took >= std::time::Duration::from_millis(250),
+                "answered after {took:?}, inside the delay"
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("the parked pop never woke");
+}
+
+/// The hold lives in the leader's memory: a new leader redelivers at once.
+#[test]
+fn a_new_leader_redelivers_a_held_message_at_once() {
+    let mut h = H::new("retry-delay-failover");
+    let pid = leased_with_retry_delay(&mut h, 60_000, 3, &["a"]);
+    h.ack(pid, "q", "g", "w1", &[("a", AckStatus::Failed)]);
+    assert!(h.wildcard("q", "g", "w2").is_empty());
+    h.failover();
+    only(h.wildcard("q", "g", "w2"));
+}

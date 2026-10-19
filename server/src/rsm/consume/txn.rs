@@ -24,7 +24,7 @@ use crate::rsm::planner::txn::TxnCommand;
 use crate::rsm::planner::Refusal;
 use crate::rsm::store::{Store, TypedReads};
 
-use super::ack::{ack_target, positional, same};
+use super::ack::{ack_target, positional, retry_hold, same};
 use super::load::{registration_meta, Seed};
 use super::state::{lock, shard_of, Cur, Gid, Group, GroupCfg};
 use super::{Engine, TxnPart};
@@ -36,6 +36,9 @@ pub(crate) struct Reservation {
     pub shadows: Vec<(Pid, Gid, Cur, bool, bool)>,
     /// Groups registered by the bundle (their meta goes live on commit).
     pub registers: Vec<(Arc<Group>, crate::rsm::effect::GroupMeta)>,
+    /// The parts a `failed` ack released, and when their `retryDelay` ends:
+    /// held from the commit on ([`super::state::Part::hold_retry`]).
+    pub holds: HashMap<(Pid, Gid), i64>,
     pub at_us: i64,
 }
 
@@ -114,6 +117,8 @@ impl Engine {
             let mut effects: Vec<Effect> = Vec::new();
             let mut registers: Vec<(Arc<Group>, crate::rsm::effect::GroupMeta)> = Vec::new();
             let mut planner_positions = Vec::new();
+            // The parts a `failed` ack released, held from the commit on.
+            let mut holds: HashMap<(Pid, Gid), i64> = HashMap::new();
 
             // Load a shadow (the live part's cursor, unless this bundle
             // touched it already).
@@ -167,6 +172,9 @@ impl Engine {
                     return Ok(Err(qtxn(acked.res.stale_hashes.len(), t.pid)));
                 }
                 s.3.extend(acked.dlq);
+                if let Some(at) = retry_hold(&cfg.queue, now).filter(|_| acked.released) {
+                    holds.insert((t.pid, g.id), at);
+                }
                 acks.results.push(acked.res);
             }
             for a in &txn.positional_acks {
@@ -207,6 +215,9 @@ impl Engine {
                     continue;
                 }
                 let s = shadow!(g, pid);
+                // A position after a `failed` ack in the same bundle moves
+                // the cursor off the failed message: nothing to hold.
+                holds.remove(&(pid, g.id));
                 let Some(offset) = op.offset else {
                     if s.1 {
                         s.1 = false;
@@ -336,9 +347,10 @@ impl Engine {
                 },
                 out_shadows,
                 registers,
+                holds,
             )))
         });
-        let (part, shadows, registers) = out.map_err(Refusal::from_store)??;
+        let (part, shadows, registers, holds) = out.map_err(Refusal::from_store)??;
         if !shadows.is_empty() || !registers.is_empty() {
             lock(&self.txns).map.insert(
                 txn.request_id,
@@ -346,6 +358,7 @@ impl Engine {
                     part: part.clone(),
                     shadows,
                     registers,
+                    holds,
                     at_us: now,
                 },
             );
@@ -426,6 +439,9 @@ impl Engine {
                     p.cur = cur;
                     p.has_row = has_row && !delete;
                     p.seed_ts = None;
+                    if let Some(at) = res.holds.get(&(pid, gid)) {
+                        p.hold_retry(*at);
+                    }
                     // The entry wrote the row: durable at this version, and
                     // whatever waited on an earlier one with it.
                     p.ver += 1;

@@ -370,6 +370,7 @@ impl Engine {
                     p.has_row = true;
                     p.seed_ts = None;
                     p.ready_at = 0;
+                    p.retry_at = 0;
                     p.ver += 1;
                     p.durable_ver = p.ver;
                     let new_worker = p.cur.worker().map(str::to_string);
