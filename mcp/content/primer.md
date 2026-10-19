@@ -69,5 +69,5 @@ SIGTERM hands partitions over; a crash loses the dead node's share. No transacti
 6. Only a `failed` ack spends retries: a message that crashes its worker or outlives its lease
    returns forever, never reaching the DLQ.
 7. Every KV write needs `ttlSeconds` or `forever: true`; read `applied` on the result.
-8. `retryDelay`, `priority`, `ttl`, `maxSize` and `minPopWaitTime` are stored and ignored.
-   For a retry backoff, ack and schedule a timer in one transaction.
+8. After a `failed` ack the partition waits `retryDelay` (1000 ms by default; ignored up to 2.5.0).
+   `priority`, `ttl`, `maxSize` and `minPopWaitTime` are stored and ignored.

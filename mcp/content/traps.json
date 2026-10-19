@@ -311,21 +311,37 @@
   },
   {
     "id": "queue-options-without-effect",
-    "title": "retryDelay, priority, ttl, maxSize and minPopWaitTime are accepted and stored, and do nothing in 2.0",
+    "title": "priority, ttl, maxSize and minPopWaitTime are accepted and stored, and do nothing in 2.0",
     "applies": [
       "all"
     ],
     "severity": "surprise",
-    "symptom": "Failed messages come back immediately despite retryDelay; priorities and size caps are ignored.",
-    "cause": "POST /api/v1/configure stores these options and the 2.0 broker never reads them; a nacked message comes back on the next pop.",
-    "fix": "For a pause between attempts, ack the message and schedule a timer into the same partition in one transaction (it goes out behind newer messages of that partition). For the same delay on every message use delayedProcessing (seconds). To drop old messages use maxWaitTimeSeconds, or retentionEnabled with retentionSeconds or completedRetentionSeconds.",
+    "symptom": "Priorities, TTLs and size caps are ignored.",
+    "cause": "POST /api/v1/configure stores these options and the 2.0 broker never reads them.",
+    "fix": "To drop old messages use maxWaitTimeSeconds, or retentionEnabled with retentionSeconds or completedRetentionSeconds. For the same delay on every message use delayedProcessing (seconds).",
+    "source": [
+      "https://queenmq.com/concepts/partitions/",
+      "server/src/rsm/facade/real/phase2.rs:1256"
+    ]
+  },
+  {
+    "id": "retry-delay-holds-the-partition",
+    "title": "After a failed ack the message comes back after retryDelay (1000 ms by default), and its partition waits with it",
+    "applies": [
+      "all"
+    ],
+    "severity": "surprise",
+    "symptom": "After a failed ack nothing comes from that partition for about a second; a broker up to 2.5.0 redelivered at once.",
+    "cause": "A queue's retryDelay (milliseconds; 1000 on a queue created by a push or by /configure without it) holds the partition for that consumer group after a failed ack that leaves retries, so nothing overtakes the failed message. A retry ack, an expired lease and a dead-lettered message do not wait, and a leader change ends the wait. Up to 2.5.0 the broker stored retryDelay and read it nowhere.",
+    "fix": "Set the delay per queue with POST /api/v1/configure (options.retryDelay; 0 redelivers at once). For a pause that grows with each attempt, ack the message and schedule a timer into the same partition in one transaction (it goes out behind newer messages of that partition).",
     "code": {
+      "http": "curl -s -X POST http://localhost:6632/api/v1/configure -H 'content-type: application/json' \\\n  -d '{\"queue\":\"webhooks\",\"options\":{\"retryDelay\":0}}'",
       "js": "await queen.transaction()\n  .ack(message, 'completed', { consumerGroup: 'senders' })\n  .timer('webhooks').key(`retry-${message.transactionId}`).partition(message.partition)\n    .delay('30s').payload(message.data).schedule()\n  .commit()"
     },
     "source": [
       "https://queenmq.com/concepts/partitions/",
       "https://queenmq.com/guides/webhooks/",
-      "server/src/rsm/facade/real/phase2.rs:1256"
+      "server/src/rsm/consume/ack.rs:53"
     ]
   },
   {
