@@ -720,8 +720,16 @@ pub async fn handle_ephemeral_pop(
     // window-fattening legs — a gauge that only counted the first wait would
     // under-report exactly the pops that wait longest.
     let mut parked_guard: Option<crate::metrics::ParkedGuard> = None;
+    // A waiting pop takes its gate BEFORE its first look
+    // (`Notifier::queue_waiter`): a push wakes only a gate that exists.
+    let waiter = wait.then(|| st.notifier.queue_waiter(&qkey));
 
     loop {
+        // Armed before the look, parked on after it: a push landing between
+        // the two ends this park at once. Armed after the look, the wake
+        // missed such a push and the pop slept to its timeout (about one
+        // reply in 950 with an inbox per request, 2.5.0).
+        let armed = waiter.as_ref().map(|w| w.arm());
         let now = crate::util::now_epoch_ms();
         let got = st.ephemeral.pop(
             tenant.as_str(),
@@ -743,9 +751,10 @@ pub async fn handle_ephemeral_pop(
         if ephemeral::window_ready(held.len(), batch, waited_ms, window) {
             break;
         }
-        if !wait {
+        // Only a waiting pop armed a wake.
+        let Some(armed) = armed else {
             break;
-        }
+        };
         // §1.7 — the window is bounded by the pop's OWN timeout, never the
         // other way round: a 5 s window on a 100 ms pop must not hold the
         // response for 5 s.
@@ -762,15 +771,28 @@ pub async fn handle_ephemeral_pop(
         if parked_guard.is_none() {
             parked_guard = Some(st.metrics.parked.enter(tenant.as_str(), &eph_name));
         }
+        #[cfg(test)]
+        if let Some(hook) = TEST_BETWEEN_LOOK_AND_PARK.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
         // PURE EVENT WAIT. No probe, no backoff, no re-query — there is no
         // second authority to consult, so a wake is the only thing that can
         // change the answer. This is the structural reason the pop floor of
         // this class is transport time.
-        st.notifier.wait_queue(&qkey, effective - now_i).await;
+        let _ = tokio::time::timeout(effective - now_i, armed).await;
     }
     drop(parked_guard);
 
     render_pop(queue, &held)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// TEST ONLY: run once by the next waiting pop on this thread, between
+    /// its look at the rings and its park: the gap a lost wake-up lives in. A
+    /// push from here lands exactly there (`tests_unit/ephemeral_wake.rs`).
+    pub(crate) static TEST_BETWEEN_LOOK_AND_PARK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Hand-rolled, because `payload` is raw JSON that must be re-emitted VERBATIM.
@@ -2342,3 +2364,9 @@ pub async fn ephemeral_drain(st: &Arc<AppState>) -> Drained {
 #[cfg(all(test, feature = "server"))]
 #[path = "../tests_unit/ephemeral_handover.rs"]
 mod ephemeral_handover_tests;
+
+// The long poll's lost wake-up: a push between the pop's look and its park
+// (`src/tests_unit/README.md`).
+#[cfg(all(test, feature = "server"))]
+#[path = "../tests_unit/ephemeral_wake.rs"]
+mod ephemeral_wake_tests;

@@ -2,8 +2,9 @@
 //!
 //! A parked POP parks on a per-queue [`tokio::sync::Notify`] gate instead of a
 //! blind `sleep`. A local push or apply wakes the gate so the pop re-checks at
-//! once; the per-poll timeout is still honoured, so a missed wake merely falls
-//! back to the poll interval.
+//! once. The pop takes the gate and arms its wake BEFORE it looks
+//! ([`Notifier::queue_waiter`]): a push landing between the look and the park
+//! is delivered, not slept through to the poll's timeout.
 //!
 //! Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): every `qkey` below is the COMPOSITE
 //! `handlers::tenant_queue_key(tenant, queue)`, byte-identical to the hot-list ring
@@ -177,14 +178,16 @@ impl Notifier {
         self.gates.lock_unpoisoned().len()
     }
 
-    /// Park a queue-scoped long-poll for up to `dur`, returning the instant a push
-    /// to `queue` wakes the gate. Replaces the old blind `sleep(poll_ms)`. The
-    /// waiter is armed (`enable`) before the wait, so a wake that arrives during the
-    /// window is delivered; a wake missed in the tiny arm gap simply times out and
-    /// the caller re-polls — identical to the pre-existing poll-interval ceiling.
-    /// Returns true if a push woke the gate, false if `dur` elapsed first — the
-    /// caller uses this to reset (on wake) vs advance (on timeout) its long-poll
-    /// backoff (RUSTFIX item 19).
+    /// The hold a queue-scoped long poll takes on its queue's gate BEFORE its
+    /// first look at the queue. From then on a push to the queue finds the gate
+    /// (a push wakes only a gate that exists) and no sweep evicts it (the waiter
+    /// holds its `Arc`). The poll arms a wake ([`QueueWaiter::arm`]) before each
+    /// look and parks on that same wake, so a push landing between the look and
+    /// the park ends the park at once. The old order (look, then take the gate
+    /// and arm) slept through such a push to the poll's own timeout: the
+    /// ephemeral pop, which has no re-poll to fall back on, answered about one
+    /// reply in 950 at its timeout (2.5.0, 2026-10-19). Kafka's fetches close
+    /// the same gap the same way ([`Self::watch_partitions`]).
     /// ---------------------------------------------------------------------
     /// SELECTIVE WAKE — assessed 2026-08-23 alongside the POP AUTOPILOT
     /// (server/src/pop_autopilot.rs) and DELIBERATELY NOT DONE. The idea: a
@@ -219,6 +222,12 @@ impl Notifier {
     /// admission budget or the pool (`hotlist_pop_attempt`), so a redundant wake
     /// costs a task poll and no database work at all. That is why this is a
     /// documented follow-up and not a blocker for the autopilot.
+    pub fn queue_waiter(&self, qkey: &str) -> QueueWaiter {
+        QueueWaiter {
+            gate: self.gate(qkey),
+        }
+    }
+
     /// Register a Kafka Fetch on the `(qkey, partition)`s it reads BEFORE it
     /// reads them: an append to any of them from then on is a permit on the
     /// watch's one `Notify`, so an append landing between the read and the park
@@ -294,14 +303,6 @@ impl Notifier {
             .map(|q| (q.clone(), TOPIC_WATCH.to_string()))
             .collect();
         self.watch_partitions(&parts)
-    }
-
-    pub async fn wait_queue(&self, qkey: &str, dur: Duration) -> bool {
-        let gate = self.gate(qkey);
-        let notified = gate.notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        tokio::time::timeout(dur, notified).await.is_ok()
     }
 
     /// Park a discovery (namespace/task) long-poll on its tenant's gate — woken by
@@ -452,6 +453,21 @@ impl Notifier {
 /// ([`Notifier::watch_topics`]). No partition is named this: a push with no
 /// partition name writes `Default`.
 pub const TOPIC_WATCH: &str = "";
+
+/// A queue-scoped long poll's hold on its queue's gate
+/// ([`Notifier::queue_waiter`]).
+pub struct QueueWaiter {
+    gate: Arc<QueueGate>,
+}
+
+impl QueueWaiter {
+    /// A wake armed now. tokio delivers a `notify_waiters` to a `Notified`
+    /// from the moment it is created, polled or not, so a wake armed before a
+    /// look is not lost to a push that lands between that look and the park.
+    pub fn arm(&self) -> tokio::sync::futures::Notified<'_> {
+        self.gate.notify.notified()
+    }
+}
 
 /// One Kafka Fetch's registration on the partitions it reads
 /// ([`Notifier::watch_partitions`]).
@@ -636,12 +652,43 @@ mod tests {
         assert!(n.drain_hints("q", 10).is_empty());
     }
 
+    /// A queue-scoped long poll with nothing to look at: take the gate, arm,
+    /// park. True when a wake ended the park, false at `dur`.
+    async fn park(n: &Notifier, qkey: &str, dur: Duration) -> bool {
+        let w = n.queue_waiter(qkey);
+        tokio::time::timeout(dur, w.arm()).await.is_ok()
+    }
+
+    /// The ephemeral pop's lost wake-up (2.5.0 and before): a push landing
+    /// between the poll's look and its park. A wake armed before the look
+    /// takes it, on a queue with no gate yet as on one polled before.
+    #[tokio::test]
+    async fn a_push_between_the_look_and_the_park_is_not_lost() {
+        let n = Notifier::new(false);
+        for pass in ["no gate yet", "the gate the first poll left"] {
+            let w = n.queue_waiter("q");
+            let armed = w.arm();
+            // The look found nothing; the push lands now, before the park.
+            n.notify_pushed("q", "p1");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(500), armed)
+                    .await
+                    .is_ok(),
+                "{pass}: the wake armed before the look was lost"
+            );
+        }
+        // The old order, for contrast: a wake armed only after the push
+        // sleeps to its timeout, because `notify_waiters` keeps no permit.
+        n.notify_pushed("q", "p1");
+        assert!(!park(&n, "q", Duration::from_millis(50)).await);
+    }
+
     #[tokio::test]
     async fn wake_delivers_hint_to_a_parked_pop() {
         let n = Notifier::new(false);
         let n2 = n.clone();
         // Park a waiter; it creates the gate.
-        let waiter = tokio::spawn(async move { n2.wait_queue("q", Duration::from_secs(5)).await });
+        let waiter = tokio::spawn(async move { park(&n2, "q", Duration::from_secs(5)).await });
         // Give the waiter a moment to arm + register.
         tokio::time::sleep(Duration::from_millis(20)).await;
         n.wake_local_hint("q", "p7");
@@ -683,8 +730,7 @@ mod tests {
         let (ka, kb) = (k(TA, "orders"), k(TB, "orders"));
         let n2 = n.clone();
         let kb2 = kb.clone();
-        let waiter =
-            tokio::spawn(async move { n2.wait_queue(&kb2, Duration::from_millis(300)).await });
+        let waiter = tokio::spawn(async move { park(&n2, &kb2, Duration::from_millis(300)).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         n.wake_local_hint(&ka, "p1");
         assert!(!waiter.await.unwrap(), "tenant B's gate must time out");
@@ -763,7 +809,7 @@ mod tests {
     async fn a_parked_waiter_is_never_evicted_and_still_wakes() {
         let n = Notifier::new(false);
         let n2 = n.clone();
-        let waiter = tokio::spawn(async move { n2.wait_queue("q", Duration::from_secs(2)).await });
+        let waiter = tokio::spawn(async move { park(&n2, "q", Duration::from_secs(2)).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         // Two sweeps: the second chance is spent, yet the waiter keeps the gate alive.
         assert_eq!(n.evict_idle(), 0);
