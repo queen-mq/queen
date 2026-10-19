@@ -750,11 +750,28 @@ impl Relay {
     }
 }
 
+impl Relay {
+    /// Whether the leader ended the relay: its reader saw the end of the
+    /// stream (or a frame nobody waited for).
+    fn closed(&self) -> bool {
+        self.reader.is_finished()
+    }
+}
+
 impl Drop for Relay {
     fn drop(&mut self) {
         self.reader.abort();
     }
 }
+
+/// How long a relayed produce waits for the leader's answer. Past every
+/// client's own `request.timeout.ms` (30 s): the client has given up on it
+/// by then, and the connection ends as for a pipelined produce that failed.
+const RELAY_ANSWER_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(60)
+};
 
 /// The entries a Produce answer (v3..=9, [`versions`]) refused with an error
 /// other than a duplicate's, as `(topic, partition)`; `None` when the answer
@@ -939,16 +956,66 @@ where
                 }
             };
             for reply in replies {
-                write_reply(wr, codec, outbuf, reply).await?;
+                if let Err(e) = write_reply(wr, codec, outbuf, reply).await {
+                    // A connection that ends on a refusal ends for that reason
+                    // whatever the write says: what is in flight behind it is
+                    // not to be settled ([`settle_pipelined`]).
+                    return Err(if close {
+                        std::io::Error::other(RESEND_IN_ORDER)
+                    } else {
+                        e
+                    });
+                }
             }
             if close {
                 return Err(std::io::Error::other(RESEND_IN_ORDER));
             }
             Ok(())
         }
-        Ok(None) | Err(_) => Err(std::io::Error::other(
-            "a pipelined produce failed; the connection ends so the client sends again in order",
-        )),
+        Ok(None) | Err(_) => Err(std::io::Error::other(PIPELINE_FAILED)),
+    }
+}
+
+/// Why a connection ends when a pipelined produce failed (its push, or the
+/// push before it, or a relayed answer that never came): nothing more is
+/// answered, and the client sends again, in order, what it was not answered.
+const PIPELINE_FAILED: &str =
+    "a pipelined produce failed; the connection ends so the client sends again in order";
+
+/// Whether a connection that ended this way left an unwritten batch behind
+/// it: what it still has in flight must not be settled ([`settle_pipelined`]).
+fn ended_on_a_failure(result: &std::io::Result<()>) -> bool {
+    result.as_ref().is_err_and(|e| {
+        let why = e.to_string();
+        why == RESEND_IN_ORDER || why == PIPELINE_FAILED
+    })
+}
+
+/// What a connection that ended — the client went away, a write failed —
+/// still had in flight, settled off the connection: each push already sent
+/// lands whether anyone waits for it, so its runs are committed to the
+/// sequence windows in request order, as their answers would have been, and
+/// the client's resend of them is then the duplicate it is rather than a
+/// second write. Aborted instead, a run would leave the in-flight list
+/// uncommitted while its records land. Stops at the first produce that failed
+/// or refused an idempotent batch: nothing behind that one may be committed
+/// ahead of its resend.
+async fn settle_pipelined(inflight: std::collections::VecDeque<Pipelined>) {
+    let mut inflight = inflight;
+    while let Some(h) = inflight.pop_front() {
+        match h.await {
+            Ok(Some(Pending::Produce(_, pushed))) => {
+                let (_, close) = pushed.answer_and_close();
+                if close {
+                    break;
+                }
+            }
+            Ok(Some(Pending::Replies(_))) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    for h in inflight {
+        h.abort();
     }
 }
 
@@ -1070,6 +1137,18 @@ where
                     }
                     relay = None;
                 }
+                if relay.as_ref().is_some_and(Relay::closed) {
+                    // The leader ended the relay — an idle connection it
+                    // closed, or the refusal it answered last. What went
+                    // through it is answered first (a refusal's answer ends
+                    // this connection with it), and a fresh one is opened.
+                    if let Err(e) =
+                        drain_pipelined(&mut inflight, &mut wr, &mut codec, &mut outbuf).await
+                    {
+                        break 'conn Err(e);
+                    }
+                    relay = None;
+                }
                 if relay.is_none() {
                     relay = Relay::open(to).await.ok();
                 }
@@ -1090,7 +1169,11 @@ where
                     match r.send(frame.clone(), answered).await {
                         Ok(Some(rx)) => {
                             inflight.push_back(tokio::spawn(async move {
-                                rx.await.ok().map(|answer| {
+                                // Bounded: a leader that vanished without a
+                                // FIN never answers, and the connection must
+                                // not wait for it for ever.
+                                let answer = tokio::time::timeout(RELAY_ANSWER_TIMEOUT, rx).await;
+                                answer.ok().and_then(Result::ok).map(|answer| {
                                     // The leader ended the relay after this
                                     // answer, and the client's connection ends
                                     // with it: its next batch must not reach
@@ -1251,15 +1334,19 @@ where
             break 'conn Err(std::io::Error::other(RESEND_IN_ORDER));
         }
     };
-    // Whatever is still in flight is not answered on this connection: its
-    // staged records leave the in-flight list as each task is dropped.
-    for h in inflight {
-        h.abort();
+    // Whatever is still in flight is not answered on this connection. After a
+    // failure it is dropped, and its staged records leave the in-flight list
+    // unwritten or uncommitted; otherwise its pushes are settled off the
+    // connection ([`settle_pipelined`]).
+    let failed = ended_on_a_failure(&result);
+    if failed || inflight.is_empty() {
+        for h in inflight {
+            h.abort();
+        }
+    } else {
+        tokio::spawn(settle_pipelined(inflight));
     }
-    if result
-        .as_ref()
-        .is_err_and(|e| e.to_string() == RESEND_IN_ORDER)
-    {
+    if failed {
         crate::stats::PRODUCE_RESEND_CLOSES.add(1);
     }
     result
@@ -3235,7 +3322,6 @@ mod tests {
             ],
             2,
         );
-        follower.producers.restart_windows_on_gaps(true);
         *follower_queen.leader_node.lock().unwrap() = Some(1);
         tokio::spawn(serve(follower_listener, Arc::new(follower), None));
 
@@ -3266,6 +3352,100 @@ mod tests {
         );
         assert_eq!(leader.landed("orders", "0"), 0);
         leader_facade.producers.end(&twin);
+    }
+
+    /// A follower relaying to `leader`, and a client connected to it.
+    async fn follower_relaying_to(leader: std::net::SocketAddr) -> Peer<TcpStream> {
+        let follower_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let follower_addr = follower_listener.local_addr().unwrap();
+        let (follower, follower_queen) = crate::handlers::testing::clustered_on_raft(
+            &[("orders", 2)],
+            &[
+                (1, "127.0.0.1", leader.port()),
+                (2, "127.0.0.1", follower_addr.port()),
+            ],
+            2,
+        );
+        *follower_queen.leader_node.lock().unwrap() = Some(1);
+        tokio::spawn(serve(follower_listener, Arc::new(follower), None));
+        Peer::new(TcpStream::connect(follower_addr).await.unwrap())
+    }
+
+    /// A leader that vanished without a FIN never answers a relayed produce;
+    /// the follower does not wait for it for ever ([`RELAY_ANSWER_TIMEOUT`]):
+    /// the client's connection ends, as for a pipelined produce that failed.
+    #[tokio::test]
+    async fn a_relayed_produce_the_leader_never_answers_ends_the_connection() {
+        let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader = silent.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = silent.accept().await {
+                held.push(stream);
+            }
+        });
+        let mut peer = follower_relaying_to(leader).await;
+        peer.send(produce_request(9, 1, -1)).await;
+        let answer = tokio::time::timeout(RELAY_ANSWER_TIMEOUT * 3, peer.recv())
+            .await
+            .expect("the follower waited for the silent leader for ever");
+        assert!(
+            answer.is_none(),
+            "an answer came from a leader that never wrote one"
+        );
+    }
+
+    /// A leader that ended an idle relay: the follower opens a new one for
+    /// the client's next produce rather than failing it.
+    #[tokio::test]
+    async fn a_relay_the_leader_closed_is_opened_again() {
+        use kafka_protocol::messages::produce_response::{
+            PartitionProduceResponse, TopicProduceResponse,
+        };
+        use kafka_protocol::messages::{ProduceResponse, TopicName};
+        let once = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader = once.local_addr().unwrap();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&accepted);
+        // Answers one produce per connection, then closes it.
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = once.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut peer = Peer::new(stream);
+                let Some(frame) = peer.recv().await else {
+                    continue;
+                };
+                let version = i16::from_be_bytes([frame[2], frame[3]]);
+                let correlation_id = i32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
+                let body =
+                    ProduceResponse::default().with_responses(vec![TopicProduceResponse::default(
+                    )
+                    .with_name(TopicName(StrBytes::from_static_str("orders")))
+                    .with_partition_responses(vec![PartitionProduceResponse::default()
+                        .with_index(0)
+                        .with_error_code(0)])]);
+                let Reply::Send(bytes) = respond(ApiKey::Produce, correlation_id, &body, version)
+                else {
+                    unreachable!()
+                };
+                peer.send(bytes).await;
+            }
+        });
+        let mut peer = follower_relaying_to(leader).await;
+        for id in [1, 2] {
+            peer.send(produce_request(9, id, -1)).await;
+            let mut answer = peer
+                .recv()
+                .await
+                .unwrap_or_else(|| panic!("produce {id} was not answered"));
+            let header =
+                ResponseHeader::decode(&mut answer, ApiKey::Produce.response_header_version(9))
+                    .unwrap();
+            assert_eq!(header.correlation_id, id);
+            // Long enough for the relay to see the leader close it.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// An idempotent producer's batch, sequence `seq`, for `orders` 0.
@@ -3381,6 +3561,69 @@ mod tests {
         assert_eq!(api.landed("orders", "0"), 2);
     }
 
+    /// A client that goes away with pushes in flight on a node that leads:
+    /// they land anyway (the broker writes what was sent), so they are
+    /// committed off the connection ([`settle_pipelined`]), and the client's
+    /// resend of them on its next connection is answered as the duplicates
+    /// they are — not written a second time.
+    #[tokio::test]
+    async fn pushes_in_flight_when_the_client_goes_away_are_settled_and_resent_as_duplicates() {
+        use kafka_protocol::messages::ProduceResponse;
+        let (addr, queen) = pipelining_facade(Duration::from_millis(200), None).await;
+        let client = TcpStream::connect(addr).await.unwrap();
+        // Closed with a reset, as a client that crashed or a follower that
+        // stopped with answers unread.
+        // Deprecated because a NON-zero linger blocks the thread on drop; a
+        // zero one sends the reset at once.
+        #[allow(deprecated)]
+        client.set_linger(Some(Duration::ZERO)).unwrap();
+        let mut client = client;
+        for seq in 0..3 {
+            send(&mut client, idempotent_produce(10 + seq, seq)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(client);
+        let t = std::time::Instant::now();
+        while queen.landed("orders", "0") < 3 {
+            assert!(
+                t.elapsed() < Duration::from_secs(5),
+                "the pushes did not land"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Their answers come 200 ms after they land; settled after that.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        for seq in 0..3 {
+            send(&mut client, idempotent_produce(20 + seq, seq)).await;
+        }
+        let mut codec = codec();
+        let mut buf = BytesMut::new();
+        let mut seen = Vec::new();
+        while seen.len() < 3 {
+            match codec.decode(&mut buf).unwrap() {
+                Some(f) => {
+                    let mut f = f.freeze();
+                    let id = ResponseHeader::decode(&mut f, 0).unwrap().correlation_id;
+                    let r = ProduceResponse::decode(&mut f, 8).unwrap();
+                    let p = &r.responses[0].partition_responses[0];
+                    seen.push((id, p.error_code, p.base_offset));
+                }
+                None => assert!(
+                    client.read_buf(&mut buf).await.unwrap() > 0,
+                    "server hung up"
+                ),
+            }
+        }
+        assert_eq!(seen, vec![(20, 0, 0), (21, 0, 1), (22, 0, 2)]);
+        assert_eq!(
+            queen.landed("orders", "0"),
+            3,
+            "a resend of a batch that landed was written again"
+        );
+    }
+
     /// The batch headers of a produce frame built by [`idempotent_produce`].
     fn batch_infos(frame: &Bytes) -> Vec<kafka_protocol::records::BatchDecodeInfo> {
         let decoded = decode_produces(std::slice::from_ref(frame)).unwrap();
@@ -3392,13 +3635,14 @@ mod tests {
             .unwrap()
     }
 
-    /// A coalesced group stops at an idempotent batch it refuses: the batch
+    /// A coalesced group stops at an idempotent batch it refuses: the request
     /// behind it, read in the same pass, is neither written nor answered, and
-    /// the connection ends after the refusal. Were it staged, it would follow
-    /// the refused batch's twin in flight on another connection and be
-    /// written; if that push then failed, the refused batch's resend would
-    /// land behind it, and its success would count the refused one delivered
-    /// in librdkafka. On a node that leads (pipelined) and one that does not.
+    /// the connection ends after the refusal. The one behind is an ordinary
+    /// produce here, which nothing else would refuse — so only the stop keeps
+    /// it out of the log. (An idempotent batch behind it that a fresh window
+    /// or a cluster's gap restart would accept is the case the stop exists
+    /// for: its success would count the refused batch delivered in
+    /// librdkafka.) On a node that leads (pipelined) and one that does not.
     #[tokio::test]
     async fn a_coalesced_group_stops_at_a_refused_idempotent_batch() {
         use kafka_protocol::messages::ProduceResponse;
@@ -3431,7 +3675,7 @@ mod tests {
                 .encode(idempotent_produce(1, 40), &mut wire)
                 .unwrap();
             peer.codec
-                .encode(idempotent_produce(2, 41), &mut wire)
+                .encode(produce_request(8, 2, -1), &mut wire)
                 .unwrap();
             peer.stream.write_all(&wire).await.unwrap();
             let mut first = peer.recv().await.expect("the refusal is answered");
@@ -3447,7 +3691,7 @@ mod tests {
             );
             assert!(
                 peer.recv().await.is_none(),
-                "leads={leads}: the batch behind the refusal was answered"
+                "leads={leads}: the request behind the refusal was answered"
             );
             assert!(task.await.unwrap().is_err(), "leads={leads}");
             assert!(
@@ -3457,7 +3701,7 @@ mod tests {
             assert_eq!(
                 api.landed("orders", "0"),
                 0,
-                "leads={leads}: the batch behind the refusal was written"
+                "leads={leads}: the request behind the refusal was written"
             );
             f.producers.end(&twin);
         }

@@ -561,6 +561,31 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// A clustered facade restarts held sequence windows on gaps, as boot
+    /// builds it (`Facade::new`, then `with_limits`); a facade on its own keeps
+    /// Kafka's refusal ([`idempotent`], "A window can be OUT OF DATE, too").
+    #[test]
+    fn a_clustered_facade_restarts_windows_on_gaps_and_a_single_one_does_not() {
+        let (clustered, _) = crate::handlers::testing::clustered_on_raft(
+            &[("orders", 1)],
+            &[(1, "127.0.0.1", 9092), (2, "127.0.0.1", 9093)],
+            1,
+        );
+        assert!(clustered.producers.restarts_windows_on_gaps());
+        let limited = clustered.with_limits(64, idempotent::MIN_MAX_TRACKED);
+        assert!(limited.producers.restarts_windows_on_gaps());
+        assert!(limited
+            .for_connection(None)
+            .producers
+            .restarts_windows_on_gaps());
+        let (single, _) = crate::handlers::testing::facade_and_queen(&[("orders", 1)]);
+        assert!(!single.producers.restarts_windows_on_gaps());
+        assert!(!single
+            .with_limits(64, idempotent::MIN_MAX_TRACKED)
+            .producers
+            .restarts_windows_on_gaps());
+    }
+
     #[test]
     fn a_server_name_is_reduced_to_what_a_host_header_may_carry() {
         assert_eq!(

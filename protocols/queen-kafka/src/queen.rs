@@ -4438,15 +4438,26 @@ pub mod testing {
             self.ordered_log.lock().unwrap().push(("sent", n));
             let delay = *self.ordered_delay.lock().unwrap();
             let fail = *self.ordered_fail_at.lock().unwrap() == Some(n);
+            // Written NOW, as the broker writes it (`push_records_ordered`
+            // spawns the write): it lands whether or not anyone waits for
+            // `done`, which only reports it, `delay` later.
+            let landed = (!fail).then(|| {
+                let mut push = self.push_raw(items, token);
+                let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                match push.as_mut().poll(&mut cx) {
+                    std::task::Poll::Ready(answer) => answer,
+                    std::task::Poll::Pending => unreachable!("the fake's push awaits nothing"),
+                }
+            });
             OrderedPushed {
                 in_log: Box::pin(async { true }),
                 done: Box::pin(async move {
                     tokio::time::sleep(delay).await;
                     self.ordered_log.lock().unwrap().push(("answered", n));
-                    if fail {
-                        return Err(Error::Transport(format!("push {n} failed, as scripted")));
+                    match landed {
+                        Some(answer) => answer,
+                        None => Err(Error::Transport(format!("push {n} failed, as scripted"))),
                     }
-                    self.push_raw(items, token).await
                 }),
             }
         }

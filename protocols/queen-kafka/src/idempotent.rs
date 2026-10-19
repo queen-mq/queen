@@ -36,10 +36,12 @@
 //! 2. `conn::connection` checks a connection's produce in arrival order. On
 //!    the node that leads it pipelines the pushes (2026-10-17): a batch is
 //!    checked while the batches before it may still be in flight, and
-//!    [`Producers::check`] accepts one that follows the newest in flight, as
-//!    it always did within one coalesced push; the runs are committed to the
-//!    window as the connection answers them, in request order too. Everywhere
-//!    else the connection is serial: one push, answered, then the next.
+//!    [`Producers::check_on`] accepts one that follows the newest batch the
+//!    SAME connection has in flight, as it always did within one coalesced
+//!    push; the runs are committed to the window as the connection answers
+//!    them (or settles them, when the client went away first), in request
+//!    order too. Everywhere else the connection is serial: one push,
+//!    answered, then the next.
 //! 3. The producer itself never advances past a gap: under idempotence the Java
 //!    client and librdkafka both re-sequence on failure, which is why
 //!    `base_sequence == last_seq + 1` below is a check and not a race.
@@ -95,7 +97,8 @@
 //! and the batches the client had already sent behind it — from being read as a
 //! window that fell behind is the CONNECTION: an idempotent batch that is not
 //! written, for any reason but being a duplicate, is answered and the connection
-//! is closed after the answer (`handlers::produce`, `conn`). Nothing the client
+//! is closed after the answer (`handlers::produce`, `conn`; a push that failed
+//! on the leader's pipelined path closes it without an answer). Nothing the client
 //! sent behind it on that connection is read, relayed or served anywhere, and the
 //! client sends again, in order, from its oldest unanswered batch — what a failed
 //! pipelined push already did. Without that, a facade with no window whose first
@@ -453,10 +456,12 @@ pub struct Producers {
     /// hold a window another one has moved past.
     gaps_restart: std::sync::atomic::AtomicBool,
     /// Batches accepted and not yet answered, per key, in the order they were
-    /// accepted ([`Producers::begin`]): what a producer's next batch follows
-    /// when both are written in ONE push — the requests a client sent back to
-    /// back, coalesced (`handlers::produce::handle_coalesced`). Only batches in
-    /// flight are here, so it is as small as a coalesced run is long.
+    /// accepted ([`Producers::begin`]), each with its connection: what a
+    /// producer's next batch on that connection follows while the ones before
+    /// it are still being written — coalesced into one push
+    /// (`handlers::produce::handle_coalesced`) or pipelined behind it
+    /// (`conn::connection`). Only batches in flight are here, so it is as
+    /// small as a connection's pipeline is deep.
     inflight: Mutex<HashMap<Key, Vec<InFlight>>>,
 }
 
@@ -1558,11 +1563,12 @@ fn decide(
     // client had already sent behind it — never reaches this point: the
     // connection that answered the failure is closed after it, so nothing
     // behind it is read (the module header). What is left, in a CLUSTER, is a
-    // window another facade moved past while the
-    // producer wrote through it (a leader change, a relay that came up), and
-    // refusing THAT is fatal to librdkafka for the head of its queue — the
-    // module header. So there the window restarts at this batch, like a lost
-    // one; `commit` drops the ranges it has fallen behind.
+    // window another facade moved past while the producer wrote through it (a
+    // leader change, a relay that came up), and refusing THAT is fatal to
+    // librdkafka for the head of its queue — the module header. So there the
+    // window restarts at this batch, like a lost one; the batches remembered
+    // before the gap are kept, so an exact resend of one is still its
+    // duplicate.
     if gaps_restart {
         return accept;
     }

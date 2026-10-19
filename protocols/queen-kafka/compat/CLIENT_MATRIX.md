@@ -160,8 +160,11 @@ What the facade actually promises, and it is Kafka's own promise:
   its connection);
 * an epoch below the highest seen is refused `INVALID_PRODUCER_EPOCH`.
 
-All three were measured against `apache/kafka:3.9.1` side by side and the
-answers are identical (`compat/differential`, scenario `idempotent`).
+The error codes were measured against `apache/kafka:3.9.1` side by side and
+are identical (`compat/differential`, scenario `idempotent`). Closing the
+connection after a batch that was not written is this facade's own rule —
+Kafka keeps it open — and the differential reconnects after the refused gap on
+both targets, so its later rows compare answers rather than a closed socket.
 
 **The caveat, and it is real: the window is in memory and per facade.** A real
 Kafka broker persists producer state in the log; this one does not. After a

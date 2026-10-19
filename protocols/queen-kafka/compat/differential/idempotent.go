@@ -151,7 +151,9 @@ func scenIdempotent(c *runctx) {
 		c.rec.bad("idempotent.dial", err)
 		return
 	}
-	defer k.Close()
+	// The connection is replaced after the gap (step 4): close whichever is
+	// current.
+	defer func() { k.Close() }()
 
 	topic := c.topic("idem")
 	if err := ensureTopic(k, topic, c.parts); err != nil {
@@ -195,6 +197,16 @@ func scenIdempotent(c *runctx) {
 	//    a claim about duplicates that said nothing about order.
 	gap := idempotentProduceOnce(k, topic, pid, epoch, 9, []string{"gap"})
 	c.rec.add("idempotent.gap.error_code", "%s", errName(gap.code))
+	// The facade ends a connection after an idempotent batch it did not write
+	// (its close rule: nothing the client sent behind it may be read first),
+	// where Kafka keeps it open. A client reconnects either way, and so does
+	// this harness, on both targets alike, so the rows below compare answers
+	// rather than a closed socket.
+	k.Close()
+	if k, err = c.target.dial(); err != nil {
+		c.rec.bad("idempotent.redial", err)
+		return
+	}
 	if hw2, err := endOffset(k, topic); err == nil {
 		c.rec.add("idempotent.gap.wrote_nothing", "%t", hw2 == hw)
 	} else {

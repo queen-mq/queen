@@ -153,29 +153,34 @@ itself rather than answering it `DUPLICATE_SEQUENCE_NUMBER` (a success to every 
 that may never have been written). A facade on its own keeps Apache Kafka's answers to both, because
 nothing else writes its partitions. What keeps a gap that IS one from being read as a window that fell
 behind is the connection: an idempotent batch that is not written, for any reason but being a
-duplicate, is answered and the connection is closed after the answer, so nothing the client sent
-behind it is read, relayed or served anywhere, and the client sends again, in order, from its oldest
-unanswered batch. Requests read together with it (a coalesced or pipelined group) are staged up to it
-and no further, and a follower that relayed it reads the leader's answer and ends its client's
-connection with the relay, so the next batch cannot reach a new leader, or the follower itself, ahead
-of the resend. A transaction's batch is exempt: it is staged rather than written, and closing its
-connection would orphan the transaction; instead a transaction's window never starts past sequence 0
-on a single facade, so the batch behind a refused one is refused too, rather than starting a window
-under which the refused batch's retry would be answered as a duplicate. A batch that follows one still
-in flight on another connection (a client that reconnected while its old connection's push runs) is
-refused retriably rather than pushed with nothing ordering it behind that push. A late batch the
-window writes from below goes where its sequence puts it rather than becoming the newest, and a late
-commit of a session the producer has since bumped past no longer enters the new session's window. This
-also closes a hole the earlier fix opened: a facade with no window whose first push for a producer
-failed accepted the batch behind it, and then answered the failed batch's resend as a duplicate, which
-the client counts as delivered. A connection that switches between relaying its produce and serving it
-locally now drains what is in flight first, and a pipelined produce dropped before its push no longer
-leaves batches in the in-flight list. `/status` counts the restarts (`producers.resynced`) and the
-connections closed after a batch that was not written (`consume.produceResendCloses`). Measured on
-`compat/cluster/rig-embedded.sh` (three raft brokers with the facade in process) under eight
-idempotent librdkafka producers: the code on stage reproduced the fatal error (one producer stopped
-for good); this one, over six runs of rolling restarts and leader kills, lost nothing, kept every
-producer's order and never failed a send fatally.
+duplicate, is answered and the connection is closed after the answer (a push that failed on the
+leader's pipelined path closes it without an answer), so nothing the client sent behind it is read,
+relayed or served anywhere, and the client sends again, in order, from its oldest unanswered batch.
+Requests read together with it (a coalesced or pipelined group) are staged up to it and no further,
+and a follower that relayed it reads the leader's answer and ends its client's connection with the
+relay, so the next batch cannot reach a new leader, or the follower itself, ahead of the resend. A
+transaction's batch is exempt: it is staged rather than written, and closing its connection would
+orphan the transaction; instead a transaction's window never starts past sequence 0 on a single
+facade, so the batch behind a refused one is refused too, rather than starting a window under which
+the refused batch's retry would be answered as a duplicate. A batch that follows one still in flight
+on another connection (a client that reconnected while its old connection's push runs) is refused
+retriably rather than pushed with nothing ordering it behind that push. A late batch the window writes
+from below goes where its sequence puts it rather than becoming the newest, and a late commit of a
+session the producer has since bumped past no longer enters the new session's window. This also closes
+a hole the earlier fix opened: a facade with no window whose first push for a producer failed accepted
+the batch behind it, and then answered the failed batch's resend as a duplicate, which the client
+counts as delivered. A connection that switches between relaying its produce and serving it locally
+now drains what is in flight first, and a pipelined produce dropped before its push no longer leaves
+batches in the in-flight list. `/status` counts the restarts (`producers.resynced`) and the
+connections closed because a produce was not written (`consume.produceResendCloses`). A client that
+goes away with pushes in flight no longer has them written twice when it resends: they land anyway, so
+the node commits them to the window off the connection and the resend is answered as the duplicate it
+is. A follower no longer waits for ever for a leader that vanished without closing the relay (60 s,
+past every client's request timeout), and opens a new relay when the leader closed an idle one instead
+of failing the client's next produce. Measured on `compat/cluster/rig-embedded.sh` (three raft brokers
+with the facade in process) under eight idempotent librdkafka producers: the code on stage reproduced
+the fatal error (one producer stopped for good); this one, over six runs of rolling restarts and
+leader kills, lost nothing, kept every producer's order and never failed a send fatally.
 
 **Kafka facade: a consumer that commits asynchronously no longer starves its own heartbeats.** A
 connection is answered one request at a time, and every commit of a group waits for that group's

@@ -77,9 +77,11 @@ pub static PRODUCE_RENDER: Timing = Timing::new();
 pub static PRODUCE_PUSHES: Counter = Counter::new();
 pub static PRODUCE_REQUESTS: Counter = Counter::new();
 pub static PRODUCE_RECORDS: Counter = Counter::new();
-/// Connections ended after answering an idempotent batch that was not written
-/// (`conn::RESEND_IN_ORDER`), on the node that refused it or on a follower
-/// that relayed it. Each is a client that reconnects and resends in order.
+/// Connections ended because a produce was not written: an idempotent batch
+/// refused and answered (`conn::RESEND_IN_ORDER`, on the node that refused it
+/// or a follower that relayed it), or a pipelined push that failed and is not
+/// answered (`conn::PIPELINE_FAILED`). Each is a client that reconnects and
+/// resends in order.
 pub static PRODUCE_RESEND_CLOSES: Counter = Counter::new();
 
 /// The whole report.
