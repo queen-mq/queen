@@ -72,6 +72,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
 # waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
 # parks wakes it instead of its timeout. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (Kafka groups in the console's reads): phase2.rs marks the queues
+# the Kafka facade created (kafkaTopic) in the queue list, one KV prefix read per list. Nothing this
+# page states changes.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They

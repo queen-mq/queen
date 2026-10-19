@@ -72,6 +72,9 @@ sourceOfTruth:
 # (consume/ack.rs, txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released,
 # for that group and a pop naming it too, until the queue's retryDelay ends; a transaction's failed
 # ack holds it from the commit. No error code changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (Kafka groups in the console's reads): phase2.rs marks the queues
+# the Kafka facade created (kafkaTopic) in the queue list, one KV prefix read per list. Nothing this
+# page states changes.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code

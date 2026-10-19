@@ -92,6 +92,10 @@ sourceOfTruth:
 # and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
 # from the commit. The Laravel driver acks completed or dlq, never failed, so nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-19 (Kafka groups in the console's reads): phase2/reads.rs reports a
+# Kafka-facade consumer group from the presence row the facade writes (kind kafka, liveMembers,
+# lastSeenAt, inactiveSeconds; state Stable, Lagging or Empty), two KV point reads per group of the
+# listing. Nothing this page states changes.
 ---
 
 Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both

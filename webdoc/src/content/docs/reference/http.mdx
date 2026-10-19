@@ -55,6 +55,10 @@ sourceOfTruth:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (Kafka groups in the console's reads): phase2/reads.rs reports a
+# Kafka-facade consumer group from the presence row the facade writes (kind kafka, liveMembers,
+# lastSeenAt, inactiveSeconds; state Stable, Lagging or Empty), two KV point reads per group of the
+# listing. Nothing this page states changes.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no

@@ -35,6 +35,9 @@ sourceOfTruth:
 # Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-17 (conn.rs, 19b024495): the pipelined produce a connection waits on is
 # boxed (a clippy size lint); the pipelining, its order and its limits are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (group presence): coordinator/mod.rs gains
+# QUEEN_KAFKA_GROUP_PRESENCE_MS (15000, 0 = off, else 1,000 to 3,600,000), the interval of the
+# presence row presence.rs writes for the console. The settings table has its row.
 ---
 
 This is the contract a Kafka client gets from Queen, in the form you check things against: the
@@ -71,6 +74,7 @@ stops the node with the variable's name, except for `QUEEN_KAFKA_THREADS`, `QUEE
 | `QUEEN_KAFKA_GROUP_JOIN_DELAY_MS` | `3000` | How long the first join of an empty group waits for more members (Kafka's `group.initial.rebalance.delay.ms`), 0 to 3,600,000. |
 | `QUEEN_KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS` | `6000` | Kafka's `group.min.session.timeout.ms`. |
 | `QUEEN_KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS` | `300000` | Kafka's `group.max.session.timeout.ms`. A consumer asking for a session timeout outside the two is refused `INVALID_SESSION_TIMEOUT`. |
+| `QUEEN_KAFKA_GROUP_PRESENCE_MS` | `15000` | How often a consumer group writes its presence for the console while its members heartbeat or, with no members, while it commits, 1,000 to 3,600,000. A group is reported live while its last write is younger than three intervals, on the broker's clock; a completed rebalance and a leave write at once. `0` writes none, and the broker then reports a Kafka group from its cursors alone, as `Dead`. |
 | `QUEEN_KAFKA_TLS_CERT`, `QUEEN_KAFKA_TLS_KEY` | none | PEM certificate chain and private key of a TLS listener. Both or neither. |
 | `QUEEN_KAFKA_SASL` | none | `plain` turns on SASL/PLAIN ([security](#security)). |
 | `QUEEN_KAFKA_FORWARD_SNI_HOST` | `false` | Sends the TLS server name a client dialled as the `Host` of its calls into Queen. Needs TLS. |

@@ -43,6 +43,10 @@ sidebar:
 # Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-17 (conn.rs, 19b024495): the pipelined produce a connection waits on is
 # boxed (a clippy size lint); the pipelining, its order and its limits are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (group presence): offsets.rs's group delete also removes the
+# group's presence row, which presence.rs writes while the group's members heartbeat. "Consumer
+# groups and committed offsets" gains a paragraph on how the broker and the dashboard see a Kafka
+# group; the example's fields are unchanged.
 ---
 
 Your Kafka producers, consumers and admin tools can use Queen as they are: change
@@ -248,6 +252,19 @@ days (`offsets.retention.minutes`), and a consumer that comes back after that st
 `kafka-consumer-groups.sh --delete` and `--delete-offsets` do that, and since a Kafka group is a
 Queen group, deleting one from a Kafka tool deletes the Queen consumer group of that name, on every
 queue.
+
+A Kafka consumer takes no lease, so the broker learns that a group is alive from the facade. While a
+group's members heartbeat, the facade writes the group's presence to the key-value store: how many
+members it has and which topics they subscribe to, every 15 seconds
+(`QUEEN_KAFKA_GROUP_PRESENCE_MS`), and at once when a rebalance completes or the last member
+leaves. A group of `assign()` consumers has no members, and is present while it commits.
+`/api/v1/consumer-groups` reports such a group as `kind: "kafka"`, with `liveMembers`, `lastSeenAt`
+and `inactiveSeconds`, and its `state` is `Stable` or `Lagging` while its members read the queue and
+`Empty` once none does: at once when the last member leaves, and 45 seconds after the facade's last
+write for a group whose consumers were killed. The dashboard counts a live Kafka group as a reader
+of its topic, and shows a group that has had no member for 15 minutes as inactive on its page
+instead of reporting it as an issue. A topic the facade created is not flagged for having no
+reader, since Kafka clients never read in queue mode.
 
 ### Idempotent producers
 

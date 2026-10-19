@@ -86,6 +86,10 @@ sourceOfTruth:
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-17 (2.5.0): the /health examples show 2.5.0, still at cluster version 7.
+# sourceOfTruth re-read 2026-10-19 (Kafka groups): useSeverity.js gains inactiveAfterSeconds (900 s)
+# and groupActivity, and settingsDoc.js its Settings line, Inactive after; a queue asks for a reader
+# only with no consumer group on it, and not when the Kafka facade created it. The paragraph under
+# the table of lines says both.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -106,8 +110,10 @@ and the members; the bar at the top of every page says when a node refuses write
 disk is full.
 
 Amber and red on those pages come from a few lines, and Settings is where a tenant moves them:
-for all its queues, or for one queue from that queue's page. A queue that no consumer group is
-meant to read can be marked so, and stops asking for attention.
+for all its queues, or for one queue from that queue's page. A queue with pending messages asks
+for attention when nothing is set up to read them: no consumer group is on it and it is not a topic
+the [Kafka facade](/guides/kafka/) created. A queue that no consumer group is meant to read can be
+marked so, and stops asking.
 
 | Line | Needs attention | Failing |
 |---|---|---|
@@ -116,6 +122,11 @@ meant to read can be marked so, and stops asking for attention.
 | Failed acks, as a share of the acks attempted in the window | 1% | 5%, with at least 500 failures |
 | A node's memory, as a share of its limit | 80% | 90% |
 | A node's CPU, as a share of the CPUs it may use | 90% | never |
+
+A Kafka consumer group takes no lease, so the dashboard judges it by the members the facade reports.
+While it has none, after a restart, a rebalance or a crash, it is still judged by its lag for 15
+minutes, the **Inactive after** line; past that it is shown as inactive on Consumer groups and is
+no longer an issue, since its lag grows for as long as nobody runs it.
 
 The moved lines are one JSON document in the tenant's KV (namespace `queen.console`, key
 `settings`), so they are replicated with everything else and another tool can read them. A line
