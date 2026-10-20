@@ -54,9 +54,20 @@ pub async fn produce(
     let budget = Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS);
     let mut items: Vec<RawPush> = Vec::new();
     let mut shape: Vec<(TopicName, Vec<Slot>)> = Vec::with_capacity(req.topic_data.len());
+    // `acks=0` has no answer to carry an error: the connection closes
+    // instead, as Kafka does, and the client refreshes its metadata.
+    let mut any_error = false;
     for t in req.topic_data {
         let name = t.name.0.to_string();
-        let width = snap.as_ref().and_then(|s| s.widths.get(&name).copied());
+        // A topic the cache does not know yet (created a moment ago on
+        // another node) is not refused: the push creates its queue, as a
+        // native push does, at the default width.
+        let width = snap.as_ref().map(|s| {
+            s.widths
+                .get(&name)
+                .copied()
+                .unwrap_or(ctx.topics.default_partitions())
+        });
         let mut slots = Vec::with_capacity(t.partition_data.len());
         for p in t.partition_data {
             let mut slot = Slot {
@@ -102,6 +113,7 @@ pub async fn produce(
             }
             if slot.error != NONE {
                 items.truncate(slot.first);
+                any_error = true;
             }
             slot.count = items.len() - slot.first;
             slots.push(slot);
@@ -145,7 +157,7 @@ pub async fn produce(
 
     if n == 0 {
         if acks == 0 {
-            return Step::Silent;
+            return if any_error { Step::Close } else { Step::Silent };
         }
         return crate::conn::ready(encode(
             ApiKey::Produce,
@@ -184,7 +196,7 @@ pub async fn produce(
         } else {
             finish.await;
         }
-        return Step::Silent;
+        return if any_error { Step::Close } else { Step::Silent };
     }
     if in_log {
         Step::Reply(Box::pin(finish))
