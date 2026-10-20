@@ -639,3 +639,31 @@ test('rollupFromQueueOps: fetches fold in as their own counter, and nodesMissing
   // A queue-ops answer that does not say is not "complete".
   assert.equal('nodesMissing' in rollupFromQueueOps({ ...OPS, groupBy: 'namespace' }), false)
 })
+
+import { tenantTotals } from '../src/composables/useWorkload.js'
+
+test('tenantTotals: a tenant without queues ({}) is zeros on every count, not undefined (#140)', () => {
+  // A fresh 2.5.0 broker, verbatim.
+  const empty = {
+    bucketMinutes: 1,
+    buckets: ['2026-10-20T05:00:00Z', '2026-10-20T05:01:00Z', '2026-10-20T05:02:00Z', '2026-10-20T05:03:00Z'],
+    groupBy: 'namespace',
+    rows: [],
+    tenant: {},
+    timeRange: { from: '2026-10-20T05:00:00.000Z', to: '2026-10-20T05:03:00.000Z' },
+  }
+  const t = tenantTotals(empty)
+  assert.equal(t.queues, 0)
+  for (const k of ['groups', 'partitions', 'pending', 'processing', 'deadLetter', 'retainedBytes']) assert.equal(t.now[k], 0, k)
+  for (const k of ['pushMessages', 'popMessages', 'fetchMessages', 'ackSuccess', 'ackFailed', 'popEmpty']) assert.equal(t.window[k], 0, k)
+  assert.deepEqual(t.series.pop, [null, null, null, null])
+  // Whatever the strip derives from it is a number or null, never NaN.
+  const d = windowDeltas(t.window, t.window)
+  assert.equal(d.pushMessages.abs, 0)
+  assert.equal(d.pushMessages.pct, null)
+
+  // A tenant with its parts is the payload's own object; no payload, no tenant.
+  assert.equal(tenantTotals(NS), NS.tenant)
+  assert.equal(tenantTotals(null), null)
+  assert.equal(tenantTotals({ rows: [] }), null)
+})

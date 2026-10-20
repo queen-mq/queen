@@ -263,6 +263,11 @@ A queue is flagged "No reader" only when no consumer group is on it and it is no
 facade created: on a queue with groups, each group answers for itself. "No reader is expected"
 still silences a queue that holds messages nobody is meant to read.
 
+**Console: Workload opens on a broker with no queues.** A tenant without queues is `"tenant": {}` in
+the workload answer, and the page stopped on "Interface error: Cannot read properties of undefined
+(reading 'groups')" on every fresh broker. It now shows zeros until the first queue exists.
+Reported in queen-mq/queen#140.
+
 **Server: `retryDelay` is enforced.** After a `failed` ack that leaves retries, the message comes
 back once the queue's `retryDelay` (milliseconds) has passed, and its partition waits with it for
 that consumer group, so nothing behind the message overtakes it; a pop that names the partition

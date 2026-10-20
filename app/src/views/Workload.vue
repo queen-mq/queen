@@ -656,8 +656,8 @@ import PageTools from '@/components/PageTools.vue'
 import { stamp } from '@/composables/useStamp'
 import {
   comparisonRange, deeperFindings, efficiency, enrichRows, findings, flowSeries, formatters as fmt,
-  heatCells, readsOf, rollupFromQueueOps, sameHourBaseline, totalSeries, trimOpenBucket, weeklyProfile,
-  windowDeltas,
+  heatCells, readsOf, rollupFromQueueOps, sameHourBaseline, tenantTotals, totalSeries, trimOpenBucket,
+  weeklyProfile, windowDeltas,
 } from '@/composables/useWorkload'
 import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
 import { onClusterChange } from '@/stores/identity'
@@ -1115,7 +1115,8 @@ const queueMetaMap = computed(() => {
 })
 
 const payload = computed(() => trimOpenBucket(workload.data.value))
-const tenant = computed(() => payload.value?.tenant || null)
+// A broker with no queues answers `tenant: {}`: zeros on the counts strip.
+const tenant = computed(() => tenantTotals(payload.value))
 const buckets = computed(() => payload.value?.buckets || [])
 const bucketMinutes = computed(() => payload.value?.bucketMinutes ?? 0)
 const multiDay = computed(() => {

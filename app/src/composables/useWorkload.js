@@ -408,6 +408,29 @@ export function trimOpenBucket(payload, now = Date.now()) {
   }
 }
 
+/**
+ * The payload's tenant totals, with the parts an empty tenant leaves out.
+ *
+ * A tenant without queues is `tenant: {}` on the wire (the procedure's empty
+ * object), and the counts strip reads `tenant.now.*` and `tenant.window.*`:
+ * that answer is a tenant of zeros, not one still loading
+ * (queen-mq/queen#140). A tenant that has its parts is returned as is.
+ *
+ * @param {object|null} payload a workload payload
+ * @returns {object|null} `{queues, window, series, now}`, null without a tenant
+ */
+export function tenantTotals(payload) {
+  const t = payload?.tenant
+  if (!t) return null
+  if (t.window && t.series && t.now) return t
+  return {
+    queues: t.queues ?? 0,
+    window: t.window || blankWindow(),
+    series: t.series || blankSeries((payload.buckets || []).length),
+    now: t.now || blankNow(),
+  }
+}
+
 export function heatCells(rows) {
   const sorted = [...rows].sort((a, b) => b.window.popMessages - a.window.popMessages)
   let max = 0
@@ -824,6 +847,28 @@ const { k: fmtK } = formatters
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
 
+// The empty `window` / `series` / `now` of a group: what a group of no
+// queues, or no rows in the window, adds up to.
+const blankWindow = () => ({
+  pushMessages: 0, pushRequests: 0, popMessages: 0, fetchMessages: 0, popEmpty: 0, ackRequests: 0,
+  ackSuccess: 0, ackFailed: 0, transactions: 0, conflated: 0,
+  partitionsCreated: 0, partitionsDeleted: 0, parkedAvg: 0, avgLagMs: null, maxLagMs: null,
+})
+const blankSeries = (n) => ({
+  push: new Array(n).fill(null),
+  pop: new Array(n).fill(null),
+  fetch: new Array(n).fill(null),
+  popEmpty: new Array(n).fill(null),
+  ackFailed: new Array(n).fill(null),
+  parked: new Array(n).fill(null),
+  avgLagMs: new Array(n).fill(null),
+  maxLagMs: new Array(n).fill(null),
+})
+const blankNow = () => ({
+  pending: 0, processing: 0, deadLetter: 0, retainedBytes: 0, partitions: 0,
+  groups: 0, queuesWithoutGroup: 0, pendingWithoutGroup: 0, queuesTouched: 0, queuesActive: 0,
+})
+
 /**
  * Fold the pre-workload endpoints into a contract-1 workload payload.
  *
@@ -886,29 +931,10 @@ export function rollupFromQueueOps(input = {}) {
   const buckets = [...new Set(series.map((s) => s.bucket))].sort()
   const bucketIndex = new Map(buckets.map((b, i) => [b, i]))
 
-  const blankWindow = () => ({
-    pushMessages: 0, pushRequests: 0, popMessages: 0, fetchMessages: 0, popEmpty: 0, ackRequests: 0,
-    ackSuccess: 0, ackFailed: 0, transactions: 0, conflated: 0,
-    partitionsCreated: 0, partitionsDeleted: 0, parkedAvg: 0, avgLagMs: null, maxLagMs: null,
-  })
-  const blankSeries = () => ({
-    push: new Array(buckets.length).fill(null),
-    pop: new Array(buckets.length).fill(null),
-    fetch: new Array(buckets.length).fill(null),
-    popEmpty: new Array(buckets.length).fill(null),
-    ackFailed: new Array(buckets.length).fill(null),
-    parked: new Array(buckets.length).fill(null),
-    avgLagMs: new Array(buckets.length).fill(null),
-    maxLagMs: new Array(buckets.length).fill(null),
-  })
-  const blankNow = () => ({
-    pending: 0, processing: 0, deadLetter: 0, retainedBytes: 0, partitions: 0,
-    groups: 0, queuesWithoutGroup: 0, pendingWithoutGroup: 0, queuesTouched: 0, queuesActive: 0,
-  })
   // Accumulators the payload does not carry: the pop-weighted lag numerator,
   // the per-queue parked averages, and per (group, bucket) lag weights.
   const mk = () => ({
-    window: blankWindow(), series: blankSeries(), now: blankNow(),
+    window: blankWindow(), series: blankSeries(buckets.length), now: blankNow(),
     queues: new Set(), touched: new Set(), active: new Map(),
     lagNum: 0, lagDen: 0, parked: new Map(),
     bucketLag: new Map(), bucketParked: new Map(),
