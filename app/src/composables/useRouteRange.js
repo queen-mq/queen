@@ -2,11 +2,7 @@ import { computed, ref, watch } from 'vue'
 import { useRouteState } from './useRouteState.js'
 import { validWindow } from './navigation.js'
 import { formatDateTimeLocal } from './useFormat.js'
-
-export const rangeMinutes = value => {
-  const match = /^(\d+)(m|h|d)$/.exec(String(value))
-  return match ? Number(match[1]) * ({ m: 1, h: 60, d: 1440 }[match[2]]) : 60
-}
+import { rangeMinutes } from '../../../shared/timeRanges.mjs'
 
 // Share the APPLIED period, not a half-edited custom-range form.
 export function useRouteRange({ range, customMode, customFrom, customTo, appliedCustom, reload }) {

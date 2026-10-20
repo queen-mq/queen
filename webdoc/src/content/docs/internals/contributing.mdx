@@ -11,6 +11,7 @@ sourceOfTruth:
   - server/Cargo.toml
   - server/clippy.toml
   - Dockerfile
+  - shared/timeRanges.mjs
   - build.sh
   - test/run.sh
   - test/README.md
@@ -85,6 +86,7 @@ its contributors had the right to give. How the project is run and who runs it a
 | `protocols/queen-kafka/` | The Kafka wire facade, linked by the `kafka` feature. |
 | `proxy/` | The multi-tenant proxy, linked by the `server` feature; `proxy/console/` is its operator console. |
 | `app/` | The dashboard (Vue and Vite). It builds into `server/webapp/dist`, which the binary embeds. |
+| `shared/` | JavaScript time-range presets and conversions used by the dashboard and proxy console. |
 | `crates/queen-protocol/` | Shared wire types for the Rust client and the embedded library API. |
 | `test/` | `run.sh` (the Docker test matrix), `jepsen/`, `recovery/` (failure rehearsals), `raft/` (the determinism lint and harnesses). |
 | `benchmark-queen/` | Archived benchmark sessions: harness, raw output, results. |
@@ -100,6 +102,12 @@ embedded at compile time:
 npm --prefix app ci && npm --prefix app run build
 cargo build --release --manifest-path server/Cargo.toml
 ```
+
+When changing `shared/timeRanges.mjs`, rebuild both frontends before the broker:
+run `npm --prefix proxy/console ci && npm --prefix proxy/console run build` alongside
+the dashboard build above. The common hourly presets feed every picker; extended
+periods, system metrics, lag thresholds and console usage add their choices in the
+same module. The Dockerfile copies `shared/` into both frontend build stages.
 
 Run one node on a throwaway data directory and check it:
 

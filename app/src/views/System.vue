@@ -342,6 +342,7 @@ import { numTone } from '@/composables/useSeverity'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
 import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
+import { DEFAULT_TIME_RANGE, SYSTEM_TIME_RANGES as timeRanges, relativeTimeRange } from '../../../shared/timeRanges.mjs'
 
 // CELL-LEVEL PAGE — every source is an operator route (queen_proxy
 // is_operator_route): /api/v1/analytics/system-metrics, the bare
@@ -357,18 +358,11 @@ const canOperate = computed(() => can('operator'))
 const dataSource = ref('system')
 const viewMode = ref('aggregate')
 const aggregationType = ref('avg')
-const timeRange = ref(60)
+const timeRange = ref(DEFAULT_TIME_RANGE)
 const customMode = ref(false)
 const customFrom = ref('')
 const customTo = ref('')
 const appliedCustom = ref(null)
-
-const timeRanges = [
-  { label: '15m', value: 15 },
-  { label: '1h', value: 60 },
-  { label: '6h', value: 360 },
-  { label: '24h', value: 1440 },
-]
 
 const aggregationTypes = [
   { label: 'Average', value: 'avg' },
@@ -381,9 +375,7 @@ const aggregationTypes = [
 // ---------------------------------------------------------------------------
 function currentRange() {
   if (customMode.value && appliedCustom.value) return appliedCustom.value
-  const to = new Date()
-  const from = new Date(to.getTime() - timeRange.value * 60_000)
-  return { from, to }
+  return relativeTimeRange(timeRange.value)
 }
 
 // Live, not on-click: an invalid range explains itself as it is typed instead
@@ -400,9 +392,9 @@ const selectQuickRange = (value) => {
 const toggleCustomMode = () => {
   customMode.value = !customMode.value
   if (customMode.value) {
-    const now = new Date()
-    customTo.value = formatDateTimeLocal(now)
-    customFrom.value = formatDateTimeLocal(new Date(now.getTime() - timeRange.value * 60_000))
+    const { from, to } = relativeTimeRange(timeRange.value)
+    customTo.value = formatDateTimeLocal(to)
+    customFrom.value = formatDateTimeLocal(from)
   } else {
     appliedCustom.value = null
     metrics.refresh()

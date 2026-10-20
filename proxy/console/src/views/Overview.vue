@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { apiFetch } from '../api.js'
+import { USAGE_TIME_RANGES } from '../../../../shared/timeRanges.mjs'
 
 const props = defineProps({ overview: { type: Object, default: null } })
 
@@ -8,19 +9,9 @@ const usage = ref([])
 const usageError = ref(null)
 const usageLoading = ref(true)
 
-// The API accepts 1..168 (console.rs clamp_hours); these are the round points
-// inside that range, so the picker can never ask for a window that gets
-// silently clamped to something else.
-const HOUR_CHOICES = [
-  { hours: 1, label: 'Last hour' },
-  { hours: 6, label: 'Last 6h' },
-  { hours: 24, label: 'Last 24h' },
-  { hours: 72, label: 'Last 3 days' },
-  { hours: 168, label: 'Last 7 days' },
-]
 const hours = ref(24)
 
-const hoursLabel = computed(() => HOUR_CHOICES.find((c) => c.hours === hours.value)?.label ?? `Last ${hours.value}h`)
+const hoursLabel = computed(() => USAGE_TIME_RANGES.find((c) => c.hours === hours.value)?.longLabel ?? `Last ${hours.value}h`)
 
 async function loadUsage() {
   usageLoading.value = true
@@ -232,7 +223,7 @@ function fmtLimit(key, value) {
       <div class="card-head">
         <h2>Usage — {{ hoursLabel.toLowerCase() }}</h2>
         <select v-model.number="hours" @change="loadUsage">
-          <option v-for="c in HOUR_CHOICES" :key="c.hours" :value="c.hours">{{ c.label }}</option>
+          <option v-for="c in USAGE_TIME_RANGES" :key="c.value" :value="c.hours">{{ c.longLabel }}</option>
         </select>
       </div>
       <div v-if="usageLoading" class="hint">Loading…</div>
