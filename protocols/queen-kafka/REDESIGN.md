@@ -86,3 +86,27 @@ node), `QUEEN_KAFKA_ADDR` (default `0.0.0.0:9092`),
 `QUEEN_KAFKA_THREADS`. Other nodes are advertised at the host of their raft
 HTTP address (`QUEEN_RAFT_PEERS`) with this node's Kafka port.
 `QUEEN_KAFKA_NODE_ID` and `QUEEN_KAFKA_CLUSTER*` are ignored.
+
+## Measured, 2026-10-20 (Alice's Mac, debug build)
+
+- franz-go compat suite (`compat/go`), one node: every failure is a phase-2
+  feature above (ACLs, config alters, OffsetDelete, transactions, idempotent
+  sequence checks, topic configs) or a test that dials the first facade's
+  broker id 0. Produce, consume, groups (rejoin storm included), metadata and
+  the native interop tests pass.
+- Java kafka-clients 3.9.2 (`compat/java-matrix`): every functional check
+  passes (512 records byte-exact with headers, order per partition, commits,
+  gzip/snappy/lz4, seeks).
+- Three nodes, 3000 records at 100/s, a two-member group, the raft leader
+  stopped at 10 s and back at 18 s:
+
+| client, stop | missing | written twice | per-key order breaks | redelivered | longest consumer pause |
+|---|---|---|---|---|---|
+| franz-go, SIGTERM | 0 | 1 | 0 | 12 | 4.5 s |
+| franz-go, SIGKILL | 0 | 1 | 0 | 5 | 7.5 s |
+| librdkafka (kcat), SIGKILL | 0 | 0 | 0 | 463 | 5.8 s |
+
+  "Written twice" is the retry of an unknown outcome (phase 2: writer dedup).
+  The librdkafka redeliveries are what it consumed since its last commit
+  (5 s auto-commit): the new leader knows no group, so commits fail until the
+  members rejoin. End-to-end latency, librdkafka producer to consumer: p50 44 ms.
