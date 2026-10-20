@@ -18,13 +18,18 @@ use crate::core::{CallError, KvOp, Queen};
 pub const NS: &str = "queen-kafka";
 pub const WIDTH_PREFIX: &str = "qk:topiccfg:";
 const TTL: Duration = Duration::from_millis(1000);
+/// A snapshot younger than this is not re-read for a missing name: a client
+/// asking for a topic that does not exist cannot turn every request into a
+/// queue list.
+const MISS_FLOOR: Duration = Duration::from_millis(100);
 const PAGE: i64 = 1000;
 const MAX_PAGES: usize = 100;
 
 /// Every topic of one tenant at one moment: name → width.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Snapshot {
     pub widths: HashMap<String, i32>,
+    pub at: Instant,
 }
 
 struct Entry {
@@ -71,6 +76,23 @@ impl Topics {
         self.load(bearer).await
     }
 
+    /// The topics, re-read once when one of `names` is missing: a topic that
+    /// another node just created is not answered unknown for the rest of a TTL.
+    pub async fn covering<'a>(
+        &self,
+        bearer: Option<&str>,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Arc<Snapshot>, CallError> {
+        let snap = self.snapshot(bearer).await?;
+        let missing = names
+            .into_iter()
+            .any(|n| valid_topic_name(n) && !snap.widths.contains_key(n));
+        if !missing || snap.at.elapsed() < MISS_FLOOR {
+            return Ok(snap);
+        }
+        self.refresh(bearer).await
+    }
+
     /// The topics, read now.
     pub async fn refresh(&self, bearer: Option<&str>) -> Result<Arc<Snapshot>, CallError> {
         let _one = self.refreshing.lock().await;
@@ -104,7 +126,10 @@ impl Topics {
                 .max(1);
             widths.insert(q.name, width);
         }
-        let snap = Arc::new(Snapshot { widths });
+        let snap = Arc::new(Snapshot {
+            widths,
+            at: Instant::now(),
+        });
         self.cache.lock().unwrap_or_else(|p| p.into_inner()).insert(
             bearer.map(str::to_string),
             Entry {

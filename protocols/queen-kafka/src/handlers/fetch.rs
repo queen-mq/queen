@@ -38,7 +38,8 @@ pub async fn fetch(ctx: &Arc<Ctx>, conn: &Conn, req: FetchRequest, _version: i16
     let bearer = conn.bearer.clone();
     let leads = ctx.broker.cluster().leads();
     let snap = if leads {
-        ctx.topics.snapshot(bearer.as_deref()).await.ok()
+        let names = req.topics.iter().map(|t| t.topic.0.as_str());
+        ctx.topics.covering(bearer.as_deref(), names).await.ok()
     } else {
         None
     };

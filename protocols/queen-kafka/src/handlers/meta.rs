@@ -90,7 +90,8 @@ pub async fn metadata(
     };
     let allow_create = ctx.cfg.auto_create && (version < 4 || req.allow_auto_topic_creation);
 
-    let snap = match ctx.topics.snapshot(bearer).await {
+    let names: Vec<&str> = requested.iter().flatten().map(String::as_str).collect();
+    let snap = match ctx.topics.covering(bearer, names).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(target: "kafka", error = %e, "cannot list the topics");

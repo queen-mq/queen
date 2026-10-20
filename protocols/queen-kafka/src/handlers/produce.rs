@@ -46,7 +46,8 @@ pub async fn produce(
     let leads = ctx.broker.cluster().leads();
     let transactional = req.transactional_id.is_some();
     let snap = if leads && !transactional {
-        ctx.topics.snapshot(bearer.as_deref()).await.ok()
+        let names = req.topic_data.iter().map(|t| t.name.0.as_str());
+        ctx.topics.covering(bearer.as_deref(), names).await.ok()
     } else {
         None
     };
