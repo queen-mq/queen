@@ -126,14 +126,18 @@ without one nothing changes.
 **Kafka facade: a node that restarts inside a raft cluster no longer leaves a third of the consumer
 groups without a coordinator.** A restarting broker's facade claimed its node id at boot, which makes
 its peers send it its share of the groups on their next read, and only then read its first view of the
-cluster, which waits for its raft log to catch up (20 to 55 s on stage). For that time those groups had
-no coordinator: the peers redirected them to the node, and the node answered COORDINATOR_NOT_AVAILABLE.
-Consumers stopped for 27 to 143 s per restarted node during a rolling restart (stage, 2026-10-20). The
-first view is now read before the claim (up to 60 s), so the groups move when the node can coordinate
-them. A node that no longer owns a group now answers the members parked in its rebalance
-NOT_COORDINATOR at once, instead of holding them until a session timeout (up to 30 s more). The registry
-row a node deletes when it stops gets a second try inside a 4 s budget, and every change of the live
-set is logged.
+cluster, which waits for its raft log to catch up (20 to 55 s on stage). For that time those groups
+had no coordinator: the peers redirected them to the node, and the node answered
+COORDINATOR_NOT_AVAILABLE. Consumers stopped for 27 to 143 s per restarted node during a rolling
+restart (stage, 2026-10-20). The first view is now read before the claim, so the groups move when the
+node can coordinate them; a node whose first view takes longer than 60 s binds and serves produce, but
+writes its row only once the view is in. Without that, a node still catching up was advertised again
+as soon as it claimed: at the stage traffic peak one node's reads took 94 s and another's over a
+minute, its peers sent it a third of the groups and of the partition leaderships, it refused the
+fetches its log could not answer yet, and consumers fell up to 270 s behind. A node that no longer
+owns a group now answers the members parked in its rebalance NOT_COORDINATOR at once, instead of
+holding them until a session timeout (up to 30 s more). The registry row a node deletes when it stops
+gets a second try inside a 4 s budget, and every change of the live set is logged.
 
 **Console: a queue read by Kafka consumers shows its reads, and a chart missing a node says so.** The
 records the in-process Kafka facade serves to Fetch requests were counted nowhere, so a topic read

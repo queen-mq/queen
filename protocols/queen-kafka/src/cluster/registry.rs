@@ -700,6 +700,14 @@ pub fn spawn(
 /// this node's own predecessor on the same raft broker is taken over on the
 /// next write, fenced on its version, instead of being a conflict.
 async fn renew(api: &dyn QueenApi, state: &ClusterState, token: Option<&str>, held: &Held) {
+    // No row before this node has a view: the row sends it its share of the
+    // consumer groups, which it cannot coordinate without one. Only a node
+    // whose boot gave up waiting for its first view gets here without one
+    // (boot.rs `serve`); its peers keep its groups until the viewer installs
+    // it.
+    if state.view().is_none() {
+        return;
+    }
     let expect = Some(held.get().or_else(|| held.adopt()).unwrap_or(0));
     let op = KvOp::put_ttl(
         NAMESPACE,
@@ -1870,6 +1878,8 @@ mod tests {
         seed_raft_row(&api, 2, "the-process-that-was-killed");
         *api.raft_members.lock().unwrap() = Some(members(2, &[(1, 0), (2, 0)], 0));
         let state = raft_state(2);
+        // Boot's first view.
+        assert!(refresh_view(&*api, &state, None).await);
         let registration = spawn(
             Arc::clone(&api) as Arc<dyn QueenApi>,
             Arc::clone(&state),
@@ -1884,6 +1894,39 @@ mod tests {
         assert!(state.coordinating());
         let departure = registration.deregister(Duration::from_secs(2)).await;
         assert_eq!(departure, Departure::Released);
+    }
+
+    /// Inside a raft broker a node writes no registry row until it has a view
+    /// of the cluster: the row sends it its share of the consumer groups, and
+    /// a node whose reads still wait on its raft catch-up cannot coordinate
+    /// them (stage, 2026-10-20). Once the viewer installs a view, the renewer
+    /// writes the row on its next beat.
+    #[tokio::test(start_paused = true)]
+    async fn inside_raft_no_row_is_written_before_the_first_view() {
+        let api = FakeQueen::with(&[]);
+        seed_raft_row(&api, 1, "inc-1");
+        // No view can be judged yet (its reads wait on the raft catch-up);
+        // writes still land, as the claim's did on stage.
+        *api.raft_members.lock().unwrap() = None;
+        let state = raft_state(2);
+        let registration = spawn(
+            Arc::clone(&api) as Arc<dyn QueenApi>,
+            Arc::clone(&state),
+            None,
+            None,
+        );
+        run_for(BEAT * 5).await;
+        assert!(state.view().is_none());
+        assert_eq!(
+            api.kv_get(NAMESPACE, "qk:node:rig:2"),
+            None,
+            "a row was written before the node had a view"
+        );
+        *api.raft_members.lock().unwrap() = Some(members(1, &[(1, 0), (2, 0)], 0));
+        run_for(BEAT * 3).await;
+        assert!(state.view().is_some());
+        assert!(api.kv_get(NAMESPACE, "qk:node:rig:2").is_some());
+        drop(registration);
     }
 
     /// A registration that is dropped without a deregister — a serve loop

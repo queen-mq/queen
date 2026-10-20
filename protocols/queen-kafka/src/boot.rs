@@ -795,7 +795,13 @@ pub async fn serve(
                 // during which a third of the groups, moved here by the row,
                 // had no coordinator. Read first, the view is in when the row
                 // lands, and the listener binds right after the claim. A node
-                // with no view by [`BOOT_VIEW_WAIT`] claims anyway.
+                // with no view by [`BOOT_VIEW_WAIT`] does NOT claim: it binds
+                // and serves produce and fetch, and its renewer writes the row
+                // once the viewer has installed a view
+                // ([`registry`]'s renew), so its peers keep its groups until
+                // then (stage, 2026-10-20: a node whose reads took 94 s at the
+                // traffic peak, claimed at 60 s, left its groups 32 s with no
+                // coordinator).
                 let started = tokio::time::Instant::now();
                 let deadline = started + BOOT_VIEW_WAIT;
                 loop {
@@ -804,8 +810,9 @@ pub async fn serve(
                         tracing::warn!(
                             target: "boot",
                             waited_ms = BOOT_VIEW_WAIT.as_millis() as u64,
-                            "no view of the cluster could be read; this node claims its id \
-                             without one and installs it on the first viewer tick"
+                            "no view of the cluster could be read; this node serves produce and \
+                             fetch, and claims its id (which sends it its consumer groups) once \
+                             its first view is in"
                         );
                         break;
                     }
@@ -822,7 +829,11 @@ pub async fn serve(
                     tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             }
-            let version =
+            // Inside a raft broker a node with no view yet leaves the row to its
+            // renewer, which waits for one (above).
+            let version = if raft_liveness && state.view().is_none() {
+                None
+            } else {
                 match registry::claim(api.as_ref(), &state, cfg.queen_token.as_deref()).await {
                     Ok(version) => Some(version),
                     // The single most likely operator error, caught for one KV
@@ -845,7 +856,8 @@ pub async fn serve(
                         );
                         None
                     }
-                };
+                }
+            };
             registration = Some(registry::spawn(
                 Arc::clone(&api),
                 Arc::clone(&state),
