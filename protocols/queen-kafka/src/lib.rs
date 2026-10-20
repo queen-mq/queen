@@ -12,6 +12,7 @@
 //! | Metadata, FindCoordinator     | queues, raft members; the raft leader leads everything |
 //! | Join/Sync/Heartbeat/Leave     | in memory on the raft leader ([`groups`])              |
 //! | Create/Delete topics          | create / delete queue, width row in KV                 |
+//! | Transactions                  | held on the leader, one Queen transaction at commit    |
 //!
 //! The design and what is left for later: `REDESIGN.md`.
 
@@ -26,8 +27,10 @@ mod conn;
 mod errors;
 mod groups;
 mod handlers;
+mod presence;
 mod server;
 mod topics;
+mod txn;
 mod versions;
 
 pub use config::Config;

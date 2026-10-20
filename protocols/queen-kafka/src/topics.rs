@@ -29,6 +29,8 @@ const MAX_PAGES: usize = 100;
 #[derive(Debug)]
 pub struct Snapshot {
     pub widths: HashMap<String, i32>,
+    /// Topics with a width row: the ones the console shows as Kafka topics.
+    pub declared: std::collections::HashSet<String>,
     pub at: Instant,
 }
 
@@ -40,18 +42,102 @@ struct Entry {
 pub struct Topics {
     queen: Queen,
     default_partitions: i32,
+    dedup_window_seconds: i64,
     cache: Mutex<HashMap<Option<String>, Entry>>,
     refreshing: tokio::sync::Mutex<()>,
+    /// Topics whose dedup window this process has checked.
+    deduped: Mutex<std::collections::HashSet<String>>,
+    /// Topics this process gave a width row.
+    marked: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Topics {
-    pub fn new(queen: Queen, default_partitions: i32) -> Topics {
+    pub fn new(queen: Queen, default_partitions: i32, dedup_window_seconds: i64) -> Topics {
         Topics {
             queen,
             default_partitions,
+            dedup_window_seconds,
             cache: Mutex::new(HashMap::new()),
             refreshing: tokio::sync::Mutex::new(()),
+            deduped: Mutex::new(std::collections::HashSet::new()),
+            marked: Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// A topic Kafka clients write to and that has no width row gets one (its
+    /// width now), once per process: that row is what the console reads as
+    /// "a Kafka topic".
+    pub async fn ensure_marked(
+        &self,
+        bearer: Option<&str>,
+        snap: &Snapshot,
+        topic: &str,
+        width: i32,
+    ) {
+        if snap.declared.contains(topic) {
+            return;
+        }
+        if !self
+            .marked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(topic.to_string())
+        {
+            return;
+        }
+        if let Err(e) = self.declare(bearer, topic, width).await {
+            tracing::debug!(target: "kafka", %topic, error = %e, "cannot write the topic's width row");
+            self.marked
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(topic);
+        }
+    }
+
+    /// Before an idempotent producer's first write to `topic` in this process:
+    /// a queue with no dedup window (every topic the first facade created had
+    /// none) gets `QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`, so a retried batch is a
+    /// duplicate there as on any Queen queue. A queue that has a window keeps
+    /// it. Failures are logged and retried on the next write.
+    pub async fn ensure_dedup(&self, bearer: Option<&str>, topic: &str) {
+        if self.dedup_window_seconds <= 0 {
+            return;
+        }
+        if self
+            .deduped
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(topic)
+        {
+            return;
+        }
+        let window = match self.queen.queue_options(bearer, topic).await {
+            Ok(Some(o)) => o.get("dedupWindowSeconds").and_then(|v| v.as_i64()),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(target: "kafka", %topic, error = %e, "cannot read the dedup window");
+                return;
+            }
+        };
+        if window == Some(0) {
+            let options = json!({ "dedupWindowSeconds": self.dedup_window_seconds });
+            match self.queen.configure(bearer, topic, options).await {
+                Ok(()) => tracing::info!(
+                    target: "kafka",
+                    %topic,
+                    window_s = self.dedup_window_seconds,
+                    "dedup window set on a topic an idempotent producer writes to (it had none)"
+                ),
+                Err(e) => {
+                    tracing::warn!(target: "kafka", %topic, error = %e, "cannot set the dedup window");
+                    return;
+                }
+            }
+        }
+        self.deduped
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(topic.to_string());
     }
 
     pub fn default_partitions(&self) -> i32 {
@@ -127,6 +213,7 @@ impl Topics {
             widths.insert(q.name, width);
         }
         let snap = Arc::new(Snapshot {
+            declared: declared.keys().cloned().collect(),
             widths,
             at: Instant::now(),
         });
@@ -177,12 +264,11 @@ impl Topics {
         topic: &str,
         partitions: i32,
     ) -> Result<(), CallError> {
-        let ops = [KvOp::Put {
-            ns: NS.to_string(),
-            key: format!("{WIDTH_PREFIX}{topic}"),
-            value: json!({ "partitions": partitions, "at": now_ms(), "set": {} }),
-            forever: true,
-        }];
+        let ops = [KvOp::put(
+            NS,
+            &format!("{WIDTH_PREFIX}{topic}"),
+            json!({ "partitions": partitions, "at": now_ms(), "set": {} }),
+        )];
         self.queen.kv(bearer, &ops).await.map(|_| ())
     }
 

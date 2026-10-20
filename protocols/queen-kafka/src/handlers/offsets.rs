@@ -59,7 +59,12 @@ pub async fn commit(ctx: &Arc<Ctx>, conn: &Conn, req: OffsetCommitRequest) -> Of
             })
             .collect();
         if !ops.is_empty() {
-            if let Err(e) = ctx.queen.commit(conn.bearer.as_deref(), &ops).await {
+            let landed = ctx.queen.commit(conn.bearer.as_deref(), &ops).await;
+            if landed.is_ok() {
+                ctx.groups
+                    .note_commit(&group, conn.bearer.as_deref(), std::time::Instant::now());
+            }
+            if let Err(e) = landed {
                 tracing::warn!(target: "kafka", %group, error = %e, "offset commit failed");
                 error = match &e {
                     crate::core::CallError::Status { code: 404, .. } => UNKNOWN_TOPIC_OR_PARTITION,

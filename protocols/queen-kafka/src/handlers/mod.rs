@@ -8,6 +8,7 @@ pub mod meta;
 pub mod offsets;
 pub mod produce;
 pub mod sasl;
+pub mod txn;
 
 use kafka_protocol::protocol::StrBytes;
 

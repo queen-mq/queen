@@ -22,7 +22,10 @@ nothing that outlives a connection or a leader's term.
 | CreateTopics / CreatePartitions | width row in KV (`queen-kafka` / `qk:topiccfg:<topic>`), then create queue | none |
 | DeleteTopics | delete queue, drop width row | none |
 | DescribeConfigs | existence only, no values | none |
-| InitProducerId | id from clock + node + counter, epoch 0; KIP-360 bumps keep the id | none |
+| InitProducerId (idempotent) | id from clock + node + counter, epoch 0; KIP-360 bumps keep the id | none |
+| Idempotent records | each record's Queen `transactionId` is `k<producer id>.<epoch>.<sequence>`: a retried batch is a duplicate in the queue's dedup window and answers its original offsets | none |
+| InitProducerId (transactional), AddPartitionsToTxn, AddOffsetsToTxn, TxnOffsetCommit, EndTxn | records and offsets held on the raft leader; EndTxn(commit) = ONE `POST /api/v1/transaction` (pushes + positions + a fence on the KV row `qk:txn:<id>`) | the open transaction, on the leader |
+| Group presence (console) | KV rows `qk:groups:<g>` and `qk:live:<g>` written by the leader every 15 s and on every membership change, in the group's own tenant | none |
 | SASL/PLAIN | the password is the Queen token, the bearer of every call | per connection |
 
 Why a Fetch is not a pop: a Kafka Fetch names no consumer group, consumers read
@@ -58,30 +61,60 @@ possible later addition.
   positions (`QUEEN_KAFKA_OFFSET_STORE=positions`). The `kv` store is gone.
 - API versions: the same windows, minus the keys of phase 2.
 
-## Not in phase 1
+## The dashboard
 
-1. **Idempotent sequences are not checked.** Producers with
-   `enable.idempotence=true` work and never get a fatal error, but a retry after
-   an unknown outcome can write a batch twice. Phase 2: writer dedup in the
-   broker (per partition and writer, the last ~10 batches with their offsets,
-   in the raft state; a gap answers a retriable error, never 45).
-2. **Transactions** (`transactional.id`): refused at InitProducerId, as cluster
-   mode did. Phase 2: the stage on the leader, one core transaction at EndTxn.
-3. Topic configs (`retention.ms`, `cleanup.policy=compact`): accepted, not
+A Kafka topic is a queue and a Kafka group a Queen group, so the console reads
+them as it reads its own, with three things the facade adds:
+
+- a record a Kafka client fetches counts as a pop (rate, pop lag, the node's
+  throughput), and a commit that moves a group past N records counts N acks
+  and adds N to the group's `totalConsumed` (core: consume/txn.rs, positions).
+  A group's FIRST commit on a partition counts nothing, because where a Kafka
+  consumer started is not known; lag, pending and completed are exact anyway;
+- the presence rows above make a live group `kind: kafka`, Stable, with its
+  live members, instead of a dead group that never consumed;
+- every topic Kafka writes to or auto-creates gets a width row, which is what
+  the console reads as "a Kafka topic".
+
+## Transactions: what is guaranteed
+
+- A commit is all or nothing: one raft entry. A fenced commit (a newer producer
+  took the `transactional.id`) writes nothing and answers PRODUCER_FENCED.
+- An open transaction lives on the leader only. When leadership moves (or the
+  node dies) its records are lost; the row says `open`, so the producer's
+  commit is answered INVALID_TXN_STATE and nothing partial is ever written. The
+  producer aborts and runs the transaction again.
+- A commit whose answer was lost is recognized on the retry by its token.
+- A transaction past its `transaction.timeout.ms` is aborted and its producer
+  fenced (epoch + 1), as Kafka's coordinator does.
+- Caps: 8 MiB and 50,000 records per transaction, 1,000 partitions, 256 MiB
+  held per node, timeout at most one hour (Flink's default ask).
+
+## Not done
+
+1. **Gap detection for idempotent producers.** Retries are deduplicated, and
+   order holds per connection (`in_log`); a producer that has batches in flight
+   on two connections at once (Java across a leader move) is not ordered
+   across them.
+2. Topic configs (`retention.ms`, `cleanup.policy=compact`): accepted, not
    applied, not reported. AlterConfigs / IncrementalAlterConfigs, OffsetDelete,
    ACLs, DescribeLogDirs: not advertised.
-4. TLS on the Kafka listener, the standalone binary, Cloud through the proxy,
+3. TLS on the Kafka listener, the standalone binary, Cloud through the proxy,
    the cargo-fuzz targets (they called the first facade's decoders).
-5. Group membership survives a leader change only by rejoin. If the pause
+4. Group membership survives a leader change only by rejoin. If the pause
    measured on a leader change hurts, snapshot membership into KV.
-6. The console's Kafka presence rows (`qk:live:*`) are no longer written.
+5. The facade's own writes (presence rows, transaction rows, the timeout
+   sweep) use the token of the clients they are about, so they land in those
+   clients' tenant; a broker without auth needs none.
 
 ## Configuration
 
 `QUEEN_KAFKA_EMBEDDED=true`, `QUEEN_KAFKA_ADVERTISED_ADDR` (required, this
 node), `QUEEN_KAFKA_ADDR` (default `0.0.0.0:9092`),
 `QUEEN_KAFKA_DEFAULT_PARTITIONS` (1024), `QUEEN_KAFKA_GROUP_JOIN_DELAY_MS`
-(3000), `QUEEN_KAFKA_AUTO_CREATE` (true), `QUEEN_KAFKA_SASL=required`,
+(3000), `QUEEN_KAFKA_AUTO_CREATE` (true), `QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`
+(3600: given to a topic with no dedup window when an idempotent producer first
+writes to it; 0 leaves topics alone), `QUEEN_KAFKA_SASL=required`,
 `QUEEN_KAFKA_MAX_CONNECTIONS`, `QUEEN_KAFKA_MAX_REQUEST_BYTES`,
 `QUEEN_KAFKA_THREADS`. Other nodes are advertised at the host of their raft
 HTTP address (`QUEEN_RAFT_PEERS`) with this node's Kafka port.

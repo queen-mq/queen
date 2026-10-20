@@ -62,12 +62,15 @@ pub async fn join(
                 .map(|p| (p.name.to_string(), p.metadata))
                 .collect(),
         };
-        match ctx.groups.join(args, Instant::now()) {
+        let group = args.group.clone();
+        let out = match ctx.groups.join(args, Instant::now()) {
             Joined::Now(o) => o,
             Joined::Wait(rx) => rx
                 .await
                 .unwrap_or_else(|_| JoinOut::error(UNKNOWN_MEMBER_ID, &member)),
-        }
+        };
+        ctx.groups.note_client(&group, conn.bearer.as_deref());
+        out
     };
     JoinGroupResponse::default()
         .with_error_code(out.error)
@@ -114,10 +117,12 @@ pub async fn sync(ctx: &Arc<Ctx>, req: SyncGroupRequest) -> SyncGroupResponse {
         .with_assignment(out.assignment)
 }
 
-pub fn heartbeat(ctx: &Arc<Ctx>, req: HeartbeatRequest) -> HeartbeatResponse {
+pub fn heartbeat(ctx: &Arc<Ctx>, conn: &Conn, req: HeartbeatRequest) -> HeartbeatResponse {
     let error = if !coordinates(ctx) {
         NOT_COORDINATOR
     } else {
+        ctx.groups
+            .note_client(req.group_id.0.as_str(), conn.bearer.as_deref());
         ctx.groups.heartbeat(
             req.group_id.0.as_str(),
             req.member_id.as_str(),

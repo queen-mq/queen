@@ -1,6 +1,6 @@
 //! The API versions this facade answers. The windows are the first facade's,
 //! measured against librdkafka, Java 3.9/4.3, franz-go, sarama and kafkajs; the
-//! transaction, config-alter, ACL and log-dir keys are not here (phase 2).
+//! config-alter, ACL and log-dir keys are not here.
 //!
 //! Capped where a later version needs state this layer does not keep: Fetch at
 //! 6 (no fetch sessions), JoinGroup at 4, Sync/Heartbeat/Leave at 2 and
@@ -43,6 +43,10 @@ pub const ADVERTISED: &[Api] = &[
     api(ApiKey::DescribeConfigs, 1, 4),
     api(ApiKey::CreatePartitions, 0, 3),
     api(ApiKey::SaslAuthenticate, 0, 1),
+    api(ApiKey::AddPartitionsToTxn, 0, 3),
+    api(ApiKey::AddOffsetsToTxn, 0, 3),
+    api(ApiKey::EndTxn, 0, 3),
+    api(ApiKey::TxnOffsetCommit, 0, 3),
 ];
 
 pub fn lookup(api_key: i16) -> Option<&'static Api> {

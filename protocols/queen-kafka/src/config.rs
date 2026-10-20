@@ -20,6 +20,10 @@ pub struct Config {
     /// waits for more members before its first generation (Kafka's
     /// `group.initial.rebalance.delay.ms`).
     pub join_delay: Duration,
+    /// `QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`, default 3600 (Queen's own
+    /// default): the window given to a topic with none when an idempotent
+    /// producer first writes to it. 0 leaves every topic as it is.
+    pub dedup_window_seconds: i64,
     /// `QUEEN_KAFKA_AUTO_CREATE`, default true: Metadata creates an unknown
     /// topic when the client allows it.
     pub auto_create: bool,
@@ -71,6 +75,7 @@ impl Config {
                 0,
                 300_000,
             )? as u64),
+            dedup_window_seconds: int("QUEEN_KAFKA_DEDUP_WINDOW_SECONDS", 3600, 0, 604_800)?,
             auto_create: flag("QUEEN_KAFKA_AUTO_CREATE", true),
             sasl_required: env("QUEEN_KAFKA_SASL").as_deref().map(str::trim) == Some("required"),
             max_connections: int("QUEEN_KAFKA_MAX_CONNECTIONS", 10_000, 1, 1_000_000)? as usize,

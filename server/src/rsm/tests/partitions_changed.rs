@@ -1246,6 +1246,7 @@ async fn ordered_pushes_sent_on_the_in_the_log_signal_keep_their_order() {
                     queue: "ord".into(),
                     partition: "p".into(),
                     payload: json!({ "n": n }).to_string().into_bytes(),
+                    txn: None,
                 }],
             )
             .await

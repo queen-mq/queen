@@ -39,8 +39,8 @@
           <p class="hero-sum">
             <template v-if="pushNow !== null">{{ formatNumber(queues.length) }} {{ queues.length === 1 ? 'queue takes' : 'queues take' }} in <b>{{ fmtMsgRate(pushNow) }}</b> and deliver <b>{{ fmtMsgRate(popNow) }}</b> to {{ formatNumber(consumers.length) }} consumer {{ consumers.length === 1 ? 'group' : 'groups' }}.</template>
             <template v-else>No traffic samples in the last {{ selectedRange }}.</template>
-            <!-- Kafka consumers read by fetch, which is no delivery: a clause of its own. -->
-            <template v-if="fetchNow !== null"> Kafka clients fetch <b>{{ fmtMsgRate(fetchNow) }}</b>.</template>
+            <!-- A Kafka fetch counts as a delivery (a pop); its share, said once. -->
+            <template v-if="fetchNow !== null"> Kafka clients fetch <b>{{ fmtMsgRate(fetchNow) }}</b> of it.</template>
             <template v-if="pendingNow !== null"> The latest overview reports <b>{{ formatNumber(pendingNow) }} pending</b>, excluding in-flight work.</template>
             <template v-if="lagMaxSeconds !== null"> The oldest message has waited <b>{{ fmtLagSeconds(lagMaxSeconds) }}</b>.</template>
             <template v-if="ackAttempts > 0">{{ ' ' }}<b>{{ ackFailPct }}</b> of acks failed in this window.</template>
@@ -145,7 +145,7 @@
         :value-format="fmtRate"
         :loading="loadingOps"
         :error="opsError"
-        tooltip="Push / pop / ack rates for this tenant, summed across its queues (from queue-ops). Kafka consumers read by fetch, charted as Fetch (Kafka): a fetch takes no lease and is never acked, and two Kafka groups reading one topic count its records twice."
+        tooltip="Push / pop / ack rates for this tenant, summed across its queues (from queue-ops). Kafka clients count as Queen consumers: a record they fetch is a pop, a commit that moves their group past N records is N acks. Fetch (Kafka) is their share of the pops; two groups reading one topic count its records twice, as two Queen groups do."
         :selected="selectedMetric === 'throughput'"
         @select="selectMetric('throughput')"
       />
@@ -642,9 +642,9 @@ const history = computed(() => {
       b = {
         bucket: row.bucket,
         pushPerSecond: 0, popPerSecond: 0, ackPerSecond: 0,
-        // Kafka consumers' reads (queue-ops fetchMessages, a raft broker from
-        // 2.5.x): records fetched, not delivered — no lease, no ack, and once
-        // per Kafka group. Never folded into pop, nor into the lag or fill.
+        // Kafka consumers' reads (queue-ops fetchMessages): already counted in
+        // pop by the broker (a fetch is a delivery, a commit an ack); kept
+        // apart only to chart the Kafka share.
         fetchPerSecond: 0, fetchMessages: 0,
         pushMessages: 0, popMessages: 0, ackSuccess: 0, ackFailed: 0, popEmpty: 0,
         partitionsCreated: 0, partitionsDeleted: 0,

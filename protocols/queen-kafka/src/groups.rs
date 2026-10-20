@@ -138,6 +138,12 @@ struct Group {
     /// member already joined, so the others of a deploy can join the same
     /// generation.
     initial: Option<Instant>,
+    /// The token its clients authenticate with: the console's presence row is
+    /// written with it, in their tenant.
+    bearer: Option<String>,
+    /// Membership changed since the last presence row.
+    dirty: bool,
+    last_presence: Option<Instant>,
 }
 
 impl Group {
@@ -151,6 +157,9 @@ impl Group {
             members: HashMap::new(),
             deadline: None,
             initial: None,
+            bearer: None,
+            dirty: true,
+            last_presence: None,
         }
     }
 }
@@ -163,6 +172,24 @@ pub struct Coordinator {
 struct Inner {
     groups: HashMap<String, Group>,
     seq: u64,
+    /// Groups that commit without members (`assign()` consumers): their token
+    /// and the time of their last commit.
+    committers: HashMap<String, (Option<String>, Instant, Option<Instant>)>,
+}
+
+/// One group's row for the console ([`Coordinator::presence_due`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceRow {
+    pub group: String,
+    pub bearer: Option<String>,
+    pub members: u64,
+    /// Members per subscribed topic; `None` when one member's subscription
+    /// could not be read.
+    pub topics: Option<std::collections::BTreeMap<String, u64>>,
+    pub committing: bool,
+    pub state: &'static str,
+    pub generation: i32,
+    pub protocol_type: String,
 }
 
 pub enum Joined {
@@ -184,6 +211,7 @@ impl Coordinator {
             inner: Mutex::new(Inner {
                 groups: HashMap::new(),
                 seq: 0,
+                committers: HashMap::new(),
             }),
             join_delay,
         }
@@ -319,6 +347,7 @@ impl Coordinator {
                         m.assignment = given.remove(id).unwrap_or_default();
                     }
                     g.state = State::Stable;
+                    g.dirty = true;
                     for m in g.members.values_mut() {
                         if let Some(s) = m.sync.take() {
                             let _ = s.send(SyncOut {
@@ -451,6 +480,97 @@ impl Coordinator {
         }
     }
 
+    /// The token a group's client authenticated with, for its presence row.
+    pub fn note_client(&self, group: &str, bearer: Option<&str>) {
+        let mut inner = self.lock();
+        if let Some(g) = inner.groups.get_mut(group) {
+            if g.bearer.as_deref() != bearer {
+                g.bearer = bearer.map(str::to_string);
+            }
+        }
+    }
+
+    /// A commit landed for `group`: a group with no members is an `assign()`
+    /// consumer, live while it commits.
+    pub fn note_commit(&self, group: &str, bearer: Option<&str>, now: Instant) {
+        let mut inner = self.lock();
+        if inner
+            .groups
+            .get(group)
+            .is_some_and(|g| !g.members.is_empty())
+        {
+            return;
+        }
+        let e = inner
+            .committers
+            .entry(group.to_string())
+            .or_insert((None, now, None));
+        e.0 = bearer.map(str::to_string);
+        e.1 = now;
+    }
+
+    /// The groups whose console row is due: changed since the last one (at
+    /// most once a second), or `every` old.
+    pub fn presence_due(&self, now: Instant, every: Duration) -> Vec<PresenceRow> {
+        let mut inner = self.lock();
+        let mut out = Vec::new();
+        for (name, g) in inner.groups.iter_mut() {
+            let since = g.last_presence.map(|t| now.duration_since(t));
+            let due = match since {
+                None => true,
+                Some(d) => d >= every || (g.dirty && d >= Duration::from_secs(1)),
+            };
+            if !due {
+                continue;
+            }
+            g.dirty = false;
+            g.last_presence = Some(now);
+            let protocol = g.protocol.clone().unwrap_or_default();
+            let topics = if g.protocol_type.as_deref() == Some("consumer") {
+                subscribed_topics(g.members.values().map(|m| m.metadata_for(&protocol)))
+            } else {
+                None
+            };
+            out.push(PresenceRow {
+                group: name.clone(),
+                bearer: g.bearer.clone(),
+                members: g.members.len() as u64,
+                topics,
+                committing: false,
+                state: g.state.name(),
+                generation: g.generation,
+                protocol_type: g.protocol_type.clone().unwrap_or_default(),
+            });
+        }
+        // `assign()` consumers: live while they commit, for one window.
+        let joined: std::collections::HashSet<String> = inner
+            .groups
+            .iter()
+            .filter(|(_, g)| !g.members.is_empty())
+            .map(|(n, _)| n.clone())
+            .collect();
+        inner.committers.retain(|name, (_, last, _)| {
+            !joined.contains(name) && now.duration_since(*last) < every * 3
+        });
+        for (name, (bearer, _, written)) in inner.committers.iter_mut() {
+            if written.is_some_and(|w| now.duration_since(w) < every) {
+                continue;
+            }
+            *written = Some(now);
+            out.push(PresenceRow {
+                group: name.clone(),
+                bearer: bearer.clone(),
+                members: 0,
+                topics: None,
+                committing: true,
+                state: "Empty",
+                generation: -1,
+                protocol_type: String::new(),
+            });
+        }
+        out
+    }
+
     /// This node stopped leading: every group is the next leader's to rebuild.
     pub fn clear(&self) {
         let mut inner = self.lock();
@@ -524,6 +644,7 @@ fn start_rebalance(g: &mut Group, now: Instant, join_delay: Duration) {
 
 /// A member left or expired.
 fn members_changed(g: &mut Group, now: Instant, join_delay: Duration) {
+    g.dirty = true;
     if g.members.is_empty() {
         g.state = State::Empty;
         g.generation += 1;
@@ -574,6 +695,7 @@ fn try_complete(g: &mut Group, now: Instant) {
     };
     g.leader = Some(leader.clone());
     g.state = State::CompletingRebalance;
+    g.dirty = true;
     g.deadline = None;
     g.initial = None;
     let mut everyone: Vec<(u64, String, Bytes)> = g
@@ -601,6 +723,28 @@ fn try_complete(g: &mut Group, now: Instant) {
             });
         }
     }
+}
+
+/// Members per subscribed topic, read from each member's consumer-protocol
+/// subscription; `None` when one of them cannot be read.
+fn subscribed_topics(
+    metadata: impl Iterator<Item = Bytes>,
+) -> Option<std::collections::BTreeMap<String, u64>> {
+    use kafka_protocol::messages::ConsumerProtocolSubscription;
+    use kafka_protocol::protocol::Decodable;
+    let mut out = std::collections::BTreeMap::new();
+    for md in metadata {
+        if md.len() < 2 {
+            return None;
+        }
+        let version = i16::from_be_bytes([md[0], md[1]]).clamp(0, 3);
+        let mut body = md.slice(2..);
+        let sub = ConsumerProtocolSubscription::decode(&mut body, version).ok()?;
+        for t in sub.topics {
+            *out.entry(t.to_string()).or_insert(0) += 1;
+        }
+    }
+    Some(out)
 }
 
 /// Kafka's choice: among the protocols every member supports, the one most

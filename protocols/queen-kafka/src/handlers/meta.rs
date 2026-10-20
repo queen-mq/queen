@@ -153,6 +153,12 @@ pub async fn metadata(
                 } else if let Some(w) = snap.widths.get(&name) {
                     topics.push(topic(&name, NONE, *w));
                 } else if allow_create {
+                    // The width row first: a node that lists the queue has
+                    // applied it, and the console knows a Kafka topic by it.
+                    let width = ctx.topics.default_partitions();
+                    if let Err(e) = ctx.topics.declare(bearer, &name, width).await {
+                        tracing::debug!(target: "kafka", topic = %name, error = %e, "cannot write the topic's width row");
+                    }
                     match ctx.queen.create_queue(bearer, &name).await {
                         Ok(()) => {
                             created = true;
@@ -196,14 +202,41 @@ pub fn find_coordinator(
     }
 }
 
-/// An idempotent producer's id. Unique without a round trip: the clock, the
-/// node, and a counter. Transactional producers are phase 2.
-pub fn init_producer_id(ctx: &Arc<Ctx>, req: InitProducerIdRequest) -> InitProducerIdResponse {
-    if req.transactional_id.is_some() {
-        return InitProducerIdResponse::default()
-            .with_error_code(TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
+/// InitProducerId. An idempotent producer's id is unique without a round
+/// trip: the clock, the node, and a counter. A transactional producer's id is
+/// its `transactional.id`'s, kept across restarts at the next epoch
+/// ([`crate::txn::Txns::init`]), which only the coordinator (the raft leader)
+/// hands out.
+pub async fn init_producer_id(
+    ctx: &Arc<Ctx>,
+    conn: &Conn,
+    req: InitProducerIdRequest,
+) -> InitProducerIdResponse {
+    let fail = |code: i16| {
+        InitProducerIdResponse::default()
+            .with_error_code(code)
             .with_producer_id(ProducerId(-1))
-            .with_producer_epoch(-1);
+            .with_producer_epoch(-1)
+    };
+    if let Some(tid) = req.transactional_id.as_ref().filter(|t| !t.0.is_empty()) {
+        if !ctx.broker.cluster().leads() {
+            return fail(NOT_COORDINATOR);
+        }
+        return match ctx
+            .txns
+            .init(
+                conn.bearer.as_deref(),
+                tid.0.as_str(),
+                req.transaction_timeout_ms,
+                (req.producer_id.0, req.producer_epoch),
+            )
+            .await
+        {
+            Ok((pid, epoch)) => InitProducerIdResponse::default()
+                .with_producer_id(ProducerId(pid))
+                .with_producer_epoch(epoch),
+            Err(code) => fail(code),
+        };
     }
     if req.producer_id.0 >= 0 && req.producer_epoch >= 0 && req.producer_epoch < i16::MAX - 1 {
         // KIP-360: the producer bumps its own epoch and keeps its id.

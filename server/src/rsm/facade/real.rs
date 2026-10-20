@@ -3563,7 +3563,11 @@ impl RaftFacade {
     ) -> Result<Vec<super::RecordPushed>, RsmError> {
         let weight = items.iter().fold(2usize, |n, it| {
             n.saturating_add(
-                it.payload.len() + it.queue.len() + it.partition.len() + PUSH_ITEM_JSON_BYTES,
+                it.payload.len()
+                    + it.queue.len()
+                    + it.partition.len()
+                    + it.txn.as_ref().map_or(0, String::len)
+                    + PUSH_ITEM_JSON_BYTES,
             )
         });
         let _admitted = self.admit_push(weight).await?;
@@ -3577,7 +3581,7 @@ impl RaftFacade {
                 queue: &it.queue,
                 partition: Some(it.partition.as_str()),
                 payload: &it.payload,
-                txn: None,
+                txn: it.txn.as_deref(),
                 prebuilt: None,
             })
             .collect();

@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::core::{Broker, Queen};
 use crate::groups::Coordinator;
 use crate::topics::Topics;
+use crate::txn::Txns;
 
 /// What every connection shares. Nothing here is durable: the topics are a
 /// cache of the broker's queues, the groups live only while this node leads.
@@ -21,7 +22,9 @@ pub struct Ctx {
     pub queen: Queen,
     pub topics: Topics,
     pub groups: Coordinator,
+    pub txns: Txns,
     pub producer_ids: AtomicU64,
+    pub indexed: crate::presence::Indexed,
 }
 
 /// Serve Kafka clients until `stop` resolves.
@@ -35,9 +38,15 @@ pub async fn serve(
         .map_err(|e| format!("cannot listen on {}: {e}", cfg.listen))?;
     let queen = Queen::new(Arc::clone(&broker));
     let ctx = Arc::new(Ctx {
-        topics: Topics::new(queen.clone(), cfg.default_partitions),
+        topics: Topics::new(
+            queen.clone(),
+            cfg.default_partitions,
+            cfg.dedup_window_seconds,
+        ),
         groups: Coordinator::new(cfg.join_delay),
+        txns: Txns::new(queen.clone()),
         producer_ids: AtomicU64::new(0),
+        indexed: crate::presence::Indexed::default(),
         queen,
         broker,
         cfg,
@@ -48,6 +57,7 @@ pub async fn serve(
         advertised = %ctx.cfg.advertised(),
         "Kafka listener up"
     );
+    ctx.txns.set_node(ctx.broker.cluster().node_id);
     let ticker = tokio::spawn(tick(Arc::clone(&ctx)));
     let slots = Arc::new(Semaphore::new(ctx.cfg.max_connections));
     tokio::pin!(stop);
@@ -78,6 +88,7 @@ pub async fn serve(
     }
     ticker.abort();
     ctx.groups.clear();
+    ctx.txns.clear().await;
     Ok(())
 }
 
@@ -85,19 +96,37 @@ pub async fn serve(
 /// a node that stops leading drops every group.
 async fn tick(ctx: Arc<Ctx>) {
     let mut led = false;
+    let mut n: u64 = 0;
     let mut every = tokio::time::interval(Duration::from_millis(100));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         every.tick().await;
         let leads = ctx.broker.cluster().leads();
-        if led && !leads && !ctx.groups.is_empty() {
-            tracing::info!(target: "kafka", "raft leadership moved away: consumer groups handed to the new leader");
+        if led && !leads {
+            if !ctx.groups.is_empty() {
+                tracing::info!(target: "kafka", "raft leadership moved away: consumer groups handed to the new leader");
+            }
             ctx.groups.clear();
+            ctx.txns.clear().await;
         }
         if leads != led {
             ctx.topics.invalidate();
         }
         led = leads;
         ctx.groups.tick(Instant::now());
+        n += 1;
+        if leads && n.is_multiple_of(10) {
+            ctx.txns.expire().await;
+            let rows = ctx
+                .groups
+                .presence_due(Instant::now(), crate::presence::EVERY);
+            if !rows.is_empty() {
+                let ctx = Arc::clone(&ctx);
+                let node = ctx.broker.cluster().node_id;
+                tokio::spawn(async move {
+                    crate::presence::write(&ctx.queen, &ctx.indexed, node, rows).await;
+                });
+            }
+        }
     }
 }

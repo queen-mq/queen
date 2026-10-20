@@ -21,7 +21,7 @@ use kafka_protocol::messages::{
 use kafka_protocol::records::{Record, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID};
 
 use crate::conn::Conn;
-use crate::core::{FetchEntry, LocalAnswer, RawFetched, RawRecord, TimeLookup};
+use crate::core::{FetchEntry, FetchedFrom, LocalAnswer, RawFetched, RawRecord, TimeLookup};
 use crate::errors::*;
 use crate::records;
 use crate::server::Ctx;
@@ -116,7 +116,8 @@ pub async fn fetch(ctx: &Arc<Ctx>, conn: &Conn, req: FetchRequest, _version: i16
         }
     };
 
-    let mut counts: HashMap<String, u64> = HashMap::new();
+    let mut counts: HashMap<String, FetchedFrom> = HashMap::new();
+    let now = crate::topics::now_ms();
     let mut read = read.map(|v| v.into_iter().map(Some).collect::<Vec<_>>());
     let responses = shape
         .into_iter()
@@ -160,7 +161,16 @@ pub async fn fetch(ctx: &Arc<Ctx>, conn: &Conn, req: FetchRequest, _version: i16
                     };
                     let (batch, n) = batch(&got.records);
                     if n > 0 {
-                        *counts.entry(name.clone()).or_default() += n as u64;
+                        let c = counts.entry(name.clone()).or_insert_with(|| FetchedFrom {
+                            queue: name.clone(),
+                            ..FetchedFrom::default()
+                        });
+                        c.records += n as u64;
+                        for r in &got.records[..n] {
+                            let lag = r.timestamp_ms.map_or(0, |t| (now - t).max(0) as u64);
+                            c.lag_sum_ms += lag;
+                            c.lag_max_ms = c.lag_max_ms.max(lag);
+                        }
                     }
                     base.with_error_code(error)
                         .with_high_watermark(hwm)
@@ -175,8 +185,8 @@ pub async fn fetch(ctx: &Arc<Ctx>, conn: &Conn, req: FetchRequest, _version: i16
         })
         .collect();
     if !counts.is_empty() {
-        let counts: Vec<(String, u64)> = counts.into_iter().collect();
-        ctx.broker.note_fetched(bearer.as_deref(), &counts);
+        let from: Vec<FetchedFrom> = counts.into_values().collect();
+        ctx.broker.note_fetched(bearer.as_deref(), &from);
     }
     FetchResponse::default().with_responses(responses)
 }

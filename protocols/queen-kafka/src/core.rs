@@ -15,12 +15,15 @@ use serde_json::{json, Value};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// One record to push: queue, partition NAME, and one JSON document.
+/// One record to push: queue, partition NAME, one JSON document, and the
+/// transaction id that makes a retry of it a duplicate (`None`: the broker
+/// mints one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawPush {
     pub queue: String,
     pub partition: String,
     pub payload: Vec<u8>,
+    pub txn: Option<String>,
 }
 
 /// The broker's answer for one pushed record.
@@ -94,6 +97,16 @@ pub struct OrderedLocal {
     pub done: BoxFuture<'static, Result<LocalAnswer<Vec<Pushed>>, String>>,
 }
 
+/// The records one Fetch answer carried from one queue, and how long they had
+/// waited (now minus the log's own timestamp of each).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FetchedFrom {
+    pub queue: String,
+    pub records: u64,
+    pub lag_sum_ms: u64,
+    pub lag_max_ms: u64,
+}
+
 /// One raft member as Kafka sees it: a broker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
@@ -145,8 +158,9 @@ pub trait Broker: Send + Sync + 'static {
     /// The raft cluster now.
     fn cluster(&self) -> ClusterView;
 
-    /// The records one Fetch answer carried, per queue, for the dashboard.
-    fn note_fetched(&self, _bearer: Option<&str>, _counts: &[(String, u64)]) {}
+    /// What one Fetch answer carried, per queue, for the dashboard: Kafka
+    /// reads count there as pops do.
+    fn note_fetched(&self, _bearer: Option<&str>, _from: &[FetchedFrom]) {}
 }
 
 // ------------------------------------------------------------------ routes
@@ -191,17 +205,26 @@ pub struct QueueRow {
     pub partitions: i64,
 }
 
-/// One KV operation (`POST /api/v1/kv`).
+/// One KV operation (`POST /api/v1/kv`, or a rider of a transaction).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "op")]
 pub enum KvOp {
+    /// A write; with `expect` it is conditional on the row's version (`0`:
+    /// absent), and `required` makes a lost condition roll the whole
+    /// transaction back instead of skipping this op.
     #[serde(rename = "put")]
     Put {
         ns: String,
         key: String,
         value: Value,
         forever: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expect: Option<i64>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        required: bool,
     },
+    #[serde(rename = "getMany")]
+    GetMany { ns: String, keys: Vec<String> },
     #[serde(rename = "getPrefix")]
     GetPrefix {
         ns: String,
@@ -214,17 +237,63 @@ pub enum KvOp {
     Delete { ns: String, key: String },
 }
 
+impl KvOp {
+    /// An unconditional write that never expires.
+    pub fn put(ns: &str, key: &str, value: Value) -> KvOp {
+        KvOp::Put {
+            ns: ns.to_string(),
+            key: key.to_string(),
+            value,
+            forever: true,
+            expect: None,
+            required: false,
+        }
+    }
+
+    /// A write at a version (`0`: only when absent), skipped when it moved.
+    pub fn put_at(ns: &str, key: &str, value: Value, expect: i64) -> KvOp {
+        KvOp::Put {
+            ns: ns.to_string(),
+            key: key.to_string(),
+            value,
+            forever: true,
+            expect: Some(expect),
+            required: false,
+        }
+    }
+
+    /// A write at a version that rolls its transaction back when it moved.
+    pub fn fence(ns: &str, key: &str, value: Value, expect: i64) -> KvOp {
+        KvOp::Put {
+            ns: ns.to_string(),
+            key: key.to_string(),
+            value,
+            forever: true,
+            expect: Some(expect),
+            required: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct KvRow {
     pub key: String,
     #[serde(default)]
     pub value: Value,
+    #[serde(default)]
+    pub version: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct KvAnswer {
     #[serde(default)]
     pub index: usize,
+    /// `false` when a conditional write was skipped.
+    #[serde(default)]
+    pub applied: Option<bool>,
+    /// The row's version after a write.
+    #[serde(default)]
+    pub version: i64,
     #[serde(default)]
     pub rows: Vec<KvRow>,
     #[serde(rename = "nextAfter", default)]
@@ -332,21 +401,58 @@ impl Queen {
             .map_err(|e| CallError::Body(e.to_string()))
     }
 
-    /// Create a queue for a Kafka topic. Dedup is off, as on every topic the
-    /// first facade created: a Kafka retry is the producer's to number.
+    /// Create a queue for a Kafka topic, with Queen's own defaults.
     pub async fn create_queue(&self, bearer: Option<&str>, name: &str) -> Result<(), CallError> {
+        self.configure(bearer, name, json!({})).await
+    }
+
+    /// Set some options of a queue (creating it when it is missing); options
+    /// not named keep their value.
+    pub async fn configure(
+        &self,
+        bearer: Option<&str>,
+        name: &str,
+        options: Value,
+    ) -> Result<(), CallError> {
+        let mut body = match options {
+            Value::Object(o) => o,
+            _ => serde_json::Map::new(),
+        };
+        body.insert("queue".into(), Value::String(name.to_string()));
         let v = self
             .call(
                 "POST",
                 "/api/v1/configure".into(),
                 bearer,
-                Some(json!({"queue": name, "dedupWindowSeconds": 0})),
+                Some(Value::Object(body)),
             )
             .await?;
         if v.get("configured").and_then(Value::as_bool) == Some(true) {
             Ok(())
         } else {
             Err(CallError::Body(format!("configure did not confirm: {v}")))
+        }
+    }
+
+    /// A queue's options (`leaseTime`, `dedupWindowSeconds`, …); `None` when
+    /// there is no such queue.
+    pub async fn queue_options(
+        &self,
+        bearer: Option<&str>,
+        name: &str,
+    ) -> Result<Option<Value>, CallError> {
+        match self
+            .call(
+                "GET",
+                format!("/api/v1/resources/queues/{}", encode_segment(name)),
+                bearer,
+                None,
+            )
+            .await
+        {
+            Ok(v) => Ok(v.get("options").cloned()),
+            Err(CallError::Status { code: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -443,6 +549,84 @@ impl Queen {
             return Err(CallError::Body(format!("the commit rolled back: {v}")));
         }
         Ok(())
+    }
+
+    /// One Queen transaction: the records pushed, the KV riders written and
+    /// the positions set, all or nothing. `Err` is an unknown outcome.
+    pub async fn transaction(
+        &self,
+        bearer: Option<&str>,
+        records: &[RawPush],
+        kv: &[KvOp],
+        positions: &[PositionOp],
+    ) -> Result<crate::txn::Committed, CallError> {
+        use crate::txn::Committed;
+        let mut items = Vec::with_capacity(records.len());
+        for r in records {
+            let payload = String::from_utf8(r.payload.clone())
+                .ok()
+                .and_then(|p| serde_json::value::RawValue::from_string(p).ok())
+                .ok_or_else(|| {
+                    CallError::Body("a staged record is not one JSON document".into())
+                })?;
+            let mut item = serde_json::Map::new();
+            item.insert("queue".into(), Value::String(r.queue.clone()));
+            item.insert("partition".into(), Value::String(r.partition.clone()));
+            item.insert(
+                "payload".into(),
+                serde_json::to_value(&payload).map_err(|e| CallError::Body(e.to_string()))?,
+            );
+            if let Some(t) = &r.txn {
+                item.insert("transactionId".into(), Value::String(t.clone()));
+            }
+            items.push(Value::Object(item));
+        }
+        let operations = if items.is_empty() {
+            json!([])
+        } else {
+            json!([{ "type": "push", "items": items }])
+        };
+        let body = json!({ "operations": operations, "kv": kv, "positions": positions });
+        let resp = self
+            .broker
+            .call(LocalRequest {
+                method: "POST",
+                path: "/api/v1/transaction".into(),
+                host: None,
+                bearer: bearer.map(str::to_string),
+                body: Some(body.to_string()),
+            })
+            .await
+            .map_err(CallError::Transport)?;
+        if (400..500).contains(&resp.status) && resp.status != 408 && resp.status != 429 {
+            return Ok(Committed::Refused(format!(
+                "{}: {}",
+                resp.status,
+                clip(&resp.body, 300)
+            )));
+        }
+        if !(200..300).contains(&resp.status) {
+            return Err(CallError::Status {
+                code: resp.status,
+                body: resp.body,
+            });
+        }
+        let v: Value =
+            serde_json::from_str(&resp.body).map_err(|e| CallError::Body(e.to_string()))?;
+        if v.get("success").and_then(Value::as_bool) == Some(false) {
+            let reason = v.get("reason").and_then(Value::as_str).unwrap_or_default();
+            return Ok(if reason == "kv_precondition" {
+                Committed::Fenced
+            } else {
+                Committed::Refused(format!("{reason}: {}", clip(&resp.body, 300)))
+            });
+        }
+        let fence_version = v.get("results").and_then(Value::as_array).and_then(|rs| {
+            rs.iter()
+                .filter(|r| r.get("type").and_then(Value::as_str) == Some("kv"))
+                .find_map(|r| r.get("version").and_then(Value::as_i64))
+        });
+        Ok(Committed::Done { fence_version })
     }
 
     /// Forget a group's positions; how many partitions it had.

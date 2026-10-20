@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use queen_kafka::core::{
-    BoxFuture, Broker, ClusterView, FetchEntry, LocalAnswer, LocalRequest, LocalResponse, Node,
-    OrderedLocal, Pushed, RawFetched, RawPush, RawRecord,
+    BoxFuture, Broker, ClusterView, FetchEntry, FetchedFrom, LocalAnswer, LocalRequest,
+    LocalResponse, Node, OrderedLocal, Pushed, RawFetched, RawPush, RawRecord,
 };
 use tower::ServiceExt;
 
@@ -206,6 +206,7 @@ impl Broker for RouterDispatch {
                     queue: i.queue,
                     partition: i.partition,
                     payload: i.payload,
+                    txn: i.txn,
                 })
                 .collect();
             match rsm.push_records(ctx, records).await {
@@ -317,14 +318,22 @@ impl Broker for RouterDispatch {
     }
 
     /// The dashboard's count of Kafka reads, per queue, as the answer carried
-    /// them.
-    fn note_fetched(&self, _bearer: Option<&str>, counts: &[(String, u64)]) {
+    /// them: a pop as a native consumer's pop counts (the pop rate, its lag,
+    /// the node's pop throughput), and the Kafka fetch series beside it.
+    fn note_fetched(&self, _bearer: Option<&str>, from: &[FetchedFrom]) {
         let Some(m) = crate::metrics::global() else {
             return;
         };
         let tenant = crate::tenant::Tenant::default_tenant();
-        for (queue, n) in counts {
-            m.per_queue.add_fetched(tenant.as_str(), queue, *n);
+        let total: u64 = from.iter().map(|f| f.records).sum();
+        if total > 0 {
+            m.pop.record_request(total as usize);
+        }
+        for f in from {
+            m.per_queue.add_fetched(tenant.as_str(), &f.queue, f.records);
+            m.per_queue.add_pop(tenant.as_str(), &f.queue, f.records);
+            m.per_queue
+                .add_pop_lag(tenant.as_str(), &f.queue, f.lag_sum_ms, f.lag_max_ms, f.records);
         }
     }
 }

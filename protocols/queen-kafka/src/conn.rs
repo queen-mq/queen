@@ -222,7 +222,27 @@ async fn handle(ctx: &Arc<Ctx>, conn: &mut Conn, frame: Bytes) -> Step {
         }
         ApiKey::InitProducerId => {
             let req = decode!(InitProducerIdRequest, buf, version, key);
-            let out = meta::init_producer_id(ctx, req);
+            let out = meta::init_producer_id(ctx, conn, req).await;
+            reply(encode(key, version, correlation, &out))
+        }
+        ApiKey::AddPartitionsToTxn => {
+            let req = decode!(AddPartitionsToTxnRequest, buf, version, key);
+            let out = txn::add_partitions(ctx, conn, req).await;
+            reply(encode(key, version, correlation, &out))
+        }
+        ApiKey::AddOffsetsToTxn => {
+            let req = decode!(AddOffsetsToTxnRequest, buf, version, key);
+            let out = txn::add_offsets(ctx, conn, req).await;
+            reply(encode(key, version, correlation, &out))
+        }
+        ApiKey::TxnOffsetCommit => {
+            let req = decode!(TxnOffsetCommitRequest, buf, version, key);
+            let out = txn::offset_commit(ctx, conn, req, version).await;
+            reply(encode(key, version, correlation, &out))
+        }
+        ApiKey::EndTxn => {
+            let req = decode!(EndTxnRequest, buf, version, key);
+            let out = txn::end(ctx, conn, req).await;
             reply(encode(key, version, correlation, &out))
         }
         ApiKey::JoinGroup => {
@@ -237,7 +257,7 @@ async fn handle(ctx: &Arc<Ctx>, conn: &mut Conn, frame: Bytes) -> Step {
         }
         ApiKey::Heartbeat => {
             let req = decode!(HeartbeatRequest, buf, version, key);
-            let out = group::heartbeat(ctx, req);
+            let out = group::heartbeat(ctx, conn, req);
             reply(encode(key, version, correlation, &out))
         }
         ApiKey::LeaveGroup => {
