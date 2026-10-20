@@ -76,6 +76,24 @@ func topicWidth(t *testing.T) int32 {
 	return int32(n)
 }
 
+// facadeNode is the broker id the stack advertises for the one node the
+// single-node tests talk to. The first facade (a process of its own) was always
+// node 0; the in-process facade advertises the raft node id, so the id is read
+// from Metadata rather than assumed. Every test that pins a request to "the
+// one node there is" goes through this.
+func facadeNode(t *testing.T, cl *kgo.Client) int32 {
+	t.Helper()
+	req := kmsg.NewPtrMetadataRequest()
+	resp, err := req.RequestWith(ctxFor(t, 20*time.Second), cl)
+	if err != nil {
+		t.Fatalf("Metadata (for the advertised node id): %v", err)
+	}
+	if len(resp.Brokers) != 1 {
+		t.Fatalf("Metadata advertises %d brokers; the single-node tests need exactly one", len(resp.Brokers))
+	}
+	return resp.Brokers[0].NodeID
+}
+
 // A failure to reach the facade is a rig fault, not a compatibility finding:
 // say so once, here, instead of ten times as an obscure per-test dial error.
 func TestMain(m *testing.M) {

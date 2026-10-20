@@ -109,7 +109,7 @@ func describeConfigs(t *testing.T, cl *kgo.Client, kind int8, name string) kmsg.
 	r.ResourceType = kmsg.ConfigResourceType(kind)
 	r.ResourceName = name
 	req.Resources = append(req.Resources, r)
-	raw, err := cl.Broker(0).Request(ctxFor(t, 30*time.Second), req)
+	raw, err := cl.Broker(int(facadeNode(t, cl))).Request(ctxFor(t, 30*time.Second), req)
 	if err != nil {
 		t.Fatalf("DescribeConfigs(%d,%q): %v", kind, name, err)
 	}
@@ -545,7 +545,8 @@ func TestDescribeConfigsOnAnUnknownTopic(t *testing.T) {
 // onto the facade.
 func TestDescribeConfigsOnTheBroker(t *testing.T) {
 	cl := newClient(t)
-	for _, name := range []string{"", "0"} {
+	// "" and this node's own id (0 on the first facade; the raft node id now).
+	for _, name := range []string{"", strconv.Itoa(int(facadeNode(t, cl)))} {
 		r := describeConfigs(t, cl, resourceBroker, name)
 		if r.ErrorCode != errNone {
 			t.Fatalf("broker %q: error code %d (%v)", name, r.ErrorCode, r.ErrorMessage)
