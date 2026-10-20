@@ -390,6 +390,20 @@ async fn connect(
     })
 }
 
+/// The pause before the stream is opened again after it failed to open: it
+/// doubles with every failure in a row, up to [`REOPEN_MAX_PAUSE`], and is
+/// cleared when the stream opens. openraft opens a new stream the moment the
+/// last one failed; its own backoff sleeps in the request stream, which a
+/// stream that never opened does not read. A follower that was down cost its
+/// leader ~4,000 refused connections and as many WARN lines a second
+/// (1,193,404 lines in five minutes, three nodes on GCP, 2026-10-20). With the
+/// pause it costs a few a second, and a follower that comes back is reached
+/// within [`REOPEN_MAX_PAUSE`].
+const REOPEN_FIRST_PAUSE: Duration = Duration::from_millis(50);
+
+/// The longest pause between two attempts to open the stream.
+const REOPEN_MAX_PAUSE: Duration = Duration::from_secs(1);
+
 /// The stream state of one [`super::network::HttpPeer`].
 #[derive(Default)]
 pub(crate) struct StreamPeer {
@@ -398,6 +412,10 @@ pub(crate) struct StreamPeer {
     /// The follower does not serve the stream: unary until then.
     unary_until: Option<Instant>,
     session: u64,
+    /// No new attempt to open the stream before this ([`REOPEN_FIRST_PAUSE`]).
+    reopen_at: Option<Instant>,
+    /// The pause the last failure set; zero once the stream opened.
+    pause: Duration,
 }
 
 impl StreamPeer {
@@ -418,6 +436,11 @@ impl StreamPeer {
             self.conn = None;
         }
         if self.conn.is_none() {
+            if self.connecting.is_none() {
+                if let Some(at) = self.reopen_at {
+                    tokio::time::sleep_until(at.into()).await;
+                }
+            }
             let task = self.connecting.get_or_insert_with(|| {
                 tokio::spawn(crate::obs::panic_policy::non_core(connect(
                     client.clone(),
@@ -427,26 +450,32 @@ impl StreamPeer {
             });
             let res = task.await;
             self.connecting = None;
-            match res {
-                Ok(Ok(c)) => self.conn = Some(c),
+            let failed = match res {
+                Ok(Ok(c)) => {
+                    self.conn = Some(c);
+                    self.reopen_at = None;
+                    self.pause = Duration::ZERO;
+                    None
+                }
                 Ok(Err(ConnectFail::NotServed)) => {
                     tracing::info!(target: "rsm", base, "raft: the follower does not serve the append stream; unary appends for now");
                     self.unary_until = Some(Instant::now() + UNSUPPORTED_RETRY);
                     return Ok(None);
                 }
-                Ok(Err(ConnectFail::Unreachable(m))) => {
-                    return Err(RPCError::Unreachable(Unreachable::new(&io::Error::other(
-                        m,
-                    ))))
-                }
+                Ok(Err(ConnectFail::Unreachable(m))) => Some(RPCError::Unreachable(
+                    Unreachable::new(&io::Error::other(m)),
+                )),
                 Ok(Err(ConnectFail::Network(m))) => {
-                    return Err(RPCError::Network(NetworkError::new(&io::Error::other(m))))
+                    Some(RPCError::Network(NetworkError::new(&io::Error::other(m))))
                 }
-                Err(e) => {
-                    return Err(RPCError::Network(NetworkError::new(&io::Error::other(
-                        format!("opening the append stream: {e}"),
-                    ))))
-                }
+                Err(e) => Some(RPCError::Network(NetworkError::new(&io::Error::other(
+                    format!("opening the append stream: {e}"),
+                )))),
+            };
+            if let Some(e) = failed {
+                self.pause = (self.pause * 2).clamp(REOPEN_FIRST_PAUSE, REOPEN_MAX_PAUSE);
+                self.reopen_at = Some(Instant::now() + self.pause);
+                return Err(e);
             }
         }
         self.session += 1;
@@ -891,6 +920,52 @@ mod tests {
             let (sid, ans) = parse_answer(got[2].1.clone()).unwrap();
             assert_eq!((sid, ans), (8, Err("stopped".into())));
         }
+    }
+
+    /// A follower that refuses connections is tried a few times a second, not
+    /// in a loop as fast as openraft can start one ([`REOPEN_FIRST_PAUSE`]),
+    /// and is reached within [`REOPEN_MAX_PAUSE`] of serving again.
+    #[tokio::test]
+    async fn a_follower_that_is_down_is_tried_a_few_times_a_second() {
+        let client = super::super::network::http_client();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let base = format!("http://{addr}");
+        let mut peer = StreamPeer::default();
+
+        let t0 = Instant::now();
+        let mut attempts = 0u32;
+        while t0.elapsed() < Duration::from_millis(1500) {
+            let refused = peer.conn(&client, &base, &None).await.is_err();
+            assert!(refused, "nothing listens at {base}");
+            attempts += 1;
+        }
+        // 0, 50, 150, 350, 750 ms, then a pause of 800 ms: at most 6.
+        assert!((3..=7).contains(&attempts), "{attempts} attempts in 1.5 s");
+        assert_eq!(peer.pause, REOPEN_MAX_PAUSE, "the pause grew to its cap");
+
+        // The follower serves again: the next attempt opens the stream.
+        let app = axum::Router::new().route(
+            STREAM_PATH,
+            axum::routing::post(|| async { StatusCode::OK }),
+        );
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let t1 = Instant::now();
+        let opened = peer.conn(&client, &base, &None).await;
+        assert!(matches!(opened, Ok(Some(_))), "the stream opens again");
+        assert!(
+            t1.elapsed() <= REOPEN_MAX_PAUSE + Duration::from_millis(500),
+            "reached {:?} after it served again",
+            t1.elapsed()
+        );
+        assert_eq!(
+            peer.pause,
+            Duration::ZERO,
+            "an open stream clears the pause"
+        );
+        assert!(peer.reopen_at.is_none());
     }
 
     #[test]
