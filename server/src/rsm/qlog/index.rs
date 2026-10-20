@@ -383,6 +383,19 @@ impl View {
     /// store recorded for the `.qlog`: an index written for a different length
     /// is stale and must be rebuilt.
     pub fn open(path: &Path, recorded_len: Option<u64>) -> io::Result<View> {
+        let view = Self::open_unchecked(path, recorded_len)?;
+        view.check_records()?;
+        Ok(view)
+    }
+
+    /// [`View::open`] without the record array's checksum: the header (its own
+    /// checksum, the record width, the file id and length it names, the size
+    /// the count implies) is verified, the records are mapped and not read.
+    /// What the boot uses for a sealed file ([`super::QLog::open`]): reading
+    /// every index to hash it is a node's whole index from disk at every start
+    /// (about 3% of the log). [`View::check_records`] does it later, and
+    /// retention judges no file before it has ([`super::FileMeta::checked`]).
+    pub fn open_unchecked(path: &Path, recorded_len: Option<u64>) -> io::Result<View> {
         let f = File::open(path)?;
         let len = f.metadata()?.len() as usize;
         if len < HEADER_LEN {
@@ -412,10 +425,6 @@ impl View {
         if len < need {
             return Err(IndexError::Short { need, have: len }.into());
         }
-        let recs_sum = u64::from_le_bytes(head[32..40].try_into().expect("8 bytes"));
-        if xxh3_64(&map[HEADER_LEN..need]) != recs_sum {
-            return Err(IndexError::RecordChecksum.into());
-        }
         if let Some(recorded) = recorded_len {
             if recorded != file_bytes {
                 return Err(IndexError::StaleLength {
@@ -431,6 +440,17 @@ impl View {
             count,
             file_bytes,
         })
+    }
+
+    /// The record array against the checksum the header carries: every page
+    /// of the index is read.
+    pub fn check_records(&self) -> Result<(), IndexError> {
+        let need = HEADER_LEN + self.count * RECORD_LEN;
+        let recs_sum = u64::from_le_bytes(self.map[32..40].try_into().expect("8 bytes"));
+        if xxh3_64(&self.map[HEADER_LEN..need]) != recs_sum {
+            return Err(IndexError::RecordChecksum);
+        }
+        Ok(())
     }
 
     /// Whether the index is memory-mapped (a small one is on the heap).

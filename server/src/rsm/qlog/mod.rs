@@ -125,6 +125,8 @@ pub mod set;
 #[cfg(test)]
 mod band_tests;
 #[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
 mod refill_tests;
 #[cfg(test)]
 mod tests;
@@ -611,6 +613,137 @@ pub struct FileMeta {
     /// one file after any roll, so every record of a file is below the first
     /// record of the next). `0` for a file that holds no record.
     pub max_seq: u64,
+    /// Whether the file's index has been read and its record checksum verified
+    /// in this process, and `min`/`max_created_at_us` taken from it. A file
+    /// this process wrote, sealed or rebuilt is; one [`QLog::open`] found is
+    /// not until [`QLog::check_index`] has read it (the boot maps indexes
+    /// without reading them). Retention judges no unchecked file: it would
+    /// decide on index rows nothing has verified, and on a time range it does
+    /// not have yet.
+    pub checked: bool,
+}
+
+/// One run of records a leader sends in a DELTA snapshot: bytes
+/// `[start, end)` of one `.qlog` file of the log in directory `log_dir`
+/// (`q<id>`), whole records, every one with `seq` in the range asked for
+/// ([`set::QLogReader::seq_runs`]). The receiver keeps its own files and
+/// appends these ([`QLog::append_raw`]): a node that was away gets what it
+/// missed, not the leader's whole log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeqRun {
+    pub log_dir: String,
+    pub file_id: u64,
+    pub path: PathBuf,
+    pub start: u64,
+    pub end: u64,
+}
+
+/// The bytes `[start, end)` of the `.qlog` at `path` (`bytes` long) that hold
+/// its records with `seq` in `(after, upto]`; `None` when it holds none. A
+/// file the range covers whole is taken with no read; one it cuts is scanned
+/// to its records' boundaries. Seqs never decrease along a file.
+pub(crate) fn seq_run(
+    path: &Path,
+    bytes: u64,
+    first_seq: u64,
+    max_seq: u64,
+    after: u64,
+    upto: u64,
+) -> io::Result<Option<(u64, u64)>> {
+    if first_seq > after && max_seq <= upto {
+        return Ok(Some((FILE_HEADER_LEN, bytes)));
+    }
+    let (mut start, mut end) = (None, FILE_HEADER_LEN);
+    let (_, torn) = scan_records_at(path, FILE_HEADER_LEN, bytes, |h, pos, rec| {
+        if h.seq > upto {
+            return Ok(false);
+        }
+        if h.seq > after {
+            start.get_or_insert(pos);
+            end = pos + rec.len() as u64;
+        }
+        Ok(true)
+    })?;
+    if let Some((at, why)) = torn {
+        return Err(corrupt(
+            path,
+            &format!("damaged record at byte {at} while reading a snapshot's run: {why}"),
+        ));
+    }
+    Ok(start.map(|s| (s, end)))
+}
+
+/// Cut the queue log in `dir` above `after` — on its files, before anything
+/// opens it: every file whose first record is above `after` is removed, and
+/// the one the cut falls in is truncated at its first record above it (its
+/// index removed: it is the active file now, which the open scans). Answers
+/// the bytes dropped.
+///
+/// What a DELTA snapshot's swap does before it appends the runs
+/// ([`QLog::append_raw`]), and unlike [`QLog::truncate_seq_from`] it cuts
+/// into sealed files: a member keeps applying while a snapshot travels to it,
+/// so records above its basis may be sealed, and they are not a torn tail but
+/// entries the delta carries again — every record a member holds above its
+/// basis is at or below the snapshot's index, which the runs cover.
+pub(crate) fn cut_log_above(dir: &Path, after: u64) -> io::Result<u64> {
+    let mut ids = scan_ids(dir)?;
+    ids.sort_unstable();
+    let mut dropped = 0u64;
+    for id in ids.iter().rev().copied() {
+        let path = file_path(dir, id);
+        let len = std::fs::metadata(&path)?.len();
+        let first_seq = if len < FILE_HEADER_LEN {
+            u64::MAX
+        } else {
+            read_file_header(&path, id)?
+        };
+        if first_seq > after {
+            dropped += len;
+            remove_if_present(&path)?;
+            remove_if_present(&qidx_path(dir, id))?;
+            remove_if_present(&qidx_tmp_path(dir, id))?;
+            continue;
+        }
+        // The newest file left: cut it at its first record above `after`.
+        let mut cut = None;
+        let (valid, _) = scan_records_at(&path, FILE_HEADER_LEN, len, |h, pos, _| {
+            if h.seq > after {
+                cut = Some(pos);
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+        let keep = cut.unwrap_or(valid);
+        if keep < len {
+            dropped += len - keep;
+            let f = OpenOptions::new().write(true).open(&path)?;
+            f.set_len(keep)?;
+            f.sync_all()?;
+        }
+        remove_if_present(&qidx_path(dir, id))?;
+        remove_if_present(&qidx_tmp_path(dir, id))?;
+        break;
+    }
+    sync_dir(dir)?;
+    Ok(dropped)
+}
+
+/// One sealed file's index as [`QLog::check_index`] read it.
+pub(crate) struct CheckedIndex {
+    id: u64,
+    /// The file's length when it was read.
+    bytes: u64,
+    min_created_at_us: i64,
+    max_created_at_us: i64,
+    /// The index rebuilt from the file, when the mapped one failed its
+    /// checksum.
+    rebuilt: Option<Arc<index::View>>,
+}
+
+impl CheckedIndex {
+    pub(crate) fn is_rebuilt(&self) -> bool {
+        self.rebuilt.is_some()
+    }
 }
 
 /// What [`QLog::open`] found and fixed.
@@ -1063,8 +1196,15 @@ impl QLog {
                 // file and indexes exactly `on_disk` bytes; otherwise rebuild
                 // it by scanning the `.qlog` (§5). A torn/damaged record in a
                 // sealed file is corruption, not a torn tail.
-                let view = match index::View::open(&qidx_path(&dir, id), Some(on_disk)) {
-                    Ok(v) if v.check_identity(id).is_ok() => v,
+                // The index is MAPPED, not read: its header is checked here,
+                // its records later ([`QLog::check_index`]), so a boot does
+                // not read every index of the node.
+                let mut meta = FileMeta::empty(id, first_seq);
+                let view = match index::View::open_unchecked(&qidx_path(&dir, id), Some(on_disk)) {
+                    Ok(v) if v.check_identity(id).is_ok() => {
+                        meta.checked = false;
+                        v
+                    }
                     _ => {
                         let scan = scan_file(&path, on_disk)?;
                         if let Some((at, why)) = scan.torn {
@@ -1078,16 +1218,15 @@ impl QLog {
                         write_qidx(&dir, id, on_disk, &records)?;
                         rec.rebuilt_indexes += 1;
                         rec.scanned_records += records.len() as u64;
+                        for r in &records {
+                            meta.absorb(r.created_at_us);
+                        }
                         index::View::open(&qidx_path(&dir, id), Some(on_disk))?
                     }
                 };
-                let mut meta = FileMeta::empty(id, first_seq);
                 meta.bytes = on_disk;
                 meta.sealed = true;
                 meta.records = view.len() as u64;
-                for r in view.records() {
-                    meta.absorb(r.created_at_us);
-                }
                 files.push(meta);
                 sealed.insert(id, Arc::new(view));
             }
@@ -3248,6 +3387,206 @@ impl QLog {
         Ok(dropped)
     }
 
+    /// The sealed files whose index the boot mapped without reading it
+    /// ([`FileMeta::checked`]): `(id, index, length)`, for [`QLog::check_index`]
+    /// to read with no lock on the log.
+    pub(crate) fn unchecked_indexes(&self) -> Vec<(u64, Arc<index::View>, u64)> {
+        self.files
+            .iter()
+            .filter(|m| m.sealed && !m.checked)
+            .filter_map(|m| self.sealed.get(&m.id).map(|v| (m.id, v.clone(), m.bytes)))
+            .collect()
+    }
+
+    /// Read the index of sealed file `id` of the log in `dir` — with NO lock
+    /// on the log: the file is sealed and the index immutable — verify its
+    /// record checksum and take the file's time range from it. A damaged index
+    /// is rebuilt by scanning the `.qlog`, as [`QLog::open`] does with one it
+    /// cannot open. [`QLog::index_checked`] records the result.
+    pub(crate) fn check_index(
+        dir: &Path,
+        id: u64,
+        view: &index::View,
+        bytes: u64,
+    ) -> io::Result<CheckedIndex> {
+        let range = |recs: &mut dyn Iterator<Item = index::Record>| {
+            recs.fold((i64::MAX, i64::MIN), |(lo, hi), r| {
+                (lo.min(r.created_at_us), hi.max(r.created_at_us))
+            })
+        };
+        if view.check_records().is_ok() {
+            let (min, max) = range(&mut view.records());
+            return Ok(CheckedIndex {
+                id,
+                bytes,
+                min_created_at_us: min,
+                max_created_at_us: max,
+                rebuilt: None,
+            });
+        }
+        let path = file_path(dir, id);
+        tracing::error!(
+            target: "rsm",
+            file = %path.display(),
+            "rsm qlog: a sealed file's index failed its checksum; it is rebuilt from the file",
+        );
+        let scan = scan_file(&path, bytes)?;
+        if let Some((at, why)) = scan.torn {
+            return Err(corrupt(
+                &path,
+                &format!("damaged record at byte {at} of a sealed file: {why}"),
+            ));
+        }
+        let mut records = scan.records;
+        index::sort_records(&mut records);
+        write_qidx(dir, id, bytes, &records)?;
+        let (min, max) = range(&mut records.iter().copied());
+        let rebuilt = index::View::open(&qidx_path(dir, id), Some(bytes))?;
+        Ok(CheckedIndex {
+            id,
+            bytes,
+            min_created_at_us: min,
+            max_created_at_us: max,
+            rebuilt: Some(Arc::new(rebuilt)),
+        })
+    }
+
+    /// [`QLog::check_index`] every index the open mapped without reading,
+    /// here and now, under this caller's lock: what the background check
+    /// does for a node, for a caller that needs retention at once (tests).
+    pub(crate) fn check_all_indexes(&mut self) -> io::Result<usize> {
+        let todo = self.unchecked_indexes();
+        let n = todo.len();
+        for (id, view, bytes) in todo {
+            let checked = Self::check_index(&self.dir, id, &view, bytes)?;
+            self.index_checked(checked);
+        }
+        Ok(n)
+    }
+
+    /// Record what [`QLog::check_index`] found: the file is checked, with its
+    /// time range (and its rebuilt index), if it is still here as it was read
+    /// — a file retention rewrote meanwhile has a new index of its own.
+    pub(crate) fn index_checked(&mut self, c: CheckedIndex) {
+        let Some(meta) = self
+            .files
+            .iter_mut()
+            .find(|m| m.id == c.id && m.sealed && m.bytes == c.bytes)
+        else {
+            return;
+        };
+        meta.min_created_at_us = c.min_created_at_us;
+        meta.max_created_at_us = c.max_created_at_us;
+        meta.checked = true;
+        if let Some(view) = c.rebuilt {
+            self.sealed.insert(c.id, view);
+        }
+    }
+
+    /// The files of this log that may hold records with `seq` in
+    /// `(after, upto]`: `(id, path, bytes, first_seq, max_seq)`, for
+    /// [`seq_run`] to read with no lock on the log (a DELTA snapshot,
+    /// [`SeqRun`]). `max_seq` is an upper bound for a sealed file found at
+    /// open, so a file may come back that holds none.
+    pub(crate) fn seq_candidates(
+        &self,
+        after: u64,
+        upto: u64,
+    ) -> Vec<(u64, PathBuf, u64, u64, u64)> {
+        self.files
+            .iter()
+            .filter(|m| m.bytes > FILE_HEADER_LEN && m.max_seq > after && m.first_seq <= upto)
+            .map(|m| {
+                (
+                    m.id,
+                    file_path(&self.dir, m.id),
+                    m.bytes,
+                    m.first_seq,
+                    m.max_seq,
+                )
+            })
+            .collect()
+    }
+
+    /// Append records exactly as another node stored them — the runs of a
+    /// DELTA snapshot ([`SeqRun`]): each verified, written byte for byte (a
+    /// zstd payload stays compressed, an entry record keeps its layout), and
+    /// indexed like a record this log wrote. Records of one `seq` go into one
+    /// file, as the writer's groups do. `bytes` holds whole records in
+    /// non-decreasing `seq` order, none below this log's tail. Synced before it
+    /// returns; answers how many records.
+    pub fn append_raw(&mut self, bytes: &[u8]) -> io::Result<u64> {
+        /// One write: at most this much, a `seq`'s records never split.
+        const GROUP_MAX: usize = 4 << 20;
+        let bad = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
+        let mut tail = self.durable_tail();
+        let mut pos = 0usize;
+        let mut n = 0u64;
+        while pos < bytes.len() {
+            let start = pos;
+            let mut recs: Vec<(record::Header, usize)> = Vec::new();
+            while pos < bytes.len() {
+                let rest = &bytes[pos..];
+                let head = rest
+                    .get(..record::FIXED_PREFIX)
+                    .ok_or_else(|| bad(format!("a record cut short at byte {pos}")))?;
+                let h = record::parse_header(head).map_err(io::Error::from)?;
+                let len = h.record_len();
+                let frame = rest
+                    .get(..len)
+                    .ok_or_else(|| bad(format!("a record cut short at byte {pos}")))?;
+                record::verify(frame, &h).map_err(io::Error::from)?;
+                if h.seq < tail {
+                    return Err(bad(format!(
+                        "a record with seq {} below the log's tail {tail}",
+                        h.seq
+                    )));
+                }
+                let new_seq = recs.last().is_none_or(|(p, _)| p.seq != h.seq);
+                if new_seq && !recs.is_empty() && pos - start >= GROUP_MAX {
+                    break;
+                }
+                tail = h.seq;
+                recs.push((h, pos - start));
+                pos += len;
+            }
+            let (file_id, base) = self.prepare_write(recs[0].0.seq)?;
+            let buf = bytes[start..pos].to_vec();
+            let mut locs = Vec::with_capacity(recs.len());
+            let mut new_recs = Vec::with_capacity(recs.len());
+            let mut seq_starts: Vec<(u64, u64)> = Vec::new();
+            let mut max_seq = 0u64;
+            for (h, at) in &recs {
+                let offset = base + *at as u64;
+                max_seq = max_seq.max(h.seq);
+                if seq_starts.last().is_none_or(|(s, _)| *s != h.seq) {
+                    seq_starts.push((h.seq, offset));
+                }
+                if !record::is_entry_kind(h.kind()) {
+                    new_recs.push(index::Record::of_header(h, offset));
+                }
+                locs.push(Loc { file_id, offset });
+            }
+            self.active
+                .as_ref()
+                .expect("active file")
+                .write_all_at(&buf, base)?;
+            n += recs.len() as u64;
+            self.publish_write(
+                base,
+                EncodedGroup {
+                    buf,
+                    locs,
+                    new_recs,
+                    max_seq,
+                    seq_starts,
+                },
+            )?;
+        }
+        self.sync()?;
+        Ok(n)
+    }
+
     /// Retention: unlink WHOLE files the predicate marks dead. Only
     /// SEALED files are candidates — the active file is never unlinked. Returns
     /// how many were dropped.
@@ -3279,7 +3618,9 @@ impl QLog {
         let victims: Vec<u64> = self
             .files
             .iter()
-            .filter(|m| m.sealed && Some(m.id) != active_id && m.max_seq <= floor && is_dead(m))
+            .filter(|m| {
+                m.sealed && m.checked && Some(m.id) != active_id && m.max_seq <= floor && is_dead(m)
+            })
             .map(|m| m.id)
             .collect();
         if victims.is_empty() {
@@ -3392,7 +3733,9 @@ impl QLog {
         let mut candidates: Vec<u64> = self
             .files
             .iter()
-            .filter(|meta| meta.sealed && Some(meta.id) != active && meta.max_seq <= floor)
+            .filter(|meta| {
+                meta.sealed && meta.checked && Some(meta.id) != active && meta.max_seq <= floor
+            })
             .filter(|meta| self.reclaim_checked.get(&meta.id).copied() != Some(generation))
             .map(|meta| meta.id)
             .collect();
@@ -3478,7 +3821,7 @@ impl QLog {
             eligible: self
                 .files
                 .iter()
-                .filter(|m| m.sealed && Some(m.id) != active && m.max_seq <= floor)
+                .filter(|m| m.sealed && m.checked && Some(m.id) != active && m.max_seq <= floor)
                 .map(|m| (m.id, m.bytes))
                 .collect(),
             all_ids: self.files.iter().map(|m| m.id).collect(),
@@ -3701,6 +4044,7 @@ impl FileMeta {
             min_created_at_us: i64::MAX,
             max_created_at_us: i64::MIN,
             max_seq: 0,
+            checked: true,
         }
     }
 

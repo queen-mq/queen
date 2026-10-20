@@ -42,7 +42,7 @@
 //! ([`MembersState::kinds_floor`]); the batcher raises it. The view carries
 //! each member's figure ([`MemberSeen::kinds`]), so every node can show it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -105,6 +105,10 @@ pub(crate) struct MembersState {
     /// The last leader that handed its leadership to another member (a
     /// `TransferLeader` this node received), and when.
     handed_off: Mutex<Option<(NodeId, Instant)>>,
+    /// While this node leads: the openraft index it purges no further than
+    /// for its absent members, and each held member's RSM index — what its
+    /// view publishes ([`MemberSeen::held`], [`MembersView::hold_floor`]).
+    holds: Mutex<(Option<u64>, BTreeMap<NodeId, u64>)>,
 }
 
 impl Default for MembersState {
@@ -144,7 +148,14 @@ impl MembersState {
             published: RwLock::new(None),
             received: Mutex::new(None),
             handed_off: Mutex::new(None),
+            holds: Mutex::new((None, BTreeMap::new())),
         }
+    }
+
+    /// The member holds this node's view publishes while it leads: the floor
+    /// they keep the log at (openraft index), and each member's RSM index.
+    pub(crate) fn set_holds(&self, floor: Option<u64>, held: BTreeMap<NodeId, u64>) {
+        *self.holds.lock().expect("member holds") = (floor, held);
     }
 
     /// What this node says it reads; `None` when it says nothing.
@@ -341,6 +352,11 @@ impl MembersState {
                 floor = floor.min(m.matched.map_or(0, |i| i.saturating_sub(1)));
             }
         }
+        // What the leader keeps for an absent member, this node keeps too:
+        // it may lead next.
+        if let Some(held) = view.hold_floor {
+            floor = floor.min(held);
+        }
         Some(floor)
     }
 
@@ -394,6 +410,7 @@ impl MembersState {
             .filter(|(term, _)| *term == m.current_term)
             .map(|(_, at)| at.elapsed().as_millis() as u64);
         let previous = self.previous_leader();
+        let holds = self.holds.lock().expect("member holds").clone();
         let membership = m.membership_config.membership();
         let voters: std::collections::BTreeSet<NodeId> = membership.voter_ids().collect();
         let members = membership
@@ -426,6 +443,7 @@ impl MembersState {
                     } else {
                         self.reported_kinds(*id).flatten()
                     },
+                    held: holds.1.get(id).copied(),
                 }
             })
             .collect();
@@ -433,6 +451,7 @@ impl MembersState {
             leader: m.id,
             term: m.current_term,
             members,
+            hold_floor: holds.0,
         })
     }
 
@@ -493,8 +512,10 @@ mod tests {
                     last_ack_ms: Some(id * 10),
                     matched: Some(99),
                     kinds: Some(3),
+                    held: None,
                 })
                 .collect(),
+            hold_floor: None,
         }
     }
 
@@ -657,6 +678,7 @@ mod tests {
                     last_ack_ms: *ms,
                     matched: None,
                     kinds: None,
+                    held: None,
                 })
                 .collect();
             ClusterMembers {
@@ -667,6 +689,7 @@ mod tests {
                     leader: 1,
                     term: 7,
                     members,
+                    hold_floor: None,
                 }),
                 view_age: age.map(Duration::from_millis),
             }
@@ -737,6 +760,7 @@ mod tests {
                     last_ack_ms: Some(0),
                     matched: *at,
                     kinds: None,
+                    held: None,
                 })
                 .collect();
             ClusterMembers {
@@ -747,6 +771,7 @@ mod tests {
                     leader: 3,
                     term: 7,
                     members,
+                    hold_floor: None,
                 }),
                 view_age: age.map(Duration::from_millis),
             }

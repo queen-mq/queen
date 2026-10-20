@@ -937,8 +937,10 @@ fn members(
                     last_ack_ms: *ack,
                     matched: None,
                     kinds: None,
+                    held: None,
                 })
                 .collect(),
+            hold_floor: None,
         }),
         view_age: Some(std::time::Duration::from_millis(view_age_ms)),
     }

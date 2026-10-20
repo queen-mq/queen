@@ -1283,6 +1283,8 @@ fn reclaim_below_txns_compacts_mixed_sealed_files() {
     drop(q);
     let (mut q, recovery) = QLog::open(td.path(), 1, opts).unwrap();
     assert!(!recovery.truncated_tail, "compacted files reopen cleanly");
+    // Retention judges a reopened file once its index has been read.
+    q.check_all_indexes().unwrap();
     for offset in 0..10 {
         assert!(q.read_payload(11, offset).unwrap().is_some());
     }
@@ -2623,6 +2625,7 @@ fn the_directory_answers_exactly_what_the_files_answer() {
     bytes[last] ^= 0x5A;
     std::fs::write(&victim, &bytes).unwrap();
     let (mut q, _) = QLog::open(td.path(), 77, opts).unwrap();
+    q.check_all_indexes().unwrap();
     assert!(!victim.exists(), "a damaged run is removed at open");
     assert_eq!(q.dirx_stats().0, runs_before - 1);
     assert_eq!(dirx_answers(&q, &pids, upto), truth, "with a run lost");

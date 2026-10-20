@@ -12,6 +12,20 @@
 //!   send time (retention paused meanwhile), so every payload the store names
 //!   and every entry above the checkpoint is there.
 //!
+//! # A delta
+//!
+//! A member that has most of the log already — it was away, and the leader
+//! purged past it — is sent only what it lacks. Before it builds anything the
+//! sender asks the member where its log stands (`/raft/v1/snapshot/basis`:
+//! the index it applied, and its queue-log layout); with the same layout, the
+//! snapshot carries the store and, instead of every queue-log file, the RUNS
+//! of records above that index ([`crate::rsm::qlog::SeqRun`], `qdelta/…`).
+//! The member keeps its own files, cuts them above the basis, and appends the
+//! runs byte for byte ([`crate::rsm::qlog::QLog::append_raw`]): a member back
+//! from an hour away receives an hour of records, not the leader's whole log.
+//! A member that does not answer, or answers with another layout, or an empty
+//! one, gets the whole state as before.
+//!
 //! # The stream
 //!
 //! ```text
@@ -106,6 +120,13 @@ pub(crate) type CopyTraces = Box<dyn Fn(&Path) -> io::Result<bool> + Send + Sync
 /// ([`stream_checkpoint`]).
 pub(crate) type Held = Arc<dyn Fn(u64) + Send + Sync>;
 
+/// Told, while a snapshot goes to a member, which member and the RSM index of
+/// the checkpoint it carries: once the copy is made and again with every piece
+/// the member makes room for. The leader keeps its log from there for that
+/// member ([`super::RaftOpts::member_hold`]), so the member, once it restarted
+/// on the snapshot, catches up from the log instead of being sent another.
+pub(crate) type Sending = Arc<dyn Fn(NodeId, u64) + Send + Sync>;
+
 /// What a node needs to send its snapshot.
 pub(crate) struct SendCtx {
     pub(crate) data_dir: PathBuf,
@@ -114,6 +135,8 @@ pub(crate) struct SendCtx {
     pub(crate) qlog: QLogReader,
     /// The membership in force at the copied checkpoint.
     pub(crate) membership_at: MembershipAt,
+    /// See [`Sending`]; `None`: nothing is held for the member.
+    pub(crate) sending: Option<Sending>,
 }
 
 impl SendCtx {
@@ -154,6 +177,7 @@ impl SendCtx {
             }),
             qlog,
             membership_at,
+            sending: None,
         }
     }
 }
@@ -166,6 +190,9 @@ pub(crate) struct RecvCtx {
     /// `snapshot.pending` (through the same `.tmp`), so a second is refused
     /// while one runs, and the leader sends again.
     pub(crate) receiving: tokio::sync::Mutex<()>,
+    /// Where this node's log stands, for a sender that may send a delta.
+    /// `None`: it is not told, and gets the whole state.
+    pub(crate) basis: Option<BasisOf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -176,6 +203,11 @@ struct Header {
     applied: u64,
     applied_term: u64,
     files: Vec<FileEntry>,
+    /// A DELTA (see the module header): the receiver's log already holds
+    /// every record up to this RSM index, and the files carry only the runs
+    /// above it (`qdelta/…`) besides the store. `None`: the whole state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    basis: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -183,7 +215,28 @@ struct FileEntry {
     /// Relative to the snapshot root, `/`-separated.
     path: String,
     len: u64,
+    /// Where the sender reads it, when not at `path` from its first byte: a
+    /// file under the staging directory and an offset (a delta's run is a
+    /// slice of a queue-log file). Never sent.
+    #[serde(skip)]
+    source: Option<(String, u64)>,
 }
+
+/// Where a member's log stands, as it answers `/raft/v1/snapshot/basis`
+/// before a snapshot is built for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Basis {
+    /// The RSM index the member applied: its queue logs hold every record up
+    /// to it.
+    pub(crate) applied: u64,
+    /// Its queue-log layout ([`QLogReader::lanes`], [`QLogReader::shards`]):
+    /// a delta's runs land in the logs of the same name only under the same.
+    pub(crate) lanes: u64,
+    pub(crate) shards: u64,
+}
+
+/// Answers `/raft/v1/snapshot/basis` on a member.
+pub(crate) type BasisOf = Box<dyn Fn() -> Basis + Send + Sync>;
 
 /// `snapshot.pending` / `snapshot.swapping`.
 #[derive(Serialize, Deserialize)]
@@ -199,6 +252,10 @@ struct Pending {
     /// marker an older build wrote has no such field: it carried none.
     #[serde(default)]
     traces: bool,
+    /// A delta's basis ([`Header::basis`]): the swap keeps this node's queue
+    /// logs, cut above it, and appends the runs. `None`: the whole state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    basis: Option<u64>,
 }
 
 fn stamp() -> u128 {
@@ -217,8 +274,11 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Hard-link every regular file under `src` into `dst` (same layout), except
-/// indexes and temporaries (the receiver rebuilds indexes). A file that
-/// vanishes between the listing and the link was reclaimed as dead: skipped.
+/// temporaries. A sealed file's `.qidx` goes with it: it indexes bytes that
+/// are sent unchanged, so the receiver opens it (verifying it, and rebuilding
+/// only one that fails) instead of reading every file of the snapshot again
+/// to rebuild them all. A file that vanishes between the listing and the link
+/// was reclaimed as dead: skipped.
 ///
 /// A queue log's files are taken NEWEST first, and a file created ahead of
 /// its roll and not taken yet is left out (`qlog::is_precreated_file`): each
@@ -250,12 +310,7 @@ fn link_tree(src: &Path, dst: &Path, rel: &str, out: &mut Vec<FileEntry>) -> io:
             link_tree(&e.path(), &dst.join(n), &child_rel, out)?;
             continue;
         }
-        if !ft.is_file()
-            || n.ends_with(".qidx")
-            || n.ends_with(".tmp")
-            || n.contains(".compact")
-            || n.ends_with(".dead")
-        {
+        if !ft.is_file() || n.ends_with(".tmp") || n.contains(".compact") || n.ends_with(".dead") {
             continue;
         }
         if n.ends_with(".qlog") {
@@ -275,19 +330,28 @@ fn link_tree(src: &Path, dst: &Path, rel: &str, out: &mut Vec<FileEntry>) -> io:
         out.push(FileEntry {
             path: child_rel,
             len,
+            source: None,
         });
     }
     Ok(())
 }
 
-/// Build what is sent: the store copy, then links to every log file.
-fn materialize(ctx: &SendCtx, dir: &Path) -> io::Result<(u64, u64, Vec<FileEntry>)> {
+/// Build what is sent: the store copy, then links to every log file — or,
+/// for a member whose log already reaches `basis`, the runs of records above
+/// it ([`materialize_runs`]). Answers the store's checkpoint, its term, the
+/// files, and the basis it used (none when it built the whole state).
+fn materialize(
+    ctx: &SendCtx,
+    dir: &Path,
+    basis: Option<u64>,
+) -> io::Result<(u64, u64, Vec<FileEntry>, Option<u64>)> {
     fs::create_dir_all(dir)?;
     let _paused = ctx.qlog.pause_reclaim();
     let (applied, term) = (ctx.copy_store)(&dir.join("store"))?;
     let mut files = vec![FileEntry {
         path: "store/data.mdb".into(),
         len: fs::metadata(dir.join("store").join("data.mdb"))?.len(),
+        source: None,
     }];
     // The trace environment AFTER the store: every trace of an entry at or
     // below the store copy's index was committed before that copy began, so
@@ -298,16 +362,59 @@ fn materialize(ctx: &SendCtx, dir: &Path) -> io::Result<(u64, u64, Vec<FileEntry
         files.push(FileEntry {
             path: format!("{}/data.mdb", crate::rsm::traces::DIR),
             len: fs::metadata(traces.join("data.mdb"))?.len(),
+            source: None,
         });
     }
-    link_tree(ctx.qlog.root(), &dir.join("qlog"), "qlog", &mut files)?;
+    // A basis at or above the copy: the member has as much as this already;
+    // the whole state is what openraft asked for.
+    let basis = basis.filter(|b| *b < applied);
+    match basis {
+        Some(after) => materialize_runs(ctx, dir, after, applied, &mut files)?,
+        None => link_tree(ctx.qlog.root(), &dir.join("qlog"), "qlog", &mut files)?,
+    }
     link_tree(
         &ctx.data_dir.join("seg"),
         &dir.join("seg"),
         "seg",
         &mut files,
     )?;
-    Ok((applied, term, files))
+    Ok((applied, term, files, basis))
+}
+
+/// A delta's queue-log part: every run of records with `seq` in
+/// `(after, upto]` ([`QLogReader::seq_runs`]), each its own file
+/// `qdelta/<log>/r<file id>.part`, read at send time from a hard link to the
+/// queue-log file it slices (`qsrc/…`), so retention cannot take the file
+/// away while the stream reads it.
+fn materialize_runs(
+    ctx: &SendCtx,
+    dir: &Path,
+    after: u64,
+    upto: u64,
+    files: &mut Vec<FileEntry>,
+) -> io::Result<()> {
+    for run in ctx.qlog.seq_runs(after, upto)? {
+        let name = run
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| io::Error::other("a queue-log file without a name"))?
+            .to_string();
+        let link_rel = format!("qsrc/{}/{name}", run.log_dir);
+        let link = dir.join(&link_rel);
+        if !link.exists() {
+            if let Some(parent) = link.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::hard_link(&run.path, &link)?;
+        }
+        files.push(FileEntry {
+            path: format!("qdelta/{}/r{:08}.part", run.log_dir, run.file_id),
+            len: run.end - run.start,
+            source: Some((link_rel, run.start)),
+        });
+    }
+    Ok(())
 }
 
 /// The request body: prefix, every file, the checksum. Read on a plain thread,
@@ -332,7 +439,14 @@ fn body_of(
                 }
                 let mut h = xxhash_rust::xxh3::Xxh3::new();
                 for f in &files {
-                    let mut file = fs::File::open(dir.join(&f.path))?;
+                    let mut file = match &f.source {
+                        Some((rel, at)) => {
+                            let mut file = fs::File::open(dir.join(rel))?;
+                            std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(*at))?;
+                            file
+                        }
+                        None => fs::File::open(dir.join(&f.path))?,
+                    };
                     let mut left = f.len;
                     while left > 0 {
                         let n = (left as usize).min(CHUNK);
@@ -362,6 +476,55 @@ fn body_of(
     Body::from_stream(stream)
 }
 
+/// Where `target`'s log stands, when a delta can be built for it: its
+/// applied index, if it answers (a node before 2.6 does not) with this node's
+/// queue-log layout and some log. `None`: the whole state is sent.
+async fn ask_basis(
+    ctx: &SendCtx,
+    client: &HttpClient,
+    url: &str,
+    token: Option<&str>,
+    target: NodeId,
+) -> Option<u64> {
+    // A member that is starting answers its snapshot route a moment after it
+    // first refuses connections, or after a slow answer: asked again, so a
+    // member whose log is there is not sent the whole state for a race. A
+    // node before 2.6 answers 404: the whole state at once.
+    let mut answer = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        let asked = post(
+            client,
+            &format!("{url}/basis"),
+            token,
+            "application/json",
+            Body::from("{}"),
+            Duration::from_secs(10),
+        )
+        .await;
+        match asked {
+            Ok(bytes) => {
+                answer = serde_json::from_slice::<Basis>(&bytes).ok();
+                break;
+            }
+            Err(Fail::Network(why)) if why.contains("404") => break,
+            Err(_) => continue,
+        }
+    }
+    let usable = answer
+        .filter(|b| b.applied > 0 && b.lanes == ctx.qlog.lanes() && b.shards == ctx.qlog.shards());
+    tracing::info!(
+        target: "rsm",
+        target_node = target,
+        basis = ?answer,
+        delta = usable.is_some(),
+        "raft: a member's log, before a snapshot is built for it",
+    );
+    usable.map(|b| b.applied)
+}
+
 /// Send `snapshot` to the node at `url`. `Ok(Err(..))` is the follower's
 /// refusal; `Err` a transport failure.
 pub(crate) async fn send(
@@ -380,13 +543,17 @@ pub(crate) async fn send(
     // Removed when the last of its owners lets go: this future, or the copy
     // below, which runs on after openraft cancels the send (a leader change).
     let staging = Arc::new(Staging(dir.clone()));
+    let asked = ask_basis(ctx, client, url, token, target).await;
     let c = ctx.clone();
     let s = staging.clone();
-    let made = tokio::task::spawn_blocking(move || materialize(&c, &s.0))
+    let made = tokio::task::spawn_blocking(move || materialize(&c, &s.0, asked))
         .await
         .map_err(|e| Fail::Network(format!("snapshot build: {e}")))?;
-    let (applied, applied_term, files) =
+    let (applied, applied_term, files, basis) =
         made.map_err(|e| Fail::Network(format!("snapshot build: {e}")))?;
+    if let Some(sending) = &ctx.sending {
+        sending(target, applied);
+    }
     // The copy is the store's checkpoint NOW, which can be past the one openraft
     // built this snapshot at: name the copy's own checkpoint and the membership
     // in force there, so the follower installs one checkpoint, not two (an older
@@ -405,6 +572,7 @@ pub(crate) async fn send(
         built = ?snapshot.meta.last_log_id,
         last_log_id = ?last_log_id,
         applied,
+        delta_after = ?basis,
         files = files.len(),
         bytes = total,
         "raft: sending a snapshot",
@@ -418,6 +586,7 @@ pub(crate) async fn send(
         applied,
         applied_term,
         files: files.clone(),
+        basis,
     };
     let header = serde_json::to_vec(&header).map_err(|e| Fail::Network(e.to_string()))?;
     let mut prefix = Vec::with_capacity(9 + header.len());
@@ -427,12 +596,16 @@ pub(crate) async fn send(
     prefix.extend_from_slice(&header);
     // A floor of 10 MB/s, plus a minute for the follower's fsyncs.
     let ttl = Duration::from_secs(60 + total / (10 << 20));
+    let reading = ctx
+        .sending
+        .clone()
+        .map(|sending| Box::new(move || sending(target, applied)) as Box<dyn Fn() + Send>);
     let res = post(
         client,
         url,
         token,
         "application/octet-stream",
-        body_of(dir.clone(), prefix, files, None, None),
+        body_of(dir.clone(), prefix, files, None, reading),
         ttl,
     )
     .await;
@@ -466,8 +639,8 @@ pub(crate) async fn stream_checkpoint(ctx: &Arc<SendCtx>, held: Option<Held>) ->
     let c = ctx.clone();
     let s = staging.clone();
     let first = held.clone();
-    let (applied, applied_term, files) = tokio::task::spawn_blocking(move || {
-        let made = materialize(&c, &s.0)?;
+    let (applied, applied_term, files, _) = tokio::task::spawn_blocking(move || {
+        let made = materialize(&c, &s.0, None)?;
         if let Some(held) = &first {
             held(made.0);
         }
@@ -501,6 +674,7 @@ pub(crate) async fn stream_checkpoint(ctx: &Arc<SendCtx>, held: Option<Held>) ->
         applied,
         applied_term,
         files: files.clone(),
+        basis: None,
     };
     let header = serde_json::to_vec(&header).map_err(io::Error::other)?;
     let mut prefix = Vec::with_capacity(9 + header.len());
@@ -594,7 +768,7 @@ fn safe_rel(p: &str) -> io::Result<PathBuf> {
         && path
             .components()
             .all(|c| matches!(c, std::path::Component::Normal(_)))
-        && ["store/", "qlog/", "seg/", "traces/"]
+        && ["store/", "qlog/", "seg/", "traces/", "qdelta/"]
             .iter()
             .any(|pre| p.starts_with(pre));
     if ok {
@@ -694,6 +868,7 @@ fn write_pending(
             .files
             .iter()
             .any(|f| f.path.starts_with(&traces_prefix)),
+        basis: header.basis,
     };
     write_atomic(
         data_dir,
@@ -877,6 +1052,66 @@ fn qlog_tail(data_dir: &Path, qopts: QLogOptions) -> io::Result<u64> {
     set.reopen_all()
 }
 
+/// A delta's queue-log half: cut every log above `after`, then append the
+/// staged runs (`qdelta/<log>/r<file id>.part`, in log and file order) to the
+/// logs of the same names ([`QLogSet::append_raw_into`]).
+fn apply_runs(data_dir: &Path, staged: &Path, after: u64, qopts: QLogOptions) -> io::Result<()> {
+    let t0 = std::time::Instant::now();
+    let sorted = |dir: &Path| -> io::Result<Vec<PathBuf>> {
+        let mut out: Vec<PathBuf> = match fs::read_dir(dir) {
+            Ok(rd) => rd.map(|e| e.map(|e| e.path())).collect::<Result<_, _>>()?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        out.sort();
+        Ok(out)
+    };
+    // Every log, cut above the basis on its files before it opens: what this
+    // node applied after the basis may be sealed already, and the runs carry it
+    // again ([`crate::rsm::qlog::cut_log_above`]).
+    let root = data_dir.join("qlog");
+    let mut cut = 0u64;
+    for dir in sorted(&root)? {
+        let is_log = dir.is_dir()
+            && dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix('q'))
+                .is_some_and(|n| n.parse::<u64>().is_ok());
+        if is_log {
+            cut += crate::rsm::qlog::cut_log_above(&dir, after)?;
+        }
+    }
+    let mut set = QLogSet::new(root, qopts);
+    set.reopen_all()?;
+    let (mut records, mut bytes, mut runs) = (0u64, 0u64, 0usize);
+    for log_dir in sorted(&staged.join("qdelta"))? {
+        let log_id = log_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix('q'))
+            .and_then(|n| n.parse::<u64>().ok())
+            .ok_or_else(|| bad(format!("{}: not a queue log's name", log_dir.display())))?;
+        for part in sorted(&log_dir)? {
+            let run = fs::read(&part)?;
+            bytes += run.len() as u64;
+            records += set.append_raw_into(log_id, &run)?;
+            runs += 1;
+        }
+    }
+    tracing::warn!(
+        target: "rsm",
+        after,
+        cut_bytes = cut,
+        runs,
+        records,
+        bytes,
+        ms = t0.elapsed().as_millis() as u64,
+        "raft: a delta snapshot's runs are appended to this node's queue logs",
+    );
+    Ok(())
+}
+
 /// At boot, before the store opens: swap a received snapshot in, if one is
 /// pending. Returns whether it did.
 pub fn apply_pending(data_dir: &Path, qopts: QLogOptions) -> io::Result<bool> {
@@ -917,13 +1152,17 @@ pub fn apply_pending(data_dir: &Path, qopts: QLogOptions) -> io::Result<bool> {
             crate::rsm::store::heed_store::read_checkpoint_meta(&data_dir.join("store"))
                 .map_err(|e| io::Error::other(format!("read the local store: {e}")))?;
         let tail = qlog_tail(data_dir, qopts)?;
-        if !staged.exists() || local >= p.applied || tail >= p.applied {
+        // A delta needs this node's log up to its basis: cut short (a disk
+        // that lost its tail), it cannot be used, and the leader sends again.
+        let short_of_basis = p.basis.is_some_and(|b| tail < b);
+        if !staged.exists() || local >= p.applied || tail >= p.applied || short_of_basis {
             tracing::warn!(
                 target: "rsm",
                 snapshot_applied = p.applied,
                 local_store = local,
                 local_log = tail,
-                "raft: discarding a received snapshot this node does not need",
+                basis = ?p.basis,
+                "raft: discarding a received snapshot this node does not need or cannot use",
             );
             let _ = fs::remove_dir_all(&staged);
             fs::remove_file(&pending_path)?;
@@ -936,9 +1175,16 @@ pub fn apply_pending(data_dir: &Path, qopts: QLogOptions) -> io::Result<bool> {
         target: "rsm",
         snapshot = ?p.last_log_id,
         applied = p.applied,
+        basis = ?p.basis,
         resuming,
         "raft: swapping a received snapshot in",
     );
+    if let Some(after) = p.basis {
+        // A delta: this node's queue logs stay, cut above the basis, and take
+        // the runs. Repeatable as a whole — a resumed swap cuts what a crash
+        // left half-appended and appends again.
+        apply_runs(data_dir, &staged, after, qopts)?;
+    }
     let replaced = data_dir.join(SNAP_DIR).join("replaced");
     fs::create_dir_all(&replaced)?;
     // The trace environment is swapped with the rest, so it must not be open:
@@ -1080,6 +1326,7 @@ mod tests {
             vec![FileEntry {
                 path: "store/data.mdb".into(),
                 len: (PIECES * CHUNK) as u64,
+                source: None,
             }]
         };
         let stream_of = |said: &Arc<AtomicUsize>| {

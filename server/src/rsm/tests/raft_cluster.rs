@@ -138,6 +138,10 @@ fn test_opts() -> RaftOpts {
         kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
         link_hold: Duration::from_secs(3600),
         link_hold_disk_pct: 100.0,
+        // Off unless a test turns it on: the tests that need a snapshot
+        // keep getting one.
+        member_hold: Duration::ZERO,
+        member_hold_disk_pct: 100.0,
     }
 }
 
@@ -586,6 +590,15 @@ async fn a_follower_behind_the_purge_point_gets_a_snapshot() {
         dirs[f].join(snapshot::PENDING).exists(),
         "the snapshot is staged"
     );
+    // The follower's log reached `away_last`: it was sent only what lies
+    // above (a delta), not the leader's whole log.
+    let pending = std::fs::read_to_string(dirs[f].join(snapshot::PENDING)).unwrap();
+    let marker: serde_json::Value = serde_json::from_str(&pending).unwrap();
+    let basis = marker["basis"].as_u64().expect("a delta");
+    assert!(
+        basis >= away_last && basis < last,
+        "basis {basis}, away at {away_last}, leader at {last}"
+    );
     let _ = close(back);
 
     // It restarts on the snapshot and catches up.
@@ -601,6 +614,171 @@ async fn a_follower_behind_the_purge_point_gets_a_snapshot() {
     assert!(more > last);
     tokio::task::block_in_place(|| wait_applied(&nodes, more));
     tokio::task::block_in_place(|| converge(nodes, 3 * N, "snapshot"));
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A member away for longer than the purge hold keeps the leader's log: its
+/// HOLD ([`RaftOpts::member_hold`]) stays at the entry it had, the leader
+/// purges no further, and the member returns to catch up from the log — no
+/// snapshot, however long it was gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_away_past_the_purge_hold_catches_up_from_the_log() {
+    let _one = serial().await;
+    log_init();
+    const N: u64 = 200;
+    let entries = workload(SEED, 3 * N);
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("member-hold")).collect();
+    let ports = free_ports(3);
+    // The eager purge of the snapshot test, with members held for 10 minutes.
+    let held = RaftOpts {
+        purge_hold: Duration::from_secs(2),
+        log_keep: 0,
+        purge_batch: 1,
+        member_hold: Duration::from_secs(600),
+        ..test_opts()
+    };
+    let opts = vec![held.clone(); 3];
+    let mut nodes = tokio::task::block_in_place(|| open_all(&dirs, &ports, &opts));
+    let l = tokio::task::block_in_place(|| leader_of(&nodes));
+    propose_all(nodes[l].as_ref().unwrap(), &entries[..N as usize]).await;
+    let f = (l + 1) % 3;
+    tokio::task::block_in_place(|| {
+        wait_applied(&nodes, nodes[l].as_ref().unwrap().applied_index())
+    });
+    let away = nodes[f].take().unwrap();
+    let away_last = away.applied_index();
+    let _ = close(away);
+
+    // Far past the purge hold, with the log growing: the leader purges, but
+    // never past what the absent member had.
+    let last = propose_all(
+        nodes[l].as_ref().unwrap(),
+        &entries[N as usize..2 * N as usize],
+    )
+    .await;
+    let until = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < until {
+        let purged = nodes[l].as_ref().unwrap().purged_index();
+        assert!(
+            purged <= away_last,
+            "the leader purged to {purged}, past the absent member's {away_last}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // It returns, and catches up from the log.
+    let id = f as u64 + 1;
+    let (d, p, o) = (dirs[f].clone(), ports.clone(), held.clone());
+    nodes[f] = Some(tokio::task::block_in_place(move || {
+        open_node(&d, id, &p, o)
+    }));
+    tokio::task::block_in_place(|| wait_applied(&nodes, last));
+    assert!(
+        nodes[f].as_ref().unwrap().restart_requested().is_none(),
+        "the member was sent a snapshot"
+    );
+    assert!(!dirs[f].join(snapshot::PENDING).exists());
+    let more = propose_all(nodes[l].as_ref().unwrap(), &entries[2 * N as usize..]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, more));
+    tokio::task::block_in_place(|| converge(nodes, 3 * N, "member-hold"));
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A member whose data directory is gone has nothing to build a delta on: it
+/// is sent the whole state, its sealed files' indexes with it, so it does not
+/// read every file again to rebuild them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_member_gets_the_whole_state_with_its_indexes() {
+    let _one = serial().await;
+    log_init();
+    const N: u64 = 200;
+    let entries = workload(SEED, 3 * N);
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("empty-member")).collect();
+    let ports = free_ports(3);
+    let eager = RaftOpts {
+        purge_hold: Duration::from_secs(2),
+        log_keep: 0,
+        purge_batch: 1,
+        ..test_opts()
+    };
+    let opts = vec![eager.clone(); 3];
+    let mut nodes = tokio::task::block_in_place(|| open_all(&dirs, &ports, &opts));
+    let l = tokio::task::block_in_place(|| leader_of(&nodes));
+    let first = propose_all(nodes[l].as_ref().unwrap(), &entries[..N as usize]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, first));
+
+    // The member loses its data, and the leader its early log.
+    let f = (l + 1) % 3;
+    let _ = close(nodes[f].take().unwrap());
+    std::fs::remove_dir_all(&dirs[f]).unwrap();
+    std::fs::create_dir_all(&dirs[f]).unwrap();
+    propose_all(
+        nodes[l].as_ref().unwrap(),
+        &entries[N as usize..2 * N as usize],
+    )
+    .await;
+    let end = Instant::now() + Duration::from_secs(60);
+    while nodes[l].as_ref().unwrap().purged_index() < 2 {
+        assert!(Instant::now() < end, "the leader never purged");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let id = f as u64 + 1;
+    let (d, p, o) = (dirs[f].clone(), ports.clone(), eager.clone());
+    let back = tokio::task::block_in_place(move || open_node(&d, id, &p, o));
+    let end = Instant::now() + Duration::from_secs(60);
+    while back.restart_requested().is_none() {
+        assert!(
+            Instant::now() < end,
+            "the empty member never asked to restart on a snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pending = std::fs::read_to_string(dirs[f].join(snapshot::PENDING)).unwrap();
+    let marker: serde_json::Value = serde_json::from_str(&pending).unwrap();
+    assert!(
+        marker.get("basis").is_none(),
+        "an empty member got a delta: {pending}"
+    );
+    // The sealed files came with their indexes.
+    let staged = dirs[f].join(marker["staged"].as_str().unwrap());
+    let count = |ext: &str| -> usize {
+        fn walk(d: &Path, ext: &str) -> usize {
+            std::fs::read_dir(d)
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| {
+                            let p = e.path();
+                            if p.is_dir() {
+                                walk(&p, ext)
+                            } else {
+                                usize::from(p.extension().is_some_and(|x| x == ext))
+                            }
+                        })
+                        .sum()
+                })
+                .unwrap_or(0)
+        }
+        walk(&staged.join("qlog"), ext)
+    };
+    let (logs, indexes) = (count("qlog"), count("qidx"));
+    assert!(
+        indexes > 0 && indexes < logs,
+        "{indexes} indexes for {logs} files"
+    );
+    let _ = close(back);
+
+    let (d, p, o) = (dirs[f].clone(), ports.clone(), eager.clone());
+    nodes[f] = Some(tokio::task::block_in_place(move || {
+        open_node(&d, id, &p, o)
+    }));
+    let more = propose_all(nodes[l].as_ref().unwrap(), &entries[2 * N as usize..]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, more));
+    tokio::task::block_in_place(|| converge(nodes, 3 * N, "empty-member"));
     for d in dirs {
         let _ = std::fs::remove_dir_all(d);
     }

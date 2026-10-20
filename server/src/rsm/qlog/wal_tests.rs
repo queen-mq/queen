@@ -436,6 +436,8 @@ fn unlink_never_drops_a_file_above_the_recovery_floor() {
     // first seq; the floor still holds, and every entry above it is still
     // recoverable.
     let set = reopen(&root, opts);
+    // Retention judges a reopened file once its index has been read.
+    set.reader().check_indexes().unwrap();
     let log = set.log(Q1).unwrap();
     assert_eq!(log.write().unwrap().unlink_dead_files(|_| true).unwrap(), 0);
     set.set_recovery_floor(10);

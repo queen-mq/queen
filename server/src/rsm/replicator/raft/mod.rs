@@ -174,6 +174,11 @@ pub(crate) struct Shared {
     /// The standbys reading this node's log, and how far each has got: the
     /// purge driver keeps what they still need ([`link`]).
     link_holds: link::Holds,
+    /// The members this node keeps its log for while they are away
+    /// ([`RaftOpts::member_hold`]): noted by the leader from its replication
+    /// view and at every snapshot it sends, mirrored by every follower from the
+    /// leader's view so the next leader keeps them too.
+    member_holds: Arc<link::Holds>,
     /// Which of the driver's pipelines is alive: moved every time the driver
     /// drops one ([`Replicator::drop_unlogged`]). A proposal carries the value
     /// it was made under, and the submitter hands openraft none of an older
@@ -789,6 +794,9 @@ struct WatchOpts {
     keep: u64,
     /// Purge in steps of at least this many entries.
     batch: u64,
+    /// Whether the leader keeps its log for absent members
+    /// ([`RaftOpts::member_hold`] above zero).
+    member_holds: bool,
     /// The member this group would rather have lead ([`ClusterConfig::for_group`]):
     /// a leader that is not it hands leadership over once it is caught up.
     preferred: Option<NodeId>,
@@ -848,6 +856,33 @@ pub struct RaftOpts {
     /// full the data volume may be while the node still keeps its log for a
     /// standby. 100: the volume's fullness never ends a hold.
     pub link_hold_disk_pct: f64,
+    /// `QUEEN_RAFT_MEMBER_HOLD_S` (default 21600 s, 6 h; 0: off): how long the
+    /// leader keeps its log for a member that stopped answering, from the
+    /// last entry the member had ([`link::HoldKind::Member`]). A member back
+    /// within it — a restart, however long its boot, or one that was sent a
+    /// snapshot and restarts to load it — catches up from the log instead of
+    /// being sent the whole state again. `purge_hold` is the short rule for a
+    /// member that is up; this one is for a member that is away, and it ends
+    /// sooner when the volume fills (`member_hold_disk_pct`).
+    pub member_hold: Duration,
+    /// `QUEEN_RAFT_MEMBER_HOLD_DISK_PCT` (default `QUEEN_RAFT_DISK_LOW_PCT`, 80):
+    /// how full the data volume may be while the leader still keeps its log
+    /// for an absent member. 100: the volume's fullness never ends a hold.
+    pub member_hold_disk_pct: f64,
+}
+
+/// `QUEEN_RAFT_MEMBER_HOLD_DISK_PCT`, else `QUEEN_RAFT_DISK_LOW_PCT`, else 80
+/// (100 in the unit tests, which run on the developer's disk).
+fn member_hold_disk_pct_from_env() -> f64 {
+    let pct = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| (1.0..=100.0).contains(v))
+    };
+    pct("QUEEN_RAFT_MEMBER_HOLD_DISK_PCT")
+        .or_else(|| pct("QUEEN_RAFT_DISK_LOW_PCT"))
+        .unwrap_or(if cfg!(test) { 100.0 } else { 80.0 })
 }
 
 impl RaftOpts {
@@ -882,6 +917,8 @@ impl RaftOpts {
             kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
             link_hold: link::hold_from_env(),
             link_hold_disk_pct: link::hold_disk_pct_from_env(),
+            member_hold: Duration::from_secs(env_u64("QUEEN_RAFT_MEMBER_HOLD_S", 21_600)),
+            member_hold_disk_pct: member_hold_disk_pct_from_env(),
         })
     }
 }
@@ -893,10 +930,87 @@ impl WatchOpts {
             hold: o.purge_hold,
             keep: o.log_keep,
             batch: o.purge_batch.max(1),
+            member_holds: !o.member_hold.is_zero(),
             preferred: None,
             quorum_loss: Duration::ZERO,
         }
     }
+}
+
+/// A member counts as present for its hold while it acknowledged an RPC this
+/// recently (heartbeats go out every 100 ms): its hold then follows the entry
+/// it has. A member silent longer keeps the hold it had.
+const MEMBER_PRESENT_WITHIN: Duration = Duration::from_secs(2);
+
+/// The member holds' step of the watch task ([`RaftOpts::member_hold`]),
+/// returning the openraft index the leader may purge up to for them
+/// (`u64::MAX`: no hold, or this node does not lead).
+///
+/// On the leader, every member it hears from has its hold at the entry it
+/// has; a member silent for longer keeps the one it had, for the hold's time
+/// or until the volume fills. A member no longer in the membership holds
+/// nothing. The view publishes the holds, and on a follower they are mirrored
+/// from the leader's last view: whoever leads next keeps the same log.
+fn member_holds_step(shared: &Arc<Shared>, m: &openraft::RaftMetrics<TypeConfig>) -> u64 {
+    let holds = &shared.member_holds;
+    let mut due = false;
+    let floor = match &m.replication {
+        Some(rep) => {
+            let members: std::collections::BTreeSet<NodeId> = m
+                .membership_config
+                .membership()
+                .nodes()
+                .map(|(id, _)| *id)
+                .collect();
+            for r in holds.readers() {
+                let gone = r
+                    .name
+                    .parse::<NodeId>()
+                    .map_or(true, |id| !members.contains(&id));
+                if gone {
+                    due |= holds.forget(&r.name);
+                }
+            }
+            for (id, matched) in rep {
+                if *id == m.id {
+                    continue;
+                }
+                let Some(l) = matched else { continue };
+                let caught_up = m.last_log_index == Some(l.index);
+                if caught_up || acked_within(m, *id, MEMBER_PRESENT_WITHIN) {
+                    due |= holds.note(&id.to_string(), rsm_index(l.index));
+                }
+            }
+            let floor = holds.floor();
+            let held: BTreeMap<NodeId, u64> = holds
+                .readers()
+                .into_iter()
+                .filter_map(|r| r.name.parse::<NodeId>().ok().map(|id| (id, r.after)))
+                .collect();
+            shared
+                .members
+                .set_holds((floor != u64::MAX).then_some(floor), held);
+            floor
+        }
+        None => {
+            if let Some((view, _)) = shared.members.received_view() {
+                for seen in &view.members {
+                    if seen.id == m.id {
+                        continue;
+                    }
+                    if let Some(after) = seen.held {
+                        due |= holds.note(&seen.id.to_string(), after);
+                    }
+                }
+            }
+            u64::MAX
+        }
+    };
+    if due {
+        let holds = holds.clone();
+        tokio::task::spawn_blocking(move || holds.save());
+    }
+    floor
 }
 
 /// On the leader: the openraft index every LIVE follower has replicated. A
@@ -1040,6 +1154,10 @@ async fn watch<S: Store + 'static>(
         if role == Role::Stopped {
             if let Some(why) = shared.restart.requested() {
                 if opts.exit_on_restart {
+                    // The leader is answered that the snapshot is installed
+                    // (it then replicates from it): let that answer leave
+                    // before the process does.
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
                     tracing::error!(target: "rsm", why, "raft: the process exits to load a received snapshot");
                     std::process::exit(75);
                 }
@@ -1066,8 +1184,17 @@ async fn watch<S: Store + 'static>(
                 // leader's view received on the appends: whoever is elected
                 // next still holds what a lagging member needs. No view yet:
                 // nothing is purged.
+                // Absent members' holds bound the PURGE only. The cache's
+                // eviction keeps following `floor`, the members that answer:
+                // entries held for a member that is away are read back from
+                // the queue logs when it returns.
+                let held = if opts.member_holds {
+                    member_holds_step(&shared, &m)
+                } else {
+                    u64::MAX
+                };
                 let purge_floor = if m.replication.is_some() {
-                    floor
+                    floor.min(held)
                 } else {
                     shared.members.follower_floor(m.id, opts.hold).unwrap_or(0)
                 };
@@ -1443,6 +1570,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
         // The `txns` rows' hash lists the checkpoint left in the queue logs:
         // back before openraft applies the replayed entries or anything reads.
         crate::rsm::txns_refill::refill(&*store, &opened.reader)?;
+        crate::rsm::txns_refill::spawn_index_check(opened.reader.clone());
         let qlog_tails = opened.tails.clone();
         let log = opened.store;
         let mut writer_join = Some(opened.writer);
@@ -1485,6 +1613,12 @@ impl<S: Store + 'static> RaftReplicator<S> {
             apply_failure: Mutex::new(None),
             state_dir: state_dir.clone(),
             link_holds: link::Holds::open(&state_dir, opts.link_hold, opts.link_hold_disk_pct),
+            member_holds: Arc::new(link::Holds::open_kind(
+                link::HoldKind::Member,
+                &state_dir,
+                opts.member_hold,
+                opts.member_hold_disk_pct,
+            )),
             pipeline: AtomicU64::new(0),
         });
         // The membership checks' catalogue inputs (D20): the committed cluster
@@ -1678,12 +1812,21 @@ impl<S: Store + 'static> RaftReplicator<S> {
         // What sends this node's snapshot: to a follower that is too far
         // behind, and to a standby cluster's seed ([`link`]).
         let send_ctx = cluster.as_ref().map(|_| {
-            Arc::new(SendCtx::new(
+            let mut ctx = SendCtx::new(
                 data_dir.clone(),
                 store.clone(),
                 opened.reader.clone(),
                 sm.membership_at(),
-            ))
+            );
+            if !opts.member_hold.is_zero() {
+                let holds = shared.member_holds.clone();
+                ctx.sending = Some(Arc::new(move |target: NodeId, applied: u64| {
+                    if holds.note(&target.to_string(), applied) {
+                        holds.save();
+                    }
+                }));
+            }
+            Arc::new(ctx)
         });
         let net = match (&cluster, &send_ctx) {
             (Some(c), Some(snap)) => Net::Http(HttpNetwork::new(
@@ -1728,6 +1871,17 @@ impl<S: Store + 'static> RaftReplicator<S> {
                         data_dir: data_dir.clone(),
                         restart: restart.clone(),
                         receiving: tokio::sync::Mutex::new(()),
+                        // Where this node's log stands, for a leader that may
+                        // send only what it lacks (a delta).
+                        basis: {
+                            let shared = shared.clone();
+                            let reader = opened.reader.clone();
+                            Some(Box::new(move || snapshot::Basis {
+                                applied: shared.applied_index.load(Ordering::Acquire),
+                                lanes: reader.lanes(),
+                                shards: reader.shards(),
+                            }))
+                        },
                     }),
                     shared.remote.clone(),
                     shared.local.clone(),
@@ -1800,6 +1954,12 @@ impl<S: Store + 'static> RaftReplicator<S> {
                         };
                         if join_flag || found.is_some() {
                             *joining_out = true;
+                            // A member that comes back EMPTY (its disk
+                            // replaced or wiped): the leader must let its log
+                            // go back to nothing, or openraft stops it.
+                            if let Some(c) = probe.clone() {
+                                tokio::spawn(tell_peers_this_node_is_empty(c));
+                            }
                             tracing::warn!(
                                 target: "rsm",
                                 node = node_id,
@@ -2795,6 +2955,37 @@ pub(crate) fn bootstrap_verdict(answers: &[(NodeId, PeerAnswer)]) -> Bootstrap {
         Bootstrap::Initialize
     } else {
         Bootstrap::Wait(silent)
+    }
+}
+
+/// A fresh node that joins an existing cluster tells every peer it is a member
+/// whose data directory is EMPTY (`/raft/v1/state` with `{"fresh": id}`): the
+/// leader among them lets this member's log go back to nothing once
+/// (openraft's `allow_next_revert`), where it would otherwise stop on seeing
+/// a member it had replicated to answer with no log at all. Told a few times
+/// over the first seconds, in case the leader is changing; a node that is no
+/// member, or a peer that does not lead, ignores it.
+async fn tell_peers_this_node_is_empty(c: ClusterConfig) {
+    let client = network::http_client();
+    let body = format!("{{\"fresh\":{}}}", c.node_id);
+    for round in 0..5 {
+        if round > 0 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        for (id, node) in &c.members {
+            if *id == c.node_id || node.raft.is_empty() {
+                continue;
+            }
+            let _ = network::post(
+                &client,
+                &format!("http://{}/raft/v1/state", node.raft),
+                c.token.as_deref(),
+                "application/json",
+                axum::body::Body::from(body.clone()),
+                Duration::from_millis(400),
+            )
+            .await;
+        }
     }
 }
 

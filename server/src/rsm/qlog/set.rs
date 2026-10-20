@@ -1560,6 +1560,15 @@ impl QLogSet {
         Ok(())
     }
 
+    /// Append records another node stored to log `log_id` — opening or
+    /// creating it — as [`QLog::append_raw`] does: a DELTA snapshot's runs,
+    /// at boot, before anything else opens the set. Answers how many records.
+    pub fn append_raw_into(&self, log_id: u64, bytes: &[u8]) -> io::Result<u64> {
+        let log = self.get_or_open(log_id)?;
+        let n = log.write().expect("qlog poisoned").append_raw(bytes)?;
+        Ok(n)
+    }
+
     /// The open log for `qid`, opening it (and inserting it into the shared map)
     /// if it is new. The `QLog::open` runs OUTSIDE the map lock — only the apply
     /// thread writes the map, and a genuinely new queue has no committed offset a
@@ -2114,6 +2123,82 @@ impl QLogReader {
     /// `<data_dir>/qlog`.
     pub fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// The runs of records with `seq` in `(after, upto]`, every log's, in log
+    /// and file order ([`crate::rsm::qlog::SeqRun`]): what a DELTA snapshot
+    /// sends a member whose log already reaches `after`. Each log's lock is
+    /// held only to list its files. The caller pauses retention
+    /// ([`QLogReader::pause_reclaim`]) for as long as it reads them.
+    pub fn seq_runs(&self, after: u64, upto: u64) -> io::Result<Vec<crate::rsm::qlog::SeqRun>> {
+        let logs: Vec<Arc<RwLock<QLog>>> = self
+            .logs
+            .read()
+            .expect("qlog set poisoned")
+            .values()
+            .cloned()
+            .collect();
+        let mut out = Vec::new();
+        for log in logs {
+            let (log_dir, candidates) = {
+                let g = log.read().expect("qlog poisoned");
+                let name = g
+                    .dir()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+                    .ok_or_else(|| io::Error::other("a queue log directory without a name"))?;
+                (name, g.seq_candidates(after, upto))
+            };
+            for (file_id, path, bytes, first_seq, max_seq) in candidates {
+                match crate::rsm::qlog::seq_run(&path, bytes, first_seq, max_seq, after, upto)? {
+                    Some((start, end)) if end > start => out.push(crate::rsm::qlog::SeqRun {
+                        log_dir: log_dir.clone(),
+                        file_id,
+                        path,
+                        start,
+                        end,
+                    }),
+                    _ => {}
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read every index the boot mapped without reading it
+    /// ([`QLog::check_index`]), one file at a time: each log's lock is held
+    /// only to list its files and to record a result, never across a read.
+    /// Retention judges a file only once this has read its index. A boot
+    /// task, run once in the background after the node opened. Returns
+    /// `(indexes read, indexes rebuilt)`.
+    pub fn check_indexes(&self) -> io::Result<(usize, usize)> {
+        let logs: Vec<Arc<RwLock<QLog>>> = self
+            .logs
+            .read()
+            .expect("qlog set poisoned")
+            .values()
+            .cloned()
+            .collect();
+        let (mut read, mut rebuilt) = (0usize, 0usize);
+        for log in logs {
+            let (dir, todo) = {
+                let g = log.read().expect("qlog poisoned");
+                (g.dir().to_path_buf(), g.unchecked_indexes())
+            };
+            for (id, view, bytes) in todo {
+                let checked = match QLog::check_index(&dir, id, &view, bytes) {
+                    Ok(c) => c,
+                    // A file retention removed meanwhile: nothing to record.
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
+                read += 1;
+                rebuilt += usize::from(checked.is_rebuilt());
+                log.write().expect("qlog poisoned").index_checked(checked);
+            }
+        }
+        Ok((read, rebuilt))
     }
 
     /// Phase C: raise the queue logs' RECOVERY FLOOR to `durable_index` — the

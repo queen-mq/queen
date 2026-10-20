@@ -13,9 +13,10 @@
 //! | `POST /raft/v1/prevote` | `VoteRequest` JSON | `Result<VoteResponse, RaftError>` JSON |
 //! | `POST /raft/v1/transfer` | `TransferLeaderRequest` JSON | `Result<TransferLeaderResponse, RaftError>` JSON |
 //! | `POST /raft/v1/snapshot` | [`super::snapshot`] stream | `Result<SnapshotResponse, RaftError>` JSON |
+//! | `POST /raft/v1/snapshot/basis` | `{}` | where this node's log stands ([`super::snapshot::Basis`]): a delta's base |
 //! | `POST /raft/v1/members` | empty | the leader's `MembersView` JSON, 503 on a non-leader ([`super::members`]) |
 //! | `POST /raft/v1/membership` | `AdminCall` JSON | `AdminAnswer` JSON, always 200: a follower's forwarded membership read or change, run on the leader ([`super::admin`]) |
-//! | `POST /raft/v1/state` | empty | `NodeState` JSON: whether this node holds cluster state (a fresh node asks before it initializes one) |
+//! | `POST /raft/v1/state` | empty, or `{"fresh": id}` | `NodeState` JSON: whether this node holds cluster state (a fresh node asks before it initializes one; a member whose disk is empty says so, and a leader lets its log revert once) |
 //!
 //! Every `append` from the leader also carries its members view in the
 //! `x-queen-raft-members` header ([`super::members`]), and every stream frame
@@ -954,9 +955,41 @@ mod server {
 
     /// Whether this node holds cluster state: what a fresh node asks before
     /// it initializes a cluster (`QUEEN_RAFT_JOIN`).
-    async fn node_state<S: Store + 'static>(State(st): State<Arc<RpcState<S>>>) -> Response {
+    async fn node_state<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        body: Bytes,
+    ) -> Response {
         use openraft::async_runtime::WatchReceiver;
         let m = st.raft.metrics().borrow_watched().clone();
+        // A member that restarted on an EMPTY data directory (a disk replaced
+        // or wiped) says so: its log goes back to nothing, which openraft
+        // refuses to see (it stops the leader) unless told, once, for that
+        // member. The leader is told; it then sends the member a snapshot.
+        #[derive(serde::Deserialize, Default)]
+        struct Ask {
+            #[serde(default)]
+            fresh: Option<super::super::NodeId>,
+        }
+        let ask: Ask = serde_json::from_slice(&body).unwrap_or_default();
+        if let Some(id) = ask.fresh {
+            let member = m.membership_config.membership().get_node(&id).is_some();
+            if m.state == openraft::ServerState::Leader && member && id != m.id {
+                match st.raft.trigger().allow_next_revert(&id, true).await {
+                    Ok(Ok(())) => tracing::warn!(
+                        target: "rsm",
+                        member = id,
+                        "raft: a member restarted with an empty data directory: its log may go \
+                         back to nothing once, and it is sent a snapshot",
+                    ),
+                    Ok(Err(e)) => {
+                        tracing::debug!(target: "rsm", member = id, error = %e, "raft: no revert allowed")
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "rsm", member = id, error = %e, "raft: no revert allowed")
+                    }
+                }
+            }
+        }
         json_answer(&super::super::NodeState::of(&m, st.members.own_kinds()))
     }
 
@@ -1001,6 +1034,25 @@ mod server {
         match super::super::snapshot::receive(&st.snap, &st.raft, body).await {
             Ok(res) => json_answer(&res),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    }
+
+    /// Where this node's log stands, asked by a leader before it builds a
+    /// snapshot for this node: with it, the leader sends only the records
+    /// above it (a delta, [`super::super::snapshot`]). 404 on a node that
+    /// does not say.
+    async fn snapshot_basis<S: Store + 'static>(State(st): State<Arc<RpcState<S>>>) -> Response {
+        match st.snap.basis.as_ref() {
+            Some(basis) => match serde_json::to_vec(&basis()) {
+                Ok(body) => (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+                    .into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            },
+            None => StatusCode::NOT_FOUND.into_response(),
         }
     }
 
@@ -1128,6 +1180,7 @@ mod server {
                     .route("/raft/v1/members", post(members::<S>))
                     .route("/raft/v1/membership", post(membership::<S>))
                     .route("/raft/v1/state", post(node_state::<S>))
+                    .route("/raft/v1/snapshot/basis", post(snapshot_basis::<S>))
                     .layer(DefaultBodyLimit::max(CONTROL_BODY_CAP)),
             )
             // A snapshot is streamed to disk, and the append stream is read

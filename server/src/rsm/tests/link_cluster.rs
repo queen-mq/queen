@@ -161,6 +161,10 @@ fn test_opts() -> RaftOpts {
         link_hold: Duration::from_secs(3600),
         // The machine's own disk is not the tests' subject.
         link_hold_disk_pct: 100.0,
+        // Off unless a test turns it on: the tests that need a snapshot
+        // keep getting one.
+        member_hold: Duration::ZERO,
+        member_hold_disk_pct: 100.0,
     }
 }
 

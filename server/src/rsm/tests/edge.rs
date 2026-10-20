@@ -111,6 +111,10 @@ fn test_opts() -> RaftOpts {
         kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
         link_hold: Duration::from_secs(3600),
         link_hold_disk_pct: 100.0,
+        // Off unless a test turns it on: the tests that need a snapshot
+        // keep getting one.
+        member_hold: Duration::ZERO,
+        member_hold_disk_pct: 100.0,
     }
 }
 

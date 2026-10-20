@@ -129,7 +129,9 @@ pub struct AppliedAt {
 /// (§12.1 verbatim; the §7.1 meanings are in the module header).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProposeError {
-    NotLeader { hint: Option<NodeId> },
+    NotLeader {
+        hint: Option<NodeId>,
+    },
     OutcomeUnknown,
     Timeout,
     /// This node leads and its log took no entry. openraft answers a write so
@@ -150,7 +152,10 @@ impl std::fmt::Display for ProposeError {
             }
             ProposeError::Timeout => write!(f, "propose deadline elapsed; entry kept in flight"),
             ProposeError::Unwritable => {
-                write!(f, "this leader's log takes no entry now; nothing was appended")
+                write!(
+                    f,
+                    "this leader's log takes no entry now; nothing was appended"
+                )
             }
             ProposeError::Refused(s) => write!(f, "propose refused: {s}"),
             ProposeError::Fatal(s) => write!(f, "propose fatal: {s}"),
@@ -238,6 +243,13 @@ pub struct MemberSeen {
     /// follower before it ignores this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kinds: Option<u32>,
+    /// The RSM index from which the leader keeps its log for this member
+    /// while it is away (`QUEEN_RAFT_MEMBER_HOLD_S`): a member back within the
+    /// hold catches up from the log instead of a snapshot. Every node keeps
+    /// the leader's holds, so whoever leads next keeps them too. Optional on
+    /// the wire both ways (2.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<u64>,
 }
 
 /// Who is in the cluster and when the raft leader last heard from each
@@ -251,6 +263,12 @@ pub struct MembersView {
     pub leader: NodeId,
     pub term: u64,
     pub members: Vec<MemberSeen>,
+    /// The openraft index the leader purges no further than for the members
+    /// it holds its log for ([`MemberSeen::held`]): a follower purges no
+    /// further either, so a new leader still has what an absent member needs.
+    /// Optional on the wire both ways (2.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_floor: Option<u64>,
 }
 
 /// What one node knows about the cluster's members.
@@ -286,7 +304,9 @@ impl ClusterMembers {
                     last_ack_ms: Some(0),
                     matched: None,
                     kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
+                    held: None,
                 }],
+                hold_floor: None,
             }),
             view_age: Some(std::time::Duration::ZERO),
         }

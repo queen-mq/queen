@@ -118,6 +118,46 @@ fn disk_used_pct(dir: &Path) -> Option<f64> {
     (total > 0).then(|| total.saturating_sub(available) as f64 * 100.0 / total as f64)
 }
 
+/// Whom a set of [`Holds`] keeps the log for: standby clusters reading it
+/// over a link, or this cluster's own members while they are away. The same
+/// rules for both — a position per reader, kept for a time and only while the
+/// volume has room, written down so a restart keeps it — with a file and a
+/// name of their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HoldKind {
+    Standby,
+    Member,
+}
+
+impl HoldKind {
+    /// The file under `raft/` the holds are written to.
+    fn file(self) -> &'static str {
+        match self {
+            HoldKind::Standby => HOLDS_FILE,
+            HoldKind::Member => MEMBER_HOLDS_FILE,
+        }
+    }
+
+    /// The log lines' prefix.
+    fn prefix(self) -> &'static str {
+        match self {
+            HoldKind::Standby => "rsm link",
+            HoldKind::Member => "raft",
+        }
+    }
+
+    /// What one reader is called in the log lines.
+    fn noun(self) -> &'static str {
+        match self {
+            HoldKind::Standby => "standby",
+            HoldKind::Member => "member",
+        }
+    }
+}
+
+/// The file a node keeps its members' holds in, under `raft/`.
+const MEMBER_HOLDS_FILE: &str = "member_holds.json";
+
 /// One standby's hold.
 #[derive(Clone, Copy)]
 struct Hold {
@@ -145,6 +185,7 @@ struct HeldReader {
 /// The standbys reading this cluster's log, as this node knows them, and how
 /// far each has got.
 pub(crate) struct Holds {
+    kind: HoldKind,
     readers: Mutex<HashMap<String, Hold>>,
     /// How long a silent standby keeps its hold.
     ttl: Duration,
@@ -185,6 +226,7 @@ impl Holds {
     /// Holds kept in memory only, for `ttl`.
     pub(crate) fn in_memory(ttl: Duration) -> Holds {
         Holds {
+            kind: HoldKind::Standby,
             readers: Mutex::new(HashMap::new()),
             ttl,
             dir: None,
@@ -202,8 +244,14 @@ impl Holds {
     /// [`RESTART_GRACE`] left at least, since a standby could not reach a
     /// node that was down.
     pub(crate) fn open(dir: &Path, ttl: Duration, disk_pct: f64) -> Holds {
+        Self::open_kind(HoldKind::Standby, dir, ttl, disk_pct)
+    }
+
+    /// [`Holds::open`] for the holds of `kind`.
+    pub(crate) fn open_kind(kind: HoldKind, dir: &Path, ttl: Duration, disk_pct: f64) -> Holds {
+        let (prefix, noun, file_name) = (kind.prefix(), kind.noun(), kind.file());
         let mut readers = HashMap::new();
-        match std::fs::read(dir.join(HOLDS_FILE)) {
+        match std::fs::read(dir.join(file_name)) {
             Ok(bytes) => match serde_json::from_slice::<HoldsFile>(&bytes) {
                 Ok(file) => {
                     let (now, wall) = (Instant::now(), wall_ms());
@@ -214,7 +262,7 @@ impl Holds {
                             target: "rsm",
                             reader = %name,
                             after = h.after,
-                            "rsm link: this node keeps its log for a standby it knew before it restarted",
+                            "{prefix}: this node keeps its log for a {noun} it knew before it restarted",
                         );
                         readers.insert(
                             name,
@@ -229,17 +277,18 @@ impl Holds {
                 Err(e) => tracing::warn!(
                     target: "rsm",
                     error = %e,
-                    "rsm link: raft/{HOLDS_FILE} does not parse: this node starts with no hold on its log",
+                    "{prefix}: raft/{file_name} does not parse: this node starts with no hold on its log",
                 ),
             },
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => tracing::warn!(
                 target: "rsm",
                 error = %e,
-                "rsm link: raft/{HOLDS_FILE} was not read: this node starts with no hold on its log",
+                "{prefix}: raft/{file_name} was not read: this node starts with no hold on its log",
             ),
         }
         Holds {
+            kind,
             readers: Mutex::new(readers),
             dir: Some(dir.to_path_buf()),
             disk_pct,
@@ -253,7 +302,11 @@ impl Holds {
     ///
     /// `true`: the file is due ([`Self::save`], off the runtime).
     pub(crate) fn note(&self, reader: &str, after: u64) -> bool {
-        let name = if reader.is_empty() { "standby" } else { reader };
+        let name = if reader.is_empty() {
+            self.kind.noun()
+        } else {
+            reader
+        };
         let now = Instant::now();
         let fresh = {
             let mut readers = self.readers.lock().expect("link holds");
@@ -281,7 +334,11 @@ impl Holds {
 
     /// `reader` holds nothing here any more. `true`: the file is due.
     pub(crate) fn forget(&self, reader: &str) -> bool {
-        let name = if reader.is_empty() { "standby" } else { reader };
+        let name = if reader.is_empty() {
+            self.kind.noun()
+        } else {
+            reader
+        };
         let had = self
             .readers
             .lock()
@@ -316,11 +373,12 @@ impl Holds {
                 .collect(),
         };
         let bytes = serde_json::to_vec(&file).expect("the holds serialize");
-        if let Err(e) = write_atomic(dir, HOLDS_FILE, &bytes) {
+        let (prefix, noun, file_name) = (self.kind.prefix(), self.kind.noun(), self.kind.file());
+        if let Err(e) = write_atomic(dir, file_name, &bytes) {
             tracing::warn!(
                 target: "rsm",
                 error = %e,
-                "rsm link: raft/{HOLDS_FILE} was not written: a restart of this node forgets its standbys' holds",
+                "{prefix}: raft/{file_name} was not written: a restart of this node forgets its {noun}s' holds",
             );
         }
     }
@@ -351,13 +409,14 @@ impl Holds {
                 .unwrap_or(u64::MAX)
         };
         if !gone.is_empty() {
+            let (prefix, noun) = (self.kind.prefix(), self.kind.noun());
             for (reader, after) in &gone {
                 tracing::warn!(
                     target: "rsm",
                     reader = %reader,
                     after,
                     silent_for = ?self.ttl,
-                    "rsm link: a standby stopped reading: this node no longer keeps its log for it",
+                    "{prefix}: a {noun} was silent too long: this node no longer keeps its log for it",
                 );
             }
             self.save();
@@ -376,19 +435,24 @@ impl Holds {
         };
         let full = used.is_some_and(|u| u >= self.disk_pct);
         if self.released.swap(full, Ordering::AcqRel) != full {
+            let (prefix, noun) = (self.kind.prefix(), self.kind.noun());
             if full {
                 tracing::error!(
                     target: "rsm",
                     used_pct = used.unwrap_or(0.0),
                     limit_pct = self.disk_pct,
-                    "rsm link: this node's data volume is too full to keep its log for a standby \
-                     (QUEEN_LINK_HOLD_DISK_PCT): it purges as if nobody read it, and a standby \
-                     that falls behind the purge needs a new seed",
+                    "{prefix}: this node's data volume is too full to keep its log for a {noun} \
+                     ({}): it purges as if nobody needed it, and a {noun} that falls behind the \
+                     purge needs a snapshot or a new seed",
+                    match self.kind {
+                        HoldKind::Standby => "QUEEN_LINK_HOLD_DISK_PCT",
+                        HoldKind::Member => "QUEEN_RAFT_MEMBER_HOLD_DISK_PCT",
+                    },
                 );
             } else {
                 tracing::info!(
                     target: "rsm",
-                    "rsm link: this node keeps its log for its standbys again",
+                    "{prefix}: this node keeps its log for its {noun}s again",
                 );
             }
         }

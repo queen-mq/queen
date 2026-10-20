@@ -152,6 +152,36 @@ pub fn refill<S: Store + ?Sized>(store: &S, reader: &QLogReader) -> io::Result<R
     Ok(out)
 }
 
+/// Read, on a thread of its own, every index the boot mapped without reading
+/// it ([`QLogReader::check_indexes`]): what retention waits for before it
+/// judges a file. Started once the node's boot reads are done (this refill
+/// first), so the two do not share the disk.
+pub fn spawn_index_check(reader: QLogReader) {
+    let spawned = std::thread::Builder::new()
+        .name("queen-qlog-check".into())
+        .spawn(move || {
+            let t0 = Instant::now();
+            match reader.check_indexes() {
+                Ok((read, rebuilt)) => tracing::info!(
+                    target: "rsm",
+                    indexes = read,
+                    rebuilt,
+                    ms = t0.elapsed().as_millis() as u64,
+                    "rsm qlog: the indexes the boot mapped are read and checked",
+                ),
+                Err(e) => tracing::error!(
+                    target: "rsm",
+                    error = %e,
+                    "rsm qlog: checking the indexes failed: retention judges no file whose \
+                     index is unchecked until the next restart",
+                ),
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!(target: "rsm", error = %e, "rsm qlog: the index check did not start");
+    }
+}
+
 /// One file's records, `(pid, frame)`, put into the rows they belong to: a row
 /// takes the hash list of the record with its base, its end and `16 * count`
 /// bytes of hashes. Returns the rows matched and the rows the store refilled.
