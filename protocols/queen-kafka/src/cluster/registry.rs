@@ -585,18 +585,37 @@ impl Registration {
             &node_key(&self.state.cluster, self.state.me.id),
             Some(version),
         )];
-        match tokio::time::timeout(budget, self.api.kv(&ops, self.token.as_deref())).await {
-            Err(_) => Departure::Failed(format!(
-                "the delete did not answer within {}ms",
-                budget.as_millis()
-            )),
-            Ok(Err(e)) => Departure::Failed(e.to_string()),
-            Ok(Ok(answers)) => match answers.first() {
-                Some(a) if a.applied == Some(true) => Departure::Released,
-                Some(a) => Departure::NotOurs(a.reason.clone().unwrap_or_default()),
-                None => Departure::Failed("the delete answered nothing".to_string()),
-            },
+        // Tried twice inside the budget: a row left behind outlives the node
+        // by its long TTL inside a raft broker, and the peers send its groups
+        // back to it as soon as raft hears it again — before its facade
+        // listens. The delete is fenced on the version held, so a second try
+        // can never delete a successor's row; and a second try that finds the
+        // row gone means the first one landed after its answer was lost.
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut last = Departure::Failed("the delete was not sent".to_string());
+        for attempt in 0..2 {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            last = match tokio::time::timeout(left, self.api.kv(&ops, self.token.as_deref())).await
+            {
+                Err(_) => Departure::Failed(format!(
+                    "the delete did not answer within {}ms",
+                    budget.as_millis()
+                )),
+                Ok(Err(e)) => Departure::Failed(e.to_string()),
+                Ok(Ok(answers)) => match answers.first() {
+                    Some(a) if a.applied == Some(true) => return Departure::Released,
+                    Some(a) if attempt > 0 && a.reason.as_deref() == Some("absent") => {
+                        return Departure::Released
+                    }
+                    Some(a) => return Departure::NotOurs(a.reason.clone().unwrap_or_default()),
+                    None => Departure::Failed("the delete answered nothing".to_string()),
+                },
+            };
         }
+        last
     }
 }
 
@@ -1522,6 +1541,21 @@ mod tests {
         );
     }
 
+    /// A delete that fails once is tried again inside the budget: a row left
+    /// behind outlives its node by a long TTL inside a raft broker.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_whose_first_delete_fails_tries_again() {
+        let api = FakeQueen::with(&[]);
+        let state = unseen(2, "kafka-2.example.com");
+        let registration = registered(&api, &state).await;
+        api.fail_kv(queen::Error::Transport("connection reset".into()));
+        assert_eq!(
+            registration.deregister(Duration::from_secs(2)).await,
+            Departure::Released
+        );
+        assert_eq!(api.kv_get(NAMESPACE, "qk:node:rig:2"), None);
+    }
+
     /// A stop cannot hang on a Queen that is not answering: the row expires by
     /// its TTL instead, which is exactly what a kill gets, and the process gets
     /// on with exiting inside whatever window its supervisor gave it.
@@ -1530,7 +1564,8 @@ mod tests {
         let api = FakeQueen::with(&[]);
         let state = unseen(2, "kafka-2.example.com");
         let registration = registered(&api, &state).await;
-        api.fail_kv(queen::Error::Transport("connection refused".into()));
+        // Refused every time: both tries fail.
+        api.fail_with("connection refused");
         match registration.deregister(Duration::from_secs(2)).await {
             Departure::Failed(why) => assert!(why.contains("connection refused"), "{why}"),
             other => panic!("{other:?}"),

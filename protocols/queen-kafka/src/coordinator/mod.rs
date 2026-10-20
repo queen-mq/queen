@@ -120,6 +120,10 @@ enum Command {
     /// DeleteGroups' last step. Answers whether the group was empty, and reaps
     /// it when it was — see [`Coordinator::discard_if_empty`].
     Discard(oneshot::Sender<bool>),
+    /// This node no longer owns the group ([`Coordinator::relinquish_unless`]):
+    /// every parked JoinGroup and SyncGroup is answered NOT_COORDINATOR, so its
+    /// member asks for the coordinator again at once, and the actor exits.
+    Relinquish,
 }
 
 /// One assignment protocol a member supports: a name the group votes on, and
@@ -892,6 +896,36 @@ impl Coordinator {
         let (reply, answer) = oneshot::channel();
         tx.send(Command::Discard(reply)).await.ok()?;
         answer.await.ok()
+    }
+
+    /// Hand back every group this node no longer owns: each actor whose group
+    /// id `owns` says no to answers its parked members NOT_COORDINATOR and
+    /// exits (Command::Relinquish). Across every tenant, because ownership is
+    /// the cluster's and the group id alone decides it.
+    ///
+    /// Without it a member whose JoinGroup or SyncGroup was held here when the
+    /// group moved waited for the rebalance it was parked in — exempt from its
+    /// session timeout while parked — and the group stalled for a session
+    /// (28 s on the rig, 2026-10-20) where the move itself took two.
+    pub fn relinquish_unless(&self, owns: impl Fn(&str) -> bool) -> usize {
+        // Copied out first: deciding ownership hashes every group id, and the
+        // registry lock is what every first JoinGroup waits on.
+        let actors: Vec<(String, mpsc::Sender<Command>)> = self
+            .groups
+            .lock()
+            .expect("the group registry lock is never held across a panic")
+            .iter()
+            .map(|((_, id), tx)| (id.clone(), tx.clone()))
+            .collect();
+        let mut handed = 0;
+        for (_, tx) in actors.into_iter().filter(|(id, _)| !owns(id)) {
+            // Never waits: a full channel is a group busy with commands, and
+            // the next pass (one heartbeat later) asks again.
+            if tx.try_send(Command::Relinquish).is_ok() {
+                handed += 1;
+            }
+        }
+        handed
     }
 
     /// How many group actors are alive. For the tests that prove one exits.

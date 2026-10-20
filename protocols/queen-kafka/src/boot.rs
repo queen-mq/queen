@@ -601,7 +601,24 @@ fn split_host_port(key: &str, raw: &str) -> Result<(String, u16), String> {
 /// well inside that window or not at all. A stop that misses it is not a
 /// failure, only a slower one: the row expires on its own TTL, which is the
 /// behaviour every kill has always had.
-const DEREGISTER_BUDGET: Duration = Duration::from_secs(2);
+const DEREGISTER_BUDGET: Duration = Duration::from_secs(4);
+
+/// A task that ends with the scope that spawned it, unwinding included: a
+/// facade the in-process supervisor restarts after a panic must not leave its
+/// predecessor's tasks running against the old facade.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// How long a facade inside a raft broker waits for its first view of the
+/// cluster before it claims its node id anyway (see `serve`). A restarting
+/// broker's first reads wait for its raft log to catch up: 20-55 s on stage
+/// (2026-10-20).
+const BOOT_VIEW_WAIT: Duration = Duration::from_secs(60);
 
 impl Config {
     /// `QUEEN_URL`, normalized.
@@ -769,6 +786,42 @@ pub async fn serve(
                     ),
                 }
             }
+            if raft_liveness {
+                // The first view BEFORE the claim. The claim's row is what
+                // makes the peers send this node its share of the consumer
+                // groups, and a node that cannot read the cluster cannot
+                // coordinate them: a restarting broker's first reads wait for
+                // its raft log to catch up, 20-55 s on stage (2026-10-20),
+                // during which a third of the groups, moved here by the row,
+                // had no coordinator. Read first, the view is in when the row
+                // lands, and the listener binds right after the claim. A node
+                // with no view by [`BOOT_VIEW_WAIT`] claims anyway.
+                let started = tokio::time::Instant::now();
+                let deadline = started + BOOT_VIEW_WAIT;
+                loop {
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if left.is_zero() {
+                        tracing::warn!(
+                            target: "boot",
+                            waited_ms = BOOT_VIEW_WAIT.as_millis() as u64,
+                            "no view of the cluster could be read; this node claims its id \
+                             without one and installs it on the first viewer tick"
+                        );
+                        break;
+                    }
+                    let read =
+                        registry::refresh_view(api.as_ref(), &state, cfg.queen_token.as_deref());
+                    if matches!(tokio::time::timeout(left, read).await, Ok(true)) {
+                        tracing::info!(
+                            target: "boot",
+                            waited_ms = started.elapsed().as_millis() as u64,
+                            "the first view of the cluster is in; claiming this node's id"
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
             let version =
                 match registry::claim(api.as_ref(), &state, cfg.queen_token.as_deref()).await {
                     Ok(version) => Some(version),
@@ -793,22 +846,6 @@ pub async fn serve(
                         None
                     }
                 };
-            if raft_liveness {
-                // The first view, before the listener binds: a client that
-                // bootstraps against a node answering "I am the only broker"
-                // keeps that layout for its whole `metadata.max.age.ms`. The
-                // raft members a follower serves are a copy it fetches from the
-                // leader, so the first one can be a poll away; half a TTL is
-                // the most this waits, and a node that has none by then serves
-                // anyway and installs its view on the first viewer tick.
-                let deadline = tokio::time::Instant::now() + cfg.cluster_ttl / 2;
-                while !registry::refresh_view(api.as_ref(), &state, cfg.queen_token.as_deref())
-                    .await
-                    && tokio::time::Instant::now() < deadline
-                {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                }
-            }
             registration = Some(registry::spawn(
                 Arc::clone(&api),
                 Arc::clone(&state),
@@ -876,6 +913,28 @@ pub async fn serve(
                 cfg.listen_addr
             ))
         }
+    };
+    // Groups this node no longer owns are handed back every heartbeat
+    // ([`Coordinator::relinquish_unless`]): a member parked in a rebalance here
+    // when its group moved is told NOT_COORDINATOR at once instead of waiting
+    // out a session. Never on a stale view: an owner that cannot be named is
+    // not a reason to drop anything.
+    let _relinquisher = if let Cluster::Enabled(state) = &facade.cluster {
+        let every = state.heartbeat;
+        let facade = Arc::clone(&facade);
+        Some(AbortOnDrop(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                facade.coordinator.relinquish_unless(|group| {
+                    !matches!(
+                        facade.cluster.owner_of_group(group),
+                        crate::cluster::Owner::Peer(_)
+                    )
+                });
+            }
+        })))
+    } else {
+        None
     };
     // The accept loop runs until this process is asked to stop. Dropping it
     // closes the listening socket, so no NEW connection is accepted from that

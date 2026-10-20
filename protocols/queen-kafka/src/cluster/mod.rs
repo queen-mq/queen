@@ -333,10 +333,27 @@ impl ClusterState {
         down.retain(|d| d.id != self.me.id && !nodes.iter().any(|n| n.id == d.id));
         down.sort_by_key(|n| n.id);
         down.dedup_by_key(|n| n.id);
-        *self
+        let mut view = self
             .view
             .lock()
-            .expect("the cluster view lock is never held across a panic") = Some(Arc::new(View {
+            .expect("the cluster view lock is never held across a panic");
+        let ids: Vec<i32> = nodes.iter().map(|n| n.id).collect();
+        let down_ids: Vec<i32> = down.iter().map(|n| n.id).collect();
+        // Every change moves consumer groups, so every one is said: it is what
+        // a pause in a group's consumption is read against.
+        if view.as_ref().is_none_or(|v| {
+            v.ids() != ids || v.down.iter().map(|n| n.id).collect::<Vec<_>>() != down_ids
+        }) {
+            tracing::info!(
+                target: "kafka",
+                node_id = self.me.id,
+                cluster = %self.cluster,
+                live = ?ids,
+                down = ?down_ids,
+                "the live set changed; consumer groups move to their owners in it"
+            );
+        }
+        *view = Some(Arc::new(View {
             nodes,
             down,
             read_at: Instant::now(),

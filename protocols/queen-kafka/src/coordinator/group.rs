@@ -415,6 +415,7 @@ impl Group {
             Command::DescribeGroup(reply) => {
                 let _ = reply.send(self.description());
             }
+            Command::Relinquish => self.relinquish(),
             Command::Discard(reply) => {
                 let empty = self.members.is_empty();
                 // Reaped NOW rather than in `empty_reap`, and through the
@@ -433,6 +434,52 @@ impl Group {
                 let _ = reply.send(empty);
             }
         }
+    }
+
+    /// This node no longer owns the group: every member waiting on a held
+    /// JoinGroup or SyncGroup is answered NOT_COORDINATOR — the redirect, which
+    /// every client follows by asking FindCoordinator again — and the group is
+    /// emptied and reaped at once, through the reaper's own path (see
+    /// `Command::Discard`). Members that were not parked find out on their next
+    /// heartbeat or commit, which the cluster guard refuses NOT_COORDINATOR
+    /// before it reaches any actor.
+    fn relinquish(&mut self) {
+        // Only a group with a member waiting on THIS coordinator: the others'
+        // members find out on their next heartbeat or commit, and a group whose
+        // ownership flips back within a session keeps its members rather than
+        // being rebuilt from nothing.
+        if !self.members.iter().any(Member::parked) {
+            return;
+        }
+        if !self.members.is_empty() {
+            tracing::info!(
+                target: "kafka",
+                group = %self.id,
+                generation = self.generation,
+                members = self.members.len(),
+                "group handed to another coordinator"
+            );
+        }
+        for m in &mut self.members {
+            if let Some(reply) = m.join_reply.take() {
+                let _ = reply.send(JoinAnswer::refused(
+                    ResponseError::NotCoordinator,
+                    m.id.clone(),
+                ));
+            }
+            if let Some(reply) = m.sync_reply.take() {
+                let _ = reply.send(SyncAnswer::refused(ResponseError::NotCoordinator));
+            }
+        }
+        self.members.clear();
+        self.pending.clear();
+        self.leader = None;
+        self.join_deadline = None;
+        self.forming = false;
+        self.formed_from = None;
+        self.arrivals = false;
+        self.state = State::Empty;
+        self.reap_deadline = Some(Instant::now());
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -1948,6 +1995,58 @@ mod tests {
             next.generation,
             follower.generation + 1,
             "the generation fences the assignment that never arrived"
+        );
+    }
+
+    /// A group handed to another coordinator answers the members parked in it
+    /// NOT_COORDINATOR at once — the redirect — instead of holding them for
+    /// the rest of a rebalance that can no longer complete here, and its actor
+    /// is gone. A group this node still owns is left alone.
+    #[tokio::test(start_paused = true)]
+    async fn a_group_handed_away_answers_its_parked_members_and_exits() {
+        let c = coordinator();
+        let (leader, follower) = two_member_group(&c, "orders").await;
+        stabilise(&c, "orders", &leader, &follower).await;
+        // Stable, nobody parked: kept, so a flip back within a session finds
+        // its members where they were.
+        c.relinquish_unless(|_| false);
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(c.live_groups(), 1, "a stable group was wiped on a flip");
+        assert_eq!(
+            c.heartbeat("orders", &follower.member_id, follower.generation)
+                .await,
+            None
+        );
+        let third = spawn_join(&c, "orders", "third");
+        wait_for_members(&c, "orders", 3).await;
+        assert_eq!(c.live_groups(), 1);
+
+        assert_eq!(
+            c.relinquish_unless(|_| true),
+            0,
+            "an owned group was handed away"
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            !third.is_finished(),
+            "an owned group answered its parked joiner"
+        );
+
+        assert_eq!(c.relinquish_unless(|group| group != "orders"), 1);
+        let answer = tokio::time::timeout(Duration::from_millis(10), third)
+            .await
+            .expect("the parked joiner was held after the group moved")
+            .unwrap();
+        assert_eq!(answer.error, Some(ResponseError::NotCoordinator));
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            c.live_groups(),
+            0,
+            "the handed-away group's actor is still running"
         );
     }
 
