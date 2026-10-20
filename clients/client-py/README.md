@@ -658,6 +658,50 @@ transaction: its cost is not bounded by the caller.
 
 ---
 
+## Reads by Offset
+
+Two queue methods read a partition's log by position, over `POST /api/v1/fetch`
+and `POST /api/v1/partitions/changed`. Neither takes a lease, moves a cursor or
+needs an ack: two readers asking the same question get the same answer, and no
+consumer group notices them. They suit a replay, an audit, a sink that keeps its
+own position, and a service that rebuilds an entity from its partition.
+
+```python
+from datetime import datetime, timedelta, timezone
+
+# Every record of these partitions, from the oldest one still kept.
+read = await queen.queue('orders').fetch(['customer-42', 'customer-7'])
+part = read['customer-42']
+part['records']          # [{'offset', 'transactionId', 'payload', 'ts'}, ...] in offset order
+part['nextOffset']       # where to start next time to read only what is new
+part['highWatermark']    # the next offset the partition will assign
+part['logStartOffset']   # the oldest offset retention kept
+
+# Only what came after an earlier read.
+later = await queen.queue('orders').fetch(['customer-42'], offsets={'customer-42': part['nextOffset']})
+
+# The partitions written at or after a time, every page of them, in creation order.
+changed = await queen.queue('orders').changed_since(datetime.now(timezone.utc) - timedelta(minutes=10))
+[p['name'] for p in changed['partitions']]   # each {'name', 'id', 'lastOffset', 'logStart', 'lastWriteAt'}
+
+# Next time, only what changed after that answer.
+newer = await queen.queue('orders').changed_since(changed['safeTime'])
+```
+
+`fetch` reads each partition up to where it ended when the call first read it:
+it asks for 1000 partitions per request, and asks again until each one is read.
+A partition whose start retention deleted is read from its oldest kept record.
+It answers a dict in the order the partitions were named; a partition nobody
+wrote, or of a queue that does not exist, has no records. `max_bytes` caps the
+payload bytes of one request (default 8 MiB).
+
+`changed_since` takes a `datetime` (a naive one is read as UTC) or an ISO-8601
+string; without one it lists every partition of the queue. `safeTime` is the
+broker's time up to which every write is counted in the answer: pass it as the
+next `since`, and never compare it with your own clock.
+
+---
+
 ## API Reference
 
 ### Queue Operations

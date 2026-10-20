@@ -2849,5 +2849,108 @@
       ],
       "notes": "All three are off by default, and with them off the client sends and reads JSON as before. They change how messages travel and nothing else: the calls, their results, deduplication and the delivery guarantees stay the same. Binary push and push compression need broker 2.3.0 on EVERY node: a broker up to 2.2.0 answers the binary bodies with 400 and the client does not fall back to JSON, so turn them on after the last node is upgraded. Framed pop is safe against any broker (an older one ignores the request and answers JSON). The client itself stays on JSON for a push that carries a trace id, for a transaction with no push or with a trace id on a push, for a pop of a conflating group, and for a pop that returns encrypted messages, which the broker answers in JSON (up to broker 2.3.0, every pop on a broker that runs with an encryption key). Turn them on when the broker's CPU or the network limits a high message rate; at a few hundred messages a second they change nothing you can measure."
     }
+  },
+  "reads": {
+    "js": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "const read = await queen.queue(q).fetch(['p1', 'p2'], { offsets, maxBytes })",
+          "does": "Every record of the named partitions, from the oldest kept one (or offsets[name]) up to where each ended at the first read. Answers a Map of name to { partition, records: [{ offset, transactionId, payload, ts }], highWatermark, logStartOffset, nextOffset }. maxBytes caps one request's payload bytes (default 8 MiB).",
+          "source": "clients/client-js/client-v2/builders/QueueBuilder.js:653"
+        },
+        {
+          "call": "const { partitions, safeTime } = await queen.queue(q).changedSince(since)",
+          "does": "The partitions written at or after since (a Date, epoch ms or ISO string; null = every partition), every page, in creation order: { name, id, lastOffset, logStart, lastWriteAt }.",
+          "source": "clients/client-js/client-v2/builders/QueueBuilder.js:665"
+        }
+      ],
+      "notes": "Neither call takes a lease, moves a cursor or needs an ack: two readers asking the same question get the same answer, and no consumer group notices them. fetch reads each partition up to where it ended when the call first read it, asks for 1000 partitions per request and asks again until each one is read; a partition whose start retention deleted is read from its oldest kept record (the raw route answers an offset below logStartOffset with OFFSET_OUT_OF_RANGE and no records, so a hand-written loop from offset 0 reads nothing there). A partition nobody wrote, or of a queue that does not exist, answers no records and no partitions. safeTime is the broker's clock: pass it as the next since and never compare it with the local clock. Use these for replay, audit, rebuilding an entity from its partition, or a sink that keeps its own position; use pop or consume for work that must be done once."
+    },
+    "python": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "read = await queen.queue(q).fetch(['p1', 'p2'], offsets={...}, max_bytes=...)",
+          "does": "Every record of the named partitions, from the oldest kept one (or offsets[name]) up to where each ended at the first read. Answers a dict of name to {'partition', 'records': [{'offset', 'transactionId', 'payload', 'ts'}], 'highWatermark', 'logStartOffset', 'nextOffset'}.",
+          "source": "clients/client-py/queen/builders/queue_builder.py:660"
+        },
+        {
+          "call": "changed = await queen.queue(q).changed_since(since)",
+          "does": "{'partitions': [...], 'safeTime': ...}: the partitions written at or after since (a datetime, naive = UTC, or an ISO string; None = every partition), every page, in creation order.",
+          "source": "clients/client-py/queen/builders/queue_builder.py:683"
+        }
+      ],
+      "notes": "Neither call takes a lease, moves a cursor or needs an ack: two readers asking the same question get the same answer, and no consumer group notices them. fetch reads each partition up to where it ended when the call first read it, asks for 1000 partitions per request and asks again until each one is read; a partition whose start retention deleted is read from its oldest kept record (the raw route answers an offset below logStartOffset with OFFSET_OUT_OF_RANGE and no records, so a hand-written loop from offset 0 reads nothing there). A partition nobody wrote, or of a queue that does not exist, answers no records and no partitions. safeTime is the broker's clock: pass it as the next since and never compare it with the local clock. Use these for replay, audit, rebuilding an entity from its partition, or a sink that keeps its own position; use pop or consume for work that must be done once."
+    },
+    "go": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "read, err := client.Queue(q).Fetch(ctx, []string{\"p1\", \"p2\"}, queen.FetchOptions{Offsets: offsets, MaxBytes: n})",
+          "does": "Every record of the named partitions up to where each ended at the first read: map[string]FetchedPartition{Records []FetchedRecord{Offset int64, TransactionID, Payload json.RawMessage, Ts time.Time}, HighWatermark, LogStartOffset, NextOffset}. Offsets stay int64 (decoded from the raw body).",
+          "source": "clients/client-go/offset_reads.go:157"
+        },
+        {
+          "call": "changed, err := client.Queue(q).ChangedSince(ctx, since)",
+          "does": "ChangedPartitions{Partitions []ChangedPartition{Name, ID, LastOffset, LogStart, LastWriteAt}, SafeTime time.Time}: the partitions written at or after since (zero time.Time = every partition), every page.",
+          "source": "clients/client-go/offset_reads.go:279"
+        }
+      ],
+      "notes": "Neither call takes a lease, moves a cursor or needs an ack: two readers asking the same question get the same answer, and no consumer group notices them. fetch reads each partition up to where it ended when the call first read it, asks for 1000 partitions per request and asks again until each one is read; a partition whose start retention deleted is read from its oldest kept record (the raw route answers an offset below logStartOffset with OFFSET_OUT_OF_RANGE and no records, so a hand-written loop from offset 0 reads nothing there). A partition nobody wrote, or of a queue that does not exist, answers no records and no partitions. safeTime is the broker's clock: pass it as the next since and never compare it with the local clock. Use these for replay, audit, rebuilding an entity from its partition, or a sink that keeps its own position; use pop or consume for work that must be done once."
+    },
+    "rust": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "let read = queen.queue(q).fetch([\"p1\", \"p2\"]).await?;",
+          "does": "Every record of the named partitions, from the oldest kept one, up to where each ended at the first read: HashMap<String, FetchedPartition> { records: Vec<FetchRecord> { offset, transaction_id, payload, ts }, high_watermark, log_start_offset, next_offset }.",
+          "source": "clients/client-rust/src/reads.rs:218"
+        },
+        {
+          "call": "queen.queue(q).fetch_with([\"p1\"], FetchOptions::new().offset(\"p1\", next).max_bytes(n)).await?",
+          "does": "fetch from given offsets, with a cap on one request's payload bytes (default 8 MiB).",
+          "source": "clients/client-rust/src/reads.rs:228"
+        },
+        {
+          "call": "let changed = queen.queue(q).changed_since(since).await?;",
+          "does": "ChangedPartitions { partitions: Vec<ChangedPartition>, safe_time: String }. since: an ISO &str/String, a SystemTime, Since::All, or an Option of those (None = all).",
+          "source": "clients/client-rust/src/reads.rs:373"
+        }
+      ],
+      "notes": "Neither call takes a lease, moves a cursor or needs an ack: two readers asking the same question get the same answer, and no consumer group notices them. fetch reads each partition up to where it ended when the call first read it, asks for 1000 partitions per request and asks again until each one is read; a partition whose start retention deleted is read from its oldest kept record (the raw route answers an offset below logStartOffset with OFFSET_OUT_OF_RANGE and no records, so a hand-written loop from offset 0 reads nothing there). A partition nobody wrote, or of a queue that does not exist, answers no records and no partitions. safeTime is the broker's clock: pass it as the next since and never compare it with the local clock. Use these for replay, audit, rebuilding an entity from its partition, or a sink that keeps its own position; use pop or consume for work that must be done once."
+    },
+    "php": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "$read = $queen->queue($q)->fetch(['p1', 'p2'], $offsets, $maxBytes);",
+          "does": "Every record of the named partitions, from the oldest kept one (or $offsets[name]) up to where each ended at the first read: an array keyed by partition name of ['partition', 'records' => [['offset', 'transactionId', 'payload', 'ts']], 'highWatermark', 'logStartOffset', 'nextOffset']. A numeric-looking name comes back as an integer array key; 'partition' keeps the string.",
+          "source": "clients/client-php/src/Builders/QueueBuilder.php:639"
+        },
+        {
+          "call": "$changed = $queen->queue($q)->changedSince($since);",
+          "does": "['partitions' => [...], 'safeTime' => ...]: the partitions written at or after $since (DateTimeInterface or ISO string; null = every partition), every page, in creation order.",
+          "source": "clients/client-php/src/Builders/QueueBuilder.php:655"
+        }
+      ],
+      "notes": "Neither call takes a lease, moves a cursor or needs an ack: two readers asking the same question get the same answer, and no consumer group notices them. fetch reads each partition up to where it ended when the call first read it, asks for 1000 partitions per request and asks again until each one is read; a partition whose start retention deleted is read from its oldest kept record (the raw route answers an offset below logStartOffset with OFFSET_OUT_OF_RANGE and no records, so a hand-written loop from offset 0 reads nothing there). A partition nobody wrote, or of a queue that does not exist, answers no records and no partitions. safeTime is the broker's clock: pass it as the next since and never compare it with the local clock. Use these for replay, audit, rebuilding an entity from its partition, or a sink that keeps its own position; use pop or consume for work that must be done once."
+    },
+    "cpp": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "auto read = client.queue(q).fetch({\"p1\", \"p2\"}, options);",
+          "does": "Every record of the named partitions up to where each ended at the first read: std::map<std::string, FetchedPartition> { records (offset, transaction_id, payload json, ts), high_watermark, log_start_offset, next_offset }. FetchOptions has offsets (std::map) and max_bytes.",
+          "source": "clients/client-cpp/queen_client.hpp:5752"
+        },
+        {
+          "call": "auto changed = client.queue(q).changed_since(since);",
+          "does": "ChangedPartitions { partitions, safe_time }: since is an ISO string (empty = every partition) or a system_clock::time_point. With several URLs and no affinity strategy in C++, the requests of one read can reach different nodes.",
+          "source": "clients/client-cpp/queen_client.hpp:5766"
+        }
+      ],
+      "notes": "Neither call takes a lease, moves a cursor or needs an ack: two readers asking the same question get the same answer, and no consumer group notices them. fetch reads each partition up to where it ended when the call first read it, asks for 1000 partitions per request and asks again until each one is read; a partition whose start retention deleted is read from its oldest kept record (the raw route answers an offset below logStartOffset with OFFSET_OUT_OF_RANGE and no records, so a hand-written loop from offset 0 reads nothing there). A partition nobody wrote, or of a queue that does not exist, answers no records and no partitions. safeTime is the broker's clock: pass it as the next since and never compare it with the local clock. Use these for replay, audit, rebuilding an entity from its partition, or a sink that keeps its own position; use pop or consume for work that must be done once."
+    }
   }
 }

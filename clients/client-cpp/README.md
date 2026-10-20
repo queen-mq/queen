@@ -525,6 +525,7 @@ make test
 # wireforms = the binary push body, the framed pop answer and the binary transaction body
 #             (built with zstd when zstd.h is installed; USE_ZSTD=0 leaves it out and the
 #             suite skips what needs it)
+# reads     = fetch and changed_since against a fake broker; ./bin/test_reads <url> adds a live half
 make run-unit
 
 # Against a live broker (localhost:6632 by default)
@@ -930,6 +931,50 @@ Two smaller gaps against client-js, for the same honesty:
 - **The KV path routes are not used**, so the `ETag` header they return is not
   surfaced. Everything goes through `POST /api/v1/kv`, which is the only route
   carrying `incr` anyway. The ETag saves bandwidth, never the round trip.
+
+## Reads by offset
+
+Two queue methods read a partition's log by position, over `POST /api/v1/fetch` and
+`POST /api/v1/partitions/changed`. Neither takes a lease, moves a cursor or needs an ack: two
+readers asking the same question get the same answer, and no consumer group notices them. They
+suit a replay, an audit, a sink that keeps its own position, and a service that rebuilds an entity
+from its partition.
+
+```cpp
+// Every record of these partitions, from the oldest one still kept.
+auto read = client.queue("orders").fetch({"customer-42", "customer-7"});
+const auto& part = read["customer-42"];
+// part.records: std::vector<FetchedRecord> { offset, transaction_id, payload (json), ts }
+// part.next_offset: where to start next time to read only what is new
+// part.high_watermark, part.log_start_offset: where the partition ends and starts
+
+// Only what came after an earlier read.
+FetchOptions options;
+options.offsets["customer-42"] = part.next_offset;
+auto later = client.queue("orders").fetch({"customer-42"}, options);
+
+// The partitions written at or after a time, every page of them, in creation order.
+auto changed = client.queue("orders").changed_since(
+    std::chrono::system_clock::now() - std::chrono::minutes(10));
+for (const auto& p : changed.partitions) {
+    std::cout << p.name << " " << p.last_offset << " " << p.last_write_at << std::endl;
+}
+
+// Next time, only what changed after that answer.
+auto newer = client.queue("orders").changed_since(changed.safe_time);
+```
+
+`fetch` reads each partition up to where it ended when the call first read it: it asks for 1000
+partitions per request, and asks again until each one is read. A partition whose start retention
+deleted is read from its oldest kept record. It answers a `std::map` with one `FetchedPartition` per
+partition named; a partition nobody wrote, or of a queue that does not exist, has no records.
+`FetchOptions::max_bytes` caps the payload bytes of one request (default 8 MiB).
+
+`changed_since` takes an ISO-8601 string or a `system_clock::time_point`; with an empty string it
+lists every partition of the queue. `safe_time` is the broker's time up to which every write is
+counted in the answer: pass it as the next `since`, and never compare it with your own clock. The
+C++ load balancer has no `affinity` strategy, so with several URLs the requests of one read can go
+to different nodes; a node that has applied less answers that a partition ends earlier.
 
 ## Error Handling
 

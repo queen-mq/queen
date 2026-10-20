@@ -1,10 +1,10 @@
 ---
 params: []
-description: "What each of the six Queen SDKs implements, and the eighteen rows where they diverge."
+description: "What each of the six Queen SDKs implements, and the nineteen rows where they diverge."
 ---
 
 Parity here is a claim about the surface, not about shared code: each client is written natively
-in its own idiom. These eighteen rows are that surface, read out of `clients/` on this tree. Eight
+in its own idiom. These nineteen rows are that surface, read out of `clients/` on this tree. Nine
 of them are full parity across all six clients; the other ten are where a client stops.
 
 | Capability | JavaScript | Python | Go | Rust | PHP | C++ |
@@ -13,6 +13,7 @@ of them are full parity across all six clients; the other ten are where a client
 | Client-side push buffering | yes | yes | yes | yes | yes | yes |
 | Transactions through `POST /api/v1/transaction` | yes | yes | yes | yes | yes | yes |
 | Dead-letter reader | yes | yes | yes | yes | yes | yes |
+| Reads by offset: `fetch` and `changedSince` | yes | yes | yes | yes | yes | yes |
 | HTTP 429 policy, separate from the retry counter | yes | yes | yes | yes | yes | yes |
 | `kv` and `timers` riders on a transaction | yes | yes | yes | yes | yes | yes |
 | Key/value: the eight operations | yes | yes | yes | yes | yes | six of eight |

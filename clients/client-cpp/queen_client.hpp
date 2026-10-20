@@ -4851,6 +4851,298 @@ public:
 };
 
 // ============================================================================
+// Reads by offset: QueueBuilder::fetch and QueueBuilder::changed_since
+//
+//   auto read = client.queue("orders").fetch({"customer-42", "customer-7"});
+//   read["customer-42"].records   // offset, transaction_id, payload, ts
+//
+//   auto changed = client.queue("orders").changed_since("2026-10-20T14:30:00Z");
+//   changed.partitions, changed.safe_time
+//
+// fetch is POST /api/v1/fetch and changed_since is POST /api/v1/partitions/changed.
+// Neither takes a lease, moves a cursor or needs an ack: two readers asking the
+// same question get the same answer, and no consumer group notices them. Each
+// is served from the answering node's own applied state.
+//
+// Both do the loops a caller of the raw routes has to write:
+// - fetch asks for at most 1000 partitions per call, and asks again from one
+//   past the last record until each partition reaches the high watermark its
+//   first answer reported. A partition whose start was deleted by retention is
+//   read from its oldest kept record (an offset below logStartOffset answers
+//   OFFSET_OUT_OF_RANGE and no records, so a loop that does not restart there
+//   silently reads nothing).
+// - changed_since follows the page cursor (next) until the broker says the pass
+//   is over, and answers the smallest safeTime of its pages.
+// ============================================================================
+
+/** One record read by offset. */
+struct FetchedRecord {
+    int64_t offset = 0;
+    std::string transaction_id;  // the id the message was pushed with
+    json payload;                // as pushed (null when it was empty)
+    std::string ts;              // when the push that wrote it was stored
+};
+
+/** What fetch read of one partition. */
+struct FetchedPartition {
+    std::string partition;
+    std::vector<FetchedRecord> records;  // in offset order
+    int64_t high_watermark = 0;          // the next offset the partition will assign
+    int64_t log_start_offset = 0;        // the oldest offset retention kept
+    // Where to start next time to read only what is new. Above high_watermark
+    // it says the partition was deleted and written again.
+    int64_t next_offset = 0;
+};
+
+struct FetchOptions {
+    // Starts a partition at an offset, e.g. the next_offset of an earlier read.
+    // A partition not named starts at 0, the oldest record still kept.
+    std::map<std::string, int64_t> offsets;
+    // Caps the payload bytes of one call: each entry's budget and the ceiling
+    // of the whole call. 8 MiB is the most the broker reads for one entry.
+    int64_t max_bytes = 8 * 1024 * 1024;
+};
+
+/** One partition of a discovery answer. */
+struct ChangedPartition {
+    std::string name;
+    std::string id;            // new when a partition is deleted and created again
+    int64_t last_offset = -1;  // the offset of its last record (-1 when none)
+    int64_t log_start = 0;
+    std::string last_write_at;
+};
+
+struct ChangedPartitions {
+    std::vector<ChangedPartition> partitions;  // in the order they were created
+    // The broker's time up to which every write is counted in the answer: pass
+    // it as the next since to see only what changed after this call. It comes
+    // from the broker's clock; never compare it with the local one.
+    std::string safe_time;
+};
+
+namespace reads {
+
+// The broker refuses more than 1024 entries in one call; 1000 leaves room.
+constexpr size_t ENTRIES_PER_CALL = 1000;
+// Partitions per discovery page: the broker's default and its ceiling.
+constexpr int CHANGED_PAGE = 1000;
+
+inline int64_t int_of(const json& v, int64_t fallback) {
+    return v.is_number_integer() ? v.get<int64_t>() : fallback;
+}
+
+inline std::string string_of(const json& v) {
+    return v.is_string() ? v.get<std::string>() : std::string();
+}
+
+/** Microseconds since the epoch in the broker's own spelling (2026-10-20T14:30:00.000000Z). */
+inline std::string iso_from_micros(int64_t micros) {
+    const int64_t per_day = 86400000000LL;
+    int64_t days = micros / per_day;
+    int64_t rem = micros % per_day;
+    if (rem < 0) {
+        rem += per_day;
+        --days;
+    }
+    // Howard Hinnant's civil_from_days: days since 1970-01-01 to a date in the
+    // proleptic Gregorian calendar.
+    const int64_t z = days + 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const int64_t doe = z - era * 146097;
+    const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const int64_t mp = (5 * doy + 2) / 153;
+    const int64_t d = doy - (153 * mp + 2) / 5 + 1;
+    const int64_t m = mp < 10 ? mp + 3 : mp - 9;
+    const int64_t y = yoe + era * 400 + (m <= 2 ? 1 : 0);
+    const int64_t secs = rem / 1000000;
+    char text[40];
+    std::snprintf(text, sizeof(text), "%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%06lldZ",
+                  static_cast<long long>(y), static_cast<long long>(m), static_cast<long long>(d),
+                  static_cast<long long>(secs / 3600), static_cast<long long>((secs / 60) % 60),
+                  static_cast<long long>(secs % 60), static_cast<long long>(rem % 1000000));
+    return text;
+}
+
+inline std::map<std::string, FetchedPartition> fetch(HttpClient& http, const std::string& queue,
+                                                     const std::vector<std::string>& partitions,
+                                                     const FetchOptions& options) {
+    if (options.max_bytes < 1) {
+        throw std::invalid_argument("fetch: max_bytes must be positive");
+    }
+    struct State {
+        FetchedPartition read;
+        bool has_end = false;
+        int64_t end = 0;  // the high watermark of the first answer: the read ends there
+    };
+    std::vector<std::string> names;
+    std::map<std::string, State> state;
+    for (const auto& name : partitions) {
+        if (name.empty()) {
+            throw std::invalid_argument("fetch: a partition name must be a non-empty string");
+        }
+        if (state.count(name)) {
+            continue;
+        }
+        auto offset = options.offsets.find(name);
+        const int64_t start = offset == options.offsets.end() ? 0 : offset->second;
+        if (start < 0) {
+            throw std::invalid_argument("fetch: the offset of '" + name + "' must be non-negative");
+        }
+        State s;
+        s.read.partition = name;
+        s.read.next_offset = start;
+        state.emplace(name, std::move(s));
+        names.push_back(name);
+    }
+
+    std::vector<std::string> pending = names;
+    while (!pending.empty()) {
+        std::vector<std::string> again;
+        for (size_t i = 0; i < pending.size(); i += ENTRIES_PER_CALL) {
+            const size_t end_of_chunk = std::min(pending.size(), i + ENTRIES_PER_CALL);
+            json entries = json::array();
+            for (size_t j = i; j < end_of_chunk; ++j) {
+                entries.push_back({{"queue", queue},
+                                   {"partition", pending[j]},
+                                   {"offset", state[pending[j]].read.next_offset},
+                                   {"maxBytes", options.max_bytes}});
+            }
+            json answer = http.post("/api/v1/fetch", {{"entries", entries}, {"maxBytes", options.max_bytes}});
+            const size_t asked = end_of_chunk - i;
+            if (!answer.is_object() || !answer.contains("entries") || !answer["entries"].is_array() ||
+                answer["entries"].size() != asked) {
+                throw std::runtime_error("fetch " + queue + ": the broker answered " +
+                                         std::to_string(answer.is_object() && answer.contains("entries") &&
+                                                                answer["entries"].is_array()
+                                                            ? answer["entries"].size()
+                                                            : 0) +
+                                         " entries for " + std::to_string(asked) + " asked");
+            }
+
+            size_t delivered = 0;
+            // Entries that came back empty while short of their end: the call's
+            // byte ceiling was spent by the entries before them.
+            std::vector<std::string> starved;
+            for (size_t j = i; j < end_of_chunk; ++j) {
+                const std::string& name = pending[j];
+                const json& entry = answer["entries"][j - i];
+                State& s = state[name];
+                s.read.high_watermark = int_of(entry.value("highWatermark", json()), s.read.high_watermark);
+                s.read.log_start_offset = int_of(entry.value("logStartOffset", json()), s.read.log_start_offset);
+                const std::string error = string_of(entry.value("error", json()));
+                if (!error.empty()) {
+                    if (error == "OFFSET_OUT_OF_RANGE" && s.read.next_offset < s.read.log_start_offset) {
+                        // Retention deleted what was asked for: go on from the
+                        // oldest kept.
+                        s.read.next_offset = s.read.log_start_offset;
+                        if (!s.has_end) {
+                            s.has_end = true;
+                            s.end = s.read.high_watermark;
+                        }
+                        if (s.read.next_offset < s.end) {
+                            again.push_back(name);
+                        }
+                        continue;
+                    }
+                    if (error == "OFFSET_OUT_OF_RANGE" || error == "UNKNOWN_TOPIC_OR_PARTITION") {
+                        continue;
+                    }
+                    throw std::runtime_error("fetch " + queue + "/" + name + ": the broker answered " + error);
+                }
+                if (!s.has_end) {
+                    s.has_end = true;
+                    s.end = s.read.high_watermark;
+                }
+                const json records = entry.value("records", json::array());
+                if (records.is_array() && !records.empty()) {
+                    delivered += records.size();
+                    for (const auto& r : records) {
+                        FetchedRecord record;
+                        record.offset = int_of(r.value("offset", json()), 0);
+                        record.transaction_id = string_of(r.value("transactionId", json()));
+                        record.payload = r.value("payload", json());
+                        record.ts = string_of(r.value("ts", json()));
+                        s.read.records.push_back(std::move(record));
+                    }
+                    s.read.next_offset = s.read.records.back().offset + 1;
+                    if (s.read.next_offset < s.end) {
+                        again.push_back(name);
+                    }
+                } else if (s.read.next_offset < s.end) {
+                    starved.push_back(name);
+                }
+            }
+            // An empty entry is asked again only when its call read something:
+            // a call that read nothing at all would answer the same next time.
+            if (delivered > 0) {
+                again.insert(again.end(), starved.begin(), starved.end());
+            }
+        }
+        pending = std::move(again);
+    }
+
+    std::map<std::string, FetchedPartition> out;
+    for (auto& [name, s] : state) {
+        out.emplace(name, std::move(s.read));
+    }
+    return out;
+}
+
+/** `since` empty = every partition of the queue. */
+inline ChangedPartitions changed_since(HttpClient& http, const std::string& queue, const std::string& since) {
+    ChangedPartitions out;
+    std::string after;
+    while (true) {
+        json entry = {{"queue", queue}, {"limit", CHANGED_PAGE}};
+        if (!since.empty()) {
+            entry["since"] = since;
+        }
+        if (!after.empty()) {
+            entry["after"] = after;
+        }
+        json answer = http.post("/api/v1/partitions/changed", {{"entries", json::array({entry})}});
+        if (!answer.is_object()) {
+            throw std::runtime_error("changed_since " + queue + ": the broker answered no entry");
+        }
+        // Pages served by different nodes: the smallest is the one that holds
+        // for all of them. The broker spells every one the same way, so the
+        // strings compare in time order.
+        const std::string page_safe = string_of(answer.value("safeTime", json()));
+        if (!page_safe.empty() && (out.safe_time.empty() || page_safe < out.safe_time)) {
+            out.safe_time = page_safe;
+        }
+        const json results = answer.value("entries", json::array());
+        if (!results.is_array() || results.empty()) {
+            throw std::runtime_error("changed_since " + queue + ": the broker answered no entry");
+        }
+        const json& result = results[0];
+        const std::string error = string_of(result.value("error", json()));
+        if (error == "UNKNOWN_TOPIC_OR_PARTITION") {
+            return out;
+        }
+        if (!error.empty()) {
+            throw std::runtime_error("changed_since " + queue + ": the broker answered " + error);
+        }
+        for (const auto& p : result.value("partitions", json::array())) {
+            ChangedPartition partition;
+            partition.name = string_of(p.value("name", json()));
+            partition.id = string_of(p.value("id", json()));
+            partition.last_offset = int_of(p.value("lastOffset", json()), -1);
+            partition.log_start = int_of(p.value("logStart", json()), 0);
+            partition.last_write_at = string_of(p.value("lastWriteAt", json()));
+            out.partitions.push_back(std::move(partition));
+        }
+        after = string_of(result.value("next", json()));
+        if (after.empty()) {
+            return out;
+        }
+    }
+}
+
+}  // namespace reads
+
+// ============================================================================
 // DLQBuilder - Dead Letter Queue query builder
 // ============================================================================
 
@@ -5450,6 +5742,39 @@ public:
         buffer_manager_->flush_buffer(queue_address, deadline_millis);
     }
     
+    /**
+     * Every record of these partitions, read by offset: no lease, no cursor,
+     * nothing to ack. From each partition's offset in options.offsets (default
+     * 0, the oldest record still kept) up to where the partition ended when it
+     * was first read. One FetchedPartition per partition named; a partition
+     * nobody has written, or of a queue that does not exist, has no records.
+     */
+    std::map<std::string, FetchedPartition> fetch(const std::vector<std::string>& partitions,
+                                                  const FetchOptions& options = FetchOptions()) {
+        if (queue_name_.empty()) {
+            throw std::runtime_error("Queue name is required for fetch");
+        }
+        return reads::fetch(*http_client_, queue_name_, partitions, options);
+    }
+
+    /**
+     * The partitions written at or after `since` (an ISO-8601 string; empty
+     * lists them all), in the order they were created, and the answer's
+     * safe_time: pass it as the next `since`. A queue that does not exist has
+     * none.
+     */
+    ChangedPartitions changed_since(const std::string& since = "") {
+        if (queue_name_.empty()) {
+            throw std::runtime_error("Queue name is required for changed_since");
+        }
+        return reads::changed_since(*http_client_, queue_name_, since);
+    }
+
+    ChangedPartitions changed_since(std::chrono::system_clock::time_point since) {
+        return changed_since(reads::iso_from_micros(
+            std::chrono::duration_cast<std::chrono::microseconds>(since.time_since_epoch()).count()));
+    }
+
     // DLQ methods
     DLQBuilder dlq(const std::string& consumer_group = "") {
         if (queue_name_.empty()) {

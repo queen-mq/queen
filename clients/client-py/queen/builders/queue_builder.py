@@ -2,10 +2,18 @@
 Queue builder for fluent API
 """
 
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Union
+from datetime import datetime
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Union
 from urllib.parse import urlencode
 
 from ..errors import ConflationUnsupportedError
+from ..reads.offset_reads import (
+    DEFAULT_MAX_BYTES,
+    ChangedPartitions,
+    FetchedPartition,
+    fetch_partitions,
+    partitions_changed_since,
+)
 from ..types import Message
 from ..utils import logger
 from ..utils.autopilot import AutopilotDecision, parse_autopilot_decision, pop_sizing
@@ -644,6 +652,44 @@ class QueueBuilder:
         queue_address = f"{self._queue_name}/{self._partition}"
         logger.log("QueueBuilder.flushBuffer", {"queue_address": queue_address})
         await self._buffer_manager.flush_buffer(queue_address)
+
+    # ===========================
+    # Reads by offset
+    # ===========================
+
+    async def fetch(
+        self,
+        partitions: Union[str, Iterable[str]],
+        *,
+        offsets: Optional[Mapping[str, int]] = None,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+    ) -> Dict[str, FetchedPartition]:
+        """Every record of these partitions, read by offset: no lease, no
+        cursor, nothing to ack. Answers a dict of partition name to
+        ``{"partition", "records", "highWatermark", "logStartOffset", "nextOffset"}``::
+
+            read = await queen.queue("orders").fetch(["customer-42", "customer-7"])
+            [r["payload"] for r in read["customer-42"]["records"]]
+
+        ``offsets`` ({name: offset}) starts a partition later than its oldest
+        kept record, e.g. at the ``nextOffset`` of an earlier read.
+        ``max_bytes`` caps the payload bytes of one call (default 8 MiB).
+        See queen/reads/offset_reads.py.
+        """
+        return await fetch_partitions(
+            self._http_client, self._queue_name, partitions, offsets=offsets, max_bytes=max_bytes
+        )
+
+    async def changed_since(self, since: Union[None, str, datetime] = None) -> ChangedPartitions:
+        """The partitions written at or after ``since`` (a datetime, naive =
+        UTC, or an ISO-8601 string; None lists them all):
+        ``{"partitions": [...], "safeTime": ...}``. Pass ``safeTime`` as the
+        next ``since``::
+
+            changed = await queen.queue("orders").changed_since(datetime.now(timezone.utc) - timedelta(minutes=10))
+            [p["name"] for p in changed["partitions"]]
+        """
+        return await partitions_changed_since(self._http_client, self._queue_name, since)
 
     # ===========================
     # Dead Letter Queue Methods

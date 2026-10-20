@@ -664,6 +664,48 @@ long loop.
 `KV().Check(ctx, ns, key, version)` is the precondition on its own, and
 `queen.KVCheckOp(ns, key, version)` rides a transaction.
 
+## Reads by offset
+
+Two queue methods read a partition's log by position, over `POST /api/v1/fetch`
+and `POST /api/v1/partitions/changed`. Neither takes a lease, moves a cursor or
+needs an ack: two readers asking the same question get the same answer, and no
+consumer group notices them. They suit a replay, an audit, a sink that keeps its
+own position, and a service that rebuilds an entity from its partition.
+
+```go
+// Every record of these partitions, from the oldest one still kept.
+read, err := client.Queue("orders").Fetch(ctx, []string{"customer-42", "customer-7"})
+part := read["customer-42"]
+// part.Records: []FetchedRecord{Offset, TransactionID, Payload (json.RawMessage), Ts}
+// part.NextOffset: where to start next time to read only what is new
+// part.HighWatermark, part.LogStartOffset: where the partition ends and starts
+
+// Only what came after an earlier read.
+later, err := client.Queue("orders").Fetch(ctx, []string{"customer-42"}, queen.FetchOptions{
+    Offsets: map[string]int64{"customer-42": part.NextOffset},
+})
+
+// The partitions written at or after a time, every page of them, in creation order.
+changed, err := client.Queue("orders").ChangedSince(ctx, time.Now().Add(-10*time.Minute))
+for _, p := range changed.Partitions {
+    fmt.Println(p.Name, p.LastOffset, p.LastWriteAt)
+}
+
+// Next time, only what changed after that answer.
+newer, err := client.Queue("orders").ChangedSince(ctx, changed.SafeTime)
+```
+
+`Fetch` reads each partition up to where it ended when the call first read it:
+it asks for 1000 partitions per request, and asks again until each one is read.
+A partition whose start retention deleted is read from its oldest kept record. A
+partition nobody wrote, or of a queue that does not exist, has no records.
+`FetchOptions.MaxBytes` caps the payload bytes of one request (default 8 MiB).
+Offsets decode as `int64` all the way, not through `float64`.
+
+`ChangedSince` with a zero `time.Time` lists every partition of the queue.
+`SafeTime` is the broker's time up to which every write is counted in the
+answer: pass it as the next `since`, and never compare it with your own clock.
+
 ## Dead Letter Queue
 
 ```go
@@ -786,6 +828,8 @@ go test ./tests/... -v
 - `Admin` - Administrative API
 - `Message` - Message structure
 - `PopResult` - Messages plus the broker's `AutopilotDecision` (`PopResult(ctx)`)
+- `FetchOptions`, `FetchedPartition`, `FetchedRecord` - Reads by offset (`Fetch`)
+- `ChangedPartitions`, `ChangedPartition` - Partition discovery (`ChangedSince`)
 - `ClientConfig` - Client configuration
 - `QueueConfig` - Queue configuration
 - `BufferConfig` - Buffer configuration

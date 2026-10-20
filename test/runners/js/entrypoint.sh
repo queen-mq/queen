@@ -42,7 +42,8 @@ node --test test-v2/http-unit/retry429.test.js \
              test-v2/admin-unit/removedRoutes.test.js \
              test-v2/wire-unit/pushBinary.test.js \
              test-v2/wire-unit/popFrames.test.js \
-             test-v2/wire-unit/transactionFrames.test.js
+             test-v2/wire-unit/transactionFrames.test.js \
+             test-v2/reads-unit/offsetReads.test.js
 
 # No argument = human + stream in one process; run.js calls process.exit(fail?1:0).
 exec node test-v2/run.js

@@ -179,6 +179,52 @@ lifetime, so release it.
 `transaction().kv_check(ns, key, version)` is the same, `required`, in a
 transaction.
 
+## Reads by offset
+
+Two queue methods read a partition's log by position, over `POST /api/v1/fetch` and
+`POST /api/v1/partitions/changed`, with the request and answer types of `queen-protocol`. Neither
+takes a lease, moves a cursor or needs an ack: two readers asking the same question get the same
+answer, and no consumer group notices them. They suit a replay, an audit, a sink that keeps its own
+position, and a service that rebuilds an entity from its partition.
+
+```rust
+use queen_mq::{FetchOptions, Since};
+use std::time::{Duration, SystemTime};
+
+// Every record of these partitions, from the oldest one still kept.
+let read = queen.queue("orders").fetch(["customer-42", "customer-7"]).await?;
+let part = &read["customer-42"];
+// part.records: Vec<FetchRecord> { offset, transaction_id, payload, ts }, in offset order
+// part.next_offset: where to start next time to read only what is new
+// part.high_watermark, part.log_start_offset: where the partition ends and starts
+
+// Only what came after an earlier read.
+let later = queen
+    .queue("orders")
+    .fetch_with(["customer-42"], FetchOptions::new().offset("customer-42", part.next_offset))
+    .await?;
+
+// The partitions written at or after a time, every page of them, in creation order.
+let changed = queen
+    .queue("orders")
+    .changed_since(SystemTime::now() - Duration::from_secs(600))
+    .await?;
+let names: Vec<&str> = changed.partitions.iter().map(|p| p.name.as_str()).collect();
+
+// Next time, only what changed after that answer. Since::All lists every partition.
+let newer = queen.queue("orders").changed_since(changed.safe_time.as_str()).await?;
+```
+
+`fetch` reads each partition up to where it ended when the call first read it: it asks for 1000
+partitions per request, and asks again until each one is read. A partition whose start retention
+deleted is read from its oldest kept record. It answers a `HashMap` with one `FetchedPartition` per
+partition named; a partition nobody wrote, or of a queue that does not exist, has no records.
+`FetchOptions::max_bytes` caps the payload bytes of one request (default 8 MiB).
+
+`changed_since` takes an ISO-8601 `&str`/`String`, a `SystemTime`, `Since::All`, or an `Option`
+of those (`None` is all). `safe_time` is the broker's time up to which every write is counted in
+the answer: pass it as the next `since`, and never compare it with your own clock.
+
 ## Pop autopilot: the broker sizes the pop (broker >= 1.2)
 
 `batch` and `partitions` that you do **not** set are chosen by the broker, per pop, from state

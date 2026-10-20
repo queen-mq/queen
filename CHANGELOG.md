@@ -123,6 +123,21 @@ without one nothing changes.
 
 ## Unreleased
 
+**Every SDK reads a partition by offset and lists the partitions written since a time.** Two queue
+methods wrap `POST /api/v1/fetch` and `POST /api/v1/partitions/changed`, which only the Kafka facade,
+the S3 sink and hand-written HTTP calls used until now. `fetch(partitions)` (Go `Fetch`) reads every
+record of the named partitions, from the oldest one still kept or from given offsets, up to where each
+partition ended when the call first read it: 1000 partitions per request, asked again until each one is
+read. Each partition answers its records with their offsets, transaction ids, payloads and push times,
+its high watermark, its log start, and the offset to start from next time. `changedSince(since)`
+(`changed_since` in Python, Rust and C++, `ChangedSince` in Go) lists the partitions written at or after
+a time, every page of them, in creation order, with the answer's `safeTime` to pass as the next
+`since`. Neither takes a lease, moves a cursor or needs an ack. A loop that reads a partition from
+offset 0 by hand reads nothing once retention has moved the partition's start, because the broker
+answers an offset below `logStartOffset` with `OFFSET_OUT_OF_RANGE` and no records; `fetch` goes on
+from `logStartOffset`. The methods ship in the 2.6.0 clients (all six, PHP included). Any 2.x broker
+serves both routes; one before 2.3.0 ignores the byte ceiling of a request.
+
 **Kafka facade: a node that restarts inside a raft cluster no longer leaves a third of the consumer
 groups without a coordinator.** A restarting broker's facade claimed its node id at boot, which makes
 its peers send it its share of the groups on their next read, and only then read its first view of the

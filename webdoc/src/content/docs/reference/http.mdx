@@ -221,7 +221,9 @@ Three routes read a partition's log by position. None of them takes a lease or m
 two readers asking the same question get the same answer and nothing has to be acked. The Kafka
 facade consumes through them, and they are also the right tool for a replay, an audit or a sink
 that keeps its own position. Each is served from the answering node's own state, with no read
-barrier: a follower answers from what it has applied.
+barrier: a follower answers from what it has applied. Every SDK wraps the first and the last as two
+queue methods, `fetch` and `changedSince`, which also follow the pages and the high watermark for
+you: see [reads by offset in the clients](/start/clients/#reads-by-offset).
 
 ### `POST /api/v1/fetch`
 

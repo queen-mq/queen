@@ -44,6 +44,7 @@ cd /src/clients/client-cpp
 # options off and on, and a framed pop read into the messages of the JSON
 # answer.
 ./bin/test_wire_forms
+./bin/test_reads "$QUEEN_HTTP_URL"
 
 # Broker URL is argv[1] (there is no env override); default would be localhost.
 # The KV/timer INTEGRATION tests inside this binary run unconditionally: every

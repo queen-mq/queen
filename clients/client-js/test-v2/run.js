@@ -20,6 +20,7 @@ import * as timerTests from './timers.js'
 import * as lockTests from './locks.js'
 import * as streamTests from './stream/index.js'
 import * as docsTests from './docs.js'
+import * as readsTests from './reads.js'
 import { LoadBalancer } from '../client-v2/http/LoadBalancer.js';
 
 
@@ -117,6 +118,7 @@ async function main() {
         kvTests,
         timerTests,
         lockTests,
+        readsTests,
         docsTests
     ]
     

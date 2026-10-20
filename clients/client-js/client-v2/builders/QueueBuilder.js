@@ -14,6 +14,7 @@ import { durableAddress } from '../buffer/sinks.js'
 import { QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS } from '../utils/defaults.js'
 import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/conflation.js'
 import { popSizing, parseAutopilotDecision } from '../utils/autopilot.js'
+import { fetchPartitions, partitionsChangedSince } from '../reads/offsetReads.js'
 import * as logger from '../utils/logger.js'
 
 // Per-item push statuses that mean the broker took the message: `queued`
@@ -630,6 +631,39 @@ export class QueueBuilder {
     const queueAddress = durableAddress(this.#queueName, this.#partition)
     logger.log('QueueBuilder.flushBuffer', { queueAddress })
     await this.#bufferManager.flushBuffer(queueAddress)
+  }
+
+  // ===========================
+  // Reads by offset
+  // ===========================
+
+  /**
+   * Every record of these partitions, read by offset: no lease, no cursor,
+   * nothing to ack. Answers a Map of partition name to
+   * `{ partition, records, highWatermark, logStartOffset, nextOffset }`.
+   *
+   *   const read = await queen.queue('orders').fetch(['customer-42', 'customer-7'])
+   *   read.get('customer-42').records.map(r => r.payload)
+   *
+   * `options.offsets` ({ name: offset } or a Map) starts a partition later than
+   * its oldest kept record, e.g. at the `nextOffset` of an earlier read.
+   * `options.maxBytes` caps the payload bytes of one call (default 8 MiB).
+   * See reads/offsetReads.js.
+   */
+  async fetch(partitions, options = {}) {
+    return fetchPartitions(this.#httpClient, this.#queueName, partitions, options)
+  }
+
+  /**
+   * The partitions written at or after `since` (a Date, epoch milliseconds or
+   * an ISO-8601 string; null lists them all): `{ partitions, safeTime }`.
+   * Pass `safeTime` as the next `since`.
+   *
+   *   const { partitions } = await queen.queue('orders').changedSince(new Date(Date.now() - 600_000))
+   *   partitions.map(p => p.name)
+   */
+  async changedSince(since = null) {
+    return partitionsChangedSince(this.#httpClient, this.#queueName, since)
   }
 
   // ===========================

@@ -35,6 +35,11 @@ sourceOfTruth:
   - clients/client-php/src/Consumer/ConsumerManager.php
   - clients/client-php/src/Consumer/Supervision.php
   - clients/client-php/src/Builders/QueueBuilder.php
+  - clients/client-js/client-v2/reads/offsetReads.js
+  - clients/client-py/queen/reads/offset_reads.py
+  - clients/client-go/offset_reads.go
+  - clients/client-rust/src/reads.rs
+  - clients/client-php/src/Reads/OffsetReads.php
   - clients/client-cli/cmd/tail.go
   - Dockerfile
   - server/Cargo.toml
@@ -154,6 +159,13 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-19 (server 2.5.1 on next-release, built for stage):
 # server/Cargo.toml, Cargo.lock and server.json say 2.5.1. The page keeps naming 2.5.0, the released
 # image, until 2.5.1 is released. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-20 (reads by offset in every SDK): QueueBuilder.js, queue_builder.py,
+# client-rust's queue.rs (through the new reads.rs), QueueBuilder.php and queen_client.hpp gained
+# fetch and changedSince over POST /api/v1/fetch and POST /api/v1/partitions/changed, and Go's
+# QueueBuilder gained Fetch and ChangedSince (offset_reads.go). The five new files join the list;
+# the new section names the methods. package.json, pyproject.toml and client-rust/Cargo.toml say
+# 2.6.0, the clients that carry them, and the page names 2.6.0 for all six (the PHP and Go lines
+# move at their tags). Nothing else this page states changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same
@@ -304,10 +316,10 @@ you run Horizon today.
 </TabItem>
 </Tabs>
 
-The JavaScript, Python, Go, Rust and C++ clients are 2.3.0; the PHP client has its own version
-line and is 2.5.0. All of them talk to any 2.x broker (the broker is at 2.5.0); locks need a 2.1
-broker, and the [binary forms](#binary-push-push-compression-and-framed-pop) a 2.3 one. The Go
-client's module path ends in `/v2`, as Go requires for a major version above 1.
+The six clients are 2.6.0; the PHP client keeps a version line of its own, which is at 2.6.0 too.
+All of them talk to any 2.x broker (the broker is at 2.5.0); locks need a 2.1 broker, and the
+[binary forms](#binary-push-push-compression-and-framed-pop) a 2.3 one. The Go client's module path
+ends in `/v2`, as Go requires for a major version above 1.
 
 ## curl is a client
 
@@ -400,6 +412,48 @@ broker 2.3.0 or later on every node: a broker up to 2.2.0 answers a binary body 
 and the client does not fall back, so turn the two on after every broker of the cluster is
 upgraded. Framed pop is safe against any broker, because an older one ignores the request and
 answers JSON.
+
+## Reads by offset
+
+Every SDK reads a partition's log by position with two queue methods, over
+[`POST /api/v1/fetch` and `POST /api/v1/partitions/changed`](/reference/http/#reads-by-offset).
+Neither takes a lease, moves a cursor or needs an ack, so two readers asking the same question get
+the same answer and no consumer group notices them. They suit a replay, an audit, a sink that keeps
+its own position, and a service that rebuilds an entity from its partition.
+
+- **fetch** reads every record of the partitions you name, each from its oldest kept record or from
+  an offset you give, up to where the partition ended when the call first read it. It asks for 1000
+  partitions per request and asks again until each one is read, and a partition whose start
+  retention deleted is read from its oldest kept record. Each partition answers its records (offset,
+  transaction id, payload, time of the push), its high watermark, its log start, and the offset to
+  give next time to read only what is new.
+- **changedSince** lists the partitions written at or after a time, every page of them, in the order
+  they were created, each with its last offset and the time of its last write. Without a time it
+  lists every partition of the queue. Its answer carries a `safeTime`: give it as the next `since`
+  to see only what changed after this call. It is the broker's time, so never compare it with your
+  own clock.
+
+| Client | Read | Discover |
+| --- | --- | --- |
+| JavaScript | `queue(q).fetch(partitions, { offsets, maxBytes })`, a `Map` | `queue(q).changedSince(since)` |
+| Python | `queue(q).fetch(partitions, offsets=..., max_bytes=...)`, a `dict` | `queue(q).changed_since(since)` |
+| Go | `Queue(q).Fetch(ctx, partitions, FetchOptions{...})`, a map | `Queue(q).ChangedSince(ctx, since)` |
+| Rust | `queue(q).fetch(partitions)`, `fetch_with(partitions, FetchOptions)`, a `HashMap` | `queue(q).changed_since(since)` |
+| C++ | `queue(q).fetch(partitions, FetchOptions)`, a `std::map` | `queue(q).changed_since(since)` |
+| PHP | `queue($q)->fetch($partitions, $offsets, $maxBytes)`, an array | `queue($q)->changedSince($since)` |
+
+```js
+// The traces written in the last ten minutes, and everything in them.
+const { partitions, safeTime } = await queen.queue('events').changedSince(new Date(Date.now() - 600_000))
+const read = await queen.queue('events').fetch(partitions.map(p => p.name))
+for (const [trace, part] of read) {
+  rebuild(trace, part.records.map(r => r.payload))
+}
+```
+
+A partition nobody has written, or of a queue that does not exist, answers no partitions and no
+records. The methods ship in the 2.6.0 clients and work against any 2.x broker; a broker before
+2.3.0 ignores the byte ceiling of a request and reads each partition to its own budget.
 
 ## What each SDK implements
 

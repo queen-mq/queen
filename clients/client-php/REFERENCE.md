@@ -23,6 +23,7 @@ they apply.
 - [Transactions](#transactions)
 - [Key/value state](#keyvalue-state)
 - [Timers](#timers)
+- [Reads by offset](#reads-by-offset)
 - [Dead-letter queue](#dead-letter-queue)
 - [Ephemeral queues](#ephemeral-queues)
 - [Admin API](#admin-api)
@@ -927,6 +928,46 @@ $pending = $timers->count('payments.timeout', 'order-');
 
 The statuses are `scheduled`, `rescheduled`, `cancelled`, `absent` and `too_late`. The model is on
 [timers](https://queenmq.com/concepts/timers/).
+
+## Reads by offset
+
+Two queue methods read a partition's log by position, over `POST /api/v1/fetch` and
+`POST /api/v1/partitions/changed`. Neither takes a lease, moves a cursor or needs an ack: two
+readers asking the same question get the same answer, and no consumer group notices them. They suit
+a replay, an audit, a sink that keeps its own position, and a job that rebuilds an entity from its
+partition.
+
+```php
+// Every record of these partitions, from the oldest one still kept.
+$read = $queen->queue('orders')->fetch(['customer-42', 'customer-7']);
+$part = $read['customer-42'];
+// $part['records']: [['offset', 'transactionId', 'payload', 'ts'], ...] in offset order
+// $part['nextOffset']: where to start next time to read only what is new
+// $part['highWatermark'], $part['logStartOffset']: where the partition ends and starts
+
+// Only what came after an earlier read.
+$later = $queen->queue('orders')->fetch(['customer-42'], ['customer-42' => $part['nextOffset']]);
+
+// The partitions written at or after a time, every page of them, in creation order.
+$changed = $queen->queue('orders')->changedSince(new DateTimeImmutable('-10 minutes'));
+$names = array_column($changed['partitions'], 'name');
+// each partition: name, id, lastOffset, logStart, lastWriteAt
+
+// Next time, only what changed after that answer.
+$newer = $queen->queue('orders')->changedSince($changed['safeTime']);
+```
+
+| Method | Effect |
+| --- | --- |
+| `fetch(string\|array $partitions, array $offsets = [], int $maxBytes = 8 MiB): array` | Reads each partition from its offset in `$offsets` (default 0, the oldest record still kept) up to where it ended when the call first read it: 1000 partitions per request, asked again until each one is read. A partition whose start retention deleted is read from its oldest kept record. Answers an array keyed by partition name, in the order they were named; a partition nobody wrote, or of a queue that does not exist, has no records. `$maxBytes` caps the payload bytes of one request. |
+| `changedSince(DateTimeInterface\|string\|null $since = null): array` | `['partitions' => [...], 'safeTime' => ...]`: the partitions written at or after `$since`, every page of them; `null` lists all of them. A queue that does not exist has none. |
+
+`safeTime` is the broker's time up to which every write is counted in the answer: pass it as the
+next `$since`, and never compare it with the server's own clock. An array key like `'3'` reads back
+as the integer `3`, as PHP does with every numeric key; each result also carries its name in
+`partition`. Both throw `RuntimeException` when the builder has no queue name or the broker answers
+an error the client does not know, and `InvalidArgumentException` for an empty partition name, a
+negative offset or a `$maxBytes` below 1.
 
 ## Dead-letter queue
 

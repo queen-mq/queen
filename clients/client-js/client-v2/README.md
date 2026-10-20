@@ -21,6 +21,7 @@ Welcome to Queen client! This is your friendly guide to mastering message queues
 - [Part 13: Callbacks & Error Handling](#part-13-callbacks--error-handling)
 - [Part 14: Graceful Shutdown](#part-14-graceful-shutdown)
 - [Part 15: Binary Push, Compression & Framed Pop](#part-15-binary-push-compression--framed-pop)
+- [Part 16: Reads by Offset - Replay Without a Lease](#part-16-reads-by-offset---replay-without-a-lease)
 - [Cheat Sheet](#cheat-sheet)
 
 ---
@@ -1666,6 +1667,55 @@ to 2.2.0 answers 400 to the binary bodies and the client does not fall back to
 JSON, so turn the two on after every broker of the cluster is upgraded.
 `framedPop` is safe against any broker: an older one ignores the parameter and
 answers JSON.
+
+---
+
+## Part 16: Reads by Offset - Replay Without a Lease
+
+A pop hands messages to one consumer and waits for its ack. Sometimes you only
+want to read: rebuild an entity from its partition, replay a day for an audit,
+copy a queue somewhere else. Two queue methods do that, and neither takes a
+lease, moves a cursor or needs an ack. Two readers asking the same question get
+the same answer, and no consumer group notices them.
+
+```javascript
+// Every record of these partitions, from the oldest one still kept
+const read = await queen.queue('orders').fetch(['customer-42', 'customer-7'])
+
+for (const [partition, part] of read) {
+  console.log(partition, part.records.map(r => r.payload))
+  // part.records: [{ offset, transactionId, payload, ts }, ...]
+  // part.nextOffset: where to start next time to read only what is new
+}
+
+// Only what came after that read
+const later = await queen.queue('orders').fetch(['customer-42'], {
+  offsets: { 'customer-42': read.get('customer-42').nextOffset }
+})
+```
+
+`fetch` reads each partition up to where it ended when the call first read it.
+It asks for 1000 partitions per request and asks again until each one is read,
+and a partition whose start retention deleted is read from its oldest kept
+record. A partition nobody wrote, or of a queue that does not exist, has no
+records. `maxBytes` caps the payload bytes of one request (default 8 MiB).
+
+To find out which partitions to read, ask which ones were written since a time:
+
+```javascript
+const { partitions, safeTime } = await queen.queue('orders')
+  .changedSince(new Date(Date.now() - 10 * 60_000))
+
+partitions.map(p => p.name)   // each { name, id, lastOffset, logStart, lastWriteAt }
+
+// Next time, only what changed after that answer
+const next = await queen.queue('orders').changedSince(safeTime)
+```
+
+`changedSince` follows every page of the answer and returns the partitions in
+the order they were created; without a time it lists all of them. `safeTime` is
+the broker's time up to which every write is counted in the answer: pass it as
+the next `since`, and never compare it with your own clock.
 
 ---
 

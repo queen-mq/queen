@@ -43,10 +43,19 @@
     "feature": "wire-forms",
     "title": "Binary push, push compression and framed pop",
     "pages": ["start/clients"],
-    "skip": ["Install and connect", "curl is a client", "Consumer supervision", "What each SDK implements", "The broker inside a Rust program", "Next"],
+    "skip": ["Install and connect", "curl is a client", "Consumer supervision", "Reads by offset", "What each SDK implements", "The broker inside a Rust program", "Next"],
     "related": ["reference/http", "benchmarks/throughput"],
     "card": "wire-forms",
     "words": "binary push compression compressed zstd framed pop frames wire throughput performance rate cpu"
+  },
+  {
+    "feature": "reads",
+    "title": "Reads by offset: fetch and changedSince",
+    "pages": ["start/clients"],
+    "skip": ["Install and connect", "curl is a client", "Consumer supervision", "Binary push, push compression and framed pop", "What each SDK implements", "The broker inside a Rust program", "Next"],
+    "related": ["reference/http"],
+    "card": "reads",
+    "words": "fetch read offset offsets replay audit rebuild changed changedsince since partitions discovery list safetime watermark sink"
   },
   {
     "feature": "kafka",

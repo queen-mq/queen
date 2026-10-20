@@ -31,6 +31,7 @@ from .errors import (
 )
 from .kv import KV, KvResult
 from .locks import Lock, LockResult, Locks
+from .reads import ChangedPartition, ChangedPartitions, FetchedPartition, FetchedRecord
 from .streams.stream import Stream
 from .streams.helpers.rate_limiter import token_bucket_gate, sliding_window_gate
 from .timers import TimerBuilder, TimerResult, Timers
@@ -43,7 +44,7 @@ from .utils.defaults import (
     BUFFER_DEFAULTS,
 )
 
-__version__ = "2.3.0"
+__version__ = "2.6.0"
 
 __all__ = [
     "Queen",
@@ -78,6 +79,10 @@ __all__ = [
     "BufferStats",
     "DLQResponse",
     "TransactionResponse",
+    "FetchedRecord",
+    "FetchedPartition",
+    "ChangedPartition",
+    "ChangedPartitions",
     "CLIENT_DEFAULTS",
     "QUEUE_DEFAULTS",
     "CONSUME_DEFAULTS",

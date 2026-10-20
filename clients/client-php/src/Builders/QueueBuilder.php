@@ -8,6 +8,7 @@ use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
 use Queen\Buffer\BufferManager;
 use Queen\Consumer\HighLevelConsumer;
+use Queen\Reads\OffsetReads;
 use Queen\Support\ConflationGuard;
 use Queen\Support\Defaults;
 use Queen\Support\PopAutopilot;
@@ -614,6 +615,49 @@ class QueueBuilder
         }
         $queueAddress = "{$this->queueName}/{$this->partition}";
         $this->bufferManager->flushBuffer($queueAddress);
+    }
+
+    // ===========================
+    // Reads by offset
+    // ===========================
+
+    /**
+     * Every record of these partitions, read by offset: no lease, no cursor,
+     * nothing to ack. Answers an array keyed by partition name of
+     * ['partition', 'records', 'highWatermark', 'logStartOffset', 'nextOffset']:
+     *
+     *     $read = $queen->queue('orders')->fetch(['customer-42', 'customer-7']);
+     *     array_column($read['customer-42']['records'], 'payload');
+     *
+     * $offsets (['name' => offset]) starts a partition later than its oldest
+     * kept record, e.g. at the 'nextOffset' of an earlier read. $maxBytes caps
+     * the payload bytes of one call. See Queen\Reads\OffsetReads.
+     *
+     * @param string|array<int|string> $partitions
+     * @param array<string,int> $offsets
+     */
+    public function fetch(string|array $partitions, array $offsets = [], int $maxBytes = OffsetReads::DEFAULT_MAX_BYTES): array
+    {
+        if ($this->queueName === null) {
+            throw new \RuntimeException('Queue name is required for fetch');
+        }
+        return OffsetReads::fetch($this->httpClient, $this->queueName, $partitions, $offsets, $maxBytes);
+    }
+
+    /**
+     * The partitions written at or after $since (a DateTimeInterface or an
+     * ISO-8601 string; null lists them all): ['partitions' => [...],
+     * 'safeTime' => ...]. Pass 'safeTime' as the next $since.
+     *
+     *     $changed = $queen->queue('orders')->changedSince(new DateTimeImmutable('-10 minutes'));
+     *     array_column($changed['partitions'], 'name');
+     */
+    public function changedSince(\DateTimeInterface|string|null $since = null): array
+    {
+        if ($this->queueName === null) {
+            throw new \RuntimeException('Queue name is required for changedSince');
+        }
+        return OffsetReads::changedSince($this->httpClient, $this->queueName, $since);
     }
 
     // ===========================
