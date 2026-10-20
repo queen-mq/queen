@@ -323,21 +323,6 @@ mod tests {
         assert_eq!(index_key("é"), "qk:groups:%C3%A9");
     }
 
-    /// The server builds without the facade too, so the spelling is kept
-    /// here twice. With it, the two must agree.
-    #[cfg(feature = "kafka")]
-    #[test]
-    fn the_keys_agree_with_the_facade_that_writes_them() {
-        for g in ["orders", "team a:billing", "lg.stage-24h-001.x", "é/%"] {
-            assert_eq!(
-                Some(index_key(g)),
-                queen_kafka::offsets::index_key(g),
-                "{g}"
-            );
-            assert_eq!(Some(presence_key(g)), queen_kafka::presence::key(g), "{g}");
-        }
-    }
-
     #[test]
     fn a_fresh_row_with_members_is_live_on_every_queue_when_topics_are_unknown() {
         let p = presence(json!({"v": 1, "members": 3, "freshMs": 45_000}), 100 * S);

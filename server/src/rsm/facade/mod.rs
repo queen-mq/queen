@@ -545,15 +545,18 @@ pub struct PushOut {
 }
 
 /// One record of [`Rsm::push_records`]: the typed twin of one `POST /api/v1/push`
-/// item that carries neither `transactionId` nor `traceId`, so the broker mints
-/// the message id and uses it as the transaction id, exactly as it does for
-/// such an item. `payload` must be one JSON document; it is stored as these
+/// item with no `traceId`. `txn` is the item's `transactionId`: a repeat of it
+/// in the partition within the queue's dedup window writes nothing and answers
+/// `duplicate` with the original offset; `None` lets the broker mint the
+/// message id and use it as the transaction id, exactly as it does for an item
+/// without one. `payload` must be one JSON document; it is stored as these
 /// bytes, as the route stores an item's raw `payload`.
 #[derive(Clone, Debug)]
 pub struct RecordPush {
     pub queue: String,
     pub partition: String,
     pub payload: Vec<u8>,
+    pub txn: Option<String>,
 }
 
 /// What [`Rsm::push_records`] did with one [`RecordPush`]: the per-item

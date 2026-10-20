@@ -365,9 +365,9 @@ func TestATransactionCoordinatorIsThisFacade(t *testing.T) {
 	if fc.ErrorCode != 0 {
 		t.Fatalf("FindCoordinator(TRANSACTION) answered error %d, want 0", fc.ErrorCode)
 	}
-	if fc.NodeID != 0 || fc.Port <= 0 {
-		t.Fatalf("FindCoordinator(TRANSACTION) answered node %d port %d, want node 0 and a real port",
-			fc.NodeID, fc.Port)
+	if node := facadeNode(t, cl); fc.NodeID != node || fc.Port <= 0 {
+		t.Fatalf("FindCoordinator(TRANSACTION) answered node %d port %d, want node %d (the one advertised) and a real port",
+			fc.NodeID, fc.Port, node)
 	}
 	if took > 2*time.Second {
 		t.Fatalf("the answer took %s; the whole point of M9's fix is that it is immediate", took)
@@ -479,7 +479,7 @@ func TestAnIdempotentProducerSurvivesAFacadeRestart(t *testing.T) {
 // need it; a non-transactional InitProducerId is routed to any broker anyway.
 func initProducerIDAtNode0(t *testing.T, cl *kgo.Client, req *kmsg.InitProducerIDRequest) *kmsg.InitProducerIDResponse {
 	t.Helper()
-	resp, err := cl.Broker(0).Request(ctxFor(t, 20*time.Second), req)
+	resp, err := cl.Broker(int(facadeNode(t, cl))).Request(ctxFor(t, 20*time.Second), req)
 	if err != nil {
 		t.Fatalf("InitProducerId at node 0: %v", err)
 	}

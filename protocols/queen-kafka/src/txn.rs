@@ -1,2143 +1,607 @@
-//! Kafka transactions by BUFFER-AND-COMMIT (M9).
+//! Kafka transactions: buffer on the raft leader, commit as ONE Queen
+//! transaction.
 //!
-//! A transactional producer's records are held in this process until
-//! `EndTxn(commit)`, which writes the whole set through ONE call to
-//! `POST /api/v1/transaction` — a single broker transaction (one raft entry,
-//! applied all or nothing) that already carries KV riders inside itself. Abort
-//! discards the stage. **No uncommitted record ever enters the log.**
+//! A transactional producer's records and offsets are held in memory on the
+//! raft leader (which is every partition's leader and every coordinator, so
+//! Produce, TxnOffsetCommit and EndTxn all reach it) until `EndTxn(commit)`,
+//! which writes them through one `POST /api/v1/transaction`: pushes, positions
+//! and the fence below, one raft entry, all or nothing. Abort drops them. No
+//! uncommitted record ever enters the log, so `read_committed` is free (the
+//! last stable offset is the high watermark) and there are no markers.
 //!
-//! That one sentence is the whole design, and everything Kafka builds to cope
-//! with uncommitted records in the log has nothing to point at here:
-//!
-//!   * `read_committed` costs nothing and was already implemented:
-//!     [`crate::handlers::fetch`] answers `last_stable_offset = high_watermark`
-//!     with an empty `aborted_transactions` on every partition, and that answer
-//!     is true for a STRONGER reason after M9 than before it.
-//!   * there is no LSO to track, no aborted-transaction index, no control
-//!     records and no `WriteTxnMarkers`.
-//!   * offsets stay contiguous. A committed transaction of N records advances
-//!     the log end offset by exactly N, where Apache Kafka advances it by N+1 —
-//!     the commit marker consumes an offset there and there is no marker here.
-//!
-//! ## The split: the stage is this process's, the outcome is Queen's
-//!
-//! The same split `lib.rs` states for the coordinator. The STAGE — records,
-//! staged offsets, the partition set — is in this module's memory and is
-//! deliberately lost on a restart. The IDENTITY, the EPOCH and the OUTCOME are
-//! durable, in one KV key per `transactional.id`:
+//! The identity is durable, in one KV row per `transactional.id`:
 //!
 //! ```text
-//!   namespace  queen-kafka                    (crate::offsets::NAMESPACE)
-//!   key        qk:txn:<esc transactional.id>  (crate::offsets::escape)
-//!   value      {"pid":<i64>,"epoch":<i16>,"state":"open"|"committed"|"aborted",
-//!               "seq":<u64>,"node":<i32>,"incarnation":"<tok>","ts":<ms>}
-//!   expiry     forever
+//!   namespace  queen-kafka
+//!   key        qk:txn:<transactional.id>
+//!   value      {"pid":<i64>,"epoch":<i16>,"state":"ready"|"open"|"committed"|"aborted","token":<u64>}
 //! ```
 //!
-//! `qk:txn:` shares no prefix with `qk:group:`, `qk:groups:`, `qk:fence:` or
-//! `qk:node:` — they differ at the fourth character — and the disjointness is
-//! pinned by a test below, including against a `transactional.id` that spells
-//! one of the other prefixes.
-//!
-//! **`forever` and not a TTL**, for [`crate::cluster::fence`]'s stated reason: a
-//! TTL would expire between two transactions of a slow producer, the `expect`
-//! would come back `absent`, and a legitimate commit would abort. The
-//! consequence is a key with no delete path in v1 — the same leak
-//! `qk:fence:` already has, and bounded the same way: a `transactional.id` is a
-//! configuration value, so a fleet has as many as it has producer instances,
-//! and a hundred thousand of them is about 20 MB.
-//!
-//! ## Fencing is the epoch bump, and the CAS is what enforces it
-//!
-//! A second producer taking the same `transactional.id` writes the key at
-//! `epoch + 1` and takes its new version with it. The first producer's commit
-//! carries the version it holds, at **index 0 of the bundle with
-//! `required: true`** — so a fenced commit does not merely fail, it writes
-//! **zero records and zero offsets**, because a lost `required` precondition
-//! rolls the whole broker transaction back (`reason: "kv_precondition"`).
-//!
-//! ## What survives a crash, and the property that must not be got wrong
-//!
-//! The stage is lost and nothing partial is ever in the log — a consequence of
-//! the write being one bundle: before `EndTxn` zero records have been sent to
-//! Queen, so there is nothing to be half-written. The client's next request
-//! meets no binding and is answered `INVALID_TXN_STATE` (48), which is fatal in
-//! the Java transactional producer.
-//!
-//! A crash of THIS PROCESS, that is. A producer's connection closing is not
-//! one: the stage stays committable until its own timeout, by whoever resumes
-//! it with its producer id and epoch ([`Txns::drop_connection`]), which is what
-//! Flink's exactly-once sink needs across a TaskManager failover. Across a
-//! restart of the facade the stage is gone, and that resumed commit is the
-//! INVALID_TXN_STATE above: Flink drops such a committable and its records are
-//! lost. Closing that needs the stage in the replicated log, not in RAM.
-//!
-//! **A client can see `error_code = 0` on `EndTxn(commit)` only if this facade
-//! held the stage and the bundle committed. A false positive — the application
-//! believes committed while nothing landed — is unreachable.** The reverse (a
-//! commit that landed and was answered an error, because the facade died
-//! between the broker's commit and the response) is reachable, is bounded to
-//! one transaction, and is the safe direction: the application resumes from
-//! offsets that were committed atomically with the records and reprocesses
-//! nothing.
-//!
-//! This is also why the `qk:txn:` marker is never consulted to answer an
-//! *unheld* `EndTxn`. It cannot be: the client sends no transaction sequence
-//! number, so a marker reading `state: "committed"` cannot distinguish "your
-//! commit landed" from "your previous commit landed and this one did not".
-//! Reading it and guessing is the fabrication this codebase refuses.
-//!
-//! ## Single-node only, and it is routing rather than fencing
-//!
-//! A Kafka producer sends `Produce` to the PARTITION LEADER and `EndTxn` to the
-//! TRANSACTION COORDINATOR. In cluster mode those are different nodes by
-//! construction, so the stage lands on one facade and the commit arrives at
-//! another, which holds nothing. There is no cheap fix — the cluster design has
-//! no facade-to-facade RPC, and a Metadata request carries no producer identity
-//! to skew the answer per producer with. So `QUEEN_KAFKA_NODE_ID` set means
-//! transactions are refused, legibly and fatally, at
-//! [`crate::handlers::find_coordinator`] and at
-//! [`crate::handlers::init_producer_id`]. The gate is on CONFIGURATION and not
-//! on the live view: a cluster-mode deployment that happens to have one live
-//! node must not serve transactions, because a node joining would break them
-//! mid-flight.
+//! Every step writes it with `expect` = the version this leader last saw, so a
+//! newer producer (InitProducerId bumps the epoch) or another leader fences
+//! this one: a commit carries that write as a `required` precondition, and a
+//! fenced commit writes nothing at all. `"open"` is written when a
+//! transaction starts, so a new leader that meets it knows a transaction's
+//! records were held by the old one and are lost: that transaction can only
+//! abort (`INVALID_TXN_STATE` to anything else). `token` names the transaction,
+//! so a commit whose answer was lost is recognized when the client retries it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use kafka_protocol::error::ResponseError;
-use tokio::time::Instant;
+use serde_json::{json, Value};
 
-use crate::identity::TenantKey;
-use crate::obs;
-use crate::offsets::{self, Committed};
-use crate::queen::{KvOp, PushItem};
+use crate::core::{CallError, PositionOp, Queen, RawPush};
+use crate::errors::*;
+use crate::topics::{now_ms, NS};
 
-/// The prefix of a `transactional.id`'s durable row. See the module header for
-/// why it cannot collide with the three other `qk:` spaces.
-const KEY_PREFIX: &str = "qk:txn:";
+pub const KEY_PREFIX: &str = "qk:txn:";
+/// Record bytes one transaction may hold.
+pub const MAX_TXN_BYTES: usize = 8 << 20;
+/// Records one transaction may hold.
+pub const MAX_TXN_RECORDS: usize = 50_000;
+/// Partitions one transaction may span.
+pub const MAX_TXN_PARTITIONS: usize = 1_000;
+/// Record bytes held across every open transaction of this node.
+pub const MAX_HELD_BYTES: usize = 256 << 20;
+/// `transaction.max.timeout.ms`: one hour, Flink's default ask.
+pub const MAX_TIMEOUT_MS: i32 = 3_600_000;
 
-/// Staged record bytes one transaction may hold — `QUEEN_KAFKA_TXN_MAX_BYTES`.
-///
-/// DERIVED, not chosen. 8 MiB of record bytes becomes ~11 MiB of base64 inside
-/// the payload envelope plus ~120 bytes of JSON per item; at
-/// [`DEFAULT_MAX_TXN_RECORDS`] that is roughly 17 MiB of request body against
-/// `QUEEN_MAX_BODY_BYTES`, whose default is 64 MiB (server/src/main.rs).
-/// **Raising this without redoing that arithmetic turns every large commit into
-/// a 413.**
-pub const DEFAULT_MAX_TXN_BYTES: usize = 8 * 1024 * 1024;
+pub const PRODUCER_FENCED: i16 = 90;
+pub const INVALID_PRODUCER_EPOCH: i16 = 47;
+pub const INVALID_TXN_STATE: i16 = 48;
+pub const INVALID_PRODUCER_ID_MAPPING: i16 = 49;
+pub const INVALID_TRANSACTION_TIMEOUT: i16 = 50;
+pub const CONCURRENT_TRANSACTIONS: i16 = 51;
 
-/// Staged records one transaction may hold — `QUEEN_KAFKA_TXN_MAX_RECORDS`.
-///
-/// One `operations[]` item per record, and the broker builds a push echo, a
-/// frame and a `results[]` slot for each. `handle_transaction` has **no cap on
-/// `operations` length at all** — the only bound there is the body size — so
-/// this is the only thing standing between a transactional producer and that
-/// allocation.
-pub const DEFAULT_MAX_TXN_RECORDS: usize = 50_000;
-
-/// Partitions one transaction may span. Each becomes a push group inside the
-/// bundle.
-pub const MAX_TXN_PARTITIONS: usize = 200;
-
-/// Offsets one transaction may commit.
-///
-/// **Derived and not negotiable:** the transaction wire takes at most
-/// [`crate::queen::WIRE_KV_MAX_OPS`] KV operations, one of which is this
-/// transaction's own fence and one of which is the group-existence index.
-pub const MAX_TXN_OFFSETS: usize = crate::queen::WIRE_KV_MAX_OPS - 2;
-
-/// Staged bytes across the whole PROCESS —
-/// `QUEEN_KAFKA_TXN_MAX_STAGED_BYTES`. Sixteen producers at their full
-/// per-transaction cap. This is the number that keeps a transaction stage from
-/// becoming an out-of-memory an unbounded client can drive; it can be this
-/// generous because, unlike the pre-auth frame budget, every byte of it belongs
-/// to a connection that has already authenticated.
-pub const DEFAULT_MAX_STAGED_BYTES: usize = 128 * 1024 * 1024;
-
-/// Open transactions this process holds — `QUEEN_KAFKA_TXN_MAX_OPEN`. The shape
-/// of `coordinator::MAX_GROUPS`: a number a deployment reaches only by
-/// misconfiguration.
-pub const DEFAULT_MAX_OPEN: usize = 1_024;
-
-/// `transaction.max.timeout.ms` — `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS`. A
-/// `transaction.timeout.ms` above it is refused at InitProducerId with Kafka's
-/// own code, INVALID_TRANSACTION_TIMEOUT, and never silently shortened.
-///
-/// ONE HOUR, where Apache Kafka's broker default is fifteen minutes, and the
-/// difference is deliberate. Flink's `KafkaSink` asks for exactly one hour by
-/// default (`transaction.timeout.ms` must outlive a checkpoint interval plus a
-/// restart), and against a stock Kafka broker that is a refusal at
-/// `initTransactions()` until an operator raises the broker's cap — the first
-/// thing Flink's own documentation tells a user to do. A cap is a ceiling and
-/// not a timeout: every other producer still gets the timeout IT asks for
-/// (60 s for a plain one, 10 s for Kafka Streams), so the only transactions
-/// this raises are the ones that asked for longer.
-///
-/// What it costs is the time an abandoned stage holds memory, which since
-/// [`Txns::drop_connection`] keeps a stage past its connection is the stage's
-/// own timeout. That is bounded in bytes by
-/// [`DEFAULT_MAX_STAGED_BYTES`], and an orphaned stage gives way to a live
-/// producer when that budget is full ([`Txns::stage_records`]).
-pub const DEFAULT_MAX_TIMEOUT_MS: u64 = 3_600_000;
-
-/// How often the sweep walks the registry. A transaction timeout is measured in
-/// tens of seconds at least, so a second of granularity costs nothing and one
-/// walk of a map bounded by [`DEFAULT_MAX_OPEN`] is not work.
-pub const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
-
-/// One line per window when transactions are being refused at a cap, not one
-/// per request: a cap is reached by a fleet, and a line per refusal is a line
-/// per produce. See [`obs::Sampler`].
-static CAPPED: obs::Sampler = obs::Sampler::new(60_000);
-/// The same, for transactions the sweep drops.
-static SWEPT: obs::Sampler = obs::Sampler::new(60_000);
-
-/// The key of a `transactional.id`'s durable row, or `None` when it will not
-/// fit the store's key column.
-///
-/// Unlike the group keys of [`crate::offsets`], this one has no longer partner
-/// key to be shorter than, so it is checked on its own: a `transactional.id`
-/// that does not fit is refused at InitProducerId and no state is created for
-/// it.
-pub fn key(transactional_id: &str) -> Option<String> {
-    let key = format!("{KEY_PREFIX}{}", offsets::escape(transactional_id));
-    (key.len() <= offsets::MAX_KEY_BYTES).then_some(key)
+pub fn key(tid: &str) -> String {
+    format!("{KEY_PREFIX}{tid}")
 }
 
-/// Which connection owns a stage.
-///
-/// Minted per accepted connection and never reused within a process, so
-/// "drop everything this connection staged" is one comparison and cannot reach
-/// a stage that a later connection built under the same address.
-pub type ConnId = u64;
-
-/// The next connection id.
-pub fn next_conn_id() -> ConnId {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Stage {
+    /// No transaction open.
+    Ready,
+    /// A transaction this node holds.
+    Open(Open),
+    /// The row says a transaction was open, and its records were held by a
+    /// leader that is gone: it can only abort.
+    Lost,
 }
 
-/// What the durable row says a transaction's last decided outcome was.
-///
-/// Written for the operator and for forensics; nothing reads it to make a
-/// decision, and the module header says why it cannot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    Open,
-    Committed,
-    Aborted,
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Open {
+    token: u64,
+    started: Option<Instant>,
+    partitions: BTreeSet<(String, i32)>,
+    groups: BTreeSet<String>,
+    records: Vec<RawPush>,
+    bytes: usize,
+    offsets: BTreeMap<(String, String, i32), PositionOp>,
+    /// A commit was sent and its outcome is unknown.
+    committing: bool,
 }
 
-impl Outcome {
-    fn as_str(self) -> &'static str {
-        match self {
-            Outcome::Open => "open",
-            Outcome::Committed => "committed",
-            Outcome::Aborted => "aborted",
-        }
-    }
-}
-
-/// The durable row's value.
-pub fn marker(
+#[derive(Debug, Clone)]
+struct Txn {
     pid: i64,
     epoch: i16,
-    outcome: Outcome,
-    seq: u64,
-    node: i32,
-    incarnation: &str,
-    now_ms: i64,
-) -> serde_json::Value {
-    serde_json::json!({
-        "pid": pid,
-        "epoch": epoch,
-        "state": outcome.as_str(),
-        "seq": seq,
-        "node": node,
-        "incarnation": incarnation,
-        "ts": now_ms,
-    })
-}
-
-/// Read a stored marker back. `None` for anything that is not one of ours — the
-/// caller treats that as a row it must not bump blindly.
-pub fn read_marker(v: &serde_json::Value) -> Option<(i64, i16, u64)> {
-    Some((
-        v.get("pid")?.as_i64()?,
-        i16::try_from(v.get("epoch")?.as_i64()?).ok()?,
-        v.get("seq").and_then(|s| s.as_u64()).unwrap_or_default(),
-    ))
-}
-
-/// Where a transaction is in its own life.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TxnState {
-    /// Bound, with nothing staged: after InitProducerId and after every
-    /// decided transaction.
-    Empty,
-    /// A first `AddPartitionsToTxn` has arrived. The deadline is running.
-    Open,
-    /// The bundle is in flight. The connection is serial so a second request of
-    /// the SAME connection cannot reach this, which is exactly why the state is
-    /// kept: it is the answer to a request from a DIFFERENT one.
-    Committing,
-    /// A cap was exceeded. The producer must abort; nothing else is accepted.
-    Abortable,
-}
-
-/// One `transactional.id`'s stage and binding.
-pub struct Txn {
-    pub pid: i64,
-    pub epoch: i16,
-    /// The version `qk:txn:<id>` holds, threaded exactly like
-    /// `offsets::Stored::fence_version`: it is what the commit `expect`s, and
-    /// it advances every time this facade writes the row.
-    pub version: i64,
-    pub state: TxnState,
-    /// The connection that ran InitProducerId. Its disconnect ORPHANS the
-    /// binding rather than dropping it ([`Txns::drop_connection`]).
-    pub owner: ConnId,
-    /// Registered by AddPartitionsToTxn, in arrival order.
-    pub partitions: Vec<(String, i32)>,
-    /// Registered by AddOffsetsToTxn. One group per transaction (see
-    /// [`Txns::add_offsets`]).
-    pub group: Option<String>,
-    /// Staged by TxnOffsetCommit, keyed by the composed KV key so a second
-    /// commit of one partition replaces the first rather than adding a second
-    /// operation to the bundle.
-    pub offsets: Vec<(String, Committed)>,
-    /// The records, in arrival order. This is the stage.
-    pub staged: Vec<PushItem>,
-    /// What [`Txn::staged`] has been charged for.
-    pub bytes: usize,
-    /// How many decided transactions this id has had. Operator-facing only.
-    pub seq: u64,
-    /// `now + min(transaction_timeout_ms, the cap)`, set when the transaction
-    /// opens.
-    pub deadline: Instant,
-    /// The timeout the client asked for, kept so a re-open sets the same
-    /// deadline without another request.
+    /// The KV row's version as this node last wrote or read it.
+    version: i64,
     timeout: Duration,
-    /// When [`Txn::owner`] closed, or `None` while it is open. An orphaned
-    /// binding outlives its connection by its own timeout and no longer
-    /// ([`Txn::lingered`]).
-    orphaned_at: Option<Instant>,
-    /// Whether the last transaction this binding DECIDED was an abort, which
-    /// is what makes a commit that follows it, of nothing, a refusal rather
-    /// than a success ([`Txns::begin_commit`]).
-    last_aborted: bool,
+    stage: Stage,
+    /// The last transaction ended here: its token and whether it committed,
+    /// for an EndTxn retried after its answer was lost.
+    last_end: Option<(u64, bool)>,
+    /// The producer's token: what the timeout sweep writes the row with.
+    bearer: Option<String>,
 }
 
-impl Txn {
-    /// Whether an orphaned binding has outlived what a resumed producer could
-    /// still need from it: its own timeout since the owner closed, and, for a
-    /// stage somebody reopened in the meantime, that stage's deadline too.
-    /// Never true while the owner is connected.
-    fn lingered(&self, now: Instant) -> bool {
-        self.orphaned_at
-            .is_some_and(|at| now >= at + self.timeout && !self.holds_stage_at(now))
-    }
-
-    /// An open stage before its deadline: what a commit could still land.
-    fn holds_stage_at(&self, now: Instant) -> bool {
-        self.state == TxnState::Open && now < self.deadline
-    }
-
-    /// Is this request's `(producer_id, epoch)` the one this binding holds?
-    fn check(&self, pid: i64, epoch: i16) -> Option<Fault> {
-        if pid != self.pid {
-            return Some(Fault::WrongProducer);
-        }
-        match epoch.cmp(&self.epoch) {
-            std::cmp::Ordering::Less => Some(Fault::Fenced),
-            std::cmp::Ordering::Greater => Some(Fault::AheadOfUs),
-            std::cmp::Ordering::Equal => None,
-        }
-    }
-
-    /// Forget the stage, keep the binding. What an abort and a fence do.
-    fn clear(&mut self) {
-        self.partitions.clear();
-        self.group = None;
-        self.offsets.clear();
-        self.staged.clear();
-        self.bytes = 0;
-        self.state = TxnState::Empty;
-    }
-
-    /// The deadline passed: forget the stage AND refuse everything that follows
-    /// until the producer aborts or re-inits.
-    ///
-    /// Not [`Txn::clear`], and the difference is the whole safety property of
-    /// this module. `clear` leaves the binding `Empty`, which is the state a
-    /// DECIDED transaction ends in, and `EndTxn(commit)` against `Empty` is a
-    /// legitimate commit of nothing that is answered `error_code = 0`. An
-    /// expired transaction is not nothing: its records were staged and were
-    /// then dropped, so answering its commit 0 would be exactly the failure the
-    /// module header calls unreachable, an application believing a commit that
-    /// never happened. `Abortable` is what the producer must be told, and it
-    /// becomes INVALID_TXN_STATE (48) on commit and `error_code = 0` on abort,
-    /// because a lost stage IS an aborted transaction.
-    fn expire(&mut self) {
-        self.clear();
-        self.state = TxnState::Abortable;
-    }
-}
-
-/// Why a transactional request cannot be served, and the code it becomes.
-///
-/// Every code here is one the Java transactional producer already handles on
-/// the API that emits it, which is `compat/ERRORS.md`'s rule for choosing one:
-/// the closed set the client accepts beats the most precise word.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fault {
-    /// No binding for this `transactional.id` on this facade — a restart, a
-    /// stage the sweep dropped, or a commit that arrived at a process which
-    /// never held it. Fatal in the client, deliberately: see the module header.
-    Unknown,
-    /// The request's epoch is BELOW the bound one: a second producer took this
-    /// id. The transaction this request belongs to writes nothing.
-    Fenced,
-    /// The request's epoch is ABOVE the bound one, which this facade cannot
-    /// have granted.
-    AheadOfUs,
-    /// The `producer_id` is not the one this `transactional.id` holds.
-    WrongProducer,
-    /// The transaction is past its deadline and the sweep has dropped, or is
-    /// about to drop, its stage.
-    Expired,
-    /// The request needs an open transaction and there is none, or a bundle is
-    /// already in flight for this one.
-    NotOpen,
-    /// A bundle is in flight for this transaction right now.
-    InFlight,
-    /// A cap was exceeded and the producer must abort.
-    Abortable,
-}
-
-impl Fault {
-    /// The wire code. `INVALID_TXN_STATE` covers three different faults on
-    /// purpose: they are three ways of saying "this transaction is not in a
-    /// state that can continue", and the Java producer's answer to all three is
-    /// the same — abort, and if it cannot, fail the application.
-    pub fn code(self) -> ResponseError {
-        match self {
-            Fault::Unknown | Fault::Expired | Fault::NotOpen | Fault::Abortable => {
-                ResponseError::InvalidTxnState
-            }
-            Fault::Fenced => ResponseError::ProducerFenced,
-            Fault::AheadOfUs => ResponseError::InvalidProducerEpoch,
-            Fault::WrongProducer => ResponseError::InvalidProducerIdMapping,
-            Fault::InFlight => ResponseError::ConcurrentTransactions,
-        }
-    }
-}
-
-/// Why a stage refused to take more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Full {
-    /// Past [`Limits::max_txn_bytes`] or [`Limits::max_txn_records`]. NOT
-    /// retriable, which is right: waiting will not make a 12 MiB transaction
-    /// fit an 8 MiB stage.
-    Transaction,
-    /// Past [`Limits::max_staged_bytes`]. Retriable, and deliberately a
-    /// different answer: memory does free up when other transactions commit.
-    Process,
-    /// Past [`MAX_TXN_PARTITIONS`].
-    Partitions,
-    /// Past [`MAX_TXN_OFFSETS`].
-    Offsets,
-}
-
-/// The caps, resolved at boot. See the constants above for each derivation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Limits {
-    pub max_txn_bytes: usize,
-    pub max_txn_records: usize,
-    pub max_staged_bytes: usize,
-    pub max_open: usize,
-    pub max_timeout: Duration,
-}
-
-impl Default for Limits {
-    fn default() -> Limits {
-        Limits {
-            max_txn_bytes: DEFAULT_MAX_TXN_BYTES,
-            max_txn_records: DEFAULT_MAX_TXN_RECORDS,
-            max_staged_bytes: DEFAULT_MAX_STAGED_BYTES,
-            max_open: DEFAULT_MAX_OPEN,
-            max_timeout: Duration::from_millis(DEFAULT_MAX_TIMEOUT_MS),
-        }
-    }
-}
-
-/// Every transaction this process is holding a stage for.
-///
-/// Keyed by `(TenantKey, transactional.id)` and never by connection alone, for
-/// three reasons that are each load-bearing: the InitProducerId fence has to
-/// drop ANOTHER connection's stage; the process-wide byte cap has to be
-/// enforced across connections; and the sweep needs a single place to walk.
-/// `lib.rs` pins that one tenant's two credentials share one coordinator and
-/// that two tenants naming one group stay apart — two tenants picking
-/// `"my-txn"` stay apart for exactly the same reason, and the KV key needs no
-/// tenant in it because `queen.kv` is keyed by one.
-///
-/// The lock is a `std::sync::Mutex` and is NEVER held across an await, the
-/// idiom `Coordinator::groups` and `cluster::ClusterState::view` already use.
+/// The transaction coordinator of this node: meaningful only while it leads.
 pub struct Txns {
-    inner: Mutex<Inner>,
-    limits: Limits,
+    queen: Queen,
+    inner: tokio::sync::Mutex<HashMap<String, Txn>>,
+    held: AtomicU64,
+    tokens: AtomicU64,
+    node: Mutex<i64>,
 }
 
-struct Inner {
-    txns: HashMap<(TenantKey, String), Txn>,
-    /// The process-wide charge, kept as a running total rather than summed on
-    /// every produce: the map is bounded by `max_open` and the sum would be
-    /// walked once per staged batch.
-    staged_bytes: usize,
-}
-
-impl Default for Txns {
-    fn default() -> Txns {
-        Txns::new(Limits::default())
-    }
+/// The row as stored.
+#[derive(Debug, Clone, PartialEq)]
+struct Row {
+    pid: i64,
+    epoch: i16,
+    state: String,
+    token: u64,
+    version: i64,
 }
 
 impl Txns {
-    pub fn new(limits: Limits) -> Txns {
+    pub fn new(queen: Queen) -> Txns {
         Txns {
-            inner: Mutex::new(Inner {
-                txns: HashMap::new(),
-                staged_bytes: 0,
-            }),
-            limits,
+            queen,
+            inner: tokio::sync::Mutex::new(HashMap::new()),
+            held: AtomicU64::new(0),
+            tokens: AtomicU64::new(now_ms() as u64),
+            node: Mutex::new(0),
         }
     }
 
-    pub fn limits(&self) -> Limits {
-        self.limits
+    pub fn set_node(&self, node: i32) {
+        *self.node.lock().unwrap_or_else(|p| p.into_inner()) = i64::from(node.max(0));
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .expect("the transaction map lock is never held across a panic")
+    /// This node stopped leading: what it held is lost, and the rows say so.
+    pub async fn clear(&self) {
+        let mut inner = self.inner.lock().await;
+        for (_, t) in inner.drain() {
+            if let Stage::Open(o) = t.stage {
+                self.held.fetch_sub(o.bytes as u64, Ordering::Relaxed);
+            }
+        }
     }
 
-    /// How many transactions are bound right now. Tests and log lines only.
-    pub fn len(&self) -> usize {
-        self.lock().txns.len()
+    fn new_pid(&self) -> i64 {
+        let seq = self.tokens.fetch_add(1, Ordering::Relaxed) as i64;
+        let node = *self.node.lock().unwrap_or_else(|p| p.into_inner());
+        // Bit 62 set: never one of the idempotent ids (clock << 20, below it).
+        (1i64 << 62) | ((now_ms() & ((1 << 40) - 1)) << 20) | ((node & 0xf) << 16) | (seq & 0xffff)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    fn new_token(&self) -> u64 {
+        self.tokens.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Staged bytes across the process. Tests and log lines only.
-    pub fn staged_bytes(&self) -> usize {
-        self.lock().staged_bytes
+    async fn read_row(&self, bearer: Option<&str>, tid: &str) -> Result<Option<Row>, CallError> {
+        let ops = [crate::core::KvOp::GetMany {
+            ns: NS.to_string(),
+            keys: vec![key(tid)],
+        }];
+        let answer = self.queen.kv(bearer, &ops).await?.into_iter().next();
+        let Some(row) = answer.and_then(|a| a.rows.into_iter().next()) else {
+            return Ok(None);
+        };
+        let v = &row.value;
+        Ok(Some(Row {
+            pid: v.get("pid").and_then(Value::as_i64).unwrap_or(-1),
+            epoch: v.get("epoch").and_then(Value::as_i64).unwrap_or(-1) as i16,
+            state: v
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("ready")
+                .to_string(),
+            token: v.get("token").and_then(Value::as_u64).unwrap_or(0),
+            version: row.version,
+        }))
     }
 
-    /// Bind `(tenant, id)` to a producer session, replacing whatever was there.
-    ///
-    /// This is what InitProducerId calls once the KV claim has been won, and it
-    /// is where an old epoch's stage is dropped: the bump has already made that
-    /// stage uncommittable (its `expect` can no longer match), and freeing the
-    /// memory at the moment of fencing rather than at the sweep is belt and
-    /// braces on top of that.
-    ///
-    /// `Err(())` is the open-transaction cap; the caller answers
-    /// CONCURRENT_TRANSACTIONS, which is retriable and literally true.
-    ///
-    /// ## What a bind takes away besides the old epoch
-    ///
-    /// **The same connection's other IDLE bindings.** A Kafka producer drives
-    /// one `transactional.id` at a time over its own connections, so an owner
-    /// that binds a second id has moved off the first one for good — and that
-    /// is not a corner case, it is how Flink's `KafkaSink` runs: one pooled
-    /// producer re-initialised under a fresh id for every checkpoint
-    /// (`FlinkKafkaInternalProducer.initTransactionId`). Kept, those bindings
-    /// would fill [`Limits::max_open`] one checkpoint at a time and then refuse
-    /// every new id CONCURRENT_TRANSACTIONS. Only bindings holding no stage go:
-    /// an open one keeps its stage until it is decided or its deadline passes.
-    ///
-    /// **At the cap, ORPHANED idle bindings**, oldest first. They linger only
-    /// so a resumed producer's repeated commit finds its answer
-    /// ([`Txns::drop_connection`]), which is worth less than a live producer
-    /// being able to begin at all.
-    // Eight arguments, and they are eight because a binding IS eight
-    // independent facts a claim decided. A parameter struct would move the same
-    // list one file away and stop the compiler naming the one a caller forgot.
-    #[allow(clippy::result_unit_err, clippy::too_many_arguments)]
-    pub fn bind(
+    /// Write the row at `expect`; the new version, or `None` when the version
+    /// moved (another producer or leader wrote it).
+    async fn write_row(
         &self,
-        tenant: &TenantKey,
-        id: &str,
-        pid: i64,
-        epoch: i16,
-        version: i64,
-        owner: ConnId,
-        timeout: Duration,
-    ) -> Result<(), ()> {
-        let mut inner = self.lock();
-        let at = (tenant.clone(), id.to_string());
-        inner.txns.retain(|key, t| {
-            *key == at
-                || t.owner != owner
-                || !matches!(t.state, TxnState::Empty | TxnState::Abortable)
-        });
-        while !inner.txns.contains_key(&at) && inner.txns.len() >= self.limits.max_open {
-            let oldest = inner
-                .txns
-                .iter()
-                .filter(|(_, t)| {
-                    t.orphaned_at.is_some()
-                        && matches!(t.state, TxnState::Empty | TxnState::Abortable)
-                })
-                .min_by_key(|(_, t)| t.orphaned_at)
-                .map(|(key, _)| key.clone());
-            if let Some(key) = oldest {
-                inner.txns.remove(&key);
-                continue;
-            }
-            if let Some(suppressed) = CAPPED.tick_now() {
-                tracing::warn!(
-                    target: "kafka",
-                    open = self.limits.max_open,
-                    suppressed,
-                    "more transactional producers than QUEEN_KAFKA_TXN_MAX_OPEN; \
-                     InitProducerId is answering CONCURRENT_TRANSACTIONS"
-                );
-            }
-            return Err(());
+        bearer: Option<&str>,
+        tid: &str,
+        expect: i64,
+        value: Value,
+    ) -> Result<Option<i64>, CallError> {
+        let ops = [crate::core::KvOp::put_at(NS, &key(tid), value, expect)];
+        let a = self.queen.kv(bearer, &ops).await?.into_iter().next();
+        Ok(a.filter(|a| a.applied != Some(false)).map(|a| a.version))
+    }
+
+    /// InitProducerId for a transactional id: the id it keeps across restarts,
+    /// at the next epoch, which fences every older producer of it.
+    pub async fn init(
+        &self,
+        bearer: Option<&str>,
+        tid: &str,
+        timeout_ms: i32,
+        asked: (i64, i16),
+    ) -> Result<(i64, i16), i16> {
+        if !(1..=MAX_TIMEOUT_MS).contains(&timeout_ms) {
+            return Err(INVALID_TRANSACTION_TIMEOUT);
         }
-        let timeout = timeout.min(self.limits.max_timeout);
-        if let Some(old) = inner.txns.remove(&at) {
-            inner.staged_bytes = inner.staged_bytes.saturating_sub(old.bytes);
-        }
-        inner.txns.insert(
-            at,
+        let mut inner = self.inner.lock().await;
+        let row = self
+            .read_row(bearer, tid)
+            .await
+            .map_err(|e| of_call_for_group(&e))?;
+        let (pid, epoch, expect) = match &row {
+            None => (self.new_pid(), 0i16, 0i64),
+            Some(r) => {
+                // KIP-360: a producer that names its id and epoch must still
+                // hold them.
+                if asked.0 >= 0 && (asked.0 != r.pid || asked.1 != r.epoch) {
+                    return Err(PRODUCER_FENCED);
+                }
+                if r.epoch >= i16::MAX - 1 {
+                    (self.new_pid(), 0, r.version)
+                } else {
+                    (r.pid, r.epoch + 1, r.version)
+                }
+            }
+        };
+        let value = json!({"pid": pid, "epoch": epoch, "state": "ready", "token": 0});
+        let version = match self.write_row(bearer, tid, expect, value).await {
+            Ok(Some(v)) => v,
+            Ok(None) => return Err(CONCURRENT_TRANSACTIONS),
+            Err(e) => return Err(of_call_for_group(&e)),
+        };
+        if let Some(old) = inner.insert(
+            tid.to_string(),
             Txn {
                 pid,
                 epoch,
                 version,
-                state: TxnState::Empty,
-                owner,
-                partitions: Vec::new(),
-                group: None,
-                offsets: Vec::new(),
-                staged: Vec::new(),
-                bytes: 0,
-                seq: 0,
-                deadline: Instant::now() + timeout,
-                timeout,
-                orphaned_at: None,
-                last_aborted: false,
+                timeout: Duration::from_millis(timeout_ms as u64),
+                stage: Stage::Ready,
+                last_end: None,
+                bearer: bearer.map(str::to_string),
             },
-        );
-        Ok(())
+        ) {
+            if let Stage::Open(o) = old.stage {
+                self.held.fetch_sub(o.bytes as u64, Ordering::Relaxed);
+                tracing::info!(target: "kafka", %tid, "a newer producer fenced an open transaction; its records are dropped");
+            }
+        }
+        Ok((pid, epoch))
     }
 
-    /// Run `f` against the binding for `(tenant, id)`, having checked the
-    /// request's `(producer_id, epoch)` and the deadline first.
-    ///
-    /// Every transactional request goes through here, which is what keeps the
-    /// four APIs and the produce path from growing four different opinions
-    /// about what a fenced producer is. Nothing is awaited inside `f`: the
-    /// signature makes that impossible, which is how the lock discipline is
-    /// enforced rather than remembered.
-    pub fn with<R>(
+    /// The transaction of `tid`, checked against the producer's id and epoch,
+    /// read from the row when this node does not hold it.
+    async fn held<'a>(
         &self,
-        tenant: &TenantKey,
-        id: &str,
+        inner: &'a mut HashMap<String, Txn>,
+        bearer: Option<&str>,
+        tid: &str,
         pid: i64,
         epoch: i16,
-        f: impl FnOnce(&mut Txn) -> R,
-    ) -> Result<R, Fault> {
-        let mut inner = self.lock();
-        let at = (tenant.clone(), id.to_string());
-        let now = Instant::now();
-        let txn = inner.txns.get_mut(&at).ok_or(Fault::Unknown)?;
-        if let Some(fault) = txn.check(pid, epoch) {
-            return Err(fault);
+    ) -> Result<&'a mut Txn, i16> {
+        if !inner.contains_key(tid) {
+            let row = self
+                .read_row(bearer, tid)
+                .await
+                .map_err(|e| of_call_for_group(&e))?
+                .ok_or(INVALID_PRODUCER_ID_MAPPING)?;
+            inner.insert(
+                tid.to_string(),
+                Txn {
+                    pid: row.pid,
+                    epoch: row.epoch,
+                    version: row.version,
+                    timeout: Duration::from_secs(60),
+                    stage: if row.state == "open" {
+                        Stage::Lost
+                    } else {
+                        Stage::Ready
+                    },
+                    last_end: matches!(row.state.as_str(), "committed" | "aborted")
+                        .then_some((row.token, row.state == "committed")),
+                    bearer: None,
+                },
+            );
         }
-        // Checked here rather than left to the sweep, so a request that arrives
-        // between two sweeps meets the same answer the sweep would have left
-        // for it. The stage is dropped on the spot for the same reason.
-        if txn.state != TxnState::Empty && now >= txn.deadline {
-            let freed = txn.bytes;
-            txn.expire();
-            inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
-            return Err(Fault::Expired);
+        let t = inner.get_mut(tid).expect("inserted above");
+        if t.pid != pid {
+            return Err(INVALID_PRODUCER_ID_MAPPING);
         }
-        Ok(f(txn))
+        if t.epoch != epoch {
+            return Err(INVALID_PRODUCER_EPOCH);
+        }
+        if bearer.is_some() && t.bearer.as_deref() != bearer {
+            t.bearer = bearer.map(str::to_string);
+        }
+        Ok(t)
     }
 
-    /// Register partitions, opening the transaction if this is its first.
-    ///
-    /// Answers one verdict per requested partition so a caller can refuse only
-    /// the ones past the cap — AddPartitionsToTxn has per-partition error codes
-    /// and no top-level one below v4.
-    pub fn add_partitions(
+    /// Open a transaction on a Ready one: the row says `open` from here on.
+    async fn begin(&self, bearer: Option<&str>, tid: &str, t: &mut Txn) -> Result<(), i16> {
+        match &t.stage {
+            Stage::Open(_) => return Ok(()),
+            Stage::Lost => return Err(INVALID_TXN_STATE),
+            Stage::Ready => {}
+        }
+        let token = self.new_token();
+        let value = json!({"pid": t.pid, "epoch": t.epoch, "state": "open", "token": token});
+        match self.write_row(bearer, tid, t.version, value).await {
+            Ok(Some(v)) => {
+                t.version = v;
+                t.stage = Stage::Open(Open {
+                    token,
+                    started: Some(Instant::now()),
+                    ..Open::default()
+                });
+                Ok(())
+            }
+            Ok(None) => Err(PRODUCER_FENCED),
+            Err(e) => Err(of_call_for_group(&e)),
+        }
+    }
+
+    pub async fn add_partitions(
         &self,
-        tenant: &TenantKey,
-        id: &str,
+        bearer: Option<&str>,
+        tid: &str,
         pid: i64,
         epoch: i16,
-        wanted: &[(String, i32)],
-    ) -> Result<Vec<Result<(), Full>>, Fault> {
-        self.with(tenant, id, pid, epoch, |txn| {
-            if txn.state == TxnState::Committing {
-                return Err(Fault::InFlight);
-            }
-            if txn.state == TxnState::Abortable {
-                return Err(Fault::Abortable);
-            }
-            if txn.state == TxnState::Empty {
-                txn.state = TxnState::Open;
-                txn.deadline = Instant::now() + txn.timeout;
-                txn.last_aborted = false;
-            }
-            Ok(wanted
-                .iter()
-                .map(|p| {
-                    if txn.partitions.contains(p) {
-                        return Ok(());
-                    }
-                    if txn.partitions.len() >= MAX_TXN_PARTITIONS {
-                        return Err(Full::Partitions);
-                    }
-                    txn.partitions.push(p.clone());
-                    Ok(())
-                })
-                .collect())
-        })?
+        partitions: &[(String, i32)],
+    ) -> i16 {
+        let mut inner = self.inner.lock().await;
+        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        if let Err(e) = self.begin(bearer, tid, t).await {
+            return e;
+        }
+        let Stage::Open(o) = &mut t.stage else {
+            return INVALID_TXN_STATE;
+        };
+        if o.committing {
+            return CONCURRENT_TRANSACTIONS;
+        }
+        for p in partitions {
+            o.partitions.insert(p.clone());
+        }
+        if o.partitions.len() > MAX_TXN_PARTITIONS {
+            return INVALID_TXN_STATE;
+        }
+        NONE
     }
 
-    /// Register the consumer group whose offsets ride in this transaction.
-    ///
-    /// ONE group per transaction in v1. A second, different group is refused,
-    /// because the offset budget of [`MAX_TXN_OFFSETS`] is derived from the
-    /// assumption that exactly one group-index operation rides in the bundle,
-    /// and a silent second group would silently shrink the partition budget.
-    /// Kafka allows several; this is a stated deviation and the shape nobody
-    /// uses.
-    pub fn add_offsets(
+    pub async fn add_offsets(
         &self,
-        tenant: &TenantKey,
-        id: &str,
+        bearer: Option<&str>,
+        tid: &str,
         pid: i64,
         epoch: i16,
         group: &str,
-    ) -> Result<Result<(), Fault>, Fault> {
-        self.with(tenant, id, pid, epoch, |txn| {
-            match txn.state {
-                TxnState::Committing => return Err(Fault::InFlight),
-                TxnState::Abortable => return Err(Fault::Abortable),
-                // Kafka's own rule: AddOffsetsToTxn is sent inside a
-                // transaction, and `sendOffsetsToTransaction` is preceded by
-                // the produce that opened it. A transaction with no partitions
-                // yet is still legitimately open here — a consume-only EOS loop
-                // commits offsets and produces nothing — so this OPENS one.
-                TxnState::Empty => {
-                    txn.state = TxnState::Open;
-                    txn.deadline = Instant::now() + txn.timeout;
-                    txn.last_aborted = false;
-                }
-                TxnState::Open => {}
-            }
-            match &txn.group {
-                Some(already) if already != group => Err(Fault::NotOpen),
-                _ => {
-                    txn.group = Some(group.to_string());
-                    Ok(())
-                }
-            }
-        })
-    }
-
-    /// Stage one partition's committed offset.
-    pub fn stage_offset(
-        &self,
-        tenant: &TenantKey,
-        id: &str,
-        pid: i64,
-        epoch: i16,
-        key: String,
-        committed: Committed,
-    ) -> Result<Result<(), Full>, Fault> {
-        self.with(tenant, id, pid, epoch, |txn| {
-            if let Some(slot) = txn.offsets.iter_mut().find(|(k, _)| *k == key) {
-                // A re-commit of one partition inside one transaction is the
-                // last one, not two operations: the bundle is an upsert per
-                // key and a duplicate would spend an operation of the budget on
-                // a write the next one overwrites.
-                slot.1 = committed;
-                return Ok(());
-            }
-            if txn.offsets.len() >= MAX_TXN_OFFSETS {
-                return Err(Full::Offsets);
-            }
-            txn.offsets.push((key, committed));
-            Ok(())
-        })
-    }
-
-    /// Charge and stage one produce entry's records.
-    ///
-    /// The charge is made BEFORE the items are moved in and the whole entry is
-    /// refused or taken together, which is what makes a partition's answer one
-    /// error code rather than "some of your records".
-    #[allow(clippy::too_many_arguments)]
-    pub fn stage_records(
-        &self,
-        tenant: &TenantKey,
-        id: &str,
-        pid: i64,
-        epoch: i16,
-        topic: &str,
-        partition: i32,
-        items: Vec<PushItem>,
-        bytes: usize,
-    ) -> Result<Result<(), Full>, Fault> {
-        let limits = self.limits;
-        if let Err(full) = self.with(tenant, id, pid, epoch, move |txn| {
-            match txn.state {
-                TxnState::Committing => return Err(Full::Transaction),
-                TxnState::Abortable => return Err(Full::Transaction),
-                // A Produce for a partition that was never added is refused by
-                // the caller before this runs; an Empty transaction here would
-                // therefore be a producer that skipped AddPartitionsToTxn.
-                TxnState::Empty | TxnState::Open => {}
-            }
-            if !txn
-                .partitions
-                .iter()
-                .any(|(t, p)| t == topic && *p == partition)
-            {
-                return Err(Full::Partitions);
-            }
-            Ok(())
-        })? {
-            // The transaction is bound and this producer owns it, but the entry
-            // cannot be staged: the partition was never added, or the
-            // transaction is already poisoned. Both are verdicts about THIS
-            // entry, so they come back beside a served request rather than as a
-            // fault about the transaction.
-            return Ok(Err(full));
+    ) -> i16 {
+        let mut inner = self.inner.lock().await;
+        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        if let Err(e) = self.begin(bearer, tid, t).await {
+            return e;
         }
-        let mut inner = self.lock();
-        let at = (tenant.clone(), id.to_string());
-        let txn = inner.txns.get_mut(&at).ok_or(Fault::Unknown)?;
-        if txn.bytes.saturating_add(bytes) > limits.max_txn_bytes
-            || txn.staged.len().saturating_add(items.len()) > limits.max_txn_records
+        let Stage::Open(o) = &mut t.stage else {
+            return INVALID_TXN_STATE;
+        };
+        o.groups.insert(group.to_string());
+        NONE
+    }
+
+    /// The records of one transactional produce, held until the commit.
+    pub async fn stage_records(
+        &self,
+        bearer: Option<&str>,
+        tid: &str,
+        pid: i64,
+        epoch: i16,
+        partition: (&str, i32),
+        records: Vec<RawPush>,
+    ) -> i16 {
+        let mut inner = self.inner.lock().await;
+        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let Stage::Open(o) = &mut t.stage else {
+            return INVALID_TXN_STATE;
+        };
+        if o.committing {
+            return CONCURRENT_TRANSACTIONS;
+        }
+        if !o
+            .partitions
+            .contains(&(partition.0.to_string(), partition.1))
         {
-            txn.state = TxnState::Abortable;
-            if let Some(suppressed) = CAPPED.tick_now() {
-                tracing::warn!(
-                    target: "kafka",
-                    transactional_id = id,
-                    staged = txn.bytes,
-                    records = txn.staged.len(),
-                    max_bytes = limits.max_txn_bytes,
-                    max_records = limits.max_txn_records,
-                    suppressed,
-                    "a transaction is past QUEEN_KAFKA_TXN_MAX_BYTES or \
-                     QUEEN_KAFKA_TXN_MAX_RECORDS; the producer must abort it"
-                );
-            }
-            return Ok(Err(Full::Transaction));
+            return INVALID_TXN_STATE;
         }
-        if inner.staged_bytes.saturating_add(bytes) > limits.max_staged_bytes {
-            // An orphaned stage is held for a producer that MIGHT come back to
-            // commit it; this one is here now. The orphans give way first,
-            // oldest first, and only what this entry needs.
-            shed_orphans(&mut inner, limits.max_staged_bytes.saturating_sub(bytes));
+        let bytes: usize = records.iter().map(|r| r.payload.len()).sum();
+        if o.records.len() + records.len() > MAX_TXN_RECORDS
+            || o.bytes + bytes > MAX_TXN_BYTES
+            || self.held.load(Ordering::Relaxed) as usize + bytes > MAX_HELD_BYTES
+        {
+            return MESSAGE_TOO_LARGE;
         }
-        let staged_bytes = inner.staged_bytes;
-        if staged_bytes.saturating_add(bytes) > limits.max_staged_bytes {
-            // NOT `Abortable`: the transaction is fine and the PROCESS is full,
-            // so the producer is answered something retriable and the same
-            // request succeeds once another transaction commits.
-            if let Some(suppressed) = CAPPED.tick_now() {
-                tracing::warn!(
-                    target: "kafka",
-                    staged = staged_bytes,
-                    max = limits.max_staged_bytes,
-                    suppressed,
-                    "the process is at QUEEN_KAFKA_TXN_MAX_STAGED_BYTES; transactional produce is \
-                     being answered retriably until a transaction commits"
-                );
-            }
-            return Ok(Err(Full::Process));
-        }
-        let txn = inner.txns.get_mut(&at).ok_or(Fault::Unknown)?;
-        txn.bytes += bytes;
-        txn.staged.extend(items);
-        inner.staged_bytes += bytes;
-        Ok(Ok(()))
+        self.held.fetch_add(bytes as u64, Ordering::Relaxed);
+        o.bytes += bytes;
+        o.records.extend(records);
+        NONE
     }
 
-    /// Everything one commit needs, taken out of the stage in one lock.
-    ///
-    /// The transaction is left in [`TxnState::Committing`] and its stage is
-    /// still charged: the bundle has not landed, so the memory is not free and
-    /// a retriable failure must be able to commit the same stage again.
-    pub fn begin_commit(
+    /// The offsets of one TxnOffsetCommit, held until the commit.
+    pub async fn stage_offsets(
         &self,
-        tenant: &TenantKey,
-        id: &str,
+        bearer: Option<&str>,
+        tid: &str,
         pid: i64,
         epoch: i16,
-    ) -> Result<Bundle, Fault> {
-        self.with(tenant, id, pid, epoch, |txn| match txn.state {
-            TxnState::Committing => Err(Fault::InFlight),
-            TxnState::Abortable => Err(Fault::Abortable),
-            // Kafka's CompleteAbort-then-commit: INVALID_TXN_STATE, not a
-            // commit of nothing. With a stage that outlives its connection a
-            // RESUMED producer can send exactly this — commit a transaction
-            // that was aborted while it was away — and answering it 0 would be
-            // the one answer the module header calls unreachable. A commit
-            // after a COMMIT is still answered 0, which is Kafka's answer to a
-            // repeated commit and what a resumed commit of a transaction that
-            // had already landed must hear.
-            TxnState::Empty if txn.last_aborted => Err(Fault::NotOpen),
-            TxnState::Empty | TxnState::Open => {
-                txn.state = TxnState::Committing;
-                Ok(Bundle {
-                    version: txn.version,
-                    seq: txn.seq,
-                    items: txn.staged.clone(),
-                    group: txn.group.clone(),
-                    offsets: txn.offsets.clone(),
-                })
+        offsets: Vec<PositionOp>,
+    ) -> i16 {
+        let mut inner = self.inner.lock().await;
+        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        if let Err(e) = self.begin(bearer, tid, t).await {
+            return e;
+        }
+        let Stage::Open(o) = &mut t.stage else {
+            return INVALID_TXN_STATE;
+        };
+        if o.committing {
+            return CONCURRENT_TRANSACTIONS;
+        }
+        for op in offsets {
+            let p: i32 = op.partition.parse().unwrap_or(-1);
+            o.groups.insert(op.group.clone());
+            o.offsets
+                .insert((op.group.clone(), op.queue.clone(), p), op);
+        }
+        NONE
+    }
+
+    /// EndTxn.
+    pub async fn end(
+        &self,
+        bearer: Option<&str>,
+        tid: &str,
+        pid: i64,
+        epoch: i16,
+        commit: bool,
+    ) -> i16 {
+        let mut inner = self.inner.lock().await;
+        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let open = match &t.stage {
+            Stage::Open(o) => o.clone(),
+            Stage::Ready => {
+                // A retry of an EndTxn whose answer was lost, or a transaction
+                // that never added anything.
+                return match t.last_end {
+                    Some((_, c)) if c == commit => NONE,
+                    _ if !commit => NONE,
+                    _ => INVALID_TXN_STATE,
+                };
             }
-        })?
-    }
-
-    /// The bundle committed: free the stage, take the fence's new version, and
-    /// count the transaction.
-    pub fn commit_landed(&self, tenant: &TenantKey, id: &str, version: i64) {
-        let mut inner = self.lock();
-        let at = (tenant.clone(), id.to_string());
-        if let Some(txn) = inner.txns.get_mut(&at) {
-            let freed = txn.bytes;
-            txn.clear();
-            txn.version = version;
-            txn.seq += 1;
-            txn.last_aborted = false;
-            inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
+            Stage::Lost if commit => return INVALID_TXN_STATE,
+            Stage::Lost => Open::default(),
+        };
+        if !commit {
+            let value =
+                json!({"pid": t.pid, "epoch": t.epoch, "state": "aborted", "token": open.token});
+            return match self.write_row(bearer, tid, t.version, value).await {
+                Ok(Some(v)) => {
+                    t.version = v;
+                    self.held.fetch_sub(open.bytes as u64, Ordering::Relaxed);
+                    t.stage = Stage::Ready;
+                    t.last_end = Some((open.token, false));
+                    NONE
+                }
+                Ok(None) => PRODUCER_FENCED,
+                Err(e) => of_call_for_group(&e),
+            };
         }
-    }
-
-    /// The bundle failed in a way a retry could still commit: put the
-    /// transaction back where it was and KEEP the stage.
-    ///
-    /// This is the rule that must not be got backwards. Dropping the stage on a
-    /// retriable failure would turn the client's retry into a silent EMPTY
-    /// commit — a transaction the application believes wrote its records and
-    /// which wrote none.
-    pub fn commit_failed(&self, tenant: &TenantKey, id: &str) {
-        let mut inner = self.lock();
-        let at = (tenant.clone(), id.to_string());
-        if let Some(txn) = inner.txns.get_mut(&at) {
-            txn.state = TxnState::Open;
+        // A commit retried after an unknown outcome: did the first one land?
+        if open.committing {
+            match self.read_row(bearer, tid).await {
+                Ok(Some(r)) if r.token == open.token && r.state == "committed" => {
+                    t.version = r.version;
+                    self.held.fetch_sub(open.bytes as u64, Ordering::Relaxed);
+                    t.stage = Stage::Ready;
+                    t.last_end = Some((open.token, true));
+                    return NONE;
+                }
+                Ok(_) => {}
+                Err(e) => return of_call_for_group(&e),
+            }
         }
-    }
-
-    /// Drop the stage and keep the binding: an abort, or a fence.
-    pub fn discard(&self, tenant: &TenantKey, id: &str) -> Option<(i64, u64)> {
-        let mut inner = self.lock();
-        let at = (tenant.clone(), id.to_string());
-        let txn = inner.txns.get_mut(&at)?;
-        let freed = txn.bytes;
-        let (version, seq) = (txn.version, txn.seq);
-        txn.clear();
-        txn.seq += 1;
-        txn.last_aborted = true;
-        inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
-        Some((version, seq))
-    }
-
-    /// Record the version the abort marker landed at, so the NEXT transaction's
-    /// commit expects the right one.
-    pub fn note_version(&self, tenant: &TenantKey, id: &str, version: i64) {
-        let mut inner = self.lock();
-        let at = (tenant.clone(), id.to_string());
-        if let Some(txn) = inner.txns.get_mut(&at) {
-            txn.version = version;
+        if let Stage::Open(o) = &mut t.stage {
+            o.committing = true;
         }
-    }
-
-    /// Forget a `transactional.id` entirely.
-    pub fn forget(&self, tenant: &TenantKey, id: &str) {
-        let mut inner = self.lock();
-        if let Some(txn) = inner.txns.remove(&(tenant.clone(), id.to_string())) {
-            inner.staged_bytes = inner.staged_bytes.saturating_sub(txn.bytes);
+        let fence = crate::core::KvOp::fence(
+            NS,
+            &key(tid),
+            json!({"pid": t.pid, "epoch": t.epoch, "state": "committed", "token": open.token}),
+            t.version,
+        );
+        let positions: Vec<PositionOp> = open.offsets.values().cloned().collect();
+        let outcome = self
+            .queen
+            .transaction(bearer, &open.records, &[fence], &positions)
+            .await;
+        let mut forget = false;
+        let code = match outcome {
+            Ok(Committed::Done { fence_version }) => {
+                self.held.fetch_sub(open.bytes as u64, Ordering::Relaxed);
+                match fence_version {
+                    Some(v) => {
+                        t.version = v;
+                        t.stage = Stage::Ready;
+                        t.last_end = Some((open.token, true));
+                    }
+                    // The answer did not carry the row's new version: the next
+                    // call reads the row again.
+                    None => forget = true,
+                }
+                NONE
+            }
+            Ok(Committed::Fenced) => {
+                // Nothing was written: a newer producer or leader holds the id.
+                self.held.fetch_sub(open.bytes as u64, Ordering::Relaxed);
+                t.stage = Stage::Ready;
+                PRODUCER_FENCED
+            }
+            Ok(Committed::Refused(why)) => {
+                tracing::warn!(target: "kafka", %tid, %why, "a transaction commit was refused; it is aborted");
+                self.held.fetch_sub(open.bytes as u64, Ordering::Relaxed);
+                t.stage = Stage::Ready;
+                INVALID_TXN_STATE
+            }
+            Err(e) => {
+                // Unknown outcome: held, and the retry finds out.
+                tracing::warn!(target: "kafka", %tid, error = %e, "a transaction commit has no answer; held for the retry");
+                CONCURRENT_TRANSACTIONS
+            }
+        };
+        if forget {
+            inner.remove(tid);
         }
+        code
     }
 
-    /// One connection closed: ORPHAN every binding it owns, and drop nothing.
-    ///
-    /// Until 2026-10-01 this dropped the stages, on the argument that a lost
-    /// stage IS an aborted transaction. That is still true, and it is what made
-    /// Flink's exactly-once sink lose data: `KafkaSink` pre-commits a
-    /// transaction at a checkpoint (every record flushed and acknowledged here)
-    /// and commits it once the checkpoint completes, and when the TaskManager
-    /// fails in between, the restarted job RESUMES the transaction from its
-    /// checkpoint — a new connection, no InitProducerId, the same producer id
-    /// and epoch through `FlinkKafkaInternalProducer.resumeTransaction` — and
-    /// sends `EndTxn(commit)`. With the stage gone that commit met
-    /// INVALID_TXN_STATE, and Flink's committer drops a committable it is told
-    /// is in an invalid state: the checkpoint's records were lost while the job
-    /// carried on. Apache Kafka keeps a transaction until its
-    /// `transaction.timeout.ms` whoever disconnects, and so does this now.
-    ///
-    /// So a closed owner starts the binding's linger instead:
-    ///
-    ///   * an OPEN stage stays committable by anyone holding its producer id
-    ///     and epoch until its own deadline, which the sweep enforces exactly as
-    ///     it does for a connected producer;
-    ///   * every orphaned binding is removed once its own timeout has passed
-    ///     since the owner closed ([`Txn::lingered`]). An idle one lingers for
-    ///     the resumed commit of a transaction that HAD landed, which Kafka
-    ///     answers 0 and this answers 0 instead of INVALID_TXN_STATE.
-    ///
-    /// The memory is bounded as before: by the byte caps, by the timeout cap,
-    /// and by orphans giving way first when the process budget is full.
-    /// Nothing changes in the safety property: a resumed commit lands only a
-    /// stage this facade still holds, and an expired or aborted one is refused.
-    pub fn drop_connection(&self, owner: ConnId) {
+    /// Abort what has outlived its timeout; the producer is fenced, as Kafka's
+    /// coordinator fences it, by the epoch its next InitProducerId bumps.
+    pub async fn expire(&self) {
         let now = Instant::now();
-        let mut inner = self.lock();
-        for txn in inner.txns.values_mut().filter(|t| t.owner == owner) {
-            txn.orphaned_at.get_or_insert(now);
+        let mut inner = self.inner.lock().await;
+        let mut timed_out: Vec<String> = Vec::new();
+        for (tid, t) in inner.iter() {
+            if let Stage::Open(o) = &t.stage {
+                if !o.committing && o.started.is_some_and(|s| now.duration_since(s) > t.timeout) {
+                    timed_out.push(tid.clone());
+                }
+            }
         }
-    }
-
-    /// Drop the stage of every open transaction past its deadline.
-    ///
-    /// Not a nicety: the stage is a memory amplifier and this is what bounds it
-    /// in TIME, exactly as the caps bound it in size. A producer that opens a
-    /// transaction and disappears without closing its TCP connection — a hung
-    /// JVM, a partitioned network — holds its bytes until either this or
-    /// `conn::IDLE_TIMEOUT` fires, and this is usually first.
-    ///
-    /// The binding and the durable marker are left alone. The next request
-    /// naming the transaction is answered INVALID_TXN_STATE, which is what the
-    /// client needs to hear.
-    ///
-    /// The one binding that does go is an ORPHAN that has lingered its whole
-    /// timeout ([`Txns::drop_connection`]): nobody holds the connection it was
-    /// bound on, and a resumed producer that comes back later than its own
-    /// `transaction.timeout.ms` meets the same INVALID_TXN_STATE an unknown id
-    /// does. An `Abortable` binding is not swept twice: it holds nothing.
-    pub fn sweep(&self) -> usize {
-        let now = Instant::now();
-        let mut inner = self.lock();
-        let mut swept = 0;
-        let mut freed = 0;
-        for txn in inner.txns.values_mut() {
-            if matches!(txn.state, TxnState::Empty | TxnState::Abortable) || now < txn.deadline {
+        for tid in timed_out {
+            let Some(t) = inner.get_mut(&tid) else {
                 continue;
+            };
+            let Stage::Open(o) = &t.stage else { continue };
+            let (token, bytes) = (o.token, o.bytes);
+            // The epoch moves on: the timed-out producer is fenced.
+            let value = json!({"pid": t.pid, "epoch": t.epoch.saturating_add(1), "state": "aborted", "token": token});
+            let bearer = t.bearer.clone();
+            if let Ok(Some(v)) = self
+                .write_row(bearer.as_deref(), &tid, t.version, value)
+                .await
+            {
+                t.version = v;
+                t.epoch = t.epoch.saturating_add(1);
             }
-            freed += txn.bytes;
-            txn.expire();
-            swept += 1;
+            self.held.fetch_sub(bytes as u64, Ordering::Relaxed);
+            t.stage = Stage::Ready;
+            t.last_end = Some((token, false));
+            tracing::info!(target: "kafka", %tid, "a transaction passed its timeout and was aborted");
         }
-        inner.txns.retain(|_, t| {
-            let gone = t.lingered(now);
-            freed += if gone { t.bytes } else { 0 };
-            !gone
-        });
-        inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
-        if swept > 0 {
-            if let Some(suppressed) = SWEPT.tick_now() {
-                tracing::warn!(
-                    target: "kafka",
-                    swept,
-                    freed,
-                    suppressed,
-                    "transactions past their transaction.timeout.ms; their staged records were \
-                     dropped and were never written"
-                );
-            }
-        }
-        swept
     }
 }
 
-/// Expire ORPHANED stages, oldest orphan first, until the process charge is at
-/// or below `target` or no orphan holds anything. Answers how many it expired.
-///
-/// The price is paid by the one party that is not here: a producer that may
-/// come back to resume a commit ([`Txns::drop_connection`]) meets
-/// INVALID_TXN_STATE instead, which is what it met before stages outlived
-/// their connections. A connected producer's stage is never taken this way.
-fn shed_orphans(inner: &mut Inner, target: usize) -> usize {
-    let mut orphans: Vec<(Instant, (TenantKey, String))> = inner
-        .txns
-        .iter()
-        .filter(|(_, t)| t.bytes > 0 && t.state == TxnState::Open)
-        .filter_map(|(key, t)| t.orphaned_at.map(|at| (at, key.clone())))
-        .collect();
-    orphans.sort_by_key(|(at, _)| *at);
-    let mut shed = 0;
-    for (_, key) in orphans {
-        if inner.staged_bytes <= target {
-            break;
-        }
-        if let Some(txn) = inner.txns.get_mut(&key) {
-            let freed = txn.bytes;
-            txn.expire();
-            inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
-            shed += 1;
-        }
-    }
-    if shed > 0 {
-        if let Some(suppressed) = SWEPT.tick_now() {
-            tracing::warn!(
-                target: "kafka",
-                shed,
-                suppressed,
-                "QUEEN_KAFKA_TXN_MAX_STAGED_BYTES is full: transactions whose producer had \
-                 disconnected gave their stages up to a connected one; a resumed commit of \
-                 them is answered INVALID_TXN_STATE"
-            );
-        }
-    }
-    shed
-}
-
-/// Everything `EndTxn(commit)` needs, taken out of the stage.
-#[derive(Debug, Clone)]
-pub struct Bundle {
-    /// The `qk:txn:` version to `expect`. THE fence.
-    pub version: i64,
-    /// The transaction ordinal this commit will become.
-    pub seq: u64,
-    pub items: Vec<PushItem>,
-    pub group: Option<String>,
-    pub offsets: Vec<(String, Committed)>,
-}
-
-impl Bundle {
-    /// The KV rider of the commit, in the order the design fixes.
-    ///
-    /// **Index 0 is the fence AND the outcome marker, in one operation**, and
-    /// `required: true` on it is the whole mechanism: without it a lost
-    /// precondition is a verdict that rolls back nothing and the records would
-    /// land anyway. With it, a fenced producer writes exactly zero records and
-    /// zero offsets.
-    ///
-    /// The offset writes are UNCONDITIONAL, byte-identical to what
-    /// `offsets::store` sends in single mode today. There is no `qk:fence:`
-    /// operation because there is no cluster: transactions are refused when
-    /// `QUEEN_KAFKA_NODE_ID` is set.
-    #[allow(clippy::too_many_arguments)]
-    pub fn kv_ops(
-        &self,
-        transactional_id: &str,
-        pid: i64,
-        epoch: i16,
-        node: i32,
-        incarnation: &str,
-        now_ms: i64,
-        protocol_type: &str,
-    ) -> Option<Vec<KvOp>> {
-        let mut ops = Vec::with_capacity(self.offsets.len() + 2);
-        ops.push(KvOp::fence(
-            offsets::NAMESPACE,
-            &key(transactional_id)?,
-            marker(
-                pid,
-                epoch,
-                Outcome::Committed,
-                self.seq + 1,
-                node,
-                incarnation,
-                now_ms,
-            ),
-            self.version,
-        ));
-        // The durable group index (M7 F2), and only when this transaction
-        // actually commits an offset: a group that exists is a group something
-        // was committed for, and writing the row for a transaction that
-        // committed none would list a group with nothing in it.
-        if let Some(group) = self.group.as_deref().filter(|_| !self.offsets.is_empty()) {
-            ops.push(offsets::index_op(group, protocol_type, now_ms)?);
-        }
-        for (key, committed) in &self.offsets {
-            ops.push(offsets::commit_op(key, committed));
-        }
-        Some(ops)
-    }
-
-    /// The commit against a broker that keeps POSITIONS
-    /// ([`crate::queen::QueenApi::native_positions`]): the same KV rider
-    /// without the offset writes — the fence at index 0 and the group index
-    /// row — and the offsets as the bundle's `positions` rider, so they commit
-    /// or roll back with the records exactly as the KV writes did. `None` when
-    /// the rider cannot be built (see [`Bundle::kv_ops`]).
-    #[allow(clippy::too_many_arguments)]
-    pub fn position_rider(
-        &self,
-        transactional_id: &str,
-        pid: i64,
-        epoch: i16,
-        node: i32,
-        incarnation: &str,
-        now_ms: i64,
-        protocol_type: &str,
-    ) -> Option<(Vec<KvOp>, Vec<crate::queen::PositionOp>)> {
-        let mut kv = self.kv_ops(
-            transactional_id,
-            pid,
-            epoch,
-            node,
-            incarnation,
-            now_ms,
-            protocol_type,
-        )?;
-        // The offset writes are the tail of `kv_ops`, by construction.
-        kv.truncate(kv.len() - self.offsets.len());
-        let positions: Option<Vec<crate::queen::PositionOp>> =
-            offsets::position_ops(&self.offsets).into_iter().collect();
-        Some((kv, positions?))
-    }
-}
-
-/// The sweep, as a task. Spawned from `boot.rs` and from nothing else.
-pub async fn sweep_loop(txns: std::sync::Arc<Txns>) {
-    let mut tick = tokio::time::interval(SWEEP_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tick.tick().await;
-        txns.sweep();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tenant() -> TenantKey {
-        TenantKey::Tenant("acme".into())
-    }
-
-    fn txns() -> Txns {
-        Txns::new(Limits::default())
-    }
-
-    fn bound(t: &Txns, id: &str) {
-        t.bind(&tenant(), id, 7, 0, 100, 1, Duration::from_secs(60))
-            .expect("the cap is not reached");
-    }
-
-    fn item(topic: &str, partition: i32) -> PushItem {
-        PushItem {
-            queue: topic.to_string(),
-            partition: partition.to_string(),
-            payload: serde_json::json!({"v": "AA=="}),
-        }
-    }
-
-    fn committed(offset: i64) -> Committed {
-        Committed {
-            offset,
-            metadata: String::new(),
-            ts: 0,
-        }
-    }
-
-    // ------------------------------------------------------------------ keys
-
-    /// The disjointness the whole `qk:` layout rests on, asserted against an
-    /// adversarial `transactional.id` rather than against a friendly one: a
-    /// producer may name itself `group:orders` or `node:1`, and neither may
-    /// land in — or be read as — another key space.
-    #[test]
-    fn the_transaction_key_space_cannot_see_the_others() {
-        for id in ["tx-1", "group:orders", "groups:orders", "node:1", "fence:g"] {
-            let k = key(id).expect("short enough to store");
-            assert!(k.starts_with("qk:txn:"), "{k}");
-            assert!(!k.starts_with("qk:group:"), "{k}");
-            assert!(!k.starts_with("qk:groups:"), "{k}");
-            assert!(!k.starts_with("qk:fence:"), "{k}");
-            assert!(!k.starts_with("qk:node:"), "{k}");
-            // ...and the separator itself is escaped, so no id can spell a key
-            // of another shape.
-            assert!(!k["qk:txn:".len()..].contains(':'), "{k}");
-        }
-        // A prefix read of any other space cannot see a transaction row, and a
-        // prefix read of this one cannot see theirs.
-        assert!(!"qk:txn:x".starts_with("qk:group:"));
-        assert!(!"qk:groups:x".starts_with("qk:txn:"));
-    }
-
-    #[test]
-    fn a_transactional_id_that_will_not_fit_has_no_key() {
-        assert!(key(&"a".repeat(400)).is_some());
-        assert!(key(&"a".repeat(600)).is_none());
-        // Escaping is what makes the bound reachable with a shorter id: every
-        // byte outside the safe set costs three.
-        assert!(key(&"\u{1}".repeat(200)).is_none());
-    }
-
-    #[test]
-    fn a_marker_round_trips() {
-        let v = marker(7, 3, Outcome::Committed, 9, 0, "abc", 1);
-        assert_eq!(read_marker(&v), Some((7, 3, 9)));
-        assert_eq!(v.get("state").and_then(|s| s.as_str()), Some("committed"));
-        assert_eq!(read_marker(&serde_json::json!({"pid": 1})), None);
-    }
-
-    // --------------------------------------------------------- the machine
-
-    #[test]
-    fn a_bound_transaction_starts_empty_and_opens_on_its_first_partitions() {
-        let t = txns();
-        bound(&t, "tx");
-        assert_eq!(
-            t.with(&tenant(), "tx", 7, 0, |x| x.state).unwrap(),
-            TxnState::Empty
-        );
-        let verdicts = t
-            .add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        assert_eq!(verdicts, vec![Ok(())]);
-        assert_eq!(
-            t.with(&tenant(), "tx", 7, 0, |x| x.state).unwrap(),
-            TxnState::Open
-        );
-    }
-
-    #[test]
-    fn an_unknown_transactional_id_is_a_fatal_state_error() {
-        let t = txns();
-        assert_eq!(
-            t.with(&tenant(), "tx", 7, 0, |_| ()).unwrap_err(),
-            Fault::Unknown
-        );
-        assert_eq!(Fault::Unknown.code(), ResponseError::InvalidTxnState);
-    }
-
-    /// The zombie path, and the reason this module exists: a second producer
-    /// took the id, so the first one's next request carries an epoch below the
-    /// bound one and is FENCED rather than served.
-    #[test]
-    fn a_stale_epoch_is_fenced_and_a_future_one_is_not_ours() {
-        let t = txns();
-        bound(&t, "tx");
-        t.bind(&tenant(), "tx", 7, 1, 101, 2, Duration::from_secs(60))
-            .unwrap();
-        assert_eq!(
-            t.with(&tenant(), "tx", 7, 0, |_| ()).unwrap_err(),
-            Fault::Fenced
-        );
-        assert_eq!(Fault::Fenced.code(), ResponseError::ProducerFenced);
-        assert_eq!(
-            t.with(&tenant(), "tx", 7, 2, |_| ()).unwrap_err(),
-            Fault::AheadOfUs
-        );
-        assert_eq!(Fault::AheadOfUs.code(), ResponseError::InvalidProducerEpoch);
-        // ...and the right epoch still works.
-        assert!(t.with(&tenant(), "tx", 7, 1, |_| ()).is_ok());
-    }
-
-    #[test]
-    fn a_producer_id_that_is_not_the_bound_one_is_a_mapping_error() {
-        let t = txns();
-        bound(&t, "tx");
-        assert_eq!(
-            t.with(&tenant(), "tx", 8, 0, |_| ()).unwrap_err(),
-            Fault::WrongProducer
-        );
-        assert_eq!(
-            Fault::WrongProducer.code(),
-            ResponseError::InvalidProducerIdMapping
-        );
-    }
-
-    /// A rebind at a higher epoch drops what the old epoch staged, and returns
-    /// the memory at the moment of fencing rather than at the sweep.
-    #[test]
-    fn a_rebind_drops_the_previous_epochs_stage() {
-        let t = txns();
-        bound(&t, "tx");
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        t.stage_records(
-            &tenant(),
-            "tx",
-            7,
-            0,
-            "orders",
-            0,
-            vec![item("orders", 0)],
-            1_000,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(t.staged_bytes(), 1_000);
-        t.bind(&tenant(), "tx", 7, 1, 101, 2, Duration::from_secs(60))
-            .unwrap();
-        assert_eq!(t.staged_bytes(), 0);
-        assert_eq!(t.len(), 1);
-    }
-
-    #[test]
-    fn two_tenants_naming_one_transactional_id_stay_apart() {
-        let t = txns();
-        bound(&t, "tx");
-        let other = TenantKey::Tenant("globex".into());
-        t.bind(&other, "tx", 99, 4, 500, 2, Duration::from_secs(60))
-            .unwrap();
-        assert_eq!(t.len(), 2);
-        // Each sees only its own binding: the other tenant's pid is a mapping
-        // error here, not an accepted request.
-        assert_eq!(
-            t.with(&tenant(), "tx", 99, 4, |_| ()).unwrap_err(),
-            Fault::WrongProducer
-        );
-        assert!(t.with(&other, "tx", 99, 4, |_| ()).is_ok());
-    }
-
-    // ----------------------------------------------------------- the caps
-
-    #[test]
-    fn the_open_transaction_cap_refuses_a_new_id_and_not_an_existing_one() {
-        let t = Txns::new(Limits {
-            max_open: 2,
-            ..Limits::default()
-        });
-        // Two producers, so two connections: one connection's second id takes
-        // its first idle one away ([`Txns::bind`]).
-        t.bind(&tenant(), "a", 7, 0, 1, 1, Duration::from_secs(60))
-            .unwrap();
-        t.bind(&tenant(), "b", 7, 0, 1, 2, Duration::from_secs(60))
-            .unwrap();
-        assert!(t
-            .bind(&tenant(), "c", 7, 0, 1, 3, Duration::from_secs(60))
-            .is_err());
-        // An id already bound is a REBIND, which allocates nothing.
-        assert!(t
-            .bind(&tenant(), "a", 7, 1, 2, 1, Duration::from_secs(60))
-            .is_ok());
-    }
-
-    #[test]
-    fn a_transaction_past_its_byte_cap_becomes_abortable() {
-        let t = Txns::new(Limits {
-            max_txn_bytes: 1_000,
-            ..Limits::default()
-        });
-        bound(&t, "tx");
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        assert_eq!(
-            t.stage_records(
-                &tenant(),
-                "tx",
-                7,
-                0,
-                "orders",
-                0,
-                vec![item("orders", 0)],
-                1_001
-            )
-            .unwrap(),
-            Err(Full::Transaction)
-        );
-        assert_eq!(
-            t.with(&tenant(), "tx", 7, 0, |x| x.state).unwrap(),
-            TxnState::Abortable
-        );
-        // ...and nothing else is accepted until it is aborted.
-        assert_eq!(
-            t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 1)])
-                .unwrap_err(),
-            Fault::Abortable
-        );
-        assert_eq!(t.staged_bytes(), 0);
-    }
-
-    #[test]
-    fn a_transaction_past_its_record_cap_becomes_abortable() {
-        let t = Txns::new(Limits {
-            max_txn_records: 1,
-            ..Limits::default()
-        });
-        bound(&t, "tx");
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        assert_eq!(
-            t.stage_records(
-                &tenant(),
-                "tx",
-                7,
-                0,
-                "orders",
-                0,
-                vec![item("orders", 0), item("orders", 0)],
-                10
-            )
-            .unwrap(),
-            Err(Full::Transaction)
-        );
-    }
-
-    /// The process cap answers something DIFFERENT on purpose: memory frees up
-    /// when another transaction commits, so this one is retriable and the
-    /// transaction is left open rather than poisoned.
-    #[test]
-    fn the_process_cap_is_retriable_and_leaves_the_transaction_open() {
-        let t = Txns::new(Limits {
-            max_staged_bytes: 1_000,
-            ..Limits::default()
-        });
-        bound(&t, "a");
-        t.add_partitions(&tenant(), "a", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        t.stage_records(
-            &tenant(),
-            "a",
-            7,
-            0,
-            "orders",
-            0,
-            vec![item("orders", 0)],
-            900,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            t.stage_records(
-                &tenant(),
-                "a",
-                7,
-                0,
-                "orders",
-                0,
-                vec![item("orders", 0)],
-                200
-            )
-            .unwrap(),
-            Err(Full::Process)
-        );
-        assert_eq!(
-            t.with(&tenant(), "a", 7, 0, |x| x.state).unwrap(),
-            TxnState::Open
-        );
-    }
-
-    #[test]
-    fn the_partition_cap_refuses_only_the_partitions_past_it() {
-        let t = txns();
-        bound(&t, "tx");
-        let wanted: Vec<(String, i32)> = (0..MAX_TXN_PARTITIONS as i32 + 2)
-            .map(|p| ("orders".to_string(), p))
-            .collect();
-        let verdicts = t.add_partitions(&tenant(), "tx", 7, 0, &wanted).unwrap();
-        assert_eq!(
-            verdicts.iter().filter(|v| v.is_ok()).count(),
-            MAX_TXN_PARTITIONS
-        );
-        assert_eq!(verdicts[MAX_TXN_PARTITIONS], Err(Full::Partitions));
-    }
-
-    #[test]
-    fn the_offset_cap_is_the_wires_op_budget_minus_the_fence_and_the_index() {
-        assert_eq!(MAX_TXN_OFFSETS, 62);
-        let t = txns();
-        bound(&t, "tx");
-        for i in 0..MAX_TXN_OFFSETS {
-            t.stage_offset(&tenant(), "tx", 7, 0, format!("k{i}"), committed(1))
-                .unwrap()
-                .unwrap();
-        }
-        assert_eq!(
-            t.stage_offset(&tenant(), "tx", 7, 0, "one-too-many".into(), committed(1))
-                .unwrap(),
-            Err(Full::Offsets)
-        );
-        // ...and a re-commit of a key already staged is not a new operation.
-        assert_eq!(
-            t.stage_offset(&tenant(), "tx", 7, 0, "k0".into(), committed(9))
-                .unwrap(),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn a_second_group_in_one_transaction_is_refused() {
-        let t = txns();
-        bound(&t, "tx");
-        assert_eq!(t.add_offsets(&tenant(), "tx", 7, 0, "g").unwrap(), Ok(()));
-        assert_eq!(t.add_offsets(&tenant(), "tx", 7, 0, "g").unwrap(), Ok(()));
-        assert_eq!(
-            t.add_offsets(&tenant(), "tx", 7, 0, "other").unwrap(),
-            Err(Fault::NotOpen)
-        );
-    }
-
-    // -------------------------------------------------------- the outcomes
-
-    #[test]
-    fn a_commit_that_lands_frees_the_stage_and_takes_the_new_version() {
-        let t = txns();
-        bound(&t, "tx");
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        t.stage_records(
-            &tenant(),
-            "tx",
-            7,
-            0,
-            "orders",
-            0,
-            vec![item("orders", 0)],
-            50,
-        )
-        .unwrap()
-        .unwrap();
-        let bundle = t.begin_commit(&tenant(), "tx", 7, 0).unwrap();
-        assert_eq!(bundle.version, 100);
-        assert_eq!(bundle.items.len(), 1);
-        // While it is in flight the stage is still charged and a second EndTxn
-        // is refused rather than served twice.
-        assert_eq!(t.staged_bytes(), 50);
-        assert_eq!(
-            t.begin_commit(&tenant(), "tx", 7, 0).unwrap_err(),
-            Fault::InFlight
-        );
-        t.commit_landed(&tenant(), "tx", 200);
-        assert_eq!(t.staged_bytes(), 0);
-        let (version, seq, state) = t
-            .with(&tenant(), "tx", 7, 0, |x| (x.version, x.seq, x.state))
-            .unwrap();
-        assert_eq!((version, seq, state), (200, 1, TxnState::Empty));
-    }
-
-    /// The rule that must not be got backwards: a retriable failure KEEPS the
-    /// stage, or the client's retry would commit an empty transaction while
-    /// believing it wrote its records.
-    #[test]
-    fn a_retriable_commit_failure_keeps_the_stage() {
-        let t = txns();
-        bound(&t, "tx");
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        t.stage_records(
-            &tenant(),
-            "tx",
-            7,
-            0,
-            "orders",
-            0,
-            vec![item("orders", 0)],
-            50,
-        )
-        .unwrap()
-        .unwrap();
-        t.begin_commit(&tenant(), "tx", 7, 0).unwrap();
-        t.commit_failed(&tenant(), "tx");
-        assert_eq!(t.staged_bytes(), 50);
-        let again = t.begin_commit(&tenant(), "tx", 7, 0).unwrap();
-        assert_eq!(again.items.len(), 1);
-    }
-
-    #[test]
-    fn an_abort_drops_the_stage_and_keeps_the_binding() {
-        let t = txns();
-        bound(&t, "tx");
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        t.stage_records(
-            &tenant(),
-            "tx",
-            7,
-            0,
-            "orders",
-            0,
-            vec![item("orders", 0)],
-            50,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(t.discard(&tenant(), "tx"), Some((100, 0)));
-        assert_eq!(t.staged_bytes(), 0);
-        assert_eq!(t.len(), 1);
-        assert_eq!(
-            t.with(&tenant(), "tx", 7, 0, |x| (x.state, x.seq)).unwrap(),
-            (TxnState::Empty, 1)
-        );
-    }
-
-    /// Open `id` and stage one record of `bytes` into it.
-    fn open_with(t: &Txns, id: &str, pid: i64, bytes: usize) {
-        t.add_partitions(&tenant(), id, pid, 0, &[("orders".into(), 0)])
-            .unwrap();
-        t.stage_records(
-            &tenant(),
-            id,
-            pid,
-            0,
-            "orders",
-            0,
-            vec![item("orders", 0)],
-            bytes,
-        )
-        .unwrap()
-        .unwrap();
-    }
-
-    /// THE Flink case. A disconnect ORPHANS the stage instead of dropping it,
-    /// so a restarted job that resumes the transaction on a new connection —
-    /// same producer id and epoch, no InitProducerId — commits exactly what the
-    /// old connection staged. Before 2026-10-01 this commit met
-    /// INVALID_TXN_STATE and Flink dropped the checkpoint's records.
-    #[test]
-    fn a_disconnect_orphans_the_stage_and_a_resumed_commit_finds_it() {
-        let t = txns();
-        t.bind(&tenant(), "a", 7, 0, 1, 11, Duration::from_secs(60))
-            .unwrap();
-        t.bind(&tenant(), "b", 8, 0, 1, 22, Duration::from_secs(60))
-            .unwrap();
-        open_with(&t, "a", 7, 100);
-        open_with(&t, "b", 8, 100);
-        t.drop_connection(11);
-        assert_eq!(t.len(), 2, "the orphan is still bound");
-        assert_eq!(t.staged_bytes(), 200, "and still holds its stage");
-        let bundle = t.begin_commit(&tenant(), "a", 7, 0).expect("resumed");
-        assert_eq!(bundle.items.len(), 1);
-        t.commit_landed(&tenant(), "a", 2);
-        assert_eq!(t.staged_bytes(), 100);
-    }
-
-    /// An orphan outlives its connection by its own timeout and no longer: an
-    /// open stage expires at its deadline exactly as a connected one does, and
-    /// the binding itself goes once the timeout has passed since the owner
-    /// closed. Bounded in time, like everything else here.
-    #[tokio::test(start_paused = true)]
-    async fn an_orphan_lingers_its_own_timeout_and_no_longer() {
-        let t = txns();
-        t.bind(&tenant(), "staged", 7, 0, 1, 11, Duration::from_secs(30))
-            .unwrap();
-        open_with(&t, "staged", 7, 100);
-        t.bind(&tenant(), "idle", 8, 0, 1, 22, Duration::from_secs(30))
-            .unwrap();
-        t.drop_connection(11);
-        t.drop_connection(22);
-
-        tokio::time::advance(Duration::from_secs(29)).await;
-        assert_eq!(t.sweep(), 0);
-        assert_eq!(t.len(), 2, "inside the timeout both linger");
-        assert!(t.begin_commit(&tenant(), "staged", 7, 0).is_ok());
-        t.commit_failed(&tenant(), "staged");
-
-        tokio::time::advance(Duration::from_secs(2)).await;
-        t.sweep();
-        assert_eq!(t.len(), 0, "past it both are gone");
-        assert_eq!(t.staged_bytes(), 0);
-        assert_eq!(
-            t.begin_commit(&tenant(), "staged", 7, 0)
-                .unwrap_err()
-                .code(),
-            ResponseError::InvalidTxnState
-        );
-    }
-
-    /// A connected producer's bindings never linger out: the timeout is the
-    /// orphan's, and an idle binding on a live connection is the producer's
-    /// between two transactions.
-    #[tokio::test(start_paused = true)]
-    async fn a_connected_binding_never_lingers_out() {
-        let t = txns();
-        bound(&t, "tx");
-        tokio::time::advance(Duration::from_secs(3_600)).await;
-        t.sweep();
-        assert_eq!(t.len(), 1);
-    }
-
-    /// A resumed commit of a transaction that had ALREADY landed is Kafka's
-    /// repeated commit, answered 0 and writing nothing; one of a transaction
-    /// that was ABORTED is INVALID_TXN_STATE, and never a commit of nothing.
-    /// The difference is the whole safety property once a stage can be
-    /// committed by a producer that was away while it was decided.
-    #[test]
-    fn a_commit_after_an_abort_is_refused_and_after_a_commit_is_not() {
-        let t = txns();
-        bound(&t, "tx");
-        open_with(&t, "tx", 7, 100);
-        t.begin_commit(&tenant(), "tx", 7, 0).unwrap();
-        t.commit_landed(&tenant(), "tx", 101);
-        let again = t.begin_commit(&tenant(), "tx", 7, 0).expect("repeated");
-        assert!(again.items.is_empty() && again.offsets.is_empty());
-        t.commit_landed(&tenant(), "tx", 101);
-
-        open_with(&t, "tx", 7, 100);
-        t.discard(&tenant(), "tx");
-        assert_eq!(
-            t.begin_commit(&tenant(), "tx", 7, 0).unwrap_err(),
-            Fault::NotOpen
-        );
-        assert_eq!(Fault::NotOpen.code(), ResponseError::InvalidTxnState);
-        // ...and the next transaction the producer opens commits as usual.
-        open_with(&t, "tx", 7, 100);
-        assert_eq!(
-            t.begin_commit(&tenant(), "tx", 7, 0).unwrap().items.len(),
-            1
-        );
-    }
-
-    /// Flink re-initialises one pooled producer under a fresh id per
-    /// checkpoint. The connection's previous idle binding goes with each bind,
-    /// or the open-transaction cap would fill one checkpoint at a time; a
-    /// binding still holding a stage stays.
-    #[test]
-    fn a_bind_takes_away_the_same_connections_idle_bindings() {
-        let t = txns();
-        t.bind(&tenant(), "ckpt-1", 7, 0, 1, 11, Duration::from_secs(60))
-            .unwrap();
-        t.bind(&tenant(), "ckpt-2", 8, 0, 1, 11, Duration::from_secs(60))
-            .unwrap();
-        assert_eq!(t.len(), 1);
-        assert_eq!(
-            t.with(&tenant(), "ckpt-1", 7, 0, |_| ()).unwrap_err(),
-            Fault::Unknown
-        );
-        open_with(&t, "ckpt-2", 8, 100);
-        t.bind(&tenant(), "ckpt-3", 9, 0, 1, 11, Duration::from_secs(60))
-            .unwrap();
-        assert_eq!(t.len(), 2, "an open stage is not idle");
-        // Another connection's idle binding is not this connection's to take.
-        t.bind(&tenant(), "other", 10, 0, 1, 22, Duration::from_secs(60))
-            .unwrap();
-        t.bind(&tenant(), "ckpt-4", 11, 0, 1, 11, Duration::from_secs(60))
-            .unwrap();
-        assert!(t.with(&tenant(), "other", 10, 0, |_| ()).is_ok());
-    }
-
-    /// At the open-transaction cap an ORPHANED idle binding gives way to a new
-    /// producer; with none to give, the cap refuses as it always did.
-    #[test]
-    fn at_the_cap_an_orphaned_idle_binding_gives_way() {
-        let t = Txns::new(Limits {
-            max_open: 2,
-            ..Limits::default()
-        });
-        let bind = |id: &str, owner: ConnId| {
-            t.bind(&tenant(), id, 7, 0, 1, owner, Duration::from_secs(60))
-        };
-        bind("a", 1).unwrap();
-        bind("b", 2).unwrap();
-        assert!(bind("c", 3).is_err(), "no orphan to give way");
-        t.drop_connection(1);
-        bind("c", 3).expect("the orphan gave way");
-        assert_eq!(t.len(), 2);
-        assert!(t.with(&tenant(), "b", 7, 0, |_| ()).is_ok());
-    }
-
-    /// A full process budget takes an ORPHAN's stage before it refuses a
-    /// connected producer, and the orphan's resumed commit is then refused
-    /// rather than answered as a commit of nothing.
-    #[test]
-    fn a_full_budget_takes_an_orphans_stage_first() {
-        let t = Txns::new(Limits {
-            max_staged_bytes: 1_000,
-            max_txn_bytes: 1_000,
-            ..Limits::default()
-        });
-        t.bind(&tenant(), "gone", 7, 0, 1, 11, Duration::from_secs(60))
-            .unwrap();
-        t.bind(&tenant(), "here", 8, 0, 1, 22, Duration::from_secs(60))
-            .unwrap();
-        open_with(&t, "gone", 7, 600);
-        t.drop_connection(11);
-        open_with(&t, "here", 8, 600);
-        assert_eq!(t.staged_bytes(), 600);
-        assert_eq!(
-            t.begin_commit(&tenant(), "gone", 7, 0).unwrap_err().code(),
-            ResponseError::InvalidTxnState
-        );
-        // A connected producer's stage is never taken: with no orphan left the
-        // budget refuses retriably, as before.
-        t.bind(&tenant(), "third", 9, 0, 1, 33, Duration::from_secs(60))
-            .unwrap();
-        t.add_partitions(&tenant(), "third", 9, 0, &[("orders".into(), 0)])
-            .unwrap();
-        assert_eq!(
-            t.stage_records(
-                &tenant(),
-                "third",
-                9,
-                0,
-                "orders",
-                0,
-                vec![item("orders", 0)],
-                600
-            )
-            .unwrap(),
-            Err(Full::Process)
-        );
-        assert_eq!(t.staged_bytes(), 600);
-    }
-
-    // ----------------------------------------------------------- the sweep
-
-    #[tokio::test(start_paused = true)]
-    async fn the_sweep_drops_an_open_transaction_past_its_deadline() {
-        let t = txns();
-        t.bind(&tenant(), "tx", 7, 0, 100, 1, Duration::from_secs(30))
-            .unwrap();
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        t.stage_records(
-            &tenant(),
-            "tx",
-            7,
-            0,
-            "orders",
-            0,
-            vec![item("orders", 0)],
-            500,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(t.sweep(), 0, "the deadline has not passed");
-        tokio::time::advance(Duration::from_secs(31)).await;
-        assert_eq!(t.sweep(), 1);
-        assert_eq!(t.staged_bytes(), 0);
-        // The BINDING survives: the next request is answered INVALID_TXN_STATE
-        // because the transaction is not open, not because the id is unknown.
-        assert_eq!(t.len(), 1);
-        // And the commit is REFUSED rather than answered as a commit of
-        // nothing. This assertion is the one the acceptance suite's
-        // `transaction.timeout.ms` check reads from the client side: a swept
-        // transaction whose commit answered 0 would tell an application that
-        // records it staged had landed, when they were dropped.
-        //
-        // The CODE and not the fault: whether the request meets `Expired` (the
-        // deadline check in `with`, which fires first because the deadline is
-        // still in the past) or `Abortable` (the state the sweep left) depends
-        // only on which of the two got there first, and both must be 48.
-        assert_eq!(
-            t.begin_commit(&tenant(), "tx", 7, 0).unwrap_err().code(),
-            kafka_protocol::error::ResponseError::InvalidTxnState
-        );
-        assert_eq!(
-            Fault::Abortable.code(),
-            kafka_protocol::error::ResponseError::InvalidTxnState
-        );
-    }
-
-    /// The other half of [`Txn::expire`]: a swept transaction refuses every
-    /// commit, but an ABORT resets the binding so the producer opens its next
-    /// transaction without re-initialising.
-    ///
-    /// `handlers::end_txn::abort` is what performs the reset, by falling
-    /// through to `discard` on an expired binding instead of answering early;
-    /// this pins the registry half of it, which is that a discarded binding is
-    /// `Empty` again and takes a FRESH deadline on the next
-    /// `AddPartitionsToTxn`.
-    #[tokio::test(start_paused = true)]
-    async fn an_abort_reopens_a_transaction_the_deadline_closed() {
-        let t = txns();
-        t.bind(&tenant(), "tx", 7, 0, 100, 1, Duration::from_secs(30))
-            .unwrap();
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        tokio::time::advance(Duration::from_secs(31)).await;
-        assert_eq!(t.sweep(), 1);
-        assert!(t.discard(&tenant(), "tx").is_some());
-        // Open again, and this time the deadline is 30 seconds from NOW.
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap()
-            .into_iter()
-            .for_each(|r| r.unwrap());
-        assert_eq!(t.sweep(), 0);
-        assert_eq!(
-            t.begin_commit(&tenant(), "tx", 7, 0).unwrap().items.len(),
-            0
-        );
-    }
-
-    /// An EMPTY binding has no deadline to miss: a producer between two
-    /// transactions is idle, not late.
-    #[tokio::test(start_paused = true)]
-    async fn the_sweep_leaves_an_empty_binding_alone() {
-        let t = txns();
-        t.bind(&tenant(), "tx", 7, 0, 100, 1, Duration::from_secs(30))
-            .unwrap();
-        tokio::time::advance(Duration::from_secs(120)).await;
-        assert_eq!(t.sweep(), 0);
-        assert!(t.with(&tenant(), "tx", 7, 0, |_| ()).is_ok());
-    }
-
-    /// A request that arrives between two sweeps meets the same answer the
-    /// sweep would have left for it, and frees the same memory.
-    #[tokio::test(start_paused = true)]
-    async fn a_request_past_the_deadline_expires_the_transaction_itself() {
-        let t = txns();
-        t.bind(&tenant(), "tx", 7, 0, 100, 1, Duration::from_secs(30))
-            .unwrap();
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        t.stage_records(
-            &tenant(),
-            "tx",
-            7,
-            0,
-            "orders",
-            0,
-            vec![item("orders", 0)],
-            500,
-        )
-        .unwrap()
-        .unwrap();
-        tokio::time::advance(Duration::from_secs(31)).await;
-        assert_eq!(
-            t.begin_commit(&tenant(), "tx", 7, 0).unwrap_err(),
-            Fault::Expired
-        );
-        assert_eq!(t.staged_bytes(), 0);
-    }
-
-    /// The timeout the client asks for is CLAMPED, never taken: a producer
-    /// asking for an hour on a facade configured for fifteen minutes gets
-    /// fifteen minutes rather than an argument.
-    #[tokio::test(start_paused = true)]
-    async fn a_timeout_above_the_cap_is_clamped() {
-        let t = Txns::new(Limits {
-            max_timeout: Duration::from_secs(10),
-            ..Limits::default()
-        });
-        t.bind(&tenant(), "tx", 7, 0, 100, 1, Duration::from_secs(3_600))
-            .unwrap();
-        t.add_partitions(&tenant(), "tx", 7, 0, &[("orders".into(), 0)])
-            .unwrap();
-        tokio::time::advance(Duration::from_secs(11)).await;
-        assert_eq!(t.sweep(), 1);
-    }
-
-    // ---------------------------------------------------------- the bundle
-
-    /// THE shape of a commit: the fence first, `required`, expecting the
-    /// version this facade holds — and everything else after it.
-    #[test]
-    fn the_fence_is_at_index_zero_and_is_required() {
-        let bundle = Bundle {
-            version: 100,
-            seq: 3,
-            items: vec![item("orders", 0)],
-            group: Some("orders-consumer".to_string()),
-            offsets: vec![(
-                offsets::key("orders-consumer", "orders", 0).unwrap(),
-                committed(42),
-            )],
-        };
-        let ops = bundle
-            .kv_ops("tx-1", 7, 2, 0, "inc", 1_700_000_000_000, "consumer")
-            .expect("every key fits");
-        assert_eq!(ops.len(), 3, "fence, group index, one offset");
-        match &ops[0] {
-            KvOp::Put {
-                ns,
-                key,
-                value,
-                forever,
-                expect,
-                required,
-                ..
-            } => {
-                assert_eq!(ns, offsets::NAMESPACE);
-                assert_eq!(key, "qk:txn:tx-1");
-                assert!(*forever, "a TTL would abort a slow producer's next commit");
-                assert_eq!(*expect, Some(100));
-                assert!(*required, "without this a fenced commit writes its records");
-                assert_eq!(read_marker(value), Some((7, 2, 4)));
-                assert_eq!(
-                    value.get("state").and_then(|s| s.as_str()),
-                    Some("committed")
-                );
-            }
-            other => panic!("index 0 is not the fence: {other:?}"),
-        }
-        // The offsets are UNCONDITIONAL: the fence is what gates them.
-        match &ops[2] {
-            KvOp::Put { expect, key, .. } => {
-                assert_eq!(*expect, None);
-                assert_eq!(key, "qk:group:orders-consumer:orders:0");
-            }
-            other => panic!("the offset is not an unconditional put: {other:?}"),
-        }
-    }
-
-    /// A transaction that commits no offset writes no group index row: a group
-    /// in the listing with nothing committed for it is a group that does not
-    /// exist.
-    #[test]
-    fn a_commit_with_no_offsets_carries_no_group_index() {
-        let bundle = Bundle {
-            version: 1,
-            seq: 0,
-            items: vec![item("orders", 0)],
-            group: Some("orders-consumer".to_string()),
-            offsets: Vec::new(),
-        };
-        let ops = bundle.kv_ops("tx", 7, 0, 0, "inc", 0, "consumer").unwrap();
-        assert_eq!(ops.len(), 1);
-    }
-
-    /// The bundle can never exceed the wire's own op ceiling, which is the
-    /// arithmetic MAX_TXN_OFFSETS was derived from — asserted here rather than
-    /// trusted, because the derivation is two constants apart.
-    #[test]
-    fn a_full_bundle_fits_the_wires_op_budget() {
-        let offsets: Vec<(String, Committed)> = (0..MAX_TXN_OFFSETS)
-            .map(|p| {
-                (
-                    offsets::key("g", "orders", p as i32).unwrap(),
-                    committed(p as i64),
-                )
-            })
-            .collect();
-        let bundle = Bundle {
-            version: 1,
-            seq: 0,
-            items: Vec::new(),
-            group: Some("g".to_string()),
-            offsets,
-        };
-        let ops = bundle.kv_ops("tx", 7, 0, 0, "inc", 0, "consumer").unwrap();
-        assert_eq!(ops.len(), crate::queen::WIRE_KV_MAX_OPS);
-        assert!(ops.len() <= crate::queen::WIRE_KV_MAX_OPS);
-        assert!(ops.iter().map(KvOp::keys).sum::<usize>() <= crate::queen::WIRE_KV_MAX_KEYS);
-    }
-
-    #[test]
-    fn a_transactional_id_that_will_not_fit_builds_no_bundle() {
-        let bundle = Bundle {
-            version: 1,
-            seq: 0,
-            items: Vec::new(),
-            group: None,
-            offsets: Vec::new(),
-        };
-        assert!(bundle
-            .kv_ops(&"a".repeat(600), 7, 0, 0, "inc", 0, "consumer")
-            .is_none());
-    }
-
-    #[test]
-    fn connection_ids_are_never_reused_within_a_process() {
-        let a = next_conn_id();
-        let b = next_conn_id();
-        assert_ne!(a, b);
-        assert!(b > a);
-    }
+/// What a transaction commit did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Committed {
+    Done {
+        fence_version: Option<i64>,
+    },
+    /// The fence's precondition was lost: nothing was written.
+    Fenced,
+    /// Refused for another reason (a body too large, a bad record).
+    Refused(String),
 }

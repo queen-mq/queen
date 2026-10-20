@@ -2059,23 +2059,18 @@ dependencies = [
 
 [[package]]
 name = "queen-kafka"
-version = "1.3.0"
+version = "2.0.0"
 dependencies = [
  "base64",
  "bytes",
  "flate2",
  "kafka-protocol",
  "lz4",
- "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "snap",
  "tokio",
- "tokio-rustls",
- "tokio-util",
  "tracing",
- "tracing-subscriber",
  "zstd",
 ]
 

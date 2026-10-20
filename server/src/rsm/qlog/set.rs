@@ -67,8 +67,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::rsm::qlog::{
-    record, BandFrame, CommittedFrame, EntryPart, EntryRecord, OwnedRecord, QLog, QLogOptions,
-    ReclaimProgress, RecordInput, WriteRecord,
+    record, BandFrame, CommittedFrame, EntryPart, EntryRecord, FileReads, OwnedRecord, QLog,
+    QLogOptions, ReclaimProgress, RecordInput, WriteRecord,
 };
 
 /// How the log writer lays an entry's payload-free record across the logs its
@@ -2917,6 +2917,27 @@ impl QLogReader {
             }
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The boot refill's reads for `(queue_id, pid, from_base, committed_end)`
+    /// spans, one [`FileReads`] per `.qlog` file of every log they live in:
+    /// what [`QLogReader::committed_frames`] of each span would read, without
+    /// reading it ([`QLog::refill_reads`]). A span of an unknown queue has none.
+    pub(crate) fn refill_reads(&self, spans: &[(u64, u64, u64, u64)]) -> Vec<FileReads> {
+        let mut by_log: BTreeMap<u64, Vec<(u64, u64, u64)>> = BTreeMap::new();
+        for &(queue_id, pid, from_base, committed_end) in spans {
+            by_log
+                .entry(self.log_id_for(queue_id, pid))
+                .or_default()
+                .push((pid, from_base, committed_end));
+        }
+        let mut out = Vec::new();
+        for (log_id, spans) in by_log {
+            if let Some(l) = self.log(log_id) {
+                out.extend(l.read().expect("qlog poisoned").refill_reads(&spans));
+            }
+        }
+        out
     }
 
     /// PLAN_RAFT_DRAIN_FIX P3.1: the committed records of `pid` overlapping any

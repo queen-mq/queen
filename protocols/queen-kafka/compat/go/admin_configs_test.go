@@ -21,6 +21,7 @@
 package compat
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -61,7 +62,7 @@ func incrementalAlter(t *testing.T, cl *kgo.Client, kind int8, name string, vali
 	// the client routes to the broker the resource NAMES, so a request meant to
 	// be REFUSED for naming another node never leaves the client. The refusal is
 	// the broker's to make, so the request has to reach one.
-	raw, err := cl.Broker(0).Request(ctxFor(t, 30*time.Second), req)
+	raw, err := cl.Broker(int(facadeNode(t, cl))).Request(ctxFor(t, 30*time.Second), req)
 	if err != nil {
 		t.Fatalf("IncrementalAlterConfigs(%d,%q): %v", kind, name, err)
 	}
@@ -95,7 +96,7 @@ func alterConfigs(t *testing.T, cl *kgo.Client, kind int8, name string, validate
 	r.Configs = configs
 	req.Resources = append(req.Resources, r)
 
-	raw, err := cl.Broker(0).Request(ctxFor(t, 30*time.Second), req)
+	raw, err := cl.Broker(int(facadeNode(t, cl))).Request(ctxFor(t, 30*time.Second), req)
 	if err != nil {
 		t.Fatalf("AlterConfigs(%d,%q): %v", kind, name, err)
 	}
@@ -270,7 +271,8 @@ func TestIncrementalAlterConfigsValidateOnlyWritesNothing(t *testing.T) {
 func TestAlterConfigsRefusesTheBrokerResource(t *testing.T) {
 	cl := newClient(t)
 
-	for _, name := range []string{"", "0"} {
+	// "" and this node's own id (0 on the first facade; the raft node id now).
+	for _, name := range []string{"", strconv.Itoa(int(facadeNode(t, cl)))} {
 		got := incrementalAlter(t, cl, resourceBroker, name, false,
 			incOp("num.partitions", opSet, str("8")))
 		if got.ErrorCode != errInvalidConfig {
@@ -352,7 +354,7 @@ func TestAlterConfigsAtEveryAdvertisedVersion(t *testing.T) {
 			alterConfig("retention.ms", str("3600000")),
 		}
 		req.Resources = append(req.Resources, r)
-		raw, err := cl.Broker(0).Request(ctxFor(t, 30*time.Second), req)
+		raw, err := cl.Broker(int(facadeNode(t, cl))).Request(ctxFor(t, 30*time.Second), req)
 		if err != nil {
 			t.Fatalf("AlterConfigs v%d: %v", v, err)
 		}
@@ -372,7 +374,7 @@ func TestAlterConfigsAtEveryAdvertisedVersion(t *testing.T) {
 			incOp("retention.ms", opSet, str("7200000")),
 		}
 		req.Resources = append(req.Resources, r)
-		raw, err := cl.Broker(0).Request(ctxFor(t, 30*time.Second), req)
+		raw, err := cl.Broker(int(facadeNode(t, cl))).Request(ctxFor(t, 30*time.Second), req)
 		if err != nil {
 			t.Fatalf("IncrementalAlterConfigs v%d: %v", v, err)
 		}

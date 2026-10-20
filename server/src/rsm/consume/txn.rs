@@ -192,6 +192,7 @@ impl Engine {
             }
             // Positions: after the acks, before the planner's keys.
             let mut registered: std::collections::HashSet<Gid> = Default::default();
+            let mut consumed: std::collections::HashMap<String, u64> = Default::default();
             for op in &txn.positions {
                 let Some(g) = self.group_for(r, &txn.tenant, &op.queue, &op.group)? else {
                     return Ok(Err(Refusal::client(
@@ -226,11 +227,18 @@ impl Engine {
                     continue;
                 };
                 let mut row = s.0.clone();
+                let before = row.committed;
                 row.release();
                 row.batch_retry_count = 0;
                 row.attempt_offset = None;
                 row.attempt_count = 0;
                 row.committed = offset as i64 - 1;
+                // A position moved forward is consumption, as an ack is: the
+                // group's total and the queue's ack rate count what it moved
+                // past (a Kafka commit is exactly this). A first position
+                // counts nothing: where the group started is not known.
+                let moved = if s.1 { (row.committed - before).max(0) as u64 } else { 0 };
+                row.total_consumed = row.total_consumed.saturating_add(moved);
                 // Position metadata is a catalogue version 2 shape (D20): a
                 // cluster below it keeps none, here as in the logged row.
                 row.metadata = if self.cluster_allows(crate::rsm::effect::VERSION_2) {
@@ -249,6 +257,9 @@ impl Engine {
                 s.0 = row;
                 s.1 = true;
                 s.2 = false;
+                if moved > 0 {
+                    *consumed.entry(op.queue.clone()).or_insert(0) += moved;
+                }
                 if g.cfg().meta.is_none() && registered.insert(g.id) {
                     let meta = registration_meta("", "", &op.sub, false, now);
                     effects.push(Effect::GroupUpsert {
@@ -258,6 +269,13 @@ impl Engine {
                         meta: meta.clone(),
                     });
                     registers.push((g.clone(), meta));
+                }
+            }
+
+            // Dashboard counters: what positions moved past, as acked.
+            if let Some(m) = crate::metrics::global() {
+                for (q, n) in &consumed {
+                    m.per_queue.add_ack(&txn.tenant, q, *n, 0);
                 }
             }
 

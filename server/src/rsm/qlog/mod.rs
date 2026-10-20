@@ -125,6 +125,8 @@ pub mod set;
 #[cfg(test)]
 mod band_tests;
 #[cfg(test)]
+mod refill_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod wal_tests;
@@ -2580,6 +2582,18 @@ impl QLog {
         committed_end: u64,
         with_hashes: bool,
     ) -> io::Result<HashPlan> {
+        let cand = self.committed_candidates(pid, from_base, committed_end);
+        self.hash_plan(cand.into_values(), with_hashes, CachePut::IfRoom)
+    }
+
+    /// The records [`QLog::committed_frames`] answers with, as
+    /// `base_offset -> (file_id, record)`, before any hash is read.
+    fn committed_candidates(
+        &self,
+        pid: u64,
+        from_base: u64,
+        committed_end: u64,
+    ) -> BTreeMap<u64, (u64, index::Record)> {
         // (base_offset) -> (file_id, record), first source wins; the active file
         // is inserted first so a replayed duplicate resolves to it.
         let mut cand: BTreeMap<u64, (u64, index::Record)> = BTreeMap::new();
@@ -2604,7 +2618,39 @@ impl QLog {
                 break;
             }
         }
-        self.hash_plan(cand.into_values(), with_hashes, CachePut::IfRoom)
+        cand
+    }
+
+    /// The boot refill's reads ([`crate::rsm::txns_refill`]): the records
+    /// [`QLog::committed_frames`] would answer for each `(pid, from_base,
+    /// committed_end)` span, grouped by file and sorted by byte offset, so each
+    /// file is read once front to back ([`FileReads::read`]) instead of one
+    /// `pread` per record. Same candidates, same first-source-wins rule: only
+    /// the I/O differs. Nothing is read here and nothing is cached.
+    pub(crate) fn refill_reads(&self, spans: &[(u64, u64, u64)]) -> Vec<FileReads> {
+        let mut by_file: BTreeMap<u64, Vec<index::Record>> = BTreeMap::new();
+        for &(pid, from_base, committed_end) in spans {
+            for (file_id, r) in self
+                .committed_candidates(pid, from_base, committed_end)
+                .into_values()
+            {
+                // A record of no message has no hash block (and no txns row).
+                if r.count > 0 {
+                    by_file.entry(file_id).or_default().push(r);
+                }
+            }
+        }
+        by_file
+            .into_iter()
+            .map(|(file_id, mut records)| {
+                records.sort_unstable_by_key(|r| r.offset);
+                FileReads {
+                    dir: self.dir.clone(),
+                    file_id,
+                    records,
+                }
+            })
+            .collect()
     }
 
     /// PLAN_RAFT_DRAIN_FIX P3.1: the committed records of `pid` that overlap ANY
@@ -3833,6 +3879,19 @@ fn pread_hashes(
     rec: &index::Record,
     scratch: &mut Vec<u8>,
 ) -> io::Result<Arc<[u8]>> {
+    let want = hashes_prefix_of(dir, file_id, rec)?;
+    scratch.clear();
+    scratch.resize(want, 0);
+    f.read_exact_at(&mut scratch[..], rec.offset)?;
+    match checked_prefix_hashes(dir, file_id, rec, &scratch[..])? {
+        Some(hashes) => Ok(Arc::from(hashes)),
+        None => Ok(Arc::from(read_whole_hashes(f, dir, file_id, rec)?)),
+    }
+}
+
+/// How many leading bytes of `rec` hold its header and hash block, refused
+/// when the index says the record is shorter than that.
+fn hashes_prefix_of(dir: &Path, file_id: u64, rec: &index::Record) -> io::Result<usize> {
     let want = record::hashes_prefix_len(rec.count);
     if (rec.len as usize) < want {
         return Err(corrupt(
@@ -3840,10 +3899,19 @@ fn pread_hashes(
             "located len is shorter than its header + hashes",
         ));
     }
-    scratch.clear();
-    scratch.resize(want, 0);
-    f.read_exact_at(&mut scratch[..], rec.offset)?;
-    match record::hashes_from_prefix(&scratch[..]).map_err(io::Error::from)? {
+    Ok(want)
+}
+
+/// The hash block in `prefix` (the record's leading [`hashes_prefix_of`]
+/// bytes), its header cross-checked against the index entry that located it.
+/// `None`: a txn-envelope record, read whole by [`read_whole_hashes`].
+fn checked_prefix_hashes<'a>(
+    dir: &Path,
+    file_id: u64,
+    rec: &index::Record,
+    prefix: &'a [u8],
+) -> io::Result<Option<&'a [u8]>> {
+    match record::hashes_from_prefix(prefix).map_err(io::Error::from)? {
         Some((h, hashes)) => {
             if h.record_len() != rec.len as usize
                 || h.pid != rec.pid
@@ -3859,17 +3927,93 @@ fn pread_hashes(
                     ),
                 ));
             }
-            Ok(Arc::from(hashes))
+            Ok(Some(hashes))
         }
-        None => {
-            let loc = Located {
-                file_id,
-                offset: rec.offset,
-                len: rec.len,
-                count: rec.count,
-            };
-            Ok(Arc::from(read_located_in(f, dir, &loc)?.hashes))
+        None => Ok(None),
+    }
+}
+
+/// The hash block of a txn-envelope record: the full, checksum-verified read.
+fn read_whole_hashes(
+    f: &File,
+    dir: &Path,
+    file_id: u64,
+    rec: &index::Record,
+) -> io::Result<Vec<u8>> {
+    let loc = Located {
+        file_id,
+        offset: rec.offset,
+        len: rec.len,
+        count: rec.count,
+    };
+    Ok(read_located_in(f, dir, &loc)?.hashes)
+}
+
+/// Records closer than this share one read in [`FileReads::read`]: on a
+/// network disk a read through the hole costs less than another request.
+const REFILL_READ_GAP: u64 = 256 << 10;
+
+/// The longest single read of [`FileReads::read`] (a record longer than this
+/// is still read whole, alone).
+const REFILL_READ_MAX: u64 = 8 << 20;
+
+/// One `.qlog` file's share of the boot refill ([`QLog::refill_reads`]): the
+/// committed records whose hash blocks it needs, ascending by byte offset.
+pub(crate) struct FileReads {
+    dir: PathBuf,
+    file_id: u64,
+    records: Vec<index::Record>,
+}
+
+impl FileReads {
+    /// Every record's hash block, as `(pid, frame)` in file order, and the
+    /// bytes read. The file is read once front to back: records less than
+    /// [`REFILL_READ_GAP`] apart share one `pread` of at most
+    /// [`REFILL_READ_MAX`] bytes. Each block is cross-checked against its
+    /// index entry exactly as the one-record read ([`pread_hashes`]) does.
+    pub(crate) fn read(&self, buf: &mut Vec<u8>) -> io::Result<(Vec<(u64, CommittedFrame)>, u64)> {
+        let f = File::open(file_path(&self.dir, self.file_id))?;
+        let recs = &self.records;
+        let mut out = Vec::with_capacity(recs.len());
+        let mut read = 0u64;
+        let mut i = 0;
+        while i < recs.len() {
+            let start = recs[i].offset;
+            let mut end = start + hashes_prefix_of(&self.dir, self.file_id, &recs[i])? as u64;
+            let mut j = i + 1;
+            while let Some(r) = recs.get(j) {
+                let r_end = r.offset + hashes_prefix_of(&self.dir, self.file_id, r)? as u64;
+                if r.offset > end.saturating_add(REFILL_READ_GAP) || r_end - start > REFILL_READ_MAX
+                {
+                    break;
+                }
+                end = end.max(r_end);
+                j += 1;
+            }
+            buf.clear();
+            buf.resize((end - start) as usize, 0);
+            f.read_exact_at(&mut buf[..], start)?;
+            read += end - start;
+            for r in &recs[i..j] {
+                let at = (r.offset - start) as usize;
+                let prefix = &buf[at..at + record::hashes_prefix_len(r.count)];
+                let hashes = match checked_prefix_hashes(&self.dir, self.file_id, r, prefix)? {
+                    Some(h) => h.to_vec(),
+                    None => read_whole_hashes(&f, &self.dir, self.file_id, r)?,
+                };
+                out.push((
+                    r.pid,
+                    CommittedFrame {
+                        base_offset: r.base_offset,
+                        end: r.end,
+                        created_at_us: r.created_at_us,
+                        hashes,
+                    },
+                ));
+            }
+            i = j;
         }
+        Ok((out, read))
     }
 }
 
