@@ -159,7 +159,11 @@ pub async fn metadata(
                     if let Err(e) = ctx.topics.declare(bearer, &name, width).await {
                         tracing::debug!(target: "kafka", topic = %name, error = %e, "cannot write the topic's width row");
                     }
-                    match ctx.queen.create_queue(bearer, &name).await {
+                    match ctx
+                        .queen
+                        .create_queue(bearer, &name, ctx.cfg.dedup_window_seconds)
+                        .await
+                    {
                         Ok(()) => {
                             created = true;
                             tracing::info!(target: "kafka", topic = %name, "topic created on first use");

@@ -113,8 +113,8 @@ them as it reads its own, with three things the facade adds:
 node), `QUEEN_KAFKA_ADDR` (default `0.0.0.0:9092`),
 `QUEEN_KAFKA_DEFAULT_PARTITIONS` (1024), `QUEEN_KAFKA_GROUP_JOIN_DELAY_MS`
 (3000), `QUEEN_KAFKA_AUTO_CREATE` (true), `QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`
-(3600: given to a topic with no dedup window when an idempotent producer first
-writes to it; 0 leaves topics alone), `QUEEN_KAFKA_SASL=required`,
+(900: the window of a topic the facade creates, and of a topic with none when
+an idempotent producer first writes to it; 0 leaves topics alone), `QUEEN_KAFKA_SASL=required`,
 `QUEEN_KAFKA_MAX_CONNECTIONS`, `QUEEN_KAFKA_MAX_REQUEST_BYTES`,
 `QUEEN_KAFKA_THREADS`. Other nodes are advertised at the host of their raft
 HTTP address (`QUEEN_RAFT_PEERS`) with this node's Kafka port.

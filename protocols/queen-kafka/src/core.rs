@@ -401,9 +401,20 @@ impl Queen {
             .map_err(|e| CallError::Body(e.to_string()))
     }
 
-    /// Create a queue for a Kafka topic, with Queen's own defaults.
-    pub async fn create_queue(&self, bearer: Option<&str>, name: &str) -> Result<(), CallError> {
-        self.configure(bearer, name, json!({})).await
+    /// Create a queue for a Kafka topic: Queen's own defaults, but the
+    /// facade's dedup window when it has one (0 keeps Queen's).
+    pub async fn create_queue(
+        &self,
+        bearer: Option<&str>,
+        name: &str,
+        dedup_window_seconds: i64,
+    ) -> Result<(), CallError> {
+        let options = if dedup_window_seconds > 0 {
+            json!({ "dedupWindowSeconds": dedup_window_seconds })
+        } else {
+            json!({})
+        };
+        self.configure(bearer, name, options).await
     }
 
     /// Set some options of a queue (creating it when it is missing); options

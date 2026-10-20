@@ -75,7 +75,11 @@ pub async fn create_topics(
                 Ok(_) if req.validate_only => (NONE, None),
                 Ok(_) => match ctx.topics.declare(bearer, &name, partitions).await {
                     Err(e) => (of_call(&e), Some(e.to_string())),
-                    Ok(()) => match ctx.queen.create_queue(bearer, &name).await {
+                    Ok(()) => match ctx
+                        .queen
+                        .create_queue(bearer, &name, ctx.cfg.dedup_window_seconds)
+                        .await
+                    {
                         Ok(()) => (NONE, None),
                         Err(e) => (of_call(&e), Some(e.to_string())),
                     },
