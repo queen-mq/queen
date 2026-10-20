@@ -70,7 +70,8 @@ possible later addition.
 3. Topic configs (`retention.ms`, `cleanup.policy=compact`): accepted, not
    applied, not reported. AlterConfigs / IncrementalAlterConfigs, OffsetDelete,
    ACLs, DescribeLogDirs: not advertised.
-4. TLS on the Kafka listener, the standalone binary, Cloud through the proxy.
+4. TLS on the Kafka listener, the standalone binary, Cloud through the proxy,
+   the cargo-fuzz targets (they called the first facade's decoders).
 5. Group membership survives a leader change only by rejoin. If the pause
    measured on a leader change hurts, snapshot membership into KV.
 6. The console's Kafka presence rows (`qk:live:*`) are no longer written.
