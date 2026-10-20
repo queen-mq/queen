@@ -65,15 +65,11 @@ pub async fn produce(
     let mut any_error = false;
     for t in req.topic_data {
         let name = t.name.0.to_string();
-        // A topic the cache does not know yet (created a moment ago on
-        // another node) is not refused: the push creates its queue, as a
-        // native push does, at the default width.
-        let width = snap.as_ref().map(|s| {
-            s.widths
-                .get(&name)
-                .copied()
-                .unwrap_or(ctx.topics.default_partitions())
-        });
+        // A topic the topics do not know even after `covering`'s re-read is
+        // refused, never pushed at the default width: a partition past the
+        // topic's real width would widen it for good (width = partitions that
+        // exist), and keyed producers would re-hash.
+        let width = snap.as_ref().and_then(|s| s.widths.get(&name).copied());
         let mut slots = Vec::with_capacity(t.partition_data.len());
         for p in t.partition_data {
             let mut slot = Slot {
@@ -109,14 +105,11 @@ pub async fn produce(
         let mut topics: Vec<&str> = items.iter().map(|i| i.queue.as_str()).collect();
         topics.dedup();
         for topic in topics {
-            let width = snap
-                .widths
-                .get(topic)
-                .copied()
-                .unwrap_or(ctx.topics.default_partitions());
-            ctx.topics
-                .ensure_marked(bearer.as_deref(), snap, topic, width)
-                .await;
+            if let Some(width) = snap.widths.get(topic).copied() {
+                ctx.topics
+                    .ensure_marked(bearer.as_deref(), snap, topic, width)
+                    .await;
+            }
         }
     }
     // A topic an idempotent producer writes to needs a dedup window for its
@@ -277,12 +270,7 @@ async fn produce_txn(
     let mut responses = Vec::with_capacity(req.topic_data.len());
     for t in req.topic_data {
         let name = t.name.0.to_string();
-        let width = snap.as_ref().map(|s| {
-            s.widths
-                .get(&name)
-                .copied()
-                .unwrap_or(ctx.topics.default_partitions())
-        });
+        let width = snap.as_ref().and_then(|s| s.widths.get(&name).copied());
         let mut partition_responses = Vec::with_capacity(t.partition_data.len());
         for p in t.partition_data {
             let code = if !leads {

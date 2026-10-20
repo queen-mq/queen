@@ -66,7 +66,8 @@ impl Topics {
 
     /// A topic Kafka clients write to and that has no width row gets one (its
     /// width now), once per process: that row is what the console reads as
-    /// "a Kafka topic".
+    /// "a Kafka topic". Written only where no row is: a width another node
+    /// declared a moment ago (CreateTopics there) is never overwritten.
     pub async fn ensure_marked(
         &self,
         bearer: Option<&str>,
@@ -85,7 +86,7 @@ impl Topics {
         {
             return;
         }
-        if let Err(e) = self.declare(bearer, topic, width).await {
+        if let Err(e) = self.declare_if_absent(bearer, topic, width).await {
             tracing::debug!(target: "kafka", %topic, error = %e, "cannot write the topic's width row");
             self.marked
                 .lock()
@@ -164,6 +165,9 @@ impl Topics {
 
     /// The topics, re-read once when one of `names` is missing: a topic that
     /// another node just created is not answered unknown for the rest of a TTL.
+    /// The re-read waits until the snapshot is [`MISS_FLOOR`] old (a topic
+    /// created within the floor is found too), and one that another request
+    /// made meanwhile serves this one.
     pub async fn covering<'a>(
         &self,
         bearer: Option<&str>,
@@ -173,10 +177,17 @@ impl Topics {
         let missing = names
             .into_iter()
             .any(|n| valid_topic_name(n) && !snap.widths.contains_key(n));
-        if !missing || snap.at.elapsed() < MISS_FLOOR {
+        if !missing {
             return Ok(snap);
         }
-        self.refresh(bearer).await
+        if let Some(wait) = MISS_FLOOR.checked_sub(snap.at.elapsed()) {
+            tokio::time::sleep(wait).await;
+        }
+        let _one = self.refreshing.lock().await;
+        match self.cached(bearer, true) {
+            Some(newer) if newer.at > snap.at => Ok(newer),
+            _ => self.load(bearer).await,
+        }
     }
 
     /// The topics, read now.
@@ -185,19 +196,43 @@ impl Topics {
         self.load(bearer).await
     }
 
+    /// Every snapshot is re-read before it serves again. Kept, not dropped:
+    /// a re-read that cannot reach the width rows (an election under way)
+    /// falls back to it rather than to default widths.
     pub fn invalidate(&self) {
-        self.cache.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        for e in cache.values_mut() {
+            if let Some(old) = Instant::now().checked_sub(TTL) {
+                e.at = old;
+            }
+        }
     }
 
     async fn load(&self, bearer: Option<&str>) -> Result<Arc<Snapshot>, CallError> {
-        let (queues, declared) = tokio::join!(self.queen.queues(bearer), self.declared(bearer));
-        let queues = queues?;
-        // A width row that cannot be read leaves the default: the topic is
-        // still served, and the next refresh tries again.
-        let declared = declared.unwrap_or_else(|e| {
-            tracing::warn!(target: "kafka", error = %e, "cannot read the topic widths");
-            HashMap::new()
-        });
+        // The queues first, then the width rows: CreateTopics writes the row
+        // before it creates the queue, so a queue this list holds has its row
+        // in the read that follows. Read side by side, a row written between
+        // the two reads went missing and its topic took the default width.
+        let queues = self.queen.queues(bearer).await?;
+        let declared = match self.declared(bearer).await {
+            Ok(d) => d,
+            // Unreadable rows never become default widths (Metadata would
+            // advertise them, a produce would write partitions past the real
+            // width and mark the default as the topic's width): the last
+            // snapshot is served for another TTL, else the caller answers a
+            // retriable error.
+            Err(e) => {
+                tracing::warn!(target: "kafka", error = %e, "cannot read the topic widths");
+                let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+                return match cache.get_mut(&bearer.map(str::to_string)) {
+                    Some(last) => {
+                        last.at = Instant::now();
+                        Ok(Arc::clone(&last.snap))
+                    }
+                    None => Err(e),
+                };
+            }
+        };
         let mut widths = HashMap::with_capacity(queues.len());
         for q in queues {
             if !valid_topic_name(&q.name) {
@@ -268,6 +303,22 @@ impl Topics {
             NS,
             &format!("{WIDTH_PREFIX}{topic}"),
             json!({ "partitions": partitions, "at": now_ms(), "set": {} }),
+        )];
+        self.queen.kv(bearer, &ops).await.map(|_| ())
+    }
+
+    /// [`Topics::declare`], only where the topic has no width row yet.
+    pub async fn declare_if_absent(
+        &self,
+        bearer: Option<&str>,
+        topic: &str,
+        partitions: i32,
+    ) -> Result<(), CallError> {
+        let ops = [KvOp::put_at(
+            NS,
+            &format!("{WIDTH_PREFIX}{topic}"),
+            json!({ "partitions": partitions, "at": now_ms(), "set": {} }),
+            0,
         )];
         self.queen.kv(bearer, &ops).await.map(|_| ())
     }

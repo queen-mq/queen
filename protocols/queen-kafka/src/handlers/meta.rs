@@ -155,8 +155,10 @@ pub async fn metadata(
                 } else if allow_create {
                     // The width row first: a node that lists the queue has
                     // applied it, and the console knows a Kafka topic by it.
+                    // Only where no row is: a topic created a moment ago
+                    // through another node keeps the width it was given.
                     let width = ctx.topics.default_partitions();
-                    if let Err(e) = ctx.topics.declare(bearer, &name, width).await {
+                    if let Err(e) = ctx.topics.declare_if_absent(bearer, &name, width).await {
                         tracing::debug!(target: "kafka", topic = %name, error = %e, "cannot write the topic's width row");
                     }
                     match ctx
