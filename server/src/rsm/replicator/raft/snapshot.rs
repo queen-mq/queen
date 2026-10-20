@@ -482,20 +482,16 @@ enum Asked {
     /// It answered: its basis, or `None` from a node before 2.6 (404) or an
     /// answer that does not parse.
     Answered(Option<Basis>),
-    /// Every attempt failed, not all of them at connect (no answer in time, a
-    /// 5xx): the whole state is sent, as before 2.6.
-    NoAnswer,
-    /// Every attempt was refused at connect: nothing listens there.
-    Refused(String),
+    /// No attempt was answered (refused at connect, no answer in time, a
+    /// 5xx): the last reason.
+    Silent(String),
 }
 
-/// Ask the member at `url` where its log stands. A member that is starting
-/// answers its snapshot route a moment after it first refuses connections, or
-/// after a slow answer: asked again, five times 400 ms apart, so a member
-/// whose log is there is not sent the whole state for a race.
+/// Ask the member at `url` where its log stands: five times, 400 ms apart,
+/// each with [`BASIS_TTL`] to answer. A member that is starting refuses
+/// connections until it serves ([`super::network::bind`]).
 async fn ask_member(client: &HttpClient, url: &str, token: Option<&str>) -> Asked {
-    let mut refused = None;
-    let mut other = false;
+    let mut last = String::new();
     for attempt in 0..5 {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_millis(400)).await;
@@ -506,26 +502,30 @@ async fn ask_member(client: &HttpClient, url: &str, token: Option<&str>) -> Aske
             token,
             "application/json",
             Body::from("{}"),
-            Duration::from_secs(10),
+            BASIS_TTL,
         )
         .await;
         match asked {
             Ok(bytes) => return Asked::Answered(serde_json::from_slice::<Basis>(&bytes).ok()),
             Err(Fail::Network(why)) if why.contains("404") => return Asked::Answered(None),
-            Err(Fail::Unreachable(why)) => refused = Some(why),
-            Err(Fail::Network(_)) => other = true,
+            Err(Fail::Unreachable(why) | Fail::Network(why)) => last = why,
         }
     }
-    match refused {
-        Some(why) if !other => Asked::Refused(why),
-        _ => Asked::NoAnswer,
-    }
+    Asked::Silent(last)
 }
+
+/// How long a member has to say where its log stands: it reads three numbers.
+#[cfg(not(test))]
+const BASIS_TTL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const BASIS_TTL: Duration = Duration::from_millis(300);
 
 /// Where `target`'s log stands, when a delta can be built for it: its
 /// applied index, if it answers (a node before 2.6 does not) with this node's
 /// queue-log layout and some log. `Ok(None)`: the whole state is sent.
-/// `Err`: the member refuses connections, and nothing is built for it.
+/// `Err`: the member did not answer, and nothing is built for it — the whole
+/// state is sent only to a member that says it needs it (it answers with no
+/// log, or a node before 2.6 answers 404), never for want of an answer.
 async fn ask_basis(
     ctx: &SendCtx,
     client: &HttpClient,
@@ -534,9 +534,13 @@ async fn ask_basis(
     target: NodeId,
 ) -> Result<Option<u64>, String> {
     let answer = match ask_member(client, url, token).await {
-        Asked::Refused(why) => return Err(why),
+        Asked::Silent(why) => {
+            return Err(format!(
+                "member {target} did not say where its log stands, so no snapshot is built \
+                 for it yet: {why}"
+            ))
+        }
         Asked::Answered(answer) => answer,
-        Asked::NoAnswer => None,
     };
     let usable = answer
         .filter(|b| b.applied > 0 && b.lanes == ctx.qlog.lanes() && b.shards == ctx.qlog.shards());
@@ -561,12 +565,14 @@ pub(crate) async fn send(
     vote: Vote,
     snapshot: Snapshot,
 ) -> Result<Result<SnapshotResponse<TypeConfig>, RaftError<TypeConfig>>, Fail> {
-    // A member that refuses connections is built nothing: openraft tries
-    // again after its backoff, and a member that is starting answers in a
-    // moment. Before, a leader that had purged past a member that was down
+    // A member that does not answer is built nothing: openraft tries again
+    // after its backoff, and a member that is starting answers once it
+    // serves. Before, a leader that had purged past a member that was down
     // built the whole state for it every ~3 s — 84 copies in 4.5 minutes, its
-    // disk writes four times the load's (GCP, 2026-10-20) — and every copy
-    // was then refused at connect.
+    // disk writes four times the load's — every copy refused at connect; and
+    // a member that was starting, asked before it served, got the whole state
+    // for want of an answer: 566 GB in 15 minutes where 1.3 GB would do
+    // (three GCP nodes, 2026-10-20).
     let asked = ask_basis(ctx, client, url, token, target)
         .await
         .map_err(Fail::Unreachable)?;
@@ -1309,55 +1315,71 @@ mod tests {
     }
 
     /// Before a snapshot is built for a member, it is asked where its log
-    /// stands: one that refuses connections every time is built nothing; a
-    /// node before 2.6 (404) gets the whole state; a 2.6 node answers its
-    /// basis.
+    /// stands. The whole state is built only for a member that says it needs
+    /// it (a node before 2.6 answers 404); one that does not answer — nothing
+    /// listens, it is starting and its port is reserved but not listening yet,
+    /// or it takes the connection and never answers — is built nothing.
     #[tokio::test]
-    async fn a_member_that_refuses_connections_is_built_nothing() {
+    async fn a_member_is_built_a_snapshot_only_once_it_answers() {
+        use super::super::network::bind;
         use super::{ask_member, Asked, Basis};
         let client = crate::rsm::replicator::raft::network::http_client();
+        let basis_route = || {
+            axum::Router::new().route(
+                "/raft/v1/snapshot/basis",
+                axum::routing::post(|| async {
+                    serde_json::to_string(&Basis {
+                        applied: 42,
+                        lanes: 1,
+                        shards: 0,
+                    })
+                    .unwrap()
+                }),
+            )
+        };
+
+        // Nothing listens: asked five times, 400 ms apart.
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         drop(l);
         let url = format!("http://{addr}/raft/v1/snapshot");
-
         let t0 = Instant::now();
         let asked = ask_member(&client, &url, None).await;
-        assert!(matches!(asked, Asked::Refused(_)), "{asked:?}");
+        assert!(matches!(asked, Asked::Silent(_)), "{asked:?}");
         assert!(
             t0.elapsed() >= Duration::from_millis(1600),
-            "asked five times, 400 ms apart: {:?}",
+            "{:?}",
             t0.elapsed()
         );
 
-        // A node before 2.6 does not serve the route.
-        let l = tokio::net::TcpListener::bind(addr).await.unwrap();
-        let old = tokio::spawn(async move { axum::serve(l, axum::Router::new()).await.unwrap() });
+        // Starting: the port is reserved, not listening (Linux refuses the
+        // connection at once; macOS lets it time out); once it listens, the
+        // member answers.
+        let socket = bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/raft/v1/snapshot", socket.local_addr().unwrap());
         let asked = ask_member(&client, &url, None).await;
-        assert!(matches!(asked, Asked::Answered(None)), "{asked:?}");
-        old.abort();
-        let _ = old.await;
-
-        // A 2.6 node answers where its log stands.
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/raft/v1/snapshot", l.local_addr().unwrap());
-        let app = axum::Router::new().route(
-            "/raft/v1/snapshot/basis",
-            axum::routing::post(|| async {
-                serde_json::to_string(&Basis {
-                    applied: 42,
-                    lanes: 1,
-                    shards: 0,
-                })
-                .unwrap()
-            }),
-        );
-        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        assert!(matches!(asked, Asked::Silent(_)), "{asked:?}");
+        let l = socket.listen(64).unwrap();
+        tokio::spawn(async move { axum::serve(l, basis_route()).await.unwrap() });
         let asked = ask_member(&client, &url, None).await;
         assert!(
             matches!(asked, Asked::Answered(Some(b)) if b.applied == 42 && b.lanes == 1),
             "{asked:?}"
         );
+
+        // Takes the connection and never answers: silent, not "send it all".
+        let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/raft/v1/snapshot", hung.local_addr().unwrap());
+        let asked = ask_member(&client, &url, None).await;
+        assert!(matches!(asked, Asked::Silent(_)), "{asked:?}");
+        drop(hung);
+
+        // A node before 2.6 does not serve the route: the whole state.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/raft/v1/snapshot", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, axum::Router::new()).await.unwrap() });
+        let asked = ask_member(&client, &url, None).await;
+        assert!(matches!(asked, Asked::Answered(None)), "{asked:?}");
     }
 
     #[tokio::test]

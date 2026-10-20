@@ -1042,6 +1042,16 @@ mod server {
     /// above it (a delta, [`super::super::snapshot`]). 404 on a node that
     /// does not say.
     async fn snapshot_basis<S: Store + 'static>(State(st): State<Arc<RpcState<S>>>) -> Response {
+        // A received snapshot waits to be swapped in: this node's log is about
+        // to change, and it takes no other snapshot (`receive`). No answer, so
+        // the leader builds nothing until the node is back.
+        if let Some(why) = st.snap.restart.requested() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("this node is restarting: {why}"),
+            )
+                .into_response();
+        }
         match st.snap.basis.as_ref() {
             Some(basis) => match serde_json::to_vec(&basis()) {
                 Ok(body) => (
@@ -1128,23 +1138,46 @@ mod server {
         }
     }
 
-    /// Bind the Raft RPC listener. Blocking, at boot: a taken port fails the
-    /// open instead of a background task.
-    pub(crate) fn bind(addr: &str) -> std::io::Result<std::net::TcpListener> {
-        let l = std::net::TcpListener::bind(addr)
-            .map_err(|e| std::io::Error::other(format!("bind the raft listener on {addr}: {e}")))?;
-        l.set_nonblocking(true)?;
-        Ok(l)
+    /// Reserve the Raft RPC port. Blocking, at boot: a taken port fails the
+    /// open instead of a background task. Bound, not listening: until
+    /// [`serve`] listens, once openraft exists, a peer that connects is
+    /// refused at once. A port that listened from the start of a boot (which
+    /// opens the queue logs and refills the dedup rows first: 20 s to
+    /// minutes) took connections nobody read, and every question a peer asked
+    /// waited for its timeout — a leader that asked a starting member where
+    /// its log stands got no answer and sent it the whole state (566 GB,
+    /// 15 minutes, three GCP nodes, 2026-10-20).
+    pub(crate) fn bind(addr: &str) -> std::io::Result<tokio::net::TcpSocket> {
+        use std::net::ToSocketAddrs;
+        let failed = |e: std::io::Error| {
+            std::io::Error::other(format!("bind the raft listener on {addr}: {e}"))
+        };
+        let at = addr
+            .to_socket_addrs()
+            .map_err(failed)?
+            .next()
+            .ok_or_else(|| failed(std::io::Error::other("the address resolves to nothing")))?;
+        let socket = if at.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()
+        } else {
+            tokio::net::TcpSocket::new_v6()
+        }
+        .map_err(failed)?;
+        // As `std::net::TcpListener::bind`: a restart binds while the last
+        // life's connections are in TIME_WAIT.
+        socket.set_reuseaddr(true).map_err(failed)?;
+        socket.bind(at).map_err(failed)?;
+        Ok(socket)
     }
 
-    /// Serve the Raft RPCs until `shutdown` resolves. Runs on openraft's
-    /// runtime.
+    /// Serve the Raft RPCs until `shutdown` resolves: listen on the port
+    /// [`bind`] reserved. Runs on openraft's runtime.
     pub(crate) async fn serve<S: Store + 'static>(
-        listener: std::net::TcpListener,
+        socket: tokio::net::TcpSocket,
         state: RpcState<S>,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) {
-        let listener = match tokio::net::TcpListener::from_std(listener) {
+        let listener = match socket.listen(1024) {
             Ok(l) => l,
             Err(e) => {
                 tracing::error!(target: "rsm", error = %e, "raft listener");
