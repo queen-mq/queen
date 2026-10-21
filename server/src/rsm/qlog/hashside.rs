@@ -20,7 +20,9 @@
 //! It is written after its file sealed, off the log writer (the maintenance
 //! pass, [`super::set::QLogReader::hashside_maintain`]), from the file's own
 //! reads, each checked against the record's index entry exactly as the
-//! refill's read checks it. It is never fsynced and never trusted unchecked:
+//! refill's read checks it, and handed to the device in steps it waits for
+//! (never left to pile up as dirty pages in front of the queue logs' fsyncs).
+//! It is never fsynced and never trusted unchecked:
 //! a missing, torn or stale sidecar (another file length, a checksum that
 //! fails, a record the refill wants that it does not name or names with
 //! another header) is not used, and the refill reads the file as it always
@@ -121,7 +123,22 @@ pub(crate) fn write(
             .write(true)
             .truncate(true)
             .open(&tmp)?;
-        f.write_all(&bytes)?;
+        // Handed to the device a step at a time, each waited for here, as a
+        // directory run is (`dirx::sync_range`): left to the kernel's
+        // writeback, the sidecars of a busy log piled up as dirty pages (1.7 GB
+        // on the leader at 3M msg/s of 256-byte messages, 48 MB/s of hash
+        // lists) and reached the device in bursts the queue logs' fsyncs
+        // waited behind: their longest went from 6 to 206 ms and the end to
+        // end p99 from 17 to 145 ms (three GCP nodes, 2026-10-21). Nothing is
+        // made durable: a sidecar never needs to be.
+        let step = super::dirx::SYNC_STEP as usize;
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let n = step.min(bytes.len() - at);
+            f.write_all(&bytes[at..at + n])?;
+            super::dirx::sync_range(&f, at as u64, n as u64)?;
+            at += n;
+        }
     }
     std::fs::rename(&tmp, path(dir, file_id))?;
     Ok(bytes.len() as u64)

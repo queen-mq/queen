@@ -384,7 +384,7 @@ pub struct Built {
 
 /// How much of a run is handed to the device at a time while it is written
 /// ([`sync_range`]).
-const SYNC_STEP: u64 = 8 << 20;
+pub(crate) const SYNC_STEP: u64 = 8 << 20;
 
 /// Push `len` bytes of `f` from `off` to the device and wait for them. It
 /// makes nothing durable: the file's sync at the end does, and finds these
@@ -399,7 +399,7 @@ const SYNC_STEP: u64 = 8 << 20;
 /// for those ten seconds). The checkpoint is written the same way and for the
 /// same reason (`HeedStore::flush_in_steps`).
 #[cfg(target_os = "linux")]
-fn sync_range(f: &File, off: u64, len: u64) -> io::Result<()> {
+pub(crate) fn sync_range(f: &File, off: u64, len: u64) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     // SAFETY: a plain system call on a descriptor the caller holds open; it
     // takes no pointer.
@@ -420,7 +420,7 @@ fn sync_range(f: &File, off: u64, len: u64) -> io::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn sync_range(_f: &File, _off: u64, _len: u64) -> io::Result<()> {
+pub(crate) fn sync_range(_f: &File, _off: u64, _len: u64) -> io::Result<()> {
     Ok(())
 }
 
