@@ -602,17 +602,48 @@ async fn a_follower_behind_the_purge_point_gets_a_snapshot() {
     let _ = close(back);
 
     // It restarts on the snapshot and catches up.
-    let (d, p, o) = (dirs[f].clone(), ports.clone(), eager.clone());
-    nodes[f] = Some(tokio::task::block_in_place(move || {
-        open_node(&d, id, &p, o)
-    }));
-    assert!(
-        !dirs[f].join(snapshot::PENDING).exists(),
-        "the snapshot was swapped in"
-    );
+    let reopen = |nodes: &mut [Option<RaftReplicator<HeedStore>>]| {
+        let (d, p, o) = (dirs[f].clone(), ports.clone(), eager.clone());
+        nodes[f] = Some(tokio::task::block_in_place(move || {
+            open_node(&d, id, &p, o)
+        }));
+        assert!(
+            !dirs[f].join(snapshot::PENDING).exists(),
+            "the snapshot was swapped in"
+        );
+    };
+    reopen(&mut nodes);
     let more = propose_all(nodes[l].as_ref().unwrap(), &entries[2 * N as usize..]).await;
     assert!(more > last);
-    tokio::task::block_in_place(|| wait_applied(&nodes, more));
+    // The hold here is 2 s: a loaded machine can restart the follower slower
+    // than that, the leader purges past it again and sends it another
+    // snapshot, and it asks to restart once more. It is restarted, as a node
+    // is, until every node has applied everything.
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let behind: Vec<(usize, u64)> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| n.as_ref().map(|r| (i, r.applied_index())))
+            .filter(|(_, a)| *a < more)
+            .collect();
+        if behind.is_empty() {
+            break;
+        }
+        if nodes[f]
+            .as_ref()
+            .is_some_and(|n| n.restart_requested().is_some())
+        {
+            let _ = close(nodes[f].take().unwrap());
+            reopen(&mut nodes);
+            continue;
+        }
+        assert!(
+            Instant::now() < end,
+            "nodes {behind:?} did not apply {more} within 60 s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     tokio::task::block_in_place(|| converge(nodes, 3 * N, "snapshot"));
     for d in dirs {
         let _ = std::fs::remove_dir_all(d);
