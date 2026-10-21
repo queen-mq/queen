@@ -1,8 +1,10 @@
 //! CreateTopics, DeleteTopics, CreatePartitions, DescribeConfigs.
 //!
 //! A topic is a queue. Its width is declared in KV before the queue exists
-//! (crate::topics). Topic configs are accepted and not applied yet (phase 2):
-//! a describe answers none rather than values nothing enforces.
+//! (crate::topics). Of a new topic's configs, `retention.ms` and
+//! `cleanup.policy` become its queue's retention ([`retention_of`]), as the
+//! first facade mapped them; the others are accepted and not applied yet
+//! (phase 2), and a describe answers none rather than values nothing enforces.
 
 use std::sync::Arc;
 
@@ -46,6 +48,11 @@ pub async fn create_topics(
         } else {
             t.num_partitions
         };
+        let retention = retention_of(
+            t.configs
+                .iter()
+                .map(|c| (c.name.as_str(), c.value.as_ref().map(|v| v.as_str()))),
+        );
         let (error, message): (i16, Option<String>) = if seen.get(&name).copied().unwrap_or(0) > 1 {
             (
                 INVALID_REQUEST,
@@ -58,6 +65,8 @@ pub async fn create_topics(
                 INVALID_TOPIC_EXCEPTION,
                 Some("topic names are 1-249 of [a-zA-Z0-9._-] and do not start with __".into()),
             )
+        } else if let Err(why) = &retention {
+            (INVALID_CONFIG, Some(why.clone()))
         } else if !t.assignments.is_empty() {
             (INVALID_REPLICA_ASSIGNMENT, Some("every partition is led by the raft leader; manual replica assignment is not supported".into()))
         } else if !(1..=MAX_PARTITIONS).contains(&partitions) {
@@ -77,7 +86,12 @@ pub async fn create_topics(
                     Err(e) => (of_call(&e), Some(e.to_string())),
                     Ok(()) => match ctx
                         .queen
-                        .create_queue(bearer, &name, ctx.cfg.dedup_window_seconds)
+                        .create_queue(
+                            bearer,
+                            &name,
+                            ctx.cfg.dedup_window_seconds,
+                            retention.clone().ok().flatten(),
+                        )
                         .await
                     {
                         Ok(()) => (NONE, None),
@@ -188,6 +202,62 @@ pub async fn create_partitions(
     CreatePartitionsResponse::default().with_results(out)
 }
 
+/// The queue retention a new topic's configs ask for, in whole seconds:
+/// `Ok(None)` keeps every record. The first facade's mapping:
+///
+/// - `retention.ms`: `-1` (the default) keeps every record; 1000 and more is
+///   the retention, rounded down to whole seconds; anything else is refused,
+///   because less than a second rounds to a retention of nothing.
+/// - `cleanup.policy`: `delete` (the default) lets that retention delete;
+///   `compact` keeps every record whatever `retention.ms` says, since Queen does
+///   not compact and the last value of every key must stay; `compact,delete`
+///   deletes by age and compacts nothing.
+///
+/// Other configs are accepted and not applied. A value that is not one of
+/// these is `Err`, which the request answers with `INVALID_CONFIG`.
+pub(crate) fn retention_of<'a>(
+    configs: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) -> Result<Option<i64>, String> {
+    let mut ms: i64 = -1;
+    let mut deletes = true;
+    for (name, value) in configs {
+        let value = value.unwrap_or("").trim();
+        match name {
+            "retention.ms" => {
+                ms = match value.parse::<i64>() {
+                    Ok(-1) => -1,
+                    Ok(v) if v >= 1000 => v,
+                    _ => {
+                        return Err(format!(
+                            "retention.ms={value}: expected -1 (keep every record) or at least 1000"
+                        ))
+                    }
+                }
+            }
+            "cleanup.policy" => {
+                let mut parts: Vec<String> = value
+                    .split(',')
+                    .map(|p| p.trim().to_ascii_lowercase())
+                    .collect();
+                parts.sort();
+                parts.dedup();
+                deletes = match parts.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                    ["delete"] => true,
+                    ["compact"] => false,
+                    ["compact", "delete"] => true,
+                    _ => {
+                        return Err(format!(
+                            "cleanup.policy={value}: expected delete, compact or compact,delete"
+                        ))
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((deletes && ms > 0).then_some(ms / 1000))
+}
+
 pub async fn describe_configs(
     ctx: &Arc<Ctx>,
     conn: &Conn,
@@ -214,4 +284,65 @@ pub async fn describe_configs(
         })
         .collect();
     DescribeConfigsResponse::default().with_results(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retention_of;
+
+    fn of(pairs: &[(&'static str, &'static str)]) -> Result<Option<i64>, String> {
+        retention_of(pairs.iter().map(|(n, v)| (*n, Some(*v))))
+    }
+
+    #[test]
+    fn retention_ms_becomes_the_queues_retention_in_whole_seconds() {
+        assert_eq!(of(&[]), Ok(None));
+        assert_eq!(of(&[("retention.ms", "-1")]), Ok(None));
+        assert_eq!(of(&[("retention.ms", "900000")]), Ok(Some(900)));
+        assert_eq!(of(&[("retention.ms", "1999")]), Ok(Some(1)));
+        assert_eq!(of(&[("retention.ms", "604800000")]), Ok(Some(604_800)));
+        // configs the facade does not apply are accepted
+        assert_eq!(
+            of(&[("segment.bytes", "1073741824"), ("retention.ms", "60000")]),
+            Ok(Some(60))
+        );
+    }
+
+    #[test]
+    fn a_compacted_topic_keeps_every_record_and_compact_delete_deletes_by_age() {
+        assert_eq!(
+            of(&[("cleanup.policy", "compact"), ("retention.ms", "60000")]),
+            Ok(None)
+        );
+        assert_eq!(
+            of(&[("retention.ms", "60000"), ("cleanup.policy", "compact")]),
+            Ok(None)
+        );
+        assert_eq!(
+            of(&[
+                ("cleanup.policy", "compact,delete"),
+                ("retention.ms", "60000")
+            ]),
+            Ok(Some(60))
+        );
+        assert_eq!(
+            of(&[
+                ("cleanup.policy", "Delete, Compact"),
+                ("retention.ms", "60000")
+            ]),
+            Ok(Some(60))
+        );
+        assert_eq!(of(&[("cleanup.policy", "delete")]), Ok(None));
+    }
+
+    #[test]
+    fn a_value_that_would_round_to_nothing_or_does_not_parse_is_refused() {
+        for v in ["0", "999", "-2", "abc", ""] {
+            let e = of(&[("retention.ms", v)]).unwrap_err();
+            assert!(e.starts_with("retention.ms="), "{e}");
+        }
+        let e = of(&[("cleanup.policy", "archive")]).unwrap_err();
+        assert!(e.contains("cleanup.policy=archive"), "{e}");
+        assert!(retention_of([("retention.ms", None)]).is_err());
+    }
 }

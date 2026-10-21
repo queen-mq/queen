@@ -123,8 +123,8 @@ function parseAdvertised(text) {
 // and OffsetDelete, now in ABSENT. Twenty-six rows. Every other window is the
 // first facade's, except SaslHandshake, which is v1 only. The reasons were
 // re-read against the new handlers: the raft leader now leads every partition
-// and coordinates every group and transactional id, and a topic's configs are
-// accepted and not applied.
+// and coordinates every group and transactional id, and of a topic's configs
+// only retention.ms and cleanup.policy are applied, at creation.
 const ADVERTISED_FINGERPRINT = "ef846e8cb3d6e0e8";
 
 /** One or two sentences per API: where the window stops, and why. */
@@ -156,11 +156,11 @@ const WINDOW_REASON = {
   SaslAuthenticate:
     "Ceiling: v2 only changes the encoding. v1's `session_lifetime_ms` is answered 0, so no client re-authenticates on a timer.",
   CreateTopics:
-    "Ceiling: v7 returns a topic id, which the facade does not mint. A partition count of -1 (v4) takes the default width, and v5 answers the width and the replication factor (the number of raft voters) with no configs: a topic's configs are accepted and not applied yet.",
+    "Ceiling: v7 returns a topic id, which the facade does not mint. A partition count of -1 (v4) takes the default width, and v5 answers the width and the replication factor (the number of raft voters) with no configs. `retention.ms` and `cleanup.policy` become the queue's retention; the other configs are accepted and not applied yet.",
   DeleteTopics:
     "Ceiling: v6 accepts a topic id in place of a name. v5 adds `error_message`, which says in words that there is no such queue.",
   DescribeConfigs:
-    "Up to the schema's v4. A topic's configs are accepted when it is created and not applied yet, so a describe answers no entries rather than values nothing enforces; an unknown topic answers UNKNOWN_TOPIC_OR_PARTITION.",
+    "Up to the schema's v4. It answers no entries, the retention a topic was created with included (that is read in Queen), rather than values nothing enforces; an unknown topic answers UNKNOWN_TOPIC_OR_PARTITION.",
   ListGroups:
     "Ceiling: v5 adds `group_type`, which tells classic groups from KIP-848 ones, and KIP-848 is not supported. v4's state filter (`--state`) is honoured.",
   DescribeGroups:
@@ -204,7 +204,7 @@ const ABSENT = [
   ["DescribeAcls", "Listing ACLs (`kafka-acls.sh --list`).", "There is no ACL model: authorization is Queen's, on the token."],
   ["CreateAcls", "Creating ACLs.", "Same reason."],
   ["DeleteAcls", "Deleting ACLs.", "Same reason."],
-  ["AlterConfigs", "Replacing a topic's configuration (the deprecated full-replacement form).", "A topic's configs are accepted when it is created and not applied yet, so a change would report a setting that nothing enforces."],
+  ["AlterConfigs", "Replacing a topic's configuration (the deprecated full-replacement form).", "A topic's retention is set when it is created (`retention.ms`, `cleanup.policy`) and changed through Queen afterwards; its other configs are not applied, so a change would report a setting that nothing enforces."],
   ["IncrementalAlterConfigs", "Changing a topic's configuration (`kafka-configs.sh --alter`).", "Same reason."],
   ["DescribeLogDirs", "Log directories and the bytes each partition holds (`kafka-log-dirs.sh`). Some topic creators also wait on it until every replica has its log.", "Not offered yet. A tool that needs it reports the broker as too old; to wait for a new topic, read Metadata (leaders and in-sync replicas) instead."],
   ["OffsetDelete", "Deleting a group's committed offsets for some partitions (`kafka-consumer-groups.sh --delete-offsets`).", "Not offered yet: a group's positions go with the group (DeleteGroups)."],

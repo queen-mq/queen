@@ -403,18 +403,25 @@ impl Queen {
 
     /// Create a queue for a Kafka topic: Queen's own defaults, but the
     /// facade's dedup window when it has one (0 keeps Queen's).
+    /// Create a topic's queue with the facade's dedup window and, when the
+    /// topic's configs ask for one, a retention in whole seconds
+    /// (`retention.ms`, see `handlers::admin::retention_of`).
     pub async fn create_queue(
         &self,
         bearer: Option<&str>,
         name: &str,
         dedup_window_seconds: i64,
+        retention_seconds: Option<i64>,
     ) -> Result<(), CallError> {
-        let options = if dedup_window_seconds > 0 {
-            json!({ "dedupWindowSeconds": dedup_window_seconds })
-        } else {
-            json!({})
-        };
-        self.configure(bearer, name, options).await
+        let mut options = serde_json::Map::new();
+        if dedup_window_seconds > 0 {
+            options.insert("dedupWindowSeconds".into(), json!(dedup_window_seconds));
+        }
+        if let Some(s) = retention_seconds {
+            options.insert("retentionEnabled".into(), json!(true));
+            options.insert("retentionSeconds".into(), json!(s));
+        }
+        self.configure(bearer, name, Value::Object(options)).await
     }
 
     /// Set some options of a queue (creating it when it is missing); options

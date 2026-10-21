@@ -127,8 +127,8 @@ than that and nothing but messages in the commit, use Pulsar.
   unchanged against a three-node Queen cluster on the first facade, before 2.6
   ([Streams, Connect and Flink](/guides/kafka-frameworks/)).
   Two things stay Kafka's for now. Queen accepts `cleanup.policy=compact` and keeps every record, so
-  a compacted topic never shrinks. And the 2.6 facade accepts a topic's configs without applying
-  them: `retention.ms` is the queue's to set, in Queen. Kafka transactions run on a cluster, held by
+  a compacted topic never shrinks. And the 2.6 facade applies only `retention.ms` and
+  `cleanup.policy` of a topic's configs, when it is created; change them later through Queen. Kafka transactions run on a cluster, held by
   the raft leader until they commit, and a leader change aborts the ones that were open.
 - **The step itself needs SQL.** KV reads by key or by prefix, in the same commit as the ack. For
   the records you search, the broker's [PostgreSQL sink](/guides/postgres/) writes a queue into a

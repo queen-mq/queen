@@ -47,17 +47,18 @@ against Queen. What each framework asks for is covered below, one request at a t
 Streams creates its internal topics with `segment.bytes`, `retention.ms=-1` and
 `message.timestamp.type=CreateTime` on repartition topics and `cleanup.policy=compact` on
 changelogs, and Connect creates its three topics compacted and then reads their configs back to
-check. In 2.6 the facade accepts every topic config and applies none of them: the topic is a queue
-with Queen's settings and the facade's dedup window. Nothing a framework asks for is refused, so none
-fails to create its topics, and DescribeConfigs answers no entries rather than values nothing
-enforces. Connect's check of its topics' cleanup policy therefore gets no answer to compare.
+check. In 2.6 two of those become the queue's settings when the topic is created: `retention.ms`
+its retention, and `cleanup.policy=compact` a queue that keeps every record. The others are
+accepted and not applied, so none of what the frameworks send is refused and none fails to create
+its topics. DescribeConfigs answers no entries rather than values nothing enforces, so Connect's
+check of its topics' cleanup policy gets no answer to compare.
 
 ## Compacted topics are kept whole
 
 Compaction guarantees a reader one thing: the last value of every key is in the log. Queen does not
-compact yet, so a topic with `cleanup.policy=compact` keeps every record, and so does every other
-topic created through Kafka, because `retention.ms` is not applied either. The last value of every
-key is always there, next to every value before it. The readers that depend on compacted topics
+compact yet, so a topic with `cleanup.policy=compact` keeps every record: its queue has no
+retention, whatever `retention.ms` says. The last value of every key is always there, next to every
+value before it. The readers that depend on compacted topics
 replay them from the start and fold each record into state, which is what a Streams changelog
 restore and Connect's config, offset and status topics do, and folding the whole log gives the same
 state as folding a compacted one, tombstones included, because each key's records are in the log's

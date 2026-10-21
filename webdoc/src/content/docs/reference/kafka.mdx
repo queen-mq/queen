@@ -25,6 +25,9 @@ sourceOfTruth:
 # (protocols/queen-kafka rewritten). Every section was rewritten against the new code: its settings,
 # what it does with topic configs, where it differs, its limits, and the clients run against it on
 # 2026-10-20. The files of the first facade this page named are gone.
+# sourceOfTruth re-read 2026-10-21 (later): handlers/admin.rs applies retention.ms and cleanup.policy at
+# CreateTopics, as the first facade did, and refuses a value it cannot apply with INVALID_CONFIG;
+# "Topic configs" says so.
 ---
 
 This is the contract a Kafka client gets from Queen, in the form you check things against: the
@@ -62,12 +65,20 @@ is out of range stops the node with the variable's name, except for `QUEEN_KAFKA
 
 ## Topic configs
 
-A topic is a Queen queue. CreateTopics accepts the configs a client sends with it and applies none
-of them yet: the queue's own settings (retention, dedup window, lease) are the ones that hold, and
-the facade sets only the dedup window, to `QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`. `retention.ms` in
-particular is not applied, so a topic keeps every record until its queue's retention says
-otherwise; set that through Queen. DescribeConfigs answers no entries rather than values nothing
-enforces, and the config-altering APIs are not offered.
+A topic is a Queen queue. Of the configs a client sends with CreateTopics, two become the queue's
+settings, as they did before 2.6; the others are accepted and not applied yet.
+
+| Config | Accepted | What it does |
+|---|---|---|
+| `retention.ms` | `-1` (default), or 1000 and more | The queue's retention (`retentionSeconds`), rounded down to whole seconds. `-1` keeps every record. Less than a second is refused with `INVALID_CONFIG`, because it would round to nothing. |
+| `cleanup.policy` | `delete` (default), `compact`, `compact,delete` | `delete` lets `retention.ms` delete by age. `compact` keeps every record whatever `retention.ms` says, because Queen does not compact and the last value of every key has to stay. `compact,delete` deletes by age and compacts nothing. Anything else is refused with `INVALID_CONFIG`. |
+| Anything else | | Accepted, not applied. |
+
+A topic created on first use, by a metadata request, has no configs and keeps every record. The
+facade also sets the queue's dedup window to `QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`. The configs are read
+at creation only: AlterConfigs and IncrementalAlterConfigs are not offered in 2.6, so change a
+topic's retention afterwards through Queen ([queue options](/concepts/partitions/#queue-options)),
+and DescribeConfigs answers no entries.
 
 ## APIs and versions
 

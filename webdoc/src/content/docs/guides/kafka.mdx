@@ -178,7 +178,9 @@ idempotent producer first writes to it.
 | Committed offset | The group's position on that partition |
 | `acks=1`, `acks=all` | One path: answered once the push is committed to the raft log |
 | Replication factor | The number of raft voters; every voter holds every partition |
-| Topic configs (`retention.ms`, `cleanup.policy`, ...) | Accepted, not applied yet: the queue's own settings hold |
+| `retention.ms` | The queue's retention, in whole seconds, set when the topic is created |
+| `cleanup.policy=compact` | Retention off: every record is kept |
+| Other topic configs | Accepted, not applied yet |
 | Idempotent producer | Queen's dedup window: a record's producer id, epoch and sequence are its transaction id |
 | Transaction | Held in the raft leader's memory, committed with its offsets as one raft entry |
 
@@ -282,15 +284,17 @@ are never written.
 
 ### Compaction and retention
 
-The configs a client sends with CreateTopics are accepted and not applied in 2.6. A topic created
-through Kafka is a queue with Queen's settings and the facade's dedup window: `retention.ms` does
-not become its retention, so it keeps every record until you set the queue's retention through
-Queen ([queue options](/concepts/partitions/#queue-options)). `cleanup.policy=compact` keeps every
-record too, so the last value of every key is always in the log, next to every earlier one. A reader
-that replays a compacted topic, a Kafka Streams changelog or Kafka Connect's config topic, rebuilds
-the same state from the whole log as from a compacted one; it reads more, and the topic grows until
-real compaction exists. What [Kafka Streams, Connect and Flink](/guides/kafka-frameworks/) ask for is
-on a page of its own.
+`retention.ms` on a topic created through Kafka becomes the queue's retention, rounded down to
+whole seconds; `-1`, the default, keeps records forever, and so does a topic created on first use.
+`cleanup.policy=compact` is accepted, and Queen keeps every record of such a topic: retention is off
+whatever `retention.ms` says, so the last value of every key is always in the log, next to every
+earlier one. A reader that replays a compacted topic, a Kafka Streams changelog or Kafka Connect's
+config topic, rebuilds the same state from the whole log as from a compacted one. It reads more, and
+the topic grows until real compaction exists; tombstones are kept like any other record.
+`compact,delete` keeps the retention and compacts nothing. The other topic configs are accepted and
+not applied yet, and a topic's configs are read when it is created: change its retention later
+through Queen ([queue options](/concepts/partitions/#queue-options)). What
+[Kafka Streams, Connect and Flink](/guides/kafka-frameworks/) ask for is on a page of its own.
 
 ## Run it on a cluster
 
@@ -363,8 +367,9 @@ three nodes. The earlier matrix, measured on the first facade, is on
   Kafka 4.x client) and leave `group.instance.id` unset, or the consumer fails when it joins.
 - No DeleteRecords, so `kafka-delete-records.sh` fails and Kafka Streams cannot purge its
   repartition topics.
-- Topic configs are accepted and not applied, and AlterConfigs, IncrementalAlterConfigs,
-  OffsetDelete, DescribeLogDirs and the ACL calls are not offered in 2.6
+- Of a topic's configs only `retention.ms` and `cleanup.policy` are applied, at creation, and
+  AlterConfigs, IncrementalAlterConfigs, OffsetDelete, DescribeLogDirs and the ACL calls are not
+  offered in 2.6
   ([reference](/reference/kafka/#apis-and-versions)).
 - No TLS listener: keep the Kafka port on a private network, or terminate TLS in front of it.
 - A partition that retention has emptied and that nobody has written to for 30 days

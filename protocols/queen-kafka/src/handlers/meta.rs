@@ -163,7 +163,9 @@ pub async fn metadata(
                     }
                     match ctx
                         .queen
-                        .create_queue(bearer, &name, ctx.cfg.dedup_window_seconds)
+                        // Created on first use: no configs, so no retention
+                        // (`retention.ms=-1`, as on Kafka's create path here).
+                        .create_queue(bearer, &name, ctx.cfg.dedup_window_seconds, None)
                         .await
                     {
                         Ok(()) => {

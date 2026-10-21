@@ -56,8 +56,8 @@ partitions carried about 8,000,000 messages a second where one Queen queue carri
 acknowledges a write once its replicas hold it in memory, without waiting for an fsync, which is
 most of that difference: with an fsync on every append its p99 was 198 ms at 1,000 partitions. Then there is the ecosystem (Connect and its connectors, Streams, schema
 registries) and log compaction. Queen's [Kafka facade](/guides/kafka/) lets existing producers and
-consumers connect, and accepts the topic settings Streams and Connect create without applying
-them, so a compacted topic keeps every record, because Queen does not compact.
+consumers connect, and accepts the topic settings Streams and Connect create, but a compacted topic
+keeps every record, because Queen does not compact.
 
 ## Pulsar
 
