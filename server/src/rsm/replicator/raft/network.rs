@@ -579,7 +579,7 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "server")]
-pub(crate) use server::{bind, serve, LinkRpc, RpcState};
+pub(crate) use server::{bind, listen, serve, LinkRpc, RpcState};
 
 #[cfg(feature = "server")]
 mod server {
@@ -1170,20 +1170,27 @@ mod server {
         Ok(socket)
     }
 
-    /// Serve the Raft RPCs until `shutdown` resolves: listen on the port
-    /// [`bind`] reserved. Runs on openraft's runtime.
-    pub(crate) async fn serve<S: Store + 'static>(
+    /// Listen on the port [`bind`] reserved. A failure here fails the open:
+    /// on Linux a second socket can bind a port that another socket bound
+    /// with SO_REUSEADDR and has not listened on yet, and only the second
+    /// `listen` fails, so the port can turn out to be taken only here.
+    pub(crate) fn listen(
         socket: tokio::net::TcpSocket,
+    ) -> std::io::Result<tokio::net::TcpListener> {
+        let at = socket.local_addr();
+        socket.listen(1024).map_err(|e| match at {
+            Ok(a) => std::io::Error::other(format!("listen for raft RPCs on {a}: {e}")),
+            Err(_) => std::io::Error::other(format!("listen for raft RPCs: {e}")),
+        })
+    }
+
+    /// Serve the Raft RPCs on `listener` until `shutdown` resolves. Runs on
+    /// openraft's runtime.
+    pub(crate) async fn serve<S: Store + 'static>(
+        listener: tokio::net::TcpListener,
         state: RpcState<S>,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) {
-        let listener = match socket.listen(1024) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!(target: "rsm", error = %e, "raft listener");
-                return;
-            }
-        };
         if state.token.is_none() {
             if let Ok(a) = listener.local_addr() {
                 if !a.ip().is_loopback() {
@@ -1278,5 +1285,25 @@ mod tests {
         assert!(full > small, "{full:?} vs {small:?}");
         // 32 MiB at 50 MB/s: ~671 ms on top of the slack.
         assert_eq!(full, soft + APPEND_SLACK + Duration::from_micros(671_088));
+    }
+
+    /// A port that another node reserved is refused to the second one: at
+    /// the bind on macOS, at the listen on Linux (which binds a second
+    /// SO_REUSEADDR socket while neither listens). Either way the open fails;
+    /// a listen that failed inside the serving task left a node running that
+    /// no peer could reach (2026-10-21, tests on Linux).
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_port_another_node_reserved_is_refused_at_bind_or_at_listen() {
+        let first = bind("127.0.0.1:0").expect("bind");
+        let at = first.local_addr().expect("addr").to_string();
+        match bind(&at) {
+            Err(e) => assert!(e.to_string().contains(&at), "{e}"),
+            Ok(second) => {
+                let _serving = listen(first).expect("the first listen");
+                let e = listen(second).expect_err("a second listen on the same port");
+                assert!(e.to_string().contains(&at), "{e}");
+            }
+        }
     }
 }

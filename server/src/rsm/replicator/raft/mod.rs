@@ -1515,7 +1515,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
         }
 
         // The Raft RPC port first: a taken port fails the open, not a task.
-        // It listens only once openraft exists ([`network::serve`]): until
+        // It listens only once openraft exists ([`network::listen`]): until
         // then a peer that connects is refused at once instead of waiting.
         #[cfg(feature = "server")]
         let listener = match &cluster {
@@ -1930,6 +1930,11 @@ impl<S: Store + 'static> RaftReplicator<S> {
                         link_rpc,
                     )) = rpc_serve
                     {
+                        // Listened on here, not in the serving task: a port
+                        // that turns out to be taken fails the open, where a
+                        // task that could not listen left a node up that no
+                        // peer could reach.
+                        let listener = network::listen(listener)?;
                         let state = network::RpcState {
                             raft: raft.clone(),
                             token,
