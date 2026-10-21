@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use super::reads::{scan_dlq_rows, walk_records};
-use super::{query_map, read_error, ApiOut, Effect, RaftFacade, ReqCtx, RsmError};
+use super::{query_map, query_value, read_error, sizes_max, ApiOut, Effect, RaftFacade, ReqCtx, RsmError};
 use crate::frames::{pack_frames, uuid_bytes_to_string, uuid_string_to_bytes, FrameIn};
 use crate::rsm::batcher::Command;
 use crate::rsm::effect::{CursorRow, SubscriptionMode};
@@ -788,13 +788,22 @@ impl RaftFacade {
             json!({"queues":self.queue_snapshots(&ctx.tenant).await?}).to_string(),
         ))
     }
+    /// `includePartitions=false` returns a bounded summary. Totals include
+    /// the whole queue's partition and consumed counts, independent of the
+    /// listed rows; `statsAge` identifies sampled or not-yet-measured counts.
     pub(super) async fn api_status_queue(
         &self,
         ctx: ReqCtx,
         queue: &str,
-        _query: Option<&str>,
+        query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
-        match self.queue_resource_detail(&ctx.tenant, queue).await? {
+        // Keep the detailed default for existing clients; the dashboard opts out.
+        let max = if query_value(query, "includePartitions").as_deref() == Some("false") {
+            0
+        } else {
+            sizes_max()
+        };
+        match self.queue_resource_detail(&ctx.tenant, queue, max).await? {
             Some(v) => {
                 let totals = v.get("totals").cloned().unwrap_or_else(|| json!({}));
                 let options = v.get("options").cloned().unwrap_or_else(|| json!({}));
@@ -809,7 +818,9 @@ impl RaftFacade {
                     json!({
                         "queue":queue_info,
                         "partitions":v.get("partitions").cloned().unwrap_or_else(|| json!([])),
-                        "totals":{"messages":totals}
+                        "totals":{"messages":totals,"partitions":v.get("partitionCount"),"consumed":v.get("totalConsumed")},
+                        "partitionsTruncated":v.get("partitionsTruncated").and_then(Value::as_bool).unwrap_or(false),
+                        "statsAge":v.get("statsAge")
                     })
                     .to_string(),
                 ))

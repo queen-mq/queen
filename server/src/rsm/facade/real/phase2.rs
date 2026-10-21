@@ -725,7 +725,10 @@ impl RaftFacade {
     }
 
     async fn api_get_queue(&self, ctx: ReqCtx, queue: &str) -> Result<ApiOut, RsmError> {
-        match self.queue_resource_detail(&ctx.tenant, queue).await? {
+        match self
+            .queue_resource_detail(&ctx.tenant, queue, sizes_max())
+            .await?
+        {
             Some(v) => Ok(ApiOut::json(200, v.to_string())),
             None => Ok(ApiOut::json(
                 404,
@@ -738,15 +741,19 @@ impl RaftFacade {
         &self,
         tenant: &str,
         queue: &str,
+        max: usize,
     ) -> Result<Option<Value>, RsmError> {
         let store = self.store.clone();
         let tenant = tenant.to_string();
         let queue = queue.to_string();
         let now = super::wall_micros();
         let known = stats::stats_for(&self.store);
-        let max = sizes_max();
         tokio::task::spawn_blocking(move || {
-            store.read(|r| queue_detail(r, &tenant, &queue, now, max, &known))
+            let detail = store.read(|r| queue_detail(r, &tenant, &queue, now, max, &known))?;
+            if detail.as_ref().is_some_and(|v| v["statsAge"] != 0) {
+                known.wake(None);
+            }
+            Ok(detail)
         })
         .await
         .map_err(|e| RsmError::Internal(format!("queue detail: {e}")))?
@@ -1385,7 +1392,9 @@ fn queue_json(name: &str, c: &QueueConfig, n: &SnapCounts) -> Value {
 /// `GET /api/v1/resources/queues/:queue`: the queue, its first `max`
 /// partitions by partition id (sorted by name), and its totals — over the
 /// listed partitions, or, when there are more (`"partitionsTruncated"`), the
-/// queue's figures ([`stats`]).
+/// queue's figures ([`stats`]). `max = 0` reads only those figures and never
+/// scans DLQ rows or builds per-partition JSON. `statsAge` is seconds since
+/// their sample, 0 for a live read, or null while the first sample is pending.
 fn queue_detail<R: TypedReads + ?Sized>(
     r: &R,
     tenant: &str,
@@ -1402,13 +1411,17 @@ fn queue_detail<R: TypedReads + ?Sized>(
     let mut listed = 0usize;
     let mut truncated = false;
     let mut dlq_by_pid: BTreeMap<u64, i64> = BTreeMap::new();
-    for (_, _, _, row) in reads::scan_dlq_rows(r, tenant, Some(queue), None)? {
-        *dlq_by_pid.entry(row.pid).or_default() += 1;
+    if max > 0 {
+        for (_, _, _, row) in reads::scan_dlq_rows(r, tenant, Some(queue), None)? {
+            *dlq_by_pid.entry(row.pid).or_default() += 1;
+        }
     }
     let mut partitions = Vec::new();
     let mut totals = [0i64; 5]; // total, pending, processing, completed, dlq
     let mut retained = 0i64;
     let mut segments = 0i64;
+    let mut consumed_total = 0u64;
+    let mut stats_age = json!(0);
     r.scan_queue_partitions(tenant, queue, None, usize::MAX, &mut |pid| {
         listed += 1;
         if listed > max {
@@ -1436,6 +1449,7 @@ fn queue_detail<R: TypedReads + ?Sized>(
         totals[2] += processing;
         totals[3] += completed;
         totals[4] += dead_letter;
+        consumed_total = consumed_total.saturating_add(consumed);
         let partition_bytes = r.partition_counter(pid, Counter::RetainedBytes).unwrap_or(0);
         retained += partition_bytes;
         let mut sealed = 0i64;
@@ -1461,8 +1475,9 @@ fn queue_detail<R: TypedReads + ?Sized>(
         true
     })?;
     partitions.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    if truncated {
-        let (f, _) = stats::queue_figures(r, tenant, queue, now, stats::exact_budget(), known)?;
+    let mut partition_count = json!(partitions.len());
+    if truncated || max == 0 {
+        let (f, exact) = stats::queue_figures(r, tenant, queue, now, stats::exact_budget(), known)?;
         let dlq = r.queue_counter(tenant, queue, Counter::DlqCount)?;
         totals = [
             f.total,
@@ -1473,6 +1488,15 @@ fn queue_detail<R: TypedReads + ?Sized>(
         ];
         segments = f.segments;
         retained = r.queue_counter(tenant, queue, Counter::RetainedBytes)?;
+        consumed_total = f.consumed;
+        partition_count = if f.at_us > 0 { json!(f.parts) } else { Value::Null };
+        if !exact {
+            stats_age = if f.at_us > 0 {
+                json!((now - f.at_us).max(0) / 1_000_000)
+            } else {
+                Value::Null
+            };
+        }
     }
     let mut v = json!({
         "id":uuid_bytes_to_string(&cfg.id),"name":queue,
@@ -1482,7 +1506,8 @@ fn queue_detail<R: TypedReads + ?Sized>(
         "options":config_options(&cfg),"partitions":partitions,
         "segments":{"segments":segments,"messages":totals[0]},
         "totals":{"total":totals[0],"pending":totals[1],"processing":totals[2],"completed":totals[3],"failed":Value::Null,"deadLetter":totals[4]},
-        "retainedBytes":retained
+        "retainedBytes":retained,
+        "partitionCount":partition_count,"totalConsumed":consumed_total,"statsAge":stats_age
     });
     if truncated {
         v["partitionsTruncated"] = Value::Bool(true);

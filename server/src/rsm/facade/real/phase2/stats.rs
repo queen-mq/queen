@@ -84,6 +84,8 @@ pub(super) struct Figures {
     pub pending: i64,
     /// Inside a live lease (a subset of `pending`).
     pub processing: i64,
+    /// Lifetime deliveries across all partition cursors.
+    pub consumed: u64,
     /// The most one cursor has pending, and the age in seconds of the oldest
     /// message one cursor has not consumed: the overview's lag inputs (zero
     /// when walked without [`LagReads`]).
@@ -134,6 +136,7 @@ fn add_partition<R: TypedReads + ?Sized>(
     let mut processing = 0i64;
     let mut sealed: Option<Vec<u32>> = None;
     for (qm, c) in &cursors {
+        f.consumed = f.consumed.saturating_add(c.total_consumed);
         let slot = if *qm { &mut queue_mode } else { &mut named_min };
         *slot = Some(slot.map_or(c.committed, |v| v.min(c.committed)));
         if rows::lease_live(c, now) {
@@ -310,14 +313,17 @@ pub(super) fn queue_figures<R: TypedReads + ?Sized>(
     budget: u64,
     known: &StoreStats,
 ) -> Result<(Figures, bool), StoreError> {
-    if let Some(f) = walk_queue(r, tenant, queue, now, budget, None)? {
+    let last = known.recall(tenant, queue);
+    let walked = match last {
+        Some(f) if f.parts as u64 > budget => None,
+        _ => walk_queue(r, tenant, queue, now, budget, None)?,
+    };
+    if let Some(f) = walked {
         known.remember(tenant, queue, f);
         return Ok((f, true));
     }
     Ok((
-        known
-            .recall(tenant, queue)
-            .unwrap_or_else(|| estimate(r, tenant, queue)),
+        last.unwrap_or_else(|| estimate(r, tenant, queue)),
         false,
     ))
 }
@@ -794,9 +800,129 @@ mod tests {
         assert_eq!(whole["partitions"].as_array().map(Vec::len), Some(3));
         assert!(whole.get("partitionsTruncated").is_none());
         assert_eq!(whole["totals"], d["totals"]);
+        assert_eq!(whole["partitionCount"], 3);
+        for (query, expected_rows) in [
+            (None, 3),
+            (Some("includePartitions=true"), 3),
+            (Some("includePartitions=false"), 0),
+        ] {
+            let answer = f.api_status_queue(ctx(), "w", query).await.expect("status");
+            assert_eq!(answer.status, 200);
+            let body: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
+            assert_eq!(body["partitions"].as_array().unwrap().len(), expected_rows);
+            assert_eq!(body["totals"]["messages"], whole["totals"]);
+            assert_eq!(body["totals"]["partitions"], 3);
+            assert_eq!(body["statsAge"], 0);
+        }
+        let missing = f
+            .api_status_queue(ctx(), "missing", Some("includePartitions=false"))
+            .await
+            .unwrap();
+        assert_eq!(missing.status, 404);
         drop(known);
         f.shutdown().await;
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The summary stays small beyond the detail cap and preserves the whole
+    /// queue's counts, including lifetime consumed, from the shared sampler.
+    #[test]
+    fn queue_summary_is_bounded_at_one_hundred_thousand_partitions() {
+        use super::super::{configured_defaults, queue_detail};
+        use crate::rsm::store::{StoreOpts, TypedWrites, Writes};
+
+        let dir = std::env::temp_dir().join(format!(
+            "queen-summary-{}-{}",
+            std::process::id(),
+            wall_us()
+        ));
+        let store = Arc::new(
+            HeedStore::open(
+                &dir,
+                &StoreOpts {
+                    map_bytes: Some(256 << 20),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let now = wall_us();
+        let count = 100_001u64;
+        {
+            let mut w = store.write().unwrap();
+            w.put_queue("tenant", "large", &configured_defaults(now))
+                .unwrap();
+            w.put_queue("tenant", "empty", &configured_defaults(now))
+                .unwrap();
+            for pid in 1..=count {
+                let mut p = PartitionRow::new(
+                    (pid as u128).to_be_bytes(),
+                    "tenant",
+                    "large",
+                    &format!("p{pid}"),
+                    now,
+                );
+                p.last_offset = 1;
+                w.create_partition(pid, &p).unwrap();
+                let mut cursor = rows::cursor_fresh(0, now);
+                cursor.total_consumed = 2;
+                w.put_cursor(pid, "reader", &cursor).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let known = stats_for(&store);
+        let cold = store
+            .read(|r| queue_detail(r, "tenant", "large", now, 0, &known))
+            .unwrap()
+            .unwrap();
+        assert!(cold["statsAge"].is_null());
+        assert!(cold["partitionCount"].is_null(), "unmeasured is not zero");
+        assert!(store
+            .read(|r| queue_detail(r, "other-tenant", "large", now, 0, &known))
+            .unwrap()
+            .is_none());
+        let empty = store
+            .read(|r| queue_detail(r, "tenant", "empty", now, 0, &known))
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty["partitionCount"], 0);
+        assert_eq!(empty["statsAge"], 0);
+
+        let figures = store
+            .read(|r| walk_queue(r, "tenant", "large", now, count, None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(figures.consumed, count * 2);
+        known.remember("tenant", "large", figures);
+        let started = Instant::now();
+        let summary = store
+            .read(|r| queue_detail(r, "tenant", "large", now + 5_000_000, 0, &known))
+            .unwrap()
+            .unwrap();
+        let summary_bytes = summary.to_string().len();
+        let summary_time = started.elapsed();
+        assert!(summary_bytes < 2048, "summary: {summary_bytes} bytes");
+        assert_eq!(summary["partitions"], serde_json::json!([]));
+        assert_eq!(summary["partitionCount"], count);
+        assert_eq!(summary["totalConsumed"], count * 2);
+        assert_eq!(summary["totals"]["total"], count * 2);
+        assert_eq!(summary["totals"]["pending"], count);
+        assert_eq!(summary["statsAge"], 5);
+
+        let started = Instant::now();
+        let detail = store
+            .read(|r| queue_detail(r, "tenant", "large", now + 5_000_000, 100_000, &known))
+            .unwrap()
+            .unwrap();
+        let detail_bytes = detail.to_string().len();
+        assert_eq!(detail["totals"], summary["totals"]);
+        assert_eq!(detail["partitionCount"], summary["partitionCount"]);
+        assert_eq!(detail["totalConsumed"], summary["totalConsumed"]);
+        assert_eq!(detail["partitionsTruncated"], true);
+        eprintln!("100001 partitions: detail {detail_bytes} bytes in {:?}; summary {summary_bytes} bytes in {summary_time:?}", started.elapsed());
+        drop(known);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The sampler walks every queue at its pace and keeps the figures a read
