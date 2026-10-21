@@ -74,6 +74,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
 # waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
 # parks wakes it instead of its timeout. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (2.6, node recovery): raft/mod.rs and link.rs read
+# QUEEN_RAFT_MEMBER_HOLD_S and QUEEN_RAFT_MEMBER_HOLD_DISK_PCT (the log kept for an away member),
+# qlog/set.rs and hashside.rs QUEEN_QLOG_HASH_SIDECARS; the tables gain their rows and the generated
+# list has them. real.rs (facade 2's push of Kafka records with their transaction id) adds no setting.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
@@ -128,6 +132,7 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 | `QUEEN_RAFT_DEDUP_INDEX` | `txns` | How each append's `transactionId` hashes are indexed: `txns` (one row per append), `segment` (read back from the queue log) or `rows`. |
 | `QUEEN_RAFT_ROWS_WINDOW` | on | A push's index row leaves memory when it leaves the queue's dedup window (never before 900 s), whether or not the message is still retained; older messages are read through the queue log's own index. Needs cluster version 6. Off: a row stays for as long as its message. |
 | `QUEEN_QLOG_DIRX` | on | Keep the directory that says which file of a queue log holds a partition's offsets, so a read of an old message does not ask every file. Off: no new directory file is built. |
+| `QUEEN_QLOG_HASH_SIDECARS` | on | Write a hash sidecar beside each sealed queue-log file (about 16 bytes a message), so a restart refills the dedup rows without reading the files. Off: a restart reads every file the rows need, and existing sidecars are not used. |
 
 ### Admission
 
@@ -161,6 +166,8 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 | `QUEEN_RAFT_FWD_STREAMS` | `4` (1 to 64) | Long-lived streams a follower forwards prepared commands over. |
 | `QUEEN_RAFT_CLUSTER_VERSION_MS` | `1000` | How often the leader compares the cluster's data format version with what every member reads, and raises it once all read the new one. A raise is one-way: older builds refuse the data from then on. `0` never raises it, which keeps a rollback open while a new release bakes. |
 | `QUEEN_EPHEMERAL_MEMBER_TTL_MS` | `4000` (at least 200) | A member the leader has not heard from for this long owns no ephemeral partition. |
+| `QUEEN_RAFT_MEMBER_HOLD_S` | `21600` (6 hours) | How long the leader keeps its log for a member that is away, from the entry the member had, so that it catches up from the log when it comes back. Past it, or past the disk limit below, the leader purges, and the member gets a snapshot of what lies above its own log. |
+| `QUEEN_RAFT_MEMBER_HOLD_DISK_PCT` | `QUEEN_RAFT_DISK_LOW_PCT` (80) | The fullness of the leader's volume past which it stops keeping its log for absent members. |
 
 ### Standby cluster
 

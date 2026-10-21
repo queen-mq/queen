@@ -32,6 +32,8 @@ sidebar:
 # parks wakes it instead of its timeout. The opening paragraph's parked consumer now always gets the
 # message at once; verifiedBy gains tests_unit/ephemeral_wake.rs. Nothing else this page states
 # changes.
+# sourceOfTruth re-read 2026-10-21: metrics.rs counts the records Kafka fetches serve, per queue
+# (11a0a5f3a); no ephemeral metric changes. Nothing this page states changes.
 ---
 
 An ephemeral queue keeps its messages in memory and nowhere else. A push is a memory write and a

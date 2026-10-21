@@ -10,7 +10,7 @@ sourceOfTruth:
   - server/src/rsm/planner/txn.rs
   - server/src/rsm/planner/push.rs
   - server/src/rsm/facade/groups.rs
-  - protocols/queen-kafka/src/topic_config.rs
+  - protocols/queen-kafka/src/handlers/admin.rs
 # sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/groups.rs
 # changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
 # QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
@@ -21,6 +21,8 @@ sourceOfTruth:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (2.6, Kafka facade 2): handlers/admin.rs accepts the topic configs
+# Streams and Connect create and applies none; the Kafka paragraph says so.
 ---
 
 Two questions separate these systems more than any feature list: how you keep order per entity when
@@ -54,8 +56,8 @@ partitions carried about 8,000,000 messages a second where one Queen queue carri
 acknowledges a write once its replicas hold it in memory, without waiting for an fsync, which is
 most of that difference: with an fsync on every append its p99 was 198 ms at 1,000 partitions. Then there is the ecosystem (Connect and its connectors, Streams, schema
 registries) and log compaction. Queen's [Kafka facade](/guides/kafka/) lets existing producers and
-consumers connect, and accepts the topic settings Streams and Connect create, but a compacted topic
-keeps every record, because Queen does not compact.
+consumers connect, and accepts the topic settings Streams and Connect create without applying
+them, so a compacted topic keeps every record, because Queen does not compact.
 
 ## Pulsar
 

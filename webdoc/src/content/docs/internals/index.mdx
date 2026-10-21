@@ -65,6 +65,10 @@ digest: >-
 # txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
 # and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
 # from the commit. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (2.6): raft/mod.rs keeps the log for an away member and listens
+# once openraft exists; stream.rs pauses 50 ms doubling to 1 s between attempts to reach a member
+# that is down. Facade 2 still calls the same router and pipeline, so a Kafka produce is still a
+# push. Nothing this page states changes.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and

@@ -90,6 +90,11 @@ sourceOfTruth:
 # and groupActivity, and settingsDoc.js its Settings line, Inactive after; a queue asks for a reader
 # only with no consumer group on it, and not when the Kafka facade created it. The paragraph under
 # the table of lines says both.
+# sourceOfTruth re-read 2026-10-21: metrics.rs and the dashboard count a Kafka fetch's records per
+# queue (11a0a5f3a, shown as fetches beside pops) and a gathered answer names the nodes it missed;
+# facade/real.rs and mod.rs count a Kafka group's commit as consumption (cd737c40a); raft/mod.rs's
+# 2.6 changes (member holds, late listen) change no metric or health field this page names. The
+# dashboard section says so.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -108,6 +113,13 @@ the page of a list are part of the address, so a reload, a shared link and the b
 on the same view. System shows the replicated log, each node with its role, term, indexes and store usage,
 and the members; the bar at the top of every page says when a node refuses writes because its
 disk is full.
+
+Kafka clients count too. The records a Kafka consumer fetches are counted beside pops ("Fetch
+(Kafka)" on the Overview, "Fetched (Kafka)" in Workload), and a Kafka group's commit counts as
+consumption the way an ack does, so a topic read only by Kafka groups shows its traffic both ways.
+The Overview and Workload gather each node's counters on every read; when a node does not answer,
+the page says so with a "Partial: node N did not answer" chip instead of showing a lower rate
+(`nodesMissing` in the API's answer).
 
 Amber and red on those pages come from a few lines, and Settings is where a tenant moves them:
 for all its queues, or for one queue from that queue's page. A queue with pending messages asks

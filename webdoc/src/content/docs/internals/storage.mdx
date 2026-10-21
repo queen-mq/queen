@@ -59,6 +59,11 @@ sourceOfTruth:
 # hold (qlog/mod.rs, qlog/record.rs REC_ENTRY_ELIDED), that the checkpoint keeps txns rows without
 # them (store/mod.rs, store/heed_store.rs), and that a boot refills them before the replay
 # (raft/mod.rs, txns_refill.rs). Reclaim and the refusals at boot are unchanged.
+# sourceOfTruth re-read 2026-10-21 (2.6, node recovery): qlog/mod.rs, set.rs and hashside.rs write a
+# hash sidecar per sealed file that the boot refill reads; dirx.rs's paced writes are what the sidecar
+# uses; index.rs opens a sealed file's index unchecked and checks it later; raft/mod.rs and link.rs
+# keep the log for an away member; snapshot.rs sends a delta with the indexes; network.rs listens
+# once openraft exists. The layout, the refill paragraph and the snapshot paragraph say so.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are
@@ -82,9 +87,11 @@ $QUEEN_RAFT_DIR                    default /var/lib/queen/raft
     q0/                            the system log: entries that touch no queue
     q<queue id>/r00000001.qlog     a queue's log files, rolling
                 r00000001.qidx     the index of a sealed file
+                r00000001.qhsh     the hash sidecar of a sealed file, for the boot refill (2.6)
                 dirx-<a>-<b>.qdx   which of the sealed files a to b holds a partition's offsets
   raft/                            openraft only: vote, commit point, purge point, membership,
-                                   and what the node keeps for a standby (link_holds.json)
+                                   and what the node keeps for a standby (link_holds.json) and
+                                   for an away member (member_holds.json, 2.6)
   snapshots/                       a snapshot received from the leader, staged for the next boot
   link.seed                        on a standby's first node: the record of the seed it took
   local.db  dash.db                node-local metrics and dashboard rows (not replicated)
@@ -181,6 +188,14 @@ of about 1.6 KB: on one node at 300,000 messages a second, the checkpoint's inde
 616 to 11 MB (`benchmark-queen/2026-10-15-bytes-per-msg`). `QUEEN_RAFT_CHECKPOINT_TXNS=whole`
 keeps the hashes in the checkpoint.
 
+From 2.6 that refill reads no payload from a sealed file. A thread of its own writes, beside each
+sealed file, a hash sidecar (`.qhsh`): every record's header and the hashes it carries, about 16
+bytes per message, written in 8 MiB steps it waits for so the log's own syncs never queue behind
+it. The boot refills the rows from the sidecars, checked by their checksums and record by record
+against the file's index, and reads the file itself only where a sidecar is missing or does not
+match, building it again afterwards. On 254 GB of queue logs a restart's refill went from 171 to 201
+s to 20 s (2026-10-21). `QUEEN_QLOG_HASH_SIDECARS=0` turns the sidecars off.
+
 ## Crash recovery
 
 1. The store reopens exactly at its last checkpoint.
@@ -208,10 +223,17 @@ copies, and **it replays only if every copy is present and identical** (the pres
 crash is cut from every log and leaves no gap in the offsets, because its offsets were never
 applied.
 
-In a cluster a restarted node then catches up from the leader. A node that was away longer than
-`QUEEN_RAFT_PURGE_HOLD_S` (600), or a new one, receives a snapshot instead: a copy of the leader's
-store checkpoint, its trace file and its queue log files. The node stages it under `snapshots/`, exits, and swaps
-it in at the next boot, never while it serves. The first node of a
+In a cluster a restarted node then catches up from the leader, whose log is kept for it: for a
+member that is away, from the entry it had, up to `QUEEN_RAFT_MEMBER_HOLD_S` (6 hours) while the
+leader's volume stays below `QUEEN_RAFT_MEMBER_HOLD_DISK_PCT` (2.6), and for one that is connected
+but behind, `QUEEN_RAFT_PURGE_HOLD_S` (600). A node the leader has purged past, or a new one,
+receives a snapshot instead: the leader's store checkpoint, its trace file and its queue log files
+with their indexes. The leader first asks the node where its log stands and sends only the queue
+log files above that point, a delta; the whole state goes to a node with no log or older than 2.6,
+and nothing to a node that does not answer. The node stages it under `snapshots/`, exits, and swaps
+it in at the next boot, never while it serves. A boot opens the sealed files' indexes without
+reading them whole and checks them in the background, so it no longer reads every index before it
+serves. The first node of a
 [standby cluster](/operate/standby/) takes the same snapshot from a node of its source, once, and
 one for each raft group when the clusters run several. That
 node keeps its log from the snapshot's position on from the moment it is asked, and the source's

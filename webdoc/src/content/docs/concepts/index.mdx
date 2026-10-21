@@ -57,6 +57,9 @@ digest: >-
 # txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
 # and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
 # from the commit. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21: real.rs gives a Kafka record's push its transaction id (facade
+# 2's idempotent producer) and consume/txn.rs counts a moved position as consumption on the
+# dashboard (cd737c40a). Nothing this page states changes.
 ---
 
 Queen has one idea, and every concept page zooms into a part of it. Every entity gets an ordered

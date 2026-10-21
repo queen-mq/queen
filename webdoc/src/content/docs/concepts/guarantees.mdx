@@ -45,6 +45,9 @@ sourceOfTruth:
 # txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
 # and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
 # from the commit. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21: replicator/mod.rs and local.rs (2.6) keep the log for an away
+# member and write a hash sidecar per sealed queue-log file for the boot refill; neither changes
+# what an acknowledged write is or how long it is kept. Nothing this page states changes.
 ---
 
 We test Queen with Jepsen, on five nodes, under kill -9, network partitions, process pauses, clock

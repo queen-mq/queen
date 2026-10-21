@@ -94,6 +94,11 @@ verifiedBy:
 # wire options and their encoders, and config/queen.php adds binary_push, push_compression and
 # framed_pop. None of them touches a publication, its interval, its timeout or its TTL. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-10-21: phase2/reads.rs, metrics.rs and the dashboard count the records
+# Kafka fetches serve beside pops, and a gathered dashboard answer names the nodes it missed
+# (11a0a5f3a) the SDKs gain a read of a partition by offset and a list of the partitions written
+# since a time (66622568e, clients 2.6.0, documented on start/clients). Nothing this page states
+# changes.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.

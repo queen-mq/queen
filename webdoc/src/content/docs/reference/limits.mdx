@@ -74,6 +74,10 @@ sourceOfTruth:
 # lastSeenAt, inactiveSeconds; state Stable, Lagging or Empty), two KV point reads per group of the
 # listing; phase2.rs marks the queues the Kafka facade created (kafkaTopic) in the queue list, one
 # KV prefix read per list. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21: facade/mod.rs and real.rs give a Kafka record's push its
+# transaction id (facade 2's idempotent producer, cd737c40a), counted in its planned size like any
+# item's; phase2/reads.rs notes the records a Kafka fetch served (11a0a5f3a). No limit on this page
+# changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling

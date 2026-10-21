@@ -101,6 +101,12 @@ digest: >-
 # sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
 # waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
 # parks wakes it instead of its timeout. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (2.6, a member recovers from the log or a delta): replicator/mod.rs,
+# raft/mod.rs and link.rs keep the log for an away member (QUEEN_RAFT_MEMBER_HOLD_S, 6 h; its disk
+# limit); snapshot.rs asks a member where its log stands and sends a delta with the queue logs'
+# indexes; network.rs listens only once openraft exists; qlog/set.rs and local.rs build the hash
+# sidecars the boot refill reads. "Find your case" and "A node crashed or restarted" say so, with
+# the measurements of 2026-10-20 and 2026-10-21. The procedures are unchanged.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and
@@ -236,7 +242,7 @@ that grows. A node that will not start names the reason in its last `FATAL` line
 | What you see | What it is | Do |
 |---|---|---|
 | A node restarted and is healthy again, `lag` 0 | A crash, an OOM kill, an eviction, a reboot | Nothing |
-| A node exited once with code 75, its log says `the process exits to load a received snapshot` | It was away longer than the leader kept the log for it (`QUEEN_RAFT_PURGE_HOLD_S`, 600 s) and loaded a snapshot on its next start | Nothing |
+| A node exited once with code 75, its log says `the process exits to load a received snapshot` | The leader no longer had the log it needed (it was away past `QUEEN_RAFT_MEMBER_HOLD_S`, 6 hours, or the leader's volume passed `QUEEN_RAFT_MEMBER_HOLD_DISK_PCT`), so it received a snapshot and loaded it on its next start | Nothing |
 | A node refuses to start: `FATAL` with `rsm qlog corrupt`, `damaged record at byte`, `does not parse`, `bus error (SIGBUS)` or `Cannot re-apply logs` | Damaged or missing files | [Replace it](#replace-a-node) |
 | A node crash-loops with exit code 139 and no `FATAL` line | A damaged store file | [Replace it](#replace-a-node) |
 | A cluster node refuses with `was written by the local replicator` | Its `raft/state.json` is gone (the message is misleading) | [Replace it](#replace-a-node) |
@@ -291,11 +297,21 @@ before it drains, so a planned restart costs one transfer and no election.
 
 In the 2026-10-01 rehearsal (beta.1, Docker, under load), kill -9 of the leader gave a new leader
 within 4 s and the old one was back and caught up 4 s later; SIGTERM of the leader handed off in
-14 ms; no acknowledged write of 3,300 was lost. A node that was away longer than the leader keeps
-the log for it receives a snapshot, exits with code 75 and loads it on its next start. On beta.6, a
-node away 45 s with the hold shortened to 20 s did exactly that, and then served all 2,325
-acknowledged pushes by itself. Do not delete such a node's volume: that turns a 10-second
-catch-up into a rebuild.
+14 ms; no acknowledged write of 3,300 was lost.
+
+The leader keeps its log for a member that is away, from the entry the member had, for up to
+`QUEEN_RAFT_MEMBER_HOLD_S` (6 hours) and while its volume stays below
+`QUEEN_RAFT_MEMBER_HOLD_DISK_PCT` (`QUEEN_RAFT_DISK_LOW_PCT`, 80%), so a node that comes back within
+that catches up from the log. Past it the node receives a snapshot, exits with code 75 and loads it
+on its next start. The leader first asks it where its log stands and sends only what lies above
+it, with the queue logs' indexes; the whole state goes only to a node that says it has no log, or
+to a node older than 2.6. A starting node does not take connections until it can answer, so it is
+never sent everything for want of an answer. On 2026-10-20, on three GCP nodes holding 521 GB each
+(network disks), a follower away 15 minutes was back and caught up from the log in 92 s, one the
+leader had purged past caught up in 28 s from a 1.1 GB delta, and one whose disk was wiped was
+rebuilt in 16 minutes (565 GB). A restart refills the dedup rows from each sealed queue-log file's
+hash sidecar instead of reading the file: on 254 GB, 20 s where it took 171 to 201 s. Do not delete
+a node's volume: that turns a catch-up into a rebuild.
 
 ## Replace a node
 

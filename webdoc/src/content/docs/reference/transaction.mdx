@@ -53,6 +53,10 @@ sourceOfTruth:
 # and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
 # from the commit. The status paragraph now says a failed redelivery waits retryDelay from the
 # commit and a retry does not.
+# sourceOfTruth re-read 2026-10-21: real.rs gives a Kafka record's push its transaction id (facade
+# 2's idempotent producer) and consume/txn.rs counts a moved position as consumption on the
+# dashboard (cd737c40a); the transaction route, its fields and its answers are unchanged. Nothing
+# this page states changes.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step

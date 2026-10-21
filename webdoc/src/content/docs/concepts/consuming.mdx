@@ -97,6 +97,11 @@ verifiedBy:
 # and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
 # from the commit. The `failed` row of the ack statuses now says the message comes back once
 # retryDelay has passed.
+# sourceOfTruth re-read 2026-10-21: real.rs gives a Kafka record's push its transaction id (facade
+# 2's idempotent producer) and consume/txn.rs counts a moved position as consumption on the
+# dashboard (cd737c40a) the SDKs gain a read of a partition by offset and a list of the partitions
+# written since a time (66622568e, clients 2.6.0, documented on start/clients). Nothing this page
+# states changes.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers

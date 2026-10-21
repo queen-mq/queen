@@ -10,7 +10,8 @@ sourceOfTruth:
   - server/src/rsm/planner/txn.rs
   - server/src/rsm/planner/push.rs
   - server/src/rsm/facade/groups.rs
-  - protocols/queen-kafka/src/topic_config.rs
+  - protocols/queen-kafka/src/handlers/admin.rs
+  - protocols/queen-kafka/src/txn.rs
 # sourceOfTruth re-read 2026-10-09 (the page is rewritten: Queen for applications, the exception is extreme
 # throughput on few partitions): txn.rs plans a transaction's ack, KV and timer parts on the control step;
 # push.rs creates a partition with its first message; groups.rs keeps a tenant in one raft group;
@@ -25,6 +26,9 @@ sourceOfTruth:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (2.6, Kafka facade 2): handlers/admin.rs accepts topic configs and
+# applies none; txn.rs serves transactions on the raft leader of a cluster. The Kafka limits bullet
+# says so; topic_config.rs, which the first facade had, is gone.
 ---
 
 For building applications, Queen is the better choice: services that handle events per customer,
@@ -119,12 +123,13 @@ than that and nothing but messages in the commit, use Pulsar.
   partition, and every consumer group that reads a queue gets every message in it. There are no
   exchanges, bindings, topic patterns or header matching. When messages have to reach queues the
   producer does not know about, use RabbitMQ.
-- **You need Kafka's compaction, or its transactions on a cluster.** Kafka Streams and Kafka
-  Connect have run unchanged against a three-node Queen cluster
-  ([Streams, Connect and Flink](/guides/kafka-frameworks/)). Two things stay Kafka's for now. Queen
-  accepts `cleanup.policy=compact` and keeps every record, so a compacted topic never shrinks. And
-  the Kafka facade commits a Kafka transaction on a single node and refuses it in cluster mode, so
-  Streams' `exactly_once_v2` and Flink's exactly-once sink need one node today.
+- **You need Kafka's compaction, or its topic configs.** Kafka Streams and Kafka Connect ran
+  unchanged against a three-node Queen cluster on the first facade, before 2.6
+  ([Streams, Connect and Flink](/guides/kafka-frameworks/)).
+  Two things stay Kafka's for now. Queen accepts `cleanup.policy=compact` and keeps every record, so
+  a compacted topic never shrinks. And the 2.6 facade accepts a topic's configs without applying
+  them: `retention.ms` is the queue's to set, in Queen. Kafka transactions run on a cluster, held by
+  the raft leader until they commit, and a leader change aborts the ones that were open.
 - **The step itself needs SQL.** KV reads by key or by prefix, in the same commit as the ack. For
   the records you search, the broker's [PostgreSQL sink](/guides/postgres/) writes a queue into a
   table with exactly-once effects. When a step needs joins, constraints or ad hoc SQL to decide

@@ -69,6 +69,9 @@ sourceOfTruth:
 # forms when they are on. Off, the default, the requests are the ones this page describes, and on, the
 # consumer returns the same messages. QueenConnector only gains the three checks. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-21: the SDKs gain a read of a partition by offset and a list of the
+# partitions written since a time (66622568e, clients 2.6.0, documented on start/clients). Nothing
+# this page states changes.
 ---
 
 `php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it

@@ -19,7 +19,8 @@ sourceOfTruth:
   - server/src/rsm/replicator/raft/network.rs
   - proxy/src/harden.rs
   - proxy/src/cp.rs
-  - protocols/queen-kafka/src/boot.rs
+  - protocols/queen-kafka/src/config.rs
+  - protocols/queen-kafka/src/conn.rs
   - SECURITY.md
 # sourceOfTruth re-read 2026-10-03 (4e2bd24a): SECURITY.md supports 2.x only (the page says so); auth.rs lets the ephemeral hand-over calls in on the cluster token since 892e7d81 (the JWT sentence says so).
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the raft port serves two more routes under /link/v1/ (network.rs), outside the raft token and under QUEEN_LINK_TOKEN (cluster.rs): the port table, a paragraph under the raft token and the no-TLS limit say so.
@@ -33,6 +34,10 @@ sourceOfTruth:
 # reads of group N on the raft port plus N, under the same QUEEN_LINK_TOKEN, and carry the placement
 # a link call states; the standby paragraph names those ports. phase2/streams.rs only converts a
 # frame's type. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-21 (2.6): network.rs listens on the raft port once openraft exists and
+# reads a member's 404 from the answer's status; the Kafka facade was rewritten (config.rs, conn.rs):
+# no TLS listener, SASL/PLAIN with QUEEN_KAFKA_SASL=plain, and an unauthenticated connection's calls
+# carry no token. The ports table and the TLS paragraph say so.
 ---
 
 Out of the box a node authenticates nobody: its HTTP port is plain HTTP, and every route answers
@@ -49,7 +54,7 @@ on a private network, and encrypt the queues whose payloads must not sit on disk
 | `7400` by convention | the raft address in `QUEEN_RAFT_PEERS`; `QUEEN_RAFT_LISTEN` (default `0.0.0.0` on that port) | Votes, log entries, snapshots, membership changes, the commands followers send the leader. With `QUEEN_LINK_TOKEN` set, also what a [standby cluster](/operate/standby/) reads, under `/link/v1/` | `QUEEN_RAFT_TOKEN`, and `QUEEN_LINK_TOKEN` for the standby's reads. Plain HTTP |
 | raft port + N | `QUEEN_RAFT_GROUPS` | Raft group N | The same token |
 | `QUEEN_PROXY_PORT`, e.g. `6711` | when set and different from `PORT` | The proxy: the data plane for keys and sessions, the console, `/api/cp/*` | API keys and sessions; `/api/cp/*` by `QUEEN_PROXY_CP_TOKEN`. TLS with `QUEEN_TLS_CERT` / `QUEEN_TLS_KEY` |
-| `9092` | `QUEEN_KAFKA_ADDR`, with `QUEEN_KAFKA_EMBEDDED=true` | The Kafka facade | `QUEEN_KAFKA_SASL=plain`, off by default. TLS with `QUEEN_KAFKA_TLS_CERT` / `QUEEN_KAFKA_TLS_KEY` |
+| `9092` | `QUEEN_KAFKA_ADDR`, with `QUEEN_KAFKA_EMBEDDED=true` | The Kafka facade | `QUEEN_KAFKA_SASL=plain`, off by default. No TLS in 2.6 |
 
 <Figure id="operate/ports" />
 
@@ -111,10 +116,11 @@ inside the process.
 
 The broker port does not terminate TLS itself. Two listeners do. The proxy's listener takes
 `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`, two PEM file paths, over HTTP/1.1, and one without the other
-stops the boot. The Kafka facade takes `QUEEN_KAFKA_TLS_CERT` and `QUEEN_KAFKA_TLS_KEY`. Without
-SASL the Kafka listener authenticates nobody, and with SASL on a plaintext listener every client's
-token crosses the network in clear, which the node warns about at boot. Anything else terminates
-TLS at your ingress or load balancer, with the hop to the node on a private network.
+stops the boot. The Kafka facade has no TLS listener in 2.6: with SASL its clients' tokens cross
+the network in clear, so keep the Kafka port on a private network or terminate TLS in front of it.
+Without SASL a Kafka connection carries no token, and a broker that checks tokens refuses its
+calls. Anything else terminates TLS at your ingress or load balancer, with the hop to the node on a
+private network.
 
 ## The raft token
 

@@ -34,6 +34,9 @@ sourceOfTruth:
 # were. The page gains the machines, settings and commands of the 2.3.0 runs of 2026-10-12 and 13.
 # sourceOfTruth re-read 2026-10-16 (2.4.0, cluster version 7): raft/log_store.rs reads entry records
 # back with the hashes an elided record leaves out. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21: qlog/set.rs writes a hash sidecar beside each sealed queue-log
+# file from 2.6 (016292b98), about 16 bytes a message more on disk, which the 2026-10-20 and 21 A/B
+# counts in its disk bytes per message; the method is unchanged. Nothing this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

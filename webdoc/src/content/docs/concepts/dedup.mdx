@@ -11,7 +11,8 @@ sourceOfTruth:
   - server/src/rsm/planner/txn.rs
   - server/src/rsm/dedup.rs
   - server/src/rsm/facade/real.rs
-  - protocols/queen-kafka/src/queen.rs
+  - protocols/queen-kafka/src/config.rs
+  - protocols/queen-kafka/src/handlers/produce.rs
   - clients/client-js/client-v2/builders/TransactionBuilder.js
   - clients/client-js/client-v2/kv/Kv.js
 verifiedBy:
@@ -58,6 +59,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-17 (the catalog behind a plain mutex): queen.rs's queue-list cache
 # takes a std mutex instead of an async one, and produce reports its staging parts in /status.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (2.6, Kafka facade 2): a Kafka topic's queue gets a 900 s window
+# (config.rs) and an idempotent producer's records carry k<producer id>.<epoch>.<sequence> as their
+# transactionId (handlers/produce.rs, real.rs's push item); the Kafka paragraph says so. The rest of
+# the dedup rules are unchanged.
 ---
 
 Every message carries a `transactionId`. Push the same id to the same partition again, inside the
@@ -89,11 +94,13 @@ the repeats answer `duplicate`. A push without an id gets the message id as its 
 which is new every time, so nothing is deduplicated (the JS SDK mints a UUIDv7 when you pass
 none, to the same effect).
 
-Queues created for a topic of the [Kafka facade](/guides/kafka/) are the exception: since
-2.0.0-beta.5 they get a window of 0. A Kafka record carries no `transactionId`, so the broker mints
-a fresh one for each record and the check could only ever answer no, and Kafka's idempotent
-producer suppresses its own retries with its sequence numbers. A queue that already existed keeps
-its own setting.
+Queues created for a topic of the [Kafka facade](/guides/kafka/) get a window of 900 seconds
+(`QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`), and so does a queue without one when an idempotent Kafka
+producer first writes to it. Each record of such a producer carries its producer id, epoch and
+sequence number as its `transactionId`, so a batch the producer sends again after a lost answer is a
+repeat and writes nothing; a producer retries for at most `delivery.timeout.ms`, two minutes by
+default, so a longer window would catch nothing more. A record from a producer without idempotence
+carries no id, and the broker mints one. A queue that already had a window keeps it.
 
 ## Choose deterministic ids
 

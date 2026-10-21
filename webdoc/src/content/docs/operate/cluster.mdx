@@ -75,6 +75,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-19 (Kafka groups in the console's reads): phase2.rs marks the queues
 # the Kafka facade created (kafkaTopic) in the queue list, one KV prefix read per list. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-10-21 (2.6, node recovery): replicator/mod.rs and raft/mod.rs keep the
+# log for an away member for QUEEN_RAFT_MEMBER_HOLD_S (6 h) within its disk limit, and a snapshot is
+# a delta above the member's log; network.rs listens once openraft exists. real.rs (facade 2's push
+# of Kafka records) changes nothing here. The failure table's away row says so.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -292,7 +296,7 @@ above.
 | A leader hears from no quorum for 1.5 s | It keeps new writes waiting, in order, instead of logging them, until a quorum answers again or another node leads. Raft takes no write from a leader that no quorum has acknowledged for 2 s, so a client sees a slower answer, or `503` with code `timeout` when its deadline comes first. |
 | A leader hears from no quorum for 3 s | It hands leadership to the most caught-up voter, so a leader that can send but not receive does not hold every write hostage. |
 | A majority is down | Nothing commits. Requests wait out their deadline and fail with `503`, code `no_leader` or `timeout`, and `Retry-After: 1`, until a majority is back. |
-| A node was away more than 10 minutes (`QUEEN_RAFT_PURGE_HOLD_S`, 600) | The leader stops holding its log for it. If the entries it missed are purged, the node receives a snapshot, exits with code 75 and loads it on its next start, and a restart policy brings it back. |
+| A node was away more than 6 hours (`QUEEN_RAFT_MEMBER_HOLD_S`, 21,600), or the leader's volume passed `QUEEN_RAFT_MEMBER_HOLD_DISK_PCT` | The leader stops holding its log for it. If the entries it missed are purged, the node receives a snapshot of only what lies above its own log, exits with code 75 and loads it on its next start. Within the hold it catches up from the log. |
 | A majority of the disks is lost for good | Only a forced recovery brings the cluster back, and it can lose acknowledged writes ([recovery](/operate/recovery/)). |
 
 In the recovery rehearsals of 2026-10-01 (three nodes in Docker under load, `test/recovery/`),

@@ -27,6 +27,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (JS consumer stop, #86): ConsumerManager.js closes the long poll and gives
 # back unstarted each() messages with a retry ack when consume() is stopped. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (optional client supervision): QueueBuilder and ConsumerManager add off-by-default observations; the chat examples do not enable them and their consume and partition behavior is unchanged.
+# sourceOfTruth re-read 2026-10-21: the SDKs gain a read of a partition by offset and a list of the
+# partitions written since a time (66622568e, clients 2.6.0, documented on start/clients). Nothing
+# this page states changes.
 ---
 
 Queen began as the broker of a hotel messaging product, so this is the application we know best.

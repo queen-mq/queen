@@ -70,6 +70,10 @@ sourceOfTruth:
 # txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
 # and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
 # from the commit. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21: real.rs gives a Kafka record's push its transaction id and
+# consume/txn.rs counts a moved position as consumption on the dashboard (cd737c40a); qlog/mod.rs
+# writes a hash sidecar beside each sealed file after it seals (2.6). None of this is on the path a
+# step takes. Nothing this page states changes.
 ---
 
 A worker's step in Queen is three calls at most: it pops a batch, does its work, and commits a

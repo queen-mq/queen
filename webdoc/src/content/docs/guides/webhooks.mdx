@@ -55,6 +55,11 @@ sidebar:
 # Kafka-facade consumer group from the presence row the facade writes (kind kafka, liveMembers,
 # lastSeenAt, inactiveSeconds; state Stable, Lagging or Empty), two KV point reads per group of the
 # listing. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21: the SDKs gain a read of a partition by offset and a list of the
+# partitions written since a time (66622568e, clients 2.6.0, documented on start/clients)
+# phase2/reads.rs, metrics.rs and the dashboard count the records Kafka fetches serve beside pops,
+# and a gathered dashboard answer names the nodes it missed (11a0a5f3a). Nothing this page states
+# changes.
 ---
 
 Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the

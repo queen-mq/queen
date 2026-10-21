@@ -51,6 +51,10 @@ sourceOfTruth:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21: metrics.rs gains a per-queue count of the records Kafka
+# consumers fetch (11a0a5f3a), which feeds the dashboard rows, not a Prometheus series; real.rs counts
+# a Kafka group's commit as consumption in the same rows (cd737c40a); collector.rs flushes the new
+# count. No series on this page changes.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node
