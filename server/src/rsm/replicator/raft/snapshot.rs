@@ -1319,6 +1319,7 @@ mod tests {
     /// it (a node before 2.6 answers 404); one that does not answer — nothing
     /// listens, it is starting and its port is reserved but not listening yet,
     /// or it takes the connection and never answers — is built nothing.
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn a_member_is_built_a_snapshot_only_once_it_answers() {
         use super::super::network::bind;

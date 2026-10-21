@@ -925,6 +925,7 @@ mod tests {
     /// A follower that refuses connections is tried a few times a second, not
     /// in a loop as fast as openraft can start one ([`REOPEN_FIRST_PAUSE`]),
     /// and is reached within [`REOPEN_MAX_PAUSE`] of serving again.
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn a_follower_that_is_down_is_tried_a_few_times_a_second() {
         let client = super::super::network::http_client();
