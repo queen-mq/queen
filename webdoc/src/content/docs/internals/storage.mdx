@@ -280,7 +280,7 @@ Retention is decided once, on the leader, and executed on every node, like every
    far behind reads its positions from disk, as it reads its payloads. One watermark moves at
    most `RETENTION_BATCH_SIZE` (1000) pushes of a partition, and a partition that has more due is
    judged again at once. A partition with no write for `PARTITION_CLEANUP_DAYS` (30), no retained
-   message, no dead letter and no live lease is deleted. `PARTITION_CLEANUP_SECONDS` sets that age
+   message, no dead letter, no live lease and no state of a stream query is deleted. `PARTITION_CLEANUP_SECONDS` sets that age
    in seconds instead, at least 60; either way the age is never shorter than the queue's dedup
    window (at least `QUEEN_RAFT_TXN_WINDOW_MIN_S`, 900 s), because the partition's rows hold the
    hashes a repeated push is checked against.

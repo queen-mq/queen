@@ -40,6 +40,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21 (partition cleanup in seconds): maintenance.rs: the partition
 # cleanup age can be set in seconds (PARTITION_CLEANUP_SECONDS) and is never shorter than the
 # queue's dedup window; no benchmark here depends on it. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (stream state seek): maintenance.rs (later): the idle-partition
+# check seeks each stream query's state instead of walking all of it; same verdict, cheaper. Nothing
+# this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

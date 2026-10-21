@@ -221,8 +221,9 @@ to it. Their contents are not in the replicated log, so a crashed node loses wha
   [storage](/internals/storage/#retention-and-reclaim).)
 - An encrypted queue on a node without `QUEEN_ENCRYPTION_KEY` stores plaintext, silently: the push
   is not refused and nothing is logged. Dead letters of an encrypted queue are stored decrypted.
-- A partition that retention has emptied is deleted after 30 days without a write, a lease or a
-  dead letter (`PARTITION_CLEANUP_DAYS`, or `PARTITION_CLEANUP_SECONDS` for a shorter age), and
+- A partition that retention has emptied is deleted after 30 days without a write, a lease, a
+  dead letter or a stream query's state on it (`PARTITION_CLEANUP_DAYS`, or
+  `PARTITION_CLEANUP_SECONDS` for a shorter age), and
   never inside its queue's dedup window, so a repeated push is still recognized.
 - Names share a budget of 447 bytes: the tenant, the queue and the longer of the partition or
   consumer group name. The tenant counts even with tenancy off (the default tenant's name is 36

@@ -182,6 +182,44 @@ fn a_cleanup_proposal_inside_the_queues_dedup_window_is_dropped() {
         .unwrap();
 }
 
+/// A stream query's state on a partition keeps it, whichever query holds it:
+/// the check seeks each query id in the state keyspace, the last possible one
+/// included.
+#[test]
+fn stream_state_keeps_its_partition_whatever_the_query() {
+    let (_d, store) = store(
+        "streams-state",
+        &[
+            (2, part(21, 21, 20, 1)),
+            (3, part(21, 21, 20, 1)),
+            (4, part(21, 21, 20, 1)),
+        ],
+    );
+    {
+        let row = crate::rsm::store::rows::StreamsStateRow {
+            value: b"{}".to_vec(),
+            updated_at_us: 1,
+        };
+        let mut w = store.write().unwrap();
+        w.put_streams_state(&[0x01; 16], 2, "k", &row).unwrap();
+        w.put_streams_state(&[0x01; 16], 9, "k", &row).unwrap();
+        w.put_streams_state(&[0x7f; 16], 5, "k", &row).unwrap();
+        w.put_streams_state(&[0xff; 16], 4, "k", &row).unwrap();
+        w.commit().unwrap();
+    }
+    let scan = ScanShared::new(&maintenance::Config::default());
+    store
+        .read(|r| {
+            let ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
+            let run = |pid| judge(r, &ov, NOW, &scan, &[Proposal::Delete { pid }]).unwrap();
+            assert_eq!(run(2), (vec![], 1), "the first query holds state on 2");
+            assert_eq!(run(4), (vec![], 1), "the last possible query id holds 4");
+            assert_eq!(run(3).0, vec![Effect::PartitionDelete { pid: 3 }]);
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn the_cleanup_age_reads_seconds_first_then_days() {
     use maintenance::cleanup_age_s as age;

@@ -252,7 +252,7 @@ The last three are constants in `server/src/handlers/ephemeral.rs`.
 |---|---|---|
 | Retention of messages | off per queue | `retentionEnabled`, `retentionSeconds`, `completedRetentionSeconds` on `configure` |
 | Retention pass | every 5000 ms | `RETENTION_INTERVAL` |
-| A partition with no retained message, no dead letter and no live lease, unwritten for this long, is deleted. Never sooner than its queue's dedup window (at least 900 s) | 30 days | `PARTITION_CLEANUP_DAYS`, or `PARTITION_CLEANUP_SECONDS` (at least 60) when set; `QUEEN_PARTITION_CLEANUP_ENABLED` |
+| A partition with no retained message, no dead letter, no live lease and no stream state, unwritten for this long, is deleted. Never sooner than its queue's dedup window (at least 900 s) | 30 days | `PARTITION_CLEANUP_DAYS`, or `PARTITION_CLEANUP_SECONDS` (at least 60) when set; `QUEEN_PARTITION_CLEANUP_ENABLED` |
 | Message traces (on disk, expired at most 512 per step) | 7 days | `QUEEN_RAFT_TRACE_RETENTION_S` |
 | A trace whose `transactionId` or one of its names makes a store key over 511 bytes is answered `400` | 511 bytes | none |
 | Disk high-water mark: writes that grow storage answer 507 | 85% | `QUEEN_RAFT_DISK_HIGH_PCT` (released at `QUEEN_RAFT_DISK_LOW_PCT`, 80%) |

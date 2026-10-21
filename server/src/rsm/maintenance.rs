@@ -1200,19 +1200,40 @@ pub(crate) fn partition_dead<R: Reads + ?Sized>(
     if veto {
         return Ok(false);
     }
-    r.scan_raw(
-        Keyspace::StreamsState,
-        &[],
-        &[],
-        usize::MAX,
-        &mut |key, _| {
-            if keys::streams_state_parts(key).is_some_and(|(_, state_pid, _)| state_pid == pid) {
-                veto = true;
-                false
-            } else {
-                true
-            }
-        },
-    )?;
-    Ok(!veto)
+    streams_state_on(r, pid).map(|held| !held)
+}
+
+/// Does any stream query hold state on partition `pid`? State is keyed
+/// (query id, pid, key), so this seeks each query id the keyspace holds and
+/// then that query's rows of `pid`: two seeks per query. It used to walk every
+/// query's whole state for each idle partition it judged (1,142 rows on stage,
+/// 2026-10-21), on the planner thread for each cleanup proposal, which a short
+/// cleanup age makes many. Query ids come from the state rows themselves, not
+/// the query rows, so state a query left behind still keeps its partition.
+fn streams_state_on<R: Reads + ?Sized>(r: &R, pid: Pid) -> Result<bool> {
+    let mut from: Vec<u8> = Vec::new();
+    loop {
+        let mut query: Option<[u8; 16]> = None;
+        r.scan_raw(Keyspace::StreamsState, &from, &[], 1, &mut |key, _| {
+            query = key.get(..16).and_then(|q| q.try_into().ok());
+            false
+        })?;
+        let Some(query) = query else {
+            return Ok(false);
+        };
+        let prefix = keys::streams_state_prefix(&query, pid);
+        let mut held = false;
+        r.scan_raw(Keyspace::StreamsState, &prefix, &prefix, 1, &mut |_, _| {
+            held = true;
+            false
+        })?;
+        if held {
+            return Ok(true);
+        }
+        // The next query id: every key of this one sorts below it.
+        match u128::from_be_bytes(query).checked_add(1) {
+            Some(next) => from = next.to_be_bytes().to_vec(),
+            None => return Ok(false),
+        }
+    }
 }
