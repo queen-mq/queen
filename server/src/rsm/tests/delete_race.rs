@@ -1105,7 +1105,7 @@ fn retention_setup(tag: &str) -> (Cycles, Pid, Pid, crate::rsm::maintenance::Con
     // Two days on, with a one-day cleanup: both are idle and empty — dead.
     c.wall += 2 * 86_400 * 1_000_000;
     let cfg = crate::rsm::maintenance::Config {
-        partition_cleanup_days: 1,
+        partition_cleanup_s: 86_400,
         ..crate::rsm::maintenance::Config::default()
     };
     (c, p0, p1, cfg)
@@ -1147,6 +1147,51 @@ fn retention_does_not_delete_a_partition_a_push_in_flight_writes() {
         .expect("read")
         .expect("p0 survives");
     assert_eq!(row.last_offset, 1, "the pushed message is there");
+}
+
+/// A cleanup age in seconds shorter than the queue's dedup window waits for
+/// the window: the partition's rows hold the hashes a repeated push is
+/// checked against, so deleted inside it a retried push would be stored twice.
+#[test]
+fn a_cleanup_age_in_seconds_still_waits_for_the_dedup_window() {
+    let mut c = Cycles::new("cleanup-seconds");
+    let mut first = push(1, "q", "p0", &["a"]);
+    if let Command::Push(p) = &mut first {
+        p.create_cfg.dedup_window_seconds = 3_600;
+    }
+    let e = c.plan(vec![first], None, None).expect("the push");
+    let p0 = created_pid(&e, "q", "p0");
+    c.land();
+    // Retention has already dropped its one message.
+    let mark = Effect::Watermark {
+        pid: p0,
+        log_start: 1,
+        txns_start: 1,
+        rows: None,
+    };
+    c.plan(vec![effects(2, vec![mark])], None, None);
+    c.land();
+    let cfg = crate::rsm::maintenance::Config {
+        partition_cleanup_s: 600,
+        ..crate::rsm::maintenance::Config::default()
+    };
+
+    // Idle 20 minutes: past the 10-minute age, inside the hour's window.
+    c.wall += 20 * 60 * 1_000_000;
+    let e = c.plan(Vec::new(), Some(cfg.clone()), None);
+    assert!(
+        !e.is_some_and(|e| deletes_partition(&e, p0)),
+        "deleted inside the dedup window"
+    );
+    c.land();
+
+    // Idle 61 minutes: past both.
+    c.wall += 41 * 60 * 1_000_000;
+    let e = c.plan(Vec::new(), Some(cfg), None).expect("retention");
+    assert!(
+        deletes_partition(&e, p0),
+        "kept past the age and the window"
+    );
 }
 
 fn kv_put(id: u64, tenant: &str, key: &str, value: i64, expect: Option<u64>) -> Command {
@@ -1281,7 +1326,7 @@ fn retention_walks_a_queue_in_bounded_resumable_passes() {
     c.land();
     c.wall += 2 * 86_400 * 1_000_000;
     let cfg = crate::rsm::maintenance::Config {
-        partition_cleanup_days: 1,
+        partition_cleanup_s: 86_400,
         visit_cap: 2,
         ..crate::rsm::maintenance::Config::default()
     };

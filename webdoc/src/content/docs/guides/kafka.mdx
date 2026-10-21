@@ -379,7 +379,9 @@ three nodes. The earlier matrix, measured on the first facade, is on
   ([reference](/reference/kafka/#apis-and-versions)).
 - No TLS listener: keep the Kafka port on a private network, or terminate TLS in front of it.
 - A partition that retention has emptied and that nobody has written to for 30 days
-  (`PARTITION_CLEANUP_DAYS`) is removed, and the next record written to it starts again at offset 0.
+  (`PARTITION_CLEANUP_DAYS`, or `PARTITION_CLEANUP_SECONDS`) is removed, and the next record
+  written to it starts again at offset 0. A shorter cleanup age makes that happen sooner on a
+  topic with `retention.ms`.
 - Right after a topic is created through another node, the leader can answer ListOffsets for it
   with `UNKNOWN_TOPIC_OR_PARTITION` for up to a second.
 - The facade's own tests run in CI; the client suites under `protocols/queen-kafka/compat/` are run

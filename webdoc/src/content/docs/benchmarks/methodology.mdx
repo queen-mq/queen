@@ -37,6 +37,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21: qlog/set.rs writes a hash sidecar beside each sealed queue-log
 # file from 2.6 (016292b98), about 16 bytes a message more on disk, which the 2026-10-20 and 21 A/B
 # counts in its disk bytes per message; the method is unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (partition cleanup in seconds): maintenance.rs: the partition
+# cleanup age can be set in seconds (PARTITION_CLEANUP_SECONDS) and is never shorter than the
+# queue's dedup window; no benchmark here depends on it. Nothing this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

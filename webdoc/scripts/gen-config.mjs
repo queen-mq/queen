@@ -383,6 +383,13 @@ const EXTRA_VARS = [
     source: "server/src/rsm/batcher.rs",
   },
   {
+    name: "PARTITION_CLEANUP_SECONDS",
+    type: "integer",
+    def: "(empty): PARTITION_CLEANUP_DAYS applies",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
     name: "QUEEN_PARTITION_CLEANUP_ENABLED",
     type: "boolean",
     def: "true",

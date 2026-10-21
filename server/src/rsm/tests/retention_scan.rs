@@ -10,6 +10,7 @@ use crate::rsm::store::rows::PartitionRow;
 use crate::rsm::store::{HeedStore, Store, TypedReads, TypedWrites, Writes};
 
 const DAY_US: i64 = 86_400 * 1_000_000;
+const MIN_US: i64 = 60 * 1_000_000;
 /// "Now": 100 days after the epoch, so a partition written at 1 µs is idle
 /// past the 30-day cleanup age.
 const NOW: i64 = 100 * DAY_US;
@@ -137,6 +138,75 @@ fn a_stale_cleanup_proposal_is_judged_again() {
             Ok(())
         })
         .unwrap();
+}
+
+/// A cleanup age in seconds still waits out the queue's dedup window, in the
+/// scanner's judgment as in the walk's.
+#[test]
+fn a_cleanup_proposal_inside_the_queues_dedup_window_is_dropped() {
+    // Both empty; pid 2 last written 20 minutes ago, pid 3 two hours ago.
+    let (_d, store) = store(
+        "cleanup-window",
+        &[
+            (2, part(21, 21, 20, NOW - 20 * MIN_US)),
+            (3, part(21, 21, 20, NOW - 120 * MIN_US)),
+        ],
+    );
+    {
+        // The queue keeps its hashes an hour.
+        let mut q = super::planner_harness::qcfg();
+        q.dedup_window_seconds = 3_600;
+        let mut w = store.write().unwrap();
+        w.put_queue("t", "q", &q).unwrap();
+        w.commit().unwrap();
+    }
+    let scan = ScanShared::new(&maintenance::Config {
+        partition_cleanup_s: 600,
+        ..maintenance::Config::default()
+    });
+    store
+        .read(|r| {
+            let ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
+            let run = |p: &[Proposal]| judge(r, &ov, NOW, &scan, p).unwrap();
+            assert_eq!(
+                run(&[Proposal::Delete { pid: 2 }]),
+                (vec![], 1),
+                "idle past the age, inside the window"
+            );
+            assert_eq!(
+                run(&[Proposal::Delete { pid: 3 }]).0,
+                vec![Effect::PartitionDelete { pid: 3 }]
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn the_cleanup_age_reads_seconds_first_then_days() {
+    use maintenance::cleanup_age_s as age;
+    assert_eq!(age(None, None), 30 * 86_400, "the default");
+    assert_eq!(age(None, Some("1")), 86_400);
+    assert_eq!(age(Some("3600"), Some("1")), 3_600, "seconds win");
+    assert_eq!(age(Some(" 900 "), None), 900);
+    assert_eq!(age(Some("5"), None), 60, "at least a minute");
+    assert_eq!(age(Some("0"), Some("2")), 2 * 86_400, "0 is unset");
+    assert_eq!(
+        age(Some("soon"), None),
+        30 * 86_400,
+        "not a number is unset"
+    );
+    assert_eq!(age(None, Some("-3")), 30 * 86_400);
+    // The age never goes under the dedup window's cutoff, nor under a minute.
+    assert_eq!(
+        maintenance::idle_cutoff(NOW, 600, NOW - 3_600 * 1_000_000),
+        NOW - 3_600 * 1_000_000
+    );
+    assert_eq!(
+        maintenance::idle_cutoff(NOW, 7_200, NOW - 900 * 1_000_000),
+        NOW - 7_200 * 1_000_000
+    );
+    assert_eq!(maintenance::idle_cutoff(NOW, 1, NOW), NOW - MIN_US);
 }
 
 #[test]

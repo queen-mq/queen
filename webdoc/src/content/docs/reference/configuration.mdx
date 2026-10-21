@@ -196,6 +196,7 @@ what each one does. A cluster with none of them set is neither a standby nor rea
 | `QUEEN_STORE_SCRUB_EVERY_S` | `21600` | How often the whole store is re-verified in the background; `0` turns the scrub off. |
 | `QUEEN_STORE_SCRUB_ROWS_PER_S` | `2000` | The scrub's pace. |
 | `QUEEN_RAFT_RETENTION_SCAN_PER_S` | `50000` | Partitions the leader's retention scanner walks per second. |
+| `PARTITION_CLEANUP_SECONDS` | unset | How long a partition that retention has emptied (no message, no dead letter, no lease) must go unwritten before it is deleted, in seconds, at least 60. Unset, `PARTITION_CLEANUP_DAYS` (30) applies. Never shorter than the queue's dedup window (at least 900 s), so a repeated push still finds the partition's hashes. A workload that opens a partition per entity (a trace, a session) keeps fewer of them with a short age. |
 
 ### Other
 

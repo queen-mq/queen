@@ -497,10 +497,10 @@ impl BatcherConfig {
                     "QUEEN_PARTITION_CLEANUP_ENABLED",
                     d.maintenance.partition_cleanup_enabled,
                 ),
-                partition_cleanup_days: num(
-                    "PARTITION_CLEANUP_DAYS",
-                    d.maintenance.partition_cleanup_days as u64,
-                ) as i64,
+                partition_cleanup_s: crate::rsm::maintenance::cleanup_age_s(
+                    std::env::var("PARTITION_CLEANUP_SECONDS").ok().as_deref(),
+                    std::env::var("PARTITION_CLEANUP_DAYS").ok().as_deref(),
+                ),
                 visit_cap: num("QUEEN_RAFT_RETENTION_VISIT", d.maintenance.visit_cap as u64)
                     as usize,
                 walk: Default::default(),

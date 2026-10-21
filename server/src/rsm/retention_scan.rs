@@ -122,9 +122,12 @@ pub(crate) struct ScanShared {
     queue: Mutex<VecDeque<Proposal>>,
     /// Most proposals waiting: the scanner pauses while the planner catches up.
     cap: usize,
-    /// The partition-cleanup settings [`judge`] runs `partition_dead` with.
+    /// The partition-cleanup settings [`judge`] runs `partition_dead` with:
+    /// the age in seconds, and the node's floor of a queue's dedup window,
+    /// which bounds the age from below ([`maintenance::idle_cutoff`]).
     cleanup_enabled: bool,
-    cleanup_days: i64,
+    cleanup_s: i64,
+    txn_window_min_s: i64,
     pub(crate) visited: AtomicU64,
     pub(crate) proposed: AtomicU64,
     pub(crate) planned: AtomicU64,
@@ -141,7 +144,8 @@ impl ScanShared {
             queue: Mutex::new(VecDeque::new()),
             cap: 8 * TAKE_PER_CYCLE,
             cleanup_enabled: cfg.partition_cleanup_enabled,
-            cleanup_days: cfg.partition_cleanup_days,
+            cleanup_s: cfg.partition_cleanup_s,
+            txn_window_min_s: cfg.txn_window_min_s,
             visited: AtomicU64::new(0),
             proposed: AtomicU64::new(0),
             planned: AtomicU64::new(0),
@@ -506,11 +510,18 @@ pub(crate) fn judge<R: Reads + ?Sized>(
                 }
             }
             Proposal::Delete { .. } => {
-                let cutoff = now_us.saturating_sub(scan.cleanup_days.max(1) * 86_400 * 1_000_000);
-                if scan.cleanup_enabled
-                    && !ov.touches_partition(pid)
-                    && maintenance::partition_dead(r, pid, &part, cutoff, now_us)?
-                {
+                // Not inside the queue's dedup window, as in the walk; a
+                // partition whose queue row is gone has the node's floor.
+                let dead = scan.cleanup_enabled && !ov.touches_partition(pid) && {
+                    let window_s = r
+                        .queue(&part.tenant, &part.queue)?
+                        .map_or(0, |q| q.dedup_window_seconds);
+                    let txns_cut =
+                        maintenance::txns_cutoff(now_us, scan.txn_window_min_s, window_s);
+                    let cutoff = maintenance::idle_cutoff(now_us, scan.cleanup_s, txns_cut);
+                    maintenance::partition_dead(r, pid, &part, cutoff, now_us)?
+                };
+                if dead {
                     effects.push(Effect::PartitionDelete { pid });
                 } else {
                     dropped += 1;

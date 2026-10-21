@@ -17,7 +17,11 @@ pub struct Config {
     pub row_limit: usize,
     pub trace_retention_s: i64,
     pub partition_cleanup_enabled: bool,
-    pub partition_cleanup_days: i64,
+    /// How long a partition goes unwritten before the cleanup may delete it,
+    /// in seconds ([`cleanup_age_s`]: `PARTITION_CLEANUP_SECONDS`, else
+    /// `PARTITION_CLEANUP_DAYS`). Never less than its queue's dedup window
+    /// ([`idle_cutoff`]).
+    pub partition_cleanup_s: i64,
     /// `QUEEN_RAFT_RETENTION_VISIT` (default 8192): partitions of ONE queue a
     /// pass visits at most. The walk resumes where the last pass stopped
     /// ([`Config::walk`]) and wraps, so a queue with more partitions is swept
@@ -71,13 +75,58 @@ pub struct Config {
     pub qlog: Option<QLogReader>,
 }
 
+/// The cleanup age when neither setting is given: 30 days.
+pub const DEFAULT_PARTITION_CLEANUP_S: i64 = 30 * 86_400;
+
+/// The shortest cleanup age `PARTITION_CLEANUP_SECONDS` takes.
+pub const MIN_PARTITION_CLEANUP_S: i64 = 60;
+
+/// The cleanup age from its two settings: `PARTITION_CLEANUP_SECONDS` when it
+/// is a positive number of seconds (at least [`MIN_PARTITION_CLEANUP_S`]),
+/// else `PARTITION_CLEANUP_DAYS` when it is a positive number of days, else
+/// [`DEFAULT_PARTITION_CLEANUP_S`].
+pub fn cleanup_age_s(seconds: Option<&str>, days: Option<&str>) -> i64 {
+    let positive = |v: Option<&str>| {
+        v.and_then(|v| v.trim().parse::<i64>().ok())
+            .filter(|v| *v > 0)
+    };
+    match (positive(seconds), positive(days)) {
+        (Some(s), _) => s.max(MIN_PARTITION_CLEANUP_S),
+        (None, Some(d)) => d.saturating_mul(86_400),
+        (None, None) => DEFAULT_PARTITION_CLEANUP_S,
+    }
+}
+
+/// A queue's txns cutoff: how long a push keeps its row, and so its hashes —
+/// its dedup window (`dedup_window_s`), never under the node's floor
+/// (`txn_window_min_s`).
+pub(crate) fn txns_cutoff(now_us: i64, txn_window_min_s: i64, dedup_window_s: i32) -> i64 {
+    let window_s = i64::from(dedup_window_s).max(txn_window_min_s.max(0));
+    now_us.saturating_sub(window_s.saturating_mul(1_000_000))
+}
+
+/// The newest write an idle partition may have had and still be deleted: the
+/// cleanup age ago, and never inside its queue's dedup window (`txns_cut`,
+/// [`txns_cutoff`]). The partition's rows hold the hashes a repeated push is
+/// checked against; deleted inside the window, a retried push would be
+/// stored twice.
+pub(crate) fn idle_cutoff(now_us: i64, cleanup_s: i64, txns_cut: i64) -> i64 {
+    now_us
+        .saturating_sub(
+            cleanup_s
+                .max(MIN_PARTITION_CLEANUP_S)
+                .saturating_mul(1_000_000),
+        )
+        .min(txns_cut)
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             row_limit: 1_000,
             trace_retention_s: 7 * 24 * 60 * 60,
             partition_cleanup_enabled: true,
-            partition_cleanup_days: 30,
+            partition_cleanup_s: DEFAULT_PARTITION_CLEANUP_S,
             visit_cap: 8_192,
             walk: Default::default(),
             visit_total: 4_096,
@@ -513,7 +562,7 @@ pub(crate) fn queue_cutoffs<R: Reads + ?Sized>(
     // but an ack repeated after it (a probe ignores an older row, dedup.rs).
     // With it, a queue that keeps its consumed messages for a month kept a
     // month of rows in every node's memory.
-    let txn_window_s = i64::from(qcfg.dedup_window_seconds).max(cfg.txn_window_min_s.max(0));
+    let txns = txns_cutoff(now_us, cfg.txn_window_min_s, qcfg.dedup_window_seconds);
     // Catalogue version 6, read from committed state as every gate is (D20).
     // A store that cannot say reads as below it: the old shape is always safe.
     let v6 = r
@@ -523,7 +572,7 @@ pub(crate) fn queue_cutoffs<R: Reads + ?Sized>(
         all,
         completed,
         max_wait,
-        txns: now_us.saturating_sub(txn_window_s * 1_000_000),
+        txns,
         v6,
         rows_past_log: v6
             && cfg.rows_window
@@ -628,7 +677,7 @@ fn judge_with<R: Reads + ?Sized>(
     // and already start at or past it cannot move without the log.
     let rows_capped = !cut.rows_past_log && rows_at >= part.log_start;
     if skip && log_cut.is_none() && (no_rows || rows_capped) {
-        return idle_verdict(r, now_us, cfg, pid, part);
+        return idle_verdict(r, now_us, cfg, pid, part, cut.txns);
     }
 
     let prefix = keys::txns_prefix(pid);
@@ -662,13 +711,13 @@ fn judge_with<R: Reads + ?Sized>(
     // they cannot pass the log, only up to where the log goes.
     let rows_may_move = !no_rows && !fresh(cut.txns) && (!rows_capped || log_may_move);
     if skip && !log_may_move && !rows_may_move {
-        return idle_verdict(r, now_us, cfg, pid, part);
+        return idle_verdict(r, now_us, cfg, pid, part, cut.txns);
     }
     // Rows are in created order: when the oldest is newer than every cutoff,
     // nothing here is stale, and the full scan below would move no watermark.
     let newest_cut = log_cut.map_or(cut.txns, |c| c.max(cut.txns));
     if !unrowed && fresh(newest_cut) {
-        return idle_verdict(r, now_us, cfg, pid, part);
+        return idle_verdict(r, now_us, cfg, pid, part, cut.txns);
     }
 
     // The rows themselves, when a judgment below reads them: the rows part,
@@ -800,7 +849,7 @@ fn judge_with<R: Reads + ?Sized>(
             more,
         }));
     }
-    idle_verdict(r, now_us, cfg, pid, part)
+    idle_verdict(r, now_us, cfg, pid, part, cut.txns)
 }
 
 /// The appends of the messages `part` retains without a row,
@@ -839,20 +888,21 @@ fn unrowed_appends(
 }
 
 /// The partition-cleanup half of [`judge_partition`]: delete a partition idle
-/// past the cleanup age.
+/// past the cleanup age and its queue's dedup window (`txns_cut`).
 fn idle_verdict<R: Reads + ?Sized>(
     r: &R,
     now_us: i64,
     cfg: &Config,
     pid: Pid,
     part: &rows::PartitionRow,
+    txns_cut: i64,
 ) -> Result<Option<Verdict>> {
     if cfg.partition_cleanup_enabled
         && partition_dead(
             r,
             pid,
             part,
-            now_us.saturating_sub(cfg.partition_cleanup_days.max(1) * 86_400 * 1_000_000),
+            idle_cutoff(now_us, cfg.partition_cleanup_s, txns_cut),
             now_us,
         )?
     {

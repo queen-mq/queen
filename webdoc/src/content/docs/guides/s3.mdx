@@ -40,6 +40,9 @@ sidebar:
 # sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs gains
 # QUEEN_RAFT_READY_QUORUM_MS (5000), the window of /health's new majority test. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-21 (partition cleanup in seconds): maintenance.rs: the partition
+# cleanup age can be set in seconds (PARTITION_CLEANUP_SECONDS) and is never shorter than the
+# queue's dedup window; the sink's retention hold is unchanged. Nothing this page states changes.
 ---
 
 The broker can mirror its queues into an S3-compatible bucket, as JSONL or Parquet files in a Hive

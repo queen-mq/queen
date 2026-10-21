@@ -69,6 +69,8 @@ digest: >-
 # once openraft exists; stream.rs pauses 50 ms doubling to 1 s between attempts to reach a member
 # that is down. Facade 2 still calls the same router and pipeline, so a Kafka produce is still a
 # push. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (partition cleanup in seconds): batcher.rs: it reads
+# PARTITION_CLEANUP_SECONDS beside PARTITION_CLEANUP_DAYS. Nothing this page states changes.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and
