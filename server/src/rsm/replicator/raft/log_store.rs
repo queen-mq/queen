@@ -174,6 +174,12 @@ impl Mem {
     fn is_empty(&self) -> bool {
         self.last_log_id == self.purged
     }
+
+    /// The first index a read can return: above the purge point, and not
+    /// below where the log begins.
+    fn first(&self) -> u64 {
+        self.purged.map_or(0, |p| p.index + 1).max(self.start)
+    }
 }
 
 struct Inner {
@@ -196,6 +202,64 @@ struct Inner {
     committed_at: tokio::sync::watch::Sender<(u64, u64)>,
     /// Makes purge points durable in the background.
     purger: Purger,
+    /// A test's hold on the replication streams' reads.
+    #[cfg(test)]
+    read_gate: ReadGate,
+}
+
+/// A test's hold on the replication streams' reads
+/// ([`RaftLogReader::limited_get_log_entries`]): armed at an openraft index,
+/// a read that starts at or below it waits until the test opens the gate.
+#[cfg(test)]
+pub(crate) struct ReadGate(tokio::sync::watch::Sender<GateState>);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct GateState {
+    armed: Option<u64>,
+    /// Where the first held read starts.
+    held: Option<u64>,
+    open: bool,
+}
+
+#[cfg(test)]
+impl ReadGate {
+    fn new() -> ReadGate {
+        ReadGate(tokio::sync::watch::Sender::new(GateState::default()))
+    }
+
+    /// Hold reads that start at or below `at`.
+    pub(crate) fn arm(&self, at: u64) {
+        self.0.send_replace(GateState {
+            armed: Some(at),
+            held: None,
+            open: false,
+        });
+    }
+
+    /// Where the first held read starts, once one is held.
+    pub(crate) async fn held(&self) -> u64 {
+        let mut rx = self.0.subscribe();
+        let s = *rx.wait_for(|s| s.held.is_some()).await.expect("gate");
+        s.held.expect("held")
+    }
+
+    /// Let every read through, from now on.
+    pub(crate) fn open(&self) {
+        self.0.send_modify(|s| s.open = true);
+    }
+
+    async fn pass(&self, start: u64) {
+        let holds = move |s: &GateState| !s.open && s.armed.is_some_and(|at| start <= at);
+        let mut rx = self.0.subscribe();
+        if !holds(&rx.borrow_and_update()) {
+            return;
+        }
+        self.0.send_modify(|s| {
+            s.held.get_or_insert(start);
+        });
+        let _ = rx.wait_for(|s| !holds(s)).await;
+    }
 }
 
 /// Makes the purge point durable off RaftCore and off the log writer: a
@@ -502,6 +566,8 @@ impl LogStore {
                     cache_cap: cfg.cache_cap,
                     written,
                     committed_at: tokio::sync::watch::Sender::new((0, 0)),
+                    #[cfg(test)]
+                    read_gate: ReadGate::new(),
                 }),
             },
             writer: join,
@@ -616,6 +682,12 @@ impl LogStore {
         &self.inner.gate
     }
 
+    /// The test's hold on the replication streams' reads.
+    #[cfg(test)]
+    pub(crate) fn read_gate(&self) -> &ReadGate {
+        &self.inner.read_gate
+    }
+
     fn send(&self, cmd: Cmd) -> io::Result<()> {
         if let Some(why) = self.inner.poison.lock().expect("poison").clone() {
             return Err(io::Error::other(why));
@@ -628,15 +700,62 @@ impl LogStore {
         }
     }
 
+    /// What a replication stream reads ([`RaftLogReader::limited_get_log_entries`]):
+    /// the entries of `[start, end)` from exactly `start`, or none.
+    ///
+    /// openraft sends what this returns after the entry before `start` (the
+    /// request's `prev_log_id`), whatever entry comes first. And a stream can
+    /// ask for entries purged since it chose its range: openraft keeps the
+    /// log a member's stream reads only while it counts that stream in
+    /// flight, and a heartbeat that finds the member's log gone (a member back
+    /// with an empty data directory, after `allow_next_revert`) makes it
+    /// forget the member's stream — which goes on, while the purge it held
+    /// back passes it. Read as [`Self::read_range`] reads, `start` moved up
+    /// to the purge point and openraft sent entries that do not follow
+    /// `prev_log_id`: its debug assertion stopped the replication to that
+    /// member for good (test builds), and a member holding `prev_log_id` but
+    /// not the purged entries would refuse the hole as a storage error and
+    /// stop. Nothing comes back instead, and openraft sends a heartbeat at
+    /// `prev_log_id`: the empty member answers it with a conflict that ends
+    /// the stale stream, and openraft ignores that conflict (it counts
+    /// another request in flight for that member by then: the snapshot it
+    /// planned).
+    fn read_for_replication(&self, start: u64, end: u64) -> io::Result<Vec<REntry>> {
+        let first = || self.inner.mem.lock().expect("log mem").first();
+        let read = if start < first() {
+            None
+        } else {
+            match self.read_range(start, end) {
+                // Purged between the look and the read.
+                Ok(got) if got.first().is_some_and(|e| e.log_id.index != start) => None,
+                Ok(got) => Some(got),
+                // The purge took the files the read was in.
+                Err(_) if start < first() => None,
+                Err(e) => return Err(e),
+            }
+        };
+        Ok(read.unwrap_or_else(|| {
+            tracing::warn!(
+                target: "rsm",
+                start,
+                first = first(),
+                "raft: a replication stream asked for entries purged since it chose them; \
+                 it sends a heartbeat instead",
+            );
+            Vec::new()
+        }))
+    }
+
     /// Every entry with an openraft index in `[start, end)` the log holds, in
     /// order: the queue logs below the in-memory window (payloads restored),
     /// then the window. A `start` at or below the purge point is moved above
     /// it without a word: a caller that needs every entry checks the first
-    /// index it gets.
+    /// index it gets (a replication stream reads with
+    /// [`Self::read_for_replication`]).
     pub(crate) fn read_range(&self, start: u64, end: u64) -> io::Result<Vec<REntry>> {
         let (disk_end, from_cache, start) = {
             let m = self.inner.mem.lock().expect("log mem");
-            let first = m.purged.map_or(0, |p| p.index + 1).max(m.start);
+            let first = m.first();
             let last_excl = m.last_log_id.map_or(0, |l| l.index + 1);
             let start = start.max(first);
             let end = end.min(last_excl);
@@ -940,6 +1059,17 @@ impl RaftLogReader<TypeConfig> for LogStore {
 
     async fn read_vote(&mut self) -> Result<Option<Vote>, io::Error> {
         Ok(self.inner.mem.lock().expect("log mem").vote)
+    }
+
+    /// The replication streams' read: openraft calls this from nowhere else.
+    async fn limited_get_log_entries(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<REntry>, io::Error> {
+        #[cfg(test)]
+        self.inner.read_gate.pass(start).await;
+        self.read_for_replication(start, end)
     }
 }
 
@@ -1800,6 +1930,68 @@ mod tests {
         assert_eq!(st.last_purged_log_id, Some(log_id(1, 14)));
         again.store.close();
         drop(again);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A replication stream chose `(4, 12]` (it sends after entry 4), then the
+    /// log was purged up to entry 9. Its read gets nothing, never 10..=12
+    /// (openraft would send them after entry 4: a hole). Other readers still
+    /// get what the log holds of their range, from memory or from disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_replication_read_the_purge_passed_gets_nothing() {
+        use openraft::type_config::TypeConfigExt;
+        let dir = scratch("repl-read");
+        let opened = open(&dir, 0);
+        let mut log = opened.store.clone();
+        let entries: Vec<REntry> = (0..20)
+            .map(|i| REntry {
+                log_id: log_id(1, i),
+                payload: EntryPayload::Blank,
+            })
+            .collect();
+        let (tx, rx) = TypeConfig::oneshot();
+        log.append(entries, IOFlushed::signal(tx)).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), rx)
+            .await
+            .expect("flushed within 20 s")
+            .unwrap()
+            .unwrap();
+        let indexes = |es: Vec<REntry>| es.iter().map(|e| e.log_id.index).collect::<Vec<_>>();
+        assert_eq!(
+            indexes(log.limited_get_log_entries(5, 13).await.unwrap()),
+            (5..13).collect::<Vec<_>>()
+        );
+
+        log.purge(log_id(1, 9)).await.expect("purge");
+        for from_disk in [false, true] {
+            if from_disk {
+                // Applied and replicated everywhere: out of memory.
+                log.evict(19, 19);
+                assert_eq!(log.cached().0, 0);
+            }
+            assert!(
+                log.limited_get_log_entries(5, 13).await.unwrap().is_empty(),
+                "from disk: {from_disk}"
+            );
+            assert!(log.limited_get_log_entries(9, 13).await.unwrap().is_empty());
+            assert_eq!(
+                indexes(log.limited_get_log_entries(10, 13).await.unwrap()),
+                vec![10, 11, 12],
+                "from disk: {from_disk}"
+            );
+            assert_eq!(
+                indexes(log.limited_get_log_entries(15, 64).await.unwrap()),
+                (15..20).collect::<Vec<_>>()
+            );
+            // The apply path and the standby link read what is left.
+            assert_eq!(
+                indexes(log.try_get_log_entries(5..13).await.unwrap()),
+                vec![10, 11, 12]
+            );
+        }
+        log.close();
+        drop(log);
+        drop(opened);
         let _ = fs::remove_dir_all(&dir);
     }
 }

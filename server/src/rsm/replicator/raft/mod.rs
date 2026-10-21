@@ -2704,6 +2704,38 @@ impl<S: Store + 'static> RaftReplicator<S> {
         self.store.clone()
     }
 
+    /// This node's raft log, for a test that holds its replication reads.
+    #[cfg(test)]
+    pub(crate) fn log_for_test(&self) -> &LogStore {
+        &self.log
+    }
+
+    /// openraft's metrics as they are now.
+    #[cfg(test)]
+    pub(crate) fn raft_metrics_for_test(&self) -> Option<openraft::RaftMetrics<TypeConfig>> {
+        self.metrics_now()
+    }
+
+    /// Build a snapshot, then purge the log up to openraft index `upto`
+    /// (openraft caps it at the snapshot), as the purge driver does.
+    #[cfg(test)]
+    pub(crate) async fn snapshot_and_purge_for_test(&self, upto: u64) {
+        let raft = self.raft.as_ref().expect("raft");
+        let end = Instant::now() + Duration::from_secs(20);
+        // A snapshot is built at the store's durable index: again until that
+        // has reached `upto`.
+        while self
+            .metrics_now()
+            .and_then(|m| m.snapshot)
+            .is_none_or(|s| s.index < upto)
+        {
+            assert!(Instant::now() < end, "no snapshot at {upto} within 20 s");
+            raft.trigger().snapshot().await.expect("snapshot");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        raft.trigger().purge_log(upto).await.expect("purge");
+    }
+
     /// openraft's own `last_applied` (RSM numbering), for a test that checks
     /// it never runs ahead of the store.
     #[cfg(test)]

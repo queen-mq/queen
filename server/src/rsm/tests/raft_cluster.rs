@@ -815,6 +815,137 @@ async fn an_empty_member_gets_the_whole_state_with_its_indexes() {
     }
 }
 
+/// The leader's view of what `member` holds: openraft's matched index.
+fn matched_by(leader: &RaftReplicator<HeedStore>, member: u64) -> Option<u64> {
+    leader
+        .raft_metrics_for_test()
+        .and_then(|m| m.replication)
+        .and_then(|r| r.get(&member).copied())
+        .flatten()
+        .map(|l| l.index)
+}
+
+/// openraft keeps the log a member's replication stream still reads — until
+/// a heartbeat finds that member's log gone (a member back with an empty data
+/// directory, after `allow_next_revert`): it then forgets what the member had
+/// and plans a snapshot, while the stream it had sent the member keeps
+/// running, and the purge it held back passes that stream. Here the stream is
+/// held in its read across exactly that. It must get no entries that start
+/// above what it asked for: openraft sends them after the `prev_log_id` it
+/// chose, and its debug assertion stopped that member's replication for good
+/// (the member stayed at its snapshot: "nodes [(2, 402)] did not apply 602").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_the_purge_overtook_sends_no_hole() {
+    let _one = serial().await;
+    log_init();
+    const N: u64 = 100;
+    let entries = workload(SEED, 3 * N);
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("overtaken")).collect();
+    let ports = free_ports(3);
+    // The purge driver keeps what the absent member had (the purge hold) and
+    // purges everything below it.
+    let opts = RaftOpts {
+        log_keep: 0,
+        purge_batch: 1,
+        ..test_opts()
+    };
+    let mut nodes = tokio::task::block_in_place(|| open_all(&dirs, &ports, &vec![opts.clone(); 3]));
+    let l = tokio::task::block_in_place(|| leader_of(&nodes));
+    let first = propose_all(nodes[l].as_ref().unwrap(), &entries[..N as usize]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, first));
+
+    // The member stops with what it had (openraft index `had`) and loses it.
+    let f = (l + 1) % 3;
+    let id = f as u64 + 1;
+    let end = Instant::now() + Duration::from_secs(30);
+    while matched_by(nodes[l].as_ref().unwrap(), id) < Some(first - 1) {
+        assert!(
+            Instant::now() < end,
+            "the leader never saw the member caught up"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let _ = close(nodes[f].take().unwrap());
+    let had = matched_by(nodes[l].as_ref().unwrap(), id).expect("matched");
+    std::fs::remove_dir_all(&dirs[f]).unwrap();
+    std::fs::create_dir_all(&dirs[f]).unwrap();
+    let second = propose_all(
+        nodes[l].as_ref().unwrap(),
+        &entries[N as usize..2 * N as usize],
+    )
+    .await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, second));
+    let end = Instant::now() + Duration::from_secs(60);
+    while nodes[l].as_ref().unwrap().purged_index() < had + 1 {
+        assert!(
+            Instant::now() < end,
+            "the leader never purged up to the member"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The member comes back empty. The leader's stream to it reads right
+    // after what it had, and is held there.
+    let gate = nodes[l].as_ref().unwrap().log_for_test().read_gate();
+    gate.arm(had + 1);
+    let (d, p, o) = (dirs[f].clone(), ports.clone(), opts.clone());
+    let back = tokio::task::block_in_place(move || open_node(&d, id, &p, o));
+    let held = tokio::time::timeout(Duration::from_secs(30), gate.held())
+        .await
+        .expect("the stream to the member reads within 30 s");
+    assert_eq!(
+        held,
+        had + 1,
+        "the stream reads right after what the member had"
+    );
+    // A heartbeat finds the member empty: the leader forgets what it had...
+    let end = Instant::now() + Duration::from_secs(30);
+    while matched_by(nodes[l].as_ref().unwrap(), id) == Some(had) {
+        assert!(
+            Instant::now() < end,
+            "the leader never saw the member empty"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // ...and nothing holds the purge back any more.
+    nodes[l]
+        .as_ref()
+        .unwrap()
+        .snapshot_and_purge_for_test(had + 10)
+        .await;
+    let end = Instant::now() + Duration::from_secs(30);
+    while nodes[l].as_ref().unwrap().purged_index() < had + 11 {
+        assert!(
+            Instant::now() < end,
+            "the purge never passed the held stream"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The held read goes on.
+    gate.open();
+
+    // The member gets the whole state, restarts on it, and is replicated to.
+    let end = Instant::now() + Duration::from_secs(60);
+    while back.restart_requested().is_none() {
+        assert!(
+            Instant::now() < end,
+            "the empty member never got a snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = close(back);
+    let (d, p, o) = (dirs[f].clone(), ports.clone(), opts.clone());
+    nodes[f] = Some(tokio::task::block_in_place(move || {
+        open_node(&d, id, &p, o)
+    }));
+    let more = propose_all(nodes[l].as_ref().unwrap(), &entries[2 * N as usize..]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, more));
+    tokio::task::block_in_place(|| converge(nodes, 3 * N, "overtaken"));
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 /// A leader on its way out (the binary's SIGTERM) hands leadership to a live
 /// peer: another node leads well within the election timeout (1 s — an
 /// election after the leader stops takes at least that), never the member that
