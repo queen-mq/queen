@@ -277,6 +277,31 @@ struct Answered {
     kinds: Option<u32>,
 }
 
+/// [`post`], with the status of a peer that answered, whatever it was: `Ok`
+/// with the status and the body, `Err` only when no answer came back. For a
+/// caller that tells statuses apart (a 404 from a node that lacks the route);
+/// a failure's text names the URL, whose port may contain any digits.
+pub(crate) async fn post_status(
+    client: &HttpClient,
+    url: &str,
+    token: Option<&str>,
+    content_type: &str,
+    body: Body,
+    ttl: Duration,
+) -> Result<(StatusCode, Bytes), Fail> {
+    post_raw(client, url, token, content_type, body, ttl, None)
+        .await
+        .map(|r| (r.status, r.bytes))
+}
+
+/// A peer's answer before its status is judged.
+struct Raw {
+    status: StatusCode,
+    bytes: Bytes,
+    reads_zstd: bool,
+    kinds: Option<u32>,
+}
+
 /// [`post_with`], also answering what the peer's answer headers said: whether
 /// it reads compressed entries ([`wire::WIRE_HEADER`]) and which catalogue
 /// version it reads ([`super::members::KINDS_HEADER`]).
@@ -289,6 +314,33 @@ async fn post_answer(
     ttl: Duration,
     members: Option<axum::http::HeaderValue>,
 ) -> Result<Answered, Fail> {
+    let raw = post_raw(client, url, token, content_type, body, ttl, members).await?;
+    if raw.status == StatusCode::UNAUTHORIZED {
+        return Err(Fail::Unreachable(format!(
+            "{url}: refused this node's QUEEN_RAFT_TOKEN"
+        )));
+    }
+    if !raw.status.is_success() {
+        let text = String::from_utf8_lossy(&raw.bytes[..raw.bytes.len().min(512)]).into_owned();
+        return Err(Fail::Network(format!("{url}: {}: {text}", raw.status)));
+    }
+    Ok(Answered {
+        bytes: raw.bytes,
+        reads_zstd: raw.reads_zstd,
+        kinds: raw.kinds,
+    })
+}
+
+/// One POST and its whole answer, whatever its status.
+async fn post_raw(
+    client: &HttpClient,
+    url: &str,
+    token: Option<&str>,
+    content_type: &str,
+    body: Body,
+    ttl: Duration,
+    members: Option<axum::http::HeaderValue>,
+) -> Result<Raw, Fail> {
     let mut req = Request::builder()
         .method(Method::POST)
         .uri(url)
@@ -318,16 +370,8 @@ async fn post_answer(
         Ok(Err(e)) => return Err(Fail::Network(format!("{url}: {e}"))),
         Ok(Ok(b)) => b.to_bytes(),
     };
-    if status == StatusCode::UNAUTHORIZED {
-        return Err(Fail::Unreachable(format!(
-            "{url}: refused this node's QUEEN_RAFT_TOKEN"
-        )));
-    }
-    if !status.is_success() {
-        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).into_owned();
-        return Err(Fail::Network(format!("{url}: {status}: {text}")));
-    }
-    Ok(Answered {
+    Ok(Raw {
+        status,
         bytes,
         reads_zstd,
         kinds,

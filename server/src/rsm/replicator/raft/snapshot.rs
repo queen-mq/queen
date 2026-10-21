@@ -60,13 +60,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
+use axum::http::StatusCode;
 use futures_util::StreamExt;
 use openraft::errors::RaftError;
 use openraft::raft::SnapshotResponse;
 use serde::{Deserialize, Serialize};
 
 use super::log_store::{state_after_snapshot, write_atomic};
-use super::network::{post, Fail, HttpClient};
+use super::network::{post, post_status, Fail, HttpClient};
 use super::state_machine::{Checkpoint, MembershipAt, Snapshot};
 use super::types::{
     applied_log_id, LogId, NodeId, SnapshotMeta, StoredMembership, TypeConfig, Vote,
@@ -496,18 +497,28 @@ async fn ask_member(client: &HttpClient, url: &str, token: Option<&str>) -> Aske
         if attempt > 0 {
             tokio::time::sleep(Duration::from_millis(400)).await;
         }
-        let asked = post(
+        let basis = format!("{url}/basis");
+        let asked = post_status(
             client,
-            &format!("{url}/basis"),
+            &basis,
             token,
             "application/json",
             Body::from("{}"),
             BASIS_TTL,
         )
         .await;
+        // The status, never the failure's text: that names the URL, and a
+        // port such as 40412 made a member that did not answer look like a
+        // node before 2.6, which is sent the whole state.
         match asked {
-            Ok(bytes) => return Asked::Answered(serde_json::from_slice::<Basis>(&bytes).ok()),
-            Err(Fail::Network(why)) if why.contains("404") => return Asked::Answered(None),
+            Ok((s, bytes)) if s.is_success() => {
+                return Asked::Answered(serde_json::from_slice::<Basis>(&bytes).ok())
+            }
+            Ok((StatusCode::NOT_FOUND, _)) => return Asked::Answered(None),
+            Ok((s, bytes)) => {
+                let text = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).into_owned();
+                last = format!("{basis}: {s}: {text}");
+            }
             Err(Fail::Unreachable(why) | Fail::Network(why)) => last = why,
         }
     }
@@ -1370,6 +1381,16 @@ mod tests {
 
         // Takes the connection and never answers: silent, not "send it all".
         let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/raft/v1/snapshot", hung.local_addr().unwrap());
+        let asked = ask_member(&client, &url, None).await;
+        assert!(matches!(asked, Asked::Silent(_)), "{asked:?}");
+        drop(hung);
+
+        // The same on a port whose number holds "404": a failure's text names
+        // the URL, and it once read as a node before 2.6 answering 404.
+        let hung = (40400..40500)
+            .find_map(|p| std::net::TcpListener::bind(("127.0.0.1", p)).ok())
+            .expect("a free port in 40400..40500");
         let url = format!("http://{}/raft/v1/snapshot", hung.local_addr().unwrap());
         let asked = ask_member(&client, &url, None).await;
         assert!(matches!(asked, Asked::Silent(_)), "{asked:?}");
