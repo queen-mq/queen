@@ -79,6 +79,10 @@ verifiedBy:
 # log for an away member for QUEEN_RAFT_MEMBER_HOLD_S (6 h) within its disk limit, and a snapshot is
 # a delta above the member's log; network.rs listens once openraft exists. real.rs (facade 2's push
 # of Kafka records) changes nothing here. The failure table's away row says so.
+# sourceOfTruth re-read 2026-10-21 (PR 141, queue status summary): phase2.rs and phase2/admin.rs:
+# the queue detail read takes includePartitions=false and then returns queue-wide totals without
+# per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
+# changes.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They

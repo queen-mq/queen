@@ -74,6 +74,10 @@ verifiedBy:
 # dashboard (cd737c40a) the SDKs gain a read of a partition by offset and a list of the partitions
 # written since a time (66622568e, clients 2.6.0, documented on start/clients). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-21 (PR 141, queue status summary): phase2.rs and phase2/admin.rs:
+# the queue detail read takes includePartitions=false and then returns queue-wide totals without
+# per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
+# changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a

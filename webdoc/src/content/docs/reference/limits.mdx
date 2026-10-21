@@ -78,6 +78,10 @@ sourceOfTruth:
 # transaction id (facade 2's idempotent producer, cd737c40a), counted in its planned size like any
 # item's; phase2/reads.rs notes the records a Kafka fetch served (11a0a5f3a). No limit on this page
 # changes.
+# sourceOfTruth re-read 2026-10-21 (PR 141, queue status summary): phase2.rs and phase2/admin.rs:
+# the queue detail read takes includePartitions=false and then returns queue-wide totals without
+# per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
+# changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling

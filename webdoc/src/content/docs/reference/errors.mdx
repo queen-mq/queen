@@ -78,6 +78,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21: real.rs gives a Kafka record's push its transaction id (facade
 # 2's idempotent producer) and consume/txn.rs counts a moved position as consumption on the
 # dashboard (cd737c40a); no error code or message changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (PR 141, queue status summary): phase2.rs and phase2/admin.rs:
+# the queue detail read takes includePartitions=false and then returns queue-wide totals without
+# per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
+# changes.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code
