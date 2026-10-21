@@ -45,7 +45,7 @@
         <template #sub>
           <span v-if="queueData?.namespace">Namespace <b>{{ queueData.namespace }}</b> · </span>
           <span v-if="queueData?.task">Task <b>{{ queueData.task }}</b> · </span>
-          <span><b>{{ formatNumber(partitions.length) }}</b> {{ partitions.length === 1 ? 'partition' : 'partitions' }}</span>
+          <span><b>{{ fmtCount(partitionCount) }}</b> {{ partitionCount === 1 ? 'partition' : 'partitions' }}</span>
           <span v-if="queueData?.createdAt" :title="formatTimestampUtc(queueData.createdAt)"> · created {{ formatRelative(queueData.createdAt) }}</span>
         </template>
         <template #range>
@@ -79,6 +79,12 @@
           configuration that were on screen at {{ lastRefreshText }}.
         </span>
       </div>
+      <div v-if="statusData.statsAge === null" class="status-banner view-banner">
+        Queue counts are warming up · showing estimated pending until the first sample is ready.
+      </div>
+      <div v-else-if="statusData.statsAge > 0" class="status-banner view-banner">
+        Queue counts sampled {{ formatDuration(statusData.statsAge * 1000) }} ago.
+      </div>
       <div
         v-for="(b, i) in banners"
         :key="i"
@@ -98,11 +104,11 @@
         </button>
         <button type="button" class="count-tile" @click="goMessages('processing')">
           <span class="k">Processing</span>
-          <span class="v">{{ formatNumber(totalMessages.processing) }}</span>
+          <span class="v">{{ fmtCount(totalMessages.processing) }}</span>
         </button>
         <button type="button" class="count-tile" @click="goMessages('completed')">
           <span class="k">Completed</span>
-          <span class="v">{{ formatNumber(totalMessages.completed) }}</span>
+          <span class="v">{{ fmtCount(totalMessages.completed) }}</span>
         </button>
         <button type="button" class="count-tile" @click="goMessages('dead_letter')">
           <span class="k">Dead letter</span>
@@ -110,11 +116,11 @@
         </button>
         <button type="button" class="count-tile" @click="goMessages()">
           <span class="k">Total</span>
-          <span class="v">{{ formatNumber(totalMessages.total) }}</span>
+          <span class="v">{{ fmtCount(totalMessages.total) }}</span>
         </button>
         <div class="count-tile">
           <span class="k">Partitions</span>
-          <span class="v">{{ formatNumber(partitions.length) }}</span>
+          <span class="v">{{ fmtCount(partitionCount) }}</span>
         </div>
       </div>
 
@@ -246,7 +252,7 @@
         </MetricTile>
         <MetricTile
           label="Consumed"
-          :value="formatNumber(consumedTotal)"
+          :value="fmtCount(consumedTotal)"
           unit="msgs"
           :context="consumedContext"
           :sparkline="popSeries"
@@ -288,12 +294,13 @@
         <div class="card flower-card">
           <div class="card-header">
             <h3>Partitions</h3>
-            <span class="muted">{{ formatNumber(partitions.length) }}</span>
+            <span class="muted">{{ fmtCount(partitionCount) }}</span>
           </div>
           <PartitionSunflower
-            mode="partitions"
+            :mode="partitionRows ? 'partitions' : 'queues'"
             :queue-name="queueName"
             :queues="partitionSeeds"
+            :loading="partitionCount === null"
           />
         </div>
 
@@ -413,7 +420,7 @@
             <div v-if="deleteError" class="panel-err">{{ deleteError }}</div>
             <p style="color:var(--text-mid);">
               Delete <strong>{{ queueName }}</strong>? This permanently removes the queue,
-              all partitions ({{ partitions.length }}), and {{ formatNumber(totalMessages.total) }} messages.
+              all partitions ({{ fmtCount(partitionCount) }}), and {{ fmtCount(totalMessages.total) }} messages.
               This action cannot be undone.
             </p>
           </div>
@@ -604,16 +611,20 @@ const chartLabels = computed(() =>
 // Partitions (existing logic, retained but enriched)
 // ---------------------------------------------------------------------------
 const partitions = computed(() => statusData.value?.partitions || [])
+const partitionCount = computed(() => {
+  const totals = statusData.value?.totals
+  return totals && 'partitions' in totals ? totals.partitions : partitions.value.length
+})
 
 const totalMessages = computed(() => {
   const apiTotals = statusData.value?.totals
   if (apiTotals) {
     const msgs = apiTotals.messages || apiTotals
     return {
-      total: msgs.total || 0,
+      total: statusData.value.statsAge === null ? null : msgs.total || 0,
       pending: Math.max(0, msgs.pending || 0),
-      processing: msgs.processing || 0,
-      completed: msgs.completed || 0,
+      processing: statusData.value.statsAge === null ? null : msgs.processing || 0,
+      completed: statusData.value.statsAge === null ? null : msgs.completed || 0,
       deadLetter: msgs.deadLetter || 0
     }
   }
@@ -923,8 +934,9 @@ const partitionDeletedTotal = computed(() =>
 // ---------------------------------------------------------------------------
 // Consumed row — lifetime cursor consumed (total) + per-bucket pop sparkline
 // ---------------------------------------------------------------------------
-const consumedTotal = computed(() =>
-  partitions.value.reduce((s, p) => s + (toNum(p.cursor?.totalConsumed) || 0), 0)
+const consumedTotal = computed(() => statusData.value?.statsAge === null ? null :
+  statusData.value?.totals?.consumed ??
+    partitions.value.reduce((s, p) => s + (toNum(p.cursor?.totalConsumed) || 0), 0)
 )
 const popSeries = computed(() => history.value.map(x => toNum(x.popMessages)))
 const consumedContext = computed(() =>
@@ -1053,7 +1065,7 @@ const fmtRate = (n) => {
   if (Math.abs(v) >= 10) return v.toFixed(1)
   return v.toFixed(2)
 }
-const fmtCount = (n) => formatNumber(Math.round(Number(n) || 0))
+const fmtCount = (n) => n === null || n === undefined ? '—' : formatNumber(Math.round(Number(n) || 0))
 const fmtLagMs = (n) => {
   const v = Number(n) || 0
   if (v < 1) return '0'
@@ -1112,8 +1124,8 @@ const nameParts = computed(() => {
   return i < 0 ? { ns: '', rest: n } : { ns: n.slice(0, i + 1), rest: n.slice(i + 1) }
 })
 
-// One seed per partition (the component caps and says so). The queue's
-// verdict — useAttention, the rule the Overview, Queues and the sidebar use —
+// Small queues have one seed per partition; large ones use the queue totals.
+// The queue's verdict — shared with the Overview, Queues and the sidebar —
 // colours only the partitions that hold work. It reads the shared listing the
 // sidebar keeps; this page never pays for a consumer-group scan of its own.
 const queueSev = computed(() => {
@@ -1122,30 +1134,34 @@ const queueSev = computed(() => {
   const here = { name: queueName.value, messages: { pending: totalMessages.value.pending }, kafkaTopic: kafkaTopic.value }
   return queueAttention([here], groups, settingsStore.linesFor)[0]?.sev || 'ok'
 })
-// Each seed's lag — the age of the oldest message its slowest reader has not
-// consumed — comes from /resources/partitions, for the seeds the flower can
-// draw. New in 2.0: on an older broker the probe 404s once and the seeds'
-// tips show pending alone.
-const getPartitionLags = routeSupport.guard('resources-partitions', (params) =>
+// Match the overview: only scan individual partitions while each fits a seed.
+const getPartitions = routeSupport.guard('resources-partitions', (params) =>
   queuesApi.partitions(params, { probe: true }))
-const partitionLags = ref(null) // Map partition name -> lagSeconds (null: caught up)
-const fetchPartitionLags = async () => {
+const partitionData = ref(null)
+const partitionRows = computed(() => {
+  if (partitionCount.value === null || partitionCount.value > MAX_SEEDS || partitionData.value?.truncated) return null
+  return partitionData.value?.partitions ?? null
+})
+const fetchPartitions = async () => {
+  if (partitionCount.value === null || partitionCount.value > MAX_SEEDS) {
+    partitionData.value = null
+    return
+  }
   const name = queueName.value
   try {
-    const r = await getPartitionLags({ queue: name, limit: MAX_SEEDS })
+    const r = await getPartitions({ queue: name, limit: MAX_SEEDS })
     if (name !== queueName.value) return
-    partitionLags.value = new Map((r.data?.partitions || []).map(p => [String(p.partition), p.lagSeconds ?? null]))
+    partitionData.value = r.data
   } catch {
-    // Keep the last lags; a missing route leaves them unknown.
+    // Keep the last rows; without them the flower uses the queue's totals.
   }
 }
-const partitionSeeds = computed(() => partitions.value.map(p => {
-  const m = p.messages || p.stats || {}
-  const pending = Math.max(0, toNum(m.pending) || 0)
-  const name = String(p.name ?? p.partition ?? p.id ?? '?')
-  const lag = partitionLags.value?.has(name) ? partitionLags.value.get(name) : undefined
-  return { name, partitions: 1, pending, lag, sev: pending > 0 ? queueSev.value : 'ok' }
-}))
+const partitionSeeds = computed(() => partitionRows.value
+  ? partitionRows.value.map(p => ({
+    name: String(p.partition), partitions: 1, pending: p.pending,
+    lag: p.lagSeconds, sev: p.pending > 0 ? queueSev.value : 'ok',
+  }))
+  : [{ name: queueName.value, partitions: partitionCount.value, pending: totalMessages.value.pending, sev: queueSev.value }])
 
 function goMessages(status = '') {
   router.push(queueLocation(queueName.value, route, 'messages', status ? { status } : {}))
@@ -1164,12 +1180,16 @@ function goConsumers() {
 // fetch of /resources/queues/:name doubled the request rate of the busiest
 // detail page for a fallback that could only ever render an all-zero view.
 const fetchQueueDetail = async () => {
+  const name = queueName.value
   try {
-    const r = await analytics.getQueueDetail(queueName.value)
+    const r = await analytics.getQueueDetail(name, { includePartitions: false })
+    if (name !== queueName.value) return
     statusData.value = r.data
     detailError.value = null
     detailStale.value = null
+    await fetchPartitions()
   } catch (err) {
+    if (name !== queueName.value) return
     // Keep whatever is on screen; the banner says the refresh failed. Only a
     // page with nothing to show falls back to the error card.
     if (statusData.value) detailStale.value = err
@@ -1198,10 +1218,10 @@ const fetchAll = async () => {
   // expensive at scale and intentionally skipped here — they live on
   // the dedicated /consumers page.
   //
-  // The one exception is the conflation probe, and it is conditional on the
-  // totals this call just returned: a queue deep enough to warn about buys a
-  // third request, because on a conflating group that warning would be wrong.
-  await Promise.all([fetchQueueDetail(), fetchOps(), fetchPartitionLags()])
+  // Small queues also load the flower's per-partition rows after the totals.
+  // A queue deep enough to warn about also probes conflation, because on a
+  // conflating group that warning would be wrong.
+  await Promise.all([fetchQueueDetail(), fetchOps()])
   probeGroupsIfDeep()
   lastRefreshAt.value = Date.now()
   loading.value = false
@@ -1256,7 +1276,7 @@ watch(queueName, () => {
   detailError.value = null
   detailStale.value = null
   statusData.value = null
-  partitionLags.value = null
+  partitionData.value = null
   opsData.value = null
   opsError.value = null
   fetchAll()
