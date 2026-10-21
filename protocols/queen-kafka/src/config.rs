@@ -68,6 +68,20 @@ impl Config {
             None => default,
             Some(v) => matches!(v, "1" | "true" | "TRUE" | "yes" | "on" | "required"),
         };
+        // `plain` is what the first facade read and what its deployments set;
+        // `required` was this one's word. Anything else stops the boot: read
+        // as "off", a misspelt value would serve every connection unchecked
+        // with the process credential.
+        let sasl_required = match env("QUEEN_KAFKA_SASL").map(|v| v.trim().to_ascii_lowercase()) {
+            None => false,
+            Some(v) if v == "plain" || v == "required" => true,
+            Some(v) if matches!(v.as_str(), "off" | "none" | "false" | "0") => false,
+            Some(v) => {
+                return Err(format!(
+                    "QUEEN_KAFKA_SASL={v}: expected plain (SASL/PLAIN on every connection) or off"
+                ))
+            }
+        };
         Ok(Config {
             listen,
             advertised_host,
@@ -81,7 +95,7 @@ impl Config {
             )? as u64),
             dedup_window_seconds: int("QUEEN_KAFKA_DEDUP_WINDOW_SECONDS", 900, 0, 604_800)?,
             auto_create: flag("QUEEN_KAFKA_AUTO_CREATE", true),
-            sasl_required: env("QUEEN_KAFKA_SASL").as_deref().map(str::trim) == Some("required"),
+            sasl_required,
             max_connections: int("QUEEN_KAFKA_MAX_CONNECTIONS", 10_000, 1, 1_000_000)? as usize,
             max_request_bytes: int("QUEEN_KAFKA_MAX_REQUEST_BYTES", 100 << 20, 1 << 20, 1 << 30)?
                 as usize,
@@ -129,5 +143,28 @@ mod tests {
         assert!(cfg(&[("QUEEN_KAFKA_ADVERTISED_ADDR", "nohost")]).is_err());
         let v6 = cfg(&[("QUEEN_KAFKA_ADVERTISED_ADDR", "[::1]:9092")]).unwrap();
         assert_eq!(v6.advertised_host, "::1");
+    }
+
+    /// `plain`, the value the first facade's deployments set, requires SASL
+    /// as `required` does; a value it does not know stops the boot instead of
+    /// leaving every connection unchecked.
+    #[test]
+    fn sasl_plain_and_required_require_a_login_and_anything_else_is_refused() {
+        let with = |v: &str| {
+            cfg(&[
+                ("QUEEN_KAFKA_ADVERTISED_ADDR", "kafka-0.svc:9092"),
+                ("QUEEN_KAFKA_SASL", v),
+            ])
+        };
+        let addr = [("QUEEN_KAFKA_ADVERTISED_ADDR", "kafka-0.svc:9092")];
+        assert!(!cfg(&addr).unwrap().sasl_required);
+        for v in ["plain", "PLAIN", " plain ", "required"] {
+            assert!(with(v).unwrap().sasl_required, "{v}");
+        }
+        for v in ["off", "none", "false", "0"] {
+            assert!(!with(v).unwrap().sasl_required, "{v}");
+        }
+        let e = with("scram").unwrap_err();
+        assert!(e.contains("QUEEN_KAFKA_SASL=scram"), "{e}");
     }
 }
