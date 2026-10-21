@@ -28,6 +28,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21 (later): handlers/admin.rs applies retention.ms and cleanup.policy at
 # CreateTopics, as the first facade did, and refuses a value it cannot apply with INVALID_CONFIG;
 # "Topic configs" says so.
+# sourceOfTruth re-read 2026-10-21 (empty groups leave memory): groups.rs drops a group with no
+# members ten minutes after its last member left, and presence.rs deletes its console row; "Where it
+# differs" says so.
 ---
 
 This is the contract a Kafka client gets from Queen, in the form you check things against: the
@@ -112,6 +115,10 @@ speaks only those. This is that answer, with the reason each window stops where 
 - Group membership is held in the leader's memory. When the leader changes, members are told
   `NOT_COORDINATOR` or `UNKNOWN_MEMBER_ID`, rejoin at the new leader and resume from their committed
   offsets, the same sequence as a Kafka coordinator failover.
+- A group with no members leaves the leader's memory ten minutes after its last member left.
+  ListGroups stops listing it and DescribeGroups answers `Dead`; its committed offsets stay, and a
+  member that joins later starts it again at generation 1. Kafka lists an empty group as `Empty`
+  until its offsets expire, seven days by default.
 
 ### Known issues in 2.6
 

@@ -97,6 +97,7 @@ pub async fn serve(
 async fn tick(ctx: Arc<Ctx>) {
     let mut led = false;
     let mut n: u64 = 0;
+    let mut writing: Option<tokio::task::JoinHandle<()>> = None;
     let mut every = tokio::time::interval(Duration::from_millis(100));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -107,6 +108,7 @@ async fn tick(ctx: Arc<Ctx>) {
                 tracing::info!(target: "kafka", "raft leadership moved away: consumer groups handed to the new leader");
             }
             ctx.groups.clear();
+            ctx.indexed.clear();
             ctx.txns.clear().await;
         }
         if leads != led {
@@ -117,15 +119,20 @@ async fn tick(ctx: Arc<Ctx>) {
         n += 1;
         if leads && n.is_multiple_of(10) {
             ctx.txns.expire().await;
-            let rows = ctx
-                .groups
-                .presence_due(Instant::now(), crate::presence::EVERY);
-            if !rows.is_empty() {
-                let ctx = Arc::clone(&ctx);
-                let node = ctx.broker.cluster().node_id;
-                tokio::spawn(async move {
-                    crate::presence::write(&ctx.queen, &ctx.indexed, node, rows).await;
-                });
+            // One presence write at a time: a row deleted for a group that
+            // left is never put back by an earlier write that landed late.
+            if writing.as_ref().is_none_or(|w| w.is_finished()) {
+                let rows = ctx
+                    .groups
+                    .presence_due(Instant::now(), crate::presence::EVERY);
+                let gone = ctx.groups.gone();
+                if !rows.is_empty() || !gone.is_empty() {
+                    let ctx = Arc::clone(&ctx);
+                    let node = ctx.broker.cluster().node_id;
+                    writing = Some(tokio::spawn(async move {
+                        crate::presence::write(&ctx.queen, &ctx.indexed, node, rows, gone).await;
+                    }));
+                }
             }
         }
     }

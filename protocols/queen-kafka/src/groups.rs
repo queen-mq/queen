@@ -6,6 +6,11 @@
 //! groups, every member's next heartbeat or commit is answered
 //! `UNKNOWN_MEMBER_ID` / `ILLEGAL_GENERATION`, and the members rejoin. The
 //! committed offsets are the Queen group's positions and do not move.
+//!
+//! A group with no members leaves memory [`EMPTY_GROUP_TTL`] after its last
+//! member did, so a leader that runs for weeks does not keep every group id a
+//! client ever used. Its positions stay; a member that joins after that starts
+//! the group again, as after a leader change.
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
@@ -144,6 +149,8 @@ struct Group {
     /// Membership changed since the last presence row.
     dirty: bool,
     last_presence: Option<Instant>,
+    /// Since when it has had no members ([`EMPTY_GROUP_TTL`]).
+    empty_since: Option<Instant>,
 }
 
 impl Group {
@@ -160,6 +167,7 @@ impl Group {
             bearer: None,
             dirty: true,
             last_presence: None,
+            empty_since: None,
         }
     }
 }
@@ -175,6 +183,9 @@ struct Inner {
     /// Groups that commit without members (`assign()` consumers): their token
     /// and the time of their last commit.
     committers: HashMap<String, (Option<String>, Instant, Option<Instant>)>,
+    /// Groups that left memory after their console row was written: the row
+    /// to delete, with the token it was written with ([`Coordinator::gone`]).
+    gone: HashMap<String, Option<String>>,
 }
 
 /// One group's row for the console ([`Coordinator::presence_due`]).
@@ -205,6 +216,11 @@ pub enum Synced {
 const MIN_SESSION_MS: i32 = 1_000;
 const MAX_SESSION_MS: i32 = 3_600_000;
 
+/// How long a group with no members stays in memory after its last member
+/// left. Until then ListGroups lists it as Empty and the console shows it;
+/// after, DescribeGroups answers Dead and its console row is deleted.
+pub const EMPTY_GROUP_TTL: Duration = Duration::from_secs(600);
+
 impl Coordinator {
     pub fn new(join_delay: Duration) -> Coordinator {
         Coordinator {
@@ -212,6 +228,7 @@ impl Coordinator {
                 groups: HashMap::new(),
                 seq: 0,
                 committers: HashMap::new(),
+                gone: HashMap::new(),
             }),
             join_delay,
         }
@@ -574,6 +591,9 @@ impl Coordinator {
     /// This node stopped leading: every group is the next leader's to rebuild.
     pub fn clear(&self) {
         let mut inner = self.lock();
+        // The next leader writes the rows now: a delete from here could land
+        // after its write.
+        inner.gone.clear();
         for (_, mut g) in inner.groups.drain() {
             for (id, m) in g.members.iter_mut() {
                 if let Some(j) = m.join.take() {
@@ -590,7 +610,9 @@ impl Coordinator {
         self.lock().groups.is_empty()
     }
 
-    /// Expire sessions and finish rebalances whose time is up.
+    /// Expire sessions, finish rebalances whose time is up, and let go of the
+    /// groups with no members: at once when they never formed a generation,
+    /// [`EMPTY_GROUP_TTL`] after their last member left when they did.
     pub fn tick(&self, now: Instant) {
         let mut inner = self.lock();
         for g in inner.groups.values_mut() {
@@ -608,11 +630,41 @@ impl Coordinator {
                 members_changed(g, now, self.join_delay);
             }
             try_complete(g, now);
+            if g.state == State::Empty && g.members.is_empty() {
+                g.empty_since.get_or_insert(now);
+            } else {
+                g.empty_since = None;
+            }
         }
-        // An empty group with no generation history is nothing to keep.
-        inner
-            .groups
-            .retain(|_, g| !(g.state == State::Empty && g.members.is_empty() && g.generation == 0));
+        let Inner { groups, gone, .. } = &mut *inner;
+        groups.retain(|name, g| {
+            let keep = match g.empty_since {
+                None => true,
+                Some(_) if g.generation == 0 => false,
+                Some(since) => now.duration_since(since) < EMPTY_GROUP_TTL,
+            };
+            if !keep && g.last_presence.is_some() {
+                gone.insert(name.clone(), g.bearer.clone());
+            }
+            keep
+        });
+    }
+
+    /// The console rows of the groups that left memory, to delete: name and
+    /// the token the row was written with. A group that came back since (it
+    /// rejoined, or commits without members) is not among them: its row is
+    /// written again.
+    pub fn gone(&self) -> Vec<(String, Option<String>)> {
+        let mut inner = self.lock();
+        let Inner {
+            groups,
+            committers,
+            gone,
+            ..
+        } = &mut *inner;
+        gone.drain()
+            .filter(|(name, _)| !groups.contains_key(name) && !committers.contains_key(name))
+            .collect()
     }
 }
 
@@ -913,6 +965,53 @@ mod tests {
             Joined::Now(o) => assert_eq!(o.error, UNKNOWN_MEMBER_ID),
             Joined::Wait(_) => panic!("an unknown member id must rejoin without one"),
         }
+    }
+
+    /// One member joins, its row is written, it leaves at `t0`.
+    fn left_at(t0: Instant) -> Coordinator {
+        let c = Coordinator::new(Duration::from_millis(0));
+        let mut a = joined(c.join(join_args(""), t0));
+        c.tick(t0);
+        let a = a.try_recv().unwrap();
+        assert_eq!(c.presence_due(t0, Duration::from_secs(15)).len(), 1);
+        assert_eq!(c.leave("g", &a.member_id, t0), NONE);
+        c.tick(t0);
+        c
+    }
+
+    #[test]
+    fn a_group_with_no_members_leaves_memory_after_the_ttl_and_its_row_is_deleted() {
+        let t0 = Instant::now();
+        let c = left_at(t0);
+        let empty = vec![("g".to_string(), "consumer".to_string(), State::Empty)];
+        assert_eq!(c.list(), empty);
+        c.tick(t0 + EMPTY_GROUP_TTL - Duration::from_secs(1));
+        assert_eq!(c.list(), empty, "kept until the TTL");
+        assert!(c.gone().is_empty());
+
+        c.tick(t0 + EMPTY_GROUP_TTL);
+        assert!(c.list().is_empty(), "dropped at the TTL");
+        assert!(c.describe("g").is_none());
+        assert_eq!(c.gone(), vec![("g".to_string(), None)]);
+        assert!(c.gone().is_empty(), "each row is deleted once");
+
+        // A member that joins after that starts the group again.
+        let later = t0 + EMPTY_GROUP_TTL;
+        let mut b = joined(c.join(join_args(""), later));
+        c.tick(later);
+        assert_eq!(b.try_recv().unwrap().generation, 1);
+    }
+
+    #[test]
+    fn a_group_that_rejoins_before_its_row_is_deleted_keeps_it() {
+        let t0 = Instant::now();
+        let c = left_at(t0);
+        let later = t0 + EMPTY_GROUP_TTL;
+        c.tick(later);
+        assert!(c.list().is_empty());
+        let _b = c.join(join_args(""), later);
+        assert!(c.gone().is_empty(), "its row is written again, not deleted");
+        assert_eq!(c.presence_due(later, Duration::from_secs(15)).len(), 1);
     }
 
     #[test]

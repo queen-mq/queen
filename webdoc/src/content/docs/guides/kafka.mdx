@@ -30,6 +30,9 @@ sidebar:
 # (protocols/queen-kafka rewritten). "How it works", the mapping, groups, idempotent producers,
 # transactions, retention, the cluster setup, performance and limits were rewritten against the new
 # code; "Try it" holds as it was. The files of the first facade this page named are gone.
+# sourceOfTruth re-read 2026-10-21 (empty groups leave memory): groups.rs drops a group with no
+# members ten minutes after its last member left and presence.rs deletes its presence row; the
+# groups and presence paragraphs say so.
 ---
 
 Your Kafka producers, consumers and admin tools can use Queen as they are: change
@@ -214,7 +217,8 @@ assignor all work. The first member of a new group waits three seconds for other
 assignment (`QUEEN_KAFKA_GROUP_JOIN_DELAY_MS`, Kafka's `group.initial.rebalance.delay.ms`). The
 raft leader coordinates every group and holds its membership in memory: when the leader changes,
 members are told `NOT_COORDINATOR` or `UNKNOWN_MEMBER_ID`, rejoin at the new leader and resume from
-their committed offsets.
+their committed offsets. A group with no members leaves that memory ten minutes after its last
+member left, so `kafka-consumer-groups.sh --list` stops showing it; its committed offsets stay.
 
 A committed offset is the group's position on the partition. That is why `billing` showed up in
 `/api/v1/consumer-groups` with its lag, and why a Queen consumer of `billing` resumed at offset 2.
@@ -235,7 +239,9 @@ A Kafka consumer takes no lease, so the broker learns that a group is alive from
 group's members heartbeat, the facade writes the group's presence to the key-value store every 15
 seconds, and at once when a rebalance completes or the last member leaves.
 `/api/v1/consumer-groups` reports such a group as `kind: "kafka"`, with `liveMembers`, `lastSeenAt`
-and `inactiveSeconds`. The dashboard counts a live Kafka group as a reader of its topic, and a topic
+and `inactiveSeconds`. When the group leaves the leader's memory, its presence row is deleted and it
+is reported like any group nobody reads for: `Dead`, or `Lagging` while it is more than five
+minutes behind. The dashboard counts a live Kafka group as a reader of its topic, and a topic
 the facade created is not flagged for having no reader, since Kafka clients never read in queue
 mode.
 

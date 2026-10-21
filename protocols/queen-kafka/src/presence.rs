@@ -10,7 +10,10 @@
 //! ```
 //!
 //! A row is fresh for `freshMs` after the broker wrote it; a group whose rows
-//! stop (its coordinator moved, it died) reads as gone after that.
+//! stop (its coordinator moved, it died) reads as gone after that. A group
+//! that leaves the coordinator's memory (no members for
+//! [`crate::groups::EMPTY_GROUP_TTL`]) has its `qk:live` row deleted; its
+//! index row stays, as its positions do.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -42,8 +45,28 @@ pub fn escape(s: &str) -> String {
 #[derive(Default)]
 pub struct Indexed(Mutex<HashSet<String>>);
 
-/// Write the rows, grouped by the token they are written with.
-pub async fn write(queen: &Queen, indexed: &Indexed, node: i32, rows: Vec<PresenceRow>) {
+impl Indexed {
+    fn set(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Leadership moved away: the groups are the next leader's.
+    pub fn clear(&self) {
+        self.set().clear();
+    }
+}
+
+/// Write the rows and delete those of the groups that are `gone` (name and
+/// token, [`crate::groups::Coordinator::gone`]), grouped by the token they are
+/// written with. Calls run one at a time ([`crate::server`]): a delete is
+/// never overtaken by an earlier write of the same row.
+pub async fn write(
+    queen: &Queen,
+    indexed: &Indexed,
+    node: i32,
+    rows: Vec<PresenceRow>,
+    gone: Vec<(String, Option<String>)>,
+) {
     let mut by_bearer: HashMap<Option<String>, Vec<KvOp>> = HashMap::new();
     let at = now_ms();
     for r in rows {
@@ -52,11 +75,7 @@ pub async fn write(queen: &Queen, indexed: &Indexed, node: i32, rows: Vec<Presen
             continue;
         }
         let ops = by_bearer.entry(r.bearer.clone()).or_default();
-        let first = indexed
-            .0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(r.group.clone());
+        let first = indexed.set().insert(r.group.clone());
         if first {
             ops.push(KvOp::put(
                 NS,
@@ -81,6 +100,17 @@ pub async fn write(queen: &Queen, indexed: &Indexed, node: i32, rows: Vec<Presen
                 "node": node,
             }),
         ));
+    }
+    for (group, bearer) in gone {
+        let key = escape(&group);
+        indexed.set().remove(&group);
+        if key.len() > 480 {
+            continue;
+        }
+        by_bearer.entry(bearer).or_default().push(KvOp::Delete {
+            ns: NS.to_string(),
+            key: format!("qk:live:{key}"),
+        });
     }
     for (bearer, ops) in by_bearer {
         for chunk in ops.chunks(OPS_PER_CALL) {
