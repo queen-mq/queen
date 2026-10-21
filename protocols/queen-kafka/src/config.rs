@@ -70,8 +70,8 @@ impl Config {
         };
         // `plain` is what the first facade read and what its deployments set;
         // `required` was this one's word. Anything else stops the boot: read
-        // as "off", a misspelt value would serve every connection unchecked
-        // with the process credential.
+        // as "off", a misspelt value lets a connection skip the login, and its
+        // calls then carry no token (refused where the broker checks tokens).
         let sasl_required = match env("QUEEN_KAFKA_SASL").map(|v| v.trim().to_ascii_lowercase()) {
             None => false,
             Some(v) if v == "plain" || v == "required" => true,
