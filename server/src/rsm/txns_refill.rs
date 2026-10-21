@@ -51,6 +51,11 @@ pub struct Refilled {
     pub missing: usize,
     /// Rows of a partition the store no longer has (a delete still sweeping).
     pub orphaned: usize,
+    /// Sealed files whose hash sidecar answered instead of the file
+    /// ([`crate::rsm::qlog::hashside`]).
+    pub sidecars: usize,
+    /// Bytes read: the sidecars' and the files'.
+    pub read_bytes: u64,
 }
 
 fn io_err(e: crate::rsm::store::StoreError) -> io::Error {
@@ -88,6 +93,7 @@ pub fn refill<S: Store + ?Sized>(store: &S, reader: &QLogReader) -> io::Result<R
     let stop = AtomicBool::new(false);
     let mut matched = 0usize;
     let mut bytes = 0u64;
+    let mut sidecars = 0usize;
     let mut failed: Option<io::Error> = None;
     std::thread::scope(|s| {
         let (tx, rx) = mpsc::sync_channel(READERS);
@@ -113,9 +119,10 @@ pub fn refill<S: Store + ?Sized>(store: &S, reader: &QLogReader) -> io::Result<R
             if failed.is_some() {
                 continue;
             }
-            let written = got.and_then(|(frames, n)| {
-                bytes += n;
-                let (m, refilled) = refill_from(store, &rows_of, frames)?;
+            let written = got.and_then(|read| {
+                bytes += read.bytes;
+                sidecars += usize::from(read.sidecar);
+                let (m, refilled) = refill_from(store, &rows_of, read.frames)?;
                 matched += m;
                 out.refilled += refilled;
                 Ok(())
@@ -130,6 +137,8 @@ pub fn refill<S: Store + ?Sized>(store: &S, reader: &QLogReader) -> io::Result<R
         return Err(e);
     }
     out.missing = (out.rows - out.orphaned).saturating_sub(matched);
+    out.sidecars = sidecars;
+    out.read_bytes = bytes;
     tracing::info!(
         target: "rsm",
         rows = out.rows,
@@ -137,6 +146,7 @@ pub fn refill<S: Store + ?Sized>(store: &S, reader: &QLogReader) -> io::Result<R
         missing = out.missing,
         orphaned = out.orphaned,
         files = files.len(),
+        sidecars,
         read_mb = bytes >> 20,
         ms = t0.elapsed().as_millis() as u64,
         "txns rows refilled from the queue logs",
@@ -179,6 +189,42 @@ pub fn spawn_index_check(reader: QLogReader) {
         });
     if let Err(e) = spawned {
         tracing::error!(target: "rsm", error = %e, "rsm qlog: the index check did not start");
+    }
+}
+
+/// Build, on a thread of its own, the hash sidecars the queue logs owe
+/// ([`crate::rsm::qlog::hashside`]): every file the roll seals or compaction
+/// rewrites, and every sealed file this boot's refill read itself, so the
+/// next boot reads the sidecars. It drains the logs' queues while they hold
+/// work and looks again every half second, and ends with the logs (it holds
+/// them weakly). Started after the boot's reads, as the index check is.
+pub fn spawn_hashside_builder(reader: &QLogReader) {
+    if !crate::rsm::qlog::hashside::enabled() {
+        return;
+    }
+    let builder = reader.hashside_builder();
+    let spawned = std::thread::Builder::new()
+        .name("queen-qlog-hashside".into())
+        .spawn(move || loop {
+            let t0 = Instant::now();
+            let Some((built, bytes)) = builder.round(t0 + std::time::Duration::from_secs(1)) else {
+                return;
+            };
+            if built > 0 && t0.elapsed() >= std::time::Duration::from_millis(500) {
+                tracing::info!(
+                    target: "rsm",
+                    built,
+                    kb = bytes >> 10,
+                    ms = t0.elapsed().as_millis() as u64,
+                    "rsm qlog hash sidecars built",
+                );
+            }
+            if built == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!(target: "rsm", error = %e, "rsm qlog: the hash sidecar builder did not start");
     }
 }
 

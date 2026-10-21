@@ -1700,6 +1700,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             // logs: back before the replay below or any read.
             crate::rsm::txns_refill::refill(&*store, &reader)?;
             crate::rsm::txns_refill::spawn_index_check(reader.clone());
+            crate::rsm::txns_refill::spawn_hashside_builder(&reader);
             // On-demand `pid -> queue_id` for a map miss: only a partition created
             // before the last restart (its create is gone from the replay window
             // but its row is committed) can miss, so this committed-catalog read

@@ -179,6 +179,8 @@ fn a_row_whose_record_is_gone_is_counted_and_left_for_the_replay() {
             refilled: 0,
             missing: 1,
             orphaned: 1,
+            sidecars: 0,
+            read_bytes: 0,
         }
     );
     assert_eq!(
@@ -186,6 +188,108 @@ fn a_row_whose_record_is_gone_is_counted_and_left_for_the_replay() {
         2,
         "left as they were"
     );
+}
+
+/// The boot of 2026-10-20 read 310 GB to put the rows' hashes back; the
+/// sealed files' hash sidecars (`qlog/hashside.rs`) hold the same lists. A
+/// restart refills every row from them, byte for byte, and reads a fraction
+/// of what the files would have cost.
+#[test]
+fn a_restart_refills_the_rows_from_the_sealed_files_hash_sidecars() {
+    use crate::rsm::qlog::set::QLogSet;
+    use crate::rsm::qlog::{QLogOptions, RecordInput};
+    let mut t = TempStore::with(opts(true));
+    let part = PartitionRow::new([3; 16], "t", "q", "p", 1);
+    let qid = QLogSet::queue_id_of(&part.tenant, &part.queue);
+    let root = t.dir.join("qlog-side");
+    let lopts = QLogOptions::testing(8 << 10);
+    let mut set = QLogSet::new(root.clone(), lopts);
+    let mut rows = Vec::new();
+    {
+        let mut w = t.s().write().expect("write");
+        w.put_partition(3, &part).expect("partition");
+        let mut base = 0u64;
+        for seq in 1..=200u64 {
+            let count = seq % 4 + 1;
+            let hashes: Vec<u8> = (0..16 * count).map(|i| (seq * 31 + i) as u8).collect();
+            let payload = vec![(seq % 251) as u8; 2000];
+            set.write_group_for_qid(
+                qid,
+                &[RecordInput {
+                    seq,
+                    pid: 3,
+                    base_offset: base,
+                    count: count as u32,
+                    created_at_us: 5_000 + seq as i64,
+                    txn: None,
+                    hashes: &hashes,
+                    payload: &payload,
+                }],
+            )
+            .expect("append");
+            let r = TxnsRow {
+                end: base + count - 1,
+                created_at_us: 5_000 + seq as i64,
+                hashes,
+            };
+            w.put_raw(
+                Keyspace::Txns,
+                &keys::txns(3, base),
+                &r.encode_with_len(2000),
+            )
+            .expect("row");
+            rows.push((base, r));
+            base += count;
+        }
+        w.durable_commit().expect("durable commit");
+    }
+    set.flush().expect("flush");
+    set.sync().expect("sync");
+
+    // Without sidecars, for the bytes it costs.
+    t.reopen(opts(true));
+    let plain = crate::rsm::txns_refill::refill(t.s(), &set.reader()).expect("refill");
+    assert_eq!(
+        (plain.rows, plain.refilled, plain.missing, plain.sidecars),
+        (200, 200, 0, 0)
+    );
+
+    // The maintenance pass builds the sidecars of the files the roll sealed;
+    // then a restart of both the store and the queue logs.
+    let (built, _) = set
+        .reader()
+        .hashside_maintain(std::time::Instant::now() + Duration::from_secs(30));
+    assert!(built >= 10, "{built} sidecars");
+    drop(set);
+    t.reopen(opts(true));
+    let mut set = QLogSet::new(root, lopts);
+    set.reopen_all().expect("reopen the logs");
+    let got = crate::rsm::txns_refill::refill(t.s(), &set.reader()).expect("refill");
+    assert_eq!(
+        (got.rows, got.refilled, got.missing, got.orphaned),
+        (200, 200, 0, 0)
+    );
+    assert_eq!(
+        got.sidecars, built,
+        "every sealed file answered by its sidecar"
+    );
+    assert!(
+        got.read_bytes * 5 < plain.read_bytes,
+        "read {} bytes with sidecars, {} without",
+        got.read_bytes,
+        plain.read_bytes
+    );
+    for (base, r) in &rows {
+        let k = keys::txns(3, *base);
+        let ram = t
+            .s()
+            .read(|rd| Ok(rd.get_raw(Keyspace::Txns, &k)?.map(|v| v.to_vec())))
+            .expect("read")
+            .expect("in RAM");
+        assert_eq!(ram, r.encode_with_len(2000), "row {base} byte for byte");
+    }
+    assert!(t.s().txns_without_hashes().expect("list").is_empty());
+    t.s().scrub().expect("scrub");
 }
 
 fn ctx() -> ReqCtx {

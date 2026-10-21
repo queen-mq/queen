@@ -117,6 +117,7 @@
 pub mod codec;
 pub mod dirx;
 pub mod entry_hashes;
+pub(crate) mod hashside;
 pub mod index;
 pub(crate) mod pool;
 pub mod record;
@@ -702,6 +703,7 @@ pub(crate) fn cut_log_above(dir: &Path, after: u64) -> io::Result<u64> {
             remove_if_present(&path)?;
             remove_if_present(&qidx_path(dir, id))?;
             remove_if_present(&qidx_tmp_path(dir, id))?;
+            hashside::remove(dir, id)?;
             continue;
         }
         // The newest file left: cut it at its first record above `after`.
@@ -722,6 +724,7 @@ pub(crate) fn cut_log_above(dir: &Path, after: u64) -> io::Result<u64> {
         }
         remove_if_present(&qidx_path(dir, id))?;
         remove_if_present(&qidx_tmp_path(dir, id))?;
+        hashside::remove(dir, id)?;
         break;
     }
     sync_dir(dir)?;
@@ -857,6 +860,30 @@ pub struct QLog {
     next_file: Arc<Mutex<Option<(u64, File)>>>,
     /// The background creation of the next file, while it runs.
     next_job: Option<std::thread::JoinHandle<()>>,
+    /// Sealed files to give a hash sidecar ([`hashside`]), oldest first: each
+    /// file the roll seals, each file compaction rewrites, each sealed file
+    /// the boot's refill had to read itself. Drained by the maintenance pass
+    /// ([`QLog::hashside_plan`]); behind a mutex so the pass takes from it
+    /// under the READ lock.
+    hashside_todo: HashsideTodo,
+}
+
+/// The files a log still owes a hash sidecar ([`QLog::hashside_todo`]).
+pub(crate) type HashsideTodo = Arc<Mutex<std::collections::VecDeque<u64>>>;
+
+/// At most this many files wait for a sidecar per log; past it the oldest is
+/// dropped (its refill reads the file, as without sidecars).
+const HASHSIDE_TODO_MAX: usize = 4096;
+
+fn hashside_push(todo: &HashsideTodo, id: u64) {
+    let mut q = todo.lock_unpoisoned();
+    if q.contains(&id) {
+        return;
+    }
+    if q.len() >= HASHSIDE_TODO_MAX {
+        q.pop_front();
+    }
+    q.push_back(id);
 }
 
 impl Drop for QLog {
@@ -1110,6 +1137,7 @@ impl QLog {
                 std::fs::remove_file(&path)?;
                 let _ = std::fs::remove_file(qidx_path(&dir, last));
                 let _ = std::fs::remove_file(qidx_tmp_path(&dir, last));
+                let _ = hashside::remove(&dir, last);
                 sync_dir(&dir)?;
                 ids.pop();
                 rec.truncated_tail |= len < FILE_HEADER_LEN;
@@ -1136,6 +1164,7 @@ impl QLog {
                 // and rebuild the RAM index from what verified.
                 let _ = std::fs::remove_file(qidx_path(&dir, id));
                 let _ = std::fs::remove_file(qidx_tmp_path(&dir, id));
+                let _ = hashside::remove(&dir, id);
                 let scan = scan_file(&path, on_disk)?;
                 if let Some((at, why)) = &scan.torn {
                     if durable > 0 {
@@ -1247,6 +1276,9 @@ impl QLog {
         rec.files = files.len();
         rec.bytes = files.iter().map(|f| f.bytes).sum();
         rec.records = files.iter().map(|f| f.records).sum();
+        // A hash sidecar names a sealed file: one of a file reclaimed, cut or
+        // rewritten before a crash, or a temporary, is dropped.
+        let _ = hashside::sweep(&dir, |id| sealed.contains_key(&id));
 
         let cache = Arc::new(ReadCache::new(dir.clone()));
         // The active file was just cut to its last verified record.
@@ -1280,6 +1312,7 @@ impl QLog {
             seq_points: Mutex::new(SeqPoints::default()),
             next_file: Arc::new(Mutex::new(None)),
             next_job: None,
+            hashside_todo: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         };
         tracing::info!(
             target: "rsm",
@@ -2004,6 +2037,8 @@ impl QLog {
         self.active_index.clear();
         self.files.last_mut().expect("active meta").sealed = true;
         self.sealed.insert(old_id, Arc::new(view));
+        // Its hash sidecar is built off the writer, by the maintenance pass.
+        hashside_push(&self.hashside_todo, old_id);
         self.active = None;
         self.create_active(old_id + 1, first_seq)?;
         Ok(())
@@ -2783,13 +2818,58 @@ impl QLog {
             .into_iter()
             .map(|(file_id, mut records)| {
                 records.sort_unstable_by_key(|r| r.offset);
+                let sealed_bytes = self
+                    .files
+                    .binary_search_by_key(&file_id, |m| m.id)
+                    .ok()
+                    .map(|i| self.files[i])
+                    .filter(|m| m.sealed)
+                    .map(|m| m.bytes);
                 FileReads {
                     dir: self.dir.clone(),
                     file_id,
                     records,
+                    sealed_bytes,
+                    hashside_todo: Some(self.hashside_todo.clone()),
                 }
             })
             .collect()
+    }
+
+    /// The next sealed file of [`QLog::hashside_todo`] that has no hash
+    /// sidecar yet, planned for [`HashsidePlan::run`]. A file gone (reclaimed)
+    /// or no longer sealed is skipped; one whose index the boot has not
+    /// checked yet ([`QLog::check_index`]) waits for a later pass.
+    pub(crate) fn hashside_plan(&self) -> Option<HashsidePlan> {
+        let mut todo = self.hashside_todo.lock_unpoisoned();
+        while let Some(id) = todo.pop_front() {
+            let Ok(i) = self.files.binary_search_by_key(&id, |m| m.id) else {
+                continue;
+            };
+            let meta = self.files[i];
+            if !meta.sealed || hashside::path(&self.dir, id).exists() {
+                continue;
+            }
+            let Some(view) = self.sealed.get(&id) else {
+                continue;
+            };
+            if !meta.checked {
+                todo.push_back(id);
+                return None;
+            }
+            return Some(HashsidePlan {
+                dir: self.dir.clone(),
+                file_id: id,
+                file_bytes: meta.bytes,
+                view: view.clone(),
+            });
+        }
+        None
+    }
+
+    /// Files waiting for a hash sidecar (tests and the pass's log line).
+    pub(crate) fn hashside_pending(&self) -> usize {
+        self.hashside_todo.lock_unpoisoned().len()
     }
 
     /// PLAN_RAFT_DRAIN_FIX P3.1: the committed records of `pid` that overlap ANY
@@ -3166,6 +3246,7 @@ impl QLog {
             remove_if_present(&file_path(&self.dir, m.id))?;
             remove_if_present(&qidx_path(&self.dir, m.id))?;
             remove_if_present(&qidx_tmp_path(&self.dir, m.id))?;
+            hashside::remove(&self.dir, m.id)?;
         }
         let m = self.files[i];
         {
@@ -3181,6 +3262,7 @@ impl QLog {
         self.seq_points.lock_unpoisoned().forget_file(m.id);
         remove_if_present(&qidx_path(&self.dir, m.id))?;
         remove_if_present(&qidx_tmp_path(&self.dir, m.id))?;
+        hashside::remove(&self.dir, m.id)?;
         sync_dir(&self.dir)?;
         let root = self
             .dir
@@ -3635,7 +3717,11 @@ impl QLog {
             self.seq_points.lock_unpoisoned().forget_file(*id);
             // Out of the log's names now (a rename: no data moves), unlinked
             // later: a reopen in between must not read the file back.
-            for path in [file_path(&self.dir, *id), qidx_path(&self.dir, *id)] {
+            for path in [
+                file_path(&self.dir, *id),
+                qidx_path(&self.dir, *id),
+                hashside::path(&self.dir, *id),
+            ] {
                 let dead = dead_path(&path);
                 match std::fs::rename(&path, &dead) {
                     Ok(()) => paths.push(dead),
@@ -3915,10 +4001,12 @@ impl QLog {
             ..
         } = rw;
         let src = file_path(&self.dir, id);
+        hashside::remove(&self.dir, id)?;
         write_qidx(&self.dir, id, at, &records)?;
         let view = index::View::open(&qidx_path(&self.dir, id), Some(at))?;
         crate::rsm::faults::hit("compaction.copied");
         std::fs::rename(&tmp, &src)?;
+        hashside_push(&self.hashside_todo, id);
         self.cache.forget_file(id);
         self.cache.clear_hashes();
         self.seq_points.lock_unpoisoned().forget_file(id);
@@ -3992,10 +4080,12 @@ impl QLog {
         // Publish the new index first. While this method owns the queue's write
         // lock, readers still use the old mmap. A crash here leaves a length
         // mismatch and open rebuilds the old file's index.
+        hashside::remove(&self.dir, id)?;
         write_qidx(&self.dir, id, at, &records)?;
         let view = index::View::open(&qidx_path(&self.dir, id), Some(at))?;
         crate::rsm::faults::hit("compaction.copied");
         std::fs::rename(&tmp, &src)?;
+        hashside_push(&self.hashside_todo, id);
 
         self.cache.forget_file(id);
         self.cache.clear_hashes();
@@ -4307,15 +4397,61 @@ pub(crate) struct FileReads {
     dir: PathBuf,
     file_id: u64,
     records: Vec<index::Record>,
+    /// The file's length when it is sealed: a hash sidecar ([`hashside`])
+    /// naming that length answers in its place. `None` for the active file.
+    sealed_bytes: Option<u64>,
+    /// Where a sealed file the refill had to read itself is queued for a
+    /// sidecar, so the next boot reads that instead.
+    hashside_todo: Option<HashsideTodo>,
+}
+
+/// What [`FileReads::read`] answered.
+pub(crate) struct FileRead {
+    /// Every record's hash block, as `(pid, frame)` in file order.
+    pub(crate) frames: Vec<(u64, CommittedFrame)>,
+    /// Bytes read: the sidecar's, or the file's.
+    pub(crate) bytes: u64,
+    /// Whether the hash sidecar answered.
+    pub(crate) sidecar: bool,
 }
 
 impl FileReads {
-    /// Every record's hash block, as `(pid, frame)` in file order, and the
-    /// bytes read. The file is read once front to back: records less than
+    /// Every record's hash block. A sealed file's hash sidecar answers when it
+    /// is whole, names this file's length and every record the refill wants
+    /// with the header its index entry has ([`hashside::Side::frames_for`]);
+    /// otherwise the file itself is read ([`FileReads::read_file`]), and a
+    /// sealed one is queued for a sidecar (an unusable one is removed first).
+    pub(crate) fn read(&self, buf: &mut Vec<u8>) -> io::Result<FileRead> {
+        if let Some(bytes) = self.sealed_bytes.filter(|_| hashside::enabled()) {
+            if let Some(side) = hashside::load(&self.dir, self.file_id, bytes) {
+                if let Some(frames) = side.frames_for(&self.records) {
+                    return Ok(FileRead {
+                        frames,
+                        bytes: side.len(),
+                        sidecar: true,
+                    });
+                }
+            }
+            let _ = hashside::remove(&self.dir, self.file_id);
+            if let Some(todo) = &self.hashside_todo {
+                hashside_push(todo, self.file_id);
+            }
+        }
+        let (frames, bytes) = self.read_file(buf)?;
+        Ok(FileRead {
+            frames,
+            bytes,
+            sidecar: false,
+        })
+    }
+
+    /// Every record's hash block from the file itself, as `(pid, frame)` in
+    /// file order (one frame a record, in `records`' order), and the bytes
+    /// read. The file is read once front to back: records less than
     /// [`REFILL_READ_GAP`] apart share one `pread` of at most
     /// [`REFILL_READ_MAX`] bytes. Each block is cross-checked against its
     /// index entry exactly as the one-record read ([`pread_hashes`]) does.
-    pub(crate) fn read(&self, buf: &mut Vec<u8>) -> io::Result<(Vec<(u64, CommittedFrame)>, u64)> {
+    fn read_file(&self, buf: &mut Vec<u8>) -> io::Result<(Vec<(u64, CommittedFrame)>, u64)> {
         let f = File::open(file_path(&self.dir, self.file_id))?;
         let recs = &self.records;
         let mut out = Vec::with_capacity(recs.len());
@@ -4358,6 +4494,51 @@ impl FileReads {
             i = j;
         }
         Ok((out, read))
+    }
+}
+
+/// A sealed file's hash sidecar to build ([`QLog::hashside_plan`]): the file
+/// and its mapped index, taken under the log's READ lock in a few
+/// microseconds; everything else runs OUTSIDE the lock ([`HashsidePlan::run`]).
+pub(crate) struct HashsidePlan {
+    dir: PathBuf,
+    file_id: u64,
+    file_bytes: u64,
+    view: Arc<index::View>,
+}
+
+impl HashsidePlan {
+    /// Read the file's hash blocks (each checked against its index entry, the
+    /// refill's own read) and write its sidecar. Returns the sidecar's length.
+    /// A file reclaimed or rewritten meanwhile fails a check or gives a
+    /// sidecar naming the old length, which nothing uses.
+    pub(crate) fn run(&self) -> io::Result<u64> {
+        let mut records: Vec<index::Record> = self.view.records().filter(|r| r.count > 0).collect();
+        records.sort_unstable_by_key(|r| r.offset);
+        let reads = FileReads {
+            dir: self.dir.clone(),
+            file_id: self.file_id,
+            records,
+            sealed_bytes: None,
+            hashside_todo: None,
+        };
+        let mut buf = Vec::new();
+        let (frames, _) = reads.read_file(&mut buf)?;
+        if frames.len() != reads.records.len() {
+            return Err(io::Error::other(format!(
+                "file {}: {} frames for {} records",
+                self.file_id,
+                frames.len(),
+                reads.records.len()
+            )));
+        }
+        let entries: Vec<(index::Record, &[u8])> = reads
+            .records
+            .iter()
+            .zip(&frames)
+            .map(|(r, (_, f))| (*r, f.hashes.as_slice()))
+            .collect();
+        hashside::write(&self.dir, self.file_id, self.file_bytes, &entries)
     }
 }
 

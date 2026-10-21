@@ -1573,6 +1573,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
         // back before openraft applies the replayed entries or anything reads.
         crate::rsm::txns_refill::refill(&*store, &opened.reader)?;
         crate::rsm::txns_refill::spawn_index_check(opened.reader.clone());
+        crate::rsm::txns_refill::spawn_hashside_builder(&opened.reader);
         let qlog_tails = opened.tails.clone();
         let log = opened.store;
         let mut writer_join = Some(opened.writer);

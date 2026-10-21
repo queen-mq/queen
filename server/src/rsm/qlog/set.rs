@@ -1781,6 +1781,63 @@ impl std::fmt::Debug for QLogReader {
     }
 }
 
+/// The sidecar builder's handle on a set's logs ([`QLogReader::hashside_builder`]).
+pub(crate) struct HashsideBuilder {
+    logs: std::sync::Weak<RwLock<BTreeMap<u64, Arc<RwLock<QLog>>>>>,
+}
+
+impl HashsideBuilder {
+    /// One go over every log until `deadline` ([`build_hashsides`]); `None`
+    /// once the set is gone.
+    pub(crate) fn round(&self, deadline: std::time::Instant) -> Option<(usize, u64)> {
+        let logs: Vec<(u64, Arc<RwLock<QLog>>)> = {
+            let map = self.logs.upgrade()?;
+            let map = map.read().expect("qlog set poisoned");
+            map.iter().map(|(id, l)| (*id, l.clone())).collect()
+        };
+        Some(build_hashsides(&logs, deadline))
+    }
+}
+
+/// Build the hash sidecars `logs` owe ([`QLog::hashside_plan`]): one file a
+/// log a round, so a busy log does not starve the others, until `deadline`.
+/// The plan takes the log's READ lock for a few microseconds; the file is
+/// read and its sidecar written outside it. A file that fails (reclaimed or
+/// rewritten under the step) is left to its refill's own read.
+fn build_hashsides(
+    logs: &[(u64, Arc<RwLock<QLog>>)],
+    deadline: std::time::Instant,
+) -> (usize, u64) {
+    let (mut built, mut bytes) = (0usize, 0u64);
+    let mut todo: Vec<&(u64, Arc<RwLock<QLog>>)> = logs.iter().collect();
+    while !todo.is_empty() {
+        let mut more = Vec::new();
+        for entry in todo {
+            if std::time::Instant::now() >= deadline {
+                return (built, bytes);
+            }
+            let (id, log) = entry;
+            let plan = log.read().expect("qlog poisoned").hashside_plan();
+            let Some(plan) = plan else { continue };
+            match plan.run() {
+                Ok(n) => {
+                    built += 1;
+                    bytes += n;
+                }
+                Err(e) => tracing::debug!(
+                    target: "rsm",
+                    log = id,
+                    error = %e,
+                    "rsm qlog hash sidecar not built; the refill reads the file",
+                ),
+            }
+            more.push(entry);
+        }
+        todo = more;
+    }
+    (built, bytes)
+}
+
 #[derive(Clone)]
 pub struct QLogReader {
     logs: SharedLogs,
@@ -2330,6 +2387,25 @@ impl QLogReader {
             ids = more;
         }
         done
+    }
+
+    /// Build the hash sidecars every log owes, until `deadline`
+    /// ([`build_hashsides`]). Returns the sidecars built and their bytes.
+    pub(crate) fn hashside_maintain(&self, deadline: std::time::Instant) -> (usize, u64) {
+        let logs: Vec<(u64, Arc<RwLock<QLog>>)> = {
+            let map = self.logs.read().expect("qlog set poisoned");
+            map.iter().map(|(id, l)| (*id, l.clone())).collect()
+        };
+        build_hashsides(&logs, deadline)
+    }
+
+    /// A handle for the sidecar builder's own thread
+    /// ([`crate::rsm::txns_refill::spawn_hashside_builder`]): the logs held
+    /// weakly, so the thread ends once this set is gone.
+    pub(crate) fn hashside_builder(&self) -> HashsideBuilder {
+        HashsideBuilder {
+            logs: Arc::downgrade(&self.logs),
+        }
     }
 
     /// Directory runs and sealed files outside any run, over every log
