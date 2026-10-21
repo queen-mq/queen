@@ -143,7 +143,7 @@ const GROUPS = [
     n === "QUEEN_RAFT_ROWS_WINDOW" ||
     n.startsWith("METRICS_") || n.startsWith("QUEEN_DASH_")],
   ["Storage and replication", (n) =>
-    n.startsWith("QUEEN_RAFT_") || n === "QUEEN_QLOG_SHARDS" || n === "QUEEN_QLOG_DIRX" || n === "QUEEN_TENANT_GROUPS"],
+    n.startsWith("QUEEN_RAFT_") || n === "QUEEN_QLOG_SHARDS" || n === "QUEEN_QLOG_DIRX" || n === "QUEEN_QLOG_HASH_SIDECARS" || n === "QUEEN_TENANT_GROUPS"],
   // A standby cluster and the source it replays (operate/standby).
   ["Standby cluster", (n) => n.startsWith("QUEEN_LINK_")],
   ["Authentication", (n) => n.startsWith("JWT_")],
@@ -326,6 +326,20 @@ const EXTRA_VARS = [
     source: "server/src/rsm/replicator/raft/mod.rs",
   },
   {
+    name: "QUEEN_RAFT_MEMBER_HOLD_S",
+    type: "integer",
+    def: "21600",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/mod.rs",
+  },
+  {
+    name: "QUEEN_RAFT_MEMBER_HOLD_DISK_PCT",
+    type: "number (percent)",
+    def: "QUEEN_RAFT_DISK_LOW_PCT (80)",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/mod.rs",
+  },
+  {
     name: "QUEEN_RAFT_GROUPS",
     type: "integer",
     def: "1 (at most 64)",
@@ -402,6 +416,13 @@ const EXTRA_VARS = [
     def: "true",
     aliases: [],
     source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_QLOG_HASH_SIDECARS",
+    type: "boolean",
+    def: "true",
+    aliases: [],
+    source: "server/src/rsm/qlog/hashside.rs",
   },
   {
     name: "QUEEN_RAFT_TRACE_RETENTION_S",

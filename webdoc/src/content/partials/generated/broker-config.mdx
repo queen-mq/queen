@@ -19,6 +19,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/rsm/link/driver.rs
       - server/src/rsm/planner/kv.rs
       - server/src/rsm/planner/timers.rs
+      - server/src/rsm/qlog/hashside.rs
       - server/src/rsm/qlog/set.rs
       - server/src/rsm/replicator/node.rs
       - server/src/rsm/replicator/raft/cluster.rs
@@ -27,7 +28,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/s3_inproc.rs
 */}
 
-The broker is configured entirely through environment variables: 112 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 115 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set.
 
@@ -91,6 +92,7 @@ The broker is configured entirely through environment variables: 112 of them, li
 | Variable | Type | Default | Also read as |
 | --- | --- | --- | --- |
 | `QUEEN_QLOG_DIRX` | boolean | `true` |  |
+| `QUEEN_QLOG_HASH_SIDECARS` | boolean | `true` |  |
 | `QUEEN_QLOG_SHARDS` | integer | `0 (one log per queue; at most 4096)` |  |
 | `QUEEN_RAFT_DIR` | string | `/var/lib/queen/raft` |  |
 | `QUEEN_RAFT_DISK_HIGH_PCT` | number (percent) | `85.0` |  |
@@ -101,6 +103,8 @@ The broker is configured entirely through environment variables: 112 of them, li
 | `QUEEN_RAFT_HEARTBEAT_MS` | integer | `100 on a cluster, 50 on a single node` |  |
 | `QUEEN_RAFT_JOIN` | boolean | `false` |  |
 | `QUEEN_RAFT_LISTEN` | string | `0.0.0.0 at this node's raft port in QUEEN_RAFT_PEERS` |  |
+| `QUEEN_RAFT_MEMBER_HOLD_DISK_PCT` | number (percent) | `QUEEN_RAFT_DISK_LOW_PCT (80)` |  |
+| `QUEEN_RAFT_MEMBER_HOLD_S` | integer | `21600` |  |
 | `QUEEN_RAFT_NODE_ID` | string | `1 (a number from 1, or ordinal)` |  |
 | `QUEEN_RAFT_PEERS` | string | `(empty: a single voter)` |  |
 | `QUEEN_RAFT_PLANNER_QUEUE_DEPTH` | integer | `1024` |  |

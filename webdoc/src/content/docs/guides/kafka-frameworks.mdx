@@ -4,11 +4,9 @@ description: "What Kafka Streams, Kafka Connect and Flink's Kafka connector ask 
 type: how-to
 tier: use
 sourceOfTruth:
-  - protocols/queen-kafka/src/topic_config.rs
-  - protocols/queen-kafka/src/topic_record.rs
-  - protocols/queen-kafka/src/handlers/create_topics.rs
-  - protocols/queen-kafka/src/handlers/describe_configs.rs
-  - protocols/queen-kafka/src/handlers/list_offsets.rs
+  - protocols/queen-kafka/src/handlers/admin.rs
+  - protocols/queen-kafka/src/handlers/fetch.rs
+  - protocols/queen-kafka/src/topics.rs
   - protocols/queen-kafka/src/txn.rs
   - protocols/queen-kafka/COMPACTION.md
   - server/src/rsm/facade/real/phase2/offsets.rs
@@ -18,18 +16,21 @@ sidebar:
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): offsets.rs answers a
 # timestamp lookup from the queue log's index for messages older than the rows the store holds; the
 # answer is the same offset.
+# sourceOfTruth re-read 2026-10-21 (2.6, the facade rewritten as a translation layer): topic configs
+# are accepted and none is applied, DescribeConfigs answers no entries, and transactions are served
+# by the raft leader on a cluster too. Every section was re-read; the runs below are the first
+# facade's and are said to be.
 ---
 
 Kafka Streams, Kafka Connect and Flink ask more of a broker than produce and consume. They create
 topics with configs and check them afterwards, keep their state in compacted topics, start reading
-from a point in time and commit transactions that outlive a process. Since 2.0.0-beta.5 the Kafka
-facade answers each of those, and Kafka Streams and Kafka Connect run against a three-node Queen
-cluster unchanged.
+from a point in time and commit transactions that outlive a process. This page says what the 2.6
+facade does with each of those requests, and what has run against Queen.
 
 ## What has run
 
-On the code of 2.0.0-beta.5, Kafka 4.3.1's own distribution ran against a fresh three-node Queen
-cluster, through the facade in cluster mode, four times for each check:
+On the first facade, the code of 2.0.0-beta.5, Kafka 4.3.1's own distribution ran against a fresh
+three-node Queen cluster, four times for each check:
 
 - Kafka Streams' `WordCountDemo`: a group formed by the Streams assignor, a repartition topic and a
   compacted changelog, and every final count exact.
@@ -37,57 +38,35 @@ cluster, through the facade in cluster mode, four times for each check:
   (compacted, with 1, 25 and 5 partitions), and a file source fed a topic that a file sink wrote back
   out, every line accounted for.
 
-Flink has not been run against Queen yet. What its Kafka connector asks for is covered below, one
-request at a time.
+2.6 rewrote the facade, and neither has been run against it yet; its client suites, Spring Boot's
+among them, ran on 2026-10-20 ([reference](/reference/kafka/#clients)). Flink has not been run
+against Queen. What each framework asks for is covered below, one request at a time.
 
 ## Topics created with configs
 
 Streams creates its internal topics with `segment.bytes`, `retention.ms=-1` and
 `message.timestamp.type=CreateTime` on repartition topics and `cleanup.policy=compact` on
 changelogs, and Connect creates its three topics compacted and then reads their configs back to
-check. A broker that refuses any of those keeps the framework from starting, so the facade accepts
-every topic config it can honour and says plainly what it does with each:
-
-- `cleanup.policy`, `retention.ms`, `min.insync.replicas` (up to the raft majority) and
-  `message.timestamp.type=CreateTime` mean what they mean on Kafka, mapped onto the queue.
-- `segment.bytes`, `segment.ms`, `retention.bytes`, `max.message.bytes` and the compaction tuning
-  keys are recorded and reported back as set, each with a line in DescribeConfigs' documentation
-  that says nothing enforces it. None of them can cost a reader a record.
-- Every other topic config is refused with `INVALID_CONFIG`, and so is a value Kafka itself would
-  refuse, because accepting a setting that is not in force is a promise the broker cannot keep.
-
-`message.timestamp.type=LogAppendTime` is one of the refusals, with a sentence that says why:
-
-```text
-message.timestamp.type=LogAppendTime is not supported: a record fetched through this facade
-carries the producer's timestamp, so `CreateTime` is the one timestamp type there is.
-`LogAppendTime` would tell a consumer it reads the broker's clock
-```
-
-A topic created on one node with `cleanup.policy=compact` describes like this:
-
-| Config | Value | Source |
-|---|---|---|
-| `cleanup.policy` | `compact` | `DYNAMIC_TOPIC_CONFIG` |
-| `min.insync.replicas` | `1` | `DEFAULT_CONFIG` |
-| `retention.ms` | `-1` | `DEFAULT_CONFIG` |
-
-The full list, with the values each key accepts, is in the [reference](/reference/kafka/#topic-configs).
+check. In 2.6 the facade accepts every topic config and applies none of them: the topic is a queue
+with Queen's settings and the facade's dedup window. Nothing a framework asks for is refused, so none
+fails to create its topics, and DescribeConfigs answers no entries rather than values nothing
+enforces. Connect's check of its topics' cleanup policy therefore gets no answer to compare.
 
 ## Compacted topics are kept whole
 
 Compaction guarantees a reader one thing: the last value of every key is in the log. Queen does not
-compact yet, so a topic with `cleanup.policy=compact` keeps every record. Retention is switched off
-on its queue, explicitly, and stays off whatever `retention.ms` says, so the last value of every key
-is always there, next to every value before it. The readers that depend on compacted topics replay
-them from the start and fold each record into state, which is what a Streams changelog restore and
-Connect's config, offset and status topics do, and folding the whole log gives the same state as
-folding a compacted one, tombstones included, because each key's records are in the log's order.
+compact yet, so a topic with `cleanup.policy=compact` keeps every record, and so does every other
+topic created through Kafka, because `retention.ms` is not applied either. The last value of every
+key is always there, next to every value before it. The readers that depend on compacted topics
+replay them from the start and fold each record into state, which is what a Streams changelog
+restore and Connect's config, offset and status topics do, and folding the whole log gives the same
+state as folding a compacted one, tombstones included, because each key's records are in the log's
+order.
 
-The cost is size. The topic grows without bound, a restore reads all of history where Kafka would
-read one record per key, and a tombstone stays for good where Kafka removes it after
-`delete.retention.ms`. Real compaction as a policy any queue can have is designed in
-`protocols/queen-kafka/COMPACTION.md` and not built yet.
+The cost is size. The topic grows until its queue is given a retention, which a compacted topic
+must not have, a restore reads all of history where Kafka would read one record per key, and a
+tombstone stays for good where Kafka removes it after `delete.retention.ms`. Real compaction as a
+policy any queue can have is designed in `protocols/queen-kafka/COMPACTION.md` and not built yet.
 
 ## Starting from a point in time
 
@@ -107,47 +86,44 @@ is that time.
 
 ## Kafka Streams
 
-`WordCountDemo`, which keeps state and repartitions, runs with the default
+`WordCountDemo`, which keeps state and repartitions, ran with the default
 `processing.guarantee=at_least_once`. The Streams assignor needs nothing from the broker beyond the
 classic group protocol, so keep Streams on its default rebalance protocol. A few things to know
 before you run your own application:
 
 - Streams purges consumed records from its repartition topics with DeleteRecords, which Queen does
-  not offer yet, so those topics keep everything (Streams creates them with `retention.ms=-1`). You
-  can give them a retention with `kafka-configs.sh --alter`, as long as it comfortably outlasts the
-  longest your application can fall behind.
-- `exactly_once_v2` runs on Kafka transactions, which need a facade outside cluster mode, and it has
-  not been run against Queen yet.
+  not offer yet, so those topics keep everything. Give their queues a retention through Queen, as
+  long as it comfortably outlasts the longest your application can fall behind.
+- `exactly_once_v2` runs on Kafka transactions, which the raft leader serves on a cluster too, and it
+  has not been run against Queen yet.
 - When you try it against a fresh cluster, use a new `application.id` or an empty `state.dir`.
   Streams restores local state from its state directory, and state left over from an earlier
   cluster is counted again: in `WordCountDemo`, every count doubles.
 
 ## Kafka Connect
 
-A distributed worker needs nothing Queen-specific in its configuration. It creates its compacted
-config, offset and status topics, checks that they are compacted, and replays them when it
-restarts, so connector configurations and source offsets survive a worker restart as they do on
-Kafka. Connect asks for replication factor 3 by default, which is accepted and reported as 1,
-because replication is raft's: every voter holds every partition. Source and sink connectors are
-ordinary producers and consumers. Exactly-once source support
-(`exactly.once.source.support=enabled`) runs on transactions, so it needs a facade outside cluster
-mode, and it has not been run against Queen yet.
+A distributed worker needs nothing Queen-specific in its configuration. It creates its config,
+offset and status topics and replays them when it restarts, so connector configurations and source
+offsets survive a worker restart as they do on Kafka. Connect asks for replication factor 3 by
+default, which is accepted, and the topic reports as many replicas as there are raft voters, because
+replication is raft's: every voter holds every partition. Source and sink connectors are ordinary
+producers and consumers. Exactly-once source support (`exactly.once.source.support=enabled`) runs on
+transactions, and it has not been run against Queen yet.
 
 ## Flink
 
 `KafkaSource` is a plain consumer: it reads partitions, commits offsets, and finds its start offsets
 with ListOffsets, including the timestamp lookup above. `KafkaSink` with `AT_LEAST_ONCE` is an
 ordinary producer. With `EXACTLY_ONCE` the sink commits a Kafka transaction per checkpoint, and
-three details decide whether that works:
+two details decide whether that works:
 
 - Flink asks for a `transaction.timeout.ms` of one hour, which a stock Kafka broker refuses until its
-  `transaction.max.timeout.ms` is raised. The facade's ceiling is one hour by default
-  (`QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS`), so Flink's default is accepted as it is.
+  `transaction.max.timeout.ms` is raised. The facade's ceiling is one hour, so Flink's default is
+  accepted as it is.
 - After a task manager fails over, Flink resumes the checkpoint's transaction from a new connection.
-  The facade keeps a transaction's stage past the connection that opened it, until its own timeout,
-  so that commit lands. It does not survive a restart of the node holding the stage: the resumed
-  commit is refused with `INVALID_TXN_STATE`, and Flink drops that checkpoint's records.
-- Cluster mode refuses transactions, so an exactly-once sink needs a facade outside it.
+  The raft leader keeps a transaction until it commits, aborts or passes its timeout, whatever
+  happens to the connection that opened it, so that commit lands. A leader change loses it: the
+  resumed commit is refused with `INVALID_TXN_STATE`, and Flink drops that checkpoint's records.
 
 ## Limits
 

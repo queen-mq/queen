@@ -8,7 +8,7 @@ sidebar:
   order: 6
 sourceOfTruth:
   - protocols/queen-kafka/src/conn.rs
-  - protocols/queen-kafka/src/queen.rs
+  - protocols/queen-kafka/src/handlers/produce.rs
   - protocols/queen-kafka/src/handlers/fetch.rs
 # sourceOfTruth re-read 2026-10-13 (2.3.0): handlers/fetch.rs and queen.rs give every call to the
 # broker the response's whole max_bytes as its ceiling (a third larger, for base64) and read the
@@ -23,6 +23,10 @@ sourceOfTruth:
 # Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-17 (conn.rs, 19b024495): the pipelined produce a connection waits on is
 # boxed (a clippy size lint); the pipelining, its order and its limits are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (2.6, the facade rewritten as a translation layer): every number on
+# this page is the first facade's, on the builds each section names. 2.6 takes produce on the raft
+# leader only and has no relay, pipelining knobs or produce coalescing; the page says so up front and
+# gives the 2.6-against-2.5.0 measurement of 2026-10-20.
 ---
 
 Queen speaks the Kafka wire protocol from inside the broker process (`QUEEN_KAFKA_EMBEDDED=true`),
@@ -34,6 +38,14 @@ messages a second a little better. At 1,000,000 msg/s on 200 partitions the faca
 4.3.1 itself; the facade ran the code of 2.0.0-beta.5 on 2026-10-02. On 2.3.0-beta.1 the same
 point reads 48 ms, and the facade no longer stops consuming at 2,000,000
 ([2.3.0](#230-five-points)).
+
+Every number on this page was measured on the first facade, the one 2.0 to 2.5 shipped. 2.6
+rewrote it as a translation layer that takes produce on the raft leader only, where the first
+facade's followers relayed theirs to the leader and spread the Kafka protocol work over the nodes.
+Measured against 2.5.0 on 2026-10-20 (three 24-vCPU nodes with local NVMe, franz-go, 1 KB records
+with lz4, one topic of 100 partitions), 2.6 matched it at 500,000 msg/s, with a produce p99 of 14
+ms, added about 3 ms of produce latency at 700,000, and at 1,000,000 pushed 30% less. Neither build
+carried 850,000 with that client.
 
 ## The shape
 
