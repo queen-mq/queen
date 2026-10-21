@@ -107,6 +107,9 @@ digest: >-
 # indexes; network.rs listens only once openraft exists; qlog/set.rs and local.rs build the hash
 # sidecars the boot refill reads. "Find your case" and "A node crashed or restarted" say so, with
 # the measurements of 2026-10-20 and 2026-10-21. The procedures are unchanged.
+# sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
+# replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
+# of entries with a hole; the rest is test-only. Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and

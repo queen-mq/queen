@@ -28,6 +28,9 @@ verifiedBy:
 # sidecar (.qhsh) beside each sealed queue-log file, and raft/ gains member_holds.json. Both are part
 # of the data directory a copy takes; a restored node rebuilds a missing or stale sidecar, and its
 # member holds start from the copy's. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
+# replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
+# of entries with a hole; the rest is test-only. Nothing this page states changes.
 ---
 
 Three replicas protect you from losing a machine. They do not protect you from a mistake: a

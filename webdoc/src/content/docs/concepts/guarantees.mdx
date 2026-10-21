@@ -48,6 +48,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21: replicator/mod.rs and local.rs (2.6) keep the log for an away
 # member and write a hash sidecar per sealed queue-log file for the boot refill; neither changes
 # what an acknowledged write is or how long it is kept. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
+# replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
+# of entries with a hole; the rest is test-only. Nothing this page states changes.
 ---
 
 We test Queen with Jepsen, on five nodes, under kill -9, network partitions, process pauses, clock

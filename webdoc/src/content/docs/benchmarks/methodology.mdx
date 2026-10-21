@@ -43,6 +43,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21 (stream state seek): maintenance.rs (later): the idle-partition
 # check seeks each stream query's state instead of walking all of it; same verdict, cheaper. Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
+# replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
+# of entries with a hole; the rest is test-only. Nothing this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

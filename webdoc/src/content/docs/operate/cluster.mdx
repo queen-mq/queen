@@ -83,6 +83,9 @@ verifiedBy:
 # the queue detail read takes includePartitions=false and then returns queue-wide totals without
 # per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
+# replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
+# of entries with a hole; the rest is test-only. Nothing this page states changes.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They

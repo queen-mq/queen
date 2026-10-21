@@ -78,6 +78,9 @@ sourceOfTruth:
 # QUEEN_RAFT_MEMBER_HOLD_S and QUEEN_RAFT_MEMBER_HOLD_DISK_PCT (the log kept for an away member),
 # qlog/set.rs and hashside.rs QUEEN_QLOG_HASH_SIDECARS; the tables gain their rows and the generated
 # list has them. real.rs (facade 2's push of Kafka records with their transaction id) adds no setting.
+# sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
+# replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
+# of entries with a hole; the rest is test-only. Nothing this page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

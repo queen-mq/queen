@@ -71,6 +71,9 @@ digest: >-
 # push. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-21 (partition cleanup in seconds): batcher.rs: it reads
 # PARTITION_CLEANUP_SECONDS beside PARTITION_CLEANUP_DAYS. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
+# replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
+# of entries with a hole; the rest is test-only. Nothing this page states changes.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and

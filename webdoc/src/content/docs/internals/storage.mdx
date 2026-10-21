@@ -64,6 +64,9 @@ sourceOfTruth:
 # uses; index.rs opens a sealed file's index unchecked and checks it later; raft/mod.rs and link.rs
 # keep the log for an away member; snapshot.rs sends a delta with the indexes; network.rs listens
 # once openraft exists. The layout, the refill paragraph and the snapshot paragraph say so.
+# sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
+# replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
+# of entries with a hole; the rest is test-only. Nothing this page states changes.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are

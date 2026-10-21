@@ -95,6 +95,9 @@ sourceOfTruth:
 # facade/real.rs and mod.rs count a Kafka group's commit as consumption (cd737c40a); raft/mod.rs's
 # 2.6 changes (member holds, late listen) change no metric or health field this page names. The
 # dashboard section says so.
+# sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
+# replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
+# of entries with a hole; the rest is test-only. The new WARN line is in the log-line table.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -325,6 +328,7 @@ with `QUEEN_LOG_JSON=true`. `LOG_LEVEL` and `RUST_LOG` take the full filter synt
 | `raft storage pressure changed` with `full=true` (WARN, `rsm`) | The disk gate closed |
 | `raft: this leader's entries wait to be logged` (WARN, `rsm`) | No quorum has acknowledged the leader for 1.5 s (`quorum_ack_age_ms`), so it holds its writes until one does or another node leads: a partition, or followers that answer slowly. `raft: an entry waited to be logged` follows, with `waited_ms` |
 | `raft: no quorum acknowledgement: handing leadership to another voter` (WARN, `rsm`) | The leader has not heard from a majority and is trying to step down |
+| `raft: a replication stream asked for entries purged since it chose them; it sends a heartbeat instead` (WARN, `rsm`) | The leader purged its log while it replicated to a member, typically one that came back with an empty data directory, and sends that member a snapshot instead. Harmless; report it when it goes on for minutes |
 | `this node still leads: the pipeline restarts from the log's end` (WARN, `rsm`) | The leader's planner dropped what it had in flight and started again with no change of leadership (`why=` says what stopped it). Harmless once; report it when it repeats |
 | `refused this node's QUEEN_RAFT_TOKEN`, inside a replication error (WARN) | The nodes do not share one raft token. The node that refuses logs nothing |
 | `raft: the process exits to load a received snapshot` (ERROR, `rsm`) | Exit code 75 after a long absence. Normal once, trouble when it repeats |
