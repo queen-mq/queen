@@ -16,6 +16,9 @@ sourceOfTruth:
   - server/src/rsm/facade/mod.rs
   - server/src/rsm/facade/real.rs
   - server/src/rsm/facade/remote.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/facade/real/phase2/stats.rs
   - server/src/rsm/facade/real/phase2/reads.rs
   - server/src/rsm/facade/real/phase2/reads/messages.rs
   - server/src/rsm/facade/real/phase2/offsets.rs
@@ -63,7 +66,7 @@ layer over the routes on this page. We kept it that way on purpose, so that when
 wrong you can ask the broker directly, with the tools already on your machine.
 
 The page starts with what every route shares, then lists every route the broker registers, then
-documents message browsing, reads by offset, and the control-plane API the embedded proxy adds.
+documents queue status, message browsing, reads by offset, and the control-plane API the embedded proxy adds.
 
 ## Base URL
 
@@ -196,6 +199,34 @@ configured), and the proxy never lets a tenant reach them.
 [standby cluster](/operate/standby/): where it is in its source's log, and the switch that makes
 it an ordinary cluster. What a standby reads from its source is not on this port: it is served on
 the source's raft port, under `/link/v1/`, to the holder of the source's `QUEEN_LINK_TOKEN`.
+
+## Queue status
+
+`GET /api/v1/status/queues/:queue` returns the queue's configuration, message totals and partition
+details. Without a query parameter, or with `includePartitions=true`, it lists up to
+`QUEEN_DASH_SIZES_MAX` partitions (100,000 by default). That is a response limit, not a limit on
+how many partitions the queue can hold.
+
+For a dashboard or a poll that needs only the totals, omit the partition rows:
+
+```bash
+curl -s 'http://localhost:6632/api/v1/status/queues/orders?includePartitions=false'
+```
+
+This returns an empty `partitions` array without building each partition's details or scanning
+DLQ rows. `totals.messages` describes the whole queue, `totals.partitions` is its partition count,
+and `totals.consumed` sums lifetime deliveries across its consumer cursors. Use those totals
+instead of summing the listed rows. `partitionsTruncated` is true when rows were omitted.
+
+A summary reads live counts within `QUEEN_DASH_EXACT_PARTITIONS` (10,000 partitions by default).
+Larger queues use the existing background sampler. `statsAge` gives the sample's age in whole
+seconds, with 0 for a live read or a sample less than a second old. Until the first sample is
+ready, `statsAge` and `totals.partitions` are `null`: pending is estimated from group counters,
+dead letters use the queue's counter, and the other counts have not been measured yet.
+
+Queue status is a snapshot. The dashboard's time range filters the separate analytics request;
+it does not reduce the partition details of a status response. The broker dashboard requests the
+summary and loads individual partition rows only when all partitions fit its 610-seed chart.
 
 ## Message browsing
 

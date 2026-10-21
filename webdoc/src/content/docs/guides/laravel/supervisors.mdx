@@ -105,6 +105,8 @@ sourceOfTruth:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21 (ad4cb3b08, queue status): phase2.rs adds optional queue-status summaries.
+# The supervisors still use the unchanged group-depth and offset-fetch routes for scaling and wake-up.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
