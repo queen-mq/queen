@@ -28,6 +28,9 @@ verifiedBy:
 # the envelope the example shows, so the program's output is unchanged. Two limits change: the
 # listener re-reads its queue list when a client names a queue it does not know, and a topic created
 # through Kafka gets a 900-second dedup window. The program was not re-run on 2.6.
+# sourceOfTruth re-read 2026-10-21 (CreateTopics applies retention.ms): meta.rs's create on first use
+# passes no retention, as before. The program creates its topics with no configs, so they keep every
+# record, as before. Nothing this page states changes.
 ---
 
 You do not have to move a Kafka shop to Queen all at once. In this program an order service keeps
