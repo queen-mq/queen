@@ -576,13 +576,6 @@ const EXTRA_VARS = [
     aliases: [],
     source: "server/src/kafka_inproc.rs",
   },
-  {
-    name: "QUEEN_KAFKA_OFFSET_STORE",
-    type: "string",
-    def: "positions (or kv)",
-    aliases: [],
-    source: "server/src/kafka_inproc.rs",
-  },
   // --- S3 sink (the rest of QUEEN_S3_* is read by the sink: deploy/s3)
   {
     name: "QUEEN_S3_THREADS",
