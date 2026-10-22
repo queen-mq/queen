@@ -113,6 +113,9 @@ digest: >-
 # sourceOfTruth re-read 2026-10-22 (2.6.0, the reclaim boost): maintenance.rs and qlog/set.rs give a
 # reclaim pass QUEEN_QLOG_RECLAIM_BOOST (4) times its budget, rewrites included, while the last pass
 # left work. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-22 (b68756955, entries count as dead): qlog/set.rs rewrites a file
+# once its dead messages plus the raft entries it carries reach the threshold (per-queue logs: half
+# the file in entries). Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and
