@@ -147,6 +147,12 @@ jobs:
       - name: Source-of-truth freshness
         run: pnpm check:sourceoftruth
 
+      # The README's condensed guide must equal the regions of the JavaScript
+      # guide program (examples/tutorials/js/00-five-minutes.mjs), the code
+      # the homepage shows and run.sh runs.
+      - name: README code
+        run: pnpm check:readme
+
       # Only a build of master that passed every gate above is published.
       - name: Keep the site for the deploy
         if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
