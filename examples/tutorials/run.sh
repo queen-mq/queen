@@ -58,6 +58,15 @@ skip_lang() {
   skip=$((skip + 1))
 }
 
+# The five-minute guide (00-*) talks to http://localhost:6632, the node its
+# step 1 starts, because the homepage shows its code verbatim. Run a copy
+# pointed at $QUEEN_URL instead. The copy sits next to the original, so it
+# resolves its dependencies the same way, and is removed after the run.
+guide_copy() { # <source> <copy>
+  mkdir -p "$(dirname "$2")"
+  sed "s#http://localhost:6632#${QUEEN_URL}#g" "$1" > "$2"
+}
+
 if wanted js; then
   echo
   echo "JavaScript"
@@ -65,6 +74,9 @@ if wanted js; then
     # The examples resolve `queen-mq` to ../../clients/client-js through a
     # file: dependency, so install once before the first run.
     [ -d "$HERE/js/node_modules" ] || (cd "$HERE/js" && npm install --silent)
+    guide_copy "$HERE/js/00-five-minutes.mjs" "$HERE/js/.00-five-minutes.run.mjs"
+    run 00-five-minutes env -C "$HERE/js" node .00-five-minutes.run.mjs
+    rm -f "$HERE/js/.00-five-minutes.run.mjs"
     for f in 01-hello-world 02-multi-queue-flow 03-transaction-ack-push 04-replay 05-streaming; do
       run "$f" env -C "$HERE/js" node "$f.mjs"
     done
@@ -77,6 +89,9 @@ if wanted py; then
   echo
   echo "Python"
   if command -v python3 >/dev/null; then
+    guide_copy "$HERE/py/00_five_minutes.py" "$HERE/py/_00_five_minutes_run.py"
+    run 00_five_minutes env -C "$ROOT" PYTHONPATH=clients/client-py python3 examples/tutorials/py/_00_five_minutes_run.py
+    rm -f "$HERE/py/_00_five_minutes_run.py"
     for f in 01_hello_world 02_multi_queue_flow 03_transaction_ack_push 04_replay 05_streaming; do
       [ -f "$HERE/py/$f.py" ] && run "$f" env -C "$ROOT" PYTHONPATH=clients/client-py python3 "examples/tutorials/py/$f.py"
     done
@@ -89,6 +104,9 @@ if wanted go; then
   echo
   echo "Go"
   if command -v go >/dev/null && [ -f "$HERE/go/go.mod" ]; then
+    guide_copy "$HERE/go/five-minutes/main.go" "$HERE/go/five-minutes-run/main.go"
+    run five-minutes env -C "$HERE/go" GOWORK=off go run ./five-minutes-run
+    rm -rf "$HERE/go/five-minutes-run"
     for f in hello-world multi-queue-flow transaction-ack-push replay streaming; do
       [ -d "$HERE/go/$f" ] && run "$f" env -C "$HERE/go" GOWORK=off go run "./$f"
     done
@@ -103,6 +121,10 @@ if wanted rust; then
   if command -v cargo >/dev/null && [ -f "$HERE/rust/Cargo.toml" ]; then
     # Compile once up front, or the first run would time its own build.
     (cd "$HERE/rust" && cargo build --quiet) || exit 1
+    # Cargo picks up anything under examples/ without a manifest entry.
+    guide_copy "$HERE/rust/src/bin/00_five_minutes.rs" "$HERE/rust/examples/five_minutes_run.rs"
+    run 00_five_minutes env -C "$HERE/rust" cargo run --quiet --example five_minutes_run
+    rm -rf "$HERE/rust/examples"
     for f in 01_hello_world 02_multi_queue_flow 03_transaction_ack_push 04_replay 05_streaming; do
       [ -f "$HERE/rust/src/bin/$f.rs" ] && run "$f" env -C "$HERE/rust" cargo run --quiet --bin "$f"
     done
@@ -122,6 +144,9 @@ if wanted php; then
       command -v composer >/dev/null && (cd "$ROOT/clients/client-php" && composer install --quiet --no-interaction)
     fi
     [ -e "$HERE/php/vendor" ] || ln -sfn ../../../clients/client-php/vendor "$HERE/php/vendor"
+    guide_copy "$HERE/php/00-five-minutes.php" "$HERE/php/.00-five-minutes.run.php"
+    run 00-five-minutes env -C "$HERE/php" php .00-five-minutes.run.php
+    rm -f "$HERE/php/.00-five-minutes.run.php"
     for f in 01-hello-world 02-multi-queue-flow 03-transaction-ack-push 04-replay; do
       [ -f "$HERE/php/$f.php" ] && run "$f" env -C "$HERE/php" php "$f.php"
     done

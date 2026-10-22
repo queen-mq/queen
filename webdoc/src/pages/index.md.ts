@@ -18,24 +18,20 @@ import { figureMarkdown } from "@/lib/figure-markdown";
 import {
   HOME_SUMMARY as SUMMARY,
   hero,
-  paradigm,
-  shifts,
-  step,
-  stepSection,
-  roles,
-  removeSection,
-  removals,
-  includedSection,
-  included,
+  guideSection,
+  guideRun,
+  guideSteps,
+  guideClosing,
   dashboardShot,
   proofSection,
   proof,
   provenSection,
   proven,
-  trySection,
+  nextSection,
   start,
   closing,
 } from "@/lib/home";
+import { GUIDE_LANGS, guideCode } from "@/lib/home-guide";
 
 export const prerender = true;
 
@@ -63,23 +59,35 @@ export function homepageBody(): string {
   );
   lines.push("```bash", hero.run, "```", "", hero.runNote, "");
 
-  lines.push(`## ${paradigm.oldTitle}`, "");
-  for (const t of paradigm.old) lines.push(t, "");
-  lines.push(`## ${paradigm.newTitle}`, "");
-  for (const x of shifts) lines.push(`**[${x.title}](${url(x.href)})** ${x.body}`, "");
-  lines.push(figureMarkdown("concepts/four-systems"), "");
-
-  lines.push(`## ${stepSection.title}`, "", stepSection.lead, "", "```js", step, "```", "");
-  for (const r of roles) lines.push(`- **${r.role}**: ${r.primitive} ([${r.role.toLowerCase()}](${url(r.href)}))`);
-  lines.push("- **One entry**: committed whole, or not at all", "", link(stepSection.link), "");
-
-  lines.push(`## ${removeSection.title}`, "");
-  for (const r of removals) lines.push(`- **${r.title}.** ${r.body}`);
-  lines.push("");
-
-  lines.push(`## ${includedSection.title}`, "");
-  for (const c of included) lines.push(`- **[${c.title}](${url(c.href)})**: ${c.body}`);
-  lines.push("", `**Screenshot.** ${dashboardShot.alt} ${dashboardShot.caption}`, "");
+  // The guide: every step in every language, since a reader of the markdown has
+  // no language picker. Each language's code is the program that ran it.
+  lines.push(`## ${guideSection.title}`, "");
+  for (const t of guideSection.lead) lines.push(t, "");
+  lines.push(`### 1. ${guideRun.title}`, "");
+  for (const t of guideRun.body) lines.push(t, "");
+  lines.push("```bash", hero.run, "```", "", guideRun.installNote, "");
+  for (const l of GUIDE_LANGS) lines.push(`${l.label}:`, "", "```bash", l.install, "```", "");
+  lines.push(`**Screenshot.** ${dashboardShot.alt} ${dashboardShot.caption}`, "");
+  guideSteps.forEach((step, n) => {
+    lines.push(`### ${n + 2}. ${step.title}`, "");
+    for (const t of step.body) lines.push(t, "");
+    step.code.forEach((c, ci) => {
+      for (const l of GUIDE_LANGS) {
+        const code = guideCode(l, c.id);
+        if (code === null) lines.push(`${l.label}: ${l.missing?.[c.id] ?? ""}`, "");
+        else lines.push(`${c.caption}, ${l.label}:`, "", "```" + l.lang, code, "```", "");
+      }
+      const after = step.between?.[ci];
+      if (after) lines.push(after, "");
+    });
+    lines.push(step.links.map((k) => `[${k.label}](${url(k.href)})`).join(" · "), "");
+  });
+  lines.push(guideClosing, "");
+  lines.push(
+    `${guideSection.programLabel}: ` +
+      GUIDE_LANGS.map((l) => `[${l.label}](https://github.com/queen-mq/queen/blob/master/${l.file})`).join(", "),
+    "",
+  );
 
   lines.push(`## ${proofSection.title}`, "", proofSection.lead, "");
   for (const p of proof) {
@@ -92,10 +100,9 @@ export function homepageBody(): string {
   for (const d of proven) lines.push(`- **[${d.title}](${d.href.startsWith("http") ? d.href : url(d.href)})**: ${d.body}`);
   lines.push("");
 
-  lines.push(`## ${trySection.title}`, "", "```bash", hero.run, "```", "", trySection.pushNote, "");
-  lines.push("```bash", trySection.push, "```", "", trySection.after, "", trySection.mcpNote, "");
-  lines.push("```bash", trySection.mcp, "```", "");
-  for (const s of start) lines.push(`- [${s.title}](${url(s.href)}): ${s.body}`);
+  lines.push(`## ${nextSection.title}`, "");
+  for (const x of start) lines.push(`- [${x.title}](${url(x.href)}): ${x.body}`);
+  lines.push("", nextSection.mcpNote, "", "```bash", nextSection.mcp, "```");
   lines.push("", `**${closing}**`);
 
   return lines.join("\n").trim();
