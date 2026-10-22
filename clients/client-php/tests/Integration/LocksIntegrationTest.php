@@ -151,14 +151,16 @@ class LocksIntegrationTest extends IntegrationTestCase
     public function testAnExpiredLockIsTakenOverAndTheOldHolderCommitsNothing(): void
     {
         // The old holder never calls keepAlive(): it is "paused" for longer
-        // than its lease.
-        $old = $this->queen->lock('php-lock-expiry', ['ttlSeconds' => 1]);
+        // than its lease. The lease is 3 s, not 1: the handle counts it from
+        // when acquire() was sent, and through the tenant proxy on a loaded CI
+        // runner an acquire could take a second, leaving nothing to guard with.
+        $old = $this->queen->lock('php-lock-expiry', ['ttlSeconds' => 3]);
         $next = $this->queen->lock('php-lock-expiry', ['ttlSeconds' => 30]);
 
         $this->assertTrue($old->acquire());
         $oldToken = $old->token();
         $staleGuard = $old->guard();
-        usleep(1_300_000);
+        usleep(3_300_000);
         $this->assertFalse($old->held(), 'past its lifetime a handle does not claim to hold');
 
         $this->assertTrue($next->acquire(), 'an expired lock is free for the next holder');
