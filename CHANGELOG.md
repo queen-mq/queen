@@ -62,6 +62,15 @@ document that was expired, malformed or dated in the future by a clock step made
 drain every worker and exit. It is now removed with one log line and supervision goes on, as in the
 PHP engine; one that cannot be removed still stops the master, as a fault of the state directory.
 
+**Go client: `QueueConfig` sets the dedup window, the retry delay and the max wait.**
+`QueueConfig{DedupWindowSeconds: 60}` now sends `dedupWindowSeconds`, as the JS, Python, PHP and
+Rust clients already could; until now a Go caller had to spell it with `Option()`.
+`RetryDelayMillis` sends `retryDelay` (milliseconds, enforced from broker 2.6.0) and
+`MaxWaitTimeSeconds` sends `maxWaitTimeSeconds`. A zero is omitted like every other field, so
+turning deduplication off or redelivering at once still goes through
+`Option("dedupWindowSeconds", 0)` and `Option("retryDelay", 0)`. A `queenctl` built against this
+client accepts the three keys in an `apply` manifest's `config:` block.
+
 ## 2.6.0 - 2026-10-22
 
 **The Kafka facade is a translation layer onto Queen, rewritten from scratch.** The first facade

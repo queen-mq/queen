@@ -136,3 +136,60 @@ func TestConfigureOptionWithoutAConfigStillSendsTheBag(t *testing.T) {
 	assertJSONBody(t, srv.only(t).Body,
 		`{"queue":"orders","options":{"encryptionEnabled":false}}`)
 }
+
+// The five-minute guide's queue step, as written: a dedup window is a queue
+// option like the lease, set from the typed config with no Option() needed.
+func TestConfigureSendsTheDedupWindow(t *testing.T) {
+	srv := newCaptureServer(t, okJSON(`{"configured":true,"queue":"orders"}`))
+	client := newWireClient(t, srv.URL)
+
+	if _, err := client.Queue("orders").
+		Config(QueueConfig{DedupWindowSeconds: 60}).
+		Create().Execute(kvCtx(t)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	assertJSONBody(t, srv.only(t).Body,
+		`{"queue":"orders","options":{"dedupWindowSeconds":60}}`)
+}
+
+// retryDelay is the one option counted in milliseconds: the field says so in
+// its name, and the key on the wire stays the broker's.
+func TestConfigureSendsRetryDelayAndMaxWaitUnderTheBrokersKeys(t *testing.T) {
+	srv := newCaptureServer(t, okJSON(`{"configured":true,"queue":"orders"}`))
+	client := newWireClient(t, srv.URL)
+
+	if _, err := client.Queue("orders").
+		Config(QueueConfig{
+			LeaseTime:          60,
+			RetryDelayMillis:   2500,
+			MaxWaitTimeSeconds: 86400,
+			DedupWindowSeconds: 600,
+		}).
+		Create().Execute(kvCtx(t)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	assertJSONBody(t, srv.only(t).Body, `{"queue":"orders","options":{
+		"leaseTime":60,
+		"retryDelay":2500,
+		"maxWaitTimeSeconds":86400,
+		"dedupWindowSeconds":600}}`)
+}
+
+// A zero dedup window means "deduplication off", which the typed field cannot
+// send (it omits zeros). The field's doc comment points at Option for it:
+// prove that path sends the literal zero and wins over the config bag.
+func TestConfigureDedupWindowZeroGoesThroughOption(t *testing.T) {
+	srv := newCaptureServer(t, okJSON(`{"configured":true,"queue":"orders"}`))
+	client := newWireClient(t, srv.URL)
+
+	if _, err := client.Queue("orders").
+		Config(QueueConfig{DedupWindowSeconds: 60, RetryDelayMillis: 2500}).
+		Create().
+		Option("dedupWindowSeconds", 0).
+		Option("retryDelay", 0).
+		Execute(kvCtx(t)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	assertJSONBody(t, srv.only(t).Body,
+		`{"queue":"orders","options":{"dedupWindowSeconds":0,"retryDelay":0}}`)
+}

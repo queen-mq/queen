@@ -155,6 +155,11 @@ type QueueConfig struct {
 	LeaseTime int `json:"leaseTime,omitempty" yaml:"leaseTime,omitempty"`
 	// RetryLimit is the maximum number of retries before moving to DLQ
 	RetryLimit int `json:"retryLimit,omitempty" yaml:"retryLimit,omitempty"`
+	// RetryDelayMillis is how long, in MILLISECONDS, a message that got a
+	// `failed` ack waits before it comes back (the broker's default is 1000).
+	// Enforced from broker 2.6.0; older brokers store it and redeliver at once.
+	// To redeliver at once, send Option("retryDelay", 0): a zero here is omitted.
+	RetryDelayMillis int `json:"retryDelay,omitempty" yaml:"retryDelay,omitempty"`
 	// Priority is the queue priority (higher = processed first)
 	Priority int `json:"priority,omitempty" yaml:"priority,omitempty"`
 	// DelayedProcessing is the delay in seconds before messages are available
@@ -167,6 +172,16 @@ type QueueConfig struct {
 	RetentionSeconds int `json:"retentionSeconds,omitempty" yaml:"retentionSeconds,omitempty"`
 	// CompletedRetentionSeconds is the retention period for completed messages
 	CompletedRetentionSeconds int `json:"completedRetentionSeconds,omitempty" yaml:"completedRetentionSeconds,omitempty"`
+	// MaxWaitTimeSeconds deletes messages older than this many seconds, consumed
+	// or not, whether or not RetentionEnabled is set, and without dead-lettering
+	// them (0 = never, the broker's default).
+	MaxWaitTimeSeconds int `json:"maxWaitTimeSeconds,omitempty" yaml:"maxWaitTimeSeconds,omitempty"`
+	// DedupWindowSeconds is how long a pushed transactionId is remembered: a
+	// repeat of it in the same partition within the window writes nothing and
+	// is answered `duplicate` (the broker's default is 3600). To turn
+	// deduplication off, send Option("dedupWindowSeconds", 0): a zero here is
+	// omitted.
+	DedupWindowSeconds int `json:"dedupWindowSeconds,omitempty" yaml:"dedupWindowSeconds,omitempty"`
 	// RetentionEnabled turns on retention/cleanup for the queue. The server only
 	// runs the retention service on queues with this flag set, so RetentionSeconds
 	// and CompletedRetentionSeconds have no effect unless RetentionEnabled is true.
