@@ -85,6 +85,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-22 (2.6.0, the reclaim boost): maintenance.rs and qlog/set.rs give a
 # reclaim pass QUEEN_QLOG_RECLAIM_BOOST (4) times its budget, rewrites included, while the last pass
 # left work. The retention table lists the pass's bounds.
+# sourceOfTruth re-read 2026-10-22 (the reclaim pass's row cache): maintenance.rs keeps only the
+# partition rows a pass found and reads a missing one again (no row can mean not applied yet).
+# Nothing this page states changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling

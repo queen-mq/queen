@@ -120,6 +120,24 @@ fn reclaim_qlogs_judges_files_by_the_partition_rows_they_name() {
     }
 }
 
+/// A pass keeps the partition rows it found and reads a missing one again: the
+/// active file holds records ahead of apply, so "no row" can mean "not yet",
+/// and a boosted pass lists a log's sealed files again later in the same pass.
+#[test]
+fn a_pass_reads_a_missing_partition_row_again() {
+    let mut rows = crate::rsm::maintenance::PassRows::default();
+    assert_eq!(rows.get_or_read::<()>(7, || Ok(None)), Ok(None));
+    assert_eq!(
+        rows.get_or_read::<()>(7, || Ok(Some((2, 5)))),
+        Ok(Some((2, 5))),
+        "read again: applied since"
+    );
+    assert_eq!(
+        rows.get_or_read::<()>(7, || panic!("a found row is read once a pass")),
+        Ok(Some((2, 5)))
+    );
+}
+
 /// What a retention pass costs on a store with a million partitions: the old
 /// whole-map build (every partition row decoded and mapped, on every pass)
 /// against the per-file pass, whose files name 400 partitions. Debug build, so

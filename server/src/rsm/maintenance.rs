@@ -160,11 +160,7 @@ pub struct Planned {
 /// map: about 0.5 µs a partition, so ~0.5 s a pass at 1M partitions and 4-5 s
 /// at 10M, repeated every 5 s on every node whatever the files held.
 pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usize> {
-    use std::collections::HashMap;
-
-    // pid -> (the log its records go to, its txns_start); None: the partition
-    // is gone. One store read per pid per pass, shared by every file and log.
-    let mut known: HashMap<Pid, Option<(u64, u64)>> = HashMap::new();
+    let mut known = PassRows::default();
     // Shared with the lookup closure, which outlives one `reclaim_log` call.
     let failed: std::cell::RefCell<Option<StoreError>> = std::cell::RefCell::new(None);
 
@@ -211,23 +207,16 @@ pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usi
         // queue. A record in any other log is dead: the key must be exactly
         // the log the writer routed the partition to.
         let mut live_start = |pid: u64| -> std::io::Result<Option<u64>> {
-            let at = match known.get(&pid) {
-                Some(at) => *at,
-                None => {
-                    let at = match r.partition(pid) {
-                        Ok(row) => row.map(|row| {
-                            let queue_id = QLogReader::queue_id_of(&row.tenant, &row.queue);
-                            (qlogs.log_id_for(queue_id, pid), row.txns_start)
-                        }),
-                        Err(e) => {
-                            *failed.borrow_mut() = Some(e);
-                            return Err(std::io::Error::other("partition read failed"));
-                        }
-                    };
-                    known.insert(pid, at);
-                    at
+            let at = known.get_or_read(pid, || match r.partition(pid) {
+                Ok(row) => Ok(row.map(|row| {
+                    let queue_id = QLogReader::queue_id_of(&row.tenant, &row.queue);
+                    (qlogs.log_id_for(queue_id, pid), row.txns_start)
+                })),
+                Err(e) => {
+                    *failed.borrow_mut() = Some(e);
+                    Err(std::io::Error::other("partition read failed"))
                 }
-            };
+            })?;
             Ok(at.and_then(|(log, start)| (log == log_id).then_some(start)))
         };
         // One rewrite a call: call again while this log rewrote a file and the
@@ -248,6 +237,38 @@ pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usi
     }
     qlogs.set_reclaim_backlog(backlog);
     Ok(removed)
+}
+
+/// The partition rows one retention pass found: pid -> (the log its records go
+/// to, its `txns_start`). One store read per pid per pass, shared by every file
+/// and log ([`reclaim_qlogs`]).
+///
+/// Only a row found is kept. No row usually means the partition is gone for
+/// good, but it can also mean its entry is not applied yet: the active file
+/// holds records ahead of apply, and the pass looks at it too
+/// (`QLogReader::judge_active`). Kept, that answer would outlive its moment:
+/// after a rewrite a boosted pass lists the log's sealed files again, by then
+/// the file may be sealed and under the recovery floor, and its records would
+/// be judged dead for good. So a missing row is read again each time.
+#[derive(Default)]
+pub(crate) struct PassRows(std::collections::HashMap<Pid, (u64, u64)>);
+
+impl PassRows {
+    /// The row of `pid`: from this pass's finds, else from `read`.
+    pub(crate) fn get_or_read<E>(
+        &mut self,
+        pid: Pid,
+        read: impl FnOnce() -> std::result::Result<Option<(u64, u64)>, E>,
+    ) -> std::result::Result<Option<(u64, u64)>, E> {
+        if let Some(at) = self.0.get(&pid) {
+            return Ok(Some(*at));
+        }
+        let at = read()?;
+        if let Some(at) = at {
+            self.0.insert(pid, at);
+        }
+        Ok(at)
+    }
 }
 
 /// `QUEEN_QLOG_RECLAIM_BOOST` (default 4, 1 to 64; 1 turns it off): how many
