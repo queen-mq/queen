@@ -2721,16 +2721,22 @@ impl<S: Store + 'static> RaftReplicator<S> {
     #[cfg(test)]
     pub(crate) async fn snapshot_and_purge_for_test(&self, upto: u64) {
         let raft = self.raft.as_ref().expect("raft");
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + Duration::from_secs(60);
         // A snapshot is built at the store's durable index: again until that
-        // has reached `upto`.
+        // has reached `upto`. Asked for only once that index has passed `upto`,
+        // which it trails after a burst: a build refused (at a durable index
+        // whose term this node never noted, the bootstrap entry, before the
+        // first checkpoint past it) is fatal to openraft, and stops the node.
+        // The purge driver never asks that early.
         while self
             .metrics_now()
             .and_then(|m| m.snapshot)
             .is_none_or(|s| s.index < upto)
         {
-            assert!(Instant::now() < end, "no snapshot at {upto} within 20 s");
-            raft.trigger().snapshot().await.expect("snapshot");
+            assert!(Instant::now() < end, "no snapshot at {upto} within 60 s");
+            if self.shared.durable() > upto {
+                raft.trigger().snapshot().await.expect("snapshot");
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         raft.trigger().purge_log(upto).await.expect("purge");
