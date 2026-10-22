@@ -265,6 +265,44 @@ fn wait_applied(nodes: &[Option<RaftReplicator<HeedStore>>], index: u64) {
     }
 }
 
+/// [`wait_applied`], restarting node `f` each time it stops to load a
+/// snapshot it received, as the binary's supervisor restarts the node. A
+/// member can need a second snapshot: a purge that passed the point of its
+/// first one before it restarted (a loaded machine restarts it slowly, or a
+/// test purges by hand) leaves it short of the leader's log again.
+fn wait_applied_restarting(
+    nodes: &mut [Option<RaftReplicator<HeedStore>>],
+    f: usize,
+    reopen: impl Fn() -> RaftReplicator<HeedStore>,
+    index: u64,
+) {
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let behind: Vec<(usize, u64)> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| n.as_ref().map(|r| (i, r.applied_index())))
+            .filter(|(_, a)| *a < index)
+            .collect();
+        if behind.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < end,
+            "nodes {behind:?} did not apply {index} within 60 s"
+        );
+        if nodes[f]
+            .as_ref()
+            .is_some_and(|n| n.restart_requested().is_some())
+        {
+            let _ = close(nodes[f].take().expect("node f is open"));
+            nodes[f] = Some(reopen());
+            continue;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn close(r: RaftReplicator<HeedStore>) -> StateDigest {
     let (_s, store) = r.shutdown().expect("shutdown");
     let store = Arc::try_unwrap(store).unwrap_or_else(|_| panic!("the store is still shared"));
@@ -602,48 +640,22 @@ async fn a_follower_behind_the_purge_point_gets_a_snapshot() {
     let _ = close(back);
 
     // It restarts on the snapshot and catches up.
-    let reopen = |nodes: &mut [Option<RaftReplicator<HeedStore>>]| {
-        let (d, p, o) = (dirs[f].clone(), ports.clone(), eager.clone());
-        nodes[f] = Some(tokio::task::block_in_place(move || {
-            open_node(&d, id, &p, o)
-        }));
+    let reopen = || {
+        let node = open_node(&dirs[f], id, &ports, eager.clone());
         assert!(
             !dirs[f].join(snapshot::PENDING).exists(),
             "the snapshot was swapped in"
         );
+        node
     };
-    reopen(&mut nodes);
+    nodes[f] = Some(tokio::task::block_in_place(&reopen));
     let more = propose_all(nodes[l].as_ref().unwrap(), &entries[2 * N as usize..]).await;
     assert!(more > last);
     // The hold here is 2 s: a loaded machine can restart the follower slower
     // than that, the leader purges past it again and sends it another
     // snapshot, and it asks to restart once more. It is restarted, as a node
     // is, until every node has applied everything.
-    let end = Instant::now() + Duration::from_secs(60);
-    loop {
-        let behind: Vec<(usize, u64)> = nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, n)| n.as_ref().map(|r| (i, r.applied_index())))
-            .filter(|(_, a)| *a < more)
-            .collect();
-        if behind.is_empty() {
-            break;
-        }
-        if nodes[f]
-            .as_ref()
-            .is_some_and(|n| n.restart_requested().is_some())
-        {
-            let _ = close(nodes[f].take().unwrap());
-            reopen(&mut nodes);
-            continue;
-        }
-        assert!(
-            Instant::now() < end,
-            "nodes {behind:?} did not apply {more} within 60 s"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    tokio::task::block_in_place(|| wait_applied_restarting(&mut nodes, f, &reopen, more));
     tokio::task::block_in_place(|| converge(nodes, 3 * N, "snapshot"));
     for d in dirs {
         let _ = std::fs::remove_dir_all(d);
@@ -803,12 +815,11 @@ async fn an_empty_member_gets_the_whole_state_with_its_indexes() {
     );
     let _ = close(back);
 
-    let (d, p, o) = (dirs[f].clone(), ports.clone(), eager.clone());
-    nodes[f] = Some(tokio::task::block_in_place(move || {
-        open_node(&d, id, &p, o)
-    }));
+    // Restarted on its snapshot, and again if it receives another.
+    let reopen = || open_node(&dirs[f], id, &ports, eager.clone());
+    nodes[f] = Some(tokio::task::block_in_place(&reopen));
     let more = propose_all(nodes[l].as_ref().unwrap(), &entries[2 * N as usize..]).await;
-    tokio::task::block_in_place(|| wait_applied(&nodes, more));
+    tokio::task::block_in_place(|| wait_applied_restarting(&mut nodes, f, &reopen, more));
     tokio::task::block_in_place(|| converge(nodes, 3 * N, "empty-member"));
     for d in dirs {
         let _ = std::fs::remove_dir_all(d);
@@ -834,6 +845,12 @@ fn matched_by(leader: &RaftReplicator<HeedStore>, member: u64) -> Option<u64> {
 /// above what it asked for: openraft sends them after the `prev_log_id` it
 /// chose, and its debug assertion stopped that member's replication for good
 /// (the member stayed at its snapshot: "nodes [(2, 402)] did not apply 602").
+///
+/// The snapshot openraft plans for the member can go out at any point from the
+/// forget on, before the purge below as well as after it (on Linux, mostly
+/// before). A purge that passes the point of that snapshot leaves the member
+/// short of the leader's log once it restarts, so it receives a second one and
+/// restarts again, as a node does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stream_the_purge_overtook_sends_no_hole() {
     let _one = serial().await;
@@ -875,6 +892,14 @@ async fn a_stream_the_purge_overtook_sends_no_hole() {
     )
     .await;
     tokio::task::block_in_place(|| wait_applied(&nodes, second));
+    // The purge driver purges up to `had`, the member's hold, but a step of it
+    // purges only more than `purge_batch` entries: one that stopped right
+    // below `had` never takes `had` alone. The rest is purged here.
+    nodes[l]
+        .as_ref()
+        .unwrap()
+        .snapshot_and_purge_for_test(had)
+        .await;
     let end = Instant::now() + Duration::from_secs(60);
     while nodes[l].as_ref().unwrap().purged_index() < had + 1 {
         assert!(
@@ -898,9 +923,13 @@ async fn a_stream_the_purge_overtook_sends_no_hole() {
         had + 1,
         "the stream reads right after what the member had"
     );
-    // A heartbeat finds the member empty: the leader forgets what it had...
+    // A heartbeat finds the member empty: the leader forgets what it had (its
+    // matched index leaves `had`) and plans a snapshot, which may be installed
+    // already, at `had` itself, by the time this looks...
     let end = Instant::now() + Duration::from_secs(30);
-    while matched_by(nodes[l].as_ref().unwrap(), id) == Some(had) {
+    while matched_by(nodes[l].as_ref().unwrap(), id) == Some(had)
+        && back.restart_requested().is_none()
+    {
         assert!(
             Instant::now() < end,
             "the leader never saw the member empty"
@@ -934,12 +963,10 @@ async fn a_stream_the_purge_overtook_sends_no_hole() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let _ = close(back);
-    let (d, p, o) = (dirs[f].clone(), ports.clone(), opts.clone());
-    nodes[f] = Some(tokio::task::block_in_place(move || {
-        open_node(&d, id, &p, o)
-    }));
+    let reopen = || open_node(&dirs[f], id, &ports, opts.clone());
+    nodes[f] = Some(tokio::task::block_in_place(&reopen));
     let more = propose_all(nodes[l].as_ref().unwrap(), &entries[2 * N as usize..]).await;
-    tokio::task::block_in_place(|| wait_applied(&nodes, more));
+    tokio::task::block_in_place(|| wait_applied_restarting(&mut nodes, f, &reopen, more));
     tokio::task::block_in_place(|| converge(nodes, 3 * N, "overtaken"));
     for d in dirs {
         let _ = std::fs::remove_dir_all(d);
