@@ -1,0 +1,11 @@
+--- test/jepsen/src/jepsen/queen/workload/register.clj (campaign)	2026-10-22 10:17:17.078010210 +0000
++++ register.clj (re-check)	2026-10-22 10:17:17.079120598 +0000
+@@ -228,7 +228,7 @@
+     {:client    (client)
+      :checker   (independent/checker
+                   (checker/linearizable {:model     (model/cas-register absent)
+-                                         :algorithm :linear}))
++                                         :algorithm :wgl}))
+      :generator (independent/concurrent-generator
+                   n
+                   (range)

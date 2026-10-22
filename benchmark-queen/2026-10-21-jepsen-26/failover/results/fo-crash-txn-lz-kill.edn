@@ -1,0 +1,190 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final nil,
+          :member-removals {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true,
+          :max-usage-pct 1.708984375,
+          :nodes {"n1" {:max-usage-pct 1.494598388671875,
+                        :clears 14,
+                        :lossy-clears 13,
+                        :lost-bytes 1709447},
+                  "n2" {:max-usage-pct 1.708984375,
+                        :clears 11,
+                        :lossy-clears 10,
+                        :lost-bytes 1315675},
+                  "n3" {:max-usage-pct 1.264190673828125,
+                        :clears 11,
+                        :lossy-clears 10,
+                        :lost-bytes 1315402},
+                  "n4" {:max-usage-pct 1.32904052734375,
+                        :clears 10,
+                        :lossy-clears 10,
+                        :lost-bytes 1315314},
+                  "n5" {:max-usage-pct 1.572418212890625,
+                        :clears 11,
+                        :lossy-clears 11,
+                        :lost-bytes 1462752},
+                  "n6" {:max-usage-pct 1.17645263671875,
+                        :clears 10,
+                        :lossy-clears 10,
+                        :lost-bytes 1313546}}},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3],
+                    "n2" [1 2 3],
+                    "n3" [1 2 3],
+                    "n4" [1 2 3],
+                    "n5" [1 2 3],
+                    "n6" [1 2 3]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:link-before-stop nil,
+            :duplicate (),
+            :last-refusal-after-promote-ms nil,
+            :planned-lost-count 0,
+            :source-record-after-own (),
+            :valid? true,
+            :diverged-count 0,
+            :lost-count 5,
+            :standby-reads-judged 941,
+            :first-own-write-ms 9,
+            :lost-before-a-survivor (),
+            :nodes-of-one-cluster-disagree (),
+            :phantom (),
+            :source-lost (),
+            :standby-read-diverged (),
+            :standby-wrote-early (),
+            :standby-send-in-source (),
+            :replayed 21866,
+            :mode :crash,
+            :lost-before-a-survivor-count 0,
+            :source-acked 21869,
+            :ack-offset-mismatch (),
+            :standby-refusals-after-promote 0,
+            :source-final-read? true,
+            :final-read-gaps {},
+            :own-lost (),
+            :diverged (),
+            :planned-lost (),
+            :await-standby nil,
+            :own-records 20393,
+            :refused-but-present (),
+            :own-acked 20390,
+            :torn-transaction (),
+            :lost-over-ms 4191,
+            :standby-refusals 8484,
+            :promote {:role "promoted",
+                      :promoted? true,
+                      :attempts 3,
+                      :node "n6",
+                      :first-answers [["n5"
+                                       :jepsen.queen.http/refused
+                                       nil
+                                       2]
+                                      ["n4"
+                                       :jepsen.queen.http/refused
+                                       nil
+                                       265]],
+                      :answers {["n5" :jepsen.queen.http/refused nil] 1,
+                                ["n4" :jepsen.queen.http/refused nil] 1},
+                      :position 10021,
+                      :ms 1252,
+                      :views [[2
+                               {"n4" {:raft {},
+                                      :link {:role nil,
+                                             :leader nil,
+                                             :position nil,
+                                             :follower {}},
+                                      :gauges nil},
+                                "n5" {:raft {},
+                                      :link {:role nil,
+                                             :leader nil,
+                                             :position nil,
+                                             :follower {}},
+                                      :gauges nil},
+                                "n6" {:raft {:role "follower",
+                                             :leader true,
+                                             :term 7,
+                                             :applied 10021,
+                                             :commit 10021,
+                                             :lag 0},
+                                      :link {:role "standby",
+                                             :leader false,
+                                             :position 10019,
+                                             :follower {:state "idle",
+                                                        :lagEntries 0,
+                                                        :error nil}},
+                                      :gauges ["queen_raft_plan_deferred{quantile=\"0.5\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.9\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.99\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.999\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"1\"} 0"
+                                               "queen_raft_plan_deferred_count 0"
+                                               "queen_raft_plan_deferred_sum 0"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.5\"} 0"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.9\"} 0"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.99\"} 0"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.999\"} 0"
+                                               "queen_raft_apply_channel_depth{quantile=\"1\"} 0"
+                                               "queen_raft_apply_channel_depth_count 0"
+                                               "queen_raft_apply_channel_depth_sum 0"
+                                               "queen_raft_index{kind=\"log\"} 10023"
+                                               "queen_raft_index{kind=\"committed\"} 10021"
+                                               "queen_raft_index{kind=\"applied\"} 10021"
+                                               "queen_raft_index{kind=\"durable\"} 10021"
+                                               "queen_raft_inflight 2"
+                                               "queen_raft_proposals_total 0"
+                                               "queen_link_role{role=\"primary\"} 0"
+                                               "queen_link_role{role=\"standby\"} 1"
+                                               "queen_link_role{role=\"promoted\"} 0"
+                                               "queen_link_position_index 10019"
+                                               "queen_link_follower_state{state=\"idle\"} 1"
+                                               "queen_link_follower_state{state=\"following\"} 0"
+                                               "queen_link_follower_state{state=\"waiting\"} 0"
+                                               "queen_link_follower_state{state=\"halted\"} 0"
+                                               "queen_link_lag_entries 0"
+                                               "queen_link_lag_seconds 0.000"
+                                               "queen_link_entries_total 0"]}}]]},
+            :replayed-per-partition {0 2778,
+                                     1 2731,
+                                     2 2680,
+                                     3 2757,
+                                     4 2803,
+                                     5 2661,
+                                     6 2760,
+                                     7 2696}},
+ :stats {:valid? true,
+         :count 57921,
+         :ok-count 23779,
+         :fail-count 34124,
+         :info-count 18,
+         :by-f {:final-read {:valid? true,
+                             :count 12,
+                             :ok-count 12,
+                             :fail-count 0,
+                             :info-count 0},
+                :read {:valid? true,
+                       :count 5814,
+                       :ok-count 4308,
+                       :fail-count 1506,
+                       :info-count 0},
+                :send {:valid? true,
+                       :count 52095,
+                       :ok-count 19459,
+                       :fail-count 32618,
+                       :info-count 18}}}}

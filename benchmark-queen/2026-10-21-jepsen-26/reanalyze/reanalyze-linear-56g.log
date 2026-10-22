@@ -1,0 +1,9 @@
+2026-10-22T10:15:01Z
+INFO [2026-10-22 10:15:12,827] main - jepsen.cli Analyzing store/queen-register-leader-deaf_kv-leader_offload=on_lanes=16/2026-10-21T22:58:43.149704411Z
+INFO [2026-10-22 10:15:12,832] main - jepsen.cli CLI args were [test --nodes n1,n2,n3,n4,n5 --username root --ssh-private-key /root/.ssh/id_ed25519 --bin /root/bin/queen-26 --concurrency 2n --workload register --kv-route leader --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20]
+INFO [2026-10-22 10:15:13,048] main - jepsen.cli Combined test:
+
+INFO [2026-10-22 10:15:13,049] main - jepsen.core Analyzing...
+INFO [2026-10-22 10:15:18,493] knossos reporter - knossos.search {:space 1, :cost 3.88E+26, :op {:process 40, :type :ok, :f :write, :value 0, :index 1719, :time 50507097373, :version 268}}
+INFO [2026-10-22 10:15:18,712] knossos reporter - knossos.search {:space 1, :cost 1.49E+25, :op {:process 47, :type :ok, :f :read, :value 0, :index 304, :time 42703038533, :version 7}}
+2026-10-22T10:29:04Z stopped by hand: no GC or progress line for 13 minutes at 49 GB of 56

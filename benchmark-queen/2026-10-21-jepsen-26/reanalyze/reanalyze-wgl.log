@@ -1,0 +1,11 @@
+2026-10-22T10:29:04Z
+231:                                         :algorithm :wgl}))
+INFO [2026-10-22 10:29:11,583] main - jepsen.cli Analyzing store/queen-register-leader-deaf_kv-leader_offload=on_lanes=16/2026-10-21T22:58:43.149704411Z
+INFO [2026-10-22 10:29:11,588] main - jepsen.cli CLI args were [test --nodes n1,n2,n3,n4,n5 --username root --ssh-private-key /root/.ssh/id_ed25519 --bin /root/bin/queen-26 --concurrency 2n --workload register --kv-route leader --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20]
+INFO [2026-10-22 10:29:11,799] main - jepsen.cli Combined test:
+
+INFO [2026-10-22 10:29:11,800] main - jepsen.core Analyzing...
+INFO [2026-10-22 10:29:13,384] main - jepsen.core Analysis complete
+INFO [2026-10-22 10:29:13,501] jepsen results - jepsen.store Wrote /root/jepsen-26/store/queen-register-leader-deaf_kv-leader_offload=on_lanes=16/2026-10-21T22:58:43.149704411Z/results.edn
+analyze exit 0
+2026-10-22T10:29:14Z

@@ -1,0 +1,549 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final {:leader 3,
+                         :term 5,
+                         :voters [1 2 3 4 5],
+                         :learners []},
+          :member-removals {[200 nil] 11},
+          :corrupt-trials 0,
+          :member-rejoins {true 11},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {:member-double 3,
+                       :member-cycle 5,
+                       :member-heal 1},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:w2 {:total-queue {:ok-count 24762,
+                               :duplicated-count 0,
+                               :valid? true,
+                               :lost-count 0,
+                               :lost #{},
+                               :acknowledged-count 24383,
+                               :recovered #{13590
+                                            14488
+                                            18349
+                                            13560
+                                            5004
+                                            24832
+                                            4702
+                                            5009
+                                            22745
+                                            14586
+                                            22701
+                                            4949
+                                            18305
+                                            22659
+                                            18277
+                                            18397
+                                            18276
+                                            4687
+                                            22720
+                                            24787
+                                            4975
+                                            14158
+                                            5019
+                                            5064
+                                            13620
+                                            4584
+                                            18283
+                                            24865
+                                            4595
+                                            1830
+                                            13638
+                                            24884
+                                            24813
+                                            22733
+                                            4950
+                                            5024
+                                            4643
+                                            18299
+                                            5062
+                                            22744
+                                            18392
+                                            14066
+                                            24781
+                                            14113
+                                            14518
+                                            13565
+                                            4729
+                                            18278
+                                            22747
+                                            22651
+                                            14106
+                                            4646
+                                            4617
+                                            4690
+                                            4627
+                                            4978
+                                            14524
+                                            14584
+                                            4593
+                                            4614
+                                            14165
+                                            13632
+                                            14454
+                                            14055
+                                            4704
+                                            4669
+                                            18400
+                                            13661
+                                            18356
+                                            22764
+                                            4591
+                                            18332
+                                            4634
+                                            22755
+                                            4942
+                                            4705
+                                            18383
+                                            13576
+                                            22750
+                                            22666
+                                            18346
+                                            4974
+                                            4633
+                                            18379
+                                            4644
+                                            24799
+                                            14507
+                                            24828
+                                            4952
+                                            5042
+                                            4610
+                                            4944
+                                            5046
+                                            18386
+                                            18313
+                                            18394
+                                            18387
+                                            14090
+                                            18281
+                                            18401
+                                            14152
+                                            14542
+                                            5012
+                                            13596
+                                            4624
+                                            18301
+                                            4951
+                                            14135
+                                            4973
+                                            4632
+                                            5014
+                                            18290
+                                            18296
+                                            14116
+                                            22711
+                                            13594
+                                            4608
+                                            14550
+                                            14155
+                                            18378
+                                            22724
+                                            14614
+                                            4892
+                                            24873
+                                            22674
+                                            18351
+                                            14493
+                                            4626
+                                            18311
+                                            18294
+                                            4642
+                                            13480
+                                            14122
+                                            14056
+                                            4537
+                                            24682
+                                            14145
+                                            14151
+                                            4602
+                                            22769
+                                            4955
+                                            13602
+                                            18372
+                                            4605
+                                            14047
+                                            18285
+                                            14600
+                                            18280
+                                            22721
+                                            13544
+                                            4621
+                                            4995
+                                            4615
+                                            22725
+                                            4618
+                                            18406
+                                            4596
+                                            18342
+                                            4991
+                                            18292
+                                            4636
+                                            5043
+                                            13640
+                                            24685
+                                            4629
+                                            4654
+                                            4941
+                                            4622
+                                            14148
+                                            24742
+                                            14520
+                                            22690
+                                            24766
+                                            14074
+                                            4625
+                                            24823
+                                            18388
+                                            14569
+                                            24854
+                                            14120
+                                            13622
+                                            18318
+                                            14125
+                                            4956
+                                            4681
+                                            5057
+                                            24776
+                                            18365
+                                            18359
+                                            4585
+                                            4609
+                                            4619
+                                            24777
+                                            24838
+                                            13651
+                                            14061
+                                            24791
+                                            18374
+                                            13647
+                                            14132
+                                            14051
+                                            14500
+                                            22670
+                                            14067
+                                            14506
+                                            4630
+                                            14059
+                                            4980
+                                            18307
+                                            4465
+                                            4727
+                                            18295
+                                            13597
+                                            18337
+                                            14101
+                                            5053
+                                            18298
+                                            13410
+                                            14075
+                                            4721
+                                            13551
+                                            4674
+                                            14046
+                                            18343
+                                            18411
+                                            14053
+                                            13646
+                                            14058
+                                            24611
+                                            4583
+                                            18395
+                                            14604
+                                            22707
+                                            18405
+                                            22680
+                                            14079
+                                            14060
+                                            14531
+                                            14139
+                                            4550
+                                            18393
+                                            14071
+                                            4671
+                                            4637
+                                            22775
+                                            14083
+                                            4958
+                                            4587
+                                            14159
+                                            18381
+                                            22748
+                                            18361
+                                            4966
+                                            14142
+                                            22777
+                                            4719
+                                            24849
+                                            13569
+                                            14131
+                                            24764
+                                            14082
+                                            5011
+                                            24783
+                                            24844
+                                            18303
+                                            13643
+                                            14104
+                                            14045
+                                            18355
+                                            4635
+                                            4939
+                                            18370
+                                            4679
+                                            14574
+                                            24746
+                                            18389
+                                            24871
+                                            18282
+                                            13656
+                                            14129
+                                            14049
+                                            24860
+                                            18384
+                                            13631
+                                            13570
+                                            13583
+                                            24868
+                                            5005
+                                            13634
+                                            14096
+                                            14088
+                                            22656
+                                            18399
+                                            18287
+                                            18410
+                                            18279
+                                            24741
+                                            4964
+                                            4989
+                                            24729
+                                            4986
+                                            14489
+                                            14588
+                                            22677
+                                            18340
+                                            4997
+                                            4723
+                                            4962
+                                            13580
+                                            4970
+                                            5016
+                                            4580
+                                            22736
+                                            4657
+                                            18323
+                                            24878
+                                            13624
+                                            4611
+                                            14109
+                                            22716
+                                            24749
+                                            14619
+                                            14511
+                                            4628
+                                            14579
+                                            22697
+                                            22704
+                                            5002
+                                            4712
+                                            24614
+                                            24757
+                                            73
+                                            14062
+                                            13545
+                                            13478
+                                            24853
+                                            24824
+                                            4598
+                                            4641
+                                            24807
+                                            4613
+                                            14567
+                                            14534
+                                            4639
+                                            4651
+                                            4946
+                                            5008
+                                            18407
+                                            5050
+                                            4953
+                                            5023
+                                            24859
+                                            4631
+                                            13623
+                                            18369
+                                            4715
+                                            18366
+                                            14030
+                                            4600
+                                            22583
+                                            13555
+                                            22768
+                                            13585
+                                            14576
+                                            4889
+                                            14455
+                                            18385
+                                            13547
+                                            4659
+                                            24793
+                                            4653
+                                            14095
+                                            4604
+                                            14578
+                                            14512
+                                            5000
+                                            14098
+                                            14091
+                                            13558},
+                               :attempt-count 25208,
+                               :unexpected #{},
+                               :unexpected-count 0,
+                               :recovered-count 379,
+                               :duplicated #{}},
+                 :queue {:lease-overlaps (),
+                         :payload-mismatch (),
+                         :valid? true,
+                         :noop-ack-examples (),
+                         :acked-twice (),
+                         :acked-twice-count 0,
+                         :lease-overlap-count 0,
+                         :partial-acks 0,
+                         :acked 24762,
+                         :redeliveries 15,
+                         :pop-skips (),
+                         :offset-value-mismatch (),
+                         :ack-unknown 0,
+                         :pop-skip-count 0,
+                         :noop-acks 0,
+                         :deliveries 24762,
+                         :pop-internal-gaps (),
+                         :redelivered-after-ack-count 0,
+                         :ack-rejected 0,
+                         :redelivered-after-ack ()},
+                 :valid? true},
+            :retention {:valid? true,
+                        :reads {"n1" {"w5" {:log-start 3051,
+                                            :hwm 3051},
+                                      "w0" {:log-start 3122,
+                                            :hwm 3122},
+                                      "w4" {:log-start 3072,
+                                            :hwm 3072},
+                                      "w7" {:log-start 3053,
+                                            :hwm 3053},
+                                      "w2" {:log-start 3079,
+                                            :hwm 3079},
+                                      "w3" {:log-start 3145,
+                                            :hwm 3145},
+                                      "w6" {:log-start 3127,
+                                            :hwm 3127},
+                                      "w1" {:log-start 3113,
+                                            :hwm 3113}},
+                                "n2" {"w5" {:log-start 3051,
+                                            :hwm 3051},
+                                      "w0" {:log-start 3122,
+                                            :hwm 3122},
+                                      "w4" {:log-start 3072,
+                                            :hwm 3072},
+                                      "w7" {:log-start 3053,
+                                            :hwm 3053},
+                                      "w2" {:log-start 3079,
+                                            :hwm 3079},
+                                      "w3" {:log-start 3145,
+                                            :hwm 3145},
+                                      "w6" {:log-start 3127,
+                                            :hwm 3127},
+                                      "w1" {:log-start 3113,
+                                            :hwm 3113}},
+                                "n3" {"w5" {:log-start 3051,
+                                            :hwm 3051},
+                                      "w0" {:log-start 3122,
+                                            :hwm 3122},
+                                      "w4" {:log-start 3072,
+                                            :hwm 3072},
+                                      "w7" {:log-start 3053,
+                                            :hwm 3053},
+                                      "w2" {:log-start 3079,
+                                            :hwm 3079},
+                                      "w3" {:log-start 3145,
+                                            :hwm 3145},
+                                      "w6" {:log-start 3127,
+                                            :hwm 3127},
+                                      "w1" {:log-start 3113,
+                                            :hwm 3113}},
+                                "n4" {"w5" {:log-start 3051,
+                                            :hwm 3051},
+                                      "w0" {:log-start 3122,
+                                            :hwm 3122},
+                                      "w4" {:log-start 3072,
+                                            :hwm 3072},
+                                      "w7" {:log-start 3053,
+                                            :hwm 3053},
+                                      "w2" {:log-start 3079,
+                                            :hwm 3079},
+                                      "w3" {:log-start 3145,
+                                            :hwm 3145},
+                                      "w6" {:log-start 3127,
+                                            :hwm 3127},
+                                      "w1" {:log-start 3113,
+                                            :hwm 3113}},
+                                "n5" {"w5" {:log-start 3051,
+                                            :hwm 3051},
+                                      "w0" {:log-start 3122,
+                                            :hwm 3122},
+                                      "w4" {:log-start 3072,
+                                            :hwm 3072},
+                                      "w7" {:log-start 3053,
+                                            :hwm 3053},
+                                      "w2" {:log-start 3079,
+                                            :hwm 3079},
+                                      "w3" {:log-start 3145,
+                                            :hwm 3145},
+                                      "w6" {:log-start 3127,
+                                            :hwm 3127},
+                                      "w1" {:log-start 3113,
+                                            :hwm 3113}}},
+                        :partitions-moved 80,
+                        :log-start-past-hwm []},
+            :valid? true},
+ :stats {:valid? true,
+         :count 50558,
+         :ok-count 48875,
+         :fail-count 1300,
+         :info-count 383,
+         :by-f {:dequeue {:valid? true,
+                          :count 25340,
+                          :ok-count 24482,
+                          :fail-count 858,
+                          :info-count 0},
+                :enqueue {:valid? true,
+                          :count 25208,
+                          :ok-count 24383,
+                          :fail-count 442,
+                          :info-count 383},
+                :watermarks {:valid? true,
+                             :count 10,
+                             :ok-count 10,
+                             :fail-count 0,
+                             :info-count 0}}}}

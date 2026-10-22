@@ -1,0 +1,80 @@
+10:01:21 roll26: OLD=627f1834 NEW=ffd1460b
+10:01:25 0. a fresh cluster of 2.6
+10:01:28     clusterVersion 7 on all three: OK
+10:01:28     n1: 2.6.0-beta.6 follower cv 7 kinds 7 applied 3 lag 0 healthy
+10:01:28     n2: 2.6.0-beta.6 follower cv 7 kinds 7 applied 3 lag 0 healthy
+10:01:29     n3: 2.6.0-beta.6 leader cv 7 kinds 7 applied 3 lag 0 healthy
+10:01:32 1. three nodes on 2.5.0
+10:01:37     n1: 2.5.0 follower cv 7 kinds 7 applied 3 lag 0 healthy
+10:01:37     n2: 2.5.0 follower cv 7 kinds 7 applied 3 lag 0 healthy
+10:01:37     n3: 2.5.0 leader cv 7 kinds 7 applied 3 lag 0 healthy
+10:02:03     history written by 2.5.0: pushErr=0 | pushed=192000
+10:02:03     dup A new: set A new: 2000 items, answers {'queued': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:02:18 2. n3, then n2, move to 2.6
+10:02:27     n1: 2.5.0 leader cv 7 kinds 7 applied 15494 lag 0 healthy
+10:02:27     n2: 2.6.0-beta.6 follower cv 7 kinds 7 applied 15586 lag 0 healthy
+10:02:27     n3: 2.6.0-beta.6 follower cv 7 kinds 7 applied 15705 lag 0 healthy
+10:02:27     cluster version 7 with n1 on 2.5.0: OK
+10:02:28     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:02:28     dup B new: set B new: 2000 items, answers {'queued': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:02:28 3. n3 goes back to 2.5.0, then forward again
+10:02:31     2.5.0 started on a directory 2.6 had written: OK
+10:02:31     n1: 2.5.0 leader cv 7 kinds 7 applied 17199 lag 0 healthy
+10:02:31     n2: 2.6.0-beta.6 follower cv 7 kinds 7 applied 17283 lag 0 healthy
+10:02:31     n3: 2.5.0 follower cv 7 kinds 7 applied 17380 lag 0 healthy
+10:02:32     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:02:33 4. n1 moves: the last 2.5.0 member (leader before: n1)
+10:02:38     every node on 2.6, cluster version 7: OK
+10:02:38     n1: 2.6.0-beta.6 follower cv 7 kinds 7 applied 19114 lag 0 healthy
+10:02:38     n2: 2.6.0-beta.6 follower cv 7 kinds 7 applied 19804 lag 0 healthy
+10:02:38     n3: 2.6.0-beta.6 leader cv 7 kinds 7 applied 19900 lag 0 healthy
+10:02:38 5. after the roll
+10:02:39     dup C new: set C new: 2000 items, answers {'queued': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:02:39     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:02:40     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:02:40     dup C dup: set C dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:08:23     live traffic over the roll (360 s, 4,500 msg/s offered):
+10:08:23     loader via n1: pushErr=116 | pushed=536200 popped=533200 lag=3000 | popErr=324 ackErr=240 
+10:08:23     loader via n2: pushErr=107 | pushed=536380 popped=533860 lag=2520 | popErr=281 ackErr=340 
+10:08:23     loader via n3: pushErr=268 | pushed=533120 popped=539620 lag=-6500 | popErr=954 ackErr=400 
+10:08:23 6. a full stop and start of the cluster on 2.6
+10:08:30     n1: 2.6.0-beta.6 follower cv 7 kinds 7 applied 198573 lag 0 healthy
+10:08:30     n2: 2.6.0-beta.6 leader cv 7 kinds 7 applied 198573 lag 0 healthy
+10:08:30     n3: 2.6.0-beta.6 follower cv 7 kinds 7 applied 198574 lag 0 healthy
+10:08:30     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:08:30     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:08:31     dup C dup: set C dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:09:12     history (written by 2.5.0) read back: popped=192000 popErr=0 
+10:09:12 7. kill -9 of the leader under load
+10:09:42     leader n2 killed
+10:09:51     n1: 2.6.0-beta.6 follower cv 7 kinds 7 applied 217091 lag 0 healthy
+10:09:51     n2: 2.6.0-beta.6 follower cv 7 kinds 7 applied 217187 lag 0 healthy
+10:09:51     n3: 2.6.0-beta.6 leader cv 7 kinds 7 applied 217279 lag 0 healthy
+10:09:51     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:09:52     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:09:52     dup C dup: set C dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:09:53     dup D new: set D new: 2000 items, answers {'queued': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:09:53     dup D dup: set D dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:11:02     loader via n1: pushErr=0 | pushed=133500 popped=125740 lag=7760 | popErr=4 ackErr=0 
+10:11:02     loader via n2: pushErr=546 | pushed=122580 popped=125020 lag=-2440 | popErr=2336 ackErr=0 
+10:11:02     loader via n3: pushErr=0 | pushed=133480 popped=138840 lag=-5360 | popErr=4 ackErr=40 
+10:11:02 8. n3 back on 2.5.0 after 2.6 wrote everything
+10:11:07     2.5.0 on n3's own directory serves: OK
+10:11:07     n1: 2.6.0-beta.6 follower cv 7 kinds 7 applied 243729 lag 0 healthy
+10:11:07     n2: 2.6.0-beta.6 leader cv 7 kinds 7 applied 243729 lag 0 healthy
+10:11:07     n3: 2.5.0 follower cv 7 kinds 7 applied 243730 lag 0 healthy
+10:11:08     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:11:08     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:11:08     dup C dup: set C dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:11:08     dup D dup: set D dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+10:11:11     n1: 2.6.0-beta.6 follower cv 7 kinds 7 applied 243739 lag 0 healthy
+10:11:11     n2: 2.6.0-beta.6 leader cv 7 kinds 7 applied 243740 lag 0 healthy
+10:11:11     n3: 2.6.0-beta.6 follower cv 7 kinds 7 applied 243740 lag 0 healthy
+10:11:11 errors and warnings per node (all starts):
+10:11:12   n1 FATAL/panic/poison/unknown-version lines: 0
+10:11:12   n1:    2993  WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client error (Connect), whe;   2462  WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client err;   1384  WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.48:N/raft/v1/stream: client error (Connect), whe;   1150  WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.48:N/raft/v1/stream: client err;    282 WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client error (Connect), when;    281 WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client erro;    130 WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.48:N/raft/v1/stream: client error (Connect), when;    107 WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.48:N/raft/v1/stream: client erro;
+10:11:13   n2 FATAL/panic/poison/unknown-version lines: 0
+10:11:14   n2:    1705  WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client error (Connect), whe;   1449  WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client err;    174 WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client error (Connect), when;    137 WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client erro;     41  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=2, target=3) failed to send a heartbeat: Err(Elapsed(()));     18 ARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client error (Connect), when:;     16  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=2, target=3) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: c;     15 ARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.54:N/raft/v1/stream: client error;
+10:11:14   n3 FATAL/panic/poison/unknown-version lines: 0
+10:11:15   n3:      28  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=3, target=2) failed to send a heartbeat: Err(Elapsed(()));     25  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=3, target=1) failed to send a heartbeat: Err(Elapsed(()));     16  WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.51:N/raft/v1/stream: client error (Connect), whe;     15  WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.48:N/raft/v1/stream: client error (Connect), whe;     15  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=3, target=1) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: c;     13  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=3, target=2) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: c;     11  WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.48:N/raft/v1/stream: client err;      8  WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.51:N/raft/v1/stream: client err;
+10:11:17 ROLL_DONE

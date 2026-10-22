@@ -1,0 +1,1 @@
+2026-10-21T16:33:11Z binary swapped ff3e7789 -> ffd1460b (2.6.0-beta.6 229a4c3ea) while test 'w11-lock-pause' ran (test 91 of the main list): tests from 92 on, the failover and batch lists and the rolling upgrade run on ffd1460b
