@@ -71,6 +71,9 @@ sourceOfTruth:
 # MSRV and the commands are unchanged. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-22 (2.6.0): Cargo.toml's version is 2.6.0; the toolchain, the MSRV and
 # the commands are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-22 (b09c4e73c): webdoc/package.json gained check:readme, run by verify
+# after check:seo. "One gate" now lists both (check:seo was missing before), and "Code on a page ran"
+# says how the homepage guide and the README take their code from guide:start regions.
 ---
 
 Queen is one repository with one Rust binary at its center: the broker, which links the proxy and
@@ -195,6 +198,12 @@ const res = await client
 `webdoc/src/content/partials/snippets/<id>.mdx`, and a page includes it with
 `<Render file="snippets/js-push" />`. The marker works after any comment prefix (`//`, `#`, `--`).
 
+The homepage's five-minute guide works the same way with its own markers. Each language has one
+program in `examples/tutorials/` (`00-five-minutes` or `five-minutes`) that runs every step, and
+the page shows its `guide:start(<step>)` regions (`webdoc/src/lib/home-guide.ts`). The README's
+condensed guide repeats the JavaScript regions under `<!-- guide: <step> -->` markers: after editing
+the JavaScript program, `node webdoc/scripts/check-readme.mjs --write` copies them in.
+
 **Generated partials are not edited by hand.** The route tables, the environment variables and the
 metric families are read out of the Rust by `webdoc/scripts/gen-*.mjs`; run `pnpm --dir webdoc gen`.
 Where a generator mirrors Rust logic in JavaScript (the access levels, the proxy's route classes),
@@ -202,7 +211,8 @@ it guards the mirror with a fingerprint of the Rust function and refuses to run 
 changes, until someone re-reads it.
 
 **One gate.** `pnpm --dir webdoc verify` runs the generator drift check, the build, the markdown
-and brief checks, the linter, the prose check and the `sourceOfTruth` check.
+and brief checks, the linter, the prose check, the `sourceOfTruth` check, the search-surface check
+and the README check.
 
 ## Rules for benchmarks
 
