@@ -229,7 +229,9 @@ members leave the Overview's lag panel and Workload's lag figures.
 on the same data, with one condition for the way back: a node holding a snapshot it has not swapped
 in yet (a `snapshot.pending` or `snapshot.swapping` that names a `basis`) boots 2.6.0 once more first,
 because 2.5.0 would take that delta for the whole state. 2.5.0 ignores the sidecars and
-`raft/member_holds.json` that 2.6.0 writes.
+`raft/member_holds.json` that 2.6.0 writes. Tested on three GCP VMs under load, with deduplication
+on, and the full Jepsen campaign ran on 2.6.0's code: 257 tests, all valid
+(`benchmark-queen/2026-10-21-jepsen-26`).
 
 ## 2.5.0 - 2026-10-18
 

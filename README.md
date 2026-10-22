@@ -112,7 +112,7 @@ Full details: [queenmq.com/benchmarks](https://queenmq.com/benchmarks/)
 ## Proven
 
 - In production at [Smartness](https://www.smartness.com/en).
-- [257 Jepsen tests](https://queenmq.com/benchmarks/jepsen/) on 2.5, all passed. No acknowledged message lost, no lease held twice.
+- [257 Jepsen tests](https://queenmq.com/benchmarks/jepsen/) on 2.6, all passed. No acknowledged message lost, no lease held twice.
 - Written in Rust. Apache-2.0.
 
 ## Try it

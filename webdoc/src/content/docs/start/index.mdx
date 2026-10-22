@@ -131,8 +131,8 @@ to ten million, with an end-to-end p99 between 17 and 29 ms, and 1,000,000 messa
 second at 17 to 25 ms (GCP nodes with 24 vCPU and local NVMe, 2026-10-15, with Kafka measured on
 the same machines). An exactly-once step of 10 messages commits in 3 to 4 ms at the
 median, and one raft group tops out near 12,900 such transactions a second (16-vCPU nodes, a
-pre-release build, 2026-10-12). The latest full Jepsen campaign, on the code of 2.5.0, ran 257 tests under kill -9,
-partitions, pauses, clock jumps and power loss: all were valid, 256 at their first run
+pre-release build, 2026-10-12). The latest full Jepsen campaign, on the code of 2.6.0, ran 257 tests under kill -9,
+partitions, pauses, clock jumps and power loss: all were valid, 255 at their first run
 ([Jepsen](/benchmarks/jepsen/)). Every number, with its conditions and
 the places where other systems did better, is on [benchmarks](/benchmarks/), and what the
 guarantees cover is on [guarantees](/concepts/guarantees/).

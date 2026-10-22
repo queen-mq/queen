@@ -111,7 +111,9 @@ campaign of 2026-10-15 and 16 ran them again on `ed73dc1cb`, the code of 2.4.0, 
 push several messages of a partition at once: all 257 were valid at their first run. The
 campaign of 2026-10-17 and 18 ran the 257 again on the code of 2.5.0: 256 were valid at their
 first run, and the 257th once the harness stopped counting a damaged node's own refusals to boot
-as panics. The
+as panics. The campaign of 2026-10-21 and 22 ran them on the code of 2.6.0: all 257 were valid,
+255 at their first run, one in four reruns after its first run's final drain ran out of time, and
+one once its history was checked again with the linearizability checker's other search. The
 campaigns before
 them found real bugs,
 which is what they are for: a KV write that was acknowledged and never committed (a stale leader
