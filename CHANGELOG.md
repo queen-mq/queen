@@ -3,6 +3,234 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+Supervisor fixes made after supervisor 0.8.1, which PHP client 2.5.0 pins: they ship with the next
+supervisor release.
+
+**Laravel and supervisor: a SIGTERM during a broker call reaches the workers sooner.** A SIGTERM
+that arrived while the master waited on the broker, for a heartbeat, a depth read or a status
+publish, reached the workers only after the rest of that pass, `http_timeout` per URL for each
+call, so a node drain during a broker outage could outlast `terminationGracePeriodSeconds`. The
+Rust master now runs those calls on a thread that a stop abandons, so its workers get SIGTERM at
+once; a request that panics on that thread is not taken for a stop. The PHP master signals its
+workers from its signal handler, which PHP runs once the call in progress returns: at most one
+`http_timeout` later.
+
+**Laravel and supervisor: a pool is refilled at once after a deploy, and a clean exit is replaced
+while a probe runs.** A worker that exited counted as a scale-up step, so an `auto` pool that lost
+most of its workers at once, as at `queue:restart`, came back one `balance_max_shift` per
+`balance_cooldown`; and while a crash held the restart circuit, no worker was replaced, so workers
+that stopped at `--max-time` left the pool shrinking to the probe. In both engines a worker that
+left as expected (at `queue:restart`, its memory limit or Laravel's job timeout, or after it ran
+`stable_after`) is now replaced outside the budget and whatever the circuit says, up to the size
+the pool had. Any other exit, even with status 0, waits for both as before: Laravel's worker exits
+0 when it loses its database, every second through an outage. A scale-down that stops the probe
+keeps the circuit's failure count.
+
+**Laravel and supervisor: a master that is PID 1 reaps the orphans it inherits.** In a container
+with no init process, as a Kubernetes pod is, a process a job started and left behind, or the lease
+helper of a killed worker, reparents to the master, and its zombie kept a pid until the container
+had none left to start a worker with. On Linux, both engines now reap every zombie child they do
+not track when they are PID 1, and the Rust master also when it is a child subreaper; their own
+workers and fork servers keep their exit statuses.
+
+**Laravel and supervisor: a status that cannot be written no longer drains every worker.** One
+failed write of `status.json`, on a full or failing disk, stopped the master and drained every
+worker. The workers now keep running and the write is retried every pass, while the probes see the
+status grow stale; the master stops once the writes have failed for `heartbeat_timeout`. A failure
+of the state directory's ownership or generation still stops it at once.
+
+**Laravel and supervisor: a fork server that failed to boot is not booted again at every exit.**
+After `queue:restart` each worker that stopped for it asked for a new fork server, and one that
+failed to boot was booted again each time, blocking the master for up to a minute per boot. After a
+failed boot the next one now waits 60 seconds, doubling to 15 minutes; the requests meanwhile share
+one boot, and workers are spawned in the meantime. With prefork on and the exit markers disabled,
+the Rust master's warning now says that `queue:restart` goes unseen.
+
+**Supervisor: a SIGTERM during start-up, and a closed stderr, no longer cost the workers.** The
+signal handler was installed after the configuration export, which runs Artisan and may take a
+minute; a master that is PID 1 ignores a signal it does not handle, so a SIGTERM during the export
+was lost and the workers it then started were killed at the platform's deadline. The handler now
+comes first, and a stop during the export ends the master before it starts a worker. And the
+master logged with `eprintln!`, which panics when stderr is a pipe whose reader is gone; the panic
+ended the master and, through `PR_SET_PDEATHSIG`, every worker. A line it cannot write is now
+dropped.
+
+**Supervisor: a bad control request is discarded instead of stopping the master.** A control
+document that was expired, malformed or dated in the future by a clock step made the Rust master
+drain every worker and exit. It is now removed with one log line and supervision goes on, as in the
+PHP engine; one that cannot be removed still stops the master, as a fault of the state directory.
+
+## 2.6.0 - 2026-10-22
+
+**The Kafka facade is a translation layer onto Queen, rewritten from scratch.** The first facade
+kept its own registry, fences, producer windows, group coordinator, transaction stages and config
+mirror beside the broker. 2.6's maps each Kafka request onto what Queen already does, inside the
+broker process: a produce is a push, a fetch reads at an offset without a lease, a committed offset
+is the Queen consumer group's position. In a cluster the raft leader leads every partition and
+coordinates every group and transaction, and the other nodes point clients at it. A group's
+membership lives in the leader's memory: after a leader change the members rejoin and resume from
+their committed offsets, and a group with no members leaves that memory ten minutes after its last
+member did. An idempotent producer's records carry the transaction id `k<producer id>.<epoch>.<sequence>`,
+so a batch sent again inside the topic's dedup window writes nothing: topics the facade creates get a
+window of 15 minutes (`QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`). A transaction is held on the leader and
+committed as one Queen transaction, its pushes and its offsets together. CreateTopics applies
+`retention.ms` and `cleanup.policy` to the topic's queue, and refuses a value it cannot apply with
+`INVALID_CONFIG`. The leader writes each group's members to the key-value store every 15 seconds and
+at once when they change, which is how the broker's group listing and the console see Kafka groups.
+Measured against 2.5.0's facade on three 24-vCPU nodes (2026-10-20): both carry 500,000 msg/s of
+1 KB records (2.6 end-to-end p50/p99 10.1/15.0 ms); at 1,000,000 msg/s 2.6 pushes 30% less, because
+it takes produce on the leader only, where 2.5.0's followers relayed theirs. Not offered in 2.6:
+AlterConfigs, IncrementalAlterConfigs, OffsetDelete, DescribeLogDirs, the ACL calls and a TLS
+listener (terminate TLS in front of the Kafka port). The standalone facade binary is gone, and so are
+the settings only the first facade read: `QUEEN_KAFKA_PIPELINE`, `QUEEN_KAFKA_RELAY`,
+`QUEEN_KAFKA_COALESCE`, `QUEEN_KAFKA_OFFSET_STORE`, `QUEEN_KAFKA_NODE_ID`, `QUEEN_KAFKA_CLUSTER`,
+`QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS`, `QUEEN_KAFKA_CLUSTER_TTL_MS`, `QUEEN_KAFKA_MAX_PARTITIONS`,
+`QUEEN_KAFKA_MAX_PRODUCER_STATES`, `QUEEN_KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS`,
+`QUEEN_KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS`, the `QUEEN_KAFKA_TXN_MAX_*` limits,
+`QUEEN_KAFKA_TLS_KEY` and `QUEEN_KAFKA_FORWARD_SNI_HOST`. New: `QUEEN_KAFKA_AUTO_CREATE`,
+`QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`, `QUEEN_KAFKA_MAX_REQUEST_BYTES` and `QUEEN_KAFKA_PEERS`.
+Topics and their records are queues and do not move; during the upgrade Kafka clients reconnect,
+groups rejoin and transactions open on the old facade abort.
+
+**A member that comes back recovers from the leader's log or from a delta, not from the whole
+state.** The leader keeps its log for a member that is away (`QUEEN_RAFT_MEMBER_HOLD_S`, 6 hours by
+default, ended sooner by `QUEEN_RAFT_MEMBER_HOLD_DISK_PCT`, the disk's low mark), so a member that
+restarts, or is moved by a node upgrade, catches up from the log. When the log no longer reaches it,
+the leader first asks where the member's log stands (`POST /raft/v1/snapshot/basis`) and, with the
+same queue-log layout, sends the store and only the records above that point, which the member
+appends byte for byte. A snapshot carries the sealed files' indexes, so the receiver no longer reads
+every file to rebuild them, and a boot maps the indexes without reading them and checks them in the
+background. The leader builds nothing for a member that is down, refuses at once a member that is
+still starting instead of waiting on it, and backs off its reconnects (50 ms doubling to 1 s) instead
+of opening about 4,000 a second. On three GCP nodes holding 521 GB each (2026-10-20), a member away
+for five minutes came back with a 1.14 GB delta, appended in 1.3 s, and was healthy 28 s after it
+started, where 2.5.0 sent it the whole state (566 GB, 15 minutes). On stage under a Kafka load
+(2026-10-21), a killed leader's cluster was whole again in 47 s (141 s on 2.5.1), and none of six
+restart and kill tests needed a snapshot.
+
+**A restart refills the dedup rows from a sidecar per file, not from the files.** On those nodes
+nine tenths of a restart went into reading the queue logs for the hash lists behind the dedup rows:
+310 GB read in 300 s for lists under a gigabyte. Every sealed file now gets a sidecar, `r<id>.qhsh`
+(each message record's offset, partition, base, count, stamp and hashes, with checksums), built off
+the log writer's path and written in steps it waits for; a boot reads a sidecar that is whole and
+matches its file, and the file otherwise. Paired cold restarts of 254 GB nodes (2026-10-21): the
+refill took 20 s reading 0.7 to 1.4 GB with sidecars, against 171 to 201 s reading 185 to 217 GB
+without, and the node was healthy after 30 to 33 s against 186 to 240 s. The sidecars cost about
+16 bytes a message on disk (147 to 163 in the 3,000,000 msg/s benchmark), and latencies are 2.5.0's.
+`QUEEN_QLOG_HASH_SIDECARS=0` turns them off. The first boot of 2.6.0 still reads every sealed file
+once, and writes their sidecars.
+
+**Raft: three fixes found while testing the recovery above.** A node binds its raft port at the start
+of its boot and listens only once its raft core exists, and a port another process already holds
+fails the open instead of leaving the node up and deaf. A member's 404 to the snapshot question is
+read from the answer's status: a member that refuses it is a node before 2.6 and gets the whole state.
+A replication stream that asks for entries the leader purged since it chose them now sends a heartbeat
+instead of entries that do not follow their `prev_log_id`; only a member back with an empty data
+directory could start that race, and in a release build the member refused the request.
+
+**Empty partitions can go within the hour: `PARTITION_CLEANUP_SECONDS`.** `PARTITION_CLEANUP_DAYS`
+counts whole days, at least one, so a workload that opens a partition per entity kept a day of empty
+ones in memory and in every retention round. `PARTITION_CLEANUP_SECONDS`, when set, replaces it (at
+least 60), and whatever the setting a partition is never deleted inside its queue's dedup window, so
+a repeated push is still recognized. The cleanup's check for a stream query's state seeks each query
+instead of reading all of them, which a short age makes matter. On a production cluster with one
+partition per trace, 3600 took the partitions from 520,857 to 151,120 within 40 s of the first 2.6
+leader.
+
+**A queue's status can be read without its partitions.** `GET /api/v1/status/queues/:queue` with
+`includePartitions=false` answers the queue's totals, its partition count and consumed total
+included, without per-partition rows or the dead-letter scan; the default answer is unchanged. The
+console's queue page asks for it on large queues and draws aggregate seeds, so a queue with 100,000
+partitions no longer sends 44 MB to every refresh (835 bytes with the summary). From
+queen-mq/queen#141 by albertovincenzi.
+
+**Every SDK reads a partition by offset and lists the partitions written since a time.** Two queue
+methods wrap `POST /api/v1/fetch` and `POST /api/v1/partitions/changed`, which only the Kafka facade,
+the S3 sink and hand-written HTTP calls used until now. `fetch(partitions)` (Go `Fetch`) reads every
+record of the named partitions, from the oldest one still kept or from given offsets, up to where each
+partition ended when the call first read it: 1000 partitions per request, asked again until each one is
+read. Each partition answers its records with their offsets, transaction ids, payloads and push times,
+its high watermark, its log start, and the offset to start from next time. `changedSince(since)`
+(`changed_since` in Python, Rust and C++, `ChangedSince` in Go) lists the partitions written at or after
+a time, every page of them, in creation order, with the answer's `safeTime` to pass as the next
+`since`. Neither takes a lease, moves a cursor or needs an ack. A loop that reads a partition from
+offset 0 by hand reads nothing once retention has moved the partition's start, because the broker
+answers an offset below `logStartOffset` with `OFFSET_OUT_OF_RANGE` and no records; `fetch` goes on
+from `logStartOffset`. The methods ship in the 2.6.0 clients (all six, PHP included). Any 2.x broker
+serves both routes; one before 2.3.0 ignores the byte ceiling of a request.
+
+**Server: the consumer-group listing reports a Kafka group by its members.**
+`GET /api/v1/consumer-groups` gives a group the Kafka facade's rows name `kind: "kafka"`, and every
+row three new fields, null on a native group: `liveMembers`, `lastSeenAt` and `inactiveSeconds` (0
+while the queue is read for the group, else the seconds since it was last seen read). With presence, a
+Kafka group's `state` is `Stable` or `Lagging` (past 300 s of lag) while members read the queue and
+`Empty` when none does; a group whose members died is `Empty` three intervals after its last
+presence write, judged on the broker's clock. A Kafka group without presence (a facade before
+2.6) is reported as before. The group detail and the lagging list carry the same `kind`,
+and `GET /api/v1/resources/queues` marks a queue the facade created with `kafkaTopic: true`. The
+broker reads the facade's rows when it answers: no replicated row or command changes, and a native
+group's row only gains the three null fields.
+
+**Server: `retryDelay` is enforced.** After a `failed` ack that leaves retries, the message comes
+back once the queue's `retryDelay` (milliseconds) has passed, and its partition waits with it for
+that consumer group, so nothing behind the message overtakes it; a pop that names the partition
+waits too. Every version up to 2.5.0 stored the option, echoed it, and redelivered at once. A queue
+created by a push, or by `/configure` without the option, stores 1000: after the upgrade a failed
+message comes back about a second later there, and `retryDelay: 0` keeps the old behaviour. A
+`retry` ack, an expired lease and a dead-lettered message do not wait, and a `failed` ack inside a
+transaction waits from the commit. The wait lives in the leader's memory: after a leader change the
+message comes back at once. The console's queue editor now offers the option beside the retry
+limit, and the queue page no longer marks it as not enforced.
+
+**Server: an ephemeral pop no longer sleeps through a push that lands as it parks.** A waiting
+`/api/v1/ephemeral/pop` looked at its partitions and only then registered for a wake, so a push
+landing between the two woke nothing and the pop answered at its own timeout, with the message
+there all along. On 2.5.0, with 16 requesters and a new inbox per request, about one reply in 950
+came back at the pop's 2 s timeout; with one inbox per requester, one in 28,000. The pop now
+registers before it looks. Durable pops wait in the consumption engine and were not affected.
+
+**Console: a queue read by Kafka consumers shows its reads, and a chart missing a node says so.** The
+records the in-process Kafka facade serves to Fetch requests were counted nowhere, so a topic read
+only by Kafka consumer groups showed pushes and no consumption on the Overview, and Workload showed
+nothing for Kafka topics at all. Each node now counts the records its facade's fetches return, per
+queue and minute, beside the pops it already counted: `/api/v1/analytics/queue-ops` answers them as
+`fetchMessages` and `fetchPerSecond`, `/api/v1/analytics/workload` as `window.fetchMessages` and
+`series.fetch`, and the console charts a "Fetch (Kafka)" line on the Overview and a "Fetched (Kafka)"
+figure in Workload. Each record a fetch returns also counts as a pop, with its lag, and a commit that
+moves a group past N records counts N acks and adds N to the group's consumed total, so two Kafka
+groups reading one topic count its records twice, as two native groups' pops do. Dashboard rows are kept by the node that
+served the traffic and gathered from the others on every read; a node that did not answer within the
+gather's 1.5 s, as during a rolling restart, used to leave its rows out without a word, and on stage
+(2026-10-19) the Overview read about 1 push a second instead of 1,500 while the leader restarted.
+Gathered answers now name the nodes that did not answer in `nodesMissing`, the node logs it at most
+once a minute per peer, and the console shows a "Partial" chip naming them.
+
+**Console: a Kafka group is a reader while it has members, and inactive after a grace.** A Kafka
+group with live members counts as its topic's reader and is judged by its lag like any group. One
+with no member is still judged by its lag for 15 minutes (a restart, a rebalance, a crash not yet
+called), then shown as inactive on Consumer groups, with when it was last seen, and no longer
+reported as an issue; Settings moves the grace (**Inactive after**) for the tenant or one queue.
+A queue is flagged "No reader" only when no consumer group is on it and it is not a topic the Kafka
+facade created: on a queue with groups, each group answers for itself. "No reader is expected"
+still silences a queue that holds messages nobody is meant to read.
+
+**Console: Workload opens on a broker with no queues.** A tenant without queues is `"tenant": {}` in
+the workload answer, and the page stopped on "Interface error: Cannot read properties of undefined
+(reading 'groups')" on every fresh broker. It now shows zeros until the first queue exists.
+Reported in queen-mq/queen#140.
+
+**Console: the time filters offer 12 hours, and sign-in recovers from a Google error.** From
+queen-mq/queen#139 by albertovincenzi. A Kafka record is shown decoded in the message drawer, and Kafka groups with no
+members leave the Overview's lag panel and Workload's lag figures.
+
+**The cluster version stays 7.** A cluster rolls from 2.5.0 to 2.6.0 one node at a time, and back
+on the same data, with one condition for the way back: a node holding a snapshot it has not swapped
+in yet (a `snapshot.pending` or `snapshot.swapping` that names a `basis`) boots 2.6.0 once more first,
+because 2.5.0 would take that delta for the whole state. 2.5.0 ignores the sidecars and
+`raft/member_holds.json` that 2.6.0 writes.
+
 ## 2.5.0 - 2026-10-18
 
 **The Kafka facade carries 1,000,000 msg/s on the OpenMessaging Benchmark, with the stock Java
@@ -121,185 +349,7 @@ keeps its older messages encrypted, so its answers stay JSON, decrypted, until t
 With a key, a framed pop reads the flags of each record's messages, one decompression per record;
 without one nothing changes.
 
-## Unreleased
-
-**Every SDK reads a partition by offset and lists the partitions written since a time.** Two queue
-methods wrap `POST /api/v1/fetch` and `POST /api/v1/partitions/changed`, which only the Kafka facade,
-the S3 sink and hand-written HTTP calls used until now. `fetch(partitions)` (Go `Fetch`) reads every
-record of the named partitions, from the oldest one still kept or from given offsets, up to where each
-partition ended when the call first read it: 1000 partitions per request, asked again until each one is
-read. Each partition answers its records with their offsets, transaction ids, payloads and push times,
-its high watermark, its log start, and the offset to start from next time. `changedSince(since)`
-(`changed_since` in Python, Rust and C++, `ChangedSince` in Go) lists the partitions written at or after
-a time, every page of them, in creation order, with the answer's `safeTime` to pass as the next
-`since`. Neither takes a lease, moves a cursor or needs an ack. A loop that reads a partition from
-offset 0 by hand reads nothing once retention has moved the partition's start, because the broker
-answers an offset below `logStartOffset` with `OFFSET_OUT_OF_RANGE` and no records; `fetch` goes on
-from `logStartOffset`. The methods ship in the 2.6.0 clients (all six, PHP included). Any 2.x broker
-serves both routes; one before 2.3.0 ignores the byte ceiling of a request.
-
-**Kafka facade: a node that restarts inside a raft cluster no longer leaves a third of the consumer
-groups without a coordinator.** A restarting broker's facade claimed its node id at boot, which makes
-its peers send it its share of the groups on their next read, and only then read its first view of the
-cluster, which waits for its raft log to catch up (20 to 55 s on stage). For that time those groups
-had no coordinator: the peers redirected them to the node, and the node answered
-COORDINATOR_NOT_AVAILABLE. Consumers stopped for 27 to 143 s per restarted node during a rolling
-restart (stage, 2026-10-20). The first view is now read before the claim, so the groups move when the
-node can coordinate them; a node whose first view takes longer than 60 s binds and serves produce, but
-writes its row only once the view is in. Without that, a node still catching up was advertised again
-as soon as it claimed: at the stage traffic peak one node's reads took 94 s and another's over a
-minute, its peers sent it a third of the groups and of the partition leaderships, it refused the
-fetches its log could not answer yet, and consumers fell up to 270 s behind. A node that no longer
-owns a group now answers the members parked in its rebalance NOT_COORDINATOR at once, instead of
-holding them until a session timeout (up to 30 s more). The registry row a node deletes when it stops
-gets a second try inside a 4 s budget, and every change of the live set is logged.
-
-**Console: a queue read by Kafka consumers shows its reads, and a chart missing a node says so.** The
-records the in-process Kafka facade serves to Fetch requests were counted nowhere, so a topic read
-only by Kafka consumer groups showed pushes and no consumption on the Overview, and Workload showed
-nothing for Kafka topics at all. Each node now counts the records its facade's fetches return, per
-queue and minute, beside the pops it already counted: `/api/v1/analytics/queue-ops` answers them as
-`fetchMessages` and `fetchPerSecond`, `/api/v1/analytics/workload` as `window.fetchMessages` and
-`series.fetch`, and the console charts a "Fetch (Kafka)" line on the Overview and a "Fetched (Kafka)"
-figure in Workload. A fetch takes no lease and is never acked, so two Kafka groups reading one topic
-count its records twice, as two native groups' pops do. Dashboard rows are kept by the node that
-served the traffic and gathered from the others on every read; a node that did not answer within the
-gather's 1.5 s, as during a rolling restart, used to leave its rows out without a word, and on stage
-(2026-10-19) the Overview read about 1 push a second instead of 1,500 while the leader restarted.
-Gathered answers now name the nodes that did not answer in `nodesMissing`, the node logs it at most
-once a minute per peer, and the console shows a "Partial" chip naming them.
-
-**Kafka facade: an idempotent producer survives a rolling restart of a cluster, and a batch behind a
-failed one is never acknowledged in its place.** In a cluster, a producer's batches for one partition
-reach whichever facade serves them at the moment: the raft leader's through the followers' relays, a
-follower's own for the second after a restart in which it does not know the leader yet, the next
-leader's after a change. So a facade can hold a sequence window another facade has since moved past,
-and the producer's next batch then looks like a gap in it. Stage, 2026-10-19: node 0 came back, served
-one producer's batches 18556 to 18600 itself, learned the leader a second later and relayed 18601 to
-node 2, whose window from before still expected 18556. Node 2 refused the gap
-`OUT_OF_ORDER_SEQUENCE_NUMBER`, which librdkafka treats as fatal for the oldest batch it waits on, and
-four producers of the load test stopped for good. A clustered facade now restarts a held window on a
-gap, as it already did for a lost one, and writes a batch below its window that it did not append
-itself rather than answering it `DUPLICATE_SEQUENCE_NUMBER` (a success to every client, for records
-that may never have been written). A facade on its own keeps Apache Kafka's answers to both, because
-nothing else writes its partitions. What keeps a gap that IS one from being read as a window that fell
-behind is the connection: an idempotent batch that is not written, for any reason but being a
-duplicate, is answered and the connection is closed after the answer (a push that failed on the
-leader's pipelined path closes it without an answer), so nothing the client sent behind it is read,
-relayed or served anywhere, and the client sends again, in order, from its oldest unanswered batch.
-Requests read together with it (a coalesced or pipelined group) are staged up to it and no further,
-and a follower that relayed it reads the leader's answer and ends its client's connection with the
-relay, so the next batch cannot reach a new leader, or the follower itself, ahead of the resend. A
-single facade that held the producer's window keeps the connection when a push fails, since the batch
-behind is then refused as a gap, as Kafka refuses it (no reconnect per throttled produce). A
-transaction's batch is exempt: it is staged rather than written, and closing its connection would
-orphan the transaction; instead a transaction's window never starts past sequence 0 on a single
-facade, so the batch behind a refused one is refused too, rather than starting a window under which
-the refused batch's retry would be answered as a duplicate. A batch that follows one still in flight
-on another connection (a client that reconnected while its old connection's push runs) is refused
-retriably rather than pushed with nothing ordering it behind that push. A late batch the window writes
-from below goes where its sequence puts it rather than becoming the newest, and a late commit of a
-session the producer has since bumped past no longer enters the new session's window. This also closes
-a hole the earlier fix opened: a facade with no window whose first push for a producer failed accepted
-the batch behind it, and then answered the failed batch's resend as a duplicate, which the client
-counts as delivered. A connection that switches between relaying its produce and serving it locally
-now drains what is in flight first, and a pipelined produce dropped before its push no longer leaves
-batches in the in-flight list. `/status` counts the restarts (`producers.resynced`) and the
-connections closed because a produce was not written (`consume.produceResendCloses`). A client that
-goes away with pushes in flight no longer has them written twice when it resends: they land anyway, so
-the node commits them to the window off the connection and the resend is answered as the duplicate it
-is. A follower no longer waits for ever for a leader that vanished without closing the relay (60 s,
-past every client's request timeout), and opens a new relay when the leader closed an idle one instead
-of failing the client's next produce. Measured on `compat/cluster/rig-embedded.sh` (three raft brokers
-with the facade in process) under eight idempotent librdkafka producers: the code on stage reproduced
-the fatal error (one producer stopped for good); this one, over six runs of rolling restarts and
-leader kills, lost nothing, kept every producer's order and never failed a send fatally. Upgrading a
-cluster from 2.5.1 or earlier is itself a rolling restart in which not-yet-upgraded nodes still refuse
-a gap: stop or pause librdkafka producers during that one rollout, or accept that some may stop and
-need a restart; the rollouts after it are covered.
-
-**Kafka facade: a consumer that commits asynchronously no longer starves its own heartbeats.** A
-connection is answered one request at a time, and every commit of a group waits for that group's
-fenced write. A member committing with `commitMessage`/`commitAsync` at prod's own rate, 80 commits a
-second, queued commits faster than they were written at the stage traffic peak. Its heartbeats waited
-behind the queue past `session.timeout.ms`, and the group fell out for a minute, twice (2026-10-19
-21:51 and 21:55). OffsetCommit requests already buffered on a connection are now answered from one
-write per group, in order, each checked on its own, the last commit of a partition winning as it
-would one by one. The longer the queue, the bigger the write, so a backlog drains instead of growing.
-`QUEEN_KAFKA_COMMIT_COALESCE` (default 64, 1 to 256) bounds how many are read together, and 1 restores
-one write per commit. `/status` counts them (`consume.commitCoalesced`).
-
-**Kafka facade: an idempotent librdkafka producer survives a restart or a leader change.** The
-facade keeps each producer's sequence window in the memory of the node that writes its batches, so
-a restart, a leader change, an eviction or a connection that moves to another node loses it. The
-producer's next batch was answered `OUT_OF_ORDER_SEQUENCE_NUMBER`, for the client to bump its epoch
-(KIP-360). Java and franz-go do; librdkafka (2.15.1), under the Node, Python, Go, .NET, Ruby and PHP
-clients, treats that answer on the oldest batch it is waiting for as fatal, and every send after it
-failed `Local: Fatal error` until the application restarted the producer (stage, 2026-10-19: a
-rolling restart stopped every producer of a load test). The batch is now accepted whatever its
-sequence and the window starts again from it, which is what Apache Kafka does for a producer whose
-state it no longer holds (measured against 3.9.1: the differential's `unknown_producer` row no
-longer differs). The producer sees no error; up to the five batches it had in flight can be written
-twice, the bound the docs already stated. A gap inside a window the facade holds is still refused.
-The facade's `/status` counts these restarts per producer-partition (`producers.resumed`) and the
-node logs one line a minute while they happen. `compat/node-librdkafka` now restarts the facade
-under an idempotent producer with four requests in flight when `QUEEN_KAFKA_RESTART_CMD` is set:
-0 fatal errors, nothing lost.
-
-**Kafka facade: a consumer group's members are visible to the broker.** A Kafka consumer commits
-positions and takes no lease, so nothing the broker keeps said it was there: the consumer-group
-listing called every Kafka group `Dead` while it read, and the console reported its topic as having
-no reader (stage, 2026-10-19: about 70 groups reading through the facade with a 2 s lag, every one
-`Dead`). While a group's members heartbeat, the facade now writes the group's presence to the
-tenant's key-value store (`queen-kafka` / `qk:live:<group>`): its members and the topics they
-subscribe to, every `QUEEN_KAFKA_GROUP_PRESENCE_MS` (15 s), at once when a rebalance completes or
-the last member leaves, and, for a group of `assign()` consumers, which has no members, while it
-commits. It is one KV write per live group per interval; `0` turns it off. DeleteGroups removes the
-row with the group.
-
-**Server: the consumer-group listing reports a Kafka group by its members.**
-`GET /api/v1/consumer-groups` gives a group the Kafka facade's rows name `kind: "kafka"`, and every
-row three new fields, null on a native group: `liveMembers`, `lastSeenAt` and `inactiveSeconds` (0
-while the queue is read for the group, else the seconds since it was last seen read). With presence, a
-Kafka group's `state` is `Stable` or `Lagging` (past 300 s of lag) while members read the queue and
-`Empty` when none does; a group whose members died is `Empty` three intervals after its last
-presence write, judged on the broker's clock. A Kafka group without presence (an older facade, or
-presence off) is reported as before. The group detail and the lagging list carry the same `kind`,
-and `GET /api/v1/resources/queues` marks a queue the facade created with `kafkaTopic: true`. The
-broker reads the facade's rows when it answers: no replicated row or command changes, and a native
-group's row only gains the three null fields.
-
-**Console: a Kafka group is a reader while it has members, and inactive after a grace.** A Kafka
-group with live members counts as its topic's reader and is judged by its lag like any group. One
-with no member is still judged by its lag for 15 minutes (a restart, a rebalance, a crash not yet
-called), then shown as inactive on Consumer groups, with when it was last seen, and no longer
-reported as an issue; Settings moves the grace (**Inactive after**) for the tenant or one queue.
-A queue is flagged "No reader" only when no consumer group is on it and it is not a topic the Kafka
-facade created: on a queue with groups, each group answers for itself. "No reader is expected"
-still silences a queue that holds messages nobody is meant to read.
-
-**Console: Workload opens on a broker with no queues.** A tenant without queues is `"tenant": {}` in
-the workload answer, and the page stopped on "Interface error: Cannot read properties of undefined
-(reading 'groups')" on every fresh broker. It now shows zeros until the first queue exists.
-Reported in queen-mq/queen#140.
-
-**Server: `retryDelay` is enforced.** After a `failed` ack that leaves retries, the message comes
-back once the queue's `retryDelay` (milliseconds) has passed, and its partition waits with it for
-that consumer group, so nothing behind the message overtakes it; a pop that names the partition
-waits too. Every version up to 2.5.0 stored the option, echoed it, and redelivered at once. A queue
-created by a push, or by `/configure` without the option, stores 1000: after the upgrade a failed
-message comes back about a second later there, and `retryDelay: 0` keeps the old behaviour. A
-`retry` ack, an expired lease and a dead-lettered message do not wait, and a `failed` ack inside a
-transaction waits from the commit. The wait lives in the leader's memory: after a leader change the
-message comes back at once. The console's queue editor now offers the option beside the retry
-limit, and the queue page no longer marks it as not enforced.
-
-**Server: an ephemeral pop no longer sleeps through a push that lands as it parks.** A waiting
-`/api/v1/ephemeral/pop` looked at its partitions and only then registered for a wake, so a push
-landing between the two woke nothing and the pop answered at its own timeout, with the message
-there all along. On 2.5.0, with 16 requesters and a new inbox per request, about one reply in 950
-came back at the pop's 2 s timeout; with one inbox per requester, one in 28,000. The pop now
-registers before it looks. Durable pops wait in the consumption engine and were not affected.
+## PHP client 2.5.0 - 2026-10-14
 
 **Laravel: a job whose timeout its lease cannot cover fails alone.** Without lease renewal, a job
 whose own `$timeout` is 0 or at least `retry_after` was refused at every delivery: it never ran,
@@ -320,46 +370,6 @@ once its lease expired. The text is now made valid UTF-8 and bounded to 8 KiB.
 worker, and that ACK used the ordinary client: up to 90 seconds on one URL, and an exception that
 landed in the job's code. The handler now makes one bounded attempt of 2 seconds that never throws;
 if it fails, the lease expires and the broker delivers the job again, past its tries.
-
-**Laravel and supervisor: a SIGTERM during a broker call reaches the workers sooner.** A SIGTERM
-that arrived while the master waited on the broker, for a heartbeat, a depth read or a status
-publish, reached the workers only after the rest of that pass, `http_timeout` per URL for each
-call, so a node drain during a broker outage could outlast `terminationGracePeriodSeconds`. The
-Rust master now runs those calls on a thread that a stop abandons, so its workers get SIGTERM at
-once; a request that panics on that thread is not taken for a stop. The PHP master signals its
-workers from its signal handler, which PHP runs once the call in progress returns: at most one
-`http_timeout` later.
-
-**Laravel and supervisor: a pool is refilled at once after a deploy, and a clean exit is replaced
-while a probe runs.** A worker that exited counted as a scale-up step, so an `auto` pool that lost
-most of its workers at once, as at `queue:restart`, came back one `balance_max_shift` per
-`balance_cooldown`; and while a crash held the restart circuit, no worker was replaced, so workers
-that stopped at `--max-time` left the pool shrinking to the probe. In both engines a worker that
-left as expected (at `queue:restart`, its memory limit or Laravel's job timeout, or after it ran
-`stable_after`) is now replaced outside the budget and whatever the circuit says, up to the size
-the pool had. Any other exit, even with status 0, waits for both as before: Laravel's worker exits
-0 when it loses its database, every second through an outage. A scale-down that stops the probe
-keeps the circuit's failure count.
-
-**Laravel and supervisor: a master that is PID 1 reaps the orphans it inherits.** In a container
-with no init process, as a Kubernetes pod is, a process a job started and left behind, or the lease
-helper of a killed worker, reparents to the master, and its zombie kept a pid until the container
-had none left to start a worker with. On Linux, both engines now reap every zombie child they do
-not track when they are PID 1, and the Rust master also when it is a child subreaper; their own
-workers and fork servers keep their exit statuses.
-
-**Laravel and supervisor: a status that cannot be written no longer drains every worker.** One
-failed write of `status.json`, on a full or failing disk, stopped the master and drained every
-worker. The workers now keep running and the write is retried every pass, while the probes see the
-status grow stale; the master stops once the writes have failed for `heartbeat_timeout`. A failure
-of the state directory's ownership or generation still stops it at once.
-
-**Laravel and supervisor: a fork server that failed to boot is not booted again at every exit.**
-After `queue:restart` each worker that stopped for it asked for a new fork server, and one that
-failed to boot was booted again each time, blocking the master for up to a minute per boot. After a
-failed boot the next one now waits 60 seconds, doubling to 15 minutes; the requests meanwhile share
-one boot, and workers are spawned in the meantime. With prefork on and the exit markers disabled,
-the Rust master's warning now says that `queue:restart` goes unseen.
 
 **Laravel: a supervised worker reports a queue whose pops fail, whatever its other queues do.** A
 pop that worked on any queue, an empty one included, cleared the worker's failure state, so with
@@ -404,20 +414,6 @@ which `consume()` backs off and polls again, as after a network error. A body
 that cannot be encoded as JSON fails at once, with no request sent and no backend marked
 unhealthy; it marked every URL unhealthy and slept through the retries. Asynchronous requests now
 report the health of their backend, so a `consume()` with several workers leaves a dead node.
-
-**Supervisor: a SIGTERM during start-up, and a closed stderr, no longer cost the workers.** The
-signal handler was installed after the configuration export, which runs Artisan and may take a
-minute; a master that is PID 1 ignores a signal it does not handle, so a SIGTERM during the export
-was lost and the workers it then started were killed at the platform's deadline. The handler now
-comes first, and a stop during the export ends the master before it starts a worker. And the
-master logged with `eprintln!`, which panics when stderr is a pipe whose reader is gone; the panic
-ended the master and, through `PR_SET_PDEATHSIG`, every worker. A line it cannot write is now
-dropped.
-
-**Supervisor: a bad control request is discarded instead of stopping the master.** A control
-document that was expired, malformed or dated in the future by a clock step made the Rust master
-drain every worker and exit. It is now removed with one log line and supervision goes on, as in the
-PHP engine; one that cannot be removed still stops the master, as a fault of the state directory.
 
 ## 2.3.0 - 2026-10-14
 

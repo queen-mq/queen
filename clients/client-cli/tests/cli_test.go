@@ -9,7 +9,7 @@
 //	docker run -d --name queen -p 6632:6632 \
 //	  -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
 //	  -v queen-e2e:/var/lib/queen/raft \
-//	  ghcr.io/queen-mq/queen:2.5.0
+//	  ghcr.io/queen-mq/queen:2.6.0
 //	cd clients/client-cli && make build
 //	QUEEN_E2E=1 \
 //	  QUEEN_SERVER=http://localhost:6632 \

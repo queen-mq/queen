@@ -542,10 +542,14 @@ that only once every member runs a release that reads the new version, and from 
 build refuses to boot with `this build reads effect catalogue version N, and the cluster this store
 belongs to writes version M ... never an older one`. 2.0.1 is the first release that raises it,
 from 3 to 4, 2.1.0 raises it from 4 to 5, 2.2.0 from 5 to 6 (2.3.0 does not raise it), and 2.4.0
-from 6 to 7 (2.5.0 does not raise it); to keep a rollback possible
+from 6 to 7 (2.5.0 and 2.6.0 do not raise it); to keep a rollback possible
 while a release bakes, run it with `QUEEN_RAFT_CLUSTER_VERSION_MS=0` and remove that setting once
-you stay. On Kubernetes, a rolling update stalls on a pod
-that cannot become Ready: fix that pod, or change only it with `OnDelete`.
+you stay. Going back from 2.6.0 to 2.5.0 has one more condition: a node that holds a snapshot it has
+not swapped in yet, a `snapshot.pending` or `snapshot.swapping` in its data directory that names a
+`basis`, must boot 2.6.0 once more first. That snapshot is a delta, the runs above the node's own
+log, and 2.5.0 would swap it in as the whole state and lose those runs. 2.5.0 ignores the files only
+2.6.0 writes, the hash sidecars (`*.qhsh`) and `raft/member_holds.json`. On Kubernetes, a rolling
+update stalls on a pod that cannot become Ready: fix that pod, or change only it with `OnDelete`.
 
 Give each stop its time. A stopping node first hands its ephemeral partitions to their next owners
 (up to 15 s), then its leadership (up to 3 s), then lets long-poll pops finish (30 s by default),

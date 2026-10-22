@@ -47,7 +47,7 @@ docker run -d --name queen -p 6632:6632 -p 9092:9092 \
   -v queen-data:/var/lib/queen/raft \
   -e QUEEN_KAFKA_EMBEDDED=true \
   -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 \
-  ghcr.io/queen-mq/queen:2.5.0
+  ghcr.io/queen-mq/queen:2.6.0
 ```
 
 `QUEEN_KAFKA_EMBEDDED=true` starts the Kafka listener inside the broker, on port 9092.

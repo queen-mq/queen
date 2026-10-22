@@ -45,7 +45,7 @@ docker run -d --name pg --network queen-pg -e POSTGRES_PASSWORD=secret \
 docker run -d --name queen --network queen-pg -p 6632:6632 \
   -v queen-data:/var/lib/queen/raft \
   -e QUEEN_ENCRYPTION_KEY=$(openssl rand -hex 32) \
-  ghcr.io/queen-mq/queen:2.5.0
+  ghcr.io/queen-mq/queen:2.6.0
 ```
 
 A table with a nested JSON column, and two rows in it:

@@ -76,12 +76,12 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
 
    ```bash
    docker run -d --name queen -p 6632:6632 \
-     -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.5.0
+     -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.6.0
    curl -s http://localhost:6632/health
    ```
 
    ```json
-   {"status":"healthy","engine":"raft","version":"2.5.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":7,"kinds":7}}
+   {"status":"healthy","engine":"raft","version":"2.6.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":7,"kinds":7}}
    ```
 
    That is the whole installation. There is no database to start first, because the node keeps
@@ -89,7 +89,7 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
    directory when the container is replaced. A single node is a raft group of one, so it reports
    itself as the leader. The image is published for linux/amd64 and linux/arm64, so Docker pulls
    the one built for your machine, an Apple Silicon Mac included. The command pins the version,
-   2.5.0; `latest` names the current release too, but it moves with each one.
+   2.6.0; `latest` names the current release too, but it moves with each one.
 
    If `curl` prints nothing, the node is still starting, and `docker logs queen` says what it is
    doing. The dashboard is on the same port, at `http://localhost:6632`.

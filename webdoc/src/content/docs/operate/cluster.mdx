@@ -192,7 +192,7 @@ name: queen-cluster
 
 x-node: &node
   # QUEEN_VERSION in .env picks another release (README.md: rolling upgrade).
-  image: ghcr.io/queen-mq/queen:${QUEEN_VERSION:-2.5.0}
+  image: ghcr.io/queen-mq/queen:${QUEEN_VERSION:-2.6.0}
   # A node that was away long enough to need a snapshot exits with code 75 to
   # load it at start; the restart policy brings it back.
   restart: unless-stopped
@@ -410,6 +410,13 @@ while one node still ran 2.3.0, rose to 7 three seconds after the last one moved
 again, also after a full restart (`benchmark-queen/2026-10-15-jepsen-24`).
 
 2.5.0 leaves the cluster at version 7: a cluster rolls from 2.4.0 to 2.5.0 one node at a time.
+
+2.6.0 leaves it at version 7 too: a cluster rolls from 2.5.0 to 2.6.0 one node at a time, and the
+two releases replicate to each other while it does. A 2.6.0 leader asks a member where its log
+stands before it builds a snapshot for it and sends only what the member lacks, a delta; a 2.5.0
+member does not answer that question and gets the whole state, as before
+([recovery](/operate/recovery/)). The first boot of 2.6.0 reads every sealed queue-log file once,
+as a 2.5.0 boot does, and writes the hash sidecars (`r<id>.qhsh`) the boots after it read instead.
 
 ## Ephemeral queues in a cluster
 

@@ -70,7 +70,7 @@ jobs:
           -e QUEEN_PROXY_BOOTSTRAP_TENANT=acme -e QUEEN_PROXY_DEFAULT_CLUSTER=acme \
           -e QUEEN_PROXY_BOOTSTRAP_API_KEY=qk_test_$(openssl rand -hex 16) \
           -e QUEEN_S3_EMBEDDED=true \
-          ghcr.io/queen-mq/queen:2.5.0
+          ghcr.io/queen-mq/queen:2.6.0
         for i in $(seq 1 60); do
           [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:6632/health)" = 200 ] && exit 0
           sleep 1

@@ -14,7 +14,7 @@ second. Every customer, order or conversation gets its own ordered partition. Ev
 takes is saved as one commit, or not at all. One binary, no database, and Kafka clients work with
 it out of the box.
 
-[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.5
+[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.6
 
 </div>
 
@@ -95,6 +95,7 @@ it to disk (fsync). Kafka, Pulsar and Redpanda ran on the same machines.
 - [**1M msg/s**](https://queenmq.com/benchmarks/queen-vs-kafka/#1000000-msgs-of-1-kb-messages) of 1 KB messages (about 1 GB/s), p99 16-22 ms.
 - [**5M msg/s**](https://queenmq.com/benchmarks/queen-vs-kafka/#the-ceiling-at-1000-partitions) on one queue at most.
 - **100 GB of lag drained in 32 seconds** (3.4 GB/s).
+- [**28 s**](https://queenmq.com/operate/recovery/#a-node-crashed-or-restarted) for a node away five minutes to rejoin a cluster holding 521 GB a node: it gets only what it missed, a 1.1 GB delta, and a restart reads hash sidecars instead of its logs (20 s where it took 171 to 201 s).
 - [**4 ms**](https://queenmq.com/benchmarks/transactions/) p99 for a 10-message transaction, at 6,000 transactions per second.
 
 <picture>
@@ -117,7 +118,7 @@ Full details: [queenmq.com/benchmarks](https://queenmq.com/benchmarks/)
 ## Try it
 
 ```bash
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.5.0
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
 ```
 
 Push your first message:

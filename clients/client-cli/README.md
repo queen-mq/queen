@@ -225,7 +225,7 @@ Running the full suite locally:
 docker run -d --name queen -p 6632:6632 \
   -e RETENTION_INTERVAL=2000 \
   -v queen-e2e:/var/lib/queen/raft \
-  ghcr.io/queen-mq/queen:2.5.0
+  ghcr.io/queen-mq/queen:2.6.0
 
 cd clients/client-cli
 QUEEN_E2E=1 QUEEN_SERVER=http://localhost:6632 \

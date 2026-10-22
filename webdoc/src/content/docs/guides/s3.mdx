@@ -84,7 +84,7 @@ docker run -d --name queen --network queen-s3 -p 6632:6632 \
   -e QUEEN_S3_SECRET_KEY=queen-secret-key \
   -e QUEEN_S3_START=earliest \
   -e QUEEN_S3_MAX_WINDOW_MS=10000 \
-  ghcr.io/queen-mq/queen:2.5.0
+  ghcr.io/queen-mq/queen:2.6.0
 ```
 
 `QUEEN_S3_EMBEDDED` starts the sink, and `QUEEN_S3_QUEUES` names the queues it mirrors (`*` takes

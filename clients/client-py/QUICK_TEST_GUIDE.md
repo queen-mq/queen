@@ -13,7 +13,7 @@ pip install -e ".[dev]"
 - ✅ A fresh Queen server running on `http://localhost:6632` (the tests expect an empty broker):
   ```bash
   docker run -d --name queen -p 6632:6632 -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
-    -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.5.0
+    -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.6.0
   ```
 - ✅ Python 3.8+
 - ✅ Dependencies installed

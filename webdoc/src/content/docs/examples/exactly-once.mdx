@@ -33,7 +33,7 @@ a second consumer group, and checks that the ledger holds exactly five charges.
 ## Run it
 
 ```bash
-docker run -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:2.5.0
+docker run -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
 npm install queen-mq
 node exactly-once.mjs     # the JavaScript tab below, saved as exactly-once.mjs
 ```

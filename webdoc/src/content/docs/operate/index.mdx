@@ -110,7 +110,7 @@ five times.
 ```bash
 docker run -d --name queen -p 6632:6632 \
   -v queen-data:/var/lib/queen/raft \
-  ghcr.io/queen-mq/queen:2.5.0
+  ghcr.io/queen-mq/queen:2.6.0
 ```
 
 </TabItem>
@@ -119,7 +119,7 @@ docker run -d --name queen -p 6632:6632 \
 ```yaml
 services:
   queen:
-    image: ghcr.io/queen-mq/queen:2.5.0
+    image: ghcr.io/queen-mq/queen:2.6.0
     ports: ["6632:6632"]
     volumes:
       - queen-data:/var/lib/queen/raft
@@ -146,7 +146,7 @@ curl -s localhost:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.5.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":7,"kinds":7}}
+{"status":"healthy","engine":"raft","version":"2.6.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":7,"kinds":7}}
 ```
 
 The dashboard is at `http://localhost:6632/`, and the image carries the CLI, so

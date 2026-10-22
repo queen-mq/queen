@@ -136,7 +136,7 @@ spec:
             labelSelector: { matchLabels: { app: queen } } }
       containers:
         - name: queen
-          image: ghcr.io/queen-mq/queen:2.5.0
+          image: ghcr.io/queen-mq/queen:2.6.0
           ports:
             - { name: http, containerPort: 6632 }
             - { name: raft, containerPort: 7400 }
@@ -246,7 +246,7 @@ clients: a smaller volume keeps filling from replication.
 
 ## Upgrades
 
-The manifest above pins the image to 2.5.0. Keep a version pinned rather than `latest`: a pod that
+The manifest above pins the image to 2.6.0. Keep a version pinned rather than `latest`: a pod that
 restarts on `latest` pulls whatever release is current by then, and an upgrade should be a step you
 take. To upgrade, change the image tag and apply. The RollingUpdate replaces one
 pod at a time, highest ordinal first, and waits for each to be Ready (and, from Kubernetes 1.34,

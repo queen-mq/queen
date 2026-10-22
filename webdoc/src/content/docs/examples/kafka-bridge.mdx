@@ -48,7 +48,7 @@ The node needs its Kafka listener on:
 docker run -d --name queen -p 6632:6632 -p 9092:9092 \
   -e QUEEN_KAFKA_EMBEDDED=true \
   -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 \
-  ghcr.io/queen-mq/queen:2.5.0
+  ghcr.io/queen-mq/queen:2.6.0
 npm install queen-mq @confluentinc/kafka-javascript
 node bridge.mjs     # the program below, saved as bridge.mjs
 ```
