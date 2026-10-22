@@ -415,10 +415,9 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
   }
 
   /* The guide: numbered steps, one language visible at a time. */
+  /* Opaque: the code scrolling under a translucent bar stayed readable through it. */
   .guide-bar {
-    background: color-mix(in oklab, var(--nb-background, var(--background)) 88%, transparent);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: var(--nb-background);
   }
   .guide-pick {
     flex-shrink: 0;
