@@ -165,7 +165,8 @@ pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usi
     // pid -> (the log its records go to, its txns_start); None: the partition
     // is gone. One store read per pid per pass, shared by every file and log.
     let mut known: HashMap<Pid, Option<(u64, u64)>> = HashMap::new();
-    let mut failed: Option<StoreError> = None;
+    // Shared with the lookup closure, which outlives one `reclaim_log` call.
+    let failed: std::cell::RefCell<Option<StoreError>> = std::cell::RefCell::new(None);
 
     let mut logs = qlogs.log_ids();
     logs.sort_unstable();
@@ -178,15 +179,32 @@ pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usi
     // unlinked (cheap), but at most ONE copy-forward rewrite (it can touch tens
     // of MiB), all within `RECLAIM_PASS_BUDGET`. A file's judging resumes where
     // the last pass stopped, so a big file is judged over several passes.
+    //
+    // While the last pass left work (it ran out of budget, or rewrote a file
+    // and may find more), every bound is `QUEEN_QLOG_RECLAIM_BOOST` times
+    // bigger, rewrites included. A shared log mixing queues that die within
+    // the hour with queues kept for days has no file that ever dies whole: it
+    // is reclaimed only by rewrites, and one a pass fell behind its writes
+    // (prod, 2026-10-22: about 1 file a minute reclaimed against 3 of 65 MB
+    // written, 83 GB dead in one shard). Judging and the copy happen off the
+    // log's write lock, so a bigger pass costs background CPU and reads, not
+    // append latency.
+    let boost = if qlogs.reclaim_backlog() {
+        reclaim_boost()
+    } else {
+        1
+    };
     let mut budget = crate::rsm::qlog::set::ReclaimBudget {
-        files: RECLAIM_EXAMINE_PER_PASS,
-        lookups: RECLAIM_LOOKUPS_PER_PASS,
-        deadline: std::time::Instant::now() + RECLAIM_PASS_BUDGET,
-        rewrite: true,
+        files: RECLAIM_EXAMINE_PER_PASS * boost,
+        lookups: RECLAIM_LOOKUPS_PER_PASS * boost,
+        deadline: std::time::Instant::now() + RECLAIM_PASS_BUDGET * boost as u32,
+        rewrites: boost,
     };
     let mut removed = 0usize;
+    let mut backlog = false;
     for log_id in logs {
         if budget.spent() {
+            backlog = true;
             break;
         }
         // The log that holds a partition's records is its lane's log of its
@@ -202,7 +220,7 @@ pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usi
                             (qlogs.log_id_for(queue_id, pid), row.txns_start)
                         }),
                         Err(e) => {
-                            failed = Some(e);
+                            *failed.borrow_mut() = Some(e);
                             return Err(std::io::Error::other("partition read failed"));
                         }
                     };
@@ -212,15 +230,37 @@ pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usi
             };
             Ok(at.and_then(|(log, start)| (log == log_id).then_some(start)))
         };
-        let progress = qlogs.reclaim_log(log_id, &mut live_start, &mut budget);
-        if let Some(e) = failed.take() {
-            return Err(e);
+        // One rewrite a call: call again while this log rewrote a file and the
+        // pass may do more.
+        loop {
+            let progress = qlogs.reclaim_log(log_id, &mut live_start, &mut budget);
+            if let Some(e) = failed.borrow_mut().take() {
+                return Err(e);
+            }
+            let progress = progress.map_err(|e| StoreError::Io(format!("qlog retention: {e}")))?;
+            removed += progress.changed;
+            backlog |= progress.more || progress.compacted > 0;
+            if progress.compacted == 0 || budget.rewrites == 0 || budget.spent() {
+                break;
+            }
         }
-        let progress = progress.map_err(|e| StoreError::Io(format!("qlog retention: {e}")))?;
         qlogs.advance_reclaim_queue_cursor(log_id);
-        removed += progress.changed;
     }
+    qlogs.set_reclaim_backlog(backlog);
     Ok(removed)
+}
+
+/// `QUEEN_QLOG_RECLAIM_BOOST` (default 4, 1 to 64; 1 turns it off): how many
+/// times bigger a retention pass is, rewrites included, while the last pass
+/// left work ([`reclaim_qlogs`]).
+fn reclaim_boost() -> usize {
+    static BOOST: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BOOST.get_or_init(|| {
+        std::env::var("QUEEN_QLOG_RECLAIM_BOOST")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(4, |b| b.clamp(1, 64))
+    })
 }
 
 /// The most sealed queue-log files one retention pass judges.

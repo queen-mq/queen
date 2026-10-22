@@ -63,7 +63,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::rsm::qlog::{
@@ -304,6 +304,9 @@ pub struct QLogSet {
     totals: Arc<SharedTotals>,
     /// Fair starting point for the globally bounded local-GC step.
     reclaim_queue_cursor: Arc<AtomicU64>,
+    /// The last retention pass left work: it ran out of budget, or rewrote a
+    /// file and may find more ([`QLogReader::reclaim_backlog`]).
+    reclaim_backlog: Arc<AtomicBool>,
     /// While non-zero, retention unlinks and rewrites nothing
     /// ([`QLogReader::pause_reclaim`]): a snapshot is linking the files.
     reclaim_paused: Arc<AtomicU64>,
@@ -797,6 +800,7 @@ impl QLogSet {
             floor: Arc::new(AtomicU64::new(0)),
             totals: Arc::new(SharedTotals::default()),
             reclaim_queue_cursor: Arc::new(AtomicU64::new(0)),
+            reclaim_backlog: Arc::new(AtomicBool::new(false)),
             reclaim_paused: Arc::new(AtomicU64::new(0)),
             reclaim_state: Arc::default(),
             lanes: Arc::new(AtomicU64::new(1)),
@@ -1092,6 +1096,7 @@ impl QLogSet {
             floor: self.floor.clone(),
             totals: self.totals.clone(),
             reclaim_queue_cursor: self.reclaim_queue_cursor.clone(),
+            reclaim_backlog: self.reclaim_backlog.clone(),
             reclaim_paused: self.reclaim_paused.clone(),
             reclaim_state: self.reclaim_state.clone(),
             root: self.root.clone(),
@@ -1848,6 +1853,8 @@ pub struct QLogReader {
     /// visible to the replicator metrics without waiting for another append.
     totals: Arc<SharedTotals>,
     reclaim_queue_cursor: Arc<AtomicU64>,
+    /// Shared with the set: see [`QLogReader::reclaim_backlog`].
+    reclaim_backlog: Arc<AtomicBool>,
     /// Shared with the set: see [`QLogReader::pause_reclaim`].
     reclaim_paused: Arc<AtomicU64>,
     /// Shared with the set: per-file retention progress
@@ -1911,8 +1918,11 @@ pub(crate) struct ReclaimBudget {
     /// Watermark lookups still allowed (one per partition run in a file).
     pub lookups: usize,
     pub deadline: std::time::Instant,
-    /// A copy-forward rewrite is still allowed (at most one per pass).
-    pub rewrite: bool,
+    /// Copy-forward rewrites still allowed in this pass. A
+    /// [`QLogReader::reclaim_log`] call makes at most one; the pass calls again
+    /// for the next while it has some left (more than one under a backlog,
+    /// [`crate::rsm::maintenance::reclaim_qlogs`]).
+    pub rewrites: usize,
 }
 
 impl ReclaimBudget {
@@ -2574,11 +2584,19 @@ impl QLogReader {
                 Judged::Dead => dead.push(id),
                 Judged::Unfinished => out.more = true,
                 Judged::Live(at) => {
-                    if budget.rewrite && rewrite.is_none() {
+                    if budget.rewrites > 0 && rewrite.is_none() {
                         if let Some(starts) =
                             rewrite_starts(progress, at, cand.compact_pct, live_start, budget)?
                         {
                             rewrite = Some((id, bytes, starts));
+                            if budget.rewrites > 1 {
+                                // The pass calls again for its next rewrite:
+                                // stop here, so that call starts at the next
+                                // file instead of passing over the candidates
+                                // this one would judge and not rewrite.
+                                out.more = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -2652,9 +2670,7 @@ impl QLogReader {
         super::QLog::remove_reclaimed(&cand.dir, &doomed, sync)?;
         out.changed += applied.changed;
         out.compacted += applied.compacted;
-        if applied.compacted > 0 {
-            budget.rewrite = false;
-        }
+        budget.rewrites = budget.rewrites.saturating_sub(applied.compacted);
         for id in &dead {
             state.files.remove(&(log_id, *id));
         }
@@ -2675,6 +2691,17 @@ impl QLogReader {
 
     pub(crate) fn reclaim_queue_cursor(&self) -> u64 {
         self.reclaim_queue_cursor.load(Ordering::Acquire)
+    }
+
+    /// Whether the last retention pass left work behind: it ran out of its
+    /// budget, or rewrote a file and may find more. The next pass then gets a
+    /// bigger budget ([`crate::rsm::maintenance::reclaim_qlogs`]).
+    pub(crate) fn reclaim_backlog(&self) -> bool {
+        self.reclaim_backlog.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_reclaim_backlog(&self, backlog: bool) {
+        self.reclaim_backlog.store(backlog, Ordering::Release);
     }
 
     pub(crate) fn advance_reclaim_queue_cursor(&self, queue_id: u64) {

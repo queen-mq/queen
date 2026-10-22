@@ -94,6 +94,8 @@ fn reclaim_qlogs_judges_files_by_the_partition_rows_they_name() {
         changed > 0,
         "the expired, missing and stray records were reclaimed"
     );
+    // The last passes found nothing left, so the next one is not boosted.
+    assert!(!reader.reclaim_backlog(), "an idle pass leaves no backlog");
 
     let q = set.log(log).unwrap();
     let q = q.read().unwrap();

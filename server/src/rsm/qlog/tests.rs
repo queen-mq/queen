@@ -1959,7 +1959,7 @@ fn unlimited_budget() -> super::set::ReclaimBudget {
         files: usize::MAX,
         lookups: usize::MAX,
         deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
-        rewrite: true,
+        rewrites: 1,
     }
 }
 
@@ -1978,7 +1978,7 @@ fn per_file_pass(
         Ok(starts.get(&pid).copied())
     };
     let mut budget = super::set::ReclaimBudget {
-        rewrite,
+        rewrites: usize::from(rewrite),
         ..unlimited_budget()
     };
     reader
@@ -2098,6 +2098,54 @@ fn per_file_retention_rewrites_mixed_files_and_keeps_their_live_records() {
         sealed_pid10, 0,
         "no expired pid 10 record is left in a sealed file"
     );
+}
+
+/// A pass under a backlog may rewrite several files: one per `reclaim_log`
+/// call, called again while it has rewrites left, as `reclaim_qlogs` does. A
+/// call that picked its rewrite stops judging there, so the next call starts
+/// at the next file and no candidate is passed over.
+#[test]
+fn a_boosted_pass_rewrites_several_mixed_files_one_call_each() {
+    use std::collections::HashMap;
+    let (_td, set, log) = per_file_set("per-file-boost", 1200, &[10, 11], 80);
+    let reader = set.reader();
+    let sealed = sealed_files(&set, log);
+    assert!(sealed >= 3, "several mixed sealed files, got {sealed}");
+    let bytes_before = set.log(log).unwrap().read().unwrap().bytes();
+    let starts: HashMap<u64, u64> = [(10, u64::MAX), (11, 0)].into();
+    let mut live_start =
+        |pid: u64| -> std::io::Result<Option<u64>> { Ok(starts.get(&pid).copied()) };
+    let mut budget = super::set::ReclaimBudget {
+        rewrites: 3,
+        ..unlimited_budget()
+    };
+    let (mut calls, mut rewritten) = (0, 0);
+    loop {
+        let p = reader
+            .reclaim_log(log, &mut live_start, &mut budget)
+            .unwrap();
+        assert!(p.compacted <= 1, "one rewrite a call");
+        rewritten += p.compacted;
+        calls += 1;
+        if p.compacted == 0 || budget.rewrites == 0 || budget.spent() {
+            break;
+        }
+        assert!(calls < 16, "the pass never stopped");
+    }
+    assert_eq!(
+        rewritten, 3,
+        "the pass used its three rewrites in {calls} calls"
+    );
+    assert_eq!(budget.rewrites, 0);
+    let q = set.log(log).unwrap();
+    let q = q.read().unwrap();
+    assert!(q.bytes() < bytes_before, "the rewrites released bytes");
+    for offset in 0..40 {
+        assert!(
+            q.read_payload(11, offset).unwrap().is_some(),
+            "live pid 11 offset {offset} survives"
+        );
+    }
 }
 
 #[test]
