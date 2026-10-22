@@ -147,12 +147,16 @@ all in `b51e4419`, took that to 44 / 108 ms:
   and reads as `POST /api/v1/push` and `POST /api/v1/fetch`, with no JSON in between. A test pins
   that both paths give byte-equal answers, so the two cannot drift apart unnoticed.
 - A Kafka record travels as bytes in both directions.
-- A topic created through Kafka gets `dedupWindowSeconds: 0`. A Kafka record carries no Queen
-  `transactionId`, so the window could only ever check a brand-new id; Kafka's own duplicate
-  suppression, the idempotent producer's sequence window, does not need it.
-- Produce requests that a connection already has buffered are written as one push and answered in
-  order. `QUEEN_KAFKA_COALESCE` (default 5, Kafka's `max.in.flight.requests.per.connection`) caps
-  how many, and nothing waits for a request that has not arrived.
+- A topic created through Kafka got `dedupWindowSeconds: 0`. A Kafka record carried no Queen
+  `transactionId`, so the window could only ever check a brand-new id; the first facade's own
+  duplicate suppression, the idempotent producer's sequence window, did not need it.
+- Produce requests that a connection already had buffered were written as one push and answered in
+  order. `QUEEN_KAFKA_COALESCE` (default 5, Kafka's `max.in.flight.requests.per.connection`) capped
+  how many, and nothing waited for a request that had not arrived.
+
+The last two are gone in 2.6: an idempotent record's producer id, epoch and sequence are its Queen
+transaction id, so a topic created through Kafka gets a dedup window of 900 seconds, and each
+produce request is its own ordered push ([how it works](/guides/kafka/#how-it-works)).
 
 On the final build, Kafka Streams (`WordCountDemo`) and Kafka Connect in distributed mode, with a
 file source into a topic and a file sink out of it, passed four runs out of four on fresh

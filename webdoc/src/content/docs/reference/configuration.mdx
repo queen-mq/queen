@@ -97,8 +97,7 @@ docker run -p 6632:6632 -v queen-data:/var/lib/queen/raft \
 ```
 
 In a cluster, give every node the same values except the per-node ones: `QUEEN_RAFT_NODE_ID`,
-`QUEEN_RAFT_LISTEN`, `QUEEN_SERVER_ID` and, with the Kafka facade, `QUEEN_KAFKA_ADVERTISED_ADDR`
-and `QUEEN_KAFKA_NODE_ID`.
+`QUEEN_RAFT_LISTEN`, `QUEEN_SERVER_ID` and, with the Kafka facade, `QUEEN_KAFKA_ADVERTISED_ADDR`.
 
 ## Broker
 
@@ -210,7 +209,8 @@ what each one does. A cluster with none of them set is neither a standby nor rea
 | `QUEEN_RAFT_METRICS` | on | The pipeline timing and admission families on `/metrics/prometheus`. |
 
 The Kafka facade's own settings (`QUEEN_KAFKA_ADDR`, `QUEEN_KAFKA_ADVERTISED_ADDR`,
-`QUEEN_KAFKA_NODE_ID`, TLS, SASL, transaction caps) are in the [Kafka reference](/reference/kafka/#settings).
+`QUEEN_KAFKA_PEERS`, SASL, the dedup window of the topics it creates) are in the
+[Kafka reference](/reference/kafka/#settings).
 
 ## Embedded proxy
 

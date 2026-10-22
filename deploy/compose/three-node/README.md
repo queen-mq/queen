@@ -52,8 +52,9 @@ trying the cluster out. For servers, read the production notes on the same docs 
 ## Kafka clients
 
 `compose.kafka.yaml` turns on the Kafka facade on every node, as one Kafka cluster with three
-brokers (node N listens on `127.0.0.1:N6092`). Kafka transactions are refused in this cluster mode;
-the rest is described at [/guides/kafka/](https://queenmq.com/guides/kafka/).
+brokers (node N listens on `127.0.0.1:N6092`). The raft leader leads every partition and coordinates
+every group and transaction; the rest is described at
+[/guides/kafka/](https://queenmq.com/guides/kafka/#run-it-on-a-cluster).
 
 ```bash
 docker compose -f compose.yaml -f compose.kafka.yaml up -d --wait

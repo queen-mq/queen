@@ -11,8 +11,8 @@ developer's code. The install page for every agent is [start/ai-agents](https://
 | `guide` | the per-page markdown of the docs build, `webdoc/dist/**/index.md` |
 | `example` | the tested snippets in `webdoc/src/content/partials/snippets/` (cut by `gen-snippets.mjs` from files the test suite runs), the whole programs under `examples/`, and the docs pages' own code blocks, labelled as such |
 | `check` | `content/traps.json` (each entry cites a docs page or a repo file; `{{broker}}` becomes the version in `server/Cargo.toml`) |
-| `explain_error` | the tables of reference/errors, reference/transaction and reference/limits, `protocols/queen-kafka/compat/ERRORS.md`, and `content/kafka-error-codes.json` (derived from the kafka-protocol crate) |
-| `kafka_client` | `protocols/queen-kafka/compat/CLIENT_MATRIX.md` |
+| `explain_error` | the tables of reference/errors, reference/transaction and reference/limits, the Kafka codes reference/kafka names under "Where it differs" and "Ceilings", and `content/kafka-error-codes.json` (derived from the kafka-protocol crate) |
+| `kafka_client` | the "Clients" table of reference/kafka |
 | `setup` | `content/setup.json` (feature → docs pages), `content/api-cards.json` (the calls per SDK, each cited to a file and line), the matching traps |
 | Install and import lines in every SDK answer | the "Install and connect" section of start/clients |
 | Prompts `design`, `review`, `from-kafka` | `content/prompts/*.md` |

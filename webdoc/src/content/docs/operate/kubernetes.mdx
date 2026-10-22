@@ -298,13 +298,11 @@ the root filesystem is read-only. Expose 6711 through a Service of its own and y
 authentication, and it is also the port the pods use to reach each other.
 
 For Kafka clients, add `QUEEN_KAFKA_EMBEDDED=true` and, per pod,
-`QUEEN_KAFKA_ADVERTISED_ADDR=$(QUEEN_SERVER_ID).queen-headless.queen.svc.cluster.local:9092`. With
-several pods, the facades present themselves to clients as one Kafka cluster: each pod needs an
-integer `QUEEN_KAFKA_NODE_ID` from 1 to 64, derived from the pod name in a small wrapper because it
-does not take `ordinal`, and a `QUEEN_TOKEN` shared by all of them. In this cluster mode the facade
-refuses Kafka transactions (a transaction lives in one node's memory), so run Flink exactly-once or
-transactional producers against a single node. See [Kafka](/guides/kafka/) and its
-[ceilings](/reference/kafka/#ceilings).
+`QUEEN_KAFKA_ADVERTISED_ADDR=$(QUEEN_SERVER_ID).queen-headless.queen.svc.cluster.local:9092`. The
+pods are then one Kafka cluster with no setting of its own: a pod advertises the others at the host
+of their raft address with its own Kafka port, which here is each pod's headless name, and the raft
+leader leads every partition and coordinates every group and transaction. See
+[Kafka](/guides/kafka/#run-it-on-a-cluster) and its [ceilings](/reference/kafka/#ceilings).
 
 ## Limits
 

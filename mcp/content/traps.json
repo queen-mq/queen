@@ -562,14 +562,15 @@
       "kafka"
     ],
     "severity": "breaks",
-    "symptom": "Queen consumers in the same group lose their leases mid-batch or see redeliveries; failed Kafka records are never dead-lettered; a Kafka-only consumer shows no pops or acks in dashboards and metrics.",
-    "cause": "A Kafka fetch is a read by offset through the same path as POST /api/v1/fetch, not a pop, so Queen's leases, redelivery, retry budget and dead-letter queue do not apply and the pop and ack counters do not move (the group's lag does). A Kafka group is the Queen consumer group of the same name: a Kafka commit sets its position like a seek and releases any lease a Queen consumer holds on that partition. Committed offsets never expire, and deleting a group from a Kafka tool deletes the Queen group on every queue.",
-    "fix": "Do not run Kafka and Queen consumers in one group at the same time: hand a group from one kind to the other, or use separate group names. Watch group lag rather than pop and ack rates, and handle failures in the Kafka consumer as you would on Kafka, or consume with a Queen SDK to get leases, retries and the DLQ.",
+    "symptom": "Queen consumers in the same group lose their leases mid-batch or see redeliveries; failed Kafka records are never dead-lettered; a Kafka group drops off kafka-consumer-groups.sh --list while its offsets stay.",
+    "cause": "A Kafka fetch is a read at an offset, like POST /api/v1/fetch, not a pop, so Queen's leases, redelivery, retry budget and dead-letter queue do not apply. A Kafka group is the Queen consumer group of the same name: a Kafka commit sets its position like a seek and releases any lease a Queen consumer holds on that partition. Committed offsets never expire, and deleting a group with no members from a Kafka tool deletes the Queen group's position on every queue. Membership lives in the raft leader's memory: a leader change makes members rejoin, and a group with no members leaves that memory ten minutes after its last member left.",
+    "fix": "Do not run Kafka and Queen consumers in one group at the same time: hand a group from one kind to the other, or use separate group names. Handle failures in the Kafka consumer as you would on Kafka, or consume with a Queen SDK to get leases, retries and the DLQ.",
     "source": [
       "https://queenmq.com/guides/kafka/",
       "https://queenmq.com/reference/kafka/",
-      "server/src/kafka_inproc.rs:236",
-      "server/src/rsm/facade/real.rs:3974"
+      "server/src/kafka_inproc.rs:233",
+      "protocols/queen-kafka/src/handlers/offsets.rs:28",
+      "server/src/rsm/consume/txn.rs:231"
     ]
   },
   {
@@ -581,7 +582,7 @@
     "severity": "breaks",
     "symptom": "Consumers fail when they join, a consumer reconnects forever, clients cannot reach the broker after their first request, or a producer silently writes with acks=0.",
     "cause": "The facade implements the classic group protocol (JoinGroup, SyncGroup, heartbeats) without KIP-848 or static membership. Clients reconnect to QUEEN_KAFKA_ADVERTISED_ADDR, which has no default (a node with the facade on refuses to boot without it). Measured client notes: a segmentio/kafka-go &kafka.Writer{} literal writes with acks=0 unless RequiredAcks is set, so errors and real offsets never reach it; sarama below 1.46.0 needs Config.Version = sarama.V1_0_0_0 or its consumer reconnects forever on EOF; aiokafka needs 0.13 or later for groups; kafka-python must not pin api_version above (0, 11, 0); a librdkafka consumer that must create its topic needs allow.auto.create.topics=true.",
-    "fix": "Keep group.protocol=classic (the Kafka 4.x default) and leave group.instance.id unset. Run the facade with QUEEN_KAFKA_EMBEDDED=true and an advertised address the client can reach (from a container, host.docker.internal:9092, not localhost); in a cluster each node advertises its own address, never one load-balanced address. Apply the per-client settings above.",
+    "fix": "Keep group.protocol=classic (the Kafka 4.x default) and leave group.instance.id unset. Run the facade with QUEEN_KAFKA_EMBEDDED=true and an advertised address the client can reach (from a container, host.docker.internal:9092, not localhost). In a cluster each node advertises its own address, never one load-balanced address, and QUEEN_KAFKA_PEERS (1=host:port,2=host:port) names the others when clients do not reach them at the host of their raft address with the same Kafka port. Apply the per-client settings above.",
     "code": {
       "go": "w := &kafka.Writer{\n\tAddr:         kafka.TCP(\"localhost:9092\"),\n\tTopic:        \"orders\",\n\tRequiredAcks: kafka.RequireAll, // the literal's zero value is acks=0\n}"
     },
@@ -594,14 +595,14 @@
   },
   {
     "id": "kafka-shared-queues",
-    "title": "Queues shared by Kafka and Queen clients: numeric partitions only, a base64 record envelope, and no dedup window",
+    "title": "Queues shared by Kafka and Queen clients: numeric partitions only, a base64 record envelope, and a 15-minute dedup window",
     "applies": [
       "kafka"
     ],
     "severity": "surprise",
-    "symptom": "Kafka consumers never see what Queen clients pushed to entity-named partitions; Queen consumers get {k, v, t} objects instead of your JSON; repeated transactionIds are stored twice; a new Kafka consumer reads nothing for about 30 s.",
-    "cause": "Kafka partition n is the Queen partition named \"n\", and a Kafka client cannot address a partition named customer-123. A Kafka record reaches Queen clients as one message {k, v, t, h} with key and value base64-encoded; a Queen push reaches Kafka consumers as a record with no key whose value is the JSON. Topics created through Kafka get dedupWindowSeconds 0. A queue a Queen client created shows up in Kafka metadata within about 3 s, and a consumer that subscribed in that window saw no partitions for about 30 s.",
-    "fix": "Use numeric partition names (or let Kafka producers hash keys) on queues Kafka consumers read; decode k and v from base64 in Queen consumers; set dedupWindowSeconds on a Kafka-created queue if Queen producers rely on transactionId; create the topic before Kafka consumers subscribe.",
+    "symptom": "Kafka consumers never see what Queen clients pushed to entity-named partitions; Queen consumers get {k, v, t} objects instead of your JSON; a transactionId pushed again more than 15 minutes later is stored twice.",
+    "cause": "Kafka partition n is the Queen partition named \"n\", and a Kafka client cannot address a partition named customer-123. A Kafka record reaches Queen clients as one message {k, v, t, h} with key and value base64-encoded; a Queen push reaches Kafka consumers as a record with no key whose value is the JSON. A topic created through Kafka gets a dedup window of 900 seconds (QUEEN_KAFKA_DEDUP_WINDOW_SECONDS), the window its idempotent producers need, where a queue a Queen push creates gets 3600. A listing (kcat -L, a subscription by pattern) can miss a queue created in the last second.",
+    "fix": "Use numeric partition names (or let Kafka producers hash keys) on queues Kafka consumers read; decode k and v from base64 in Queen consumers; set dedupWindowSeconds on a Kafka-created queue if Queen producers count on a window longer than 15 minutes.",
     "source": [
       "https://queenmq.com/guides/kafka/",
       "https://queenmq.com/examples/kafka-bridge/",
@@ -610,17 +611,18 @@
   },
   {
     "id": "kafka-facade-gaps",
-    "title": "Kafka facade gaps: compaction keeps everything, no DeleteRecords, records stored uncompressed, no transactions in cluster mode",
+    "title": "Kafka facade gaps: compaction keeps everything, no DeleteRecords or config changes, records stored uncompressed, transactions held in the leader's memory",
     "applies": [
       "kafka"
     ],
     "severity": "surprise",
-    "symptom": "A compacted topic keeps growing; kafka-delete-records.sh fails; zstd brings no saving; initTransactions() throws TransactionalIdAuthorizationException on a cluster.",
-    "cause": "cleanup.policy=compact switches retention off and keeps every record, tombstones included. DeleteRecords is not offered. Records are stored decoded and fetched as uncompressed batches, so producer compression saves only inbound bandwidth; librdkafka-based producers send zstd uncompressed, and librdkafka 2.11.0 and older send gzip, snappy and lz4 uncompressed too. In cluster mode (QUEEN_KAFKA_NODE_ID set) transactions are refused; outside it, a transaction is staged in one node's memory (at most 8 MiB and 50,000 records) and a commit resumed after that node restarts is refused with INVALID_TXN_STATE.",
-    "fix": "Plan disk for compacted topics, delete and recreate a topic instead of truncating it, and run transactional producers against a facade outside cluster mode, inside the staging limits.",
+    "symptom": "A compacted topic keeps growing; kafka-delete-records.sh and kafka-configs.sh --alter fail; zstd brings no saving; a transaction open during a leader change can only abort (INVALID_TXN_STATE); a large transaction answers MESSAGE_TOO_LARGE.",
+    "cause": "cleanup.policy=compact switches retention off and keeps every record, tombstones included. DeleteRecords, AlterConfigs, IncrementalAlterConfigs, OffsetDelete and the ACL calls are not offered, and of a topic's configs only retention.ms and cleanup.policy are applied, at creation. Records are stored decoded and fetched as uncompressed batches, so producer compression saves only inbound bandwidth; librdkafka-based producers send zstd uncompressed, and librdkafka 2.11.0 and older send gzip, snappy and lz4 uncompressed too. A transaction's records wait in the raft leader's memory until its commit writes them as one raft entry: at most 8 MiB, 50,000 records and 1,000 partitions per transaction, 256 MiB across the leader's open transactions, and a timeout of at most one hour. A leader change loses the open transactions, which the new leader lets only abort. There is no TLS listener.",
+    "fix": "Plan disk for compacted topics, delete and recreate a topic instead of truncating it, and set retention at creation or later through Queen's queue options. Keep transactions inside the limits, and abort and rerun one that a leader change interrupted. Keep the Kafka port on a private network, or terminate TLS in front of it.",
     "source": [
       "https://queenmq.com/guides/kafka/",
-      "https://queenmq.com/reference/kafka/"
+      "https://queenmq.com/reference/kafka/",
+      "https://queenmq.com/reference/kafka/#ceilings"
     ]
   },
   {

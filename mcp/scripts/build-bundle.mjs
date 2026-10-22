@@ -12,8 +12,9 @@
  *              the page each one is shown on, and the whole program when the
  *              snippet comes from examples/
  *   errors     the tables of reference/errors, reference/transaction and
- *              reference/limits, and protocols/queen-kafka/compat/ERRORS.md
- *   kafka      the client matrix in protocols/queen-kafka/compat/CLIENT_MATRIX.md
+ *              reference/limits, and the Kafka codes reference/kafka names
+ *              under "Where it differs" and "Ceilings"
+ *   kafka      the client table of reference/kafka ("Clients")
  *   codes      content/kafka-error-codes.json, derived from the kafka-protocol
  *              crate's own error table (refresh: --refresh-kafka-codes)
  *   primer     content/primer.md + content/usage.md, the server instructions
@@ -33,7 +34,6 @@ const MCP = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO = join(MCP, "..");
 const DIST = process.env.QUEEN_DOCS_DIST ?? join(REPO, "webdoc", "dist");
 const CONTENT_SRC = join(REPO, "webdoc", "src", "content");
-const COMPAT = join(REPO, "protocols", "queen-kafka", "compat");
 const OWN = join(MCP, "content");
 const OUT = join(MCP, "src", "bundle.generated.mjs");
 const SITE = "https://queenmq.com";
@@ -351,20 +351,6 @@ docRows("reference/errors");
 docRows("reference/transaction", (s) => /reason|rollback/i.test(s));
 docRows("reference/limits");
 
-const errorsMd = join(COMPAT, "ERRORS.md");
-if (existsSync(errorsMd)) {
-  for (const row of tableRows(readFileSync(errorsMd, "utf8"))) {
-    const name = (row.cells[0] ?? "").match(/^`?([A-Z][A-Z_]+)`?(?:\s*\((-?\d+)\))?/)?.[1];
-    if (!name) continue;
-    errors.push({
-      origin: "kafka",
-      code: name,
-      section: `Kafka ${row.h2.replace(/\s+—.*$/, "")}`,
-      url: "",
-      fields: row.header.map((h, i) => [plain(h), row.cells[i] ?? ""]).filter(([, v]) => v),
-    });
-  }
-} else warn(`errors: ${errorsMd} missing`);
 
 // ---------------------------------------------------------------- kafka error codes
 
@@ -390,30 +376,42 @@ const kafkaCodes = existsSync(codesFile) ? JSON.parse(readFileSync(codesFile, "u
 
 // ---------------------------------------------------------------- kafka clients
 
-const kafka = { clients: [], evidence: [], updated: "" };
-const matrixMd = join(COMPAT, "CLIENT_MATRIX.md");
-if (existsSync(matrixMd)) {
-  const text = readFileSync(matrixMd, "utf8");
-  for (const row of tableRows(text)) {
-    if (row.h2 !== "The matrix" || row.h3 || row.header[0] !== "Client") continue;
+// Both come from reference/kafka, the page that describes the facade of this
+// release: its client table, and the Kafka codes it says the facade answers.
+const kafka = { clients: [], note: "" };
+const kafkaPage = pageBySlug.get("reference/kafka");
+if (kafkaPage) {
+  for (const row of tableRows(kafkaPage.markdown)) {
+    if (row.h2 !== "Clients" || row.header[0] !== "Client") continue;
     const get = (name) => row.cells[row.header.indexOf(name)] ?? "";
     kafka.clients.push({
       client: plain(get("Client")),
-      versions: get("Versions tested"),
-      verified: get("Verified"),
-      result: plain(get("Result")),
-      config: get("Mandatory config"),
-      caveat: get("Main caveat"),
+      versions: get("Versions run"),
+      config: get("Set"),
+      caveat: get("Watch for"),
     });
   }
-  // The evidence for each non-PASS row: "### <client>: PARTIAL" under "## The non-PASS rows".
-  const part = text.split(/\n## /).find((s) => s.startsWith("The non-PASS rows"));
-  for (const block of (part ?? "").split(/\n### /).slice(1)) {
-    const [title, ...rest] = block.split("\n");
-    kafka.evidence.push({ title: title.trim(), text: rest.join("\n").trim() });
+  // The paragraph under "## Clients": when, how and against what the rows were run.
+  kafka.note = kafkaPage.markdown.split(/\n## /).find((s) => s.startsWith("Clients\n"))?.split(/\n\n/)[1]?.replace(/\s*\n\s*/g, " ").replace(/ \((above|below)\)/g, "").trim() ?? "";
+
+  // Every Kafka code a ceiling or a difference names, with that row or bullet as its explanation.
+  const known = new Set(kafkaCodes.map((c) => c.name));
+  const named = (text) => [...new Set([...text.matchAll(/`([A-Z][A-Z_]+)`/g)].map((m) => m[1]))].filter((n) => known.has(n));
+  for (const row of tableRows(kafkaPage.markdown)) {
+    if (row.h2 !== "Ceilings") continue;
+    const fields = row.header.map((h, i) => [plain(h), row.cells[i] ?? ""]).filter(([, v]) => v);
+    for (const code of named(row.cells.join(" "))) {
+      errors.push({ origin: "kafka", code, section: "Kafka facade ceilings", url: `${kafkaPage.url}#ceilings`, fields: [["Code", code], ...fields] });
+    }
   }
-  kafka.updated = git("log", "-1", "--format=%ad", "--date=short", "--", posix(relative(REPO, matrixMd)));
-} else warn(`kafka: ${matrixMd} missing`);
+  const differs = kafkaPage.markdown.split(/\n## /).find((s) => s.startsWith("Where it differs"))?.split(/\n### /)[0] ?? "";
+  for (const bullet of differs.split(/\n- /).slice(1)) {
+    const text = bullet.replace(/\s*\n\s*/g, " ").trim();
+    for (const code of named(text)) {
+      errors.push({ origin: "kafka", code, section: "Where the Kafka facade differs from Apache Kafka", url: `${kafkaPage.url}#where-it-differs-from-apache-kafka`, fields: [["Code", code], ["Difference", text]] });
+    }
+  }
+} else warn("kafka: page reference/kafka missing from the docs build");
 
 // ---------------------------------------------------------------- own content
 

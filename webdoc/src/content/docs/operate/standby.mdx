@@ -461,6 +461,3 @@ On every node of the source:
   the standby reads makes the standby wait (`"state": "waiting"`, with the reason in `error`)
   until every node of the standby runs the newer release. Nothing is lost while it waits, but the
   lag grows.
-- **A standby's embedded Kafka facade** started in cluster mode logs one warning a minute that it
-  cannot renew its registry row. It renews it within a heartbeat of the promotion and takes over
-  the source's broker ids.

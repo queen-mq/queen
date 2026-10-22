@@ -165,15 +165,20 @@ test("explain_error: exact codes, Kafka numbers, HTTP statuses", async () => {
   assert.match(kafka15.text, /COORDINATOR_NOT_AVAILABLE/);
   const named = await call("explain_error", { error: "coordinator_not_available" });
   assert.match(named.text, /Kafka error 15/);
+  const notCoordinator = await call("explain_error", { error: "NOT_COORDINATOR" });
+  assert.match(notCoordinator.text, /raft leader/);
+  const tooLarge = await call("explain_error", { error: "message_too_large" });
+  assert.match(tooLarge.text, /One transaction/);
   const status = await call("explain_error", { error: "429" });
   assert.match(status.text, /Retry-After/);
   assert.equal((await call("explain_error", { error: "" })).isError, true);
 });
 
-test("kafka_client: finds clients by name or alias, with config and evidence", async () => {
+test("kafka_client: finds clients by name or alias, with what to set and what to watch for", async () => {
   const sarama = await call("kafka_client", { client: "sarama", version: "1.42" });
-  assert.match(sarama.text, /IBM\/sarama: PARTIAL/);
+  assert.match(sarama.text, /### IBM\/sarama/);
   assert.match(sarama.text, /V1_0_0_0/);
+  assert.match(sarama.text, /against the 2\.6 facade/);
   const dotnet = await call("kafka_client", { client: ".NET" });
   assert.match(dotnet.text, /Confluent\.Kafka/);
   const unknown = await call("kafka_client", { client: "zzz-unknown" });

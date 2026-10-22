@@ -91,7 +91,7 @@ const KAFKA_ALIASES = [
   [/kafka-javascript/i, "confluent kafka-javascript node javascript typescript"],
   [/node-rdkafka/i, "node-rdkafka node javascript blizzard"],
   [/platformatic/i, "platformatic node javascript typescript"],
-  [/rust crate/i, "rust rdkafka rust-rdkafka"],
+  [/rust crate|rust-rdkafka/i, "rust rdkafka rust-rdkafka"],
   [/ruby/i, "ruby rdkafka-ruby karafka"],
   [/php-rdkafka/i, "php rdkafka laravel"],
   [/brod/i, "brod erlang elixir"],
@@ -397,24 +397,17 @@ function kafkaClient(args) {
   }
   const top = hits[0].score;
   const rows = hits.filter((h) => h.score >= top * 0.6).map(({ doc }) => doc);
-  const parts = rows.map((c) => {
-    let out = `### ${c.client}: ${c.result}\n- Versions tested: ${c.versions} (verified ${c.verified})\n- Mandatory config: ${c.config}\n- Main caveat: ${c.caveat}`;
-    if (c.result !== "PASS") {
-      const key = c.client.toLowerCase().split(" (")[0].replace(/^ibm\//, "");
-      const ev = bundle.kafka.evidence.find((e) => e.title.toLowerCase().includes(key));
-      if (ev) out += `\n\n${cap(ev.text, 3_000, "The full evidence is in protocols/queen-kafka/compat/CLIENT_MATRIX.md.")}`;
-    }
-    return out;
-  });
+  const parts = rows.map((c) =>
+    [`### ${c.client}`, `- Versions run: ${c.versions}`, c.config && `- Set: ${c.config}`, c.caveat && `- Watch for: ${c.caveat}`].filter(Boolean).join("\n"),
+  );
   const version = str(args.version);
-  if (version) parts.unshift(`Asked about version ${version}: compare it with the tested versions and any version floor in the mandatory config below.`);
+  if (version) parts.unshift(`Asked about version ${version}: compare it with the versions run and any version floor in what to set below.`);
 
   const connect = bundle.sections.find((s) => s.slug === "guides/kafka" && /connect|point|bootstrap|listener|enable|start/i.test(s.heading));
   if (connect) parts.push(`## Connecting (from ${connect.url})\n\n${cap(sectionText(connect), 2_500, `Read it all with guide(page: "guides/kafka").`)}`);
   parts.push(
-    `Result: PASS works with the config in its row; PARTIAL works, with a sharp edge (a version floor, a refused lane, a silent degradation). ` +
-      `The facade's deliberate differences from Apache Kafka, which every client meets: guide(page: "reference/kafka"). Traps: check(language: "kafka").` +
-      (bundle.kafka.updated ? ` Matrix last updated ${bundle.kafka.updated}.` : ""),
+    (bundle.kafka.note ? `${bundle.kafka.note} ` : "") +
+      `The facade's deliberate differences from Apache Kafka, which every client meets: guide(page: "reference/kafka"). Traps: check(language: "kafka").`,
   );
   return ok(parts.join("\n\n"));
 }

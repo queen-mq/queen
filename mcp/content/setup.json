@@ -44,7 +44,7 @@
     "title": "Binary push, push compression and framed pop",
     "pages": ["start/clients"],
     "skip": ["Install and connect", "curl is a client", "Consumer supervision", "Reads by offset", "What each SDK implements", "The broker inside a Rust program", "Next"],
-    "related": ["reference/http", "benchmarks/throughput"],
+    "related": ["reference/http", "benchmarks/queen-vs-kafka"],
     "card": "wire-forms",
     "words": "binary push compression compressed zstd framed pop frames wire throughput performance rate cpu"
   },
