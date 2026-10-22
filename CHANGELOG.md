@@ -139,6 +139,18 @@ instead of reading all of them, which a short age makes matter. On a production 
 partition per trace, 3600 took the partitions from 520,857 to 151,120 within 40 s of the first 2.6
 leader.
 
+**A shared queue log no longer outgrows its disk when queues that die within the hour share it with
+queues kept for days.** A file of a shared log (`QUEEN_QLOG_SHARDS`) mixes queues, so once one of
+them keeps messages for days no file ever dies whole, and its dead bytes go only through rewrites,
+one per reclaim pass. A pass is bounded (256 files, 200 ms) and judging a file costs a lookup per
+partition in it: in production a queue with a partition per message filled one shard at about
+40 GB an hour while reclaim freed about one 65 MB file a minute (2026-10-22). While the last pass
+left work, a pass now gets `QUEEN_QLOG_RECLAIM_BOOST` (4) times its budget, rewrites included, and
+passes go back to the small budget once one finds nothing left. Judging and copying stay off the
+log's write lock, so appends do not wait for them. A pass that picked its rewrite stops judging
+there, so the next starts at the following file instead of passing the other candidates over until
+its cursor comes round again.
+
 **A queue's status can be read without its partitions.** `GET /api/v1/status/queues/:queue` with
 `includePartitions=false` answers the queue's totals, its partition count and consumed total
 included, without per-partition rows or the dead-letter scan; the default answer is unchanged. The

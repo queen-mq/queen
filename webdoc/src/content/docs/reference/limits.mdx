@@ -82,6 +82,9 @@ sourceOfTruth:
 # the queue detail read takes includePartitions=false and then returns queue-wide totals without
 # per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-22 (2.6.0, the reclaim boost): maintenance.rs and qlog/set.rs give a
+# reclaim pass QUEEN_QLOG_RECLAIM_BOOST (4) times its budget, rewrites included, while the last pass
+# left work. The retention table lists the pass's bounds.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -256,6 +259,7 @@ The last three are constants in `server/src/handlers/ephemeral.rs`.
 |---|---|---|
 | Retention of messages | off per queue | `retentionEnabled`, `retentionSeconds`, `completedRetentionSeconds` on `configure` |
 | Retention pass | every 5000 ms | `RETENTION_INTERVAL` |
+| A queue-log reclaim pass: files judged, time, rewrites | 256 files, 200 ms, one rewrite; four times each while the last pass left work | `QUEEN_QLOG_RECLAIM_BOOST` |
 | A partition with no retained message, no dead letter, no live lease and no stream state, unwritten for this long, is deleted. Never sooner than its queue's dedup window (at least 900 s) | 30 days | `PARTITION_CLEANUP_DAYS`, or `PARTITION_CLEANUP_SECONDS` (at least 60) when set; `QUEEN_PARTITION_CLEANUP_ENABLED` |
 | Message traces (on disk, expired at most 512 per step) | 7 days | `QUEEN_RAFT_TRACE_RETENTION_S` |
 | A trace whose `transactionId` or one of its names makes a store key over 511 bytes is answered `400` | 511 bytes | none |

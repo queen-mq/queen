@@ -67,6 +67,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
 # replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
 # of entries with a hole; the rest is test-only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-22 (2.6.0, the reclaim boost): maintenance.rs and qlog/set.rs give a
+# reclaim pass QUEEN_QLOG_RECLAIM_BOOST (4) times its budget, rewrites included, while the last pass
+# left work. "Retention and reclaim" says so.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are
@@ -301,7 +304,12 @@ Retention is decided once, on the leader, and executed on every node, like every
 
 Reclaim never touches the active file, nor a file holding a record above the last store checkpoint
 or, in a cluster, above the raft purge point. One pass examines at most 256 files, spends at most
-200 ms and rewrites at most one file. An active file that holds data older than
+200 ms and rewrites at most one file. While the last pass left work (it ran out of its budget, or
+rewrote a file), the next is `QUEEN_QLOG_RECLAIM_BOOST` (4) times bigger in every bound, rewrites
+included, and passes go back to the small budget once one finds nothing left. A shared log whose
+files mix messages that die within the hour with messages kept for days frees bytes only through
+rewrites, and at one a pass such a log in production filled at about 40 GB an hour while about one
+65 MB file a minute was reclaimed (2026-10-22). An active file that holds data older than
 `QUEEN_QLOG_SEAL_AGE_S` (600) is sealed so that reclaim can reach it, when that is worth a file:
 reclaim found a dead message in it (it looks at 32 partitions of an aged active file a pass), or
 it holds an eighth of a full file. Age alone seals nothing, so a queue without retention gets a

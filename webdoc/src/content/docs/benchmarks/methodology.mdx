@@ -46,6 +46,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
 # replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
 # of entries with a hole; the rest is test-only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-22 (2.6.0, the reclaim boost): maintenance.rs and qlog/set.rs give a
+# reclaim pass QUEEN_QLOG_RECLAIM_BOOST (4) times its budget, rewrites included, while the last pass
+# left work. Nothing this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

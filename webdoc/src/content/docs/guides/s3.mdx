@@ -46,6 +46,9 @@ sidebar:
 # sourceOfTruth re-read 2026-10-21 (stream state seek): maintenance.rs (later): the idle-partition
 # check seeks each stream query's state instead of walking all of it; same verdict, cheaper. The
 # sink's retention hold is unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-22 (2.6.0, the reclaim boost): maintenance.rs and qlog/set.rs give a
+# reclaim pass QUEEN_QLOG_RECLAIM_BOOST (4) times its budget, rewrites included, while the last pass
+# left work. Nothing this page states changes.
 ---
 
 The broker can mirror its queues into an S3-compatible bucket, as JSONL or Parquet files in a Hive

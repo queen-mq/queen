@@ -78,6 +78,9 @@ verifiedBy:
 # the queue detail read takes includePartitions=false and then returns queue-wide totals without
 # per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-22 (2.6.0, the reclaim boost): maintenance.rs and qlog/set.rs give a
+# reclaim pass QUEEN_QLOG_RECLAIM_BOOST (4) times its budget, rewrites included, while the last pass
+# left work. Nothing this page states changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a
