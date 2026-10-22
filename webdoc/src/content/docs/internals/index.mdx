@@ -74,6 +74,9 @@ digest: >-
 # sourceOfTruth re-read 2026-10-21 (raft purge vs replication race): log_store.rs and raft/mod.rs: a
 # replication read that the purge passed now gets no entries, and openraft sends a heartbeat instead
 # of entries with a hole; the rest is test-only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-22 (a38ba74f9, a test helper): raft/mod.rs's snapshot_and_purge_for_test,
+# test code only, waits for the durable index to pass the purge point before it asks for a snapshot.
+# The broker is unchanged. Nothing this page states changes.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and
