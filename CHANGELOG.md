@@ -139,17 +139,17 @@ instead of reading all of them, which a short age makes matter. On a production 
 partition per trace, 3600 took the partitions from 520,857 to 151,120 within 40 s of the first 2.6
 leader.
 
-**A shared queue log no longer outgrows its disk when queues that die within the hour share it with
-queues kept for days.** A file of a shared log (`QUEEN_QLOG_SHARDS`) mixes queues, so once one of
-them keeps messages for days no file ever dies whole, and its dead bytes go only through rewrites,
-one per reclaim pass. A pass is bounded (256 files, 200 ms) and judging a file costs a lookup per
-partition in it: in production a queue with a partition per message filled one shard at about
-40 GB an hour while reclaim freed about one 65 MB file a minute (2026-10-22). While the last pass
-left work, a pass now gets `QUEEN_QLOG_RECLAIM_BOOST` (4) times its budget, rewrites included, and
-passes go back to the small budget once one finds nothing left. Judging and copying stay off the
-log's write lock, so appends do not wait for them. A pass that picked its rewrite stops judging
-there, so the next starts at the following file instead of passing the other candidates over until
-its cursor comes round again.
+**A queue log no longer fills its disk with raft entries nothing needs.** The queue logs are the
+write-ahead log: each entry is written to the logs of the queues it touches. A sealed file was
+rewritten once half of its message bytes were dead, and its entries did not count. In production a
+stream query wrote its whole state, up to 15 MB, on every commit (2026-10-22): one shared log
+(`QUEEN_QLOG_SHARDS`) grew about 40 GB an hour, most of each file was those entries, and the few
+messages beside them, of a queue kept 2 days, held every file for days. The entries now count as
+dead: a file reclaim may touch is below the point recovery and the cluster need, and a rewrite
+keeps only messages. And while the last reclaim pass left work, a pass gets
+`QUEEN_QLOG_RECLAIM_BOOST` (4) times its budget (256 files, 200 ms, one rewrite), rewrites
+included; passes go back to the small budget once one finds nothing left. Judging and copying stay
+off the log's write lock, so appends do not wait for them.
 
 **A queue's status can be read without its partitions.** `GET /api/v1/status/queues/:queue` with
 `includePartitions=false` answers the queue's totals, its partition count and consumed total

@@ -302,17 +302,21 @@ Retention is decided once, on the leader, and executed on every node, like every
    with no live record is unlinked. A partly live file is rewritten with only its live records; the
    copy is made without holding the log's lock (a sealed file is immutable) and swapped in under
    it, so appends do not wait for it. A per-queue log file is rewritten on its first dead message,
-   a shared log file once half its message bytes are dead; `QUEEN_QLOG_COMPACT_MIN_DEAD_PCT`
-   overrides both.
+   a shared log file once half of it is dead; `QUEEN_QLOG_COMPACT_MIN_DEAD_PCT` overrides both.
+   The raft entries a file carries are dead too (the queue logs are the write-ahead log, a file
+   reclaim may touch is below the point recovery and the cluster need, and a rewrite keeps only
+   messages): they count toward a shared file's half, and a per-queue file, where every file
+   carries some, is rewritten for them once they are half of it.
 
 Reclaim never touches the active file, nor a file holding a record above the last store checkpoint
 or, in a cluster, above the raft purge point. One pass examines at most 256 files, spends at most
 200 ms and rewrites at most one file. While the last pass left work (it ran out of its budget, or
 rewrote a file), the next is `QUEEN_QLOG_RECLAIM_BOOST` (4) times bigger in every bound, rewrites
-included, and passes go back to the small budget once one finds nothing left. A shared log whose
-files mix messages that die within the hour with messages kept for days frees bytes only through
-rewrites, and at one a pass such a log in production filled at about 40 GB an hour while about one
-65 MB file a minute was reclaimed (2026-10-22). An active file that holds data older than
+included, and passes go back to the small budget once one finds nothing left. Both matter when a
+log's files hold more entries than messages. In production (2026-10-22) a stream query wrote its
+whole state, up to 15 MB, on every commit: one shared log grew about 40 GB an hour, most of each
+file was those entries, and the few messages beside them, of a queue kept 2 days, held every file
+for days while their entries were not counted. An active file that holds data older than
 `QUEEN_QLOG_SEAL_AGE_S` (600) is sealed so that reclaim can reach it, when that is worth a file:
 reclaim found a dead message in it (it looks at 32 partitions of an aged active file a pass), or
 it holds an eighth of a full file. Age alone seals nothing, so a queue without retention gets a

@@ -1909,6 +1909,12 @@ struct FileProgress {
     dead_bytes: u64,
     /// Message bytes in the whole file (entry records carry none).
     msg_bytes: u64,
+    /// The file's bytes that are not messages or its header: the raft entries
+    /// it carries (the queue logs are the write-ahead log), stubs included.
+    /// An eligible file is wholly under the recovery floor, so the store and
+    /// openraft need none of them, and a rewrite keeps none
+    /// ([`super::copy_forward`]): they are dead from the start.
+    entry_bytes: u64,
 }
 
 /// What one retention pass may still spend, across every log it visits.
@@ -1991,8 +1997,12 @@ fn judge_file(
     Ok(verdict)
 }
 
-/// Is live file `p` worth a rewrite: at least `pct`% of its message bytes dead
-/// ([`QLog::set_compact_min_dead_pct`])? A sample of the records from `from`
+/// Is live file `p` worth a rewrite: at least `pct`% of it dead
+/// ([`QLog::set_compact_min_dead_pct`])? Dead is its dead messages and every
+/// byte that is not a message ([`FileProgress::entry_bytes`]): a file of raft
+/// entries (a stream query writing its state, prod 2026-10-22: 98% of a 67 MB
+/// file) holding a few messages of a queue kept for days would otherwise wait
+/// days, its entries counted as nothing. A sample of the records from `from`
 /// (the live one) on estimates it; only then is every remaining partition
 /// looked up, for the exact figure and the watermarks the rewrite keeps records
 /// by. `None`: not worth it, or not affordable in this pass.
@@ -2009,8 +2019,16 @@ fn rewrite_starts(
         return Ok(None);
     }
     let is_dead = |start: Option<u64>, end: u64| start.is_none_or(|s| end <= s);
-    let worth =
-        |dead: u64| dead > 0 && u128::from(dead) * 100 >= u128::from(pct) * u128::from(p.msg_bytes);
+    // Entries decide alone only from half the file: on a per-queue log (`pct`
+    // 0, its first dead message) every file carries some, and each would
+    // otherwise be copied once for a few of them.
+    let entry_pct = if pct == 0 { 50 } else { pct };
+    let whole = p.msg_bytes.saturating_add(p.entry_bytes);
+    let worth = |dead: u64| {
+        let freed = dead.saturating_add(p.entry_bytes);
+        (dead > 0 && u128::from(dead) * 100 >= u128::from(pct) * u128::from(p.msg_bytes))
+            || (freed > 0 && u128::from(freed) * 100 >= u128::from(entry_pct) * u128::from(whole))
+    };
     let mut seen: std::collections::HashMap<u64, Option<u64>> = std::collections::HashMap::new();
     let mut lookup = |pid: u64, budget: &mut ReclaimBudget| -> io::Result<Option<Option<u64>>> {
         if let Some(start) = seen.get(&pid) {
@@ -2567,7 +2585,7 @@ impl QLogReader {
                     let Some(view) = view else {
                         continue;
                     };
-                    let msg_bytes = view
+                    let msg_bytes: u64 = view
                         .records()
                         .filter(|r| r.count > 0)
                         .map(|r| u64::from(r.len))
@@ -2577,6 +2595,9 @@ impl QLogReader {
                         pos: 0,
                         dead_bytes: 0,
                         msg_bytes,
+                        entry_bytes: bytes
+                            .saturating_sub(super::FILE_HEADER_LEN)
+                            .saturating_sub(msg_bytes),
                     })
                 }
             };

@@ -2148,6 +2148,122 @@ fn a_boosted_pass_rewrites_several_mixed_files_one_call_each() {
     }
 }
 
+/// A per-queue log (rewrite threshold 0, the first dead message) of 12
+/// entries, each one live message of pid 7 (`msg` bytes of payload) and its
+/// entry record (`entry` bytes of state) under one seq, as the writer groups
+/// them. Answers the set, the log, and how many rewrites one pass with a
+/// budget of 64 made over the sealed files with every message live.
+fn entries_beside_live_messages(
+    tag: &str,
+    msg: usize,
+    entry: usize,
+) -> (TmpDir, super::set::QLogSet, u64, usize) {
+    use super::{EntryInput, WriteRecord};
+    let td = TmpDir::new(tag);
+    let mut set = super::set::QLogSet::new(td.path().join("qlog"), QLogOptions::testing(4_000));
+    set.reopen_all().unwrap();
+    set.set_recovery_floor(u64::MAX);
+    let log = set.log_id_for(super::set::QLogSet::queue_id_of("t", "per-file"), 7);
+    let now = super::wall_now_us();
+    let state = vec![0xE5u8; entry];
+    for i in 0..12u64 {
+        let seq = i + 1;
+        // Noise (xorshift), so the payload codec stores it at its size.
+        let mut x = seq.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let p: Vec<u8> = (0..msg)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect();
+        let h = hashes(seq, 1);
+        set.write_mixed_for_qid(
+            log,
+            &[
+                WriteRecord::Msg(RecordInput {
+                    seq,
+                    pid: 7,
+                    base_offset: i,
+                    count: 1,
+                    created_at_us: now + i as i64,
+                    txn: None,
+                    hashes: &h,
+                    payload: &p,
+                }),
+                WriteRecord::Entry(EntryInput {
+                    seq,
+                    now_us: now + i as i64,
+                    copies: 1,
+                    term: 0,
+                    entry: &state,
+                }),
+            ],
+        )
+        .unwrap();
+    }
+    set.sync().unwrap();
+    let reader = set.reader();
+    let starts: std::collections::HashMap<u64, u64> = [(7, 0)].into();
+    let mut live_start =
+        |pid: u64| -> std::io::Result<Option<u64>> { Ok(starts.get(&pid).copied()) };
+    let mut budget = super::set::ReclaimBudget {
+        rewrites: 64,
+        ..unlimited_budget()
+    };
+    let mut rewritten = 0;
+    for _ in 0..64 {
+        let p = reader
+            .reclaim_log(log, &mut live_start, &mut budget)
+            .unwrap();
+        rewritten += p.compacted;
+        if p.compacted == 0 {
+            break;
+        }
+    }
+    (td, set, log, rewritten)
+}
+
+/// A file of raft entries beside a few live messages is worth a rewrite: under
+/// the recovery floor its entries are dead, and a rewrite keeps none. Prod,
+/// 2026-10-22: a stream query wrote its whole 15 MB state on every commit, and
+/// most of a shard's 67 MB files were those entries, held for days by the few
+/// messages of a queue kept 2 days beside them, their entries counted as
+/// nothing.
+#[test]
+fn a_file_of_entries_beside_live_messages_is_rewritten() {
+    let (_td, set, log, rewritten) = entries_beside_live_messages("per-file-entries", 64, 3_000);
+    let q = set.log(log).unwrap();
+    let q = q.read().unwrap();
+    let sealed = q.file_count() - 1;
+    assert!(sealed >= 4, "several sealed files, got {sealed}");
+    assert_eq!(rewritten, sealed, "every sealed file was rewritten");
+    // Sealed files of ~6.4 KB each kept ~290 bytes; the active one is whole.
+    assert!(
+        q.bytes() < 2 * 6_400 + sealed as u64 * 400,
+        "the entries are gone: {} bytes left",
+        q.bytes()
+    );
+    for offset in 0..12 {
+        assert!(
+            q.read_payload(7, offset).unwrap().is_some(),
+            "live pid 7 offset {offset} survives"
+        );
+    }
+}
+
+/// The other side: a file of live messages with a few entries, as every file of
+/// a per-queue log is, stays as it is. Counted alone, its entries would have
+/// it copied once for them.
+#[test]
+fn a_file_of_live_messages_and_a_few_entries_is_left_alone() {
+    let (_td, set, log, rewritten) =
+        entries_beside_live_messages("per-file-few-entries", 1_500, 100);
+    assert!(sealed_files(&set, log) >= 3, "several sealed files");
+    assert_eq!(rewritten, 0, "no file was copied for its entries");
+}
+
 #[test]
 fn per_file_retention_stops_at_its_lookup_budget_and_resumes() {
     let (_td, set, log) = per_file_set("per-file-budget", 300, &[1, 2, 3], 24);
