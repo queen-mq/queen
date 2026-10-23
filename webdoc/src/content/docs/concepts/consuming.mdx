@@ -106,6 +106,12 @@ verifiedBy:
 # the queue detail read takes includePartitions=false and then returns queue-wide totals without
 # per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-23 (e82652798, pinned long polls woken): consume/pop.rs, state.rs
+# and hooks.rs mark a part that a pop naming its partition claimed while it sat in the ready list,
+# and arm() wakes the group once that part has work again: a long poll of the partition already
+# waiting is now answered by a push and at the end of a retryDelay, delayedProcessing or
+# windowBuffer hold, instead of at its timeout. The page already says so (a long poll waits until a message
+# arrives; a failed message comes back once retryDelay has passed). Nothing this page states changes.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers

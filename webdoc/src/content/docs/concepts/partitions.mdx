@@ -84,6 +84,12 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-22 (the reclaim pass's row cache): maintenance.rs keeps only the
 # partition rows a pass found and reads a missing one again (no row can mean not applied yet).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-23 (e82652798, pinned long polls woken): consume/pop.rs, state.rs
+# and hooks.rs mark a part that a pop naming its partition claimed while it sat in the ready list,
+# and arm() wakes the group once that part has work again: a long poll of the partition already
+# waiting is now answered by a push and at the end of a retryDelay, delayedProcessing or
+# windowBuffer hold, instead of at its timeout. The queue options table already says so (retryDelay,
+# delayedProcessing, windowBuffer). Nothing this page states changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a

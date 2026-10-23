@@ -60,6 +60,12 @@ digest: >-
 # sourceOfTruth re-read 2026-10-21: real.rs gives a Kafka record's push its transaction id (facade
 # 2's idempotent producer) and consume/txn.rs counts a moved position as consumption on the
 # dashboard (cd737c40a). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-23 (e82652798, pinned long polls woken): consume/pop.rs, state.rs
+# and hooks.rs mark a part that a pop naming its partition claimed while it sat in the ready list,
+# and arm() wakes the group once that part has work again: a long poll of the partition already
+# waiting is now answered by a push and at the end of a retryDelay, delayedProcessing or
+# windowBuffer hold, instead of at its timeout. This page does not describe long polls, and nothing it states
+# changes.
 ---
 
 Queen has one idea, and every concept page zooms into a part of it. Every entity gets an ordered
