@@ -71,6 +71,15 @@ turning deduplication off or redelivering at once still goes through
 `Option("dedupWindowSeconds", 0)` and `Option("retryDelay", 0)`. A `queenctl` built against this
 client accepts the three keys in an `apply` manifest's `config:` block.
 
+**Broker: a long poll of a partition by name wakes when the partition has work again.** After a
+pop that named the partition (`.partition(...)` in the SDKs), a long poll of that partition that
+was already waiting was not woken by a push, by the end of a `failed` ack's `retryDelay`, or by the
+end of a `delayedProcessing` or `windowBuffer` hold: it answered empty at its timeout, and the next
+pop got the message. A retry could so wait the SDKs' 30 s poll timeout instead of `retryDelay` (1 s
+by default). On 2.6.0 such a long poll with a 3 s timeout answered empty after 2.7 s; it now gets
+the failed message after about `retryDelay`. Long polls of the whole queue, and those after a pop of
+the whole queue, were not affected. The push case is older than 2.6.0: 2.5.0 has it too.
+
 ## 2.6.0 - 2026-10-22
 
 **The Kafka facade is a translation layer onto Queen, rewritten from scratch.** The first facade

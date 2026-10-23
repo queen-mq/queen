@@ -1842,3 +1842,178 @@ fn a_new_leader_redelivers_a_held_message_at_once() {
     h.failover();
     only(h.wildcard("q", "g", "w2"));
 }
+
+/// Serve `c` as a long poll (parked: nothing is claimable yet), run `then`
+/// (a push, say), and wait on the wall clock for its answer: the claims and
+/// how long after `then` they came, `None` when nothing came in `wait_ms`.
+fn parked_answer(
+    h: &mut H,
+    mut c: PopCommand,
+    wait_ms: u64,
+    then: impl FnOnce(&mut H),
+) -> Option<(Vec<PopClaim>, std::time::Duration)> {
+    c.wait = true;
+    c.deadline_us = wall_us() + 10_000_000;
+    h.now = wall_us();
+    let cmd = if c.partition.is_some() {
+        Command::PopPinned(c)
+    } else {
+        Command::PopWildcard(c)
+    };
+    let mut rx = h.later(cmd);
+    let start = std::time::Instant::now();
+    then(h);
+    while start.elapsed() < std::time::Duration::from_millis(wait_ms) {
+        h.checkpoint();
+        if let Ok(r) = rx.try_recv() {
+            match r {
+                Reply::Done {
+                    outcome: Outcome::Pop(p),
+                    ..
+                } => return Some((p.claims, start.elapsed())),
+                other => panic!("{other:?}"),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    None
+}
+
+/// The book's case (2026-10-23, 2.6.0): two messages popped in one batch BY
+/// PARTITION NAME, the first acked `completed` and the second `failed` in one
+/// ack, then a long poll of the partition by name made while the hold runs.
+/// It is answered with the failed message when the retryDelay ends, not at
+/// its deadline. A pinned claim leaves the part in the group's ready list
+/// (only a wildcard walk takes it out), and the timer that ends the hold
+/// found it "already ready" and woke nobody. Every pairing of a pinned or
+/// wildcard first pop with a pinned or wildcard long poll.
+#[test]
+fn a_parked_pop_is_answered_when_the_retry_delay_ends_after_a_pinned_claim() {
+    for (first_pinned, wait_pinned) in [(true, true), (true, false), (false, true), (false, false)]
+    {
+        let case = format!("first pinned={first_pinned}, long poll pinned={wait_pinned}");
+        let mut h = H::new("retry-delay-park-pinned");
+        let mut cfg = qcfg();
+        cfg.retry_delay = 300;
+        cfg.retry_limit = 3;
+        h.queue("q", cfg);
+        h.now = wall_us();
+        let pid = h.push("q", "p0", &["a", "b"]);
+        let first = if first_pinned {
+            h.pinned("q", "p0", "g", "w1")
+        } else {
+            h.wildcard("q", "g", "w1")
+        };
+        let first = only(first);
+        assert_eq!((first.start_offset, first.end_offset), (0, 1), "{case}");
+        h.now = wall_us();
+        let r = h.ack(
+            pid,
+            "q",
+            "g",
+            "w1",
+            &[("a", AckStatus::Ok), ("b", AckStatus::Failed)],
+        );
+        assert!(r.lease_released, "{case}");
+        let mut c = h.pop_cmd("q", "g", "w2");
+        if wait_pinned {
+            c.partition = Some("p0".to_string());
+        }
+        let Some((claims, took)) = parked_answer(&mut h, c, 3_000, |_| {}) else {
+            panic!("{case}: the parked pop was not answered when the delay ended");
+        };
+        let c = only(claims);
+        assert_eq!(
+            (c.start_offset, c.end_offset),
+            (1, 1),
+            "{case}: the failed message"
+        );
+        assert!(
+            took >= std::time::Duration::from_millis(250),
+            "{case}: answered after {took:?}, inside the delay"
+        );
+    }
+}
+
+/// A control for the case above, without a hold: after a pinned claim and
+/// its ack, a pinned long poll is answered by the next push.
+#[test]
+fn a_parked_pinned_pop_is_answered_by_a_push_after_a_pinned_claim() {
+    let mut h = H::new("pinned-park-push");
+    let pid = h.push("q", "p0", &["a"]);
+    only(h.pinned("q", "p0", "g", "w1"));
+    h.ack(pid, "q", "g", "w1", &[("a", AckStatus::Ok)]);
+    let mut c = h.pop_cmd("q", "g", "w2");
+    c.partition = Some("p0".to_string());
+    c.wait = true;
+    c.deadline_us = wall_us() + 10_000_000;
+    h.now = wall_us();
+    let mut rx = h.later(Command::PopPinned(c));
+    h.push("q", "p0", &["b"]);
+    for _ in 0..3000 {
+        h.checkpoint();
+        if let Ok(r) = rx.try_recv() {
+            match r {
+                Reply::Done {
+                    outcome: Outcome::Pop(p),
+                    ..
+                } => {
+                    let c = only(p.claims);
+                    assert_eq!((c.start_offset, c.end_offset), (1, 1));
+                    return;
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("the push did not wake the parked pinned pop");
+}
+
+/// `delayedProcessing` and `windowBuffer` hold a partition just written the
+/// same way (a timer, then [`super::pop::arm`]): a long poll parked before the
+/// push is answered when the hold ends, after a claim of the partition by
+/// name too (the part then still sits in the ready list).
+#[test]
+fn a_parked_pop_is_answered_when_a_delay_or_a_window_ends() {
+    for (delay, window) in [(1, 0), (0, 1)] {
+        for (first_pinned, wait_pinned) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let case = format!(
+                "delay {delay} s, window {window} s, first pinned={first_pinned}, long poll pinned={wait_pinned}"
+            );
+            let mut h = H::new("hold-park");
+            let mut cfg = qcfg();
+            cfg.delayed_processing = delay;
+            cfg.window_buffer = window;
+            h.queue("q", cfg);
+            // An old message, consumed: the partition exists and is caught up.
+            h.now = wall_us();
+            let pid = h.push_at("q", "p0", &["a"], wall_us() - 5_000_000);
+            if first_pinned {
+                only(h.pinned("q", "p0", "g", "w1"));
+            } else {
+                only(h.wildcard("q", "g", "w1"));
+            }
+            h.ack(pid, "q", "g", "w1", &[("a", AckStatus::Ok)]);
+            let mut c = h.pop_cmd("q", "g", "w2");
+            if wait_pinned {
+                c.partition = Some("p0".to_string());
+            }
+            let answer = parked_answer(&mut h, c, 4_000, |h| {
+                h.now = wall_us();
+                h.push("q", "p0", &["b"]);
+            });
+            let Some((claims, took)) = answer else {
+                panic!("{case}: the parked pop was not answered when the hold ended");
+            };
+            let c = only(claims);
+            assert_eq!((c.start_offset, c.end_offset), (1, 1), "{case}");
+            assert!(
+                took >= std::time::Duration::from_millis(900),
+                "{case}: answered after {took:?}, inside the hold"
+            );
+        }
+    }
+}
