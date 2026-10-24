@@ -313,7 +313,8 @@ def place_inline():
     write("{{-- The Queen logo, inline. Written by assets/logo.py: do not edit. --}}\n" + mark,
           "clients", "client-php", "resources", "views", "dashboard", "partials", "mark.blade.php", root=ROOT)
     view, shapes = lockup("queen")
-    write(inline(view, *shapes(YELLOW, "currentColor", "")), "webdoc", "src", "assets", "queen.svg", root=ROOT)
+    for name in ("app", "webdoc"):
+        write(inline(view, *shapes(YELLOW, "currentColor", "")), name, "src", "assets", "queen.svg", root=ROOT)
     # the logo with its line, for the dashboard's sign-in page
     view, shapes = lockup("queen-tagline")
     write(inline(view, *shapes(YELLOW, "currentColor", "currentColor")), "app", "public", "queen-wordmark.svg",

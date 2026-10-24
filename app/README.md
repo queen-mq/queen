@@ -271,6 +271,7 @@ app/
 │   │   └── Workload.vue
 │   ├── App.vue                   # Root component
 │   ├── main.js                   # Entry point
+│   ├── shell.css                 # Console shell; Gate and Traceflow copy it
 │   └── style.css                 # Global styles & design system
 ├── test/                         # node --test unit tests (npm test)
 ├── index.html

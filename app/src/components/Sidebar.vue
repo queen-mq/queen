@@ -15,17 +15,13 @@
 
   <aside class="sidebar" :class="{ 'sidebar-mobile-open': mobileOpen, rail }">
     <!-- Brand. As tall as the top bar, so the two share a baseline; no rule
-         under it. The mark is the small logo: the q with its sunflower
-         (assets/logo.py writes it). Its petals are the logo's yellow, the
-         dashboard's brand colour, and its letter takes the name's colour.
-         The name beside it is plain interface type. -->
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true" v-html="mark" />
-      <template v-if="!rail">
-        <span class="brand-word">queen</span>
-        <span v-if="brokerVersion" class="brand-ver" :title="`Broker ${brokerVersion}`">{{ shortVersion }}</span>
-      </template>
-    </div>
+         under it. The wordmark, like Gate's and Traceflow's: the sunflower on
+         the q, then the name; the rail keeps the q alone. Petals in the logo's
+         yellow, letters in the name's colour (assets/logo.py writes both). -->
+    <router-link to="/" class="brand" aria-label="Queen overview" @click="closeMobile">
+      <span class="brand-mark" aria-hidden="true" v-html="rail ? mark : wordmark" />
+      <span v-if="!rail && brokerVersion" class="brand-ver" :title="`Broker ${brokerVersion}`">{{ shortVersion }}</span>
+    </router-link>
 
     <div class="sidebar-content">
       <!-- Navigation, derived from route meta filtered by what identity
@@ -113,6 +109,7 @@ import { h, ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import mark from '@/assets/q.svg?raw'
+import wordmark from '@/assets/queen.svg?raw'
 import ClusterSelector from '@/components/ClusterSelector.vue'
 import { system } from '@/api'
 import { formatNumber } from '@/composables/useApi'
@@ -439,28 +436,5 @@ function DlqIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', 
 </script>
 
 <style>
-/* Scrim over the page while the drawer is open. Flat: no blur. */
-.sidebar-overlay {
-  position: fixed; inset: 0;
-  background: var(--scrim);
-  z-index: 44; display: none;
-}
-.sidebar-mobile-toggle {
-  position: fixed; top: 8px; left: 10px; z-index: 50;
-  width: 36px; height: 36px; border-radius: var(--r-control);
-  background: transparent; border: 0; display: none;
-  place-items: center; cursor: pointer; color: var(--text-mid);
-}
-.sidebar-mobile-toggle:hover { color: var(--text-hi); background: var(--ink-3); }
-
-@media (max-width: 1100px) {
-  .sidebar-overlay { display: block; }
-  .sidebar-mobile-toggle { display: grid; }
-}
-@media (min-width: 1101px) {
-  .sidebar-overlay { display: none !important; }
-  .sidebar-mobile-toggle { display: none !important; }
-}
-
 .animate-spin { animation: spin 1s linear infinite; }
 </style>
