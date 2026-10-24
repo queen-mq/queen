@@ -3,7 +3,7 @@
 It runs Queen clusters on Kubernetes from `QueenCluster` objects, and does through the broker's
 membership API what a StatefulSet cannot: change the voters, replace a node, grow the volumes, and
 restart the pods one at a time, the leader last, each behind a write that commits. The docs page is
-[/operate/operator/](https://queenmq.com/operate/operator/).
+[/operate/operator/](https://queenmq.com/manage/operator/).
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/queen-mq/queen/master/deploy/operator/install.yaml
@@ -39,7 +39,7 @@ queen   2.3.0     [1,2,3]   true      Ready   40s
 
 Everything that can lose data: a forced recovery, an apply skip, two clusters where there was
 one. It reports the state (`Blocked`, or `Degraded` with the reason) and stops. The procedures are
-in [recovery](https://queenmq.com/operate/recovery/).
+in [recovery](https://queenmq.com/manage/recovery/).
 
 It also notices a voter that is behind the leader and does not move, which is what a volume wiped
 or restored under a node's id looks like, and restarts nothing while there is one. Replacing that

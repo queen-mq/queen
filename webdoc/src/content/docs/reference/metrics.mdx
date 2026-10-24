@@ -60,7 +60,7 @@ sourceOfTruth:
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node
 describes itself: what it served, how far its log and its apply have got, how long each stage of
 its pipeline takes. So scrape every node of a cluster, and read a cluster as the set of its
-nodes. Which of these to alert on, and at what thresholds, is on [monitoring](/operate/monitoring/).
+nodes. Which of these to alert on, and at what thresholds, is on [monitoring](/manage/upgrades-monitoring/).
 
 ```bash
 curl -s http://localhost:6632/metrics/prometheus | grep '^queen_raft_index'
@@ -84,7 +84,7 @@ own port with `QUEEN_PROXY_PORT` and scrape `PORT` from inside your network.
 `GET /metrics` is a JSON summary for the dashboard: `uptime`, request and message totals, the
 process's resident memory, and a `raft` block with this node's `role`, whether it knows a
 `leader`, its `term`, `applied` and `commit` indexes, its `lag` and its `quorumAckMs`
-([monitoring](/operate/monitoring/#health)). It is not Prometheus.
+([monitoring](/manage/upgrades-monitoring/)). It is not Prometheus.
 
 ## Reading the replicated log
 

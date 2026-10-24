@@ -15,7 +15,7 @@ pool of workers completes, how soon a job runs after its dispatch, how much memo
 take, and what happens when a worker, a master or the backend dies in the middle of a job. We
 wrote the protocol ourselves, so read every result as diagnostic: one host per run, one broker
 node, and the conditions next to each number. The guides that use these numbers start at
-[Laravel](/guides/laravel/).
+[Laravel](/integrations/laravel/).
 
 ## The runs
 
@@ -199,7 +199,7 @@ for 4.1 million of them, about 175 bytes each, and stopped growing when the disp
 2026-10-05, Queen only: the Rust supervisor with prefork, the command-line opcache and lease
 renewal in the master, three runs per lane (five at 500 jobs/s), each on a fresh broker. Every
 worker long-polls for 1 s. The profiles are the
-[Laravel guide's](/guides/laravel/#choose-a-delivery-profile): safe is `prefetch` 1 with
+[Laravel guide's](/integrations/laravel/#choose-a-delivery-profile): safe is `prefetch` 1 with
 synchronous ACKs; balanced is `prefetch` `'auto'`; fast adds `ack_async` and `pop_ahead`.
 
 <Figure id="benchmarks/laravel-profiles" />

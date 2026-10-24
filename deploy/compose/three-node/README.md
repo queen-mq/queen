@@ -2,7 +2,7 @@
 
 A real three-node Raft cluster on one machine, to watch replication, a leader hand-off and a
 rolling upgrade happen. The walkthrough with the output to expect is on the docs site at
-[/operate/cluster/](https://queenmq.com/operate/cluster/).
+[/operate/cluster/](https://queenmq.com/manage/docker/).
 
 ```bash
 cd deploy/compose/three-node
@@ -47,14 +47,14 @@ docker compose down -v               # removes the containers and the three volu
 
 Three containers on one host survive a process dying, not the host dying, so this file is for
 trying the cluster out. For servers, read the production notes on the same docs page and the
-[Kubernetes](https://queenmq.com/operate/kubernetes/) manifest.
+[Kubernetes](https://queenmq.com/manage/kubernetes/) manifest.
 
 ## Kafka clients
 
 `compose.kafka.yaml` turns on the Kafka facade on every node, as one Kafka cluster with three
 brokers (node N listens on `127.0.0.1:N6092`). The raft leader leads every partition and coordinates
 every group and transaction; the rest is described at
-[/guides/kafka/](https://queenmq.com/guides/kafka/#run-it-on-a-cluster).
+[/guides/kafka/](https://queenmq.com/integrations/kafka/).
 
 ```bash
 docker compose -f compose.yaml -f compose.kafka.yaml up -d --wait

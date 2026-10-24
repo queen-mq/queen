@@ -1,6 +1,6 @@
 # Three Queen nodes on one machine: a real Raft cluster for trying replication,
 # leader failover and rolling restarts. Walkthrough in README.md next to this
-# file and at https://queenmq.com/operate/cluster/.
+# file and at https://queenmq.com/manage/docker/.
 #
 #   echo "QUEEN_RAFT_TOKEN=$(openssl rand -hex 32)" > .env
 #   docker compose up -d --wait

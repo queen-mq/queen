@@ -1,0 +1,403 @@
+---
+title: "Laravel Horizon alternative: Queen vs Horizon"
+description: "For a team that runs Horizon: the two stacks side by side, where each one is ahead, what happened when we broke both on purpose, and the limits of that evidence."
+type: concept
+tier: use
+status: preview
+sidebar:
+  order: 3
+  label: Queen or Horizon
+sourceOfTruth:
+  - clients/client-php/src/Laravel/Contracts/QueenPartitionable.php
+  - clients/client-php/src/Laravel/Queue/SyncedFailedJobProvider.php
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - clients/client-php/config/queen.php
+  - clients/client-php/src/Laravel/Queue/QueenConnector.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Queue/HandBackJournal.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/TelemetryReader.php
+  - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
+  - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServer.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
+  - clients/client-php/src/Laravel/Dashboard/PrometheusMetrics.php
+  - clients/client-php/src/Laravel/Monitoring/JobMetricsRecorder.php
+  - clients/client-php/src/Laravel/Monitoring/TagMonitor.php
+  - clients/client-php/src/Laravel/Monitoring/QueueWaits.php
+  - supervisor/src/main.rs
+  - supervisor/src/coordination.rs
+  - supervisor/src/prefork.rs
+  - supervisor/src/lease/mod.rs
+  - supervisor/src/watch.rs
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/README.md
+  - benchmark-queen/2026-10-02-laravel-failure-matrix/README.md
+# Describes clients/client-php and supervisor/ as they are on master (PHP client 2.0.0, which pins
+# supervisor 0.6.0); the measurements are the Linux-server archives above, on master too.
+# sourceOfTruth re-read 2026-10-05 (docs restore): master carries clients/client-php, supervisor/ and the Laravel archives, so the files this page describes join the list; only Linux-server results remain (no Docker Desktop run); restored the Evidence column, the Queue backend and size-limit rows, the Horizon-docs sentence, the control-plane caveat, the global backlog analytics and the link to the crashes still charged an attempt; corrected the failure count (15 plus 2 replica scenarios), the four-profile soak, the pop_ahead rule (full batch, one queue) and the PHP master's memory (58.5 MiB, above Horizon's 49.1).
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /integrations/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (pool diagnostics): DashboardRepository adds counts_available to distinguish reported counts from legacy fallbacks. The process-health, controls and multi-host comparisons here still hold.
+# sourceOfTruth re-read 2026-10-06 (prefork per pool): SupervisorConfiguration and main.rs let a pool spawn while
+# the others fork; the comparison still holds, so nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (queen:consume fixes): QueenConnector builds its lease renewer
+# through the new LeaseRenewerFactory, with the same keys, checks and messages, and
+# QueenServiceProvider builds the container's client with clientConfig() and binds that factory.
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (connection defaults): SupervisorConfiguration and ApplicationSettings start
+# every queen connection from config/queen.php, as QueenConnector does and as the configuration page
+# already says; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its response and status filters; the documented Laravel dashboard and broker capabilities are unchanged.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
+# messages whose rows are gone from the queue log. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (review fixes): the crash-loop circuit closes only with the
+# probe in both engines, as the table says; the failed-job provider leaves other drivers' records
+# to Laravel. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): a worker that cannot
+# pop leaves or is reported by status, where Horizon's keeps looping. The table gains that row.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
+# delivery that carries no Laravel job in the dead-letter queue at once. Nothing this page states
+# changes.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): JobMetricsRecorder::flush() starts over in a forked process, and timed-out attempts and $this->fail() count as failed; the page still describes live per-class metrics over up to a day. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): QueenConnector, QueenQueue,
+# SupervisorConfiguration, coordination.rs, main.rs, prefork.rs: the stability fixes of the
+# unreleased changelog. A worker that cannot pop still leaves on a wrong connection or a
+# LogicException, which an unsafe job timeout no longer is; every row still holds.
+# sourceOfTruth re-read 2026-10-11 (review fixes, unreleased): failover counts a URL listed twice
+# once; consume() backs off after an answer that is not the broker's; a replacement that cannot
+# start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
+# SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
+# states changes.
+# sourceOfTruth re-read 2026-10-12 (binary push, push compression, framed pop): config/queen.php adds
+# binary_push, push_compression and framed_pop, off by default, and QueenConnector checks them and
+# gives them to the client. The comparison names none of them, and the keys and behaviour it does name
+# are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-13 (2.3.0, PHP client 2.5.0): phase2/reads.rs gives POST
+# /api/v1/fetch a ceiling for the whole call; the reads this page describes are answered as before.
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-16 (windowBuffer cap): consume/pop.rs ends a windowBuffer hold one
+# window after the oldest message waiting for the group instead of one window after the newest
+# write. This page does not describe windowBuffer, and nothing it states changes.
+# sourceOfTruth re-read 2026-10-17 (a parked fetch answers when its topic is written): reads.rs's
+# fetch_wait also watches the topics it reads (QUEEN_FETCH_TOPIC_WAKE_MS), and answers early only a
+# fetch that has read nothing. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (retryDelay enforced): the consumption engine (consume/ack.rs,
+# txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
+# and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
+# from the commit. The Laravel driver acks completed or dlq, never failed, so nothing this page
+# states changes.
+# sourceOfTruth re-read 2026-10-19 (Kafka groups in the console's reads): phase2/reads.rs reports a
+# Kafka-facade consumer group from the presence row the facade writes (kind kafka, liveMembers,
+# lastSeenAt, inactiveSeconds; state Stable, Lagging or Empty), two KV point reads per group of the
+# listing. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-21: phase2/reads.rs, metrics.rs and the dashboard count the records
+# Kafka fetches serve beside pops, and a gathered dashboard answer names the nodes it missed
+# (11a0a5f3a). Nothing this page states changes.
+---
+
+Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both
+supervise their workers, on different backends: Horizon on Redis, Queen on its own broker. This page puts the two whole stacks side by
+side for a team that runs Horizon today. We are proud of where Queen comes out ahead, and we say as
+plainly where it does not. [How Queen runs Laravel jobs](/integrations/laravel/concepts/) defines the
+terms, and the [Laravel benchmark](/benchmarks/laravel/) has every run behind the numbers.
+
+<Why>choosing a queue stack is choosing what happens on the bad day: a Redis restart, a slow job, a deploy in the middle of a burst. This page puts the two side by side at each of those moments.</Why>
+
+## At a glance
+
+**Measured on one Linux server**
+
+| | Horizon | Queen |
+| --- | --- | --- |
+| [Jobs/s, 32 workers, 10 ms jobs, fsync on every write](/benchmarks/laravel/#worker-capacity-on-a-linux-server) | 1,124 | 2,753 |
+| [Jobs/s, 64 workers](/benchmarks/laravel/#worker-capacity-on-a-linux-server) | 1,090 | 4,395 |
+| [p95 from dispatch to completion, 500 jobs/s asked, 16 workers](/benchmarks/laravel/#latency-at-a-steady-rate) | 227 ms | 23 ms |
+| [Application memory, 64 idle workers after 10 ms jobs](/benchmarks/laravel/#where-the-difference-comes-from) | 1,967 MiB | 225 MiB, with forked workers |
+| [The same, after jobs that each held 8 MiB](/benchmarks/laravel/#where-the-difference-comes-from) | 2,494 MiB | 755 MiB |
+| [Supervisor processes beside 64 workers, proportional set size](/benchmarks/laravel/#where-the-difference-comes-from) | 60 MiB: master and `horizon:supervisor` | 31 MiB: Rust master and fork server |
+| [Master resident memory through a 45-minute soak](/benchmarks/laravel/#the-soak) | 49.1 MiB | 7.0 MiB Rust, 58.5 MiB PHP |
+| [Backend CPU per job, at 500 jobs/s and under load with 32 workers](/benchmarks/laravel/#cpu) | 0.49 and 0.37 ms | 0.87 and 0.23 ms |
+| [15 failures and 2 replica scenarios on one Linux server](/benchmarks/laravel/#failures-replicas-a-soak-and-laravel-features) | all but one passed: 2 of 300 jobs ran twice after a Redis restart | all passed, on both engines |
+| [32 Laravel queue features](/benchmarks/laravel/#laravel-queue-features) | all passed | all passed, on both engines |
+
+**How they behave**
+
+| | Horizon | Queen |
+| --- | --- | --- |
+| [Queue backend](/integrations/laravel/concepts/#durability) | Redis | the Queen broker: one binary, a replicated log |
+| [Durability in the benchmark](/benchmarks/laravel/#the-runs) | Redis AOF, `appendfsync` `always`, `everysec` or `no` | one Raft node, fsync on every acknowledged write |
+| [A job that runs longer than `retry_after`](/integrations/laravel/concepts/#lease-renewal-and-fencing) | can run in two workers at once | lease renewal and fencing keep one attempt at a time |
+| [The jobs behind a long job](/integrations/laravel/concepts/#queues-and-stripes) | free workers take them | the jobs in its stripe wait for it |
+| [Order per entity](/integrations/laravel/concepts/#queues-and-stripes) | none | `QueenPartitionable` |
+| [Reaction to a burst](/benchmarks/laravel/#worker-capacity-on-a-linux-server) | reads queue sizes every `balanceCooldown` | with `event_driven` and `fast_scale_up`, 64 workers 8.2 s after a burst of 30,000 jobs began |
+| [Several masters on one queue](/integrations/laravel/supervisors/#several-replicas) | each sizes its pools from the whole backlog | opt-in coordination shares one target |
+| [Dashboard and alerts](/integrations/laravel/monitoring/) | mature: job lists, batches, silenced jobs, Slack and SMS | preview: process health, job metrics, tags, what each queue holds, failed jobs with a retry, tuning advice, mail, Prometheus |
+| [Clear a queue](/integrations/laravel/migrate-from-horizon/#clearing-a-queue) | `horizon:clear` and `queue:clear` | not supported: `queue:clear` fails and the jobs still run |
+| [Maturity](/integrations/laravel/supervisors/#requirements) | established | preview, supervisors on Unix only |
+
+Each row label links to its evidence. The measured rows come from the
+[Laravel benchmark](/benchmarks/laravel/): one 16-vCPU Linux
+server and one Raft node of 2.0.0-beta.2 and beta.3 (2026-10-01 and 2026-10-02). They are
+diagnostic, with a protocol written by the Queen team; [the limits](#the-limits-of-this-evidence)
+say what they do not show. The master memory row is a control-plane result, not a whole-stack one:
+Queen still needs its broker and storage. On the same server, over the 15-minute soak at 400
+jobs/s, Redis grew from 67 to 611 MiB with Horizon's job records, and the Queen broker from 59 to
+117 MiB, plus the page cache of its log.
+
+## Choose Horizon when
+
+- Redis is the queue backend you want, and your team already runs it well.
+- You need silenced jobs, job lists, batches in the dashboard, or Slack and SMS alerts out of the
+  box.
+- Several masters must run without a broker to coordinate through.
+- A native release artifact, or a supervisor that runs on Unix only, is not acceptable.
+- Jobs of very different lengths must share one queue, and a short job must never wait behind a
+  long one.
+- The application has no use for Queen's partitions, replay, timers or transactions.
+- The load is low and steady and backend CPU matters more than latency: there the Raft broker spends
+  more CPU per job than Redis.
+
+## Evaluate Queen when
+
+- Queen is already, or should be, the queue backend.
+- The memory of the workers matters. Only the Rust engine also makes the supervisor smaller: in the
+  soak the PHP master held 58.5 MiB, against 49.1 MiB for Horizon's and 7.0 MiB for the Rust one.
+- Workers run as Kubernetes pods that should follow the backlog.
+- Bursts must get workers within seconds, not within several cooldowns.
+- Jobs are short and you want each worker to complete more of them at the same durability, and keep
+  growing with the worker count: on the benchmark server Horizon stayed near 1,100 jobs/s from 32 to
+  64 workers, while Queen went from 2,753 to 4,395.
+- A long job must never run twice at the same time, however long it takes.
+- Per-entity order, consumer groups, replay, or an ACK and a push committed together help the
+  workload.
+- Your team can qualify its own jobs under at-least-once delivery and the current preview.
+
+If Queen fits, follow the [migration](/integrations/laravel/migrate-from-horizon/). If a Horizon-only
+feature above is a hard requirement, stay on Horizon until Queen has a tested replacement; rebuilding
+it in application code by accident is the worst of both.
+
+## Where Queen is ahead
+
+### More jobs per worker at the same durability
+
+On the Linux server, 32 Queen workers on a Raft node that fsyncs every acknowledged write completed
+2,753 jobs/s of 10 ms jobs, against 1,124 for Horizon on Redis with `appendfsync always`. Relaxing
+Redis did not close the gap: 1,247 with `everysec` and 1,313 with `appendfsync no`, while the Raft
+node kept fsyncing. With 64 workers Horizon stayed near 1,100 and Queen reached 4,395. Each Horizon
+job cost about 33 Redis commands and each Queen job 1.3 broker requests. Every Queen pop and ACK
+waits for an fsync, so the driver keeps those waits off the worker's path: the ACK of a job travels
+while the next job runs ([`ack_async`](/integrations/laravel/#fast)), and after a full batch
+from one queue, the pop for the next batch travels while the last job of that batch runs
+(`pop_ahead`).
+
+### Lower latency at a steady rate
+
+With jobs dispatched one at a time at 500 jobs/s and 16 workers, 95% of the jobs completed within
+227 ms of their dispatch on Horizon and within 23 ms on Queen. Over a 15-minute soak at 400 jobs/s
+the p95 was 249 against 22 ms. Horizon's producer reached 440 of the 500 jobs/s asked, because each
+dispatch also writes Horizon's monitoring records
+([benchmark](/benchmarks/laravel/#latency-at-a-steady-rate)).
+
+### Long jobs without a long `retry_after`
+
+Laravel's Redis queue gives a job back `retry_after` seconds after a worker took it, even while that
+worker still runs it, so a Horizon job has to end before `retry_after`. With
+[lease renewal](/integrations/laravel/concepts/#lease-renewal-and-fencing), Queen renews the lease of a
+running job and stops the worker before the lease ends if it cannot renew. A job with a longer
+`$timeout` of its own can then run past `retry_after` with no second attempt beside it, and
+`retry_after` only sets how soon the job a crashed worker was running runs again. On Linux the Rust
+master renews the leases of all its workers, so renewal adds no process beside each worker: on the
+Linux server, the application with 32 forked workers used 116 MiB with renewal in the master,
+against 417 MiB with a renewal helper per worker
+([benchmark](/benchmarks/laravel/#the-worker-side-features-one-at-a-time)).
+
+### Smaller workers, and a smaller Rust master
+
+Horizon, like Laravel's own `queue:work`, boots the framework once per worker.
+[Prefork](/integrations/laravel/supervisors/#prefork-workers) boots it once per master and forks every
+worker from it, so the workers share the compiled code in the opcache outright and the booted heap
+copy-on-write ([why](/integrations/laravel/concepts/#why-a-forked-worker-is-smaller-when-it-is-still-php)).
+On the Linux server, 64 workers idle after 10 ms jobs held 1.7 MiB of private memory each, against
+28.9 MiB for Horizon's, and the container used 225 against 1,967 MiB. The Horizon workers ran with
+PHP's default `opcache.enable_cli=0`, their smaller setting: with it on they held 35.9 MiB. The
+memory a job allocates is private on either engine, so with jobs that held 8 MiB the container used
+755 against 2,494 MiB. Count on about 27 MiB less per worker, the booted framework, not on a ratio.
+
+The Rust master does not load Laravel and held 7.0 MiB through the soak, against 49.1 MiB for
+Horizon's master. With prefork, the fork server holds the booted Laravel beside it, as Horizon runs
+`horizon:supervisor` beside its master: 31 MiB of proportional set size together for Queen, 60 MiB
+for Horizon. The PHP master keeps Laravel loaded itself and held 58.5 MiB, so only the Rust engine
+makes the supervisor smaller.
+
+### Faster reaction to bursts
+
+Horizon reads its queue sizes every `balanceCooldown`, three seconds by default, and moves
+`balanceMaxShift` workers per check; a Queen supervisor polls at the same pace by default. With
+[`event_driven`](/integrations/laravel/supervisors/#event-driven-scaling), the broker wakes it when jobs
+arrive, and with `fast_scale_up` each step closes half the gap to the target, once a second while
+the pool climbs. On the Linux server a burst of 30,000 jobs, autoscaling from 1 to 64 workers, was
+done after 9.5 s with Queen, which reached 64 workers after 8.2 s, and after 37.0 s with Horizon,
+whose producer sent jobs too slowly for it to need more than 34.
+
+### Built for Kubernetes replicas
+
+[Coordinated replicas](/integrations/laravel/supervisors/#several-replicas) split every pool's target
+through the broker's key/value store, so a supervisor Deployment scales with its replica count. The
+[Prometheus endpoint](/integrations/laravel/monitoring/#prometheus-and-kubernetes-autoscaling) gives KEDA
+the backlog to scale on, and the dashboard lists every pod and warns about masters that share a queue
+without coordinating. [Scale on Kubernetes](/integrations/laravel/kubernetes/) puts the pieces together.
+
+### Metrics without a snapshot command
+
+The workers record per-class metrics, monitored tags and what the long-wait alerts need into the
+broker, so the numbers cover every host and need no scheduled snapshot, and a long-wait alert reads
+the age of the oldest waiting job instead of estimating it ([monitoring](/integrations/laravel/monitoring/)).
+
+### The queue model underneath
+
+Choosing Queen also chooses what is below the supervisor: one ordered partition per key, created by
+its first push; consumer groups and replay over one stored copy; delayed jobs held by broker timers;
+a dead-letter queue kept in step with Laravel's failed jobs; an ACK and a push or a timer committed
+as one [transaction](/writing-applications/transactions/); and a cluster of three nodes that keeps serving
+through the loss of one. These are advantages only when the application uses them. A team that
+already runs Redis well and needs none of it may value Horizon's smaller topology more.
+
+## Where Horizon is ahead
+
+### Less backend CPU at a low, steady rate
+
+At 500 jobs/s with one job per dispatch, the Raft broker used 0.87 ms of CPU per job against 0.49
+for Redis, and 0.97 against 0.54 in the 15-minute soak. Each job is then its own Raft entry, and
+about half of the broker's CPU goes to handing work between its threads. Under load the order
+reverses, 0.23 against 0.37 ms per job with 32 workers. The application side was cheaper with Queen
+on the Linux server, 0.91 against 1.83 ms per job under load, with the PHP client's cURL transport.
+When CPU is the scarce resource, measure your own jobs first
+([benchmark](/benchmarks/laravel/#cpu)).
+
+### No wait behind a long job
+
+On Redis any free worker takes the next job, so a long job delays no other. On Queen a job waits
+until the job ahead of it in its stripe has ended: a ten-minute job holds back the jobs that hashed
+to its stripe for up to ten minutes, even while other workers are idle. Give long jobs a queue of
+their own ([queues and stripes](/integrations/laravel/concepts/#queues-and-stripes)).
+
+### Maturity, and a richer dashboard
+
+Horizon has an established installation path, a long operating history and one familiar Redis
+surface, and `horizon:clear` empties a queue. Queen's Laravel supervisor is a preview, with more
+decisions to make about the broker, the state directory and the native binary, and no atomic clear
+yet. Horizon's dashboard also still has silenced jobs, lists of recent, pending and completed jobs,
+batches, Slack and SMS routes and per-supervisor controls. Queen's panel covers process health, safe
+controls for a whole master, per-class metrics over up to a day, monitored tags, failed jobs with a
+one-click retry, what each queue holds and a tuning page; job lists, global backlog analytics and
+dead-letter operations live in the Queen dashboard, and forgetting and pruning failed jobs stay
+with Laravel's commands.
+
+### Several masters without a broker in between
+
+Horizon keeps live master and supervisor records in its
+[Redis repository](https://github.com/laravel/horizon/blob/5.x/src/Repositories/RedisMasterSupervisorRepository.php).
+Queen's lock excludes a second master on the same host only. With coordination, masters register
+in the broker and each runs a share of every pool; without it, a Queen deployment runs one master per
+application and consumer group, with no rolling-surge overlap.
+
+### Fewer release artifacts
+
+Horizon installs as a Composer package and relies on an outer process monitor, and so does the
+Queen PHP engine. The Rust engine adds a native binary, a platform matrix, an installer and a release
+that has to match the Composer one. The installer is explicit and checks every step, but it is one
+more deployment step.
+
+## Feature by feature
+
+The Horizon column follows the
+[official Laravel Horizon documentation](https://laravel.com/docs/horizon), and the Queen column
+the PHP client and the Rust supervisor.
+
+| | Horizon | Queen |
+| --- | --- | --- |
+| Laravel jobs | standard dispatch, middleware, retry, backoff, failures | the same Laravel surface |
+| Queue backend | Redis only; the official docs state that Redis Cluster is not supported | the Queen broker and its replicated log |
+| Dynamic balancing | `auto`, with `size` or `time` | `auto`, with our own `size` and `time` |
+| Per-queue minimum | `minProcesses`, on every queue | `min_processes_per_queue` |
+| Reaction to new jobs | queue sizes read every `balanceCooldown` | the same polling, or `event_driven`: the broker wakes the master |
+| Scale-up rate | `balanceMaxShift` per cooldown | the same, or `fast_scale_up`: half the gap per cycle |
+| Fixed allocation | `simple` | `simple` |
+| Strict queue priority | `balance=false` | `balance=off` |
+| Long jobs | `retry_after` must exceed the job | lease renewal, with fencing before the lease ends |
+| Master | PHP with Laravel and Horizon loaded | the PHP engine, or the Rust engine |
+| Configuration and status | `config/horizon.php`, with its records in Redis | one configuration and one status protocol for both engines; configuration, status and telemetry have explicit size limits |
+| Worker memory | every worker boots Laravel | the same, or prefork: workers share one booted Laravel |
+| Crash loops | restart behaviour of Horizon and the outer monitor | capped backoff and a one-probe circuit in both engines, for short-lived crashes only |
+| A worker that cannot pop | it reports each failure and pops again, alive and counted | it leaves on a wrong connection or a `LogicException`, and otherwise status reports it after a minute of failed pops |
+| Several master hosts | master records in Horizon's Redis repository | opt-in coordination through the broker, otherwise one master |
+| Dashboard | the mature Horizon dashboard | the supervisor panel for every host or pod, plus the Queen dashboard |
+| Job metrics | per job and per queue, from `horizon:snapshot` | live per class, one hour to one day, from every worker; a per-queue chart from the broker's counters |
+| Tags and silencing | automatic and `tags()`, monitored tags, silenced jobs | automatic and `tags()`, monitored tags; no silencing |
+| Long-wait alerts | mail, Slack, SMS; the wait is estimated | `queen:check-waits`: the broker's age of the oldest waiting job, an event and mail |
+| Autoscaler metrics | not built in | a Prometheus endpoint for KEDA and HPAs |
+| Per-supervisor controls | pause, continue and status per supervisor | controls for the whole local master |
+| Failed jobs | Horizon's commands and dashboard | Laravel's commands, a dead-letter copy kept in step, and a detail page with a retry |
+| Clear a queue | `horizon:clear` and `queue:clear` | not supported |
+| Native binary | none needed | the Rust engine, installed explicitly at a pinned version |
+
+Matching names do not mean identical algorithms. You can configure the same limits, but depth,
+runtime estimates, cooldowns and process lifecycles come from different implementations.
+
+## When things fail
+
+On the Linux server, the same Laravel application went through 15 failures and 2 replica scenarios
+on Horizon, the Queen PHP supervisor and the Queen Rust supervisor. The failures were jobs that
+throw, time out or run out of memory, killed workers and masters, deploys during short and long
+jobs, and a backend that restarts, freezes or is down at dispatch. The replica scenarios were two
+masters on one queue, with one killed or both restarted in turn. A lane passed when every job
+completed once or failed once into `failed_jobs`, and no two attempts of one job ever overlapped.
+Both Queen engines passed every lane. Horizon passed all but one: after a Redis restart, 2 of 300
+jobs ran twice, because the worker could not remove them from Redis's reserved set while it was
+down.
+
+A fourth profile, the Rust engine with prefetch 4, `ack_async` and `pop_ahead`, passed every lane but
+one: a job that crashes its worker charged an attempt to the jobs prefetched with it. The lease
+renewer now hands those jobs back after a crash (PHP client 1.9.0). A rerun of that lane and four
+others on the Linux server passed on both engines, with prefetch 1 and with prefetch 4. Some crashes
+still cost an attempt: a lost node, a crash that takes the lease helper with the worker, and a
+batch popped ahead whose answer the worker had not read yet
+([prefetch](/integrations/laravel/concepts/#prefetch-ack_async-and-pop_ahead)). The first run of these
+lanes found three defects in the client and the supervisors, fixed before the release. The
+[benchmark page](/benchmarks/laravel/#failures-replicas-a-soak-and-laravel-features) has every
+lane, the defects and the data.
+
+The soak of the release candidate ran the three engines and the fourth profile at once for 45
+minutes, with a worker killed every 10 minutes and a deploy halfway. On all four profiles, every
+one of 13,501 jobs ended as its kind said, with 398 failed-job rows for 398 permanent failures
+([the soak](/benchmarks/laravel/#the-soak)).
+
+All 32 Laravel queue features we checked passed on the three engines and the fourth profile:
+delays and retries, uniqueness and rate limits, chains and batches, queued listeners, notifications
+and closures, encrypted jobs, `afterCommit` and the queue events, and the failed-job commands. Only
+`queue:clear` differs. Laravel's Redis queue stores due times in whole seconds, so a Horizon retry
+can start up to a second early or late: for `backoff` `[1, 3]`, Horizon's retries came after 1.81
+and 4.03 s, Queen's after 1.02 and 3.05 s.
+
+## The limits of this evidence
+
+These results are diagnostic. Each comes from one host and a single broker node, so the fsync cost
+of one virtual disk sets the absolute numbers and no replication round trip is in them. The lanes
+and their checks are ours, and nobody else has repeated them yet. Before we call the Laravel stack
+generally available we still want a 24-hour soak, network and storage faults, the same failure lanes
+on a three-node cluster, broader scaling and partition matrices, and verified native releases for
+every target.
+
+They verify the at-least-once paths we tested. They do not verify exactly-once external effects: in
+all three systems a process can perform a side effect and die before its acknowledgement is durable,
+so jobs still need an idempotency key.
+
+The broker results near a million messages a second on the [benchmarks](/benchmarks/) page are
+broker-native push and pop with Go loaders. They do not run Laravel jobs and do not belong in this
+comparison.

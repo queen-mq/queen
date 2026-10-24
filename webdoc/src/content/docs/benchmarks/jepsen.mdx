@@ -90,7 +90,7 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | W9 `streams` | stream cycles: pop a batch, read the partition's state, one cycle that acks it, writes output and updates the state | a batch counted twice or never, state that disagrees with the output |
 | W10 `timers` | schedule, reschedule and cancel timers, and consume what fires | a timer that fires twice or early, a cancelled timer that fires, fires and cancels that do not add up to the timers created |
 | W11 `locks`, W11b `semaphore` | take a lock, or one permit of a semaphore, for 2 to 4 seconds; commit transactions that carry its guard and push to the partition it protects; renew it, release it and read its holders. No client watches a clock, so each goes on using a token whose lease ran out | a guarded transaction that commits after its permit moved on, a token with two owners, a record of a transaction that rolled back, a grant whose token is not above the one before it, a permit handed to another owner before its lease could have ended |
-| W12 `failover` | two clusters of three nodes, one [following the other](/operate/standby/): push to the source, one record or a transaction over several partitions, and keep sending writes to the standby, which must refuse them; then the source stops (a crash, a crash while the standby is 10 s behind, or a planned switch that waits for the standby), the standby is promoted, and the clients write to it | a write a standby took before its promotion; a promoted log that is not the source's, record for record, up to where it ends; a transaction there in part; a planned switch that lost a write; after a crash, an acknowledged write missing while a later one is there; a write of the promoted cluster lost; a write refused as a standby's and found in the log |
+| W12 `failover` | two clusters of three nodes, one [following the other](/manage/standby/): push to the source, one record or a transaction over several partitions, and keep sending writes to the standby, which must refuse them; then the source stops (a crash, a crash while the standby is 10 s behind, or a planned switch that waits for the standby), the standby is promoted, and the clients write to it | a write a standby took before its promotion; a promoted log that is not the source's, record for record, up to where it ends; a transaction there in part; a planned switch that lost a write; after a crash, an acknowledged write missing while a later one is there; a write of the promoted cluster lost; a write refused as a standby's and found in the log |
 
 ## The faults
 
@@ -311,4 +311,4 @@ standby, one that follows across a version upgrade, and two clusters in differen
 part of it.
 
 What each API guarantees, written for the developer using it, is on
-[guarantees](/concepts/guarantees/).
+[guarantees](/introduction/guarantees/).

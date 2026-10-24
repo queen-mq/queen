@@ -1,0 +1,54 @@
+---
+title: "Write applications: a local broker and a client"
+description: "Start one Queen node with Docker, open the dashboard, and add the client for JavaScript, Python, Go, Rust, PHP or C++. Every code block on these pages runs in all six."
+type: quickstart
+tier: use
+sidebar:
+  label: "A local broker"
+  order: 0
+---
+
+Every feature of the client, one page each, with its reason. The code is in the six languages of the SDKs: pick yours in any code block, and every block on every page follows. The text names options as the JavaScript client spells them; [Client SDKs](/writing-applications/clients/) says how the others spell them.
+
+## Start a broker
+
+One binary serves the HTTP API and the dashboard on one port:
+
+```bash
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+```
+
+Open `http://localhost:6632` and watch every step of these pages land in the dashboard.
+
+<Screenshot src="dashboard-overview" alt="The Queen dashboard: the overview page of a running broker, with its queues, message rates and the replicated log." caption="The dashboard, served on the same port as the API." />
+
+<Fig id="one-node" caption="One process serves the API, the dashboard, health and metrics on port 6632." />
+
+## Add the client
+
+| Language | Install |
+| --- | --- |
+| JavaScript | `npm install queen-mq` |
+| Python | `pip install queen-mq` |
+| Go | `go get github.com/smartpricing/queen/clients/client-go/v2` |
+| Rust | `cargo add queen-mq serde_json` and `cargo add tokio --features rt-multi-thread,macros` |
+| PHP | `composer require queen-mq/php-client` |
+| C++ | Header only: `clients/client-cpp/queen_client.hpp`, with cpp-httplib and nlohmann/json |
+
+No SDK is needed to try anything: the API is JSON over HTTP, and `curl` is a complete client.
+
+## On these pages
+
+| Page | What it covers |
+| --- | --- |
+| [Client SDKs](/writing-applications/clients/) | Install and connect, how each SDK names things, and what each one lacks. |
+| [Queues](/writing-applications/queues/) | Create and configure a queue: every option, with its default and its reason. |
+| [Push](/writing-applications/push/) | One partition per entity, an answer per message, buffering, binary forms. |
+| [Pop and consume](/writing-applications/pop/) | Queue mode and consumer groups, where a group starts, batches, leases, conflation, seek, reads by offset. |
+| [Acknowledge](/writing-applications/ack/) | completed, failed, retry and dlq, one by one or in a batch. |
+| [Retries and DLQ](/writing-applications/retries/) | How a failed message comes back, and how to read and replay the dead-letter queue. |
+| [Transactions](/writing-applications/transactions/) | Acks, pushes, KV and timers in one commit. |
+| [KV, locks and timers](/writing-applications/kv-locks-timers/) | State in the broker, singletons with leased locks, messages scheduled for later. |
+| [Ephemeral queues](/writing-applications/ephemeral/) | Request and reply in memory, outside the log. |
+| [Streams](/writing-applications/streams/) | Windows, reduce and gates, with the source ack, the state and the output in one commit. |
+| [AI coding agents](/writing-applications/ai-agents/) | Give your coding agent the rules and the examples through MCP. |

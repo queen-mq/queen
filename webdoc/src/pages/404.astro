@@ -3,17 +3,18 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 import Header from "../components/Header.astro";
 
 // The site's only other link out of here is the header logo, which lands the
-// reader on the homepage and nothing more. These are the seven top-level
+// reader on the homepage and nothing more. These are the eight top-level
 // groups from the sidebar config in astro.config.ts, so a reader who arrives
 // on a dead URL can jump straight to the section they were after. Trailing
 // slashes match the canonical form the pages declare.
 const sections = [
-  { href: "/start/", label: "Start", blurb: "What Queen is, the quickstart, clients" },
-  { href: "/concepts/", label: "Concepts", blurb: "Partitions, consuming, transactions, KV, timers" },
-  { href: "/guides/", label: "Guides", blurb: "State machines, exactly-once, webhooks, Kafka" },
-  { href: "/operate/", label: "Operate", blurb: "A node, a cluster, Kubernetes, tenants, monitoring" },
+  { href: "/introduction/", label: "Introduction", blurb: "What Queen is, why it exists, the model, guarantees" },
+  { href: "/writing-applications/", label: "Writing applications", blurb: "Queues, push, pop, acks, transactions, KV, streams" },
+  { href: "/patterns/", label: "Patterns", blurb: "Work queue, pub/sub, request/reply, workflows, rate limits" },
+  { href: "/integrations/", label: "Integrations", blurb: "Kafka clients, S3, PostgreSQL, Laravel" },
+  { href: "/manage/", label: "Manage clusters", blurb: "Docker, Kubernetes, configuration, upgrades, recovery" },
   { href: "/reference/", label: "Reference", blurb: "HTTP API, configuration, metrics, errors, limits" },
-  { href: "/internals/", label: "Internals", blurb: "How the broker works underneath" },
+  { href: "/architecture/", label: "Architecture", blurb: "How the broker works underneath" },
   { href: "/benchmarks/", label: "Benchmarks", blurb: "Measured runs and their conditions" },
 ];
 ---

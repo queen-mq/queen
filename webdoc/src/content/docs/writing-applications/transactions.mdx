@@ -1,0 +1,93 @@
+---
+title: "Transactions: acks, pushes and state in one commit"
+description: "One call acks the input, pushes to any queue, writes KV and schedules timers, and commits as one log entry, all or nothing. Conditions on KV writes stand in for reads."
+type: how-to
+tier: use
+sidebar:
+  label: "Transactions"
+  order: 8
+sourceOfTruth:
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/consume/txn.rs
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/handlers/raft.rs
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/00-five-minutes.mjs
+  - examples/tutorials/py/00_five_minutes.py
+  - examples/tutorials/go/five-minutes/main.go
+  - examples/tutorials/rust/src/bin/00_five_minutes.rs
+  - examples/tutorials/php/00-five-minutes.php
+  - examples/tutorials/cpp/00-five-minutes.cpp
+---
+
+The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.
+
+<SdkCode id="transaction" />
+
+Then open the dashboard: its KV page holds the order's new state, and its Timers page holds tomorrow's reminder.
+
+<Why>a worker's step is several writes: it marks its input done, saves what changed, tells the next service and plans what comes later. When those writes go to different systems, a crash between two of them leaves the step half done, and someone writes code to find and repair the halves. One commit has no halves.</Why>
+
+If the worker took too long and its lease ran out, the whole transaction is refused, so a slow worker can never write over the one that has the message now. If the step committed and only the answer got lost, a retry with the same `transactionId`s is refused whole, and nothing is written twice.
+
+<Fig id="lease-fence" caption="A worker whose lease ran out: its whole transaction rolls back." />
+
+## What can go in
+
+| Part | What it can hold |
+| --- | --- |
+| Acks | Messages leased from any partitions, queues and consumer groups of the tenant. Each ack carries its group and the lease of the pop that delivered it. |
+| Pushes | Messages to any queues and partitions. A queue or a partition that does not exist is created, as by a push. |
+| KV | `put`, `putIfAbsent`, `delete`, `incr` and `check`, each one optionally with a condition (`expect`, `required`). |
+| Timers | `schedule`, which replaces a timer with the same key, and `cancel`. |
+| A guard | `.guard(lock)`: the call commits only while the lock is still yours. |
+
+Over HTTP the same call is `POST /api/v1/transaction`: the acks and pushes go in `operations`, the KV and timer parts in the top-level arrays `kv` and `timers`. [Transaction API](/reference/transaction/) has every field.
+
+<Why>a step can touch anything the tenant owns, and it is still one entry of one log. The tenant lives in one raft group with one leader, so there is no coordinator and no two-phase commit.</Why>
+
+## Conditions instead of reads
+
+A transaction is one call, not a session: there is no "read, decide, write". To make a write depend on the state, put a condition on it. `expect` names the version the key must have, and `required: true` makes a missed condition roll back the whole call.
+
+<SdkCode id="uc-order" />
+
+`once(ns, key, { ttl })` (JavaScript and Python) is the short form of the most common condition: a marker written with `putIfAbsent` and `required: true`. Key it on the business fact (`paymentId`), and a second delivery of the same fact rolls back whole, receipts and timers included. The other SDKs write the same marker with KV `putIfAbsent` and `required: true`.
+
+<Why>two workers can read the same version and both decide to write. A condition checked inside the commit cannot race: one of them wins, and the other rolls back with nothing written.</Why>
+
+## Why a transaction rolls back
+
+A rollback answers HTTP 200 with `success: false`, a `reason`, and nothing written.
+
+| `reason` | Cause |
+| --- | --- |
+| `rejected_ack` | An ack's lease ran out or moved to another worker. The message goes to whoever holds it now. |
+| `kv_precondition` | A condition with `required: true` failed: a `once` marker that exists, an `expect` that missed, a lock that is gone. |
+| `duplicate` | A pushed `transactionId` is already in its partition's dedup window: the step already committed. |
+| `reserved` | Another write holds that cursor at this moment. Try again. |
+| `bad_request`, `too_large` | A malformed operation, or a part over the entry limit. |
+
+The JavaScript client returns a lost condition from `commit()` and throws for the other reasons. A 503 is not a rollback: `retry`, `timeout` and `no_leader` mean the outcome is not known, so the call may still commit. Make every step safe to send twice, with a `once` marker or a push with a fixed `transactionId`.
+
+<Why>a lost answer and a lost race look the same to a worker. The reason tells them apart: some mean "already done", some "not yours any more", some "try again".</Why>
+
+## Limits
+
+- One transaction belongs to one tenant.
+- KV inside a transaction: at most 64 operations over 256 keys, one write per key.
+- One timer operation per queue and timer key in one call.
+- A request body is at most 64 MiB (`QUEEN_MAX_BODY_BYTES`).
+- An external call (a payment provider, an email) is outside the commit. Give it an idempotency key from the message.
+
+## See also
+
+- [Workflows](/patterns/workflows/): an order moving from step to step, one transaction each.
+- [KV, locks and timers](/writing-applications/kv-locks-timers/): the parts a transaction writes.
+- [Errors](/reference/errors/): every reason and status code.
+

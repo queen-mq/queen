@@ -1,0 +1,103 @@
+---
+/**
+ * The little book of QueenMQ: its cover and the download, as `<BookDownload />`.
+ *
+ * Everything shown comes from `public/book/edition.json`, which `book/build.sh
+ * --publish` writes beside the PDF and the cover, so the page always describes the
+ * edition it serves: its month, page count, size and the QueenMQ release it covers.
+ * The markdown copy renders the same facts as a link (src/lib/markdown-partials.ts).
+ */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { LinkButton } from "./ui/link-button";
+
+interface Edition {
+  date: string;
+  edition: string;
+  pages: number;
+  bytes: number;
+  queen: string;
+  cover: [number, number];
+}
+
+// process.cwd() is the project root in dev and build (import.meta.url is a chunk in a build).
+let edition: Edition;
+try {
+  edition = JSON.parse(readFileSync(join(process.cwd(), "public", "book", "edition.json"), "utf8"));
+} catch {
+  throw new Error("<BookDownload>: public/book/edition.json is missing. Run book/build.sh --publish");
+}
+const pdf = "/book/the-little-book-of-queenmq.pdf";
+const size = `${(edition.bytes / 1024 / 1024).toFixed(1)} MB`;
+---
+
+<div class="qbook">
+  <a href={pdf} class="qbook-cover" aria-label="Download the PDF">
+    <img
+      src="/book/cover.webp"
+      alt="The cover of The little book of QueenMQ: the title in white on black, the line Partitions are for ordering. Not for scaling., and a yellow sunflower with a bee."
+      width={edition.cover[0]}
+      height={edition.cover[1]}
+      decoding="async"
+    />
+  </a>
+  <div class="qbook-text">
+    <p class="qbook-title">The little book of QueenMQ</p>
+    <p class="qbook-meta">{edition.edition} edition · QueenMQ {edition.queen} · {edition.pages} pages · PDF, {size}</p>
+    <LinkButton href={pdf} variant="primary">Download the PDF</LinkButton>
+    <p class="qbook-note">Free to download. The same book is on this site, with the code in six languages.</p>
+  </div>
+</div>
+
+<style>
+  .qbook {
+    display: flex;
+    gap: 1.75rem;
+    align-items: center;
+    margin: 1.5rem 0 2rem;
+  }
+  .qbook-cover {
+    flex: 0 0 13rem;
+    display: block;
+    border-radius: 0.375rem;
+    overflow: hidden;
+    box-shadow: 0 10px 30px -10px rgb(0 0 0 / 0.45);
+    transition: transform 0.15s ease;
+  }
+  .qbook-cover:hover {
+    transform: translateY(-2px);
+  }
+  .qbook-cover img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .qbook-text p {
+    margin: 0;
+  }
+  .qbook-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--nb-foreground);
+  }
+  .qbook-meta {
+    margin: 0.35rem 0 1rem !important;
+    font-size: 0.875rem;
+    color: var(--nb-muted-foreground);
+  }
+  .qbook-note {
+    margin-top: 0.75rem !important;
+    font-size: 0.8125rem;
+    color: var(--nb-muted-foreground);
+  }
+  @media (max-width: 560px) {
+    .qbook {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+    .qbook-cover {
+      flex-basis: auto;
+      width: 11rem;
+    }
+  }
+</style>

@@ -107,7 +107,7 @@ export function sidebarLabels(): Map<string, string> {
  *
  * The case worth spelling out is the one that silently dropped three pages when
  * this was a plain `split("/")`: a section's own overview page is
- * `start/index.mdx`, whose entry id is `start`, with no slash in it. That is not
+ * `manage/index.mdx`, whose entry id is `manage`, with no slash in it. That is not
  * a root-level page, it is the section's front door, and it is usually the page
  * carrying the section's most quotable fact. An id with no slash is therefore a
  * section overview when the sidebar declares a directory by that name, and a

@@ -8,8 +8,8 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "node scripts/gen-changelog.mjs && astro dev",
-    "build": "node scripts/gen-changelog.mjs && astro build",
+    "dev": "node ../figures/build.mjs --site public/figures && node scripts/gen-changelog.mjs && astro dev",
+    "build": "node ../figures/build.mjs --site public/figures && node scripts/gen-changelog.mjs && astro build",
     "preview": "astro preview",
     "typecheck": "astro check",
     "lint:docs": "nimbus-docs lint",

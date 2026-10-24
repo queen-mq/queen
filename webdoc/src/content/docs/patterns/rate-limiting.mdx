@@ -1,0 +1,31 @@
+---
+title: "Rate limiting with a token bucket gate"
+description: "An SMS provider takes five messages a second: a token bucket gate in a stream lets five through, and the rest come back after their lease, in order."
+type: example
+tier: use
+sidebar:
+  label: "Rate limiting"
+  order: 7
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+---
+
+An SMS provider accepts five messages a second for each customer. Send more and it refuses them, or blocks the account. The messages must still all go out, in order.
+
+A stream with a gate decides, message by message, whether a message may go on now. The token bucket gate keeps its state per partition, in the broker: here five tokens per customer, refilled at five a second. A message the gate refuses stops its partition there, and comes back, with the ones after it, when its lease ends.
+
+<SdkCode id="uc-rate" />
+
+Five messages went at once, and the rest followed at about five a second, so the twelfth left about two seconds after the first: all twelve, in order.
+
+<Fig id="sms-gate" caption="The token bucket gate: 5, 5, then 2, in order. A refill a few milliseconds short lets 4 through, not 5." />
+
+<Why>the bucket lives in the broker, per customer, and survives restarts: no Redis next to it. Waiting messages stay in their queue, in order, and never need a queue of your own.</Why>
+
+One thing to know: the refused messages wait for their lease, so size the two together. The most a gate can let through is the smaller of `refillPerSec` and `capacity` divided by the lease in seconds, so keep `capacity` near `refillPerSec` times the lease.
+
+Built from: [Streams](/writing-applications/streams/#rate-limits-with-a-gate), [Queues](/writing-applications/queues/) (the lease).

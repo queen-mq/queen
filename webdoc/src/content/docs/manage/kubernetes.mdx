@@ -1,0 +1,192 @@
+---
+title: "Run a Queen cluster inside Kubernetes"
+description: "A StatefulSet of three nodes with a Helm chart or the operator: stable names, one volume per node, probes, and a rolling update that hands over leadership."
+type: how-to
+tier: operate
+sidebar:
+  label: "Kubernetes"
+  order: 2
+---
+
+On Kubernetes a cluster is a StatefulSet of three pods. Each pod gets its own volume, the pods find each other through a headless Service, a second Service carries port 6632 to clients, and a disruption budget lets Kubernetes evict only one pod at a time. There are two ways to run it: a plain manifest you apply yourself, or the operator, which runs the same cluster from one object.
+
+<Fig id="k8s-topology" caption="The cluster on Kubernetes." />
+
+The repository ships no Helm chart. The complete manifest is [below](#the-whole-manifest), ready to copy or to put in your own chart.
+
+## The secret
+
+Both ways start with a namespace and a secret: the token the nodes share, and the key that encrypts payloads on disk.
+
+```bash
+kubectl create namespace queen
+kubectl -n queen create secret generic queen \
+  --from-literal=QUEEN_RAFT_TOKEN="$(openssl rand -hex 32)" \
+  --from-literal=QUEEN_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+```
+
+Keep a copy of the encryption key somewhere safe, apart from the cluster. Without it, the payloads of encrypted queues cannot be read, and a backup does not contain it.
+
+## The manifest
+
+The manifest is ordinary Kubernetes, but a few fields are there for a reason that is not obvious. Change them only if you know what you lose.
+
+| Field | Value | Why |
+| --- | --- | --- |
+| `podManagementPolicy` | Parallel | With `publishNotReadyAddresses`, lets all pods start together. Without both, a full restart never ends: no pod is ready without a leader, and no leader is elected until the pods can find each other. |
+| `publishNotReadyAddresses` | true | On the headless Service, for the same reason. |
+| `QUEEN_RAFT_NODE_ID` | ordinal | Pod `queen-0` is node 1, `queen-1` is node 2, and so on. |
+| `readinessProbe` | /health | A pod that does not know a leader, or is behind, gets no clients, and a rolling update waits for it. |
+| `livenessProbe` | TCP on 6632 | Never `/health`: an election would make every pod fail it, and Kubernetes would restart them all at once. |
+| `terminationGracePeriodSeconds` | 90 | A stopping pod hands over its work first, which can take close to a minute. Shorter, and the stop becomes a crash. |
+| `CPU limit` | none | Throttling turns a burst of work into a missed heartbeat. Memory request equals the limit. |
+| `podAntiAffinity` | required | One voter per machine: two voters on one machine turn its failure into a lost majority. |
+
+After `kubectl apply`, check that the three nodes formed one cluster:
+
+```bash
+kubectl -n queen rollout status statefulset/queen
+kubectl -n queen exec queen-0 -- curl -s localhost:6632/api/v1/system/raft/membership \
+  | jq -c '.membership | {leader, term, voters, members: [.members[] | {nodeId, live, lag}]}'
+```
+
+```json
+{"leader":1,"term":4,"voters":[1,2,3],"members":[{"nodeId":1,"live":true,"lag":0},...]}
+```
+
+Three voters, all live, none behind. Clients use the `queen` Service and can land on any pod.
+
+<Why>a StatefulSet gives each pod a stable name and its own volume, which is what a node of a cluster needs: the same identity and the same disk after every restart.</Why>
+
+## The operator
+
+A StatefulSet cannot add a voter, replace a node whose volume is lost, or grow its volumes, and its rolling update moves on as soon as a pod is Ready. The operator does those steps for you, through the same HTTP API you would use. Install it once:
+
+```bash
+kubectl apply -f \
+  https://raw.githubusercontent.com/queen-mq/queen/master/deploy/operator/install.yaml
+```
+
+Then, with the secret above, a cluster is one object:
+
+```yaml
+apiVersion: queenmq.com/v1alpha1
+kind: QueenCluster
+metadata:
+  name: queen
+  namespace: queen
+spec:
+  version: "2.6.0"
+  replicas: 3
+  secretName: queen
+  storage:
+    size: 50Gi
+```
+
+```bash
+kubectl -n queen get queencluster
+NAME    VERSION   VOTERS    COMMITS   PHASE   AGE
+queen   2.6.0     [1,2,3]   true      Ready   40s
+```
+
+`COMMITS` is a write the operator makes once a minute: `true` while the cluster can commit. The pods and Services have the same names as in the manifest.
+
+<Why>the steps that keep a cluster whole (remove a node before you wipe it, add it back as a learner, restart the leader last) are easy to get wrong by hand on a bad day. The operator does them in the right order, and stops and says why when only a person can decide. It is young: its API is `v1alpha1`, and a field may still change.</Why>
+
+## Four things to know
+
+- **Scaling the StatefulSet does not add a voter.** The members live in the log. Add or remove voters through the membership API, or change `replicas` on the operator's object.
+- **Some things are fixed at the first start:** the StatefulSet, Service and namespace names (they are part of the node addresses), and the ports.
+- **Delete one volume at a time, and remove the member first.** In a test, deleting two volumes at once left a cluster that could not commit while every pod said Ready.
+- **Pin the image version.** A pod that restarts on `latest` pulls whatever is current that day. An upgrade should be a step you take.
+
+## The whole manifest
+
+A headless Service for the nodes, a Service for the clients, the StatefulSet and a disruption budget. The fields in the table above are marked where they are set.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata: { name: queen }
+spec:
+  selector: { app: queen }
+  ports: [{ name: http, port: 6632, targetPort: http }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: queen-headless }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: queen }
+  ports:
+    - { name: http, port: 6632, targetPort: http }
+    - { name: raft, port: 7400, targetPort: raft }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: queen }
+spec:
+  maxUnavailable: 1
+  selector: { matchLabels: { app: queen } }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: queen }
+spec:
+  replicas: 3
+  serviceName: queen-headless
+  podManagementPolicy: Parallel
+  minReadySeconds: 30
+  updateStrategy: { type: RollingUpdate }
+  selector: { matchLabels: { app: queen } }
+  template:
+    metadata: { labels: { app: queen } }
+    spec:
+      terminationGracePeriodSeconds: 90
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532 }
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector: { matchLabels: { app: queen } }
+      topologySpreadConstraints:
+        - { maxSkew: 1, topologyKey: topology.kubernetes.io/zone, whenUnsatisfiable: ScheduleAnyway,
+            labelSelector: { matchLabels: { app: queen } } }
+      containers:
+        - name: queen
+          image: ghcr.io/queen-mq/queen:2.6.0
+          ports:
+            - { name: http, containerPort: 6632 }
+            - { name: raft, containerPort: 7400 }
+          env:
+            - { name: QUEEN_RAFT_REPLICATOR, value: openraft }
+            - { name: QUEEN_RAFT_DIR, value: /var/lib/queen/raft }
+            - { name: QUEEN_RAFT_NODE_ID, value: ordinal }
+            - name: QUEEN_RAFT_PEERS
+              value: "1=queen-0.queen-headless.queen.svc.cluster.local:7400/queen-0.queen-headless.queen.svc.cluster.local:6632,2=queen-1.queen-headless.queen.svc.cluster.local:7400/queen-1.queen-headless.queen.svc.cluster.local:6632,3=queen-2.queen-headless.queen.svc.cluster.local:7400/queen-2.queen-headless.queen.svc.cluster.local:6632"
+            - name: QUEEN_RAFT_TOKEN
+              valueFrom: { secretKeyRef: { name: queen, key: QUEEN_RAFT_TOKEN } }
+            - name: QUEEN_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: queen, key: QUEEN_ENCRYPTION_KEY } }
+            - name: QUEEN_SERVER_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: QUEEN_LOG_JSON, value: "true" }
+          resources:
+            requests: { cpu: "1", memory: 4Gi }
+            limits: { memory: 4Gi }
+          startupProbe:   { tcpSocket: { port: http }, periodSeconds: 5, timeoutSeconds: 5, failureThreshold: 360 }
+          readinessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 5, timeoutSeconds: 5, failureThreshold: 3 }
+          livenessProbe:  { tcpSocket: { port: http }, periodSeconds: 20, timeoutSeconds: 5, failureThreshold: 3 }
+          lifecycle: { preStop: { exec: { command: ["/bin/sleep", "5"] } } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/queen/raft }
+            - { name: tmp, mountPath: /tmp }
+      volumes: [{ name: tmp, emptyDir: {} }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 50Gi } }
+```

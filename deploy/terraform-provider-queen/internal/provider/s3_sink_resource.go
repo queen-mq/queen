@@ -62,7 +62,7 @@ func (r *s3SinkResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 		return schema.StringAttribute{Optional: true, MarkdownDescription: description}
 	}
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "The S3 sink of one cluster: the broker mirrors the cluster's queues into a bucket. It is set through the proxy's control plane, so the provider needs `cp_endpoint` and `cp_token`, and the broker has to run with `QUEEN_S3_EMBEDDED=true`. The settings and their defaults are the per-sink ones of the [S3 guide](https://queenmq.com/guides/s3/#reference); one this resource leaves out takes the broker's default.",
+		MarkdownDescription: "The S3 sink of one cluster: the broker mirrors the cluster's queues into a bucket. It is set through the proxy's control plane, so the provider needs `cp_endpoint` and `cp_token`, and the broker has to run with `QUEEN_S3_EMBEDDED=true`. The settings and their defaults are the per-sink ones of the [S3 guide](https://queenmq.com/integrations/s3/); one this resource leaves out takes the broker's default.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:            true,

@@ -10,12 +10,12 @@ same records.
 
 How to use it and what it does are on the docs site:
 
-- [Kafka clients](https://queenmq.com/guides/kafka/): how it works, how Kafka
+- [Kafka clients](https://queenmq.com/integrations/kafka/): how it works, how Kafka
   maps onto Queen, groups, idempotent producers, transactions, a cluster, limits.
 - [Kafka reference](https://queenmq.com/reference/kafka/): every setting, topic
   configs, APIs and versions, where it differs from Apache Kafka, the clients
   run against it, security and ceilings.
-- [Kafka Streams, Connect and Flink](https://queenmq.com/guides/kafka-frameworks/).
+- [Kafka Streams, Connect and Flink](https://queenmq.com/integrations/kafka-frameworks/).
 
 [REDESIGN.md](REDESIGN.md) records the design of the rewrite (2026-10-20) and
 why the first facade, the one 2.0 to 2.5 shipped, was replaced.

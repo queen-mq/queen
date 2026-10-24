@@ -1,0 +1,99 @@
+---
+title: "Create and configure queues: every option"
+description: "A queue is created by its first push. Configure it for leases, retries, delays, deduplication, retention and encryption, with the default and the reason for each option."
+type: concept
+tier: use
+sidebar:
+  label: "Queues"
+  order: 3
+sourceOfTruth:
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/consume/pop.rs
+  - server/src/encryption.rs
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/00-five-minutes.mjs
+  - examples/tutorials/py/00_five_minutes.py
+  - examples/tutorials/go/five-minutes/main.go
+  - examples/tutorials/rust/src/bin/00_five_minutes.rs
+  - examples/tutorials/php/00-five-minutes.php
+  - examples/tutorials/cpp/00-five-minutes.cpp
+  - examples/tutorials/js/book-client-guide.mjs
+  - examples/tutorials/py/book_client_guide.py
+  - examples/tutorials/go/book-client-guide/main.go
+  - examples/tutorials/rust/src/bin/book_client_guide.rs
+  - examples/tutorials/php/book-client-guide.php
+  - examples/tutorials/cpp/book-client-guide.cpp
+---
+
+A queue is a named set of partitions that share one configuration. You never have to create one: the first push that names a queue creates it, with the defaults. Configure it when you want other settings.
+
+<Fig id="queue-anatomy" caption="A queue: options shared by its partitions, each an ordered list of messages." />
+
+<SdkCode id="configure" />
+
+<Why>a queue created by a push is good enough to start, and most queues never need more. When they do, the settings live on the queue, in one place, instead of in every worker.</Why>
+
+## Every option
+
+Here is a queue that sets most of them, and the table below says what each one does.
+
+<SdkCode id="configure-jobs" />
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `leaseTime` | 60 s (300 s from `create()`) | How long a worker holds the messages it took before they go to another worker. |
+| `retryLimit` | 3 | How many failed attempts a message gets. After the last one it goes to the dead-letter queue. |
+| `retryDelay` | 1000 ms | How long a failed message waits before it comes back. Its partition waits with it, for that consumer group. |
+| `deadLetterQueue`, `dlqAfterMaxRetries` | true | File a message that ran out of retries in the dead-letter queue. With both off, it is dropped. |
+| `delayedProcessing` | 0 s | How long every new message waits after its push before anyone can take it. |
+| `windowBuffer` | 0 s | How long new messages wait in their partition, so a burst is handed over as one batch. |
+| `dedupWindowSeconds` | 3600 s | How long a partition remembers `transactionId`s. `0` turns deduplication off. |
+| `retentionEnabled` | false | Must be true for the two options below to do anything. |
+| `retentionSeconds` | 0 | Remove messages older than this, consumed or not. |
+| `completedRetentionSeconds` | 0 | Remove messages older than this that every consumer group has already acked. |
+| `maxWaitTimeSeconds` | 0 | Remove messages older than this, consumed or not. Works without `retentionEnabled`. |
+| `encryptionEnabled` | false | Encrypt payloads on disk. Every node needs `QUEEN_ENCRYPTION_KEY`. |
+| `namespace`, `task` | from the name | Labels that group queues in the dashboard and in a discovery pop. |
+
+**Leases.** A worker that takes messages holds them under a lease. Until it acks them or the lease runs out, no other worker of the same consumer group gets that partition.
+
+<Why>a worker can crash in the middle of its work. The lease is how its messages get back to someone else without a human noticing. Set it longer than your slowest handler, or renew it while the handler runs (see [Pop messages](/writing-applications/pop/)).</Why>
+
+**Retries.** A failed message comes back `retryLimit` times, each time after `retryDelay`, and then goes to the dead-letter queue.
+
+<Why>most failures are temporary: a database that restarts, a provider that times out. Trying again later fixes them. Waiting between tries gives the other side time to recover, and a message that can never succeed stops after a few tries instead of blocking its partition forever.</Why>
+
+**Delays.** `delayedProcessing` holds every new message of the queue for a while. `windowBuffer` holds a group's new messages until the burst is over, so the handler gets them together.
+
+<Why>some work should not start at once (a reminder sent five minutes after a signup), and some work is cheaper in bulk (one database write for a burst of fifty updates). For a delay that is different for each message, use a timer instead (see [KV, Locks and Timers](/writing-applications/kv-locks-timers/)).</Why>
+
+**Deduplication.** Inside the dedup window, a second push with the same `transactionId` in the same partition is not written.
+
+<Why>producers retry when they do not get an answer, and a retry must not create a second order.</Why>
+
+**Retention.** By default Queen keeps every message, and the disk grows. Retention runs only when `retentionEnabled` is true; then `retentionSeconds` removes old messages, read or not, and `completedRetentionSeconds` removes old messages that every group has finished. `maxWaitTimeSeconds` removes old messages without needing `retentionEnabled`. A node whose disk is 85% full refuses the writes that would grow it.
+
+<Why>an acked message is not deleted: it stays in its partition so that a new consumer group, an audit or a fixed bug can read it again. Retention is how you decide how long that history is worth its disk.</Why>
+
+**Encryption.** With `encryptionEnabled`, payloads are encrypted on disk.
+
+<Why>some payloads hold personal data that must not sit on a disk in clear text.</Why>
+
+## Three traps
+
+- `config(...).create()` in the JavaScript client sends your options together with the client's own defaults (a 300-second lease, encryption off, no retention). Calling it on an existing queue resets every option you leave out. Name every option you care about.
+- On a node without `QUEEN_ENCRYPTION_KEY`, an encrypted queue stores plain text, and nothing warns you.
+- `priority`, `ttl`, `maxSize` and `minPopWaitTime` are accepted and stored, and do nothing.
+- The C++ client cannot set `retentionEnabled`, `retryDelay`, `dedupWindowSeconds` or `maxWaitTimeSeconds`, so its code above posts to `/api/v1/configure` itself. A C++ queue configured with `retention_seconds` alone never runs retention.
+
+## See also
+
+- [Push](/writing-applications/push/): the first push creates the queue and the partition.
+- [Configuration for different use cases](/manage/configuration/): retention and disk on the broker side.
+- [Limits](/reference/limits/): name rules and the bounds of every option.

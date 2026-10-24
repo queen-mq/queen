@@ -25,7 +25,7 @@ const BROKER = process.env.BROKER ?? 'localhost:9092'
 // The width declared for TOPIC with CreateTopics. It has to be declared before
 // anything produces to the topic, because a producer's auto-create would make
 // it at the broker's default width first. How the facade advertises and stores
-// a topic's width is on https://queenmq.com/guides/kafka/.
+// a topic's width is on https://queenmq.com/integrations/kafka/.
 const PARTITIONS = Number(process.env.PARTITIONS ?? 1000)
 
 const { KafkaJS } = Confluent

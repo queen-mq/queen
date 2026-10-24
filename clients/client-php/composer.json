@@ -15,7 +15,7 @@
     "support": {
         "issues": "https://github.com/queen-mq/queen/issues",
         "source": "https://github.com/queen-mq/php-client",
-        "docs": "https://queenmq.com/guides/laravel/"
+        "docs": "https://queenmq.com/integrations/laravel/"
     },
     "require": {
         "php": "^8.3",

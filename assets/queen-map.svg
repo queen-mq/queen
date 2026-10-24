@@ -26,7 +26,7 @@
       are written as two lines rather than one corner. Nobody else's numbers
       appear: the axes stay unnumbered, and a competitor's figure would travel
       away from the conditions that make it true.
-      Frontiers, from /start/compare "What the measurements say", the
+      Frontiers, from /introduction/compare/ "What the measurements say", the
       benchmarks pages, and (for SQS alone) its published quotas:
         Kafka     lane ceiling ~5k (refuses topics between 2k and 5k on
                   defaults; p95 is gone by 8k). Its rate edge is NOT one we

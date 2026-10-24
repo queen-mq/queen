@@ -73,7 +73,7 @@ export async function GET() {
     "",
     "It answers from these docs, with tested code in every client language, the checklist of",
     "known traps, what each error means, which Kafka clients work, and setup recipes for KV,",
-    `timers, streams and the Postgres and S3 connectors. Setup for each agent: ${abs("/start/ai-agents/")}`,
+    `timers, streams and the Postgres and S3 connectors. Setup for each agent: ${abs("/writing-applications/ai-agents/")}`,
     "",
     "## Pages",
     "",

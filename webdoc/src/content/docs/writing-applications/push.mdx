@@ -1,0 +1,109 @@
+---
+title: "Push messages: answers, buffering, binary forms"
+description: "Push to a partition per entity, read the answer for each message (queued, duplicate, error), buffer many small messages, and turn on binary push, compression and framed pop."
+type: how-to
+tier: use
+sidebar:
+  label: "Push"
+  order: 4
+sourceOfTruth:
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/consume/pop.rs
+  - server/src/encryption.rs
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/dedup.rs
+  - protocols/queen-kafka/src/config.rs
+  - protocols/queen-kafka/src/handlers/produce.rs
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - clients/client-js/client-v2/kv/Kv.js
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/00-five-minutes.mjs
+  - examples/tutorials/py/00_five_minutes.py
+  - examples/tutorials/go/five-minutes/main.go
+  - examples/tutorials/rust/src/bin/00_five_minutes.rs
+  - examples/tutorials/php/00-five-minutes.php
+  - examples/tutorials/cpp/00-five-minutes.cpp
+  - examples/tutorials/js/book-client-guide.mjs
+  - examples/tutorials/py/book_client_guide.py
+  - examples/tutorials/go/book-client-guide/main.go
+  - examples/tutorials/rust/src/bin/book_client_guide.rs
+  - examples/tutorials/php/book-client-guide.php
+  - examples/tutorials/cpp/book-client-guide.cpp
+---
+
+In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up every customer that shares its partition. Here a partition is one entity: a customer, an order, a conversation. The push that names it creates it, order holds inside it, and one queue has held ten million.
+
+The `transactionId` makes a retry safe: the same id within the dedup window (an hour by default) is not written twice.
+
+<SdkCode id="push" />
+
+<Why>order matters per entity (an order's events must be handled in sequence), not across the whole queue. One partition per entity keeps that order without one slow entity holding up the others. A push with no partition goes to a partition called `Default`.</Why>
+
+## Every message gets its own answer
+
+One push can carry many messages, and the broker answers each one: `queued` (stored, with its offset), `duplicate` (that `transactionId` is already there, nothing was written) or `error` (refused, nothing written). The JavaScript client throws when any message is refused, unless you handle it yourself, and never throws for a duplicate. The other clients never throw for a refused message: they return each message's status, and their code below reads it.
+
+<Fig id="push-verdicts" caption="One push, one answer per message." />
+
+<SdkCode id="push-callbacks" />
+
+<Why>a duplicate is usually good news: it means an earlier attempt already got through. A refusal is not. Telling them apart per message lets one bad item in a batch of a hundred be retried alone, and lets a producer that retried after a timeout know that its first attempt worked.</Why>
+
+## Buffering, for many small messages
+
+Each push is one HTTP request. A producer that pushes thousands of small messages a second can let the client collect them and send them in batches instead.
+
+<SdkCode id="push-buffer" />
+
+A buffer is sent when it holds `messageCount` messages or when `timeMillis` has passed, whichever comes first. If the producer gets far ahead of the network (four times `messageCount` waiting), a buffered push waits instead of letting memory grow.
+
+<Fig id="push-buffer" caption="Client buffering: many small pushes, a few requests." />
+
+<Why>one request per message spends most of its time on the round trip, not on the message. Batching gets far more messages through the same connection. The price: a message is stored only when its batch is sent, so a process that crashes loses what was still in its buffer. Call `flushAllBuffers()` before you exit, and do not buffer messages you cannot afford to lose.</Why>
+
+## When several messages must land together
+
+A push of several messages is not all-or-nothing: each message gets its own answer, so some can be stored while others are refused. When messages must be stored together or not at all (an order and its payment request, say), push them in a transaction (see [Advanced transactional usage](/writing-applications/transactions/)).
+
+## Binary push, compression and framed pop
+
+By default the client and the broker speak JSON. Three options of the client change how messages travel, and nothing else: the calls, their results, deduplication and the guarantees stay the same.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `binaryPush` | false | A push, direct or buffered, goes as one binary body instead of a JSON document. A transaction that pushes sends its pushes the same way. |
+| `pushCompression` | false | Needs `binaryPush`. The client packs each partition's batch the way the broker stores it, and compresses it with zstd once. The broker keeps those bytes as they are. |
+| `framedPop` | false | `pop()` and `consume()` get the records as they are stored, and the client unpacks them into the same messages. |
+
+Turn them on when you create the client:
+
+<SdkCode id="wire-forms" />
+
+Compression needs zstd in the client:
+
+| Language | zstd |
+| --- | --- |
+| JavaScript | Comes with Node.js. |
+| Python | Comes with Python 3.14; before it, `pip install "queen-mq[zstd]"`. |
+| Go | Comes with the module. |
+| Rust | Comes with the crate. |
+| PHP | The `zstd` extension: `pecl install zstd`. |
+| C++ | Compile with `-DQUEEN_CLIENT_ZSTD` and link `-lzstd`. |
+
+Some requests stay JSON by themselves: a push with a `traceId`, a pop of a conflating group, and a pop of an encrypted queue. Acks, KV, timers and locks do not change.
+
+<Why>at a high message rate, the broker spends CPU turning JSON into stored records and back, and the network carries every message uncompressed. These options move that work into the clients, where many processes share it, and send the batches compressed. When neither the broker's CPU nor the network is the limit, leave them off: JSON is easier to read when you debug.</Why>
+
+One trap: `binaryPush` and `pushCompression` need broker 2.3.0 or later on every node. An older broker answers 400, and the client does not fall back to JSON, so turn them on after the last node is upgraded. `framedPop` is safe with any broker: an older one ignores it and answers JSON.
+
+## See also
+
+- [Queues](/writing-applications/queues/): the dedup window and the other options a push meets.
+- [Transactions](/writing-applications/transactions/): pushes that commit with an ack and state.
+- [Limits](/reference/limits/): message sizes and how many messages one push takes.

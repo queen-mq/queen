@@ -1,0 +1,33 @@
+---
+title: "One worker at a time: a nightly job with a lock"
+description: "Three replicas run the nightly report and only one may: a leased lock, and a guard on the transaction so a worker that lost its lock cannot commit."
+type: example
+tier: use
+sidebar:
+  label: "One worker at a time"
+  order: 11
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+  - examples/tutorials/php/book-use-cases.php
+  - examples/tutorials/cpp/book-use-cases.cpp
+---
+
+The nightly report must be built once, but every replica of the service runs the same scheduler. This is leader election, or a singleton job.
+
+A lock with a lifetime: the worker that gets it builds the report, and the others skip. The report is committed with `.guard(lock)`: the transaction commits only while the lock is still this worker's. The day in the `transactionId` is a second fence.
+
+<Fig id="singleton" caption="One worker builds the report; the guard keeps a late one out." />
+
+<SdkCode id="uc-singleton" />
+
+Three workers started at once: one built the report and two skipped. There was one report.
+
+<Why>a lock expires without telling its holder. A worker paused past the lifetime keeps running, while another one takes the lock. The guard keeps the late worker's work out: its commit rolls back.</Why>
+
+One thing to know: in JavaScript, Python, Go and Rust the lock renews itself in the background while the worker holds it. For long work in JavaScript, pass `lock.signal` to what the work waits on, so it stops when the lock is lost. For "at most three at a time", `queen.semaphore(name, 3)` works the same way.
+
+Built from: [KV, locks and timers](/writing-applications/kv-locks-timers/#locks-and-semaphores), [Transactions](/writing-applications/transactions/).

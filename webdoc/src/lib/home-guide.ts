@@ -17,9 +17,10 @@ import py from "../../../examples/tutorials/py/00_five_minutes.py?raw";
 import go from "../../../examples/tutorials/go/five-minutes/main.go?raw";
 import rust from "../../../examples/tutorials/rust/src/bin/00_five_minutes.rs?raw";
 import php from "../../../examples/tutorials/php/00-five-minutes.php?raw";
+import cpp from "../../../examples/tutorials/cpp/00-five-minutes.cpp?raw";
 import { guideRegions } from "../../scripts/lib/guide-regions.mjs";
 
-export type GuideLangId = "js" | "py" | "go" | "rust" | "php";
+export type GuideLangId = "js" | "py" | "go" | "rust" | "php" | "cpp";
 
 export interface GuideLang {
   id: GuideLangId;
@@ -81,6 +82,19 @@ export const GUIDE_LANGS: GuideLang[] = [
         "step from JavaScript, Python, Go or Rust.",
     },
     source: php,
+  },
+  {
+    id: "cpp",
+    label: "C++",
+    lang: "cpp",
+    file: "examples/tutorials/cpp/00-five-minutes.cpp",
+    install: "# header-only: clients/client-cpp/queen_client.hpp, with cpp-httplib and nlohmann/json",
+    missing: {
+      stream:
+        "C++ has no streams client. A stream reads any queue, whoever pushes to it, so run this " +
+        "step from JavaScript, Python, Go or Rust.",
+    },
+    source: cpp,
   },
 ];
 

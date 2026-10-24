@@ -1,0 +1,33 @@
+---
+title: "Retries and dead letters: a webhook sender"
+description: "Deliver webhooks with retries spaced out by retryDelay, an idempotency key from the message, a dead-letter queue for what never succeeds, and a clean stop on SIGTERM."
+type: example
+tier: use
+sidebar:
+  label: "Retries and dead letters"
+  order: 10
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+  - examples/tutorials/php/book-use-cases.php
+  - examples/tutorials/cpp/book-use-cases.cpp
+---
+
+When a booking is confirmed, send `booking.confirmed` to the customer's URL. Their server fails sometimes, and a crash at the wrong moment can make you call it twice.
+
+One message per call, in a queue with retries (`retryLimit: 5` and a `retryDelay`). The handler throws when the call fails: the message comes back after the delay, and goes to the dead-letter queue after the last try. The message's `transactionId` travels as the `Idempotency-Key`, so the receiver can drop a second call.
+
+<Fig id="webhook-retries" caption="A failed call comes back after the delay; the key makes it count once." />
+
+<SdkCode id="uc-webhook" />
+
+The receiver failed the first call. The message came back after the delay, the second call worked, and the receiver kept the event once, under `evt-9001`.
+
+<Why>the call happens outside any commit, so it can happen twice: a crash after the call and before the ack sends it again. The receiver dropping the second call by its key is what makes it count once. Queen gives the stable key, the retries and the dead-letter queue.</Why>
+
+One thing to know: a failed message holds its partition for the delay. Use one partition per customer, so a customer whose server is down waits on its own retries alone.
+
+Built from: [Retries and DLQ](/writing-applications/retries/), [Acknowledge](/writing-applications/ack/).

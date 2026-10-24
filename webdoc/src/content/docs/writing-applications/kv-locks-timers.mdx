@@ -1,0 +1,98 @@
+---
+title: "KV store, locks and timers in the same log"
+description: "Keep entity state in the broker's KV store, run singletons with leased locks and fencing, and schedule real messages for later with timers, all inside your transactions."
+type: how-to
+tier: use
+sidebar:
+  label: "KV, locks and timers"
+  order: 9
+sourceOfTruth:
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/facade/real/kv.rs
+  - server/src/rsm/kv_reads.rs
+  - server/src/handlers/kv.rs
+  - server/src/quota.rs
+  - server/src/config.rs
+  - clients/client-js/client-v2/kv/Kv.js
+  - server/src/locks.rs
+  - server/src/handlers/locks.rs
+  - server/src/rsm/effect.rs
+  - server/src/auth.rs
+  - proxy/src/routes.rs
+  - clients/client-js/client-v2/locks/Locks.js
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - server/src/rsm/planner/timers.rs
+  - server/src/handlers/timers.rs
+  - server/src/rsm/batcher.rs
+  - server/src/switches.rs
+  - clients/client-js/client-v2/builders/TimerBuilder.js
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/00-five-minutes.mjs
+  - examples/tutorials/py/00_five_minutes.py
+  - examples/tutorials/go/five-minutes/main.go
+  - examples/tutorials/rust/src/bin/00_five_minutes.rs
+  - examples/tutorials/php/00-five-minutes.php
+  - examples/tutorials/cpp/00-five-minutes.cpp
+---
+
+The transaction above already used two of the three: `kv.put` stored the order's state, and `timer()` scheduled tomorrow's reminder, which arrives as a message.
+
+<Why>KV is there so workers keep nothing between messages: the state of each order lives next to its events and changes in the same commit. Timers are there because "do this in 24 hours" is a message that should arrive later, in the order's own partition, not a cron job that scans a table. Scheduling the same timer key again moves it, so a reminder can be pushed back or cancelled.</Why>
+
+The third is a lock. Some work no message triggers: a nightly report, a cleanup, a singleton. Take a lock for it. A lock is a lease, and a slow holder can outlive it, so guard the transaction with it: the push commits only while the lock is still yours.
+
+<SdkCode id="lock" />
+
+<Why>a cron job running on three replicas runs three times. A lock makes it run once, and the guard makes sure a holder that froze and lost its lock cannot commit after another one took over. A semaphore (`queen.semaphore(name, n)`) allows `n` holders at once.</Why>
+
+<Fig id="lock-fence" caption="A lock expires without telling its holder; the guard keeps it out." />
+
+## KV
+
+KV holds the state a step changes, in the same log as the messages. Keep there an entity's current state, the markers that make a step safe to repeat, and counters. It also works on its own, outside a transaction. Every write names its lifetime, and the version a read returns makes the next write conditional:
+
+<SdkCode id="kv" />
+
+<Why>two workers can read the same cart and both write it. With `expect`, the second write finds the version moved and is refused, with the current value in the answer, so nobody overwrites what they never saw. A counter with `max` is a rate limit in one call.</Why>
+
+| Operation | What it does |
+| --- | --- |
+| `get`, `getMany` | Read one key, or several of one namespace: the value, its version and when it expires. |
+| `getPrefix` | One page of keys under a prefix, with a cursor for the next page. Not inside a transaction. |
+| `put`, `putIfAbsent` | Write a value. `putIfAbsent` writes only when the key does not exist: of several callers, one wins. |
+| `delete` | Remove a key. |
+| `incr` | Add to a counter with no read first. With `max` (or `min`), an increment past the bound does not apply. |
+| `check` | Assert a key's version and write nothing, to make a call depend on a key it does not change. |
+
+Every write names its lifetime: a TTL, or `forever`. Every write gives the key a new, higher version, and `expect` makes a write depend on it. A missed condition answers `applied: false` with the key's current value, so read `applied` on every write.
+
+<Why>state written by messages tends to outlive the reason it was written. A lifetime on every key means nobody has to clean it up by hand. KV has no queries: keep the records you search in your own database, and in KV what a step needs to decide.</Why>
+
+## Timers
+
+A timer is a message scheduled for later. It is named by its queue and its key, and scheduling the same key again replaces it, so moving a reminder is the same call. When it fires, the broker pushes the message into its queue, through the log like any push, and your consumers read it like any message. [Delayed messages](/patterns/delayed-messages/) shows one scheduled, moved and cancelled.
+
+- Give a timer the entity's partition, so it arrives in order with the entity's other events.
+- A fire is never early, and a little late: the leader checks every 50 ms, then the message waits for a consumer.
+- A cancel that answers `absent` may mean the timer already fired. A handler that compensates (a payment timeout) checks the entity's state before it acts.
+- For the same delay on every message of a queue, use the queue's `delayedProcessing` instead.
+
+<Why>a timer scheduled in the transaction of the step that wants it exists exactly when that step committed: no cron job, no table to scan, no reminder for an order that was never paid.</Why>
+
+## Locks and semaphores
+
+A lock is a lease: one holder at a time, for a lifetime the holder declares and renews. A semaphore is the same with `n` holders. A lock somebody else holds is not an error: the answer says `acquired: false` and who holds it. [One worker at a time](/patterns/one-worker/) runs a nightly job with one.
+
+- **A lock expires without telling its holder.** A paused or slow process can carry on after another one took the lock. Fence the work: `.guard(lock)` on the transaction inside Queen, or the lock's token outside it (a resource that refuses a token lower than the highest it has seen).
+- **The token changes at every renew.** Use the token of the last answer; the SDK handles do.
+- **The JavaScript, Python, Go and Rust handles renew in the background**, every third of the lifetime, and tell you when the lock is lost.
+
+<Why>no lock service can stop two processes from both believing they hold a lock for a moment. What Queen stops is both of them doing the work.</Why>
+
+## See also
+
+- [Transactions](/writing-applications/transactions/): KV writes and timers that commit with the step.
+- [HTTP API](/reference/http/): the KV, timers and locks endpoints.
+- [Limits](/reference/limits/): key sizes, value sizes and how many operations a call takes.
+

@@ -1,0 +1,47 @@
+---
+title: "Kafka Streams, Connect and Flink on Queen"
+description: "Which Kafka frameworks run against Queen's Kafka port, with the settings each one needs: Kafka Streams, Kafka Connect, Flink, Spring Kafka and more."
+type: how-to
+tier: use
+sidebar:
+  label: "Kafka frameworks"
+  order: 2
+sourceOfTruth:
+  - protocols/queen-kafka/src/handlers/admin.rs
+  - protocols/queen-kafka/src/handlers/fetch.rs
+  - protocols/queen-kafka/src/topics.rs
+  - protocols/queen-kafka/src/txn.rs
+  - protocols/queen-kafka/COMPACTION.md
+  - server/src/rsm/facade/real/phase2/offsets.rs
+---
+
+Kafka Streams, Kafka Connect and Flink ask more of a broker than produce and consume: they create topics with configs, keep state in compacted topics, start reading from a point in time, and commit transactions that outlive a process. This page says what the 2.6 Kafka port does with each of those requests, and what has run against QueenMQ.
+
+<Why>a framework is where a Kafka application keeps its state and its exactly-once promises. Knowing which requests the port honors, and which it only accepts, decides whether a framework can move as it is.</Why>
+
+## What has run
+
+On the first Kafka port (2.0.0-beta.5), Kafka 4.3.1's own distribution ran against a three-node cluster, four times each: Kafka Streams' `WordCountDemo` (a repartition topic, a compacted changelog, every final count exact) and Kafka Connect in distributed mode (its config, offset and status topics, a file source feeding a file sink, every line accounted for). 2.6 rewrote the port; its client suites, Spring Boot's among them, ran on 2026-10-20 ([reference](/reference/kafka/)), and neither framework has run against it yet. Flink has not run against QueenMQ.
+
+## What the port does with each request
+
+| Request | What happens |
+| --- | --- |
+| Topic configs | `retention.ms` becomes the queue's retention and `cleanup.policy=compact` a queue that keeps every record, when the topic is created. The other configs are accepted and not applied. |
+| Compacted topics | Kept whole: QueenMQ does not compact yet. Folding the whole log gives the same state as folding a compacted one, so changelog restores and Connect's topics work; the cost is size, and a restore reads all of history. |
+| A start from a point in time | Answered from the time each record was appended (`POST /api/v1/fetch/offsets`). A time after the last append answers "no offset". |
+| DeleteRecords | Not offered: Streams' repartition topics keep everything. Give their queues a retention through QueenMQ. |
+| Transactions | Served by the raft leader, up to one hour each. A change of leader aborts the ones that were open. |
+| Static membership, the KIP-848 protocol | Not supported. All three frameworks leave both off by default. |
+
+## Kafka Streams
+
+`WordCountDemo` ran with the default `at_least_once`. Keep Streams on its default rebalance protocol, give the repartition topics a retention that outlasts the longest your application can fall behind, and use a new `application.id` or an empty `state.dir` against a fresh cluster: state left over from an earlier cluster is counted again. `exactly_once_v2` has not run against QueenMQ yet.
+
+## Kafka Connect
+
+A distributed worker needs nothing QueenMQ-specific. It creates and replays its three topics, so connector configurations and source offsets survive a restart. Replication factor 3 is accepted, and a topic reports as many replicas as there are raft voters. Exactly-once source support has not run against QueenMQ yet.
+
+## Flink
+
+`KafkaSource` is a plain consumer, and `KafkaSink` with `AT_LEAST_ONCE` a plain producer. With `EXACTLY_ONCE` the sink commits a transaction per checkpoint: Flink's one-hour `transaction.timeout.ms` is accepted as it is, and a checkpoint's transaction resumed from a new connection after a failover commits, unless the leader changed in between, which drops that checkpoint's records.

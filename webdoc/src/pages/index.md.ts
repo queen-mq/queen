@@ -29,6 +29,7 @@ import {
   proven,
   nextSection,
   start,
+  book,
   closing,
 } from "@/lib/home";
 import { GUIDE_LANGS, guideCode } from "@/lib/home-guide";
@@ -101,6 +102,7 @@ export function homepageBody(): string {
   lines.push("");
 
   lines.push(`## ${nextSection.title}`, "");
+  lines.push(`**[${book.title}](${url(book.href)})**: ${book.body}`, "");
   for (const x of start) lines.push(`- [${x.title}](${url(x.href)}): ${x.body}`);
   lines.push("", nextSection.mcpNote, "", "```bash", nextSection.mcp, "```");
   lines.push("", `**${closing}**`);

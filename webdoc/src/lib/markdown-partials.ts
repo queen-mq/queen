@@ -60,6 +60,9 @@ import { getCollection } from "astro:content";
 import { renderEntryAsMarkdown } from "@cloudflare/nimbus-docs";
 import { SCHEMATICS, describeSchematic } from "./schematic-models";
 import { figureMarkdown } from "@/lib/figure-markdown";
+import { sdkCode } from "@/lib/book-code";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /** The shape this module needs from a content entry — docs page or partial. */
 interface MarkdownEntry {
@@ -113,7 +116,7 @@ export async function renderEntryMarkdown(entry: MarkdownEntry): Promise<string>
 
   // The page's own fences come out first, so a `<Render />` inside a code
   // sample is never expanded and no fence is touched by the downleveler.
-  const protectedBody = protectFences(entry.body ?? "", fences);
+  const protectedBody = expandSdkCode(protectFences(entry.body ?? "", fences), fences, where);
   const expanded = expand(protectedBody, { partials, fences, stack: [], where });
   assertNoUnexpandedRender(expanded, where);
 
@@ -248,6 +251,30 @@ const componentMap = {
    * which is the section. The wrappers carry nothing and collapse to their
    * children.
    */
+  /**
+   * A drawing shared with the book becomes its alt text and caption: the alt is
+   * written for a reader who cannot see the picture, which is what an agent is.
+   */
+  Fig: ({ attrs }: { attrs: Record<string, string | boolean> }): string => {
+    const id = typeof attrs.id === "string" ? attrs.id.trim() : "";
+    if (!id) throw new Error('[markdown-partials] <Fig /> without a literal id="…"');
+    const caption = typeof attrs.caption === "string" ? attrs.caption.trim() : "";
+    return `\n**Figure.** ${figAlt(id)}${caption ? `\n\n${caption}` : ""}\n`;
+  },
+
+  /** The book's download: the edition the site serves, as a link (public/book/edition.json). */
+  BookDownload: (): string => {
+    const e = JSON.parse(readFileSync(join(process.cwd(), "public", "book", "edition.json"), "utf8"));
+    const size = `${(e.bytes / 1024 / 1024).toFixed(1)} MB`;
+    return (
+      `\n**Download:** [The little book of QueenMQ, PDF](https://queenmq.com/book/the-little-book-of-queenmq.pdf), ` +
+      `${e.edition} edition, QueenMQ ${e.queen}, ${e.pages} pages, ${size}.\n`
+    );
+  },
+
+  /** The reason behind a feature, as a labelled paragraph. */
+  Why: ({ children }: { children: string }): string => `\n**Why:** ${children.trim()}\n`,
+
   AccordionGroup: ({ children }: { children: string }): string => children,
   Accordion: ({ children }: { children: string }): string => children,
   AccordionTrigger: ({ children }: { children: string }): string => `\n**${children.trim()}**\n`,
@@ -353,6 +380,38 @@ function assertNoUnexpandedRender(text: string, where: string): void {
 }
 
 /** Lift fenced blocks out into `store`, dedented by their own indentation. */
+/** A `<SdkCode id="…" />` tag on a line of its own. */
+const SDK_TAG = /^[ \t]*<SdkCode\b([^>]*?)\/>[ \t]*$/gm;
+
+/**
+ * `<SdkCode id="push" />` becomes the step in every language: a label, then the
+ * code as a fence. The fences go into the same store as the page's own, so the
+ * downleveler never touches them (Python's indentation survives).
+ */
+function expandSdkCode(text: string, store: string[], where: string): string {
+  return text.replace(SDK_TAG, (_match, rawAttrs: string) => {
+    const id = attrString(rawAttrs, "id");
+    if (!id) throw new Error(`[markdown-partials] <SdkCode> on "${where}" without a literal id="…"`);
+    const blocks = sdkCode(id, where).map((v) => {
+      if (v.code === null) return `${v.lang.label}: ${v.note}`;
+      store.push("```" + v.lang.lang + "\n" + v.code + "\n```");
+      return `${v.lang.label}:\n\n${FENCE_TOKEN(store.length - 1)}`;
+    });
+    return `\n${blocks.join("\n\n")}\n`;
+  });
+}
+
+let figIndex: Record<string, { alt: string }> | null = null;
+
+/** The alt text of a figure shared with the book (public/figures/index.json). */
+function figAlt(id: string): string {
+  // process.cwd() is the project root in dev and build alike (import.meta.url is a chunk in a build).
+  figIndex ??= JSON.parse(readFileSync(join(process.cwd(), "public", "figures", "index.json"), "utf8"));
+  const fig = figIndex![id];
+  if (!fig) throw new Error(`[markdown-partials] <Fig id="${id}"> names no figure in figures/src`);
+  return fig.alt;
+}
+
 function protectFences(body: string, store: string[]): string {
   return body.replace(FENCE, (match, indent: string) => {
     const fence = indent

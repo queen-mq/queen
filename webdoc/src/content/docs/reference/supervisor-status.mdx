@@ -314,7 +314,7 @@ group does not preserve identity or counters. A normal exit from a message or
 idle limit ends that instance and publishes `stopped` with zero running workers.
 Repeated short executions therefore leave multiple recent stopped observations
 for the same hostname. SDK reporters do not aggregate them into process or pod
-liveness. See [client APIs and timing differences](/start/clients/#consumer-supervision).
+liveness. See [client APIs and timing differences](/writing-applications/clients/).
 
 Reporting is explicitly enabled by the application and defaults to off. A disabled
 reporter creates no timer, task, thread or KV traffic. The standard interval is 10

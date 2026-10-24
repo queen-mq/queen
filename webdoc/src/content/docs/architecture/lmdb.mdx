@@ -1,0 +1,33 @@
+---
+title: "LMDB checkpoints of the memory state"
+description: "The memory state is saved to an LMDB file four times a second. No client waits for it: it decides how much log a restart replays. Every value carries a checksum."
+type: concept
+tier: internals
+sidebar:
+  label: "LMDB"
+  order: 6
+sourceOfTruth:
+  - server/src/rsm/qlog/mod.rs
+  - server/src/rsm/qlog/set.rs
+  - server/src/rsm/qlog/dirx.rs
+  - server/src/rsm/qlog/index.rs
+  - server/src/rsm/qlog/record.rs
+  - server/src/rsm/qlog/codec.rs
+  - server/src/rsm/store/mod.rs
+  - server/src/rsm/store/heed_store.rs
+  - server/src/rsm/store/integrity.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/scrub.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/retention_scan.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/log_store.rs
+  - server/src/rsm/replicator/raft/snapshot.rs
+---
+
+The state in memory is saved to an LMDB file, `store/data.mdb`, four times a second. This is a checkpoint, and no client waits for it: it only decides how much of the log a restart has to replay.
+
+Every value carries a checksum, and the node checks all of them at boot. Every 6 hours a background scan reads the whole store again, to find damage before a restart does.
+
+Traces have their own LMDB file, `traces/data.mdb`.

@@ -5,6 +5,13 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Docs: rebuilt from the little book of QueenMQ.** The site now follows the book, chapter by
+chapter: introduction, writing applications, patterns, integrations, managing clusters and
+architecture, with every example in JavaScript, Python, Go, Rust, PHP and C++, cut from programs
+that run against a broker and check their results (`examples/tutorials/run.sh`). The book is a free
+PDF at [queenmq.com/book](https://queenmq.com/book/). Every page of the old tree redirects to the
+page that now answers its question.
+
 Supervisor fixes made after supervisor 0.8.1, which PHP client 2.5.0 pins: they ship with the next
 supervisor release.
 
@@ -641,7 +648,7 @@ promotes every group; a group that could not be promoted is named in the answer 
 and the call is repeated. A promotion cuts each group at the entry its own replay had reached: no
 command spans two groups, so every tenant gets a state the source had for it, and tenants in
 different groups can be cut at slightly different moments. The Jepsen failover tests ran one
-group. See [standby cluster](https://queenmq.com/operate/standby/#several-raft-groups).
+group. See [standby cluster](https://queenmq.com/manage/standby/).
 
 **Server: a node added to a cluster of several raft groups can become a voter in every group.**
 With `QUEEN_RAFT_GROUPS` above 1 each group prefers one member as its leader, and a group's leader
@@ -1076,7 +1083,7 @@ restarts, and gives it up when its own disk fills (`QUEEN_LINK_HOLD_S`,
 `QUEEN_LINK_HOLD_DISK_PCT`). `GET /api/v1/system/link`, the `link` block of `/health` and the
 `queen_link_*` series say where a standby is. The source needs `QUEEN_LINK_TOKEN`, the standby
 `QUEEN_LINK_SOURCE` and `QUEEN_LINK_SOURCE_TOKEN`; a cluster with none of them behaves as before.
-See [Standby cluster](https://queenmq.com/operate/standby/).
+See [Standby cluster](https://queenmq.com/manage/standby/).
 
 **Server: the last node of a cluster to stop no longer hangs.** A node that led a cluster whose
 other nodes were already down, with an entry in its log that could no longer commit, waited for
@@ -1094,7 +1101,7 @@ again, and a leader that finds itself stopped while it leads starts again after 
 Jepsen on a five-node cluster with two slow disks. With the leader of five nodes cut off for
 2.4 s, the build before the fix took no write afterwards in 11 of the 12 trials where the leader
 kept its leadership, and this one took the next write in all 10. The log lines that say when it
-happens are on [Monitoring](https://queenmq.com/operate/monitoring/).
+happens are on [Monitoring](https://queenmq.com/manage/upgrades-monitoring/).
 
 **Server: locks and semaphores.** A lock is a lease: one holder at a time, for a lifetime the holder
 declares and renews, with a token that fences a holder that outlived it. A semaphore is the same
@@ -1718,8 +1725,8 @@ so a queue read to its end and idle lags by about the guard and one discovery in
 growing; a node exports a queue's gauges only while it runs the queue. The commit pointer's `tEnd` is now an
 ISO-8601 timestamp: 1.5.0 wrote integer microseconds, which the retention hold could not read,
 so `retentionSinkHold` always sat at its cap; it now follows the sink. Running it is
-[deploy/s3](https://queenmq.com/guides/s3/); what it writes is
-[reference/s3](https://queenmq.com/guides/s3/).
+[deploy/s3](https://queenmq.com/integrations/s3/); what it writes is
+[reference/s3](https://queenmq.com/integrations/s3/).
 
 **Every broker tenant can have an S3 sink and a bucket of its own.** The default tenant's sink is
 configured by `QUEEN_S3_*` and turned on by `QUEEN_S3_QUEUES`: without it the default tenant has no

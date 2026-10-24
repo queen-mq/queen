@@ -25,7 +25,7 @@ export const HOME_TITLE = "Message broker with one partition per entity";
 /** One line describing the page, for the index and corpus rows that list it. */
 export const HOME_SUMMARY =
   "The landing page: partitions for ordering instead of scaling, then a five-minute guide in " +
-  "JavaScript, Python, Go, Rust and PHP (run a node, configure a queue, push to a partition, " +
+  "JavaScript, Python, Go, Rust, PHP and C++ (run a node, configure a queue, push to a partition, " +
   "consume, commit one step as one transaction, replay from a time and fetch by offset, run a job " +
   "once under a lock, aggregate with a stream, request/reply over an ephemeral queue), the " +
   "measured numbers with their conditions, and where to go next.";
@@ -41,7 +41,7 @@ export const hero = {
     "step a worker takes is saved as one commit, or not at all.",
   second: "One binary, no database, and Kafka clients work with it out of the box.",
   primary: { label: "Run it in five minutes", href: "#guide" },
-  secondary: { label: "See the model", href: "/concepts/" },
+  secondary: { label: "See the model", href: "/introduction/model/" },
   run: `docker run -p 6632:6632 ${IMAGE}`,
   runNote: "Then open localhost:6632: the dashboard is served by the same process.",
 };
@@ -100,7 +100,7 @@ export const guideSteps: GuideStep[] = [
         "other settings.",
     ],
     code: [{ id: "configure", caption: "Configure" }],
-    links: [{ label: "Every queue option", href: "/concepts/partitions/#queue-options" }],
+    links: [{ label: "Every queue option", href: "/writing-applications/queues/" }],
   },
   {
     id: "push",
@@ -115,8 +115,8 @@ export const guideSteps: GuideStep[] = [
     ],
     code: [{ id: "push", caption: "Push" }],
     links: [
-      { label: "Partitions", href: "/concepts/partitions/" },
-      { label: "Deduplication", href: "/concepts/dedup/" },
+      { label: "Partitions", href: "/writing-applications/queues/" },
+      { label: "Deduplication", href: "/writing-applications/push/" },
     ],
   },
   {
@@ -139,7 +139,7 @@ export const guideSteps: GuideStep[] = [
         "Ack failed and the message comes back, up to the queue's retryLimit; after the last retry " +
         "it goes to the dead-letter queue.",
     },
-    links: [{ label: "Groups, leases and acks", href: "/concepts/consuming/" }],
+    links: [{ label: "Groups, leases and acks", href: "/writing-applications/pop/" }],
   },
   {
     id: "transaction",
@@ -153,9 +153,9 @@ export const guideSteps: GuideStep[] = [
     ],
     code: [{ id: "transaction", caption: "Ack, KV, push and timer in one transaction" }],
     links: [
-      { label: "Transactions", href: "/concepts/transactions/" },
-      { label: "KV", href: "/concepts/kv/" },
-      { label: "Timers", href: "/concepts/timers/" },
+      { label: "Transactions", href: "/writing-applications/transactions/" },
+      { label: "KV", href: "/writing-applications/kv-locks-timers/" },
+      { label: "Timers", href: "/writing-applications/kv-locks-timers/" },
     ],
   },
   {
@@ -176,8 +176,8 @@ export const guideSteps: GuideStep[] = [
         "rebuilding one entity, or a sink that keeps its own position.",
     },
     links: [
-      { label: "Where a new group starts", href: "/concepts/consuming/#where-a-new-group-starts" },
-      { label: "Reads by offset", href: "/start/clients/#reads-by-offset" },
+      { label: "Where a new group starts", href: "/writing-applications/pop/" },
+      { label: "Reads by offset", href: "/writing-applications/clients/" },
     ],
   },
   {
@@ -189,7 +189,7 @@ export const guideSteps: GuideStep[] = [
         "it: the push commits only while the lock is still yours.",
     ],
     code: [{ id: "lock", caption: "A guarded job" }],
-    links: [{ label: "Locks and semaphores", href: "/concepts/locks/" }],
+    links: [{ label: "Locks and semaphores", href: "/writing-applications/kv-locks-timers/" }],
   },
   {
     id: "stream",
@@ -200,7 +200,7 @@ export const guideSteps: GuideStep[] = [
         "more orders and a result arrives a minute later.",
     ],
     code: [{ id: "stream", caption: "Revenue per customer per minute" }],
-    links: [{ label: "Streams", href: "/guides/streams/" }],
+    links: [{ label: "Streams", href: "/writing-applications/streams/" }],
   },
   {
     id: "ephemeral",
@@ -214,7 +214,7 @@ export const guideSteps: GuideStep[] = [
       { id: "worker", caption: "Worker" },
       { id: "caller", caption: "Caller" },
     ],
-    links: [{ label: "Ephemeral queues", href: "/guides/ephemeral/" }],
+    links: [{ label: "Ephemeral queues", href: "/writing-applications/ephemeral/" }],
   },
 ];
 
@@ -280,7 +280,7 @@ export const provenSection = {
 };
 
 export const proven: { title: string; body: string; href: string }[] = [
-  { title: "In production", body: "At Smartness, where Queen is built.", href: "/start/about/" },
+  { title: "In production", body: "At Smartness, where Queen is built.", href: "/introduction/about/" },
   {
     title: "257 Jepsen tests",
     body: "On 2.6, all passed. No acknowledged message lost, no lease held twice.",
@@ -296,13 +296,22 @@ export const nextSection = {
   mcp: "claude mcp add --transport http queen https://queenmq.com/mcp",
 };
 
+/** The book, shown above the cards of the last section (public/book/, book/build.sh --publish). */
+export const book = {
+  title: "The little book of QueenMQ",
+  body:
+    "The whole story in one free PDF, written by the authors of QueenMQ: what it is and why we " +
+    "built it, how to build with it, how to run it, and how it works inside.",
+  href: "/book/",
+};
+
 export const start: { title: string; body: string; href: string }[] = [
-  { title: "Quickstart", body: "The same first steps with curl, then a transaction.", href: "/start/quickstart/" },
-  { title: "Pick a client", body: "Six SDKs, curl, queenctl and the broker embedded in Rust.", href: "/start/clients/" },
-  { title: "Concepts", body: "Partitions, consuming, transactions, KV, timers and locks.", href: "/concepts/" },
-  { title: "Examples", body: "Whole programs: a chat backend, a saga, webhooks, rate limits.", href: "/examples/" },
-  { title: "Kafka, PostgreSQL, S3", body: "Kafka protocol, PostgreSQL in and out, S3 export, all inside the broker.", href: "/guides/kafka/" },
-  { title: "Compare", body: "Against Kafka, RabbitMQ, SQS and Temporal, and when to pick them.", href: "/start/compare/" },
+  { title: "Write applications", body: "Every feature of the client, one page each, in six languages.", href: "/writing-applications/" },
+  { title: "Pick a client", body: "Six SDKs, curl, queenctl and the broker embedded in Rust.", href: "/writing-applications/clients/" },
+  { title: "The model", body: "Partitions, leases, transactions and a plain HTTP interface.", href: "/introduction/model/" },
+  { title: "Patterns", body: "Work queue, pub/sub, request/reply, workflows, rate limits and more.", href: "/patterns/" },
+  { title: "Kafka, PostgreSQL, S3", body: "Kafka protocol, PostgreSQL in and out, S3 export, all inside the broker.", href: "/integrations/" },
+  { title: "Compare", body: "Against Kafka, RabbitMQ, SQS and Temporal, and when to pick them.", href: "/introduction/compare/" },
 ];
 
 /** The last line of the page. */

@@ -18,7 +18,7 @@ sourceOfTruth:
 # reads 7. Nothing this page states changes.
 ---
 
-A [transaction](/concepts/transactions/) is the step Queen is built around: take a message, do the work, then ack it and
+A [transaction](/writing-applications/transactions/) is the step Queen is built around: take a message, do the work, then ack it and
 write what comes next, all of it or none of it. So we built a transactional benchmark and ran it on
 all four systems. A pipeline reads an input, transforms each batch and commits the ack and the
 output together, and at the end a verifier reads every output and checks that every input appears
@@ -27,7 +27,7 @@ point needed a second run because our verifier stopped reading too early. At 9,0
 second in transactions of 10, a Queen commit took 3 ms at p50 and 4 ms at p99, Kafka's 12 and 34 ms
 and Pulsar's 22 and 32 ms (2.0.0-beta.2, 2026-10-01). 2.3.0 was measured against 2.2.0, not
 against the other systems again: its binary transaction body takes about a third off the commit
-time at 12,000 transactions a second ([below](#230-against-220)). [Compare](/start/compare/) shows
+time at 12,000 transactions a second ([below](#230-against-220)). [Compare](/introduction/compare/) shows
 what one commit covers in each system.
 
 ## The pipeline
@@ -103,7 +103,7 @@ The same pipeline ran on 2026-10-12 on the machines of the
 partitions in and out, 198 workers, 40-second steps, release 2.2.0 next to a pre-release build of
 2.3.0 with its transactions sent as JSON and as the binary body the release adds (the pushes of a
 transaction go as frames the client built and compressed; a client sends it when
-[binary push and push compression](/start/clients/#binary-push-push-compression-and-framed-pop)
+[binary push and push compression](/writing-applications/clients/)
 are both on). No step had an error or an abort, and a verifier found every message once on both
 bodies. Commit and e2e are p50 / p99 in milliseconds over all load processes. Runs: `txn-*` in
 [`benchmark-queen/2026-10-12-three-node-new-forms/runs/`](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-12-three-node-new-forms).

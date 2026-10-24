@@ -1,0 +1,27 @@
+---
+title: "The little book of QueenMQ, free as a PDF"
+description: "A short book by the authors of QueenMQ: what it is and why we built it, how to write applications, the common patterns, integrations, running clusters, and how it works inside."
+type: overview
+tier: use
+---
+
+<BookDownload />
+
+This book is written by the authors of QueenMQ. In it, we have tried to explain in simple terms what QueenMQ does, and why. Read it from the first page to the last, offline, in an afternoon; come back to this site to look things up.
+
+## What is inside
+
+| Chapter | What it covers |
+| --- | --- |
+| 1. [Introduction](/introduction/) | What QueenMQ is, why we built it (the story that went from a Postgres table to a log on disk replicated with Raft), and [the model](/introduction/model/) in four ideas: partitions, leases, transactions and a simple interface. |
+| 2. [Writing applications](/writing-applications/) | Every feature of the client API, one at a time: a local broker, queues and their options, push, pop and consume, acks, retries and the dead-letter queue, transactions, KV, locks and timers, ephemeral queues and stream processing. |
+| 3. [Real applications](/patterns/) | The common messaging patterns, one each, with a real case: work queue, publish/subscribe, request and reply, ordering and batching, workflows, windowed aggregation, rate limiting, last value, delayed messages, retries and dead letters, one worker at a time. |
+| 4. [Integrations](/integrations/) | Kafka clients through the built-in Kafka port, an S3 bucket kept up to date by the sink, and PostgreSQL tables read and written by the source and the sink. |
+| 5. [Manage clusters](/manage/) | The settings that matter most, a cluster with Docker and inside Kubernetes, the configuration for different needs, upgrades and monitoring, and what to do when something breaks. |
+| 6. [Architecture](/architecture/) | How the broker works inside: one leader per tenant, the path of a write from the request to the disk, Raft, the memory state, the consumption engine, LMDB, and the files on disk down to their bytes. |
+
+## The book and this site
+
+These docs follow the book, chapter by chapter, with the same drawings. The book shows its code in JavaScript; the site shows the same code in all six SDK languages. Every piece of code in both comes from programs that run it against QueenMQ and check the result.
+
+<Why>a book is for reading in order, and a site is for looking things up. Built from the same text and the same tested programs, the two say the same thing.</Why>

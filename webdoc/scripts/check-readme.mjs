@@ -18,13 +18,18 @@
  * README with:
  *
  *   node scripts/check-readme.mjs --write
+ *
+ * Another markdown file with the same markers (the book's `book/index.md`) is
+ * checked or written by naming it: `node scripts/check-readme.mjs --write book/index.md`.
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { REPO } from "./lib/source.mjs";
 import { guideRegions } from "./lib/guide-regions.mjs";
 
-const README = join(REPO, "README.md");
+const target = process.argv.slice(2).find((a) => !a.startsWith("--"));
+const README = target ? (isAbsolute(target) ? target : join(process.cwd(), target)) : join(REPO, "README.md");
+const NAME = relative(REPO, README);
 const PROGRAM = "examples/tutorials/js/00-five-minutes.mjs";
 const MARKER = /^<!--\s*guide:\s*([a-z][a-z-]*)\s*-->\s*$/;
 const OPEN = /^```(js|javascript)\s*$/;
@@ -40,7 +45,7 @@ for (let i = 0; i < lines.length; i++) {
   const marker = lines[i].match(MARKER);
   if (!marker) continue;
   const step = marker[1];
-  const at = `README.md:${i + 1}`;
+  const at = `${NAME}:${i + 1}`;
   const region = regions.get(step);
   if (region === undefined) {
     problems.push(`${at}: no guide:start(${step}) region in ${PROGRAM}`);
@@ -72,22 +77,22 @@ for (let i = 0; i < lines.length; i++) {
     `${at}: the ${step} block differs from ${PROGRAM} at its line ${n + 1}:\n` +
       `    README:  ${a[n] ?? "(nothing)"}\n` +
       `    program: ${b[n] ?? "(nothing)"}\n` +
-      `  run \`node webdoc/scripts/check-readme.mjs --write\` to copy the program's regions in`,
+      `  run \`node webdoc/scripts/check-readme.mjs --write${target ? " " + NAME : ""}\` to copy the program's regions in`,
   );
 }
 
 if (checked === 0 && problems.length === 0) {
-  problems.push("README.md: no <!-- guide: <step> --> markers; the condensed guide's code would go unchecked");
+  problems.push(`${NAME}: no <!-- guide: <step> --> markers; its code would go unchecked`);
 }
 
 if (write && rewritten) {
   writeFileSync(README, lines.join("\n"));
-  console.log(`wrote ${rewritten} README block(s) from ${PROGRAM}`);
+  console.log(`wrote ${rewritten} block(s) of ${NAME} from ${PROGRAM}`);
 }
 
 if (problems.length) {
   for (const p of problems) console.error(p);
-  console.error(`\n${problems.length} problem(s) with the README's code.`);
+  console.error(`\n${problems.length} problem(s) with the code of ${NAME}.`);
   process.exit(1);
 }
-console.log(`ok  README code (${checked} blocks equal to the regions of ${PROGRAM})`);
+console.log(`ok  ${NAME === "README.md" ? "README" : NAME} code (${checked} blocks equal to the regions of ${PROGRAM})`);
