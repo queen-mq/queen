@@ -54,7 +54,8 @@ $queen->queue('orders')
     ->config([
         'leaseTime' => 30,           // seconds a worker holds a message before it is redelivered
         'retryLimit' => 3,           // failures before the message goes to the dead-letter queue
-        'retentionSeconds' => 86400, // keep messages for a day
+        'retentionEnabled' => true,  // retention runs only when this is on
+        'retentionSeconds' => 86400, // then messages older than a day are removed
     ])
     ->create()
     ->execute();

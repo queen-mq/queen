@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Run every client tutorial, in every language, against one broker.
 #
-# These are the programs the documentation's per-client tutorial pages show,
-# included verbatim through the snippet pipeline. Each one asserts its own
+# These are the programs the documentation shows: the five-minute guide (00-*),
+# the client guide and the patterns of the book and the site (book-*), and the
+# older per-client tutorials. The site cuts its code out of them by region
+# (webdoc/src/lib/book-code.ts). Each one asserts its own
 # outcome and exits non-zero on failure, so a green run here is what makes the
 # word "verified" on those pages mean something.
 #
@@ -77,6 +79,13 @@ if wanted js; then
     guide_copy "$HERE/js/00-five-minutes.mjs" "$HERE/js/.00-five-minutes.run.mjs"
     run 00-five-minutes env -C "$HERE/js" node .00-five-minutes.run.mjs
     rm -f "$HERE/js/.00-five-minutes.run.mjs"
+    # The book's own examples (book/chapters/2-writing-applications), same treatment.
+    guide_copy "$HERE/js/book-client-guide.mjs" "$HERE/js/.book-client-guide.run.mjs"
+    run book-client-guide env -C "$HERE/js" node .book-client-guide.run.mjs
+    rm -f "$HERE/js/.book-client-guide.run.mjs"
+    guide_copy "$HERE/js/book-use-cases.mjs" "$HERE/js/.book-use-cases.run.mjs"
+    run book-use-cases env -C "$HERE/js" node .book-use-cases.run.mjs
+    rm -f "$HERE/js/.book-use-cases.run.mjs"
     for f in 01-hello-world 02-multi-queue-flow 03-transaction-ack-push 04-replay 05-streaming; do
       run "$f" env -C "$HERE/js" node "$f.mjs"
     done
@@ -88,12 +97,18 @@ fi
 if wanted py; then
   echo
   echo "Python"
-  if command -v python3 >/dev/null; then
-    guide_copy "$HERE/py/00_five_minutes.py" "$HERE/py/_00_five_minutes_run.py"
-    run 00_five_minutes env -C "$ROOT" PYTHONPATH=clients/client-py python3 examples/tutorials/py/_00_five_minutes_run.py
-    rm -f "$HERE/py/_00_five_minutes_run.py"
+  # The client's own virtualenv when there is one: it has httpx, and zstandard for
+  # the binary wire forms (Python before 3.14 has no zstd of its own).
+  PY=python3
+  [ -x "$ROOT/clients/client-py/venv/bin/python" ] && PY="$ROOT/clients/client-py/venv/bin/python"
+  if command -v "$PY" >/dev/null; then
+    for f in 00_five_minutes book_client_guide book_use_cases; do
+      guide_copy "$HERE/py/$f.py" "$HERE/py/_${f}_run.py"
+      run "$f" env -C "$ROOT" PYTHONPATH=clients/client-py "$PY" "examples/tutorials/py/_${f}_run.py"
+      rm -f "$HERE/py/_${f}_run.py"
+    done
     for f in 01_hello_world 02_multi_queue_flow 03_transaction_ack_push 04_replay 05_streaming; do
-      [ -f "$HERE/py/$f.py" ] && run "$f" env -C "$ROOT" PYTHONPATH=clients/client-py python3 "examples/tutorials/py/$f.py"
+      [ -f "$HERE/py/$f.py" ] && run "$f" env -C "$ROOT" PYTHONPATH=clients/client-py "$PY" "examples/tutorials/py/$f.py"
     done
   else
     skip_lang "no python3"
@@ -104,9 +119,11 @@ if wanted go; then
   echo
   echo "Go"
   if command -v go >/dev/null && [ -f "$HERE/go/go.mod" ]; then
-    guide_copy "$HERE/go/five-minutes/main.go" "$HERE/go/five-minutes-run/main.go"
-    run five-minutes env -C "$HERE/go" GOWORK=off go run ./five-minutes-run
-    rm -rf "$HERE/go/five-minutes-run"
+    for f in five-minutes book-client-guide book-use-cases; do
+      guide_copy "$HERE/go/$f/main.go" "$HERE/go/$f-run/main.go"
+      run "$f" env -C "$HERE/go" GOWORK=off go run "./$f-run"
+      rm -rf "$HERE/go/$f-run"
+    done
     for f in hello-world multi-queue-flow transaction-ack-push replay streaming; do
       [ -d "$HERE/go/$f" ] && run "$f" env -C "$HERE/go" GOWORK=off go run "./$f"
     done
@@ -122,8 +139,10 @@ if wanted rust; then
     # Compile once up front, or the first run would time its own build.
     (cd "$HERE/rust" && cargo build --quiet) || exit 1
     # Cargo picks up anything under examples/ without a manifest entry.
-    guide_copy "$HERE/rust/src/bin/00_five_minutes.rs" "$HERE/rust/examples/five_minutes_run.rs"
-    run 00_five_minutes env -C "$HERE/rust" cargo run --quiet --example five_minutes_run
+    for f in 00_five_minutes book_client_guide book_use_cases; do
+      guide_copy "$HERE/rust/src/bin/$f.rs" "$HERE/rust/examples/${f}_run.rs"
+      run "$f" env -C "$HERE/rust" cargo run --quiet --example "${f}_run"
+    done
     rm -rf "$HERE/rust/examples"
     for f in 01_hello_world 02_multi_queue_flow 03_transaction_ack_push 04_replay 05_streaming; do
       [ -f "$HERE/rust/src/bin/$f.rs" ] && run "$f" env -C "$HERE/rust" cargo run --quiet --bin "$f"
@@ -144,9 +163,13 @@ if wanted php; then
       command -v composer >/dev/null && (cd "$ROOT/clients/client-php" && composer install --quiet --no-interaction)
     fi
     [ -e "$HERE/php/vendor" ] || ln -sfn ../../../clients/client-php/vendor "$HERE/php/vendor"
-    guide_copy "$HERE/php/00-five-minutes.php" "$HERE/php/.00-five-minutes.run.php"
-    run 00-five-minutes env -C "$HERE/php" php .00-five-minutes.run.php
-    rm -f "$HERE/php/.00-five-minutes.run.php"
+    # The book programs need ext-pcntl and ext-posix; wire-forms also needs ext-zstd,
+    # and prints a skip line without it.
+    for f in 00-five-minutes book-client-guide book-use-cases; do
+      guide_copy "$HERE/php/$f.php" "$HERE/php/.$f.run.php"
+      run "$f" env -C "$HERE/php" php ".$f.run.php"
+      rm -f "$HERE/php/.$f.run.php"
+    done
     for f in 01-hello-world 02-multi-queue-flow 03-transaction-ack-push 04-replay; do
       [ -f "$HERE/php/$f.php" ] && run "$f" env -C "$HERE/php" php "$f.php"
     done
@@ -181,6 +204,30 @@ if wanted cpp; then
         ld+=(-L"$ssl_prefix/lib")
       fi
     fi
+    # The five-minute guide and the book programs, from a copy pointed at $QUEEN_URL
+    # (the includes come from -I, so the copy can live in build/). book-client-guide
+    # also links zstd for the binary wire forms when the header is there; without it
+    # the program prints a skip line for that step.
+    zstd=()
+    if [ -f "${brew_prefix:-/usr}/include/zstd.h" ] || [ -f /usr/include/zstd.h ]; then
+      zstd=(-DQUEEN_CLIENT_ZSTD -lzstd)
+      [ -n "${brew_prefix:-}" ] && zstd+=(-L"$brew_prefix/lib")
+    fi
+    for f in 00-five-minutes book-client-guide book-use-cases; do
+      [ -f "$HERE/cpp/$f.cpp" ] || continue
+      mkdir -p "$HERE/cpp/build/src"
+      guide_copy "$HERE/cpp/$f.cpp" "$HERE/cpp/build/src/$f.cpp"
+      extra=()
+      [ "$f" = book-client-guide ] && extra=(${zstd[@]+"${zstd[@]}"})
+      # ${a[@]+"${a[@]}"}: an empty array under set -u, which bash 3.2 (macOS) calls unbound.
+      if c++ "${cxx[@]}" -o "$HERE/cpp/build/$f" "$HERE/cpp/build/src/$f.cpp" "${ld[@]}" ${extra[@]+"${extra[@]}"} 2>/dev/null; then
+        run "$f" "$HERE/cpp/build/$f"
+      else
+        printf '  %-34s FAILED (compile)\n' "$f"
+        fail=$((fail + 1))
+        failed_names+=("$f (compile)")
+      fi
+    done
     for f in 01-hello-world 02-multi-queue-flow 03-transaction-ack-push 04-replay; do
       [ -f "$HERE/cpp/$f.cpp" ] || continue
       bin="$HERE/cpp/build/$f"

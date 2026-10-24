@@ -56,7 +56,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .configure(QueueOptions {
             lease_time: Some(30),           // seconds a worker holds a message before it is redelivered
             retry_limit: Some(3),           // failures before the message goes to the dead-letter queue
-            retention_seconds: Some(86400), // keep messages for a day
+            retention_enabled: Some(true),  // retention runs only when this is on
+            retention_seconds: Some(86400), // then messages older than a day are removed
             ..Default::default()
         })
         .await?;

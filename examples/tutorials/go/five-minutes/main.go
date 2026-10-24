@@ -57,7 +57,8 @@ func main() {
 		Config(queen.QueueConfig{
 			LeaseTime:        30,    // seconds a worker holds a message before it is redelivered
 			RetryLimit:       3,     // failures before the message goes to the dead-letter queue
-			RetentionSeconds: 86400, // keep messages for a day
+			RetentionEnabled: true,  // retention runs only when this is on
+			RetentionSeconds: 86400, // then messages older than a day are removed
 		}).
 		Create().
 		Execute(ctx)
