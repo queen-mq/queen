@@ -2,12 +2,17 @@ version: 2
 
 project_name: queenctl
 
-# This subproject lives inside the smartpricing/queen monorepo. Release tags
+# This subproject lives inside the queen-mq/queen monorepo. Release tags
 # are shaped `clients/client-cli/vX.Y.Z` to satisfy Go's module proxy
 # convention for nested modules. GoReleaser would otherwise try to parse the
 # whole tag string as semver and fail. We strip the directory prefix in the
 # release workflow by exporting GORELEASER_CURRENT_TAG; the `monorepo` block
 # that would handle this declaratively is Pro-only.
+#
+# GoReleaser only builds the archives and checksums.txt into dist/. The
+# workflow (.github/workflows/release-cli.yml) publishes them as the release
+# "queenctl X.Y.Z" on the clients/client-cli/vX.Y.Z tag: GoReleaser itself
+# would publish on vX.Y.Z, the broker's tag.
 
 before:
   hooks:
@@ -57,34 +62,11 @@ snapshot:
   version_template: "{{ .Tag }}-next"
 
 release:
-  github:
-    owner: queen-mq
-    name: queen
-  prerelease: auto
-  draft: false
-  name_template: 'queenctl {{ .Version }}'
-  header: |
-    queenctl is the Queen MQ operator CLI.
+  disable: true
 
-    Install:
-      # Pre-built binary (recommended)
-      # Download the matching tar.gz / zip from the assets below and put `queenctl` on $PATH.
-
-      # Or with Go (1.22+):
-      go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@v{{ .Version }}
-
+# The release notes come from CHANGELOG.md (see the workflow).
 changelog:
-  sort: asc
-  use: github
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
-      - "Merge pull request"
+  disable: true
 
 git:
   tag_sort: -version:refname
-
-env_files:
-  github_token: ~/.config/goreleaser/github_token

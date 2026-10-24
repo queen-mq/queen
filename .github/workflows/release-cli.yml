@@ -3,7 +3,13 @@ name: Release CLI
 # Triggered by tags shaped 'clients/client-cli/vX.Y.Z'. The directory-prefixed
 # pattern is required so Go's module proxy can resolve the submodule at
 # github.com/smartpricing/queen/clients/client-cli/v2 — see
-# https://go.dev/ref/mod#vcs-version and developer/14-release.md.
+# https://go.dev/ref/mod#vcs-version.
+#
+# The GitHub release lives on that same tag, named "queenctl X.Y.Z", as the PHP
+# client's and the supervisor's releases do. GoReleaser only builds the
+# archives: left to publish, it releases on `vX.Y.Z`, which is the broker's tag.
+# It renamed the broker release v2.3.0 to "queenctl 2.3.0", and for a version
+# the broker has not reached it would create the broker's tag itself.
 on:
   push:
     tags:
@@ -16,6 +22,11 @@ on:
 
 permissions:
   contents: write
+
+# Build from the module's own go.mod, as `go install` does, not from the
+# workspace that links the CLI to the Go client in the same tree.
+env:
+  GOWORK: 'off'
 
 jobs:
   goreleaser:
@@ -32,38 +43,99 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: clients/client-cli/go.sum
 
+      - name: Compute the version
+        id: tag
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          case "$tag" in
+            clients/client-cli/v*) ;;
+            *) echo "::error::$tag is not a clients/client-cli/vX.Y.Z tag"; exit 1 ;;
+          esac
+          semver="${tag#clients/client-cli/}"
+          {
+            echo "tag=$tag"
+            echo "semver=$semver"
+            echo "version=${semver#v}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release ${semver#v} from $tag"
+
+      # Against the Go client that go.mod pins: a pin older than the client
+      # the CLI needs fails here (TestApplyBindsEveryQueueConfigField did).
+      - name: Unit tests
+        working-directory: clients/client-cli
+        run: go test ./...
+
       - name: Pre-build completions
         working-directory: clients/client-cli
         run: |
           make build
           make completion
 
-      # GoReleaser parses the tag as semver. Our tags are shaped
-      # `clients/client-cli/vX.Y.Z` to satisfy Go's module proxy convention
-      # for nested modules, so we strip the directory prefix and pass the
-      # result via GORELEASER_CURRENT_TAG (and GORELEASER_PREVIOUS_TAG so
-      # the changelog computation doesn't fall back to an unrelated tag).
-      - name: Compute semver tag for goreleaser
-        id: tag
-        run: |
-          full_ref="${{ github.event.inputs.tag || github.ref_name }}"
-          semver="${full_ref#clients/client-cli/}"
-          echo "semver=$semver" >> "$GITHUB_OUTPUT"
-          echo "Resolved semver: $semver"
-
-      - name: Run GoReleaser
+      # GoReleaser parses the tag as semver, so it gets the bare vX.Y.Z.
+      # --skip=validate: that tag does not exist at the release commit, only
+      # clients/client-cli/vX.Y.Z does. bin/ and completions/ are gitignored,
+      # so the pre-build step does not dirty the tree.
+      - name: Build the archives
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: '~> v2'
           workdir: clients/client-cli
-          # --skip=validate is required because the override semver tag
-          # (e.g. v0.15.2) does not physically exist at the release commit;
-          # only `clients/client-cli/v0.15.2` does. The actual git state
-          # (dirty / wrong commit) is otherwise covered by the workflow:
-          # checkout is at the tagged ref, and bin/ + completions/ are
-          # gitignored so the pre-build step doesn't dirty the tree.
           args: release --clean --skip=validate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.semver }}
+
+      # Notes = the CHANGELOG.md section whose heading names "queenctl X.Y.Z",
+      # then the install lines. Not marked Latest: that stays the broker's.
+      - name: Publish the release
+        working-directory: clients/client-cli
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          notes="$RUNNER_TEMP/notes.md"
+          base="https://github.com/$GH_REPO/releases/download/$TAG"
+          {
+            awk -v want="queenctl $VERSION" '
+              /^## / {
+                if (on) exit
+                i = index($0, want)
+                c = substr($0, i + length(want), 1)
+                if (i && (c == " " || c == "")) { on = 1; next }
+              }
+              on' ../../CHANGELOG.md
+            echo
+            echo "## Install"
+            echo
+            echo "Download the archive for your platform below and put \`queenctl\` on your \`\$PATH\`. On a Mac with Apple silicon:"
+            echo
+            echo '```bash'
+            echo "curl -sSL $base/queenctl_${VERSION}_macos_arm64.tar.gz | tar -xz queenctl"
+            echo "sudo mv queenctl /usr/local/bin/"
+            echo '```'
+            echo
+            echo "Or with Go:"
+            echo
+            echo '```bash'
+            echo "go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@v$VERSION"
+            echo '```'
+          } > "$notes"
+          cat "$notes"
+
+          shopt -s nullglob
+          assets=(dist/*.tar.gz dist/*.zip dist/checksums.txt)
+          if [ "${#assets[@]}" -lt 6 ]; then
+            echo "::error::expected 5 archives and checksums.txt in dist/, found: ${assets[*]}"
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            pre=()
+            case "$VERSION" in *-*) pre=(--prerelease) ;; esac
+            gh release create "$TAG" "${assets[@]}" --verify-tag --latest=false \
+              "${pre[@]}" --title "queenctl $VERSION" --notes-file "$notes"
+          fi
