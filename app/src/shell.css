@@ -1,0 +1,421 @@
+/* =========================================================================
+   CONSOLE SHELL — the frame Queen, Gate and Traceflow share: the sidebar
+   with its rail and its drawer, the top bar, the status strip and the head
+   of every page. Queen owns this file (queen-mq/queen, app/src/shell.css).
+   Gate and Traceflow carry a byte-identical copy written by their
+   `npm run sync:shell`, and a test there fails when the copy is edited by
+   hand: change the frame here, then sync the other two.
+
+   The markup is Queen's (components/Sidebar.vue, Header.vue, PageHead.vue).
+   The colours are not in this file: every console defines these tokens for
+   both of its themes.
+     surfaces  --rail --ink-0 --ink-2 --ink-3 --ink-4 --selected --scrim
+     lines     --bd --bd-hi
+     text      --text-hi --text-mid --text-low --text-faint --accent-text
+     state     --warn-400 --ember-400 --ember-500
+     shape     --r-chip --r-control --r-card --shadow-pop
+     motion    --ease --drawer-duration --drawer-ease
+     logo      --brand-height (optional, 36px): sized so the product's
+               lettering matches the other two
+   ========================================================================= */
+
+/* =========================================================================
+   APP SHELL — one surface. The sidebar and the page share the page's black,
+   one hairline between them; the brand sits on the top bar's line, with no
+   rule of its own under it: a single sheet, not a panel lying on a frame.
+   ========================================================================= */
+.app-shell {
+  position: relative; z-index: 1;
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  height: 100vh;
+  background: var(--ink-0);
+}
+
+.sidebar-slot { display: contents; }
+
+/* The frame sets its own type rather than inheriting the app's body, which
+   differs (Gate's is 13px with a looser line): Queen's values, in rem so
+   they are the same wherever the body is set. */
+.sidebar, .topbar-wrap, .rail-tip {
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  font-size: 1rem; line-height: 1.5; letter-spacing: -0.005rem;
+}
+.page-head { line-height: 1.5; letter-spacing: -0.005rem; }
+
+.app-main {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  min-width: 0; min-height: 0;
+  overflow: hidden;
+  background: var(--ink-0);
+}
+
+.app-page {
+  grid-row: 3; /* row 2 is the status strip, when there is one */
+  min-height: 0;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+/* Up to 1100px the sidebar is a drawer, opened from the top bar: without
+   icons there is no rail to collapse to, and a rail of initials would be a
+   shape standing for nothing. */
+@media (max-width: 1100px) {
+  /* Two explicit rows. With implicit auto rows the empty sidebar slot took
+     half the leftover height on short pages and pushed the header down. */
+  .app-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .sidebar-slot { display: block; }
+  .sidebar-slot .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0;
+    width: 264px; z-index: 45;
+    transform: translateX(-100%);
+    transition: transform var(--drawer-duration) var(--drawer-ease);
+    background: var(--rail);
+  }
+  .sidebar-slot .sidebar.sidebar-mobile-open { transform: translateX(0); }
+  .sidebar-slot .sidebar .brand { padding-left: 56px; }
+}
+
+/* The drawer's scrim and its button, in the top bar's corner. Flat: no blur. */
+.sidebar-overlay {
+  position: fixed; inset: 0;
+  background: var(--scrim);
+  z-index: 44; display: none;
+}
+.sidebar-mobile-toggle {
+  position: fixed; top: 8px; left: 10px; z-index: 50;
+  width: 36px; height: 36px; border-radius: var(--r-control);
+  background: transparent; border: 0; display: none;
+  place-items: center; cursor: pointer; color: var(--text-mid);
+}
+.sidebar-mobile-toggle:hover { color: var(--text-hi); background: var(--ink-3); }
+.sidebar-mobile-toggle svg { width: 20px; height: 20px; }
+@media (max-width: 1100px) {
+  .sidebar-overlay { display: block; }
+  .sidebar-mobile-toggle { display: grid; }
+}
+.drawer-scrim-enter-active,
+.drawer-scrim-leave-active { transition: opacity var(--drawer-duration) var(--drawer-ease); }
+.drawer-scrim-enter-from,
+.drawer-scrim-leave-to { opacity: 0; }
+
+/* =========================================================================
+   SIDEBAR — one quiet icon and a word per row; the page's state glyphs only
+   where something needs you. No boxes, no avatar, no second search box. The
+   page you are on is the filled row.
+   ========================================================================= */
+.sidebar {
+  position: relative;
+  display: flex; flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  /* A column of its own: one visible tone below the page in both themes,
+     flush, one hairline. A tone, not an elevation — nothing floats. */
+  background: var(--rail);
+  border-right: 1px solid var(--bd);
+}
+
+/* As tall as the top bar, so the two share a line. The logo is the
+   product's wordmark: the family sunflower on its own letter, with the name
+   beside it. In the rail it is the letter alone. Its height is the one thing
+   a product sets (--brand-height), because the letters sit differently in
+   each drawing and it is the letters that must match. The mark hangs from
+   the top rather than the centre: above the baseline the three drawings
+   have the same proportions, below it they do not (q and g descend), so
+   letters of one size then share one baseline. */
+.brand {
+  display: flex; align-items: center; gap: 10px;
+  height: 52px; flex: none; padding: 0 16px;
+  color: inherit; text-decoration: none;
+}
+.brand-mark { flex: none; display: block; align-self: flex-start; margin-top: 3px; color: var(--text-hi); }
+.brand-mark svg, .brand-mark img { height: var(--brand-height, 36px); width: auto; display: block; }
+.sidebar.rail .brand-mark { align-self: center; margin-top: 0; }
+.sidebar.rail .brand-mark svg, .sidebar.rail .brand-mark img { height: 30px; }
+.brand-ver { margin-left: auto; font-size: 11px; color: var(--text-low); white-space: nowrap; }
+
+.sidebar-content {
+  display: flex; flex-direction: column; gap: 14px;
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 12px 8px 10px;
+}
+
+/* Sized so the whole column, footer included, fits a laptop window (about
+   800px tall) without scrolling. */
+.nav-groups { display: flex; flex-direction: column; gap: 12px; flex: 1; }
+.nav-group { display: flex; flex-direction: column; gap: 1px; }
+.nav-label { padding: 0 8px 4px; font-size: 11px; line-height: 16px; font-weight: 600; color: var(--text-mid); letter-spacing: .01em; }
+
+.nav-item {
+  display: flex; align-items: center; gap: 8px;
+  height: 28px; padding: 0 8px; border-radius: var(--r-control);
+  color: var(--text-mid); font-size: 13px; font-weight: 400;
+  cursor: pointer; text-decoration: none;
+  transition: color .12s var(--ease), background .12s var(--ease);
+}
+.nav-item:hover { color: var(--text-hi); background: var(--ink-2); }
+/* The page you are on is filled like a selected segment. */
+.nav-item-active, .nav-item-active:hover { color: var(--accent-text); font-weight: 500; background: var(--selected); }
+.nav-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Icons a step quieter than the words; the row you are on, or point at,
+   gives them the words' ink. */
+.nav-icon { width: 16px; height: 16px; flex: none; margin-right: 2px; color: var(--text-low); transition: color .12s var(--ease); }
+/* Each console draws its own icons; the frame gives them one stroke. */
+.nav-icon, .nav-icon * { stroke-width: 1.5px; }
+.nav-item:hover .nav-icon { color: var(--text-hi); }
+.nav-item-active .nav-icon, .nav-item-active:hover .nav-icon { color: var(--accent-text); }
+/* On the right of a row that lists things: how many, or what needs you. */
+.nav-mark {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 10px;
+  font-size: 12px; font-weight: 400; color: var(--text-mid); font-variant-numeric: tabular-nums;
+}
+.nav-mark-part { display: inline-flex; align-items: center; gap: 5px; }
+.nav-fig { margin-left: auto; font-size: 12px; color: var(--text-low); font-variant-numeric: tabular-nums; }
+.nav-item-active .nav-fig { color: var(--text-mid); }
+
+/* =========================================================================
+   SIDEBAR FOOTER — who you are, and whether the service answers, in one
+   sentence each.
+   ========================================================================= */
+.sidebar-foot {
+  display: flex; flex-direction: column; gap: 8px;
+  padding-top: 10px; border-top: 1px solid var(--bd);
+}
+
+/* Where you are: words when there is nothing to switch to. */
+.whoami { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 0 8px; cursor: default; }
+.whoami b {
+  font-size: 13px; font-weight: 600; color: var(--text-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.whoami-sep { color: var(--text-faint); font-weight: 400; }
+.whoami-cluster { color: var(--text-mid); font-weight: 400; }
+.whoami-sub { font-size: 11px; color: var(--text-low); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell-line {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0; padding: 2px 8px; border-radius: var(--r-control);
+  font-size: 12px; line-height: 1.45; color: var(--text-low); text-decoration: none;
+}
+a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
+.cell-words { min-width: 0; }
+.cell-words b { font-weight: 500; color: var(--text-mid); }
+.cell-words .is-bad { color: var(--ember-400); }
+.cell-words .is-warn { color: var(--warn-400); }
+
+/* =========================================================================
+   THE RAIL — the sidebar at icon width, the operator's choice on a wide
+   screen (the toggle leads the top bar). Every row keeps its height and a
+   group's label becomes a rule of the same height, so nothing moves up or
+   down when the width changes.
+   ========================================================================= */
+.app-shell.nav-rail { grid-template-columns: 52px minmax(0, 1fr); }
+.sidebar.rail .brand { padding: 0; justify-content: center; }
+.sidebar.rail .sidebar-content { scrollbar-width: none; }
+.sidebar.rail .nav-item { position: relative; justify-content: center; padding: 0; }
+.sidebar.rail .nav-icon { margin-right: 0; }
+/* 4 + 1 + 15 = the label's 20px, the rule centred between the rows around it. */
+.nav-rule { width: 16px; height: 1px; margin: 4px auto 15px; background: var(--bd-hi); }
+/* The row's most severe mark, on the icon's corner. */
+.nav-corner { position: absolute; top: 3px; right: 4px; transform: scale(.8); }
+.sidebar.rail .cell-line { justify-content: center; padding: 5px 0; }
+.rail-tip {
+  position: fixed; z-index: 60; transform: translateY(-50%);
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 9px; border-radius: var(--r-chip);
+  background: var(--ink-3); border: 1px solid var(--bd-hi);
+  font-size: 12px; line-height: 1.4; color: var(--text-hi);
+  white-space: nowrap; pointer-events: none;
+}
+.rail-tip-note { color: var(--text-low); }
+
+/* =========================================================================
+   TOPBAR — the head of the page, on the same line as the brand. Two sides
+   that share the width equally, so anything set between them sits on the
+   bar's centre line whatever the page is called.
+   ========================================================================= */
+.topbar-wrap { position: relative; z-index: 5; container-type: inline-size; }
+.topbar {
+  display: flex; align-items: center; gap: 10px;
+  height: 52px; padding: 0 20px;
+  border-bottom: 1px solid var(--bd);
+  background: var(--ink-0);
+  z-index: 5;
+}
+@media (max-width: 1100px) { .topbar { padding-left: 56px; } }
+.topbar-side { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 10px; }
+.topbar-end { justify-content: flex-end; }
+
+.crumbs { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-mid); white-space: nowrap; min-width: 0; }
+.crumbs .sep { color: var(--text-faint); font-size: 12px; }
+.crumbs .here { color: var(--text-hi); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.crumb-link { color: var(--text-mid); text-decoration: none; }
+.crumb-link:hover { color: var(--text-hi); }
+
+.cmd-search {
+  margin-left: auto; display: flex; align-items: center; gap: 8px;
+  min-width: 160px; max-width: 360px; flex: 1;
+  height: 32px; padding: 0 10px; border-radius: var(--r-control);
+  border: 1px solid var(--bd); color: var(--text-low);
+  font-size: 13px; cursor: text; position: relative; transition: border-color .12s, background .12s;
+  background: var(--ink-2);
+}
+.cmd-search:hover { border-color: var(--bd-hi); }
+.cmd-search:focus-within { border-color: var(--bd-hi); background: var(--ink-3); }
+.cmd-input { flex: 1; min-width: 0; background: transparent; border: none; outline: none; font-size: 13px; color: var(--text-hi); }
+.cmd-input::placeholder { color: var(--text-low); }
+
+.kbd {
+  font-family: inherit; font-size: 11px; line-height: 1.4;
+  padding: 0 6px; border-radius: var(--r-chip);
+  background: var(--ink-3); border: 1px solid var(--bd);
+  color: var(--text-low);
+}
+
+.top-btn {
+  width: 32px; height: 32px; border-radius: var(--r-control); flex-shrink: 0;
+  border: 0; display: grid; place-items: center;
+  color: var(--text-mid); cursor: pointer; transition: color .12s, background .12s;
+  background: transparent;
+}
+.top-btn:hover, .top-btn.active { color: var(--text-hi); background: var(--ink-4); }
+.top-btn svg { width: 15px !important; height: 15px !important; }
+.top-btn svg, .top-btn svg * { stroke-width: 1.6px; }
+.cmd-search > svg, .cmd-search > svg * { stroke-width: 1.8px; }
+/* The sidebar toggle leads the bar. Up to 1100px the sidebar is a drawer
+   with its own button in this corner. */
+.nav-toggle { margin-left: -8px; }
+@media (max-width: 1100px) { .nav-toggle { display: none; } }
+
+/* The bar's last two things: the colour theme and the account. Each is an
+   icon button with its menu under it (ThemeMenu.vue, UserMenu.vue). */
+.theme-picker, .user-picker { position: relative; flex: none; }
+.theme-menu, .user-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 50;
+  padding: 4px; border: 1px solid var(--bd-hi);
+  border-radius: var(--r-card); background: var(--ink-3); box-shadow: var(--shadow-pop);
+}
+.theme-menu { min-width: 144px; }
+.user-menu { min-width: 200px; max-width: 320px; }
+.theme-option, .user-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  width: 100%; padding: 7px 10px; border: 0; border-radius: var(--r-control);
+  background: transparent; color: var(--text-mid); font: inherit; font-size: 13px;
+  text-align: left; cursor: pointer; transition: color .12s, background .12s;
+}
+.theme-option:hover, .theme-option:focus-visible,
+.user-item:hover, .user-item:focus-visible { color: var(--text-hi); background: var(--ink-4); }
+.theme-option[aria-checked="true"] { color: var(--text-hi); }
+.theme-option svg { width: 15px; height: 15px; flex: none; color: var(--accent-text); }
+/* The account's button is the bar's icon button, widened by the name. */
+.top-btn.user-trigger {
+  width: auto; max-width: 200px; padding: 0 10px 0 8px;
+  display: inline-flex; align-items: center; gap: 7px;
+  font: inherit; font-size: 13px;
+}
+.user-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-who {
+  display: grid; gap: 2px; padding: 8px 10px 9px; margin-bottom: 4px;
+  border-bottom: 1px solid var(--bd); font-size: 12px; color: var(--text-low);
+}
+.user-who b { font-size: 13px; font-weight: 500; color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A bar with no room for a name keeps the icon: the menu still says who. */
+@container (max-width: 1180px) {
+  .top-btn.user-trigger { width: 32px; padding: 0; justify-content: center; }
+  .user-name { display: none; }
+}
+
+/* Phone: the search is a magnifier until it is used, then it opens over the
+   top bar. */
+@media (max-width: 700px) {
+  .topbar { gap: 6px; }
+  .topbar-end { flex: none; gap: 6px; }
+  .crumbs { flex: 1; text-align: center; justify-content: center; }
+  .cmd-search {
+    flex: none; min-width: 32px; width: 32px; padding: 0; justify-content: center;
+    border-color: transparent; background: transparent; cursor: pointer;
+  }
+  .cmd-search:hover { border-color: transparent; background: var(--ink-2); }
+  .cmd-search .cmd-input, .cmd-search .kbd { display: none; }
+  .cmd-search.open {
+    position: absolute; left: 52px; right: 12px; top: 8px; z-index: 6;
+    width: auto; max-width: none; height: 36px; padding: 0 10px; justify-content: flex-start;
+    border-color: var(--bd-hi); background: var(--ink-3); cursor: text;
+  }
+  .cmd-search.open .cmd-input { display: block; }
+}
+
+/* =========================================================================
+   STATUS STRIP — one banner under the top bar, driven by what the wire
+   did; the same banner inside a page.
+   ========================================================================= */
+.status-strip { display: flex; flex-direction: column; border-bottom: 1px solid var(--bd); }
+.status-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 20px;
+  font-size: 13px; line-height: 1.3;
+  border-bottom: 1px solid var(--bd);
+}
+.status-banner:last-child { border-bottom: none; }
+.status-banner strong { font-weight: 600; }
+.banner-warn { color: var(--warn-400); background: color-mix(in srgb, var(--warn-400) 6%, transparent); }
+.banner-bad { color: var(--ember-400); background: color-mix(in srgb, var(--ember-500) 6%, transparent); }
+.banner-info { color: var(--text-hi); background: var(--ink-3); }
+.status-banner.view-banner { border: 1px solid currentColor; border-radius: var(--r-card); margin-bottom: 12px; }
+.view-banner .banner-action { margin-left: auto; flex: none; }
+@media (max-width: 700px) {
+  .status-banner { padding: 8px 14px 8px 56px; font-size: 12px; }
+  .status-banner.view-banner { padding: 8px 12px; }
+}
+
+/* =========================================================================
+   THE PAGE — one anatomy on every page:
+
+     [lead] Title  sub ·············· live · range · switches · actions
+
+   then, only where a page filters a list, one tools row.
+   ========================================================================= */
+.view-container { padding: 14px 20px 40px; max-width: 1560px; margin: 0 auto; }
+@media (max-width: 640px) { .view-container { padding: 10px 12px 28px; } }
+
+.page-head { display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap; min-height: 36px; margin-bottom: 16px; }
+.page-id { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.page-id h1 {
+  flex: 0 0 auto; max-width: 100%; margin: 0;
+  font-size: 20px; font-weight: 600; letter-spacing: -0.015em; color: var(--text-hi);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.page-sub { font-size: 12px; color: var(--text-low); font-variant-numeric: tabular-nums; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-sub b { font-weight: 500; color: var(--text-mid); }
+.page-controls { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.live-tick { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-low); }
+.live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-low); flex: none; }
+
+.page-tools { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.tools-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1 1 auto; min-width: 0; }
+.tools-view { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-left: auto; }
+
+/* The Overview's page: the answer first, its blocks a column apart. */
+.view-container.dash { display: flex; flex-direction: column; gap: 24px; max-width: 1320px; padding: 24px 28px 64px; }
+.view-container.dash > .page-head { margin-bottom: 0; }
+
+@media (max-width: 640px) {
+  .view-container.dash { padding: 16px 16px 48px; gap: 18px; }
+  .page-head { margin-bottom: 12px; }
+  .page-controls { margin-left: 0; width: 100%; }
+  .tools-view { margin-left: 0; }
+}
+
+/* =========================================================================
+   BOOT — the screen before the shell: the product's mark and one line.
+   ========================================================================= */
+.boot-screen {
+  height: 100vh; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  color: var(--text-mid); font-size: 13px; padding: 24px; text-align: center;
+}
+.boot-mark { color: var(--text-hi); }
+.boot-mark svg, .boot-mark img { height: 72px; width: auto; display: block; }
+.boot-error h2 { margin: 0; font-size: 16px; color: var(--text-hi); font-weight: 600; }
+.boot-error p { margin: 0; max-width: 460px; line-height: 1.5; }
+.boot-actions { display: flex; gap: 8px; margin-top: 6px; }

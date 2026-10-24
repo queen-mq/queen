@@ -77,36 +77,3 @@ function onPointerDown(event) {
 onMounted(() => document.addEventListener('pointerdown', onPointerDown))
 onUnmounted(() => document.removeEventListener('pointerdown', onPointerDown))
 </script>
-
-<style scoped>
-.user-picker { position: relative; flex: none; }
-/* The bar's icon button, widened by the name beside the icon. */
-.user-trigger {
-  width: auto; max-width: 200px; padding: 0 10px 0 8px;
-  display: inline-flex; align-items: center; gap: 7px;
-  font: inherit; font-size: 13px;
-}
-.user-trigger.active { color: var(--text-hi); background: var(--ink-4); }
-.user-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.user-menu {
-  position: absolute; top: calc(100% + 6px); right: 0; z-index: 50;
-  min-width: 200px; max-width: 320px; padding: 4px; border: 1px solid var(--bd-hi);
-  border-radius: var(--r-card); background: var(--ink-3); box-shadow: var(--shadow-pop);
-}
-.user-who {
-  display: grid; gap: 2px; padding: 8px 10px 9px; margin-bottom: 4px;
-  border-bottom: 1px solid var(--bd); font-size: 12px; color: var(--text-low);
-}
-.user-who b { font-size: 13px; font-weight: 500; color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.user-item {
-  display: block; width: 100%; padding: 7px 10px; border: 0; border-radius: var(--r-control);
-  background: transparent; color: var(--text-mid); font: inherit; font-size: 13px;
-  text-align: left; cursor: pointer; transition: color .12s, background .12s;
-}
-.user-item:hover, .user-item:focus-visible { color: var(--text-hi); background: var(--ink-4); }
-/* A bar with no room for a name keeps the icon: the menu still says who. */
-@container (max-width: 1180px) {
-  .user-trigger { width: 32px; padding: 0; justify-content: center; }
-  .user-name { display: none; }
-}
-</style>
