@@ -1,0 +1,42 @@
+---
+title: "Architecture: one leader per tenant"
+description: "A Queen node is one process, and every write is decided once, on the leader of its tenant's raft group, then applied on every node. A transaction is one log entry."
+type: overview
+tier: internals
+sidebar:
+  label: "One leader per tenant"
+  order: 0
+sourceOfTruth:
+  - server/src/rsm/mod.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/facade/intake.rs
+  - server/src/rsm/facade/remote.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/batcher_lanes.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/apply_shard.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/consume/hooks.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/stream.rs
+  - server/clippy.toml
+digest: >-
+  A Queen MQ node is one process: an HTTP edge, a planner on the raft leader, a replicated log
+  (openraft in a cluster) stored in per-queue log files, a deterministic apply, and an ordered store
+  held in RAM and checkpointed to LMDB. The leader turns client commands into log entries of effects
+  (offsets, ids, timestamps decided once), and every node applies the committed entries in index
+  order, so each node holds a full copy. Planning is split across lanes (QUEEN_LANES, default 8) by
+  partition and still produces one entry per cycle. Pops, acks and leases are served from the
+  leader's memory by a consumption engine that logs changed cursor rows as checkpoints, at once when
+  an answer waits and at least every 5 ms by default. Each tenant lives in exactly one raft group
+  with one leader, so a multi-queue transaction is one log entry with no coordinator and no
+  two-phase commit; one tenant's writes go through one leader and one log, and more raft groups and
+  clusters add capacity across tenants.
+---
+
+A Queen node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.
+
+The rule behind the whole design is: **one leader per tenant**. A tenant lives in one raft group, and one leader orders all its writes. So a transaction, even across ten queues, is one log entry: no coordinator, no two-phase commit. The price is that one tenant's writes do not spread over more nodes. To use more nodes for writes, run more raft groups (see [Many tenants on one cluster](/manage/configuration/#many-tenants-on-one-cluster)): with as many groups as nodes, every node leads one.
+
+<Fig id="raft-groups" caption="One leader per tenant: three raft groups, each led on a different node." />

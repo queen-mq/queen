@@ -40,9 +40,9 @@ func TestDocsTargetResolution(t *testing.T) {
 	cases := []struct{ topic, want string }{
 		// Every topic name the flat site published still resolves, now onto
 		// the page that content moved to.
-		{"quickstart", "https://queenmq.com/start/quickstart/"},
+		{"quickstart", "https://queenmq.com/writing-applications/"},
 		{"concepts", "https://queenmq.com/use/model/"},
-		{"architecture", "https://queenmq.com/internals/"},
+		{"architecture", "https://queenmq.com/architecture/"},
 		{"http-api", "https://queenmq.com/reference/http/"},
 		{"clients", "https://queenmq.com/use/"},
 		{"server", "https://queenmq.com/deploy/"},
@@ -50,7 +50,7 @@ func TestDocsTargetResolution(t *testing.T) {
 		{"benchmarks", "https://queenmq.com/benchmarks/"},
 		{"sizing", "https://queenmq.com/deploy/"},
 		// The .html suffix the old flag taught people to type is tolerated.
-		{"quickstart.html", "https://queenmq.com/start/quickstart/"},
+		{"quickstart.html", "https://queenmq.com/writing-applications/"},
 		{"HTTP-API", "https://queenmq.com/reference/http/"},
 		// Anything unlisted is a site path, so the pages this file does not
 		// enumerate stay reachable.

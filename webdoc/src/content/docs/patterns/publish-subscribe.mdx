@@ -1,0 +1,33 @@
+---
+title: "Publish/subscribe: one event, many consumer groups"
+description: "One order-placed event read by billing, shipping and analytics: each consumer group gets every message, and a late group chooses where it starts."
+type: example
+tier: use
+sidebar:
+  label: "Publish/subscribe"
+  order: 2
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+  - examples/tutorials/php/book-use-cases.php
+  - examples/tutorials/cpp/book-use-cases.cpp
+---
+
+One event, many readers: when an order is placed, billing charges it, shipping prepares it, and analytics counts it. Each reader must get every event, at its own pace, and a reader added later must be able to start from the beginning.
+
+Each reader is a consumer group. A group gets every message of the queue and keeps its own position; the workers inside a group share its work, as in a work queue.
+
+<Fig id="pubsub" caption="Published once, read by every group, also by one that joins later." />
+
+<SdkCode id="uc-pubsub" />
+
+Billing and shipping each got the three orders. Analytics, started later, read all three from the start.
+
+<Why>the queue is a log: reading does not delete. So a new subscriber costs nothing to the publisher, and a group that falls behind slows down only itself.</Why>
+
+One thing to know: a new group starts at the end of the queue unless it asks for `subscriptionMode('all')`, or a point in time with `subscriptionFrom`. Our check proved it: a group created without it found nothing.
+
+Built from: [Pop and consume](/writing-applications/pop/#queue-mode-and-consumer-groups).

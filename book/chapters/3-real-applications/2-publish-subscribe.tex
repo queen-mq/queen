@@ -1,0 +1,30 @@
+% Chapter 3, section 2: Publish/subscribe and fan-out
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Publish/subscribe and fan-out}
+
+One event, many readers: when an order is placed, billing charges it, shipping prepares it, and
+analytics counts it. Each reader must get every event, at its own pace, and a reader added later
+must be able to start from the beginning.
+
+Each reader is a consumer group. A group gets every message of the queue and keeps its own
+position; the workers inside a group share its work, as in a work queue.
+
+\queenfig{pubsub}{Published once, read by every group, also by one that joins later.}
+
+\guide{uc-pubsub}
+
+Billing and shipping each got the three orders. Analytics, started later, read all three from the
+start.
+
+\why{the queue is a log: reading does not delete. So a new subscriber costs nothing to the
+publisher, and a group that falls behind slows down only itself.}
+
+One thing to know: a new group starts at the end of the queue unless it asks for
+\texttt{subscriptionMode('all')}, or a point in time with \texttt{subscriptionFrom}. Our check
+proved it: a group created without it found nothing.

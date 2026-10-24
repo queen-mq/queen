@@ -92,7 +92,7 @@ test("lists: six read-only tools with schemas, three prompts, every page as a re
   assert.deepEqual(prompts.map((p) => p.name), ["design", "review", "from-kafka"]);
   const { resources } = (await rpc("resources/list")).result;
   assert.equal(resources.length, bundle.pages.length + 1);
-  const read = (await rpc("resources/read", { uri: "https://queenmq.com/concepts/transactions/" })).result;
+  const read = (await rpc("resources/read", { uri: "https://queenmq.com/writing-applications/transactions/" })).result;
   assert.match(read.contents[0].text, /transaction/i);
 });
 
@@ -100,11 +100,11 @@ test("lists: six read-only tools with schemas, three prompts, every page as a re
 
 test("guide: a topic finds its section; a page and a section read in full", async () => {
   const topic = await call("guide", { topic: "where does a new consumer group start" });
-  assert.match(topic.text, /concepts\/consuming/);
+  assert.match(topic.text, /writing-applications\/pop/);
   assert.match(topic.text, /subscriptionMode/);
-  const page = await call("guide", { page: "https://queenmq.com/concepts/timers/" });
-  assert.match(page.text, /^https:\/\/queenmq\.com\/concepts\/timers\//);
-  const missing = await call("guide", { page: "concepts/nope" });
+  const page = await call("guide", { page: "https://queenmq.com/writing-applications/kv-locks-timers/" });
+  assert.match(page.text, /^https:\/\/queenmq\.com\/writing-applications\/kv-locks-timers\//);
+  const missing = await call("guide", { page: "writing-applications/nope" });
   assert.equal(missing.isError, true);
   assert.equal((await call("guide", {})).isError, true);
 });
@@ -117,20 +117,27 @@ test("example: the tested snippet named after the task comes first", async () =>
   assert.match(list.text, /Tested JavaScript snippets: .*transaction/);
 });
 
-test("example: docs code fills what no tested snippet covers, and says so", async () => {
+test("example: the book's programs are tested code, in every SDK", async () => {
   const kv = await call("example", { task: "kv put get", language: "js" });
+  assert.match(kv.text, /^### JavaScript: kv/);
   assert.match(kv.text, /queen\.kv\.put/);
-  assert.match(kv.text, /not cut from a tested file/);
+  assert.match(kv.text, /book-client-guide\.mjs`, a file Queen's test suite runs/);
   const php = await call("example", { task: "kv state", language: "php" });
-  assert.match(php.text, /^No PHP code covers/);
-  assert.match(php.text, /Translate it with the PHP SDK's own names/);
+  assert.match(php.text, /^### PHP: kv/);
   assert.equal((await call("example", { task: "x", language: "kafka" })).isError, true);
+});
+
+test("example: docs code fills what no tested snippet covers, and says so", async () => {
+  const docs = await call("example", { task: "try a cluster on one machine", language: "js" });
+  assert.match(docs.text, /urls:/);
+  assert.match(docs.text, /not cut from a tested file/);
 });
 
 test("example: tested code in the asked language beats another language's docs code", async () => {
   const go = await call("example", { task: "schedule a timer in a transaction", language: "go" });
-  assert.match(go.text, /^### Go: excerpt from examples\/apps\/go\/saga\/main\.go/);
-  assert.match(go.text, /ScheduleTimerOp\(queen\.TimerSchedule\{/);
+  assert.match(go.text, /^### Go: /);
+  assert.match(go.text, /a file Queen's test suite runs/);
+  assert.match(go.text, /queen\.TimerSchedule\{/);
 });
 
 test("example answers carry the language's install line and import path", async () => {
@@ -190,7 +197,7 @@ test("setup: lists the recipes, and every recipe names pages the docs build has"
   for (const f of bundle.setup) assert.ok(list.text.includes(`\`${f.feature}\``), f.feature);
   const pages = new Set(bundle.pages.map((p) => p.slug));
   const missing = bundle.setup.flatMap((f) => f.pages.filter((p) => !pages.has(p)).map((p) => `${f.feature}: ${p}`));
-  // guides/s3 lands with the S3 sink docs; everything else must resolve.
+  // integrations/s3 lands with the S3 sink docs; everything else must resolve.
   assert.deepEqual(missing.filter((m) => !m.startsWith("s3-sink")), []);
   assert.equal((await call("setup", { feature: "nope" })).isError, true);
 });
@@ -198,14 +205,14 @@ test("setup: lists the recipes, and every recipe names pages the docs build has"
 test("setup: a recipe is its docs page, and focuses Postgres on source or sink", async () => {
   const kv = await call("setup", { feature: "kv" });
   assert.match(kv.text, /^# Set up: KV state/);
-  assert.match(kv.text, /https:\/\/queenmq\.com\/concepts\/kv\//);
-  if (bundle.pages.some((p) => p.slug === "guides/postgres")) {
+  assert.match(kv.text, /https:\/\/queenmq\.com\/writing-applications\/kv-locks-timers\//);
+  if (bundle.pages.some((p) => p.slug === "integrations/postgres")) {
     const sink = await call("setup", { feature: "pg-sink" });
-    assert.match(sink.text, /## How a message becomes a row/);
-    assert.doesNotMatch(sink.text, /## The change events/);
+    assert.match(sink.text, /## The sink/);
+    assert.doesNotMatch(sink.text, /## The source/);
     const source = await call("setup", { feature: "pg-source" });
-    assert.match(source.text, /## The change events/);
-    assert.doesNotMatch(source.text, /## How a message becomes a row/);
+    assert.match(source.text, /## The source/);
+    assert.doesNotMatch(source.text, /## The sink/);
   }
 });
 

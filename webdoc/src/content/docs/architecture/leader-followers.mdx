@@ -1,0 +1,34 @@
+---
+title: "Leader and followers in a Queen cluster"
+description: "The leader orders every write; followers parse their own clients' requests and answer from their own copy. Reads wait for what was committed, and a SIGTERM hands leadership over."
+type: concept
+tier: internals
+sidebar:
+  label: "Leader and followers"
+  order: 1
+sourceOfTruth:
+  - server/src/rsm/mod.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/facade/intake.rs
+  - server/src/rsm/facade/remote.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/batcher_lanes.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/apply_shard.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/consume/hooks.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/stream.rs
+  - server/clippy.toml
+---
+
+A raft group has one leader. The other nodes are followers, and every node has a full copy of the data.
+
+The leader orders all the writes. A follower is not idle: it reads the requests of its own clients, prepares each one, and sends the leader only the prepared command. When the write is committed, the follower answers its client from its own copy. So the leader spends its time ordering and writing, not parsing JSON.
+
+<Fig id="follower-offload" caption="A follower does the work of its own clients." />
+
+A client can talk to any node. A read waits until that node has applied everything that was committed when the read started, so nobody reads behind a write they were already told about.
+
+If the leader stops with SIGTERM, it hands its role to the most up-to-date follower, in a fraction of a second. If it crashes, the others wait one to two seconds and elect a new leader.

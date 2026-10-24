@@ -1,0 +1,15 @@
+% Chapter 6, section 6: LMDB
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{LMDB}
+
+The state in memory is saved to an LMDB file, \texttt{store/data.mdb}, four times a second. This is
+a checkpoint, and no client waits for it: it only decides how much of the log a restart has to
+replay.
+
+Every value carries a checksum, and the node checks all of them at boot. Every 6 hours a
+background scan reads the whole store again, to find damage before a restart does.
+
+Traces have their own LMDB file, \texttt{traces/data.mdb}.

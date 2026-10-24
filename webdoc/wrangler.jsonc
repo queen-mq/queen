@@ -20,7 +20,7 @@
   "compatibility_date": "2026-06-19",
   "assets": {
     "directory": "./dist",
-    // Astro emits directory-style pages (`/start/` -> `/start/index.html`) and
+    // Astro emits directory-style pages (`/manage/` -> `/manage/index.html`) and
     // a 404.html for anything unmatched.
     "html_handling": "auto-trailing-slash",
     "not_found_handling": "404-page"

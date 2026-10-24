@@ -1,0 +1,33 @@
+---
+title: "Delayed messages: reminders with timers"
+description: "Ask for a review a day after checkout: a timer keyed by the booking is scheduled, moved or cancelled, and fires as a real message in the booking's partition."
+type: example
+tier: use
+sidebar:
+  label: "Delayed messages"
+  order: 9
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+  - examples/tutorials/php/book-use-cases.php
+  - examples/tutorials/cpp/book-use-cases.cpp
+---
+
+A day after an order is delivered, ask for a review. If the delivery is late, move the reminder. If the guest already wrote a review, cancel it. The usual answer is a cron job that scans a table every minute.
+
+A timer is a message that waits. It is named by its queue and a key: scheduling the same key again moves it, and cancelling the key removes it. When it is due, it arrives in its queue as a normal message, through the log.
+
+<Fig id="timer-reminder" caption="A keyed timer: schedule, move, cancel." />
+
+<SdkCode id="uc-reminder" />
+
+The first call answered `scheduled` and the second `rescheduled`; after the cancel, no reminder was left. A short timer of the same queue arrived as a message, with its payload as data.
+
+<Why>the key makes a reminder easy to move or cancel, and a retried schedule is harmless. Put the timer in the [transaction](/writing-applications/transactions/) of the step that creates it, and it exists exactly when the step committed.</Why>
+
+One thing to know: a cancel can arrive just after the timer fired. The consumer of the reminder should check the order's state before it sends anything.
+
+Built from: [KV, locks and timers](/writing-applications/kv-locks-timers/#timers).

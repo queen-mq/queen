@@ -1,0 +1,72 @@
+---
+title: "The model: partitions, leases and transactions"
+description: "Four ideas: one partition per entity, created by its first push; leases instead of static assignment; one transaction per step; and a plain HTTP interface with thin SDKs."
+type: concept
+tier: use
+sidebar:
+  label: "The model"
+  order: 3
+sourceOfTruth:
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/consume/txn.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/encryption.rs
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+digest: >-
+  In Queen MQ every entity (a customer, an order, a conversation) gets its own partition in a queue,
+  created by the first push that names it, and each consumer group reads one partition in offset
+  order with one leased batch at a time. A step is what a worker does with one event: it acks the
+  event, writes KV state, pushes the next events, schedules timers and makes a retry harmless with a
+  transactionId or a once marker. One POST /api/v1/transaction writes every part of a step as one
+  entry of the log, and either all parts apply or none does. Delivery is at-least-once; effects
+  inside Queen are exactly-once through transactions and transactionId deduplication, and stop at
+  calls a worker makes to other systems.
+---
+
+The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases, transactions and a simple interface.
+
+## Partitions
+
+The core of the system are the partitions. A QueenMQ partition is a FIFO sub-queue inside a queue, created on the fly, and a queue is a named collection of those sub-queues. The first push that names a partition creates it, so there is no partition count to choose and nothing to plan: you give each entity its own partition, a customer, an order, a conversation, and one queue has held ten million of them.
+
+<Fig id="kafka-vs-queen" caption="Hashed partitions share one queue per partition; Queen gives every entity its own." />
+
+QueenMQ partitions are not physical entities like in Kafka: there is no dedicated thread or file for each partition. A partition is a name, a few rows in the broker's memory and a position for each consumer group, and its messages live in the log files of its queue.
+
+<Why>order matters per entity, not across the whole queue. In Kafka you choose a number of partitions and hash your keys onto them, so a slow key blocks every key that shares its partition: the head-of-line blocking of [the Smartchat story](/introduction/why/). With one partition per entity, a slow conversation waits only for itself.</Why>
+
+## Leases, not static assignment
+
+A consumer does not own partitions. When it asks for work, the broker gives it a batch from a partition that is free, and leases that partition to it for a while (`leaseTime`). Until the consumer acks the batch, or the lease runs out, no other consumer of the same group gets that partition. Then the partition is free again, for whoever asks next.
+
+<Fig id="lease-cycle" caption="A partition's cycle for one consumer group: free, leased, acked, free again." />
+
+Consumer groups give every reader its own position: each group gets every message, and the workers inside a group share its work. And reading does not delete: an ack only moves the group's position, and the messages stay until retention removes them, so a new group can read the history again.
+
+<Why>with no static assignment there is no rebalance. You add a worker and it starts taking work; a worker dies and its lease runs out, and someone else continues from the same message. The order of each partition is kept, because a partition has one holder at a time.</Why>
+
+## Transactions
+
+A worker's step usually does several things: it finishes the message it read, pushes the next events, saves some state, and maybe schedules something for later. In QueenMQ that is one call: a transaction that acks, pushes to any queue, writes to the key-value store and schedules timers, and commits as a single entry of the log, all or nothing.
+
+<Fig id="one-step-one-commit" caption="One worker step without and with a transaction." />
+
+<Why>without it, every step needs an outbox table, an idempotency table and a cron job, plus the code that keeps them in step. With it, a crash can never leave a step half done.</Why>
+
+## A simple interface
+
+QueenMQ chose a simple API over HTTP: JSON on one port, the same for pushing, consuming, transactions, KV, timers and locks. The SDKs (JavaScript, Python, Go, Rust, PHP, C++) are thin layers over it, `curl` is enough to try everything, and Kafka clients can talk to the broker through its built-in Kafka port.
+
+<Fig id="thin-clients" caption="Thin clients; the logic lives in the broker." />
+
+<Why>any language with an HTTP client can use QueenMQ, and what you see on the wire is easy to read and debug.</Why>
+
+## Wrap up
+
+In QueenMQ, clients are dumb and the broker is where all the logic lives: the order of each partition, the leases, the retries and the dead-letter queue, deduplication, timers, state, and the transactions that tie them together. Your application keeps only its own business.

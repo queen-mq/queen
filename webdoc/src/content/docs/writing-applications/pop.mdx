@@ -1,0 +1,162 @@
+---
+title: "Pop and consume messages with consumer groups"
+description: "Pop a batch or run a consume loop: queue mode and consumer groups, where a new group starts, batches, leases and renewal, conflation, seek, and reads by offset."
+type: how-to
+tier: use
+sidebar:
+  label: "Pop and consume"
+  order: 5
+sourceOfTruth:
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/consume/state.rs
+  - server/src/handlers/data.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/facade/autopilot.rs
+  - server/src/config.rs
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/consumer/Supervision.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+  - clients/client-py/queen/consumer/consumer_manager.py
+  - clients/client-py/queen/consumer/supervision.py
+  - clients/client-go/consumer_manager.go
+  - clients/client-go/supervision.go
+  - clients/client-rust/src/consumer.rs
+  - clients/client-rust/src/supervision.rs
+  - clients/client-cpp/queen_client.hpp
+  - clients/client-php/src/Consumer/ConsumerManager.php
+  - clients/client-php/src/Consumer/Supervision.php
+  - clients/client-cli/cmd/tail.go
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/00-five-minutes.mjs
+  - examples/tutorials/py/00_five_minutes.py
+  - examples/tutorials/go/five-minutes/main.go
+  - examples/tutorials/rust/src/bin/00_five_minutes.rs
+  - examples/tutorials/php/00-five-minutes.php
+  - examples/tutorials/cpp/00-five-minutes.cpp
+  - examples/tutorials/js/book-client-guide.mjs
+  - examples/tutorials/py/book_client_guide.py
+  - examples/tutorials/go/book-client-guide/main.go
+  - examples/tutorials/rust/src/bin/book_client_guide.rs
+  - examples/tutorials/php/book-client-guide.php
+  - examples/tutorials/cpp/book-client-guide.cpp
+---
+
+There are two ways to read. `consume()` is a loop: it takes messages, calls your handler, acks them when the handler returns, and goes on. `pop()` is one call: it hands you the messages and leaves the ack to you.
+
+<Why>most workers are loops, and `consume()` writes the loop for you, with the error handling done right. `pop()` is for the cases a loop does not fit: a scheduled job that reads once, a script, or code that wants to decide itself when to ack.</Why>
+
+<Fig id="consume-loop" caption="What consume() does for you." />
+
+## Queue mode and consumer groups
+
+Without a consumer group, each message goes to one worker, and the broker sizes every pop for you.
+
+<SdkCode id="consume" />
+
+With a consumer group, every group gets every message and the workers of one group share them. A new group starts at the tail, so this one asks for everything already in the queue. Here every option is set by hand, and the handler acks.
+
+<SdkCode id="consume-group" />
+
+Ack `failed` and the message comes back, up to the queue's `retryLimit`; after the last retry it goes to the dead-letter queue.
+
+<Why>one queue often feeds several services: billing, emails and analytics all want every order. Each service is a consumer group, reading at its own pace, and none of them can slow the others down. Inside a group, the workers compete, so you add workers to go faster.</Why>
+
+<Fig id="queue-mode-vs-groups" caption="Queue mode shares the messages; every consumer group gets all of them." />
+
+## One message at a time, or a whole batch
+
+With `.each()`, the handler gets one message at a time. Without it, the handler gets the whole batch as an array.
+
+<SdkCode id="consume-batch" />
+
+What the client does with your handler's result (`autoAck`, on by default):
+
+- **It returns:** the message (or the whole batch) is acked.
+- **It throws:** the message (or the whole batch) is nacked as `failed`, which spends one retry, and the loop goes on with the next messages.
+- **It throws under `.each()`:** the rest of that partition's messages in the same batch are skipped, because they will be delivered again after the failed one, in order. Messages of other partitions in the batch are handled as usual.
+- **With `.autoAck(false)`:** the handler acks itself (in a transaction, for example). A handler that throws is still nacked, so its partition is not stuck until the lease runs out.
+
+**In the other SDKs:** the list above is what JavaScript, Python and Go do. Under `autoAck(false)`, Rust and C++ do not nack a handler that fails (its messages wait for their lease), and PHP stops the loop: catch the error and ack `failed` yourself.
+
+<Why>a batch is cheaper (one ack for a hundred messages, one database write for a hundred rows), and one at a time is simpler and fails one message instead of a hundred. Pick per worker.</Why>
+
+If you add `.onSuccess()` or `.onError()` to a consumer, the client stops acking and nacking for you: you decide in those callbacks what happens to each message. Python and PHP have the same callbacks (PHP with `autoAck(false)`); Go, Rust and C++ have none, so their code turns `autoAck` off and acks in the handler.
+
+<SdkCode id="consume-callbacks" />
+
+<Why>some failures should be retried and some never will succeed (an email address that does not exist). The callbacks let you send the first kind back with `failed` and the second kind straight to the dead-letter queue with `dlq`.</Why>
+
+## How many messages a pop takes: autopilot
+
+By default the broker decides how many messages each pop gets (`batch`, from 100 to 1,000, based on how fast the group acks) and from how many partitions (`partitions`, the ones that have work, shared among the waiting workers). A value you set yourself is never changed. `partitions(N)` lets one pop take messages from up to `N` partitions (1 to 64), with `batch` as the total. `.autopilot(false)` goes back to one message from one partition per pop.
+
+<Why>the right batch size depends on your handler and your load, and it changes during the day. The broker sees both, so it can size every pop better than a number fixed in the code.</Why>
+
+## Leases and long work
+
+A pop leases its messages to the worker for the queue's `leaseTime`. Work that can take longer renews the lease while it runs: `.renewLease(true, 10000)` renews every 10 seconds, and `queen.renew(message)` renews once. In PHP, the renewal happens between messages, so a single long handler calls the renew callback it is given. A lease that has already expired cannot be renewed: its messages go to the next worker, marked as one delivery attempt more.
+
+<Why>the lease is what protects order and stops two workers from doing the same work. A short lease gets a crashed worker's messages moving again quickly; renewing lets a slow but healthy worker keep them.</Why>
+
+## Where a new group starts
+
+A group's starting point is decided on its first pop and then stored: `new` (the default) reads only what is pushed after that first pop, `all` reads everything still kept, and `subscriptionFrom` reads from a point in time. A group that already exists moves with a seek, to a time or to the end.
+
+<Fig id="subscription-start" caption="Where a new group starts, fixed at its first pop." />
+
+<SdkCode id="seek" />
+
+<Why>a new service usually wants only new events, a new projection wants the whole history, and a bug fix wants to replay the last day. A seek to the end is how a group skips a backlog it no longer needs.</Why>
+
+## Only the newest message: conflation
+
+A group with `.conflation()` gets only the newest message of each partition, and its cursor moves past the older ones.
+
+<SdkCode id="conflation" />
+
+<Why>some queues carry commands where only the latest one matters: "recompute the price of A-1". A worker that is behind should do the work once, with the newest input, instead of three times with inputs that are already old.</Why>
+
+Conflation is decided by the group's first pop, needs a consumer group, and cannot be combined with `commitOnDelivery`.
+
+## Faster, with no ack: commitOnDelivery
+
+A pop with `.commitOnDelivery()` moves the group's cursor as the messages are handed out. There is no lease and nothing to ack.
+
+<SdkCode id="commit-on-delivery" />
+
+<Why>a live dashboard or a metrics chart can lose a reading now and then, and would rather not pay for leases and acks. This is at-most-once delivery: a worker that crashes after the pop loses that batch. It works with `pop()` only; `consume()` refuses it.</Why>
+
+## Running a consumer for real
+
+<SdkCode id="consume-run" />
+
+- `concurrency(n)` runs `n` handlers at once, each on its own partitions.
+- `limit(n)` stops after `n` messages, and `idleMillis(ms)` stops after that long with nothing to do.
+- `wait(true)` (the default) waits for messages instead of returning empty, up to `timeoutMillis(ms)` (30 seconds by default, at most 60).
+- A `signal` stops the loop at once. Messages it had taken but not started go back with a `retry` ack, which spends no retry, so a deploy does not leave partitions waiting for their leases to run out.
+
+**In the other SDKs:** in 2.6.0 only JavaScript gives the unstarted messages back. Python, Go, Rust, PHP and C++ stop after the message they are handling, and the rest wait for their lease. Python, Rust and C++ also notice the stop only between two long polls, so their code sets a short poll timeout. PHP stops on SIGTERM by itself.
+
+<Why>a worker runs for weeks, through deploys and quiet nights. These options decide how much it does at once, when it stops, and how it gives its work back when it is told to.</Why>
+
+## Read it again
+
+Consuming does not delete: the queue is a log, kept for its retention. A new group can start from a point in time and read the same orders again, while the groups that already read them stay where they are.
+
+<SdkCode id="replay" />
+
+Or read a partition by offset with `fetch`: no group, no lease, no ack. It suits an audit, rebuilding one entity, or a sink that keeps its own position.
+
+<SdkCode id="fetch" />
+
+<Why>history is useful long after the first reader is done with it: to build a new view, to audit what happened, or to rebuild one customer's state from its events.</Why>
+
+## See also
+
+- [Acknowledge](/writing-applications/ack/): the four outcomes of an ack.
+- [The consumption engine](/architecture/consumption-engine/): how the leader serves pops and leases from memory.
+- [HTTP API](/reference/http/): the pop and ack endpoints and every parameter.

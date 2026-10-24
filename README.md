@@ -14,7 +14,7 @@ second. Every customer, order or conversation gets its own ordered partition. Ev
 takes is saved as one commit, or not at all. One binary, no database, and Kafka clients work with
 it out of the box.
 
-[Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.6
+[Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.6
 
 </div>
 
@@ -50,7 +50,8 @@ await queen.queue('orders')
   .config({
     leaseTime: 30,                // seconds a worker holds a message before it is redelivered
     retryLimit: 3,                // failures before the message goes to the dead-letter queue
-    retentionSeconds: 86400,      // keep messages for a day
+    retentionEnabled: true,       // retention runs only when this is on
+    retentionSeconds: 86400,      // then messages older than a day are removed
   })
   .create()
 ```
@@ -152,7 +153,7 @@ it to disk (fsync). Kafka, Pulsar and Redpanda ran on the same machines.
 - [**1M msg/s**](https://queenmq.com/benchmarks/queen-vs-kafka/#1000000-msgs-of-1-kb-messages) of 1 KB messages (about 1 GB/s), p99 16-22 ms.
 - [**5M msg/s**](https://queenmq.com/benchmarks/queen-vs-kafka/#the-ceiling-at-1000-partitions) on one queue at most.
 - **100 GB of lag drained in 32 seconds** (3.4 GB/s).
-- [**28 s**](https://queenmq.com/operate/recovery/#a-node-crashed-or-restarted) for a node away five minutes to rejoin a cluster holding 521 GB a node: it gets only what it missed, a 1.1 GB delta, and a restart reads hash sidecars instead of its logs (20 s where it took 171 to 201 s).
+- [**28 s**](https://queenmq.com/manage/recovery/) for a node away five minutes to rejoin a cluster holding 521 GB a node: it gets only what it missed, a 1.1 GB delta, and a restart reads hash sidecars instead of its logs (20 s where it took 171 to 201 s).
 - [**4 ms**](https://queenmq.com/benchmarks/transactions/) p99 for a 10-message transaction, at 6,000 transactions per second.
 
 <picture>
@@ -174,12 +175,14 @@ Full details: [queenmq.com/benchmarks](https://queenmq.com/benchmarks/)
 
 ## Documentation
 
-- [The model](https://queenmq.com/concepts/): partitions, consumer groups, transactions, KV, timers, dedup, guarantees.
-- [Guides](https://queenmq.com/guides/) · [Examples](https://queenmq.com/examples/): exactly-once, state machines, streams, webhooks, Kafka, PostgreSQL, S3, Laravel.
-- [Operate](https://queenmq.com/operate/): a [cluster](https://queenmq.com/operate/cluster/), [Kubernetes](https://queenmq.com/operate/kubernetes/), [monitoring](https://queenmq.com/operate/monitoring/), [recovery](https://queenmq.com/operate/recovery/), [tenants](https://queenmq.com/operate/tenants/).
-- [Reference](https://queenmq.com/reference/): the HTTP API, configuration, errors, limits.
-- [Internals](https://queenmq.com/internals/): the replicated log, storage, the life of a step.
-- [Compared to Kafka, SQS and Temporal](https://queenmq.com/start/compare/).
+- [The little book of QueenMQ](https://queenmq.com/book/): the whole story in one free PDF, from what Queen is to the bytes on disk.
+- [The model](https://queenmq.com/introduction/model/): partitions, leases, transactions and a plain HTTP interface; [guarantees](https://queenmq.com/introduction/guarantees/).
+- [Writing applications](https://queenmq.com/writing-applications/): queues, push, pop, acks, retries, transactions, KV, locks, timers, ephemeral queues and streams, every example in six languages.
+- [Patterns](https://queenmq.com/patterns/): work queue, pub/sub, request/reply, workflows, windowed aggregation, rate limiting, delayed messages and more.
+- [Integrations](https://queenmq.com/integrations/): Kafka clients, S3, PostgreSQL, Laravel.
+- [Manage clusters](https://queenmq.com/manage/): [Docker](https://queenmq.com/manage/docker/), [Kubernetes](https://queenmq.com/manage/kubernetes/), [upgrades and monitoring](https://queenmq.com/manage/upgrades-monitoring/), [recovery](https://queenmq.com/manage/recovery/), [tenants](https://queenmq.com/manage/tenants/).
+- [Architecture](https://queenmq.com/architecture/): one leader per tenant, the write path, Raft, storage down to the bytes.
+- [Compared to Kafka, SQS and Temporal](https://queenmq.com/introduction/compare/).
 
 Using a coding agent? Add the MCP server:
 

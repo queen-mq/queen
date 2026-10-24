@@ -1,0 +1,31 @@
+% Chapter 3, section 7: Rate limiting
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Rate limiting}
+
+An SMS provider accepts five messages a second for each customer. Send more and it refuses them,
+or blocks the account. The messages must still all go out, in order.
+
+A stream with a gate decides, message by message, whether a message may go on now. The token
+bucket gate keeps its state per partition, in the broker: here five tokens per customer, refilled
+at five a second. A message the gate refuses stops its partition there, and comes back, with the
+ones after it, when its lease ends.
+
+\guide{uc-rate}
+
+Five messages went at once, and the rest followed at about five a second, so the twelfth left
+about two seconds after the first: all twelve, in order.
+
+\queenfig{sms-gate}{The token bucket gate: 5, 5, then 2, in order. A refill a few milliseconds short lets 4 through, not 5.}
+
+\why{the bucket lives in the broker, per customer, and survives restarts: no Redis next to it.
+Waiting messages stay in their queue, in order, and never need a queue of your own.}
+
+One thing to know: the refused messages wait for their lease, so size the two together. The most a
+gate can let through is the smaller of \texttt{refillPerSec} and \texttt{capacity} divided by the
+lease in seconds, so keep \texttt{capacity} near \texttt{refillPerSec} times the lease.

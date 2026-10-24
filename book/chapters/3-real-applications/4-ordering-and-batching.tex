@@ -1,0 +1,30 @@
+% Chapter 3, section 4: Ordering per key, and batching
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Ordering per key, and batching}
+
+A chat: every conversation must be handled in order, and a slow one must not delay the others. And
+a guest rarely sends one message. They send three in a row: ``Hi!'', ``Is breakfast included?'',
+``And is there parking?''. An assistant that answers each message at once answers three times.
+
+Every conversation is a partition of its own, created by its first message, so its messages stay in
+order and it waits on nobody else. \texttt{windowBuffer} adds the batching: new messages of a
+conversation wait until the first of them is two seconds old, and then go to the handler together.
+
+\queenfig{chat-burst}{A conversation's burst waits two seconds, then goes as one batch.}
+
+\guide{uc-chat}
+
+The handler ran once, two seconds after the first message, with the three texts.
+
+\why{a conversation comes in bursts, not one message at a time. Waiting a moment gives the
+assistant the whole question. Each conversation waits only for its own burst, never for the
+others.}
+
+One thing to know: the window ends two seconds after the oldest waiting message, even if the guest
+keeps typing, so a long burst is answered in parts, every two seconds.

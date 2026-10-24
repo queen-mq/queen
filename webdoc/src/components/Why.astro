@@ -1,0 +1,41 @@
+---
+/**
+ * The reason behind a feature, as the book prints it: `<Why>one or two sentences</Why>`.
+ * Every feature on these pages is said once, then its reason in one of these.
+ * The markdown copy renders it as "**Why:** …" (src/lib/markdown-partials.ts).
+ */
+---
+
+<div class="qwhy"><span class="qwhy-label">Why</span><div class="qwhy-text"><slot /></div></div>
+
+<style>
+  .qwhy {
+    display: flex;
+    gap: 0.75rem;
+    align-items: baseline;
+    margin: 1rem 0 1.25rem;
+    padding: 0.125rem 0 0.125rem 0.875rem;
+    border-left: 2px solid #fcc620;
+  }
+  .qwhy-label {
+    flex-shrink: 0;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #b07d00;
+  }
+  :global(:root[data-mode="dark"]) .qwhy-label {
+    color: #fcc620;
+  }
+  .qwhy-text {
+    font-style: italic;
+    color: var(--nb-foreground);
+  }
+  .qwhy-text :global(p) {
+    margin: 0;
+  }
+  .qwhy-text :global(p + p) {
+    margin-top: 0.5rem;
+  }
+</style>

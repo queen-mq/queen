@@ -1,0 +1,22 @@
+% Chapter 6, section 5: Consumption engine
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Consumption engine}
+
+Pops, acks and leases do not go through the planner. The leader keeps each consumer group's
+positions and leases in memory, and gives out the oldest ready partition first.
+
+The positions that changed go into the log as one small checkpoint, at once when an answer is
+waiting and at least every 5~ms. A pop gets its answer only after that checkpoint is committed. A
+pop that finds nothing waits, and is woken when a new message arrives in its partition.
+
+\queenfig{consumption-engine}{Pops, acks and leases, served from the leader's memory.}
+
+We moved consumption out of the planner because acks were waiting behind pushes: at 300,000
+messages a second, an ack took more than 500~ms. Now many acks travel in one checkpoint.
+
+A partition idle for 10 minutes leaves memory, and is loaded again with its next message. A new
+leader waits about half a second before it serves pops, so the same messages are never given out
+twice.

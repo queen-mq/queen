@@ -1,0 +1,27 @@
+% Chapter 2, section 9: Ephemeral queues
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Ephemeral queues}
+
+Ephemeral queues live in memory, outside the log, for request/reply. The worker answers on whatever
+inbox a request names; the caller makes a private inbox and waits on it. There is no transaction or
+replay here, and a crash loses what is in flight.
+
+The worker:
+
+\guide{worker}
+
+The caller:
+
+\guide{caller}
+
+\why{a request that waits for an answer (``what is the price of A-1, now?'') needs speed more
+than history. Writing it to disk, replicating it and keeping it for days would cost time for
+nothing. Ephemeral queues keep the same groups, leases and acks, and skip the log. Use a regular
+queue for anything that must survive a crash.}
+
+\queenfig{ephemeral-reply}{Request and reply over ephemeral queues, with a private inbox.}
+
+On the site, with the code in all six SDK languages: \href{https://queenmq.com/writing-applications/ephemeral/}{queenmq.com/writing-applications/ephemeral}.

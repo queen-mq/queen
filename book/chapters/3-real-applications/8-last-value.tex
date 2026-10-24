@@ -1,0 +1,29 @@
+% Chapter 3, section 8: Last value
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Last value}
+
+The availability of a hotel changes many times a minute. A screen that shows it needs only the
+current value, and handling every old update on the way there is wasted work.
+
+A consumer group with \texttt{.conflation()} gets only the newest message of each partition, and its
+cursor moves past the older ones.
+
+\queenfig{last-value}{Conflation: the newest value of each partition, for this group only.}
+
+\guide{uc-latest}
+
+Three updates were pushed (12, 11 and 9 rooms). The screen got 9, and the older two were never
+delivered to it.
+
+\why{for a value that changes, only the last one matters. Conflation lets a slow consumer catch up
+in one step instead of replaying every update. Other groups of the same queue still get every
+message.}
+
+One thing to know: use it only where an old message has no meaning of its own. For events that
+each count, such as payments, every message must be handled.

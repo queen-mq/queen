@@ -1,0 +1,33 @@
+---
+title: "Ordering and batching: a chat burst in one call"
+description: "A user sends five chat messages in two seconds: windowBuffer holds the burst, and the handler gets it in order, in one call, instead of five."
+type: example
+tier: use
+sidebar:
+  label: "Ordering and batching"
+  order: 4
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+  - examples/tutorials/php/book-use-cases.php
+  - examples/tutorials/cpp/book-use-cases.cpp
+---
+
+A chat: every conversation must be handled in order, and a slow one must not delay the others. And a guest rarely sends one message. They send three in a row: "Hi!", "Is breakfast included?", "And is there parking?". An assistant that answers each message at once answers three times.
+
+Every conversation is a partition of its own, created by its first message, so its messages stay in order and it waits on nobody else. `windowBuffer` adds the batching: new messages of a conversation wait until the first of them is two seconds old, and then go to the handler together.
+
+<Fig id="chat-burst" caption="A conversation's burst waits two seconds, then goes as one batch." />
+
+<SdkCode id="uc-chat" />
+
+The handler ran once, two seconds after the first message, with the three texts.
+
+<Why>a conversation comes in bursts, not one message at a time. Waiting a moment gives the assistant the whole question. Each conversation waits only for its own burst, never for the others.</Why>
+
+One thing to know: the window ends two seconds after the oldest waiting message, even if the guest keeps typing, so a long burst is answered in parts, every two seconds.
+
+Built from: [Queues](/writing-applications/queues/) (`windowBuffer`), [Pop and consume](/writing-applications/pop/).

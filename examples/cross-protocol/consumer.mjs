@@ -10,7 +10,7 @@
 // as JSON with base64 bytes, because a Kafka key or value is arbitrary bytes:
 //   { k: key, v: value, h: [{ k: name, v: value }], t: timestamp }
 // h is left out when there are no headers and t when there is no timestamp.
-// More on the mapping: https://queenmq.com/guides/kafka/
+// More on the mapping: https://queenmq.com/integrations/kafka/
 
 import { Queen } from 'queen-mq'
 

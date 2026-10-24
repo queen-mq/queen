@@ -36,7 +36,7 @@ sourceOfTruth:
 This is the contract a Kafka client gets from Queen, in the form you check things against: the
 settings the facade reads, what it does with topic configs, the APIs and versions it answers, the
 places where it knowingly behaves differently from Apache Kafka, and what each client library needs.
-How it all fits together, with a working example, is on [Kafka clients](/guides/kafka/).
+How it all fits together, with a working example, is on [Kafka clients](/integrations/kafka/).
 
 ```bash
 QUEEN_KAFKA_EMBEDDED=true
@@ -80,7 +80,7 @@ settings, as they did before 2.6; the others are accepted and not applied yet.
 A topic created on first use, by a metadata request, has no configs and keeps every record. The
 facade also sets the queue's dedup window to `QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`. The configs are read
 at creation only: AlterConfigs and IncrementalAlterConfigs are not offered in 2.6, so change a
-topic's retention afterwards through Queen ([queue options](/concepts/partitions/#queue-options)),
+topic's retention afterwards through Queen ([queue options](/writing-applications/queues/)),
 and DescribeConfigs answers no entries.
 
 ## APIs and versions
@@ -109,7 +109,7 @@ speaks only those. This is that answer, with the reason each window stops where 
 - Every leader epoch is 0. OffsetForLeaderEpoch is not offered, and clients skip truncation detection
   against a broker without it.
 - A timestamp lookup (ListOffsets with a time) is answered on the broker's append clock, and the
-  records carry the producer's timestamps ([details](/guides/kafka-frameworks/#starting-from-a-point-in-time)).
+  records carry the producer's timestamps ([details](/integrations/kafka-frameworks/)).
 - Committed offsets are the Queen consumer group's positions and never expire. DeleteGroups
   removes a group with no members and its position on every queue.
 - Group membership is held in the leader's memory. When the leader changes, members are told

@@ -1,0 +1,162 @@
+% Chapter 5, section 1: Run a cluster with Docker
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-23. Every command below ran on 2.6.0: the Compose cluster on
+% other ports (51632..53632), the docker run form on three containers with fixed IPs on one
+% Docker network (10.77.0.11..13 instead of 10.0.0.11..13). Outputs are copied from those runs.
+
+\section{Run a cluster with Docker}
+
+A cluster is three copies of the same broker, each on its own machine, each told where the other
+two are. Together they keep one log. The leader puts every write in that log and sends it to the
+others, and a write is answered only when a majority of the nodes (two of three) has it on disk.
+Any node serves any client: it prepares the work of its own clients and sends the leader only the
+prepared command.
+
+\why{a machine can die, and with it the disk. With three nodes, losing one costs nothing: the
+other two keep working, and no message they acknowledged is lost. The price is three machines,
+and a write that waits for a second disk.}
+
+\queenfig{cluster-write}{A write is answered when two of three nodes have it on disk.}
+
+\subsection{Try it on one machine}
+
+The repository has a Compose file that runs three nodes on your laptop, each with its own volume.
+Give the nodes a shared secret, start them, and ask each one what it is:
+
+\begin{shell}
+cd deploy/compose/three-node        # in a clone of github.com/queen-mq/queen
+echo "QUEEN_RAFT_TOKEN=$(openssl rand -hex 32)" > .env
+docker compose up -d --wait
+for n in 1 2 3; do
+  echo "queen-$n $(curl -s localhost:${n}6632/health | jq -r .raft.role)"
+done
+\end{shell}
+
+\begin{shell}
+queen-1 follower
+queen-2 follower
+queen-3 leader
+\end{shell}
+
+The three nodes started empty, voted, and node 3 won. \texttt{-{}-wait} returns when every node is
+healthy, a few seconds on a laptop. Node $N$ answers on port $N$6632 (16632, 26632, 36632),
+API and dashboard alike. The raft port, 7400, where the nodes talk to each other, is not published
+at all.
+
+\queenfig{compose-cluster}{The Compose cluster on one machine.}
+
+Now give a client all three addresses. It spreads its requests over the nodes, and when one does
+not answer it moves to the next:
+
+\begin{code}
+const queen = new Queen({
+  urls: ['http://localhost:16632', 'http://localhost:26632', 'http://localhost:36632'],
+})
+\end{code}
+
+With node 1 stopped, ten pushes through this client took 64~ms in total, and a consumer read all
+twenty messages, the ten pushed before the stop included.
+
+\subsection{Stop the leader}
+
+\begin{shell}
+docker compose stop queen-3          # the node that said leader
+for n in 1 2; do
+  echo "queen-$n $(curl -s localhost:${n}6632/health | jq -r .raft.role)"
+done
+\end{shell}
+
+\begin{shell}
+queen-1 follower
+queen-2 leader
+\end{shell}
+
+Node 2 leads now. Node 3's log says how long the change took:
+
+\begin{shell}
+INFO rsm: raft: leadership handed off to=2 ms=28
+\end{shell}
+
+Start node 3 again. It gets the writes it missed from the new leader:
+
+\begin{shell}
+docker compose up -d --wait queen-3
+curl -s localhost:36632/health | jq -c '.raft | {role, applied, commit, lag}'
+\end{shell}
+
+\begin{shell}
+{"role":"follower","applied":56,"commit":56,"lag":0}
+\end{shell}
+
+\texttt{applied} equal to \texttt{commit} means node 3 has caught up. \texttt{docker compose down -v}
+removes the containers and their volumes when you are done.
+
+\why{a planned stop should cost nothing. When a leader gets SIGTERM, it hands its job to the most
+up-to-date follower before it exits, so clients see no gap. A crash (kill -9, a lost machine)
+costs more: the others wait one to two seconds, then elect a new leader, at most about four
+seconds in our tests.}
+
+\queenfig{failover}{The leader stops: a planned hand-off, or an election after a crash.}
+
+\subsection{Three machines}
+
+Three containers on one laptop all die with the laptop, so the Compose file is only for trying
+things. In production each node gets its own machine, on a private network. On each machine, run
+the same command with that machine's address and node number. Here are the commands for node 1:
+
+\begin{shell}
+TOKEN=...              # openssl rand -hex 32, made once: the same secret on every node
+PEERS="1=10.0.0.11:7400/10.0.0.11:6632"
+PEERS="$PEERS,2=10.0.0.12:7400/10.0.0.12:6632"
+PEERS="$PEERS,3=10.0.0.13:7400/10.0.0.13:6632"
+
+docker run -d --name queen --hostname queen-1 \
+  --restart unless-stopped --stop-timeout 60 \
+  -p 10.0.0.11:6632:6632 -p 10.0.0.11:7400:7400 \
+  -v /var/lib/queen:/var/lib/queen/raft \
+  -e QUEEN_RAFT_REPLICATOR=openraft \
+  -e QUEEN_RAFT_NODE_ID=1 \
+  -e QUEEN_RAFT_PEERS="$PEERS" \
+  -e QUEEN_RAFT_TOKEN="$TOKEN" \
+  ghcr.io/queen-mq/queen:2.6.0
+\end{shell}
+
+\begin{options}{Setting}{Default}{What it does}
+QUEEN\_RAFT\_REPLICATOR & local & \texttt{openraft} makes the node a member of a cluster. \\
+QUEEN\_RAFT\_NODE\_ID & 1 & This node's number: 1, 2, 3. A different number on each node. \\
+QUEEN\_RAFT\_PEERS & unset & Every node as \texttt{id=raft address/HTTP address}. The same list on every node. \\
+QUEEN\_RAFT\_TOKEN & unset & The secret the nodes show each other. Unset, anyone who reaches port 7400 can vote. \\
+QUEEN\_RAFT\_DIR & /var/lib/\allowbreak queen/raft & This node's data. One directory per node, never shared. \\
+\end{options}
+
+The Docker flags matter too. \texttt{-{}-stop-timeout 60} gives a stopping node time to hand over
+its work (Docker's default of 10 seconds can kill it halfway). \texttt{-{}-restart unless-stopped}
+brings a node back after a crash, and after the one planned exit a node makes: when it was away so
+long that the leader sent it a snapshot, it exits with code 75 and loads the snapshot when it starts
+again. \texttt{-{}-hostname} gives the node a stable name in the logs and the dashboard.
+
+\why{the peer list is how a new cluster is born: every node reads the same list on an empty
+directory, and they elect a leader. After that first start the list lives in the log, and the
+nodes change it only through the membership API (see Recovery).}
+
+\subsection{Five things to know}
+
+\begin{itemize}
+\item \textbf{The addresses are fixed at the first start.} They are stored in the log. Changing a
+host name or an IP under a running cluster cuts the nodes off from each other: put the old
+addresses back, or run a forced recovery. Use addresses that do not change.
+\item \textbf{Keep both ports private.} Port 6632 has no authentication unless you turn it on (see
+Configuration for different use cases), and port 7400 is plain HTTP with a shared token. Neither
+should face the internet.
+\item \textbf{One node does not grow into a cluster.} To go from one node to three, start a new
+cluster beside the old one and move the clients to it.
+\item \textbf{Give every node the same disk size.} A node refuses its own clients' writes at 85\%
+full, but writes accepted by the other nodes keep arriving until its disk is full.
+\item \textbf{Run NTP on every machine.} Leases are timed on the leader's clock, and they stay
+exclusive across a leader change only while the clocks agree within half a second.
+\end{itemize}
+
+On the site: \href{https://queenmq.com/manage/docker/}{queenmq.com/manage/docker}.

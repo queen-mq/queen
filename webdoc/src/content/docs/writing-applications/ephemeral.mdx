@@ -1,0 +1,43 @@
+---
+title: "Ephemeral queues for fast request and reply"
+description: "Ephemeral queues live in memory, outside the log: a requester sends a replyTo inbox and waits on it with a timeout. Fast, and lost on a crash by design."
+type: how-to
+tier: use
+sidebar:
+  label: "Ephemeral queues"
+  order: 10
+sourceOfTruth:
+  - server/src/ephemeral.rs
+  - server/src/handlers/ephemeral.rs
+  - server/src/main.rs
+  - server/src/config.rs
+  - server/src/metrics.rs
+  - clients/client-js/client-v2/ephemeral/Ephemeral.js
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/00-five-minutes.mjs
+  - examples/tutorials/py/00_five_minutes.py
+  - examples/tutorials/go/five-minutes/main.go
+  - examples/tutorials/rust/src/bin/00_five_minutes.rs
+  - examples/tutorials/php/00-five-minutes.php
+  - examples/tutorials/cpp/00-five-minutes.cpp
+---
+
+Ephemeral queues live in memory, outside the log, for request/reply. The worker answers on whatever inbox a request names; the caller makes a private inbox and waits on it. There is no transaction or replay here, and a crash loses what is in flight.
+
+The worker:
+
+<SdkCode id="worker" />
+
+The caller:
+
+<SdkCode id="caller" />
+
+<Why>a request that waits for an answer ("what is the price of A-1, now?") needs speed more than history. Writing it to disk, replicating it and keeping it for days would cost time for nothing. Ephemeral queues keep the same groups, leases and acks, and skip the log. Use a regular queue for anything that must survive a crash.</Why>
+
+<Fig id="ephemeral-reply" caption="Request and reply over ephemeral queues, with a private inbox." />
+
+## See also
+
+- [Request and reply](/patterns/request-reply/): a quote with a timeout and a fallback.
+- [HTTP API](/reference/http/): the `/api/v1/ephemeral` endpoints.

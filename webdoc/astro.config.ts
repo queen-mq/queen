@@ -56,7 +56,7 @@ const structuredData = {
       programmingLanguage: "Rust",
       license: "https://www.apache.org/licenses/LICENSE-2.0",
       downloadUrl: "https://ghcr.io/queen-mq/queen",
-      installUrl: "https://queenmq.com/start/quickstart/",
+      installUrl: "https://queenmq.com/writing-applications/",
       url: "https://queenmq.com/",
       image: "https://queenmq.com/queen-tile.png",
       author: { "@id": "https://queenmq.com/#org" },
@@ -111,17 +111,18 @@ const nimbusConfig = defineNimbusConfig({
     defaultCollapsed: true,
     overviewLabel: "Overview",
     indexDisplay: "overview-leaf",
-    // Eight sections, in the order a reader meets them: what it is, the model,
-    // what to build with it, whole programs built with it, how to run it, the
-    // exhaustive tables, how it works inside, and the evidence.
+    // Eight sections, in the order of the little book of QueenMQ, which the site follows:
+    // what it is, how to write applications, the patterns, the systems around it, how to
+    // run it, the exhaustive tables, how it works inside, and the evidence.
     items: [
-      { label: "Start", icon: "ph:rocket-launch", autogenerate: { directory: "start" } },
-      { label: "Concepts", icon: "ph:graph", autogenerate: { directory: "concepts" } },
-      { label: "Guides", icon: "ph:code", autogenerate: { directory: "guides" } },
-      { label: "Examples", icon: "ph:app-window", autogenerate: { directory: "examples" } },
-      { label: "Operate", icon: "ph:hard-drives", autogenerate: { directory: "operate" } },
+      { label: "The little book (PDF)", link: "/book/" },
+      { label: "Introduction", icon: "ph:rocket-launch", autogenerate: { directory: "introduction" } },
+      { label: "Writing applications", icon: "ph:code", autogenerate: { directory: "writing-applications" } },
+      { label: "Patterns", icon: "ph:app-window", autogenerate: { directory: "patterns" } },
+      { label: "Integrations", icon: "ph:plugs-connected", autogenerate: { directory: "integrations" } },
+      { label: "Manage clusters", icon: "ph:hard-drives", autogenerate: { directory: "manage" } },
       { label: "Reference", icon: "ph:book-open-text", autogenerate: { directory: "reference" } },
-      { label: "Internals", icon: "ph:cpu", autogenerate: { directory: "internals" } },
+      { label: "Architecture", icon: "ph:cpu", autogenerate: { directory: "architecture" } },
       { label: "Benchmarks", icon: "ph:chart-line-up", autogenerate: { directory: "benchmarks" } },
     ],
   },

@@ -1,0 +1,21 @@
+---
+title: "Integrations: Kafka clients, S3 and PostgreSQL"
+description: "Queen talks to the systems around it from inside the broker: Kafka clients through a Kafka port, S3 buckets through a sink, PostgreSQL through a source and a sink, and Laravel through a queue driver."
+type: overview
+tier: use
+sidebar:
+  label: "All integrations"
+  order: 0
+---
+
+QueenMQ talks to the systems around it from inside the broker: Kafka clients through a Kafka port, S3 buckets through a sink, PostgreSQL tables through a source and a sink. There is no extra process to run. Each one is a few settings or one HTTP call, and each one runs on every node of a cluster.
+
+| Integration | What it does |
+| --- | --- |
+| [Kafka clients](/integrations/kafka/) | Kafka producers, consumers and admin tools use QueenMQ unchanged: a topic is a queue, a consumer group is a group. |
+| [Kafka frameworks](/integrations/kafka-frameworks/) | Kafka Streams, Kafka Connect and Flink against the Kafka port, with the settings each one needs. |
+| [S3 sink](/integrations/s3/) | The messages of chosen queues, written to a bucket as JSONL or Parquet, once each. |
+| [PostgreSQL](/integrations/postgres/) | A table streamed into a queue through logical replication, and a queue written into a table, with exactly-once effects. |
+| [Laravel](/integrations/laravel/) | A queue driver for Laravel: your jobs stay Laravel jobs, with order per customer and a supervisor that follows the backlog. |
+
+<Why>every process next to a broker is one more thing to deploy, watch and upgrade. Inside the broker, an integration shares the broker's cluster, its upgrades and its guarantees.</Why>

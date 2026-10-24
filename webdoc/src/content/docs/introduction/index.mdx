@@ -1,0 +1,61 @@
+---
+title: "What Queen MQ is: a transactional event broker"
+description: "Queen MQ is a message broker built in Rust and replicated with Raft. One partition per entity, leases instead of static assignment, and one transaction per worker step."
+type: overview
+tier: use
+sidebar:
+  label: "What is Queen MQ"
+  order: 0
+sourceOfTruth:
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+digest: >-
+  Queen MQ is a transactional event broker written in Rust: one binary per node, state in a log on
+  the node's local disk, replicated with raft across a cluster of three or five nodes, and no
+  external database (2.0 removed PostgreSQL). Every entity (a customer, an order, a conversation)
+  gets its own ordered partition, created by the first message that names it, with no partition
+  count to choose. One call to POST /api/v1/transaction acknowledges input, writes KV state, pushes
+  the next events and schedules timers as one log entry: all of it applies or none of it does.
+  Delivery is at-least-once; effects inside Queen are exactly-once through transactions and
+  transactionId deduplication. Each tenant lives in exactly one raft group, so every transaction is
+  one entry with no coordinator. Clients speak HTTP and JSON (SDKs for JavaScript, Python, Go, Rust,
+  C++ and PHP), and Kafka clients can connect to a wire-protocol facade built into the broker.
+  PostgreSQL tables stream in and out through built-in connectors, and an S3 sink writes queues to a
+  bucket as JSONL or Parquet. Apache 2.0; the image is ghcr.io/queen-mq/queen:2.6.0, built for
+  linux/amd64 and linux/arm64.
+---
+
+QueenMQ is a distributed message broker, built in Rust, replicated with Raft, and developed at Smartness. With it you can write applications that decouple producing from consuming, do request and reply, and process streams, using transactional features that let you remove a lot of logic from the application and offload it to QueenMQ.
+
+Every feature the broker has is there because we needed it at Smartness, where it powers almost every product.
+
+## In one picture
+
+A worker takes a message, does its job, and then does several things at once: it finishes the message, saves some state, pushes the next events and asks for a reminder later. In most stacks those are four systems and four commits. In QueenMQ they are one call, written as one entry of the log, all or nothing.
+
+<Fig id="one-step-one-commit" caption="One worker step without and with a transaction." />
+
+<Why>a crash between two commits leaves a step half done, and somebody writes the code that finds those halves and repairs them. With one commit there is nothing to repair.</Why>
+
+## How these docs are organized
+
+These pages follow [the little book of QueenMQ](/book/) (a free PDF), chapter by chapter, with every example in the six languages of the SDKs.
+
+| Section | What it covers |
+| --- | --- |
+| [Introduction](/introduction/why/) | Why we built QueenMQ (the story that went from a Postgres table to a log on disk replicated with Raft), and [the model](/introduction/model/) in four ideas: partitions, leases, transactions and a simple interface. |
+| [Writing applications](/writing-applications/) | Every feature of the client API, one page each: a local broker, queues and their options, push, pop and consume, acks, retries and the dead-letter queue, transactions, KV, locks and timers, ephemeral queues and stream processing. |
+| [Patterns](/patterns/) | The common messaging patterns, one page each, with a real case: work queue, publish/subscribe, request and reply, ordering and batching, workflows, windowed aggregation, rate limiting, last value, delayed messages, retries and dead letters, one worker at a time. |
+| [Integrations](/integrations/) | Kafka clients through the built-in Kafka port, an S3 bucket kept up to date by the sink, PostgreSQL tables read and written by the source and the sink, and the Laravel queue driver. |
+| [Manage clusters](/manage/) | The settings that matter most, a cluster with Docker and inside Kubernetes, the configuration for different needs, upgrades and monitoring, and what to do when something breaks. |
+| [Architecture](/architecture/) | How the broker works inside: one leader per tenant, the path of a write from the request to the disk, Raft, the memory state, the consumption engine, LMDB, and the files on disk down to their bytes. |
+| [Reference](/reference/) and [Benchmarks](/benchmarks/) | The HTTP API, every setting, metric, error and limit, and the measurements with their conditions. |
+
+Every piece of code on these pages comes from a program that runs it against QueenMQ 2.6.0 and checks the result. Pick your language in any code block, and every block follows.
+
+## Try it
+
+The fastest way in is the [five-minute guide](/#guide) on the homepage. Then start a broker and write your first application in [Writing applications](/writing-applications/).

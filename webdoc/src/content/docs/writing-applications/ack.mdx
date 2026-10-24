@@ -1,0 +1,89 @@
+---
+title: "Acknowledge messages: completed, failed, retry"
+description: "Every ack names an outcome: completed moves the cursor, failed spends a retry, retry redelivers for free, dlq files the message now. Batch acks and the lease that guards them."
+type: how-to
+tier: use
+sidebar:
+  label: "Acknowledge"
+  order: 6
+sourceOfTruth:
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/consume/state.rs
+  - server/src/handlers/data.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/facade/autopilot.rs
+  - server/src/config.rs
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/consumer/Supervision.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+  - clients/client-py/queen/consumer/consumer_manager.py
+  - clients/client-py/queen/consumer/supervision.py
+  - clients/client-go/consumer_manager.go
+  - clients/client-go/supervision.go
+  - clients/client-rust/src/consumer.rs
+  - clients/client-rust/src/supervision.rs
+  - clients/client-cpp/queen_client.hpp
+  - clients/client-php/src/Consumer/ConsumerManager.php
+  - clients/client-php/src/Consumer/Supervision.php
+  - clients/client-cli/cmd/tail.go
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-client-guide.mjs
+  - examples/tutorials/py/book_client_guide.py
+  - examples/tutorials/go/book-client-guide/main.go
+  - examples/tutorials/rust/src/bin/book_client_guide.rs
+  - examples/tutorials/php/book-client-guide.php
+  - examples/tutorials/cpp/book-client-guide.cpp
+---
+
+An ack tells the broker what happened to a message. A `completed` ack moves the consumer group's cursor past it, and that is all: the message stays in its partition until retention removes it.
+
+<Fig id="cursor-per-group" caption="An ack moves the group's cursor; the message stays." />
+
+<Why>the cursor is the group's memory of where it is. Keeping the message after the ack is what lets other groups, and later replays, read it too.</Why>
+
+## Four answers
+
+| Status | Spends a retry | What happens, and when to use it |
+| --- | --- | --- |
+| `completed` | no | Done. The cursor moves past it. `true` means the same. |
+| `failed` | yes | The lease is released and the message comes back after `retryDelay`. After the last retry it goes to the dead-letter queue. Use it for failures that may pass. `false` means the same. |
+| `retry` | no | The lease is released and the message comes back at once. Use it to give work back (a worker that is shutting down). |
+| `dlq` | no | Filed in the dead-letter queue now. Use it when trying again cannot help (a payload that will never parse). |
+
+A `failed` or `dlq` ack can carry the reason (`error: 'card declined'` next to the group), and the dead-letter queue keeps it.
+
+<Why>"it did not work" has different meanings. Sometimes trying again in a while is right, sometimes now, and sometimes never. Each answer sends the message where it should go.</Why>
+
+## One message or a whole batch
+
+`queen.ack()` takes one message or an array. With an array, one call acks the whole batch.
+
+<SdkCode id="pop-ack" />
+
+Each message of an array can carry its own answer:
+
+<SdkCode id="ack-each-status" />
+
+In Go, Rust and C++ one batch ack carries one status for all its messages, so their code sends one call per status, or a transaction of acks, where each message has its own.
+
+In a batch, the cursor stops at the first message that will come back: a `completed` message after it is delivered again too.
+
+<Fig id="batch-ack-rule" caption="In a batch, the cursor stops at the first message that comes back." />
+
+<Why>one call for a hundred messages is much cheaper than a hundred calls. The cursor rule keeps order: a message is never passed while an earlier one of the same partition is still to be done.</Why>
+
+## Three things to know
+
+- **Inside `.each()`, throw to fail a message** (in JavaScript, Python and Go; see [Pop and consume](/writing-applications/pop/) for the others). When the handler throws, the client nacks it and skips the rest of that partition's batch. When the handler acks `failed` itself and returns, the client does not know: it goes on with the partition's next messages, their acks are refused (that part of the batch is coming back anyway), and they are handled twice.
+- **Every ack answers HTTP 200, even a refused one.** Read `success` in the answer: a refused ack usually means the lease ran out and another worker has the message now.
+- **An ack carries its consumer group and its lease.** The client takes both from the message. Over HTTP you send them yourself: an ack without its lease is not checked, and can complete a batch another worker holds.
+
+## See also
+
+- [Retries and DLQ](/writing-applications/retries/): where a `failed` message goes.
+- [Transactions](/writing-applications/transactions/): an ack that commits with the step's other writes.
+- [Errors](/reference/errors/): the reason of a refused ack.

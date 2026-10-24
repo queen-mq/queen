@@ -1,0 +1,86 @@
+---
+title: "Delivery guarantees, durability and exactly-once"
+description: "What Queen promises and what it does not: at-least-once delivery, exactly-once effects inside the broker, durability after fsync on a majority, and order inside a partition."
+type: concept
+tier: use
+sidebar:
+  label: "Guarantees"
+  order: 4
+sourceOfTruth:
+  - server/src/rsm/replicator/mod.rs
+  - server/src/rsm/replicator/local.rs
+  - server/src/rsm/replicator/raft/log_store.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/consume/checkpoint.rs
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/ephemeral.rs
+  - test/jepsen/src/jepsen/queen/nemesis.clj
+  - test/jepsen/src/jepsen/queen/workload/log.clj
+  - test/jepsen/src/jepsen/queen/workload/queue.clj
+  - test/jepsen/src/jepsen/queen/workload/register.clj
+  - test/jepsen/src/jepsen/queen/workload/elle.clj
+  - test/jepsen/src/jepsen/queen/workload/pipeline.clj
+  - test/jepsen/src/jepsen/queen/workload/dedup.clj
+  - test/jepsen/src/jepsen/queen/workload/timers.clj
+  - test/jepsen/src/jepsen/queen/workload/locks.clj
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/dedup.rs
+  - server/src/rsm/facade/real.rs
+  - protocols/queen-kafka/src/config.rs
+  - protocols/queen-kafka/src/handlers/produce.rs
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - clients/client-js/client-v2/kv/Kv.js
+---
+
+A broker that promises "all or nothing" has to keep the promise exactly when something breaks. We test QueenMQ with Jepsen on five nodes, under kill -9, network partitions, paused processes, clock jumps, power loss and corrupted files. This page says what each API guarantees, what an answered write means, and where the guarantees stop.
+
+## What each API guarantees
+
+| API | Guarantee |
+| --- | --- |
+| KV, one key | Linearizable. |
+| KV, several keys in one call | Strict serializable. |
+| KV `putIfAbsent` | One winner. |
+| KV `incr` | No lost and no doubled increments, for every call the broker committed. |
+| Push, and reads by offset | No acked message lost or duplicated. One order per partition for every reader, with offsets that have no gaps. |
+| Pop and ack | No acked message lost, none acked twice, none delivered again after a successful ack. Leases are exclusive in real time. Order per partition, with no skips. |
+| Transactions | Atomic, and each input's effects applied exactly once. |
+| `transactionId` dedup | A retry gets the original offset, across a change of leader too. |
+| Locks | One `acquire` wins, a later holder has a higher token, and a transaction guarded by a lock commits only while the token is still the lock's. |
+| Timers | A timer fires at most once, never after a cancel that reported removing it, and never before its delay. |
+| Every answered write, with two exceptions below | Survives kill -9 and power loss. |
+
+The campaign on the code of 2.6.0 ran 257 tests, and all were valid. [Jepsen](/benchmarks/jepsen/) lists every campaign, every fault, and every bug the earlier campaigns found and we fixed.
+
+<Why>"exactly once" and "no message lost" are easy to write and hard to keep. A test that kills, cuts and pauses the nodes while it checks every answer is the only way we know to find out whether we keep them.</Why>
+
+## What an answered write means
+
+A write is answered only after its entry is committed: a majority of the nodes have written it and synced it to disk (fsync). A single node syncs before it answers.
+
+<Fig id="cluster-write" caption="A write is answered after a majority has it on disk." />
+
+There are two exceptions. **Ephemeral queues** keep their messages in memory, so a node that crashes loses what it held, by design. **`QUEEN_CONSUME_FAST=1`** (off by default) answers pops and acks before their checkpoint commits, so a change of leader can lose a lease or an ack you were told about.
+
+A 503 means the outcome is not known: the write may still commit (`retry`, `timeout`, `no_leader`, or `outcome_unknown` on an ack). Send it again with the same ids, and deduplication makes the retry safe. The one 503 after which nothing was applied is `standby`, from a [standby cluster](/manage/standby/).
+
+## What exactly-once means here
+
+| Layer | What holds |
+| --- | --- |
+| Delivery | At least once. An expired lease, a nack or a crash delivers a message again. |
+| Effects inside QueenMQ | Exactly once, through [transactions](/writing-applications/transactions/) (the ack and the writes are one entry, fenced by the lease) and `transactionId` deduplication. |
+| A lost answer | A retry of a committed step writes nothing twice when the step carries a gate: a fixed push id or a `once` marker. Without one, a retry can apply its KV writes and timers again. |
+| Calls outside QueenMQ | Not covered. A call to a payment provider is outside any commit: give it an idempotency key from the message. |
+
+<Why>delivery can never be exactly once over a network that loses answers. What can be exactly once is the effect, when the effect and the ack are one commit.</Why>
+
+## Where the guarantees stop
+
+- **This is testing, not proof.** Jepsen finds bugs; it cannot show there are none.
+- **The campaigns run the HTTP API on one raft group.** The Kafka port, and several raft groups per node, are not in them.
+- **Clocks.** Lease exclusivity across a change of leader needs the nodes' clocks within 500 ms of each other (`QUEEN_RAFT_MAX_CLOCK_SKEW_MS`).
+- **Disks.** Losing a majority of the disks for good can lose acked data. Raft survives the loss of a minority, and no more.
+- **A standby cluster** replays the cluster a moment later. Promoting it after the cluster is lost gives up the acked writes it had not read yet.
+- **`/health` is not a write.** A node cut off from the majority answers 200 for five more seconds. To know a cluster can commit, write to it (see [Upgrades and monitoring](/manage/upgrades-monitoring/)).

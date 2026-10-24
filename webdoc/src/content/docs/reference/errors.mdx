@@ -120,7 +120,7 @@ The `code` of the first shape.
 | `no_leader` | 503 | No leader is known after the hold: an election is running, or a majority is down. | Retry. |
 | `timeout` | 503 | The request's deadline passed before an answer. A write may have committed. | Retry a write that is safe to repeat; otherwise read to check. |
 | `outcome_unknown` | 503 | The leader changed while an ack, nack or DLQ move was being made durable, or a forwarded one was lost after it went out. It may or may not have applied. | Send the same ack again: a repeat of an ack that applied is answered as the first one was. |
-| `standby` | 503 | The cluster is a [standby](/operate/standby/): it replays another cluster and takes no writes until it is promoted. Every write route answers it, on every node, and nothing was applied. | Retry after `Retry-After` (1 s) if a switch to this cluster is under way: the call is served once the standby is promoted. Otherwise you are pointed at the wrong cluster. |
+| `standby` | 503 | The cluster is a [standby](/manage/standby/): it replays another cluster and takes no writes until it is promoted. Every write route answers it, on every node, and nothing was applied. | Retry after `Retry-After` (1 s) if a switch to this cluster is under way: the call is served once the standby is promoted. Otherwise you are pointed at the wrong cluster. |
 | `overloaded` | 429 | The node's admission budget for writes stayed full for the whole hold. | Retry after `Retry-After` (1 to 5 s). |
 | `storage_full` | 507 | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Pushes, KV writes and timer schedules are refused; acks and deletes still work. | Free disk or add space, then retry. |
 | `name_too_long` | 413 | The tenant, queue and partition or group names together exceed the store's key budget. | Shorten the name. |
@@ -133,7 +133,7 @@ The `code` of the first shape.
 
 **A 503 or a timeout on a write does not mean nothing happened.** Make writes safe to repeat
 before you retry them: a deterministic `transactionId` on every pushed message, the same lease on a
-repeated ack, a `required` marker in a transaction. See [dedup](/concepts/dedup/).
+repeated ack, a `required` marker in a transaction. See [dedup](/writing-applications/push/).
 
 ## After a leader change
 
@@ -155,7 +155,7 @@ messages are delivered again. A node that cannot reach the leader answers 503 `r
 
 All of this holds for a cluster. Lease exclusivity across a leader change assumes node clocks
 within `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. See
-[guarantees](/concepts/guarantees/).
+[guarantees](/introduction/guarantees/).
 
 ## KV, lock and timer codes
 
@@ -211,7 +211,7 @@ for a busy semaphore), and a renew or release whose token is no longer the lock'
 ## Proxy codes
 
 Behind the embedded proxy, these answers come before the request reaches the broker. Plans and
-limits are on [tenants](/operate/tenants/).
+limits are on [tenants](/manage/tenants/).
 
 | `code` | Status | Meaning |
 |---|---|---|
@@ -254,7 +254,7 @@ every route answers 404 `not_found`; a wrong token answers 401 `unauthorized`, a
 503 for `leader_unreachable`; and 504 `timeout` when the deadline (`?timeoutMs=`, default 30 s)
 passed, in which case the change may still complete, so read the membership before repeating it. A
 request that carries a tenant answers 403 `forbidden`: the membership belongs to the whole cluster.
-See [cluster](/operate/cluster/).
+See [cluster](/manage/docker/).
 
 ## What the JS client does
 

@@ -1,0 +1,30 @@
+% Chapter 3, section 11: One worker at a time
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{One worker at a time}
+
+The nightly report must be built once, but every replica of the service runs the same scheduler.
+This is leader election, or a singleton job.
+
+A lock with a lifetime: the worker that gets it builds the report, and the others skip. The report
+is committed with \texttt{.guard(lock)}: the transaction commits only while the lock is still this
+worker's. The day in the \texttt{transactionId} is a second fence.
+
+\queenfig{singleton}{One worker builds the report; the guard keeps a late one out.}
+
+\guide{uc-singleton}
+
+Three workers started at once: one built the report and two skipped. There was one report.
+
+\why{a lock expires without telling its holder. A worker paused past the lifetime keeps running,
+while another one takes the lock. The guard keeps the late worker's work out: its commit rolls
+back.}
+
+One thing to know: the lock renews itself in the background while the worker holds it. For long
+work, pass \texttt{lock.signal} to what the work waits on, so it stops when the lock is lost. For
+``at most three at a time'', \texttt{queen.semaphore(name, 3)} works the same way.

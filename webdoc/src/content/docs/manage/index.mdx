@@ -1,0 +1,84 @@
+---
+title: "Manage clusters: the settings that matter most"
+description: "A broker starts with no settings, and most installations change very few. The ones that matter most, some read only at the first start, and where each one is explained."
+type: overview
+tier: operate
+sidebar:
+  label: "Key settings"
+  order: 0
+digest: >-
+  A Queen node is one process, `queen`, from the image ghcr.io/queen-mq/queen, serving HTTP on port
+  6632 (`PORT`) and keeping its whole state in one data directory, `QUEEN_RAFT_DIR` (default
+  /var/lib/queen/raft), with no database beside it. A single node answers a write once it is fsynced
+  to its own disk: acked writes survive kill -9 and power loss, not the loss of the disk, and the
+  node serves nothing while its process is down. A cluster of three or five nodes
+  (`QUEEN_RAFT_REPLICATOR=openraft`, `QUEEN_RAFT_NODE_ID`, `QUEEN_RAFT_PEERS`, `QUEEN_RAFT_TOKEN`)
+  replicates every write to a majority with Raft and keeps serving while a majority is up; on
+  SIGTERM a node hands its ephemeral partitions and its leadership to the others. Broker JWT
+  authentication is off by default; the proxy built into the same binary
+  (`QUEEN_PROXY_EMBEDDED=true`, its own `QUEEN_PROXY_PORT`) adds tenants, API keys, quotas, TLS and
+  a control plane over `/api/cp/*`. `GET /health` answers 200 `healthy` or 503 `settling`, `GET
+  /metrics/prometheus` serves the metrics, and the dashboard is served by the same binary. A second
+  cluster can run as a standby of the first (`QUEEN_LINK_SOURCE` on the standby, `QUEEN_LINK_TOKEN`
+  on the source): it replays the first cluster's committed log asynchronously, answers reads,
+  refuses writes with 503 `standby`, and becomes an ordinary cluster on `POST
+  /api/v1/system/link/promote`, without the writes it had not read yet.
+---
+
+A broker starts with no settings at all, and most installations change very few. These are the ones that matter most. Some are read only once, when a node creates its data directory, so choose them before the first start. The pages of this section explain each one where it is used, and [Configuration](/reference/configuration/) lists every setting.
+
+
+**Read only at the first start**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_QLOG_SHARDS` | 0 | `0`: each queue has its own log files. `K`: all queues share K logs, so a write syncs at most K files. For thousands of queues. |
+| `QUEEN_RAFT_PEERS` | unset | The nodes of a cluster (see [Run a cluster with Docker](/manage/docker/)). After the first start, members change only through the membership API. |
+| `QUEEN_RAFT_DIR` | /var/lib/queen/raft | The data directory, one per node. |
+
+**How fast old data leaves**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `PARTITION_CLEANUP_SECONDS` | 30 days | An empty partition is deleted after this long without a write. At least 60. |
+| `QUEEN_RAFT_TXN_WINDOW_MIN_S` | 900 | The least time a message's dedup record is kept. Nothing is deleted sooner, partitions included. |
+| `QUEEN_RAFT_RETENTION_SCAN_PER_S` | 50000 | Partitions the retention scan visits a second. On 2.6.0, set `40000` when partitions come and go fast (see [Many short-lived partitions](/manage/configuration/#many-short-lived-partitions)). |
+| `QUEEN_RAFT_TRACE_RETENTION_S` | 7 days | How long message traces are kept. |
+
+**Limits**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_RAFT_DISK_HIGH_PCT` | 85 | Above this share of the disk, writes that would grow it answer 507. |
+| `QUEEN_EPHEMERAL_MAX_BYTES` | 256 MiB | The memory for ephemeral queues. Above it, their pushes answer 503. |
+
+**Security**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_RAFT_TOKEN` | unset | The secret the nodes of a cluster share. |
+| `JWT_ENABLED` | false | Check a token on every request. |
+| `QUEEN_ENCRYPTION_KEY` | unset | The key of encrypted queues: 64 hex characters, the same on every node. |
+
+**Upgrades and logs**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_RAFT_CLUSTER_VERSION_MS` | 1000 | `0` keeps the way back to the previous release open. |
+| `LOG_LEVEL`, `QUEEN_LOG_JSON` | info, false | How much the node logs, and whether each line is a JSON object for a log collector. |
+
+<Why>most settings have a default that is right for most installations. The few above decide the shape of a cluster, how fast old data leaves, and who may talk to it, so they are worth a decision before the first start.</Why>
+
+## On these pages
+
+| Page | What it covers |
+| --- | --- |
+| [Cluster with Docker](/manage/docker/) | Three nodes with Docker Compose, and what happens when one stops. |
+| [Kubernetes](/manage/kubernetes/) | A StatefulSet with Helm or the operator, probes, and rolling updates. |
+| [Configuration by need](/manage/configuration/) | The settings for each need, from trying QueenMQ to surviving a site. |
+| [Upgrades and monitoring](/manage/upgrades-monitoring/) | One node at a time, the way back, and what to watch. |
+| [Recovery](/manage/recovery/) | What to do when a node, a disk or a majority is gone. |
+| [Backups](/manage/backups/), [Standby cluster](/manage/standby/) | Copies of the data, and a second cluster to fail over to. |
+| [Security](/manage/security/), [Tenants and API keys](/manage/tenants/) | Who may talk to the cluster, and many tenants on one. |
+| [Kubernetes operator](/manage/operator/), [Terraform](/manage/terraform/) | Clusters and queues declared as resources. |
+

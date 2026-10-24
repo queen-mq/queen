@@ -1,0 +1,49 @@
+---
+title: "When not to use Queen MQ, and what to use instead"
+description: "The workloads Queen MQ is the wrong tool for, with what to use instead: analytics over a huge log, cross-region writes, very large messages, and more."
+type: concept
+tier: use
+sidebar:
+  label: "When not to use it"
+  order: 6
+sourceOfTruth:
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/facade/groups.rs
+  - protocols/queen-kafka/src/handlers/admin.rs
+  - protocols/queen-kafka/src/txn.rs
+---
+
+For building applications, QueenMQ is the better choice: services that handle events per customer, order or conversation, microservices that hand work to each other, and steps that have to commit whole. The exception is a firehose of millions of messages a second on up to some thousands of partitions, where Kafka and Pulsar are ahead.
+
+| You are building | Use |
+| --- | --- |
+| Services that handle events per customer, order, device or conversation | QueenMQ |
+| Microservices that hand work to each other: jobs, fan-out, retries, delayed work | QueenMQ |
+| Steps that must commit whole: the ack, the state, the next events and the timer | QueenMQ |
+| A firehose: millions of messages a second through up to some thousands of partitions, where every millisecond matters | Kafka or Pulsar |
+
+## The firehose
+
+One leader orders all of a queue's writes, and more nodes do not raise that. On three 24-vCPU nodes with local NVMe, one queue of 1,000 partitions carried 3,000,000 messages a second at a p99 of 15 ms, 5,000,000 at 87 ms, and not 5,500,000, with every write on two disks before its answer. On the same machines Kafka carried about 8,000,000 on one topic at a p99 near 12 ms, answering from memory before any fsync. Kafka's lead ends as partitions multiply: at 10,000 it used twice QueenMQ's CPU, and it did not carry 50,000. The runs are in [Queen vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/).
+
+Transactions have the same kind of ceiling: one leader plans a tenant's transactions, near 12,900 a second of ten messages each on 16-vCPU machines. More raft groups raise it for a deployment, not for one tenant. If one tenant needs more, with nothing but messages in the commit, use Pulsar.
+
+<Why>one leader per tenant is what makes a transaction one log entry, with no coordinator. That is the trade: a ceiling per tenant, for steps that cannot come apart.</Why>
+
+## Smaller cases, and what to use instead
+
+- **You route messages by their content.** QueenMQ has no exchanges, bindings or topic patterns: the producer names the queue and the partition. Use RabbitMQ.
+- **You need Kafka's compaction.** QueenMQ accepts `cleanup.policy=compact` and keeps every record, so a compacted topic never shrinks. See [Kafka frameworks](/integrations/kafka-frameworks/).
+- **The step itself needs SQL.** KV reads by key or by prefix. When a step needs joins or ad hoc queries to decide what to do, keep that state in PostgreSQL with an outbox. For records you only search, the [PostgreSQL sink](/integrations/postgres/) writes a queue into a table.
+- **A step needs many reads and decisions inside one transaction.** A QueenMQ transaction is one call, with conditions on its writes; there is no interactive BEGIN and COMMIT. That belongs in a database.
+- **You want to write workflows as code.** Temporal and Restate are better when a workflow reads best as one function, with its loops and compensations in code.
+- **You want nothing to run and a bill per request.** Amazon SQS. Or [Queen Cloud](https://queenmq.cloud/), which runs QueenMQ for you.
+
+## Limits you design around
+
+Three limits are part of how QueenMQ works. Each has an answer inside QueenMQ.
+
+- **A partition is sequential.** One entity's events are handled one step at a time, in order. Parallelism comes from many partitions with work; an entity too busy for one worker is split into finer partitions (an order's lines instead of the order).
+- **Delivery is at least once.** Effects inside QueenMQ are exactly once through transactions and deduplication. A call to another system needs that system's own idempotency key. No broker removes that.
+- **Ephemeral queues are not durable.** A node that crashes loses what it held. Use them for request and reply, and a regular queue for anything that must survive a crash.

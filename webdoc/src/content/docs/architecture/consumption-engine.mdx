@@ -1,0 +1,34 @@
+---
+title: "The consumption engine: leases and cursors"
+description: "Pops, acks and leases are served from the leader's memory, outside the planner, and the changed cursors go into the log as one small checkpoint at least every 5 ms."
+type: concept
+tier: internals
+sidebar:
+  label: "Consumption engine"
+  order: 5
+sourceOfTruth:
+  - server/src/rsm/mod.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/facade/intake.rs
+  - server/src/rsm/facade/remote.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/batcher_lanes.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/apply_shard.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/consume/hooks.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/stream.rs
+  - server/clippy.toml
+---
+
+Pops, acks and leases do not go through the planner. The leader keeps each consumer group's positions and leases in memory, and gives out the oldest ready partition first.
+
+The positions that changed go into the log as one small checkpoint, at once when an answer is waiting and at least every 5 ms. A pop gets its answer only after that checkpoint is committed. A pop that finds nothing waits, and is woken when a new message arrives in its partition.
+
+<Fig id="consumption-engine" caption="Pops, acks and leases, served from the leader's memory." />
+
+We moved consumption out of the planner because acks were waiting behind pushes: at 300,000 messages a second, an ack took more than 500 ms. Now many acks travel in one checkpoint.
+
+A partition idle for 10 minutes leaves memory, and is loaded again with its next message. A new leader waits about half a second before it serves pops, so the same messages are never given out twice.

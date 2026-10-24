@@ -1,0 +1,33 @@
+---
+title: "Work queue pattern: spread jobs over workers"
+description: "Thumbnail jobs shared by three workers: queue mode, one partition per job or per user, and leases that hand the work of a dead worker to the next one."
+type: example
+tier: use
+sidebar:
+  label: "Work queue"
+  order: 1
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+  - examples/tutorials/php/book-use-cases.php
+  - examples/tutorials/cpp/book-use-cases.cpp
+---
+
+Many workers share one stream of jobs, and each job is done by exactly one of them: resizing photos, sending emails, rendering invoices. This is the work queue, also called competing consumers.
+
+In Queen it is a consumer with no consumer group. Each message goes to one worker. Work runs in parallel across partitions: a partition is held by one worker at a time, so here every user's photos are a partition, and three workers share four users.
+
+<Fig id="work-queue" caption="Competing consumers: each job once, one user's partition per worker at a time." />
+
+<SdkCode id="uc-work" />
+
+All twelve photos were resized once each, shared out between the three workers (6, 3 and 3 in one run).
+
+<Why>order still holds inside each user's photos, and a slow user holds up only its own partition. To go faster, add workers, up to the number of partitions that have work.</Why>
+
+One thing to know: with a single partition the workers would take turns, one at a time. Give the jobs a partition per user, per customer or per tenant.
+
+Built from: [Pop and consume](/writing-applications/pop/), [Push](/writing-applications/push/).

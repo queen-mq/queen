@@ -1,0 +1,33 @@
+---
+title: "Request/reply pattern over ephemeral queues"
+description: "A booking page asks the pricing service for a quote and waits half a second: an ephemeral inbox, a replyTo, and a fallback when no answer comes."
+type: example
+tier: use
+sidebar:
+  label: "Request and reply"
+  order: 3
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+  - examples/tutorials/php/book-use-cases.php
+  - examples/tutorials/cpp/book-use-cases.cpp
+---
+
+The booking page needs a price from the pricing service, now. If no answer comes in half a second, it shows "ask us". A durable queue is too heavy for that, and a direct HTTP call ties the two services together.
+
+Ephemeral queues live in memory, outside the log. The caller makes a private inbox, sends it as `replyTo`, and waits for the answer with a timeout. Any instance of the pricing service can answer.
+
+<Fig id="request-reply" caption="A quote with a deadline: the answer, or &quot;ask us&quot;." />
+
+<SdkCode id="uc-reply" />
+
+The answer came back in time: `{room: 'deluxe', price: 129}`. With no pricing service running, the caller gave up after half a second and got `price: null`.
+
+<Why>an answer that comes too late is worth nothing, so it does not need a disk. In memory a round trip costs very little, and the service scales like any consumer group.</Why>
+
+One thing to know: a node that crashes loses the ephemeral messages it held. There are no transactions, dead letters or replays on these queues.
+
+Built from: [Ephemeral queues](/writing-applications/ephemeral/).

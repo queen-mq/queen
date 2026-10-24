@@ -1,0 +1,109 @@
+---
+title: "Build with AI coding agents through MCP"
+description: "Point a coding agent at queenmq.com/mcp: it gets the rules, the traps and runnable examples for the SDK you use, and checks its own code against them."
+type: how-to
+tier: use
+sidebar:
+  label: "AI coding agents"
+  order: 12
+sourceOfTruth:
+  - mcp/src/mcp.mjs
+  - mcp/src/tools.mjs
+---
+
+QueenMQ runs an MCP server for coding agents at `https://queenmq.com/mcp`. Connect your agent and it starts every session knowing the model and its traps. While it works, it asks the server for tested code in your language, checks what it wrote against the known traps, and looks up the errors it meets. There is no account, and nothing runs on your machine.
+
+<Why>an agent that learned messaging from Kafka posts writes Kafka habits: a fresh UUID as the message id, an ack without its lease, a consumer group that skips the history. The server hands it the rules of this broker before it writes the first line.</Why>
+
+## Install
+
+<Tabs>
+<TabItem label="Claude Code">
+
+```bash
+claude mcp add --transport http queen https://queenmq.com/mcp
+```
+
+That connects the server for you, in the current project, and `--scope user` makes it yours in
+every project. To give it to everyone who works on the repository, use `--scope project`: Claude
+Code then writes the entry to `.mcp.json` at the project root, for you to commit.
+
+```bash
+claude mcp add --transport http --scope project queen https://queenmq.com/mcp
+```
+
+`/mcp` inside Claude Code shows the server and whether it is connected.
+
+</TabItem>
+<TabItem label="Cursor">
+
+[Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=queen&config=eyJ1cmwiOiJodHRwczovL3F1ZWVubXEuY29tL21jcCJ9)
+installs the server from a link. To add it by hand, put this in `.cursor/mcp.json` in your project,
+or in `~/.cursor/mcp.json` for every project:
+
+```json
+{
+  "mcpServers": {
+    "queen": {
+      "url": "https://queenmq.com/mcp"
+    }
+  }
+}
+```
+
+</TabItem>
+<TabItem label="VS Code">
+
+[Install in VS Code](vscode:mcp/install?%7B%22name%22%3A%22queen%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fqueenmq.com%2Fmcp%22%7D)
+opens VS Code ready to install the server. For one workspace, add it to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "queen": {
+      "type": "http",
+      "url": "https://queenmq.com/mcp"
+    }
+  }
+}
+```
+
+VS Code discovers the server's tools and makes them available in chat.
+
+</TabItem>
+<TabItem label="Codex">
+
+Add the server to `~/.codex/config.toml`, or to `.codex/config.toml` in a trusted project:
+
+```toml
+[mcp_servers.queen]
+url = "https://queenmq.com/mcp"
+```
+
+`codex mcp add queen --url https://queenmq.com/mcp` writes the same entry. The Codex CLI, its IDE
+extension and the ChatGPT desktop app all read this file.
+
+</TabItem>
+<TabItem label="Claude Desktop and claude.ai">
+
+Open **Customize > Connectors**, choose **+ Add**, then **Add custom connector**. Name it Queen,
+paste `https://queenmq.com/mcp` as the server URL and add it; the server needs no sign-in. On a Team
+or Enterprise plan, an owner adds the connector first, under **Organization settings > Connectors**.
+
+</TabItem>
+</Tabs>
+
+Any other agent that speaks MCP over Streamable HTTP connects to the same URL, with no headers and no sign-in.
+
+## What your agent gets
+
+| Tool | What it answers |
+| --- | --- |
+| `guide(topic or page)` | The sections of these docs that best match a question, or a whole page. |
+| `example(task, language)` | Code for one operation or a whole app, in JavaScript, Python, Go, Rust, PHP, C++ or plain HTTP, cut from programs the test suite runs. |
+| `check(language)` | The checklist of known traps for code in that language, from the ones that lose messages to the ones that only cost speed. |
+| `explain_error(error)` | What an HTTP status, an error `code`, a transaction `reason` or a Kafka error means, and what to do. |
+| `kafka_client(client)` | Whether a Kafka client library works against QueenMQ, with the configuration it needs. |
+| `setup(feature, language)` | How to set up one feature (KV, timers, locks, streams, ephemeral queues, binary forms, Kafka, PostgreSQL, S3), with the calls in your SDK. |
+
+And three prompts you run yourself: `design` turns a description of a flow into queues, partitions, readers and one transaction per step; `review` goes through the QueenMQ code in your current changes; `from-kafka` brings a Kafka application over.

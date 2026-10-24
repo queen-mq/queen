@@ -1,0 +1,31 @@
+---
+title: "Windowed aggregation: spans merged into traces"
+description: "Spans of a trace arrive over a few seconds: a session window per trace partition merges them into one record when the trace goes quiet."
+type: example
+tier: use
+sidebar:
+  label: "Windowed aggregation"
+  order: 6
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+---
+
+Tracing: an SDK sends one event for each step of a request (the HTTP call, the database query, the cache lookup), and retries when it gets no answer. A trace is finished when no more events arrive, and what you want to keep is one record per trace. The same shape counts visits, sessions and anything else that ends when it goes quiet.
+
+Each trace is a partition, and each event's `transactionId` is the trace and the step, so a retried event is stored once. A stream with a session window closes a trace after two seconds of quiet, adds it up, and pushes one message per finished trace.
+
+<Fig id="trace-merge" caption="Events merged into one record per trace by a session window." />
+
+<SdkCode id="uc-trace" />
+
+Two seconds after the last event, the `traces` queue held one message: 3 spans and 168 ms. The retried database event was counted once.
+
+<Why>every trace is its own ordered stream, so "this partition went quiet" is exactly "this trace is finished". The open traces live in the broker, so a restart of the merger loses nothing.</Why>
+
+With many traces, delete the empty trace partitions quickly ([Many short-lived partitions](/manage/configuration/#many-short-lived-partitions)), and copy the finished traces to a bucket ([the S3 sink](/integrations/s3/)). One thing to know: a trace that pauses longer than the gap becomes two records, and the reader merges them.
+
+Built from: [Push](/writing-applications/push/), [Streams](/writing-applications/streams/).

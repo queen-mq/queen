@@ -22,3 +22,6 @@ pnpm-debug.log*
 
 # Written at build time by scripts/gen-changelog.mjs from ../CHANGELOG.md.
 src/content/docs/reference/changelog.md
+
+# Written at build time by ../figures/build.mjs --site.
+public/figures/

@@ -1,0 +1,32 @@
+---
+title: "The memory state of a Queen node"
+description: "Each node keeps queues, partitions, positions, KV, timers and recent dedup records in memory. Messages stay on disk, so memory grows with partitions and keys, not with retained messages."
+type: concept
+tier: internals
+sidebar:
+  label: "Memory state"
+  order: 4
+sourceOfTruth:
+  - server/src/rsm/mod.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/facade/intake.rs
+  - server/src/rsm/facade/remote.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/batcher_lanes.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/apply_shard.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/consume/hooks.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/stream.rs
+  - server/clippy.toml
+---
+
+Each node keeps its whole state in memory: queues, partitions, consumer positions, KV, timers, request ids, and the dedup records of recent pushes. It is loaded once, at boot.
+
+Messages are not in memory. They stay in the queue log files and are read from there. So memory grows with the number of partitions and keys, and with the pushes of the dedup window, not with how many messages a queue keeps.
+
+<Fig id="memory-disk" caption="What lives in memory, and what lives on disk." />
+
+Message traces are kept apart, in their own file, and are read from disk.

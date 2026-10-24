@@ -18,9 +18,11 @@ import {
   proven,
   nextSection,
   start,
+  book,
   closing,
 } from "../lib/home";
 import { GUIDE_LANGS, guideCode } from "../lib/home-guide";
+import edition from "../../public/book/edition.json";
 
 /**
  * The landing page. Every word on it comes from src/lib/home.ts, which the
@@ -197,7 +199,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
                     />
                   </div>
                   <figcaption class="mt-3 text-[0.8125rem] text-muted-foreground">
-                    {dashboardShot.caption} <a href="/operate/monitoring/">Monitoring →</a>
+                    {dashboardShot.caption} <a href="/manage/upgrades-monitoring/">Monitoring →</a>
                   </figcaption>
                 </figure>
               </div>
@@ -262,7 +264,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
             var root = document.getElementById("guide");
             if (!root) return;
             var KEY = "queen-guide-lang";
-            var LANGS = ["js", "py", "go", "rust", "php"];
+            var LANGS = ["js", "py", "go", "rust", "php", "cpp"];
             function set(lang) {
               root.setAttribute("data-guide-lang", lang);
               root.querySelectorAll("[data-guide-pick]").forEach(function (b) {
@@ -350,7 +352,15 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-24">
           <p class={eyebrow}>{nextSection.eyebrow}</p>
           <h2 data-md class={h2}>{nextSection.title}</h2>
-          <div class="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <a href={book.href} class="mt-10 flex items-center gap-5 rounded-xl border border-border bg-background p-4 transition-colors hover:border-foreground/30">
+            <img src="/book/cover.webp" alt="" width={edition.cover[0]} height={edition.cover[1]} loading="lazy" decoding="async" class="w-16 shrink-0 rounded shadow-md sm:w-20" />
+            <div class="min-w-0">
+              <div class="text-[0.9375rem] font-medium text-foreground">{book.title}</div>
+              <p data-md class="mt-1 text-[0.875rem] leading-relaxed text-muted-foreground">{book.body}</p>
+              <p class="mt-2 text-[0.8125rem] font-medium text-foreground">Read it: PDF, {edition.pages} pages →</p>
+            </div>
+          </a>
+          <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {
               start.map((s) => (
                 <a href={s.href} class={card}>
@@ -388,7 +398,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
           <a href="/benchmarks/">Benchmarks</a>
           <a href="/reference/http/">HTTP API</a>
           <a href="/reference/changelog/">Changelog</a>
-          <a href="/start/about/" class="ml-auto">Built at Smartness.</a>
+          <a href="/introduction/about/" class="ml-auto">Built at Smartness.</a>
         </div>
       </footer>
     </main>
@@ -477,7 +487,8 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
   #guide[data-guide-lang="py"] .guide-variant[data-lang="py"],
   #guide[data-guide-lang="go"] .guide-variant[data-lang="go"],
   #guide[data-guide-lang="rust"] .guide-variant[data-lang="rust"],
-  #guide[data-guide-lang="php"] .guide-variant[data-lang="php"] {
+  #guide[data-guide-lang="php"] .guide-variant[data-lang="php"],
+  #guide[data-guide-lang="cpp"] .guide-variant[data-lang="cpp"] {
     display: block;
   }
   @media (max-width: 639px) {

@@ -1,0 +1,110 @@
+% Chapter 6, section 7: Storage
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Storage}
+
+A message is written once, in its queue's log files, and that write is what makes it durable:
+there is no second copy. We built it this way on purpose. An earlier design wrote every message
+twice, first in a consensus log and then in a segment file. Now the bytes that make a message
+durable are the bytes a pop reads back.
+
+\subsection{The data directory}
+
+Everything a node knows is in one directory:
+
+\begin{shell}
+/var/lib/queen/raft
+  qlog/                    the messages: one log per queue
+    LANES                  the log layout, fixed at creation (and SHARDS, when set)
+    q0/                    the system log: entries that touch no queue
+    q5837314263283300749/  one directory per queue
+      r00000001.qlog       a log file, up to 64 MiB, then the next one starts
+      r00000001.qidx       the index of a closed file
+      r00000001.qhsh       the dedup hashes of a closed file, for a fast restart
+  store/data.mdb           the state checkpoint (LMDB)
+  traces/data.mdb          message traces (LMDB)
+  raft/                    cluster only: vote, members, what is kept for an away node
+  snapshots/               a snapshot from the leader, waiting for the next start
+  seg/  log/               almost empty, from an earlier design
+  local.db  dash.db        this node's own metrics and dashboard data
+  groups/g1/               the same tree for each extra raft group
+\end{shell}
+
+A closed file never changes again. Payloads of 512 bytes or more are compressed with zstd, when it
+saves at least a tenth. With thousands of queues, \texttt{QUEEN\_QLOG\_SHARDS} puts them all into a
+few shared logs, so a write syncs a few files instead of thousands.
+
+\subsection{What is inside a log file}
+
+A log file is a 32-byte header and then records, one after the other. Here is the start of a real
+file, after one push of \texttt{order-8891} with data \texttt{\{"orderId":8891\}}:
+
+\begin{shell}
+xxd qlog/q5837314263283300749/r00000001.qlog | head -10
+00000000: 514e 514c 4f47 3100 0100 0000 0000 0000  QNQLOG1.........
+00000010: 0b00 0000 0000 0000 0000 0000 0000 0000  ................
+00000020: 6e00 0000 da25 b6dc 1ed0 878c 0b00 0000  n....%..........
+00000030: 0000 0000 0100 0000 0000 0000 0000 0000  ................
+00000040: 0000 0000 0100 0000 75e7 b953 935e 0600  ........u..S.^..
+00000050: 00b9 7eb7 7dcc 2db6 dcbc ff49 4354 80b3  ..~.}.-....ICT..
+00000060: c82d 0000 0000 01a1 6d65 4e4f 7001 bf27  .-......meNOp..'
+00000070: b56a 9334 d445 0a00 6f72 6465 722d 3838  .j.4.E..order-88
+00000080: 3931 7b22 6f72 6465 7249 6422 3a38 3839  91{"orderId":889
+00000090: 317d da01 0000 6b08 25f1 17ae 81e2 0b00  1}....k.%.......
+\end{shell}
+
+The record starts at byte 0x20. Every number is little-endian.
+
+\begin{options}{Field}{Bytes}{In this record}
+len & 4 & 110: the bytes after this field. A reader always knows where the next record starts. \\
+checksum & 8 & An xxh3 of everything after it. A record torn by a crash fails it, and is cut. \\
+seq & 8 & 11: the log entry that wrote this record. \\
+partition & 8 & 1: the partition id. \\
+first offset & 8 & 0. \\
+count & 4 & 1 message. \\
+created at & 8 & The time of the push, in microseconds. \\
+kind & 1 & 0: messages. The top bit says the payload is compressed. \\
+hashes & 16 a message & The hash of \texttt{order-8891}, for dedup. \\
+payload & the rest & One frame per message: its length (45), flags, its 16-byte id, its transactionId and its data. \\
+\end{options}
+
+\queenfig{record-layout}{The message record of the dump, field by field.}
+
+The next record (474 bytes, at 0x92) has the same seq, 11: it is the log entry itself, without the
+payload. An entry that touches several queues is written into each of their logs, and after a
+crash it is replayed only if every copy is there. This is how a transaction stays all or nothing on
+disk.
+
+\queenfig{entry-copies}{An entry in every log it touches; replayed only if every copy is there.}
+
+\subsection{How retention works}
+
+Retention is decided once, on the leader, like every write. A scanner walks all the partitions
+(50,000 a second) and proposes what can go. The planner checks each proposal and logs watermarks:
+below one the messages are gone, below another their dedup records are gone. A partition that is
+empty, with no dead letter, no lease and no write for the cleanup age, is deleted.
+
+Moving a watermark frees no disk by itself. Each node then frees its own files, one whole file at a
+time.
+
+\queenfig{retention-watermarks}{Retention decided on the leader, as watermarks.}
+
+\subsection{Rewriting a file}
+
+A closed file with no live record is deleted. A closed file that is partly live is rewritten: the
+node copies only the live records into a new file, without stopping the writes, and swaps it in.
+A queue's own file is rewritten at its first dead message, a shared file when half of it is dead.
+
+The active file is never touched, and neither is a file that recovery or a node that is behind
+still needs. One pass looks at up to 256 files, for at most 200~ms, and rewrites at most one file;
+while work is left, the next pass is four times bigger. An active file with data older than 10
+minutes is closed early, so retention can reach it, when it holds a dead message or is an eighth
+full.
+
+\queenfig{file-rewrite}{Reclaim: dead files deleted, partly live files rewritten.}
+
+\why{a file is the unit the disk gives back. Rewriting a file with only its live records gives back
+the space of the dead ones without waiting for the whole file to die, and the small passes keep the
+rewrite from slowing down the writes.}

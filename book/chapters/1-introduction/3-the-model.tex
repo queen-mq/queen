@@ -1,0 +1,76 @@
+% Chapter 1, section 3: The model
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{The model}
+
+The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases,
+transactions and a simple interface.
+
+\subsection{Partitions}
+
+The core of the system are the partitions. A QueenMQ partition is a FIFO sub-queue inside a queue,
+created on the fly, and a queue is a named collection of those sub-queues. The first push that
+names a partition creates it, so there is no partition count to choose and nothing to plan: you
+give each entity its own partition, a customer, an order, a conversation, and one queue has held
+ten million of them.
+
+\queenfig{kafka-vs-queen}{Hashed partitions share one queue per partition; Queen gives every entity its own.}
+
+QueenMQ partitions are not physical entities like in Kafka: there is no dedicated thread or file
+for each partition. A partition is a name, a few rows in the broker's memory and a position for
+each consumer group, and its messages live in the log files of its queue.
+
+\why{order matters per entity, not across the whole queue. In Kafka you choose a number of
+partitions and hash your keys onto them, so a slow key blocks every key that shares its partition:
+the head-of-line blocking of the Smartchat story. With one partition per entity, a slow
+conversation waits only for itself.}
+
+\subsection{Leases, not static assignment}
+
+A consumer does not own partitions. When it asks for work, the broker gives it a batch from a
+partition that is free, and leases that partition to it for a while (\texttt{leaseTime}). Until
+the consumer acks the batch, or the lease runs out, no other consumer of the same group gets that
+partition. Then the partition is free again, for whoever asks next.
+
+\queenfig{lease-cycle}{A partition's cycle for one consumer group: free, leased, acked, free again.}
+
+Consumer groups give every reader its own position: each group gets every message, and the
+workers inside a group share its work. And reading does not delete: an ack only moves the group's
+position, and the messages stay until retention removes them, so a new group can read the history
+again.
+
+\why{with no static assignment there is no rebalance. You add a worker and it starts taking work;
+a worker dies and its lease runs out, and someone else continues from the same message. The order
+of each partition is kept, because a partition has one holder at a time.}
+
+\subsection{Transactions}
+
+A worker's step usually does several things: it finishes the message it read, pushes the next
+events, saves some state, and maybe schedules something for later. In QueenMQ that is one call: a
+transaction that acks, pushes to any queue, writes to the key-value store and schedules timers, and
+commits as a single entry of the log, all or nothing.
+
+\queenfig{one-step-one-commit}{One worker step without and with a transaction.}
+
+\why{without it, every step needs an outbox table, an idempotency table and a cron job, plus the
+code that keeps them in step. With it, a crash can never leave a step half done.}
+
+\subsection{A simple interface}
+
+QueenMQ chose a simple API over HTTP: JSON on one port, the same for pushing, consuming,
+transactions, KV, timers and locks. The SDKs (JavaScript, Python, Go, Rust, PHP, C++) are thin
+layers over it, \texttt{curl} is enough to try everything, and Kafka clients can talk to the
+broker through its built-in Kafka port.
+
+\queenfig{thin-clients}{Thin clients; the logic lives in the broker.}
+
+\why{any language with an HTTP client can use QueenMQ, and what you see on the wire is easy to read
+and debug.}
+
+\subsection{Wrap up}
+
+In QueenMQ, clients are dumb and the broker is where all the logic lives: the order of each
+partition, the leases, the retries and the dead-letter queue, deduplication, timers, state, and
+the transactions that tie them together. Your application keeps only its own business.

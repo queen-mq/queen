@@ -75,7 +75,7 @@ function walk(dir, out = []) {
 const files = walk(DIST);
 const rel = (abs) => relative(DIST, abs).split(sep).join("/");
 
-/** `start/index.html` -> `/start/`, `index.html` -> `/`. */
+/** `manage/index.html` -> `/manage/`, `index.html` -> `/`. */
 const urlPathOfHtml = (abs) => `/${rel(abs).replace(/index\.html$/, "")}`;
 
 // ---------------------------------------------------------------------------
@@ -211,7 +211,7 @@ for (const page of htmlPages) {
 
 // 1. Structured data: breadcrumb trails, the site's name, one article per page --
 
-/** Content files git tracks, as URL paths (`concepts/kv.mdx` -> `/concepts/kv/`). */
+/** Content files git tracks, as URL paths (`manage/backups.mdx` -> `/manage/backups/`). */
 const tracked = new Set(
   execFileSync("git", ["ls-files", "src/content/docs"], { cwd: WEBDOC, encoding: "utf8" })
     .split("\n")
