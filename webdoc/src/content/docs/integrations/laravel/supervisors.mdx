@@ -140,6 +140,8 @@ starts PHP: the supervisor is a local process on each worker host, and the broke
 
 <Why>a fixed number of workers is either too many at night or too few in a burst. A supervisor that reads the backlog sizes the pools for you, and stops the workers cleanly at a deploy so no job is cut in half.</Why>
 
+<Fig id="supervisor-topology" caption="The supervisor starts the workers; the workers talk to QueenMQ." />
+
 | Engine | Master process | Use it when |
 | --- | --- | --- |
 | PHP | Laravel stays loaded in one PHP master | there is no native build for the host, or as the reference during a Rust rollout |
@@ -320,6 +322,10 @@ master passes that standard error to its own log while it reads the document fro
 | `off` | every worker gets the whole ordered queue list | strict Laravel priority, such as `high,default` |
 
 <Why>a backlog that grows faster than the pool is what a queue looks like from the outside when it falls behind. Sizing the pool from the backlog, with a cooldown and a delay before shrinking, follows the load without flapping.</Why>
+
+<Fig id="supervisor-run" caption="A burst of 300 jobs of 200 ms on a pool of 1 to 8 workers, as the supervisor followed it." />
+
+We measured that run on 2.6.0 with `balance` `auto`, `target_jobs_per_process` 10 and `fast_scale_up`: five workers three seconds after the dispatch, eight at nine seconds, the queue empty at fifteen, and the extra workers given back one at a time after `scale_down_delay`. The Rust engine gave the same curve within a second.
 
 In `auto` mode the master reads the backlog of each queue every `poll_interval` and sizes the pool
 between `min_processes` and `max_processes`. The backlog is the consumer group's

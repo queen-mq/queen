@@ -9,7 +9,9 @@
 Queen talks to the systems around it from inside the broker: Kafka clients through a Kafka port,
 S3 buckets through a sink, PostgreSQL tables through a source and a sink. There is no extra process
 to run. Each one is a few settings or one HTTP call, and each one runs on every node of a cluster.
+The last section is on the application side: Laravel, whose workers the QueenMQ supervisor runs.
 
 \input{chapters/4-integrations/1-how-to-use-with-kafka-clients}
 \input{chapters/4-integrations/2-s3-sink}
 \input{chapters/4-integrations/3-postgres-source-and-sink}
+\input{chapters/4-integrations/4-laravel-worker-supervisor}

@@ -24,8 +24,9 @@ limiting, last value, delayed messages, retries and dead letters, and one worker
 one solves a real problem in a few lines.
 
 \paragraph{4. Integrations.} How QueenMQ works with the systems around it: Kafka clients through
-its built-in Kafka port, an S3 bucket kept up to date by the sink, and PostgreSQL tables read and
-written by the source and the sink.
+its built-in Kafka port, an S3 bucket kept up to date by the sink, PostgreSQL tables read and
+written by the source and the sink, and Laravel applications, whose workers the QueenMQ supervisor
+runs.
 
 \paragraph{5. Manage clusters.} The settings that matter most, a cluster with Docker and inside
 Kubernetes, the configuration for different needs (tenants included), upgrades and monitoring, and
@@ -38,5 +39,3 @@ on disk down to their bytes.
 \medskip
 Every piece of code in this book comes from a program that runs it against QueenMQ 2.6.0 and checks
 the result. The examples are in JavaScript; the website has them in every language of the SDKs.
-
-We hope this book helps everyone make the most of QueenMQ.
