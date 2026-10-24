@@ -1,0 +1,30 @@
+% Chapter 3, section 3: Request and reply
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Request and reply}
+
+The booking page needs a price from the pricing service, now. If no answer comes in half a second,
+it shows ``ask us''. A durable queue is too heavy for that, and a direct HTTP call ties the two
+services together.
+
+Ephemeral queues live in memory, outside the log. The caller makes a private inbox, sends it as
+\texttt{replyTo}, and waits for the answer with a timeout. Any instance of the pricing service can
+answer.
+
+\queenfig{request-reply}{A quote with a deadline: the answer, or "ask us".}
+
+\guide{uc-reply}
+
+The answer came back in time: \texttt{\{room: 'deluxe', price: 129\}}. With no pricing service
+running, the caller gave up after half a second and got \texttt{price: null}.
+
+\why{an answer that comes too late is worth nothing, so it does not need a disk. In memory a round
+trip costs very little, and the service scales like any consumer group.}
+
+One thing to know: a node that crashes loses the ephemeral messages it held. There are no
+transactions, dead letters or replays on these queues.

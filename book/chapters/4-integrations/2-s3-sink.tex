@@ -1,0 +1,113 @@
+% Chapter 4, section 2: S3 Sink
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{S3 Sink}
+
+The broker can copy its queues into an S3 bucket, as JSONL or Parquet files in folders that DuckDB,
+Spark or ClickHouse read directly. The sink runs inside the broker, on every node of a cluster, and
+it is exactly once: each record lands in one file, and a crash or a retried upload rewrites the same
+bytes under the same name instead of adding a copy.
+
+\why{a queue is a log, and its history is worth keeping for analytics, audits and replays. Disk on
+the brokers is expensive for that; a bucket is cheap, and the tools that read it are already there.
+The sink needs no consumer to run and no code to write.}
+
+\subsection{Turn it on}
+
+Any S3-compatible service works. Our test used a versitygw gateway named \texttt{s3} on the same
+Docker network:
+
+\begin{shell}
+docker run -d --name queen --network lake -p 6632:6632 \
+  -v /var/lib/queen:/var/lib/queen/raft \
+  -e QUEEN_S3_EMBEDDED=true \
+  -e QUEEN_S3_QUEUES=orders \
+  -e QUEEN_S3_ENDPOINT=http://s3:7070 \
+  -e QUEEN_S3_REGION=us-east-1 \
+  -e QUEEN_S3_PATH_STYLE=true \
+  -e QUEEN_S3_BUCKET=lake \
+  -e QUEEN_S3_ACCESS_KEY=queen \
+  -e QUEEN_S3_SECRET_KEY=queen-secret-key \
+  -e QUEEN_S3_START=earliest \
+  -e QUEEN_S3_MAX_WINDOW_MS=10000 \
+  ghcr.io/queen-mq/queen:2.6.0
+\end{shell}
+
+The last two lines are for the demo: \texttt{earliest} copies the queue from its first record, and
+a file closes after ten seconds instead of five minutes. Push three messages:
+
+\begin{shell}
+curl -s -X POST localhost:6632/api/v1/push -H 'content-type: application/json' -d '{"items":[
+  {"queue":"orders","partition":"cust-1","payload":{"order":1,"status":"new","total":42.00}},
+  {"queue":"orders","partition":"cust-2","payload":{"order":2,"status":"new","total":17.50}},
+  {"queue":"orders","partition":"cust-1","payload":{"order":1,"status":"paid","total":42.00}}
+]}' >/dev/null
+curl -s localhost:6632/status \
+  | jq -c '.s3.sinks[0].queues[0] | {state, k, windowsCommitted, records}'
+{"state":"filling","k":1,"windowsCommitted":1,"records":3}
+\end{shell}
+
+About ten seconds later window 1 was in the bucket, as two files: the data and its manifest.
+
+\begin{shell}
+queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/dt=2026-10-24/hour=10/
+  w-0000000001-1792836000000000-1792837437745538.jsonl.zst
+queen/_queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/windows/0000000001.json
+\end{shell}
+
+The data file holds one line per record, sorted by partition and offset:
+
+\begin{shell}
+{"partition":"cust-1","offset":0,"transactionId":"01a16d70-3e1e-7001-9fb4-299167829f1d",
+ "ts":"2026-10-24T10:23:54.910988Z","payload":{"order":1,"status":"new","total":42.00}}
+{"partition":"cust-1","offset":1,...,"payload":{"order":1,"status":"paid","total":42.00}}
+{"partition":"cust-2","offset":0,...,"payload":{"order":2,"status":"new","total":17.50}}
+\end{shell}
+
+The payload is the producer's own text, byte for byte: \texttt{42.00} is still \texttt{42.00}.
+
+\subsection{How it works}
+
+The sink cuts each queue into windows of time, on the broker's clock. A window closes when it holds
+\texttt{QUEEN\_S3\_TARGET\_MB} of records, when it is \texttt{QUEEN\_S3\_MAX\_WINDOW\_MS} old, or at the
+next hour. Once a window is closed, no record can join it, so building it again gives the same
+records in the same order, the same bytes and the same file name. That is the whole exactly-once
+argument, and it asks nothing special of the bucket.
+
+\queenfig{s3-sink}{Windows on the broker's clock, and the three-step commit.}
+
+Every node runs the sink, but only one node writes a queue: the one that holds the queue's lease, a
+row in Queen's KV. A window is committed in three steps: its end is written in KV, the files go up,
+then a commit pointer moves in KV. A node that dies halfway leaves the next one enough to finish the
+same window. The queues spread over the nodes by themselves.
+
+\begin{options}{Setting}{Default}{What it does}
+QUEEN\_S3\_EMBEDDED & false & Starts the sink on this node. \\
+QUEEN\_S3\_QUEUES & required & The queues to copy, comma-separated, or \texttt{*} for all. \\
+QUEEN\_S3\_ENDPOINT, \_REGION, \_BUCKET & required & Where the bucket is. \\
+QUEEN\_S3\_ACCESS\_KEY, \_SECRET\_KEY & required & The credentials. The secret is never logged. \\
+QUEEN\_S3\_PATH\_STYLE & false & \texttt{true} puts the bucket in the URL path, as most self-hosted services want. \\
+QUEEN\_S3\_FORMAT & jsonl & \texttt{jsonl} or \texttt{parquet}. \\
+QUEEN\_S3\_START & latest & Where a new queue starts: \texttt{latest}, or \texttt{earliest} for what retention still holds. \\
+QUEEN\_S3\_TARGET\_MB & 128 & Uncompressed megabytes that close a window. \\
+QUEEN\_S3\_MAX\_WINDOW\_MS & 300000 & The longest a window stays open. \\
+QUEEN\_S3\_SSE & unset & \texttt{AES256} or \texttt{aws:kms}: encryption of the files in the bucket. \\
+\end{options}
+
+\subsection{Four things to know}
+
+\begin{itemize}
+\item \textbf{The bucket copies the log, not what consumers did.} A message a group nacked or sent
+to the dead-letter queue is in the bucket like any other.
+\item \textbf{The bucket is plain text.} The sink decrypts encrypted queues before it writes them,
+so give the bucket encryption of its own (\texttt{QUEEN\_S3\_SSE}, or the bucket's default).
+\item \textbf{Retention can delete records before the sink reads them.} The loss is never silent
+(the manifest lists the lost range), but you can rule it out: with
+\texttt{"retentionSinkHold":"default"} on the queue, retention waits for the sink, up to seven days.
+\item \textbf{Watch \texttt{queen\_s3\_lag\_seconds}}: how far behind the bucket is. It climbs to a
+little more than one window on a busy queue, then drops when the window commits.
+\end{itemize}
+
+On the site: \href{https://queenmq.com/integrations/s3/}{queenmq.com/integrations/s3}.

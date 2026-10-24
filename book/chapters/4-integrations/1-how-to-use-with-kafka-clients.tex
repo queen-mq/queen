@@ -1,0 +1,122 @@
+% Chapter 4, section 1: How to use with Kafka clients
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{How to use with Kafka clients}
+
+Kafka producers, consumers and admin tools can use Queen as they are: change
+\texttt{bootstrap.servers}, and nothing else. A topic is a Queen queue and a Kafka consumer group is
+a Queen consumer group, so Kafka clients and Queen clients read and write the same data.
+
+\why{moving away from Kafka should not mean rewriting every service on the same day. With the Kafka
+port, you move one service at a time, and the services not moved yet keep working on the same
+topics.}
+
+\subsection{Turn it on}
+
+\begin{shell}
+docker run -d --name queen -p 6632:6632 -p 127.0.0.1:9092:9092 \
+  -v /var/lib/queen:/var/lib/queen/raft \
+  -e QUEEN_KAFKA_EMBEDDED=true \
+  -e QUEEN_KAFKA_ADVERTISED_ADDR=127.0.0.1:9092 \
+  ghcr.io/queen-mq/queen:2.6.0
+\end{shell}
+
+\texttt{QUEEN\_KAFKA\_ADVERTISED\_ADDR} is the address Kafka clients come back to after their first
+request, so they must be able to reach it. It has no default: without it the node refuses to start.
+Send three keyed records with kcat, and read them back:
+
+\begin{shell}
+kcat -P -b 127.0.0.1:9092 -t orders -K: <<'EOF'
+customer-123:{"orderId":8891,"total":42}
+customer-456:{"orderId":8892,"total":17}
+customer-123:{"orderId":8893,"total":5}
+EOF
+kcat -C -b 127.0.0.1:9092 -t orders -o beginning -e -q -f '%t [%p] offset %o  key=%k  %s\n'
+orders [307] offset 0  key=customer-123  {"orderId":8891,"total":42}
+orders [307] offset 1  key=customer-123  {"orderId":8893,"total":5}
+orders [400] offset 0  key=customer-456  {"orderId":8892,"total":17}
+\end{shell}
+
+Nobody created \texttt{orders}: kcat's first request did, 1,024 partitions wide. kcat hashed each key
+onto a partition, and both orders of \texttt{customer-123} landed in partition 307, in order. The
+HTTP API reads the same records. A Kafka key and value are bytes, so each message carries them in
+base64 (\texttt{k}, \texttt{v}), with the producer's timestamp (\texttt{t}):
+
+\begin{shell}
+curl -s 'localhost:6632/api/v1/pop/queue/orders/partition/307?batch=10' \
+  | jq -c '.messages[].data'
+{"k":"Y3VzdG9tZXItMTIz","t":1792837397814,"v":"eyJvcmRlcklkIjo4ODkxLCJ0b3RhbCI6NDJ9"}
+{"k":"Y3VzdG9tZXItMTIz","t":1792837397814,"v":"eyJvcmRlcklkIjo4ODkzLCJ0b3RhbCI6NX0="}
+\end{shell}
+
+\subsection{One consumer group for both}
+
+Run a Kafka group consumer, and stop it once it has printed the three records:
+
+\begin{shell}
+kcat -b 127.0.0.1:9092 -G billing -o beginning -q -f 'billing [%p] offset %o key=%k\n' orders
+billing [400] offset 0 key=customer-456
+billing [307] offset 0 key=customer-123
+billing [307] offset 1 key=customer-123
+\end{shell}
+
+\texttt{billing} is a Queen consumer group now, with its lag in the dashboard
+(\texttt{/api/v1/\allowbreak consumer-groups} lists it with \texttt{"kind":"kafka"}). A Queen consumer of \texttt{billing}
+starts where the Kafka consumer stopped:
+
+\begin{shell}
+curl -s -X POST localhost:6632/api/v1/push -H 'content-type: application/json' -d '{"items":[
+  {"queue":"orders","partition":"307","payload":{"orderId":8894,"total":99}}]}' >/dev/null
+Q=localhost:6632/api/v1/pop/queue/orders/partition/307
+curl -s "$Q?consumerGroup=billing&batch=10" | jq -c '.messages[] | {offset, data}'
+{"offset":2,"data":{"orderId":8894,"total":99}}
+\end{shell}
+
+And a Kafka consumer reads what a Queen client pushed: a record with no key, whose value is the JSON.
+
+\subsection{How Kafka maps onto Queen}
+
+\begin{pairs}[0.34]{Kafka}{Queen}
+Topic & A queue of the same name, created by CreateTopics or by the first request that names it \\
+Partition \texttt{n} & The partition named \texttt{"n"} \\
+Partition count & What CreateTopics asked for, else 1,024. A topic never gets narrower \\
+Offset, committed offset & The partition's offset; the group's position on that partition \\
+\texttt{acks=1}, \texttt{acks=all} & One path: answered when the push is committed in the raft log \\
+Replication factor & The raft voters: every voter holds every partition \\
+Idempotent producer & Queen's dedup: producer id, epoch and sequence are the transactionId \\
+Transaction & Kept in the leader's memory, committed with its offsets as one raft entry \\
+\texttt{retention.ms} & The queue's retention, set when the topic is created \\
+\texttt{cleanup.policy=compact} & Retention off: every record is kept \\
+\end{pairs}
+
+\queenfig{kafka-mapping}{What a Kafka client sees, and what Queen stores.}
+
+On a cluster every node runs the Kafka port, and together they are one Kafka cluster. The raft
+leader leads every partition and coordinates every group; a client sent to another node is told to
+go to the leader. Give each node its own \texttt{QUEEN\_KAFKA\_ADVERTISED\_ADDR}, and never put the
+nodes behind one load-balanced address: a client sent to the leader would land on another node, and
+loop. A load balancer is fine in \texttt{bootstrap.servers}, which a client uses once.
+
+\queenfig{kafka-cluster}{One Kafka cluster: bootstrap once, then straight to the raft leader.}
+
+\subsection{Five things to know}
+
+\begin{itemize}
+\item \textbf{Kafka consumers take no lease.} Queen's retries and dead-letter queue do not apply to
+them: a Kafka consumer handles its own failures, as on Kafka. Kafka and Queen consumers share a
+group's position, not its work, so hand a group from one kind to the other, and do not run both at
+once.
+\item \textbf{Committed offsets never expire.} Kafka forgets an empty group after seven days; here a
+group keeps its position until you delete it.
+\item \textbf{Transactions live in the leader's memory}, up to 8 MiB, 50,000 records and 1,000
+partitions each. A leader change aborts the transactions that were open.
+\item \textbf{The Kafka port has no TLS in 2.6}, and SASL passwords travel in clear: keep it on a
+private network.
+\item \textbf{Advertise an address the client can reach, as it will try it.} On macOS,
+\texttt{localhost} is tried as \texttt{::1} first, so a port published on \texttt{127.0.0.1} only
+fails with \texttt{localhost}: use \texttt{127.0.0.1}.
+\end{itemize}
+
+On the site: \href{https://queenmq.com/integrations/kafka/}{queenmq.com/integrations/kafka}. More there: \href{https://queenmq.com/integrations/kafka-frameworks/}{Kafka Streams, Connect and Flink}.

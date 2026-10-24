@@ -1,0 +1,37 @@
+% Chapter 2, section 8: KV, Locks and Timers
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{KV, Locks and Timers}
+
+The transaction above already used two of the three: \texttt{kv.put} stored the order's state, and
+\texttt{timer()} scheduled tomorrow's reminder, which arrives as a message.
+
+\why{KV is there so workers keep nothing between messages: the state of each order lives next to
+its events and changes in the same commit. Timers are there because ``do this in 24 hours'' is a
+message that should arrive later, in the order's own partition, not a cron job that scans a table.
+Scheduling the same timer key again moves it, so a reminder can be pushed back or cancelled.}
+
+KV also works on its own, outside a transaction. Every write names its lifetime, and the version a
+read returns makes the next write conditional:
+
+\guide{kv}
+
+\why{two workers can read the same cart and both write it. With \texttt{expect}, the second write
+finds the version moved and is refused, with the current value in the answer, so nobody overwrites
+what they never saw. A counter with \texttt{max} is a rate limit in one call.}
+
+The third is a lock. Some work no message triggers: a nightly report, a cleanup, a singleton. Take a
+lock for it. A lock is a lease, and a slow holder can outlive it, so guard the transaction with it:
+the push commits only while the lock is still yours.
+
+\guide{lock}
+
+\why{a cron job running on three replicas runs three times. A lock makes it run once, and the guard
+makes sure a holder that froze and lost its lock cannot commit after another one took over. A
+semaphore (\texttt{queen.semaphore(name, n)}) allows \texttt{n} holders at once.}
+
+\queenfig{lock-fence}{A lock expires without telling its holder; the guard keeps it out.}
+
+On the site, with the code in all six SDK languages: \href{https://queenmq.com/writing-applications/kv-locks-timers/}{queenmq.com/writing-applications/kv-locks-timers}.

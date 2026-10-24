@@ -1,0 +1,169 @@
+% Chapter 2, section 4: Pop messages
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Pop messages}
+
+There are two ways to read. \texttt{consume()} is a loop: it takes messages, calls your handler,
+acks them when the handler returns, and goes on. \texttt{pop()} is one call: it hands you the
+messages and leaves the ack to you.
+
+\why{most workers are loops, and \texttt{consume()} writes the loop for you, with the error handling
+done right. \texttt{pop()} is for the cases a loop does not fit: a scheduled job that reads once, a
+script, or code that wants to decide itself when to ack.}
+
+\queenfig{consume-loop}{What consume() does for you.}
+
+\subsection{Queue mode and consumer groups}
+
+Without a consumer group, each message goes to one worker, and the broker sizes every pop for you.
+
+\guide{consume}
+
+With a consumer group, every group gets every message and the workers of one group share them. A
+new group starts at the tail, so this one asks for everything already in the queue. Here every
+option is set by hand, and the handler acks.
+
+\guide{consume-group}
+
+Ack \texttt{failed} and the message comes back, up to the queue's \texttt{retryLimit}; after the last retry it
+goes to the dead-letter queue.
+
+\why{one queue often feeds several services: billing, emails and analytics all want every order.
+Each service is a consumer group, reading at its own pace, and none of them can slow the others
+down. Inside a group, the workers compete, so you add workers to go faster.}
+
+\queenfig{queue-mode-vs-groups}{Queue mode shares the messages; every consumer group gets all of them.}
+
+\subsection{One message at a time, or a whole batch}
+
+With \texttt{.each()}, the handler gets one message at a time. Without it, the handler gets the
+whole batch as an array.
+
+\guide{consume-batch}
+
+What the client does with your handler's result (\texttt{autoAck}, on by default):
+
+\begin{itemize}
+\item \textbf{It returns:} the message (or the whole batch) is acked.
+\item \textbf{It throws:} the message (or the whole batch) is nacked as \texttt{failed}, which
+spends one retry, and the loop goes on with the next messages.
+\item \textbf{It throws under \texttt{.each()}:} the rest of that partition's messages in the same
+batch are skipped, because they will be delivered again after the failed one, in order. Messages of
+other partitions in the batch are handled as usual.
+\item \textbf{With \texttt{.autoAck(false)}:} the handler acks itself (in a transaction, for
+example). A handler that throws is still nacked, so its partition is not stuck until the lease
+runs out.
+\end{itemize}
+
+\why{a batch is cheaper (one ack for a hundred messages, one database write for a hundred rows),
+and one at a time is simpler and fails one message instead of a hundred. Pick per worker.}
+
+If you add \texttt{.onSuccess()} or \texttt{.onError()} to a consumer, the client stops acking and
+nacking for you: you decide in those callbacks what happens to each message.
+
+\guide{consume-callbacks}
+
+\why{some failures should be retried and some never will succeed (an email address that does not
+exist). The callbacks let you send the first kind back with \texttt{failed} and the second kind
+straight to the dead-letter queue with \texttt{dlq}.}
+
+\subsection{How many messages a pop takes: autopilot}
+
+By default the broker decides how many messages each pop gets (\texttt{batch}, from 100 to 1,000,
+based on how fast the group acks) and from how many partitions (\texttt{partitions}, the ones that
+have work, shared among the waiting workers). A value you set yourself is never changed.
+\texttt{partitions(N)} lets one pop take messages from up to \texttt{N} partitions (1 to 64), with
+\texttt{batch} as the total. \texttt{.autopilot(false)} goes back to one message from one partition
+per pop.
+
+\why{the right batch size depends on your handler and your load, and it changes during the day.
+The broker sees both, so it can size every pop better than a number fixed in the code.}
+
+\subsection{Leases and long work}
+
+A pop leases its messages to the worker for the queue's \texttt{leaseTime}. Work that can take
+longer renews the lease while it runs: \texttt{.renewLease(true, 10000)} renews every 10 seconds,
+and \texttt{queen.renew(message)} renews once. In PHP, the renewal happens between messages, so a
+single long handler calls the renew callback it is given. A lease that has already
+expired cannot be renewed: its messages go to the next worker, marked as one delivery attempt
+more.
+
+\why{the lease is what protects order and stops two workers from doing the same work. A short lease
+gets a crashed worker's messages moving again quickly; renewing lets a slow but healthy worker keep
+them.}
+
+\subsection{Where a new group starts}
+
+A group's starting point is decided on its first pop and then stored: \texttt{new} (the default)
+reads only what is pushed after that first pop, \texttt{all} reads everything still kept, and
+\texttt{subscriptionFrom} reads from a point in time. A group that already exists moves with a seek,
+to a time or to the end.
+
+\queenfig{subscription-start}{Where a new group starts, fixed at its first pop.}
+
+\guide{seek}
+
+\why{a new service usually wants only new events, a new projection wants the whole history, and a
+bug fix wants to replay the last day. A seek to the end is how a group skips a backlog it no longer
+needs.}
+
+\subsection{Only the newest message: conflation}
+
+A group with \texttt{.conflation()} gets only the newest message of each partition, and its cursor
+moves past the older ones.
+
+\guide{conflation}
+
+\why{some queues carry commands where only the latest one matters: ``recompute the price of A-1''.
+A worker that is behind should do the work once, with the newest input, instead of three times with
+inputs that are already old.} Conflation is decided by the group's first pop, needs a consumer
+group, and cannot be combined with \texttt{commitOnDelivery}.
+
+\subsection{Faster, with no ack: commitOnDelivery}
+
+A pop with \texttt{.commitOnDelivery()} moves the group's cursor as the messages are handed out.
+There is no lease and nothing to ack.
+
+\guide{commit-on-delivery}
+
+\why{a live dashboard or a metrics chart can lose a reading now and then, and would rather not pay
+for leases and acks. This is at-most-once delivery: a worker that crashes after the pop loses that
+batch. It works with \texttt{pop()} only; \texttt{consume()} refuses it.}
+
+\subsection{Running a consumer for real}
+
+\guide{consume-run}
+
+\begin{itemize}
+\item \texttt{concurrency(n)} runs \texttt{n} handlers at once, each on its own partitions.
+\item \texttt{limit(n)} stops after \texttt{n} messages, and \texttt{idleMillis(ms)} stops after
+that long with nothing to do.
+\item \texttt{wait(true)} (the default) waits for messages instead of returning empty, up to
+\texttt{timeoutMillis(ms)} (30 seconds by default, at most 60).
+\item A \texttt{signal} stops the loop at once. Messages it had taken but not started go back with a
+\texttt{retry} ack, which spends no retry, so a deploy does not leave partitions waiting for their
+leases to run out.
+\end{itemize}
+
+\why{a worker runs for weeks, through deploys and quiet nights. These options decide how much it
+does at once, when it stops, and how it gives its work back when it is told to.}
+
+\subsection{Read it again}
+
+Consuming does not delete: the queue is a log, kept for its retention. A new group can start from a
+point in time and read the same orders again, while the groups that already read them stay where
+they are.
+
+\guide{replay}
+
+Or read a partition by offset with \texttt{fetch}: no group, no lease, no ack. It suits an audit,
+rebuilding one entity, or a sink that keeps its own position.
+
+\guide{fetch}
+
+\why{history is useful long after the first reader is done with it: to build a new view, to audit
+what happened, or to rebuild one customer's state from its events.}
+
+On the site, with the code in all six SDK languages: \href{https://queenmq.com/writing-applications/pop/}{queenmq.com/writing-applications/pop}. More there: \href{https://queenmq.com/writing-applications/clients/}{reads by offset in every SDK}.

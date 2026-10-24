@@ -1,0 +1,64 @@
+% Chapter 2, section 5: Acknowledge messages
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Acknowledge messages}
+
+An ack tells the broker what happened to a message. A \texttt{completed} ack moves the consumer
+group's cursor past it, and that is all: the message stays in its partition until retention removes
+it.
+
+\queenfig{cursor-per-group}{An ack moves the group's cursor; the message stays.}
+
+\why{the cursor is the group's memory of where it is. Keeping the message after the ack is what
+lets other groups, and later replays, read it too.}
+
+\subsection{Four answers}
+
+\begin{options}{Status}{Spends a retry}{What happens, and when to use it}
+completed & no & Done. The cursor moves past it. \texttt{true} means the same. \\
+failed & yes & The lease is released and the message comes back after \texttt{retryDelay}. After the last retry it goes to the dead-letter queue. Use it for failures that may pass. \texttt{false} means the same. \\
+retry & no & The lease is released and the message comes back at once. Use it to give work back (a worker that is shutting down). \\
+dlq & no & Filed in the dead-letter queue now. Use it when trying again cannot help (a payload that will never parse). \\
+\end{options}
+
+A \texttt{failed} or \texttt{dlq} ack can carry the reason (\texttt{error:~'card~declined'} next to
+the group), and the dead-letter queue keeps it.
+
+\why{``it did not work'' has different meanings. Sometimes trying again in a while is right,
+sometimes now, and sometimes never. Each answer sends the message where it should go.}
+
+\subsection{One message or a whole batch}
+
+\texttt{queen.ack()} takes one message or an array. With an array, one call acks the whole batch.
+
+\guide{pop-ack}
+
+Each message of an array can carry its own answer:
+
+\guide{ack-each-status}
+
+In a batch, the cursor stops at the first message that will come back: a \texttt{completed}
+message after it is delivered again too.
+
+\queenfig{batch-ack-rule}{In a batch, the cursor stops at the first message that comes back.}
+
+\why{one call for a hundred messages is much cheaper than a hundred calls. The cursor rule keeps
+order: a message is never passed while an earlier one of the same partition is still to be done.}
+
+\subsection{Three things to know}
+
+\begin{itemize}
+\item \textbf{Inside \texttt{.each()}, throw to fail a message.} When the handler throws, the client
+nacks it and skips the rest of that partition's batch. When the handler acks \texttt{failed} itself
+and returns, the client does not know: it goes on with the partition's next messages, their acks are
+refused (that part of the batch is coming back anyway), and they are handled twice.
+\item \textbf{Every ack answers HTTP 200, even a refused one.} Read \texttt{success} in the answer: a
+refused ack usually means the lease ran out and another worker has the message now.
+\item \textbf{An ack carries its consumer group and its lease.} The client takes both from the
+message. Over HTTP you send them yourself: an ack without its lease is not checked, and can complete
+a batch another worker holds.
+\end{itemize}
+
+On the site, with the code in all six SDK languages: \href{https://queenmq.com/writing-applications/ack/}{queenmq.com/writing-applications/ack}.

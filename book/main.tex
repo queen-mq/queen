@@ -1,0 +1,29 @@
+% The little book of QueenMQ.
+%
+% This file is the book's order: the cover, the contents, then the chapters (each
+% chapter file lists its own sections). The text is in chapters/*.tex, the look in latex/queen.sty.
+% Build the PDF with book/build.sh.
+\documentclass[fontsize=10.5pt,oneside,open=any,headings=normal,chapterprefix=true,toc=flat,
+  numbers=noenddot,parskip=false]{scrbook}
+\usepackage{latex/queen}
+\hypersetup{pdftitle={The little book of QueenMQ}}
+\input{build/meta.tex}
+
+\begin{document}
+
+\queencover{\builddate}
+
+\frontmatter
+\pagestyle{scrheadings}
+\tableofcontents
+\input{chapters/0-about}
+
+\mainmatter
+\input{chapters/1-introduction}
+\input{chapters/2-writing-applications}
+\input{chapters/3-real-applications}
+\input{chapters/4-integrations}
+\input{chapters/5-manage-clusters}
+\input{chapters/6-architecture}
+
+\end{document}

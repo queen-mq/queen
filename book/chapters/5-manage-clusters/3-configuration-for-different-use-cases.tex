@@ -1,0 +1,260 @@
+% Chapter 5, section 3: Configuration for different use cases
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-23. Settings and defaults checked against server/src/config.rs and the
+% site's operate and reference pages (webdoc/src/content/docs/operate/, reference/configuration.mdx).
+
+\section{Configuration for different use cases}
+
+Every setting is an environment variable, and most installations need very few of them. When a
+node starts, it prints the settings it is really using, in lines that start with
+\texttt{config:}. Read them after every change. A yes/no setting accepts \texttt{true} or
+\texttt{false}, \texttt{1} or \texttt{0}, \texttt{yes} or \texttt{no}, \texttt{on} or
+\texttt{off}; any other value stops the node at boot, so a typo cannot pass unnoticed.
+
+\begin{pairs}[0.46]{You need}{What to set}
+To try Queen, or to develop & Nothing \\
+A small production & One node with a volume, and backups \\
+To survive the loss of a machine & Three nodes; five to survive two \\
+To keep strangers out & Broker JWT, or the built-in proxy \\
+Many teams or customers on one cluster & The proxy, and raft groups \\
+Payloads that must not sit on disk in clear & \texttt{QUEEN\_ENCRYPTION\_KEY} \\
+Disk that does not fill up & Retention on the queues \\
+Many short-lived partitions & \texttt{PARTITION\_CLEANUP\_SECONDS} and two more \\
+Kafka clients & \texttt{QUEEN\_KAFKA\_EMBEDDED} \\
+Thousands of queues & \texttt{QUEEN\_QLOG\_SHARDS}, before the first start \\
+To survive the loss of a whole site & A standby cluster \\
+\end{pairs}
+
+\subsection{To try Queen, or to develop}
+
+One command, no settings:
+
+\begin{shell}
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+\end{shell}
+
+Without a volume, the data lives inside the container and is gone when the container is removed.
+That is usually what you want on a laptop.
+
+\subsection{A small production}
+
+One node with its data on a volume:
+
+\begin{shell}
+docker run -d --name queen --restart unless-stopped --stop-timeout 60 \
+  -p 6632:6632 -v /var/lib/queen:/var/lib/queen/raft \
+  ghcr.io/queen-mq/queen:2.6.0
+\end{shell}
+
+A single node writes every message to disk (fsync) before it answers. A crash, a kill -9 or a
+power cut loses nothing it acknowledged: it starts again and reads its log. What it cannot survive
+is losing its disk, so take backups (see Recovery). An upgrade stops it for a few seconds, and its
+ephemeral queues, which live in memory, are empty after every restart. Port 6632 stays on a private
+network, as on a cluster (see To keep strangers out).
+
+\why{many workloads do not need three machines. One node is the simplest thing that keeps every
+acknowledged message. Choose it knowing that a lost disk means restoring the last backup.}
+
+\subsection{To survive the loss of a machine}
+
+Run three nodes, or five (see Run a cluster with Docker). A majority of three is two, so three
+nodes survive one failure. Five survive two, but every write then waits for three disks, and the
+leader feeds four followers. Four nodes survive only one failure, like three, while every write
+waits for three of them: an even number only costs. Put each node on its own machine, and in its
+own zone if you have zones.
+
+\why{a majority is what lets the cluster decide alone, without a person, which node leads. More
+nodes make a cluster harder to kill, not faster: one leader orders every write, so adding nodes
+adds no write throughput.}
+
+\subsection{To keep strangers out}
+
+Out of the box a node checks nobody: anyone who reaches port 6632 can read, write, delete queues
+and change the cluster's members. Choose one of two front doors.
+
+\queenfig{front-doors}{What listens where: only the proxy's port faces the internet.}
+
+\begin{options}{Setting}{Default}{What it does}
+JWT\_ENABLED & false & The broker checks a token on every request. For services that already get tokens from an identity provider. \\
+JWT\_ALGORITHM & HS256 & HS256 checks with \texttt{JWT\_SECRET}; RS256 and EdDSA with \texttt{JWT\_PUBLIC\_KEY} or \texttt{JWT\_JWKS\_URL}. \\
+QUEEN\_PROXY\_EMBEDDED & false & The built-in proxy: API keys, people who sign in to the dashboard, tenants, quotas. \\
+QUEEN\_PROXY\_PORT & unset & The proxy's own port. Expose this one, and keep 6632 inside. \\
+QUEEN\_TLS\_CERT, \_KEY & unset & TLS on the proxy's port. The broker port has no TLS: use your load balancer. \\
+\end{options}
+
+A token's roles decide what it may do: \texttt{read-only}, \texttt{write-only} (push, for producers
+that must not read), \texttt{read-write} and \texttt{admin} (the membership API and deletes).
+Whatever you choose, keep the raft port (7400) on a private network, with \texttt{QUEEN\_RAFT\_TOKEN}
+set on every node.
+
+\why{a broker holds every payload and every key of your system. The default is open so that the
+first run is one command, and it is the first thing to change before anything else can reach the
+node.}
+
+\subsection{Many tenants on one cluster}
+
+One cluster can serve many teams or customers. Each one is a tenant: its queues, KV and timers are
+invisible to the others. The proxy built into the broker adds API keys and people in front of it.
+It keeps its own data (tenants, users, key hashes, plans, usage) in the broker's replicated KV, so
+there is no database to run.
+
+\begin{shell}
+SESSION_SECRET=$(openssl rand -hex 32)    # signs console sessions
+CP_TOKEN=$(openssl rand -hex 32)          # opens the control plane, /api/cp/*
+QUEEN_KEY="qk_live_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+
+docker run -d --name queen -p 6711:6711 -p 127.0.0.1:6632:6632 \
+  -v /var/lib/queen:/var/lib/queen/raft \
+  -e QUEEN_PROXY_EMBEDDED=true \
+  -e QUEEN_PROXY_PORT=6711 \
+  -e QUEEN_PROXY_JWT_SECRET="$SESSION_SECRET" \
+  -e QUEEN_PROXY_CP_TOKEN="$CP_TOKEN" \
+  -e QUEEN_PROXY_SPOOL_DIR=/var/lib/queen/raft/proxy-spool \
+  -e QUEEN_PROXY_BOOTSTRAP_TENANT=acme \
+  -e QUEEN_PROXY_BOOTSTRAP_API_KEY="$QUEEN_KEY" \
+  -e QUEEN_PROXY_DEFAULT_CLUSTER=acme \
+  ghcr.io/queen-mq/queen:2.6.0
+\end{shell}
+
+The first start creates the tenant \texttt{acme} and its key. Clients now use port 6711, with the
+key (\texttt{bearerToken} in the JavaScript client); without it they get \texttt{401
+unauthorized}. Port 6632 is the broker itself, with no keys: the nodes talk to each other on it,
+so it stays inside your network.
+
+Add a tenant with one call to the control plane. You make the key yourself and send only its
+hash, so the proxy never sees the key:
+
+\begin{shell}
+KEY="qk_live_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+HASH=$(printf %s "$KEY" | sha256sum | cut -d' ' -f1)
+curl -s -X POST localhost:6711/api/cp/provision -H "x-queen-cp-token: $CP_TOKEN" \
+  -H 'content-type: application/json' -d '{
+    "tenant_slug": "globex", "cluster_slug": "globex", "plan": "pro",
+    "user_id": "308d3f3d-2306-41de-95f1-e32b12ec7470", "email": "ops@globex.example",
+    "role": "admin", "key_name": "default", "key_hash": "'"$HASH"'",
+    "scopes": ["produce", "consume", "read"]}'
+{"broker_tenant_uuid":"91a5d7bb-879c-4ae2-95e2-295fa2704098","created":{"cluster":true,...}}
+\end{shell}
+
+The proxy finds the tenant from the first part of the host name: \texttt{globex.\allowbreak queen.\allowbreak example.com}
+is \texttt{globex}. A key works only there: on another tenant's host it gets \texttt{403 key/cluster
+mismatch}. Each plan (\texttt{free}, \texttt{dev}, \texttt{pro}, \texttt{dedicated-s}) limits
+requests a second, queues and stored bytes. The proxy starts by only logging what it would block;
+\texttt{QUEEN\_PROXY\_ENFORCE=true} makes it block.
+
+With one raft group, all tenants share one leader. \texttt{QUEEN\_RAFT\_GROUPS=3} runs three groups
+in each node, each with its own leader, log and directory (\texttt{groups/g1/}, \ldots). A tenant
+lives in one group, chosen by a hash of its id. To choose yourself, pin it by the
+\texttt{broker\_tenant\_uuid} of the answer above: \texttt{QUEEN\_TENANT\_GROUPS=<uuid>=1} puts it in
+group 1. Pin a big tenant before it writes, because a tenant cannot move while it has data. With as many groups as nodes, every node leads one group.
+
+\queenfig{tenants-groups}{Tenants through the proxy, each in one raft group.}
+
+\why{tenants share machines, not data. One leader per tenant keeps each tenant's transaction a
+single log entry, and more groups spread the tenants' writes over more leaders. Raft groups were
+not part of the Jepsen tests, which ran one group.}
+
+Three things to know: every node needs the same secrets; the membership routes are closed on the
+proxy's port, so call them on 6632; and keep \texttt{QUEEN\_PROXY\_SPOOL\_DIR} on the data volume,
+where usage waits when it cannot be written.
+
+\subsection{Payloads that must not sit on disk in clear}
+
+Give every node the same key, 64 hex characters, then turn encryption on for the queues that need
+it (\texttt{encryptionEnabled}, see Create and configure queues):
+
+\begin{shell}
+QUEEN_ENCRYPTION_KEY="$(openssl rand -hex 32)"      # the same value on every node
+\end{shell}
+
+Payloads are encrypted with AES-256-GCM. Queue and partition names, KV keys and KV values are not.
+Check that the boot log says \texttt{encryption service initialized (AES-256-GCM)}. Without a key, the
+node stores those queues in clear and says so only in its \texttt{config:} lines; a key of the wrong
+length logs one warning and does the same.
+
+\why{some payloads hold personal data, and a disk, or a copy of it, can end up in the wrong hands.
+The price is the key itself: lose it and the payloads are gone; change it and consumers receive the
+encrypted envelope as their data, with no error. Keep it safe, apart from the backups.}
+
+\subsection{Disk that does not fill up}
+
+Queen keeps every message until retention removes it, even after every group has acked it (see
+Create and configure queues). Turn retention on for the queues that grow. As a last guard, a node
+whose disk is 85\% full (\texttt{QUEEN\_RAFT\_DISK\_HIGH\_PCT}) refuses the writes that would grow
+it, with \texttt{507 storage\_full}, and accepts them again below 80\%
+(\texttt{QUEEN\_RAFT\_DISK\_LOW\_PCT}). Reads, acks and deletes keep working.
+
+\why{a broker that keeps history lets new consumer groups and replays read old messages. Retention
+is where you decide how long that history is worth its disk. The 85\% gate leaves room to grow the
+volume before the node stops.}
+
+\subsection{Many short-lived partitions}
+
+Some workloads open a partition per trace, per session or per order, and never write to it again.
+By default an empty partition stays for 30 days, and each one costs memory and time in every
+retention round. To delete them soon after their last message, set three things on the broker:
+
+\begin{shell}
+docker run -d --name queen -p 6632:6632 -v /var/lib/queen:/var/lib/queen/raft \
+  -e PARTITION_CLEANUP_SECONDS=60 \
+  -e QUEEN_RAFT_TXN_WINDOW_MIN_S=60 \
+  -e QUEEN_RAFT_RETENTION_SCAN_PER_S=40000 \
+  ghcr.io/queen-mq/queen:2.6.0
+\end{shell}
+
+and give the queue retention and a short dedup window:
+
+\begin{shell}
+curl -s -X POST http://localhost:6632/api/v1/configure -H 'content-type: application/json' \
+  -d '{"queue":"traces","options":{"retentionEnabled":true,
+       "completedRetentionSeconds":60,"dedupWindowSeconds":60}}'
+\end{shell}
+
+Retention removes a message once it is a minute old and every group has acked it, and the empty
+partition is deleted after a minute without a write. We pushed 50 messages to 50 partitions and
+consumed them: all 50 partitions were gone within 76 seconds.
+
+\queenfig{short-lived-partitions}{A short-lived partition: three settings, and the longest wins.}
+
+\why{a partition holds the dedup records of its messages. Deleted too early, a producer that
+retries would store a message twice. So a partition is never deleted inside its queue's dedup
+window, nor before \texttt{QUEEN\_RAFT\_TXN\_WINDOW\_MIN\_S} (15 minutes by default): a short cleanup
+needs both to be short too.}
+
+On 2.6.0 the third setting matters when partitions come and go fast: we saw the problem from 200
+new partitions a second. By default the retention scan paces each round from the size of the previous one. When new
+partitions arrive faster than that, a round never ends, and nothing is deleted: in a test with
+1,000 new partitions a second, 594,000 of 595,000 partitions were still there after ten minutes.
+\texttt{40000} turns that pacing off. With it, 1,000 and 2,000 new partitions a second stayed flat,
+at about 70,000 and 150,000 partitions.
+
+\subsection{Kafka clients}
+
+\texttt{QUEEN\_KAFKA\_EMBEDDED=true} opens a Kafka port (9092) on every node, so existing Kafka
+producers and consumers work without code changes. On a cluster, each node also needs
+\texttt{QUEEN\_KAFKA\_ADVERTISED\_ADDR}, the address at which clients reach that node's Kafka
+port. The Kafka port has no TLS in 2.6, and passwords (\texttt{QUEEN\_KAFKA\_SASL=plain}) cross the
+network in clear: keep it on a private network. How to use with Kafka clients, in chapter 4, has
+the details.
+
+\subsection{Thousands of queues}
+
+By default each queue has its own log file on disk, and a write can touch many files.
+\texttt{QUEEN\_QLOG\_SHARDS=K} puts all queues into K shared logs instead, so a write syncs at most
+K files. It is read only when the data directory is created, so set it before the first start.
+
+\subsection{To survive the loss of a whole site}
+
+Three nodes in one zone, or in one Kubernetes cluster, all go down together when that goes. A
+standby is a second cluster, somewhere else, that reads everything the first one commits and stays
+a moment behind it. When the first is lost, you promote the standby and point the clients at it.
+
+\why{replicas protect against a lost machine, backups against a mistake. A standby protects
+against losing everything at once, and loses only the last moment before the failure. It does not
+protect against mistakes: a deleted queue is replayed on the standby a moment later. Keep the
+backups too.}
+
+On the site: \href{https://queenmq.com/manage/configuration/}{queenmq.com/manage/configuration}. More there: \href{https://queenmq.com/reference/configuration/}{every setting}, \href{https://queenmq.com/manage/security/}{security}, \href{https://queenmq.com/manage/tenants/}{tenants and API keys}, \href{https://queenmq.com/manage/standby/}{standby cluster}.

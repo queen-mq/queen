@@ -1,0 +1,15 @@
+% Chapter 1, section 1: What is QueenMQ?
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{What is QueenMQ?}
+
+
+QueenMQ is a distributed message broker, built in Rust, replicated with Raft, and developed at
+Smartness. With it you can write applications that decouple producing from consuming, do request
+and reply, and process streams, using transactional features that let you remove a lot of logic
+from the application and offload it to QueenMQ.
+
+Every feature the broker has is there because we needed it at Smartness, where it powers almost
+every product.

@@ -1,0 +1,29 @@
+% Chapter 3, section 1: Work queue
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Work queue}
+
+Many workers share one stream of jobs, and each job is done by exactly one of them: resizing
+photos, sending emails, rendering invoices. This is the work queue, also called competing
+consumers.
+
+In Queen it is a consumer with no consumer group. Each message goes to one worker. Work runs in
+parallel across partitions: a partition is held by one worker at a time, so here every user's
+photos are a partition, and three workers share four users.
+
+\queenfig{work-queue}{Competing consumers: each job once, one user's partition per worker at a time.}
+
+\guide{uc-work}
+
+All twelve photos were resized once each, shared out as 6, 3 and 3 between the three workers.
+
+\why{order still holds inside each user's photos, and a slow user holds up only its own
+partition. To go faster, add workers, up to the number of partitions that have work.}
+
+One thing to know: with a single partition the workers would take turns, one at a time. Give the
+jobs a partition per user, per customer or per tenant.

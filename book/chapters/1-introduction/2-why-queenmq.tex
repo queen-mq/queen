@@ -1,0 +1,65 @@
+% Chapter 1, section 2: Why QueenMQ
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Why QueenMQ}
+
+
+The world is full of message brokers, and some of them are really powerful, with tons of useful
+features. So why build another one?
+
+Back in 2025, while we were developing a product called Smartchat, we suffered heavily from
+head-of-line blocking in Kafka. The product was made of several services that talked through
+Kafka, and some of them processed messages with LLMs. Processing a message with an LLM can be slow,
+and how slow depends on the size and type of the message (plain text, XML\ldots), so in production
+we saw messages wait seconds, sometimes minutes, behind heavier ones. This was expected when we
+chose Kafka for Smartchat, but there was no easy alternative (also because we used Kafka in every
+other product), so we stuck with it.
+
+To solve the issue, we started with a hack. For the heavy topics, we consumed the messages and
+wrote them into a Postgres table with a \texttt{chat\_id} column (one conversation between A and B,
+for example). Then a custom poller read that table, processed the messages of each chat in order,
+and pushed them again to another Kafka topic.
+
+It was easy, and it worked very well. So in our minds a new model took shape, one that SQL
+represents very well, with these entities:
+
+\begin{itemize}
+\tightlist
+\item the queue table
+\item the partition table
+\item the partition consumer table
+\item the message table
+\end{itemize}
+
+Like this:
+
+\queenfig{sql-schema}{The model as the broker's first schema wrote it (October 2025): four tables.}
+
+Because we had to solve the same problem in another part of the application, we started to think
+about a generic solution. The idea was simple: an HTTP API on a Node.js server, which writes to and
+reads from Postgres tables. After the first MVP, we started to think that something good could come
+out of it. So we rewrote the MVP in C++, to get a statically typed language with stronger
+correctness guarantees, and replaced the SQL queries with stored procedures in Postgres. One month
+after the first idea, that custom broker was running in production, first for the heavy LLM queue,
+and one week later for all the other original Kafka topics too.
+
+Then, in July 2026, we redesigned the way data was saved in Postgres: no more a row for each
+message, but segments with offsets. To make it fast, we put a lot of in-memory data structures in
+the broker to speed up consuming. The new storage was so fast that our C++ design became the
+bottleneck. After some thought, we decided to rewrite it in Rust, because fast async I/O is much
+easier to write there than in C++ (no more custom libuv loops: we relied on the Tokio async
+runtime).
+
+This version was faster than anything we ever needed, but it had one structural issue: the more
+data you store in the broker, the slower the system becomes. Postgres is fast and configurable, but
+it is a system you cannot fully tune from the outside: you have to follow its rules.
+
+So we started to think about a new class of queue, stored on disk next to the ones in the
+database. The idea was sound, and after some tests we decided to remove the Postgres queue engine
+completely, write the storage on disk ourselves, and replicate it with Raft.
+
+The result of this rewrite is Queen today: a message broker replicated with Raft, with a single
+leader per tenant, able to sustain millions of messages per second at low latency, with a
+virtually unlimited number of partitions.

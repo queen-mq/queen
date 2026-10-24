@@ -1,0 +1,249 @@
+% The little book of QueenMQ: the book's look, in one package (book/main.tex loads it).
+%
+% Typography is a book's, not the website's: prose at about 70 characters a
+% line, indented paragraphs with no gap, serif headings, small-caps running
+% heads. The book is read as a PDF, not printed, so every page is the same:
+% equal margins, centred head and page number, and code boxes as wide as the
+% text. The cover uses the site's face (Inter) and colours.
+%
+% What a chapter can use besides plain LaTeX:
+%   \guide{push}            the JavaScript of one step of the five-minute guide, cut from
+%                           examples/tutorials/js/00-five-minutes.mjs by build.sh (the code
+%                           that runs, highlighted like the site)
+%   \begin{shell}...\end{shell}   commands, in the same box, not highlighted
+%   \begin{code}...\end{code}     any other code, the same way
+%   \why{...}              why the feature just described exists
+%   \begin{options}{A}{B}{C} rows \\ \end{options}   a table of options
+%   \begin{pairs}[width]{A}{B} rows \\ \end{pairs}   a two-column table of plain text
+%   \placeholder{what}      a visible "To come: what" box in a draft
+%   \notwritten             "Not written yet."
+%   \screenshot[place]{file}{caption}   a framed screenshot with its caption
+%   \includegraphics{x}     looks in book/images/ first
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{latex/queen}[2026/10/23 The little book of QueenMQ]
+
+% 138 mm of prose on a 178 mm page (10.5 pt, about 74 characters a line), equal
+% margins; code boxes are exactly as wide as the text.
+\RequirePackage[paperwidth=178mm,paperheight=233mm,left=20mm,right=20mm,top=22mm,bottom=24mm,
+  headsep=8mm,footskip=12mm]{geometry}
+
+% --- Fonts: Source Serif for text and headings, Source Code Pro for code, Inter on the cover
+\RequirePackage{fontspec}
+\RequirePackage[default,lining,semibold]{sourceserifpro}
+\RequirePackage[semibold]{inter}
+\RequirePackage[scale=0.88]{sourcecodepro}
+\newfontfamily\InterRegular{Inter-Regular.otf}
+\newfontfamily\InterSemi{Inter-SemiBold.otf}
+\newfontfamily\InterBold{Inter-Bold.otf}
+\linespread{1.12}
+\RequirePackage[protrusion=true,final]{microtype}
+
+% --- Colours: the site's
+\RequirePackage{xcolor}
+\definecolor{queenyellow}{HTML}{FCC620}
+\definecolor{amber}{HTML}{9A6B00}
+\definecolor{ink}{HTML}{0B0A0A}
+\definecolor{paper}{HTML}{F9F7F4}
+\definecolor{muted}{HTML}{6E6862}
+\definecolor{codebg}{HTML}{F6F4F0}
+
+% --- Headings: serif, book sizes; the chapter number is the one touch of yellow
+\setkomafont{disposition}{\rmfamily\bfseries\color{ink}}
+\setkomafont{chapter}{\fontsize{21}{25}\selectfont}
+\setkomafont{section}{\fontsize{14}{17}\selectfont}
+\setkomafont{subsection}{\fontsize{11.5}{14}\selectfont\itshape}
+\renewcommand*{\chapterformat}{%
+  {\fontsize{36}{36}\selectfont\color{queenyellow}\thechapter}}
+\renewcommand*{\chapterheadmidvskip}{\par\nobreak\vspace{2mm}}
+\RedeclareSectionCommand[beforeskip=0mm,afterskip=8mm,afterindent=false]{chapter}
+\RedeclareSectionCommand[beforeskip=-7mm plus -2mm minus -1mm,afterskip=3mm]{section}
+\RedeclareSectionCommand[beforeskip=-5mm plus -1mm minus -1mm,afterskip=2mm]{subsection}
+
+% Part pages take the cover's voice: an Inter eyebrow and an Inter Bold title.
+\setkomafont{part}{\InterBold\fontsize{28}{33}\selectfont\color{ink}}
+\setkomafont{partnumber}{}
+\renewcommand*{\partformat}{{\InterSemi\fontsize{9.5}{12}\selectfont\color{amber}%
+  \addfontfeature{LetterSpace=22}\spaceskip=0.62em\relax\MakeUppercase{\partname~\thepart}}}
+\renewcommand*{\partheadmidvskip}{\par\nobreak\vspace{5mm}}
+% Text that goes on a part's own page, under its title: \partintro{...} before \part.
+\newcommand{\partintro}[1]{\setpartpreamble[c][0.74\textwidth]{\vspace{12mm}%
+  \begin{flushleft}\small #1\end{flushleft}}}
+
+% --- Contents: chapters in the serif, parts in Inter like their pages
+\setkomafont{partentry}{\InterSemi\small\color{ink}}
+\setkomafont{chapterentry}{\normalfont\bfseries}
+\RedeclareSectionCommand[tocbeforeskip=0.8em plus 1pt]{chapter}
+
+% --- Running heads: small caps, centred, the page number centred below
+\RequirePackage[automark,headsepline=0.3pt]{scrlayer-scrpage}
+\clearpairofpagestyles
+\chead{\headmark}
+\cfoot*{\pagemark}
+\setkomafont{pageheadfoot}{\normalfont}
+\setkomafont{pagehead}{\scshape\footnotesize\color{muted}\addfontfeature{LetterSpace=4}}
+\setkomafont{pagenumber}{\footnotesize\color{ink}}
+\addtokomafont{headsepline}{\color{muted!30}}
+% The current section (the chapter before its first section).
+\automark[section]{chapter}
+\renewcommand*{\chaptermarkformat}{}
+
+% --- Paragraphs: indented, no gap; lone lines at a page's top or foot are avoided
+%     (strongly, not at any price: a page that ends half empty is worse)
+\setlength{\parindent}{1.2em}
+\setlength{\parskip}{0pt}
+\clubpenalty=3000
+\widowpenalty=3000
+\displaywidowpenalty=3000
+\raggedbottom
+\setlength{\emergencystretch}{2em}
+% Long setting names (QUEEN_RAFT_CLUSTER_VERSION_MS) may break after an underscore, never overflow.
+\AtBeginDocument{\renewcommand{\_}{\textunderscore\allowbreak}%
+  \pdfstringdefDisableCommands{\def\_{\textunderscore}}}
+
+% --- Lists: tight, with one indent; a nested list stays with the item it belongs to
+\RequirePackage{enumitem}
+\setlist{itemsep=1pt,parsep=0pt,topsep=4pt plus 1pt,partopsep=0pt,leftmargin=1.5em}
+\setlist[itemize,1]{label={\color{muted}\textbullet}}
+\setlist[itemize,2]{label={\color{muted}\textendash},topsep=1pt,itemsep=0pt,
+  beginpenalty=10000,midpenalty=10000}
+\setlist[enumerate]{label=\arabic*.}
+\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+
+% --- Pictures: book/images/ first, then the build's own assets
+\RequirePackage{graphicx}
+\graphicspath{{images/}{build/assets/}{build/figures/}}
+\RequirePackage{tikz}
+% Figures may share a page with text (a figure page is the last resort), and a page of
+% figures starts at the top instead of centring them.
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.65}
+\renewcommand{\textfraction}{0.12}
+\renewcommand{\floatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setlength{\@fptop}{0pt}
+\setlength{\@fpsep}{8mm plus 2mm}
+\setkomafont{caption}{\small\itshape}
+\setkomafont{captionlabel}{\small\bfseries\upshape}
+% A screenshot: most of the text width, a hairline frame, its caption below; refer to it
+% as Figure~\ref{fig:<file>}.
+%   \screenshot{dashboard-overview}{The dashboard, served on the same port as the API.}
+% An optional first argument is LaTeX's placement: \screenshot[b]{...}{...} asks for the
+% foot of the page (put the command early in the section, near the text that refers to it).
+\newcommand{\screenshot}[3][htbp]{%
+  \begin{figure}[#1]
+    \centering
+    {\setlength{\fboxsep}{0pt}\setlength{\fboxrule}{0.4pt}%
+     \fcolorbox{muted!35}{white}{\includegraphics[width=0.86\linewidth]{#2}}}%
+    \caption{#3}\label{fig:#2}
+  \end{figure}}
+
+% --- Drawings: \queenfig[placement]{id}{caption}. The figure is figures/src/**/<id>.mjs in the
+%     repository, drawn at 1000 units wide and printed at the text width, so every drawing has
+%     the same type size; build.sh renders it to build/figures/<id>.pdf.
+\newcommand{\queenfig}[3][htbp]{%
+  \begin{figure}[#1]
+    \centering
+    \includegraphics[width=\linewidth]{#2.pdf}%
+    \caption{#3}\label{fig:#2}
+  \end{figure}}
+
+% --- Links
+\RequirePackage[hidelinks]{hyperref}
+\hypersetup{colorlinks=true,linkcolor=ink,urlcolor=amber,citecolor=ink,
+  pdfauthor={The authors of QueenMQ}}
+\RequirePackage{bookmark}
+
+% --- Code. build.sh writes pandoc's highlighting macros (the site's colours, from
+%     latex/queen.theme) to build/highlighting.tex and each guide step to build/code/.
+\RequirePackage{fancyvrb}
+\InputIfFileExists{build/highlighting.tex}{}{\PackageWarning{queen}{run book/build.sh: no highlighting macros}}
+\RequirePackage{fvextra}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{commandchars=\\\{\},breaklines,
+  breakanywhere,fontsize=\fontsize{7.6}{10.1}\selectfont,
+  breaksymbolleft={\color{muted}\tiny\ensuremath{\hookrightarrow}}}
+\RequirePackage[most]{tcolorbox}
+% A quiet card with a yellow edge, exactly as wide as the text.
+\tcbset{queencode/.style={breakable,enhanced,colback=codebg,colframe=codebg,boxrule=0pt,
+  arc=1.2mm,left=2.8mm,right=2mm,top=2.2mm,bottom=2.2mm,before skip=4mm plus 1mm,
+  after skip=4mm plus 1mm,
+  before={\par\nobreak\vspace{4mm plus 1mm}\noindent},% the line that introduces a box stays with it
+  borderline west={1.4pt}{0pt}{queenyellow}}}
+\renewenvironment{Shaded}{\begin{tcolorbox}[queencode]}{\end{tcolorbox}}
+\newtcblisting{shell}{queencode,unbreakable,listing only,listing options={basicstyle=\ttfamily
+  \fontsize{7.6}{10.1}\selectfont,columns=fullflexible,keepspaces=true,breaklines=true,
+  showstringspaces=false,aboveskip=0pt,belowskip=0pt}}
+\newtcblisting{code}{queencode,unbreakable,listing only,listing options={basicstyle=\ttfamily
+  \fontsize{7.6}{10.1}\selectfont,columns=fullflexible,keepspaces=true,breaklines=true,
+  showstringspaces=false,aboveskip=0pt,belowskip=0pt}}
+\newcommand{\guide}[1]{\input{build/code/#1.tex}}
+% A code box of up to 18 lines is never split across pages: it moves whole to the next
+% page if it does not fit. Longer boxes break where they must. build.sh puts
+% \codelines{<lines>} at the head of every \guide fragment.
+\RequirePackage{needspace}
+\newcommand{\codelines}[1]{\ifnum#1<19 \Needspace*{\dimexpr #1\dimexpr 10.1pt\relax+16mm\relax}\fi}
+% The paragraph after a code box continues the thought: no indent, as after a heading.
+\RequirePackage{etoolbox}
+\AfterEndEnvironment{Shaded}{\@afterindentfalse\@afterheading}
+\AfterEndEnvironment{shell}{\@afterindentfalse\@afterheading}
+\AfterEndEnvironment{code}{\@afterindentfalse\@afterheading}
+
+% --- Why a feature exists: \why{...} after the paragraph that says what it does.
+\newcommand{\why}[1]{\par\smallskip\noindent
+  \begin{minipage}{\linewidth}{\InterSemi\fontsize{7.5}{10}\selectfont\color{amber}%
+  \addfontfeature{LetterSpace=12}WHY}\enspace{\itshape #1}\end{minipage}\par\smallskip}
+
+% --- Tables of options: \begin{options}{Option}{Default}{What it does} rows \end{options}
+\RequirePackage{booktabs}
+\RequirePackage{tabularx}
+\RequirePackage{array}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\RequirePackage{xltabular}
+\newenvironment{options}[3]{%
+  \par\small\renewcommand{\arraystretch}{1.25}%
+  \setlength{\LTpre}{\medskipamount}\setlength{\LTpost}{\medskipamount}%
+  \xltabular{\linewidth}{@{}>{\ttfamily\raggedright\arraybackslash}p{0.32\linewidth}>{\raggedright\arraybackslash}p{0.15\linewidth}Y@{}}
+  \toprule \normalfont\bfseries #1 & \bfseries #2 & \bfseries #3 \\ \midrule \endhead
+  \bottomrule \endlastfoot}
+  {\endxltabular\par}
+% Two columns of plain text: \begin{pairs}[<first column width>]{A}{B} rows \end{pairs}
+\newenvironment{pairs}[3][0.40]{%
+  \par\small\renewcommand{\arraystretch}{1.25}%
+  \setlength{\LTpre}{\medskipamount}\setlength{\LTpost}{\medskipamount}%
+  \xltabular{\linewidth}{@{}>{\raggedright\arraybackslash}p{#1\linewidth}Y@{}}
+  \toprule \bfseries #2 & \bfseries #3 \\ \midrule \endhead
+  \bottomrule \endlastfoot}
+  {\endxltabular\par}
+
+% --- Gaps a draft shows on purpose
+\newcommand{\notwritten}{\par\noindent{\itshape\color{muted}Not written yet.}\par}
+\newcommand{\placeholder}[1]{\par\medskip\noindent
+  \fcolorbox{muted!45}{white}{\parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule}{%
+    \centering\itshape\small\color{muted}To come: #1}}\par\medskip}
+
+% --- The cover: \queencover{<date line>}
+\newcommand{\queencover}[1]{%
+  \pagenumbering{Alph}% its own numbering, so its page anchor clashes with nothing
+  \hypersetup{pageanchor=false}%
+  \begin{titlepage}
+  \thispagestyle{empty}
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[ink] (current page.south west) rectangle (current page.north east);
+    \node[anchor=south east,inner sep=0] at ([xshift=2mm,yshift=0mm]current page.south east)
+      {\includegraphics[height=186mm]{scene-on-dark.png}};
+    \node[anchor=north west,inner sep=0,text width=125mm,align=left]
+      at ([xshift=18mm,yshift=-28mm]current page.north west) {%
+      {\InterSemi\fontsize{9.5}{12}\selectfont\color{queenyellow}\addfontfeature{LetterSpace=22}%
+        \spaceskip=0.62em\relax THE LITTLE BOOK OF}\par\vspace{4mm}
+      {\InterBold\fontsize{48}{50}\selectfont\color{paper}QueenMQ}\par\vspace{8mm}
+      {\itshape\fontsize{13.5}{18}\selectfont\color{paper!70!ink}Partitions are for ordering.\\
+        Not for scaling.}};
+    \node[anchor=south west,inner sep=0,text width=100mm,align=left]
+      at ([xshift=18mm,yshift=17mm]current page.south west) {%
+      \includegraphics[width=36mm]{wordmark-on-dark.pdf}\par\vspace{5mm}
+      {\InterRegular\fontsize{8.5}{12.5}\selectfont\color{paper!60!ink}%
+        #1\enspace\textperiodcentered\enspace Queen 2.6\enspace\textperiodcentered\enspace queenmq.com}};
+  \end{tikzpicture}
+  \end{titlepage}
+  \cleardoublepage
+  \hypersetup{pageanchor=true}}

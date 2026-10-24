@@ -1,0 +1,26 @@
+% Chapter 6: Architecture
+% The chapter's own opening text goes after \chapter; its sections are files in
+% chapters/6-architecture/, added below with \input in the order they appear in the book.
+
+\chapter{Architecture}
+
+% Draft by Claude, 2026-10-24, from webdoc internals pages (index, storage, life-of-a-step) and the
+% server code; the queue-log bytes below are from a 2.6.0 node.
+A Queen node is one process. Every write is decided once, on the leader, and then applied on every
+node. This chapter follows a write through the process, from the request to the disk.
+
+The rule behind the whole design is: \textbf{one leader per tenant}. A tenant lives in one raft
+group, and one leader orders all its writes. So a transaction, even across ten queues, is one log
+entry: no coordinator, no two-phase commit. The price is that one tenant's writes do not spread
+over more nodes. To use more nodes for writes, run more raft groups (see Many tenants on one
+cluster): with as many groups as nodes, every node leads one.
+
+\queenfig{raft-groups}{One leader per tenant: three raft groups, each led on a different node.}
+
+\input{chapters/6-architecture/1-leader-and-followers}
+\input{chapters/6-architecture/2-admission-batch-plan-apply}
+\input{chapters/6-architecture/3-raft-internal-protocol}
+\input{chapters/6-architecture/4-memory-state}
+\input{chapters/6-architecture/5-consumption-engine}
+\input{chapters/6-architecture/6-lmdb}
+\input{chapters/6-architecture/7-storage}

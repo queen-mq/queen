@@ -1,0 +1,126 @@
+% Chapter 5, section 2: Run a cluster inside Kubernetes
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-23. NOT run for the book: the commands and the outputs come from the
+% site's Kubernetes and operator pages (webdoc/src/content/docs/operate/kubernetes.mdx and
+% operator.mdx), which were tested on k3s.
+
+\section{Run a cluster inside Kubernetes}
+
+On Kubernetes a cluster is a StatefulSet of three pods. Each pod gets its own volume, the pods
+find each other through a headless Service, a second Service carries port 6632 to clients, and a
+disruption budget lets Kubernetes evict only one pod at a time. There are two ways to run it: a
+plain manifest you apply yourself, or the operator, which runs the same cluster from one object.
+
+\queenfig{k8s-topology}{The cluster on Kubernetes.}
+
+The repository ships no Helm chart. The complete manifest is on the site
+(\href{https://queenmq.com/manage/kubernetes/}{queenmq.com/manage/kubernetes}), ready to copy
+or to put in your own chart.
+
+\subsection{The secret}
+
+Both ways start with a namespace and a secret: the token the nodes share, and the key that
+encrypts payloads on disk.
+
+\begin{shell}
+kubectl create namespace queen
+kubectl -n queen create secret generic queen \
+  --from-literal=QUEEN_RAFT_TOKEN="$(openssl rand -hex 32)" \
+  --from-literal=QUEEN_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+\end{shell}
+
+Keep a copy of the encryption key somewhere safe, apart from the cluster. Without it, the payloads
+of encrypted queues cannot be read, and a backup does not contain it.
+
+\subsection{The manifest}
+
+The manifest is ordinary Kubernetes, but a few fields are there for a reason that is not obvious.
+Change them only if you know what you lose.
+
+\begin{options}{Field}{Value}{Why}
+podManagementPolicy & Parallel & With \texttt{publishNotReadyAddresses}, lets all pods start together. Without both, a full restart never ends: no pod is ready without a leader, and no leader is elected until the pods can find each other. \\
+publishNotReady\-Addresses & true & On the headless Service, for the same reason. \\
+QUEEN\_RAFT\_NODE\_ID & ordinal & Pod \texttt{queen-0} is node 1, \texttt{queen-1} is node 2, and so on. \\
+readinessProbe & /health & A pod that does not know a leader, or is behind, gets no clients, and a rolling update waits for it. \\
+livenessProbe & TCP on 6632 & Never \texttt{/health}: an election would make every pod fail it, and Kubernetes would restart them all at once. \\
+terminationGrace\-PeriodSeconds & 90 & A stopping pod hands over its work first, which can take close to a minute. Shorter, and the stop becomes a crash. \\
+CPU limit & none & Throttling turns a burst of work into a missed heartbeat. Memory request equals the limit. \\
+podAntiAffinity & required & One voter per machine: two voters on one machine turn its failure into a lost majority. \\
+\end{options}
+
+After \texttt{kubectl apply}, check that the three nodes formed one cluster:
+
+\begin{shell}
+kubectl -n queen rollout status statefulset/queen
+kubectl -n queen exec queen-0 -- curl -s localhost:6632/api/v1/system/raft/membership \
+  | jq -c '.membership | {leader, term, voters, members: [.members[] | {nodeId, live, lag}]}'
+\end{shell}
+
+\begin{shell}
+{"leader":1,"term":4,"voters":[1,2,3],"members":[{"nodeId":1,"live":true,"lag":0},...]}
+\end{shell}
+
+Three voters, all live, none behind. Clients use the \texttt{queen} Service and can land on any
+pod.
+
+\why{a StatefulSet gives each pod a stable name and its own volume, which is what a node of a
+cluster needs: the same identity and the same disk after every restart.}
+
+\subsection{The operator}
+
+A StatefulSet cannot add a voter, replace a node whose volume is lost, or grow its volumes, and
+its rolling update moves on as soon as a pod is Ready. The operator does those steps for you,
+through the same HTTP API you would use. Install it once:
+
+\begin{shell}
+kubectl apply -f \
+  https://raw.githubusercontent.com/queen-mq/queen/master/deploy/operator/install.yaml
+\end{shell}
+
+Then, with the secret above, a cluster is one object:
+
+\begin{code}
+apiVersion: queenmq.com/v1alpha1
+kind: QueenCluster
+metadata:
+  name: queen
+  namespace: queen
+spec:
+  version: "2.6.0"
+  replicas: 3
+  secretName: queen
+  storage:
+    size: 50Gi
+\end{code}
+
+\begin{shell}
+kubectl -n queen get queencluster
+NAME    VERSION   VOTERS    COMMITS   PHASE   AGE
+queen   2.6.0     [1,2,3]   true      Ready   40s
+\end{shell}
+
+\texttt{COMMITS} is a write the operator makes once a minute: \texttt{true} while the cluster can
+commit. The pods and Services have the same names as in the manifest.
+
+\why{the steps that keep a cluster whole (remove a node before you wipe it, add it back as a
+learner, restart the leader last) are easy to get wrong by hand on a bad day. The operator does
+them in the right order, and stops and says why when only a person can decide. It is young: its
+API is \texttt{v1alpha1}, and a field may still change.}
+
+\subsection{Four things to know}
+
+\begin{itemize}
+\item \textbf{Scaling the StatefulSet does not add a voter.} The members live in the log. Add or
+remove voters through the membership API, or change \texttt{replicas} on the operator's object.
+\item \textbf{Some things are fixed at the first start:} the StatefulSet, Service and namespace
+names (they are part of the node addresses), and the ports.
+\item \textbf{Delete one volume at a time, and remove the member first.} In a test, deleting two
+volumes at once left a cluster that could not commit while every pod said Ready.
+\item \textbf{Pin the image version.} A pod that restarts on \texttt{latest} pulls whatever is
+current that day. An upgrade should be a step you take.
+\end{itemize}
+
+On the site: \href{https://queenmq.com/manage/kubernetes/}{queenmq.com/manage/kubernetes}. More there: \href{https://queenmq.com/manage/operator/}{the operator}.

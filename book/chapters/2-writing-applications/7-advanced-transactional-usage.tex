@@ -1,0 +1,28 @@
+% Chapter 2, section 7: Advanced transactional usage
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Advanced transactional usage}
+
+The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or
+none of them does. That one call replaces the outbox table, the idempotency table and the cron job.
+
+\guide{transaction}
+
+Then open the dashboard: its KV page holds the order's new state, and its Timers page holds
+tomorrow's reminder.
+
+\why{a worker's step is several writes: it marks its input done, saves what changed, tells the
+next service and plans what comes later. When those writes go to different systems, a crash between
+two of them leaves the step half done, and someone writes code to find and repair the halves. One
+commit has no halves.}
+
+If the worker took too long and its lease ran out, the whole transaction is refused, so a slow
+worker can never write over the one that has the message now. If the step committed and only the
+answer got lost, a retry with the same \texttt{transactionId}s is refused whole, and nothing is
+written twice.
+
+\queenfig{lease-fence}{A worker whose lease ran out: its whole transaction rolls back.}
+
+On the site, with the code in all six SDK languages: \href{https://queenmq.com/writing-applications/transactions/}{queenmq.com/writing-applications/transactions}.

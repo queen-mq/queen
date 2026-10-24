@@ -1,0 +1,23 @@
+% Chapter 2, section 1: Setup a local broker
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Setup a local broker}
+
+\screenshot[b]{dashboard-overview}{The dashboard, served on the same port as the API.}
+
+One binary serves the HTTP API and the dashboard on one port:
+
+\begin{shell}
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+\end{shell}
+
+Open http://localhost:6632 and watch every step of this part land in the dashboard
+(Figure~\ref{fig:dashboard-overview}). Then add the client:
+
+\queenfig{one-node}{One process serves the API, the dashboard, health and metrics on port 6632.}
+
+\begin{shell}
+npm install queen-mq
+\end{shell}

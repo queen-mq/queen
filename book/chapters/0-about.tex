@@ -1,0 +1,42 @@
+% About this book (front matter, unnumbered)
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a gap in the draft: \placeholder{...}. See book/latex/queen.sty for the full list.
+
+\chapter*{About this book}
+\addcontentsline{toc}{chapter}{About this book}
+\markboth{About this book}{About this book}
+
+This book is written by the authors of QueenMQ. In it, we have tried to explain in simple terms
+what QueenMQ does, and why. Here is what each chapter covers.
+
+\paragraph{1. Introduction.} What QueenMQ is, why we built it (the story that went from a Postgres
+table to a log on disk replicated with Raft), and the model behind it, in four ideas: partitions,
+leases, transactions and a simple interface.
+
+\paragraph{2. Writing applications with QueenMQ.} Every feature of the client API, one at a time, in
+JavaScript: a local broker, queues and their options, push, pop and consume, acks, retries and the
+dead-letter queue, transactions, KV, locks and timers, ephemeral queues and stream processing. Each
+feature comes with the reason it exists.
+
+\paragraph{3. Real applications examples.} The common messaging patterns, one page each: work queue,
+publish/subscribe, request and reply, ordering and batching, workflows, windowed aggregation, rate
+limiting, last value, delayed messages, retries and dead letters, and one worker at a time. Each
+one solves a real problem in a few lines.
+
+\paragraph{4. Integrations.} How QueenMQ works with the systems around it: Kafka clients through
+its built-in Kafka port, an S3 bucket kept up to date by the sink, and PostgreSQL tables read and
+written by the source and the sink.
+
+\paragraph{5. Manage clusters.} The settings that matter most, a cluster with Docker and inside
+Kubernetes, the configuration for different needs (tenants included), upgrades and monitoring, and
+what to do when something breaks.
+
+\paragraph{6. Architecture.} How the broker works inside: one leader per tenant, the path of a write
+from the request to the disk, Raft, the memory state, the consumption engine, LMDB, and the files
+on disk down to their bytes.
+
+\medskip
+Every piece of code in this book comes from a program that runs it against QueenMQ 2.6.0 and checks
+the result. The examples are in JavaScript; the website has them in every language of the SDKs.
+
+We hope this book helps everyone make the most of QueenMQ.

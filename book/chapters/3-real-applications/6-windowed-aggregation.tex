@@ -1,0 +1,32 @@
+% Chapter 3, section 6: Windowed aggregation
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Windowed aggregation}
+
+Tracing: an SDK sends one event for each step of a request (the HTTP call, the database query, the
+cache lookup), and retries when it gets no answer. A trace is finished when no more events arrive,
+and what you want to keep is one record per trace. The same shape counts visits, sessions and
+anything else that ends when it goes quiet.
+
+Each trace is a partition, and each event's \texttt{transactionId} is the trace and the step, so a
+retried event is stored once. A stream with a session window closes a trace after two seconds of
+quiet, adds it up, and pushes one message per finished trace.
+
+\queenfig{trace-merge}{Events merged into one record per trace by a session window.}
+
+\guide{uc-trace}
+
+Two seconds after the last event, the \texttt{traces} queue held one message: 3 spans and 168~ms.
+The retried database event was counted once.
+
+\why{every trace is its own ordered stream, so ``this partition went quiet'' is exactly ``this
+trace is finished''. The open traces live in the broker, so a restart of the merger loses nothing.}
+
+With many traces, delete the empty trace partitions quickly (Many short-lived partitions, in
+chapter 5), and copy the finished traces to a bucket (the S3 sink, in chapter 4). One thing to
+know: a trace that pauses longer than the gap becomes two records, and the reader merges them.
