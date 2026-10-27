@@ -14,6 +14,8 @@ second. Every customer, order or conversation gets its own ordered partition. Ev
 takes is saved as one commit, or not at all. One binary, no database, and Kafka clients work with
 it out of the box.
 
+**Live demo, Codemotion week:** [milan.queenmq.com](https://milan.queenmq.com): 50,000 cars in Milan, each car its own partition, 500,000 messages a second on one Queen node.
+
 [Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.6
 
 </div>
