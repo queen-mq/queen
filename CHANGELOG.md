@@ -12,6 +12,13 @@ that run against a broker and check their results (`examples/tutorials/run.sh`).
 PDF at [queenmq.com/book](https://queenmq.com/book/). Every page of the old tree redirects to the
 page that now answers its question.
 
+**Go client: a guarded step no longer rolls back while its lock is held, after a slow renew.** The
+background renew gives up after `RenewEvery` (a third of the lifetime by default). A renew slower
+than that could still land on the broker: the lock's token moved and the handle kept the old one,
+so a step with `Guard(lock)` rolled back, `Success: false` with no error, until the next renew
+answered. The step now renews with the token it has, which the broker carries through for the same
+owner, and is sent again with the current token.
+
 Supervisor fixes made after supervisor 0.8.1, which PHP client 2.5.0 pins: they ship with the next
 supervisor release.
 
