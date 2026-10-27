@@ -817,7 +817,10 @@ def backend_restart(lane: Lane) -> list[Check]:
     lane.note(f"{lane.backend} restarted")
     jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 300, "all completed")
     jobs = lane.settle(35)
-    return completed_once(jobs, expected)
+    # Horizon: a job that finished while Redis restarted could not be
+    # acknowledged, and runs again (the jobs in flight at the restart, 1 or 2
+    # of 300 a night). Queen's profiles must run each job once.
+    return completed_once(jobs, expected, duplicates_allowed=lane.profile.engine == "horizon")
 
 
 def backend_pause(lane: Lane, pause: float, sleep_ms: int, *, duplicates_allowed: bool = False) -> list[Check]:

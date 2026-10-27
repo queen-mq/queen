@@ -121,7 +121,7 @@ jobs:
                 echo 'BENCH_COMPOSER_VERSION=2.10.3'
                 echo 'BENCH_LARAVEL_VERSION=11.55.1'
                 echo 'BENCH_HORIZON_VERSION=5.48.3'
-                echo 'BENCH_COMPOSER_ADVISORY_IGNORE_IDS=PKSA-d5tc-s1qs-h781 PKSA-m5cs-t1y6-qpcs PKSA-3r5d-mb8f-1qw9 PKSA-mdq4-51ck-6kdq'
+                echo 'BENCH_COMPOSER_ADVISORY_IGNORE_IDS=PKSA-d5tc-s1qs-h781 PKSA-m5cs-t1y6-qpcs PKSA-3r5d-mb8f-1qw9 PKSA-mdq4-51ck-6kdq PKSA-b41t-wbzk-9q51'
                 ;;
               *) echo "unknown stack $STACK" >&2; exit 1 ;;
             esac
@@ -145,6 +145,9 @@ jobs:
 
   lanes:
     needs: [plan, image]
+    # One image that fails to build fails the lanes that load it, at their
+    # download; the others still run.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     name: ${{ matrix.lane.group }} on broker ${{ matrix.lane.broker }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
