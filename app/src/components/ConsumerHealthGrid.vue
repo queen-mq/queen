@@ -401,7 +401,7 @@ const displayed = computed(() => {
   background: var(--ink-3);
   color: var(--text-low);
   font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: .08em;
   text-transform: uppercase;

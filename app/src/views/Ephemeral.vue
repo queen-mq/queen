@@ -627,8 +627,8 @@ const runPending = async () => {
   font-size: 12px; color: var(--text-low);
 }
 .eph-drop i {
-  font-style: normal; font-size: 9px; letter-spacing: .06em;
-  text-transform: uppercase; color: var(--text-faint);
+  font-style: normal; font-size: 11px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--text-low);
 }
 /* Raised ink once something has actually been dropped — see dropClass(). */
 .eph-drop.on { color: var(--text-hi); }
@@ -638,7 +638,7 @@ const runPending = async () => {
   font-size: 11.5px; color: var(--text-low); margin-bottom: 10px;
 }
 .eph-detail-meta b { color: var(--text-hi); font-weight: 600; }
-.eph-detail-note { color: var(--text-faint); font-style: italic; }
+.eph-detail-note { color: var(--text-low); font-style: italic; }
 
 /* The group table is a table inside a row: no card, no outer border, and a
    head that reads as a sub-head rather than a second page header. */

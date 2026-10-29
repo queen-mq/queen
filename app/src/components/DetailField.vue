@@ -86,7 +86,7 @@ onBeforeUnmount(() => clearTimeout(resetTimer))
 .detail-field-copyable { display: flex; align-items: flex-start; gap: 8px; }
 .detail-field-copyable .detail-field-value { flex: 1; }
 .detail-field-copy {
-  flex-shrink: 0; padding: 1px 6px; font-size: 10.5px;
+  flex-shrink: 0; padding: 1px 6px; font-size: 11px;
 }
 .detail-field-header {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;

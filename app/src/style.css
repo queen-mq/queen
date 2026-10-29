@@ -20,22 +20,26 @@
     /* ---- Surfaces: sidebar < page < card ---------------------------------- */
     --rail:  #000000;  /* the sidebar column: one visible step below the page;
                           #070606 was 1.3 L* away and read as the same black */
-    --ink-0: #0b0a0a;  /* page                                               */
-    --ink-1: #070606;  /* deepest well inside the page                       */
-    --ink-2: #111010;  /* card                                               */
-    --ink-3: #171615;  /* input, recessed                                    */
-    --ink-4: #1c1b19;  /* hover                                              */
-    --ink-5: #242220;  /* active / selected                                  */
+    --ink-0: #0c0b0a;  /* page                                               */
+    --ink-1: #080707;  /* deepest well inside the page                       */
+    --ink-2: #191817;  /* card: 1.11:1 on the page, so a panel reads as one  */
+    --ink-3: #201f1d;  /* input, recessed                                    */
+    --ink-4: #262422;  /* hover                                              */
+    --ink-5: #2c2a27;  /* active / selected                                  */
 
     --recessed: var(--ink-1);
     --card:     var(--ink-2);
-    --selected: color-mix(in srgb, var(--accent) 14%, var(--ink-2));
+    /* Selection is a neutral step; the yellow stays on the label and the
+       primary action, not on the fill of every chosen tab. */
+    --selected: var(--ink-5);
 
-    /* ---- Text: warm white down to warm grey. --text-low is 5.4:1 on a card. */
-    --text-hi:    #eeebe6;
-    --text-mid:   #aaa59e;
-    --text-low:   #8f8a83;
-    --text-faint: #57534e;  /* rules and glyphs, never text */
+    /* ---- Text: warm white down to warm grey. Every tier that carries words
+       holds 4.5:1 on every surface it sits on (--text-low: 4.8:1 on the
+       selected step, 6.0:1 on a card). */
+    --text-hi:    #f3f0eb;
+    --text-mid:   #b8b3ab;
+    --text-low:   #9a958e;
+    --text-faint: #706b65;  /* rules and glyphs, never words: 3:1 or more */
     --text: var(--text-mid);
     --brand: #fcc620;       /* sunflower yellow sampled from the logo */
 
@@ -45,9 +49,9 @@
     --on-accent:  #000000;
 
     /* ---- State. ok and idle are NEUTRAL: healthy says nothing. ------------ */
-    --ok-500: #8f8a83;
-    --ok-glow: rgba(143, 138, 131, 0.10);
-    --ok-bd:   rgba(143, 138, 131, 0.26);
+    --ok-500: #9a958e;
+    --ok-glow: rgba(154, 149, 142, 0.10);
+    --ok-bd:   rgba(154, 149, 142, 0.26);
 
     --warn-400: #e8a849;                     /* attention: amber              */
     --warn-500: #d9962f;
@@ -61,15 +65,16 @@
     --ember-glow: rgba(240, 122, 95, 0.12);
     --ember-bd:   rgba(240, 122, 95, 0.30);
 
-    --ice-400: #77726b;                      /* idle: a quiet ring            */
-    --ice-500: #6b6660;
-    --ice-600: #5a5651;
-    --ice-glow: rgba(119, 114, 107, 0.10);
-    --ice-bd:   rgba(119, 114, 107, 0.26);
+    --ice-400: #8a857e;                      /* idle: a quiet ring, and the
+                                                words of an idle chip (4.8:1) */
+    --ice-500: #78736d;
+    --ice-600: #66625c;
+    --ice-glow: rgba(138, 133, 126, 0.10);
+    --ice-bd:   rgba(138, 133, 126, 0.28);
 
-    --info-400: #aaa59e;
-    --info-glow: rgba(170, 165, 158, 0.08);
-    --info-bd:   rgba(170, 165, 158, 0.24);
+    --info-400: #b8b3ab;
+    --info-glow: rgba(184, 179, 171, 0.08);
+    --info-bd:   rgba(184, 179, 171, 0.24);
 
     --scope-400: var(--text-low);
     --scope-glow: transparent;
@@ -78,21 +83,22 @@
     --crown-400: var(--accent-text);
 
     /* ---- Charts: warm greys, adjacent slots apart by lightness. ----------- */
-    --series-1: #eeebe6;
-    --series-2: #8f8a83;
-    --series-3: #66625c;
-    --series-4: #bdb7af;
-    --series-5: #4a4743;
+    --series-1: #f3f0eb;
+    --series-2: #9a958e;
+    --series-3: #6b6661;
+    --series-4: #c4beb6;
+    --series-5: #4f4b47;
     --cat-1: #7f9fd0;
     --cat-2: #6fb3a3;
     --cat-3: #b092d0;
     --cat-4: #a3b56f;
     --cat-5: #d08fae;
 
-    /* ---- Lines ----------------------------------------------------------- */
-    --bd:      #1f1d1b;
-    --bd-hi:   #34312e;
-    --bd-soft: #181716;
+    /* ---- Lines: card edge 1.24:1 on a card, control outline 1.9:1, so an
+       outlined control reads as clickable without a fill. ----------------- */
+    --bd:      #2c2a27;
+    --bd-hi:   #4a4743;
+    --bd-soft: #22201e;
 
     --ring: var(--accent-text);
 
@@ -105,7 +111,7 @@
     --shadow-sm: none;
     --shadow:    none;
     --shadow-lg: none;
-    --shadow-pop: 0 14px 34px -14px rgba(0, 0, 0, 0.7), 0 0 0 1px #34312e;
+    --shadow-pop: 0 14px 34px -14px rgba(0, 0, 0, 0.7), 0 0 0 1px #4a4743;
     --scrim: rgba(7, 6, 6, 0.62);
 
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
@@ -116,25 +122,29 @@
   }
 
   /* ========================================================================
-     LIGHT — an overcast day: warm paper, soft contrast, the same rules.
+     LIGHT — white sheets on a neutral grey, black ink, the logo's yellow on
+     the one action. Not paper: a cream ground under rust and coral read as
+     every generated dashboard, and its 1.06:1 card step hid the panels.
      ======================================================================== */
   html.light {
-    --rail:  #e8e5e0;  /* the sidebar column    */
-    --ink-0: #f2f0ec;  /* page                  */
-    --ink-1: #e8e5e0;  /* deepest well          */
-    --ink-2: #f9f7f4;  /* card                  */
-    --ink-3: #f1eee9;  /* input, recessed       */
-    --ink-4: #ebe7e1;  /* hover                 */
-    --ink-5: #e2ded7;  /* active                */
+    --rail:  #f5f5f4;  /* the sidebar column: the page's own ground, so the
+                          selected pill shows on it (1.14:1); a darker rail
+                          swallowed the pill */
+    --ink-0: #f5f5f4;  /* page                  */
+    --ink-1: #ededeb;  /* deepest well          */
+    --ink-2: #ffffff;  /* card: 1.09:1 on the page, with a 1.3:1 edge */
+    --ink-3: #fcfcfb;  /* input: white, its border does the work */
+    --ink-4: #f0f0ee;  /* hover                 */
+    --ink-5: #e7e7e4;  /* active                */
 
-    --recessed: var(--ink-3);
+    --recessed: var(--ink-0);
     --card:     var(--ink-2);
-    --selected: color-mix(in srgb, var(--accent) 14%, var(--ink-2));
+    --selected: var(--ink-5);
 
-    --text-hi:    #1f1d1a;
-    --text-mid:   #4f4b45;
-    --text-low:   #6c675f;  /* 5.3:1 on a card */
-    --text-faint: #b0aaa2;
+    --text-hi:    #1a1918;
+    --text-mid:   #45423e;
+    --text-low:   #67625c;  /* 6.0:1 on a card, 4.9:1 on the selected step */
+    --text-faint: #8c8782;  /* rules and glyphs, never words: 3:1 or more */
     --text: var(--text-mid);
     --brand: #fcc620;
 
@@ -143,31 +153,33 @@
     --accent-text: #806000;
     --on-accent:  #000000;
 
-    --ok-500: #6c675f;
-    --ok-glow: rgba(108, 103, 95, 0.08);
-    --ok-bd:   rgba(108, 103, 95, 0.24);
+    --ok-500: #67625c;
+    --ok-glow: rgba(103, 98, 92, 0.08);
+    --ok-bd:   rgba(103, 98, 92, 0.24);
 
-    --warn-400: #9a5b07;
-    --warn-500: #7f4a05;
-    --warn-glow: rgba(154, 91, 7, 0.09);
-    --warn-bd:   rgba(154, 91, 7, 0.30);
+    /* Amber without the rust, red without the coral: both 5.3:1 or more on
+       the page and on a card. */
+    --warn-400: #8f5a00;
+    --warn-500: #774a00;
+    --warn-glow: rgba(143, 90, 0, 0.09);
+    --warn-bd:   rgba(143, 90, 0, 0.32);
     --amber: var(--warn-400);
 
-    --ember-400: #c6452e;
-    --ember-500: #b03a25;
-    --ember-600: #962f1d;
-    --ember-glow: rgba(198, 69, 46, 0.09);
-    --ember-bd:   rgba(198, 69, 46, 0.30);
+    --ember-400: #c0262d;
+    --ember-500: #a51f25;
+    --ember-600: #8a1a1f;
+    --ember-glow: rgba(192, 38, 45, 0.07);
+    --ember-bd:   rgba(192, 38, 45, 0.32);
 
-    --ice-400: #a39d95;
-    --ice-500: #8f8a83;
-    --ice-600: #77726b;
-    --ice-glow: rgba(163, 157, 149, 0.10);
-    --ice-bd:   rgba(163, 157, 149, 0.28);
+    --ice-400: #6b6660;
+    --ice-500: #7d7872;
+    --ice-600: #8c8782;
+    --ice-glow: rgba(107, 102, 96, 0.08);
+    --ice-bd:   rgba(107, 102, 96, 0.26);
 
-    --info-400: #4f4b45;
-    --info-glow: rgba(79, 75, 69, 0.06);
-    --info-bd:   rgba(79, 75, 69, 0.22);
+    --info-400: #45423e;
+    --info-glow: rgba(69, 66, 62, 0.06);
+    --info-bd:   rgba(69, 66, 62, 0.22);
 
     --scope-400: var(--text-low);
     --scope-glow: transparent;
@@ -175,28 +187,28 @@
 
     --crown-400: var(--accent-text);
 
-    --series-1: #1f1d1a;
-    --series-2: #8f8a83;
-    --series-3: #b0aaa2;
-    --series-4: #4f4b45;
-    --series-5: #cdc7bf;
+    --series-1: #1a1918;
+    --series-2: #8c8782;
+    --series-3: #b5b1ab;
+    --series-4: #45423e;
+    --series-5: #d3d0cb;
     --cat-1: #44689e;
     --cat-2: #2c7a6a;
     --cat-3: #6f4fa0;
     --cat-4: #5b7a26;
     --cat-5: #9a4d73;
 
-    --bd:      #e0dcd6;
-    --bd-hi:   #cfc9c1;
-    --bd-soft: #ebe7e1;
+    --bd:      #e2e2df;
+    --bd-hi:   #cfcfcb;
+    --bd-soft: #ededeb;
 
     --ring: var(--accent-text);
 
     --shadow-sm: none;
     --shadow:    none;
     --shadow-lg: none;
-    --shadow-pop: 0 14px 32px -16px rgba(40, 30, 20, 0.28), 0 0 0 1px #d4cfc8;
-    --scrim: rgba(40, 36, 32, 0.25);
+    --shadow-pop: 0 14px 32px -16px rgba(20, 20, 18, 0.24), 0 0 0 1px #d6d6d2;
+    --scrim: rgba(20, 20, 18, 0.25);
 
     color-scheme: light;
   }
@@ -223,7 +235,7 @@
      `a:not([class])` port of the docs' link idiom would be dead CSS. */
   code:not([class]):not(pre *) {
     font-family: var(--font-mono);
-    font-size: 0.8125em;
+    font-size: max(0.8125em, 11px); /* inside 12px notes, 0.8125em was 9.75px */
     font-weight: 450;
     background: var(--recessed);
     border: 1px solid var(--bd);
@@ -319,7 +331,7 @@
 .search-item:hover, .search-item.active { background: var(--ink-4); }
 .search-type {
   width: 22px; height: 20px; border-radius: var(--r-chip); display: grid; place-items: center;
-  font-size: 10px; font-weight: 600; background: var(--ink-4); color: var(--text-mid);
+  font-size: 11px; font-weight: 600; background: var(--ink-4); color: var(--text-mid);
   border: 1px solid var(--bd);
 }
 
@@ -356,7 +368,7 @@
   .stat, .metric-card { background: var(--ink-2); }
 
   .stat .stat-label {
-    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+    font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
     color: var(--text-low); display: flex; align-items: center; gap: 6px;
     font-weight: 500;
   }
@@ -369,13 +381,13 @@
   .stat .stat-foot { margin-top: 2px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-low); }
 
   /* --- Trend pills --- */
-  .trend { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: var(--r-pill); font-family: 'JetBrains Mono',monospace; font-size: 10.5px; font-weight: 500; border: 1px solid transparent; }
+  .trend { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: var(--r-pill); font-family: 'JetBrains Mono',monospace; font-size: 11px; font-weight: 500; border: 1px solid transparent; }
   .trend-up   { background: var(--ok-glow);    color: var(--ok-500);    border-color: color-mix(in srgb, var(--ok-500) 20%, transparent); }
   .trend-down { background: var(--ember-glow); color: var(--ember-400); border-color: color-mix(in srgb, var(--ember-500) 20%, transparent); }
   .trend-flat { background: var(--ink-3);      color: var(--text-mid);  border-color: var(--bd); }
 
   /* --- Chips/Badges --- */
-  .chip, .badge { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: var(--r-chip); font-size: 10.5px; font-weight: 500; border: 1px solid transparent; letter-spacing: 0.01em; }
+  .chip, .badge { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: var(--r-chip); font-size: 11px; font-weight: 500; border: 1px solid transparent; letter-spacing: 0.01em; }
   .chip .dot, .badge .dot { width: 4px; height: 4px; border-radius: var(--r-pill); }
   .chip-ok, .badge-success { color: var(--ok-500); background: var(--ok-glow); border-color: color-mix(in srgb, var(--ok-500) 22%, transparent); }
   .chip-ok .dot, .badge-success .dot { background: var(--ok-500); }
@@ -425,7 +437,7 @@
   /* --- Tables --- */
   .t, .table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .t th {
-    text-align: left; font-weight: 500; font-size: 10.5px;
+    text-align: left; font-weight: 500; font-size: 11px;
     letter-spacing: .08em; text-transform: uppercase;
     color: var(--text-low); padding: 7px 12px;
     border-bottom: 1px solid var(--bd);
@@ -491,7 +503,7 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* --- Labels --- */
-  .label-xs { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; font-weight: 500; color: var(--text-low); }
+  .label-xs { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; font-weight: 500; color: var(--text-low); }
 
   /* --- Status dots --- */
   .status-dot { width: 6px; height: 6px; border-radius: var(--r-pill); }
@@ -560,7 +572,7 @@
   /* --- Compat aliases --- */
   .metric-value { font-size: 22px; font-weight: 600; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; color: var(--text-hi); line-height: 1.15; margin-top: 0; }
   .metric-label { font-size: 11px; color: var(--text-low); }
-  .metric-change { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 500; }
+  .metric-change { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 500; }
   .metric-change-up { color: var(--ok-500); }
   .metric-change-down { color: var(--ember-400); }
 
@@ -662,10 +674,10 @@
      (Dashboard's counts strip, MetricRow). */
   .cell-chip {
     font-style: normal;
-    font-size: 9px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
     color: var(--scope-400); border: 1px solid var(--scope-400);
     border-radius: var(--r-chip); padding: 0 3px;
-    margin-left: 5px; vertical-align: 1px; opacity: .85;
+    margin-left: 5px; vertical-align: 1px;
   }
 
   /* --- Filter card ------------------------------------------------------
@@ -841,7 +853,7 @@
     margin-bottom: 8px;
   }
   .detail-section-title {
-    margin-bottom: 8px; font-size: 10.5px; letter-spacing: .14em;
+    margin-bottom: 8px; font-size: 11px; letter-spacing: .14em;
     text-transform: uppercase; font-weight: 500; color: var(--text-low);
   }
   .detail-copy-button { padding: 2px 8px; font-size: 11px; }
@@ -888,7 +900,7 @@
   .counts-group-right { color: var(--text-low); }
   .count-item-label {
     font-family: var(--font-mono);
-    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+    font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
     color: var(--text-low); margin-right: 2px;
   }
   .count-item {
@@ -908,11 +920,11 @@
   }
   .counts-group-right .count-item strong { color: var(--text-mid); font-size: 13px; }
   .count-suffix {
-    font-family: var(--font-mono); font-size: 10.5px;
+    font-family: var(--font-mono); font-size: 11px;
     color: var(--text-low); letter-spacing: .04em; text-transform: uppercase;
   }
   .count-muted strong { color: var(--text-mid); }
-  .count-sep { color: var(--bd-hi); font-size: 11px; user-select: none; }
+  .count-sep { color: var(--text-faint); font-size: 11px; user-select: none; }
 
   /* --- Metric table head (Dashboard + QueueDetail) -----------------------
      Hoisted verbatim. Both media queries must travel with it or the head
@@ -927,7 +939,7 @@
     display: grid;
     grid-template-columns: 14px 150px 160px 1fr 260px 24px;
     gap: 16px; padding: 9px 16px;
-    font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+    font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
     color: var(--text-low);
     border-bottom: 1px solid var(--bd);
     background: color-mix(in srgb, var(--text-hi) 1.5%, transparent);
@@ -1063,7 +1075,7 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .foot-version {
-  font-size: 10.5px; color: var(--text-low); text-align: center; margin-top: 4px;
+  font-size: 11px; color: var(--text-low); text-align: center; margin-top: 4px;
   font-family: 'JetBrains Mono', monospace;
 }
 
@@ -1087,7 +1099,7 @@
 .toast-body { flex: 1; min-width: 0; }
 .toast-title { font-size: 12.5px; font-weight: 550; color: var(--text-hi); }
 .toast-count {
-  margin-left: 5px; font-size: 10px; color: var(--text-low);
+  margin-left: 5px; font-size: 11px; color: var(--text-low);
   font-family: 'JetBrains Mono', monospace;
 }
 .toast-detail { font-size: 11.5px; color: var(--text-mid); margin-top: 2px; word-break: break-word; }

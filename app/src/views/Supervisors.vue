@@ -379,7 +379,7 @@ function onDrawerClick(event) { if (backdropDown && outside(event)) closeDrawer(
 .supervisor-app { margin: 0 0 18px; color: var(--text-low); font-size: 12px; overflow-wrap: anywhere; }
 .supervisor-detail-status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .supervisor-next { background: var(--ink-3); border-radius: var(--r-card); padding: 14px 16px; margin: 18px 0; }
-.supervisor-next span { color: var(--text-low); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+.supervisor-next span { color: var(--text-low); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 .supervisor-next p { margin: 6px 0 0; font-size: 13px; line-height: 1.6; }
 .supervisor-evidence { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--bd); border-radius: var(--r-card); margin: 20px 0 12px; }
 .supervisor-evidence > div { padding: 16px; min-width: 0; }

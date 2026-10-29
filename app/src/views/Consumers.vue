@@ -1074,7 +1074,7 @@ onMounted(() => {
   background: var(--ice-glow);
   color: var(--ice-400);
   font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: .08em;
   text-transform: uppercase;
