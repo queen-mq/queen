@@ -53,6 +53,11 @@ mod switches;
 mod syscollect;
 mod tenant;
 mod util;
+// Twin of the `mod test_alloc;` in lib.rs. Here mimalloc stays the allocator,
+// so it counts nothing and its memory tests only check their answers.
+#[cfg(test)]
+#[allow(dead_code)]
+mod test_alloc;
 
 /// Broker version, embedded from server.json at build time (see build.rs). Single
 /// source of truth shared with the Docker image tag (build.sh) and /health.

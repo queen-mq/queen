@@ -100,6 +100,48 @@ pub fn check_message_key_names(
     })
 }
 
+/// [`streams_max_state_bytes`]'s default: 16 MiB.
+pub const STREAMS_MAX_STATE_BYTES_DEFAULT: usize = 16 * 1024 * 1024;
+
+/// The largest value a Streams cycle may store in one state cell, in bytes of
+/// its JSON: `QUEEN_STREAMS_MAX_STATE_BYTES`, else
+/// [`STREAMS_MAX_STATE_BYTES_DEFAULT`], read once per process. A larger value
+/// is refused `state_too_large` (413) when the cycle is received, before
+/// anything is planned, as the KV value ceiling is
+/// (`planner::kv::max_value_bytes`).
+///
+/// A window's state is read whole on every cycle of its partition and on every
+/// idle flush, and written whole on every cycle, through the leader and the
+/// replicated log. On 2026-10-29 states of 20 to 65 MB took the leader past its
+/// memory limit, and each new leader after it.
+pub fn streams_max_state_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let raw = std::env::var("QUEEN_STREAMS_MAX_STATE_BYTES").ok();
+        let n = streams_state_ceiling(raw.as_deref());
+        if raw
+            .as_deref()
+            .is_some_and(|r| r.trim().parse::<usize>().ok() != Some(n))
+        {
+            tracing::warn!(
+                target: "boot",
+                value = raw.as_deref().unwrap_or(""),
+                ceiling = n,
+                "QUEEN_STREAMS_MAX_STATE_BYTES is not a positive byte count; using the default"
+            );
+        }
+        n
+    })
+}
+
+/// [`streams_max_state_bytes`]'s parse: a positive byte count, anything else
+/// the default.
+pub fn streams_state_ceiling(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(STREAMS_MAX_STATE_BYTES_DEFAULT)
+}
+
 // ---------------------------------------------------------------------------
 // Deadlines (I15) and the per-command context (§9.1, D6).
 // ---------------------------------------------------------------------------

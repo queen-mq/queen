@@ -5,6 +5,21 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Broker: large stream states and fetches no longer use many times their size in memory.**
+`POST /streams/v1/state/get` and `POST /api/v1/fetch` parsed every stored state and payload into a
+JSON tree and copied the tree two more times before printing it: a read held 19 to 25 times what it
+returned. `POST /streams/v1/cycle` held about 10 times its body. Window states of tens of megabytes,
+read on every cycle and every idle flush, took a leader past its memory limit, and then each new
+leader. These routes now check each stored document with the same JSON rules and write it into the
+answer as stored, so a read holds about its own size. The answers are the same JSON. A fetched
+payload keeps the producer's key order, spacing and number digits, as a pop always returned it, and
+a cycle stores its state and sink payloads as the SDK sent them.
+
+**Broker: a stream state value above 16 MiB is refused.** A Streams cycle with a state value larger
+than `QUEEN_STREAMS_MAX_STATE_BYTES` (16 MiB by default) answers 413 `state_too_large` and stores
+nothing, its pushes and ack included. Why: a window's state is read and written whole on every cycle
+of its partition. A delete is never refused.
+
 **Docs: rebuilt from the little book of QueenMQ.** The site now follows the book, chapter by
 chapter: introduction, writing applications, patterns, integrations, managing clusters and
 architecture, with every example in JavaScript, Python, Go, Rust, PHP and C++, cut from programs

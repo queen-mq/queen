@@ -16,6 +16,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/rsm/dashboard/collector.rs
       - server/src/rsm/dashboard/store.rs
       - server/src/rsm/facade/groups.rs
+      - server/src/rsm/facade/mod.rs
       - server/src/rsm/link/driver.rs
       - server/src/rsm/planner/kv.rs
       - server/src/rsm/planner/timers.rs
@@ -28,7 +29,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/s3_inproc.rs
 */}
 
-The broker is configured entirely through environment variables: 116 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 117 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set.
 
@@ -63,6 +64,7 @@ The broker is configured entirely through environment variables: 116 of them, li
 | `QUEEN_RAFT_TIMER_FIRE_MAX_BYTES` | integer | `4194304 (4 MiB)` |  |
 | `QUEEN_RAFT_TIMER_TICK_MS` | integer | `50 (0: timers never fire)` |  |
 | `QUEEN_STMT_TIMEOUT_MS` | integer | `30000` |  |
+| `QUEEN_STREAMS_MAX_STATE_BYTES` | integer | `16777216 (16 MiB)` |  |
 | `QUEEN_SWEEPER_BACKOFF_MAX_MS` | integer | `60000` |  |
 | `QUEEN_SWEEPER_BACKOFF_MIN_MS` | integer | `1000` |  |
 | `QUEEN_SWEEPER_MAX_ATTEMPTS` | integer | `5` |  |

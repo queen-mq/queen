@@ -316,29 +316,12 @@ impl RaftFacade {
         let answers = self
             .fetch_wait(&ctx, &asks, max_wait, min_bytes, true)
             .await?;
-        let entries: Vec<Value> = asks
-            .into_iter()
-            .zip(answers)
-            .map(|(ask, a)| {
-                let mut entry = json!({
-                    "queue": ask.queue,
-                    "partition": ask.partition,
-                    "records": a.records.into_iter().map(|rec| json!({
-                        "offset": rec.offset,
-                        "transactionId": rec.txn.unwrap_or_default(),
-                        "payload": payload_json(&rec.payload),
-                        "ts": crate::rsm::planner::timers::iso_us(rec.created_at_us),
-                    })).collect::<Vec<_>>(),
-                    "highWatermark": a.high_watermark,
-                    "logStartOffset": a.log_start_offset,
-                });
-                if let Some(error) = a.error {
-                    entry["error"] = Value::from(error);
-                }
-                entry
-            })
-            .collect();
-        Ok(ApiOut::json(200, json!({"entries":entries}).to_string()))
+        // Each payload written as it is stored (json_out): a tree of an
+        // 8 MiB answer took about 19 times that.
+        Ok(ApiOut::json(
+            200,
+            super::json_out::fetch_answer(&asks, &answers),
+        ))
     }
 
     /// [`crate::rsm::facade::Rsm::fetch_records`]: the read of `POST

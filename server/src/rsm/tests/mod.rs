@@ -96,6 +96,7 @@ mod store_crash;
 mod store_integrity;
 mod store_scrub;
 mod store_sigbus;
+mod streams_json;
 mod timers;
 mod timers_crash;
 mod traces;

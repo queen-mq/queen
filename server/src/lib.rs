@@ -67,6 +67,14 @@ mod syscollect;
 mod tenant;
 mod util;
 
+// Test builds only: the system allocator, counted on the threads that ask
+// (`test_alloc::peak_during`), for the tests that bound a route's memory.
+#[cfg(test)]
+mod test_alloc;
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOC: test_alloc::Counting = test_alloc::Counting;
+
 /// Broker version, embedded from server.json at build time (see build.rs).
 /// Same value the binary reports from /health.
 pub const VERSION: &str = env!("QUEEN_VERSION");

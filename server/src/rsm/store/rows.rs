@@ -1100,6 +1100,26 @@ pub struct StreamsStateRow {
     pub updated_at_us: i64,
 }
 
+/// A state row read in place: its value BORROWED from `b`, and its
+/// `updated_at_us`. `state/get` copies a value into its answer once, and a
+/// window's value can be tens of megabytes.
+pub fn streams_state_view(b: &[u8]) -> Result<(&[u8], i64), CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "streams state row version")?;
+    let n = r.u32("value")? as usize;
+    let rest = r.rest();
+    if n > rest.len() {
+        return Err(CodecError::Field("value"));
+    }
+    let value = &rest[..n];
+    r.skip(n, "value")?;
+    let updated_at_us = r.i64("updated_at_us")?;
+    if !r.done() {
+        return Err(CodecError::Field("streams state row trailing bytes"));
+    }
+    Ok((value, updated_at_us))
+}
+
 pub fn streams_state_encode(s: &StreamsStateRow) -> Vec<u8> {
     let mut w = Writer::with_capacity(16 + s.value.len());
     head(&mut w);

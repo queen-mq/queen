@@ -203,6 +203,16 @@ Applied in `server/src/rsm/facade/real/phase2/reads.rs` and `offsets.rs`.
 A call over a tenant's rate answers 429 `rate_limited`. A tenant's quota row can set its own rates
 and row and byte caps; see [tenants](/manage/tenants/).
 
+## Streams
+
+| Limit | `POST /streams/v1/cycle` | Setting |
+|---|---|---|
+| One state value | 16 MiB of JSON. A cycle with a larger one answers 413 `state_too_large` and stores nothing | `QUEEN_STREAMS_MAX_STATE_BYTES` |
+
+Why: a window's state is read and written whole on every cycle of its partition, so its size is
+paid on every event. Keep large data out of the state: put it in a message or your own storage, and
+keep a reference. Applied in `server/src/rsm/facade/real/phase2/streams.rs`.
+
 ## Locks
 
 A lock is a KV row in the namespace `queen-locks`, so the KV value, rate and quota limits above

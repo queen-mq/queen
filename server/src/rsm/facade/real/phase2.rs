@@ -19,6 +19,7 @@ use crate::rsm::store::{Keyspace, Reads, Store, StoreError, TypedReads};
 
 mod admin;
 mod dash;
+mod json_out;
 mod link;
 mod offsets;
 mod positions;
@@ -1141,25 +1142,22 @@ impl RaftFacade {
                 }
                 let Some(pid) = pid else { return Ok(None); };
                 let sp = keys::streams_state_prefix(&qid, pid);
-                let mut out = Vec::new();
+                // Each value written into the answer as it is stored
+                // (json_out): a tree of a large window took 25 times its size.
+                let mut answer = json_out::StateAnswer::new();
                 r.scan_raw(Keyspace::StreamsState, &sp, &sp, usize::MAX, &mut |k,v| {
-                    if let (Some(key), Ok(row)) = (keys::streams_state_key_of(k), crate::rsm::store::rows::streams_state_decode(v)) {
-                        let value = serde_json::from_slice::<Value>(&row.value).unwrap_or(Value::Null);
-                        let ripe = ripe_at_or_before.is_none_or(|cutoff| value.get("windowEnd").and_then(Value::as_i64).is_some_and(|end| end <= cutoff));
-                        if ripe && (keys_wanted.is_empty() || keys_wanted.contains(&key)) && key.starts_with(&prefix) {
-                            out.push(json!({"key":key,"value":value,"updated_at":crate::rsm::planner::timers::iso_us(row.updated_at_us)}));
+                    if let (Some(key), Ok((value, updated_at_us))) = (keys::streams_state_key_of(k), crate::rsm::store::rows::streams_state_view(v)) {
+                        if (keys_wanted.is_empty() || keys_wanted.contains(&key)) && key.starts_with(&prefix) {
+                            answer.row(&key, value, updated_at_us, ripe_at_or_before);
                         }
                     }
                     true
                 })?;
-                Ok(Some(out))
+                Ok(Some(answer.finish()))
             })
         }).await.map_err(|e| RsmError::Internal(format!("streams state read: {e}")))?.map_err(read_error)?;
         match rows {
-            Some(rows) => Ok(ApiOut::json(
-                200,
-                json!({"success":true,"rows":rows}).to_string(),
-            )),
+            Some(body) => Ok(ApiOut::json(200, body)),
             None => Ok(ApiOut::json(404, json!({"error":"not found"}).to_string())),
         }
     }
