@@ -21,6 +21,7 @@ pub const INCONSISTENT_GROUP_PROTOCOL: i16 = 23;
 pub const INVALID_GROUP_ID: i16 = 24;
 pub const UNKNOWN_MEMBER_ID: i16 = 25;
 pub const INVALID_SESSION_TIMEOUT: i16 = 26;
+pub const INVALID_COMMIT_OFFSET_SIZE: i16 = 28;
 pub const REBALANCE_IN_PROGRESS: i16 = 27;
 pub const TOPIC_AUTHORIZATION_FAILED: i16 = 29;
 pub const GROUP_AUTHORIZATION_FAILED: i16 = 30;
@@ -33,11 +34,14 @@ pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
 pub const INVALID_CONFIG: i16 = 40;
 pub const INVALID_REQUEST: i16 = 42;
+pub const POLICY_VIOLATION: i16 = 44;
 pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
 pub const KAFKA_STORAGE_ERROR: i16 = 56;
 pub const SASL_AUTHENTICATION_FAILED: i16 = 58;
 pub const NON_EMPTY_GROUP: i16 = 68;
 pub const GROUP_ID_NOT_FOUND: i16 = 69;
+pub const MEMBER_ID_REQUIRED: i16 = 79;
+pub const GROUP_MAX_SIZE_REACHED: i16 = 81;
 pub const INVALID_RECORD: i16 = 87;
 
 /// A route that refused, as the error of a request a client may retry.

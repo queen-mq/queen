@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use queen_kafka::core::{
     BoxFuture, Broker, ClusterView, FetchEntry, FetchedFrom, LocalAnswer, LocalRequest,
-    LocalResponse, Node, OrderedLocal, Pushed, RawFetched, RawPush, RawRecord,
+    LocalResponse, Node, OrderedLocal, Permit, Pushed, RawFetched, RawPush, RawRecord,
 };
 use tower::ServiceExt;
 
@@ -186,10 +186,34 @@ impl Broker for RouterDispatch {
         })
     }
 
-    fn push(&self, bearer: Option<String>, items: Vec<RawPush>) -> OrderedLocal {
+    /// The broker's push admission ([`crate::rsm::admit`]), taken by the
+    /// facade for a Produce frame before it decodes a record.
+    fn admit(&self, bytes: usize) -> BoxFuture<'static, Result<Option<Permit>, u64>> {
+        Box::pin(async move {
+            match crate::rsm::admit::global() {
+                None => Ok(None),
+                Some(gate) => gate
+                    .admit(bytes)
+                    .await
+                    .map(|a| Some(Box::new(a) as Permit))
+                    .map_err(|o| o.retry_after_s),
+            }
+        })
+    }
+
+    fn push(
+        &self,
+        bearer: Option<String>,
+        items: Vec<RawPush>,
+        admitted: Option<Permit>,
+    ) -> OrderedLocal {
         let (rsm, auth) = (Arc::clone(&self.rsm), Arc::clone(&self.auth));
         let (ordered, in_log) = crate::rsm::facade::OrderedPush::new();
         let task = self.broker.spawn(async move {
+            // Admitted by its frame before the facade decoded it: held until
+            // the push answers, and not taken a second time by the push.
+            let pre_admitted = admitted.is_some();
+            let _admitted = admitted;
             let sub = match authorize(&auth, "/api/v1/push", bearer.as_deref()).await {
                 Ok(sub) => sub,
                 Err(refused) => return LocalAnswer::Refused(refused),
@@ -209,7 +233,12 @@ impl Broker for RouterDispatch {
                     txn: i.txn,
                 })
                 .collect();
-            match rsm.push_records(ctx, records).await {
+            let pushed = if pre_admitted {
+                crate::rsm::admit::pre_admitted_scope(rsm.push_records(ctx, records)).await
+            } else {
+                rsm.push_records(ctx, records).await
+            };
+            match pushed {
                 Ok(out) => LocalAnswer::Done(
                     out.into_iter()
                         .map(|o| Pushed {
@@ -250,7 +279,15 @@ impl Broker for RouterDispatch {
                     RECORDS_BUDGET + Duration::from_millis(max_wait_ms),
                 ),
             );
-            ctx.fetch_max_bytes = max_bytes.map(|b| b.max(1) as usize);
+            // Never unlimited: absent, zero or negative is the facade's ceiling
+            // (QUEEN_KAFKA_FETCH_MAX_BYTES), and nothing asks past it.
+            let ceiling = queen_kafka::config::fetch_max_bytes();
+            ctx.fetch_max_bytes = Some(
+                max_bytes
+                    .filter(|b| *b > 0)
+                    .map_or(ceiling, |b| b.min(ceiling))
+                    .max(1) as usize,
+            );
             let asks = entries
                 .into_iter()
                 .map(|e| crate::rsm::facade::RecordFetch {
@@ -289,8 +326,13 @@ impl Broker for RouterDispatch {
                 Err(e) => LocalAnswer::Refused(refusal(e).await),
             }
         });
+        // A fetch nobody waits for any more (its connection closed, or the
+        // facade answered from another read of a split fetch) stops parking.
+        let task = AbortOnDrop(task);
         Box::pin(async move {
-            task.await
+            let mut task = task;
+            (&mut task.0)
+                .await
                 .map_err(|e| format!("the broker task serving an in-process fetch ended: {e}"))
         })
     }
@@ -335,6 +377,15 @@ impl Broker for RouterDispatch {
             m.per_queue
                 .add_pop_lag(tenant.as_str(), &f.queue, f.lag_sum_ms, f.lag_max_ms, f.records);
         }
+    }
+}
+
+/// A broker task aborted when its caller stops waiting for it.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

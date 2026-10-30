@@ -27,6 +27,11 @@ use crate::versions::ADVERTISED;
 
 pub const CLUSTER_ID: &str = "queen";
 
+/// Topics one Metadata request may create on first use. The rest are
+/// answered LEADER_NOT_AVAILABLE, which every client retries: the next
+/// request creates the next ones.
+const MAX_AUTO_CREATES: usize = 16;
+
 /// ApiVersions. A version this side does not know is answered in v0 with
 /// UNSUPPORTED_VERSION and the table, so the client retries with one it does
 /// (KIP-511).
@@ -78,15 +83,20 @@ pub async fn metadata(
         .with_cluster_id(Some(s(CLUSTER_ID)))
         .with_controller_id(BrokerId(leader));
 
-    // v0: an empty list is every topic; v1+: null is every topic.
+    // v0: an empty list is every topic; v1+: null is every topic. A name
+    // asked twice is answered once.
     let requested: Option<Vec<String>> = match req.topics {
         None => None,
         Some(t) if t.is_empty() && version == 0 => None,
-        Some(t) => Some(
-            t.into_iter()
-                .filter_map(|t| t.name.map(|n| n.0.to_string()))
-                .collect(),
-        ),
+        Some(t) => {
+            let mut seen = std::collections::HashSet::new();
+            Some(
+                t.into_iter()
+                    .filter_map(|t| t.name.map(|n| n.0.to_string()))
+                    .filter(|n| seen.insert(n.clone()))
+                    .collect(),
+            )
+        }
     };
     let allow_create = ctx.cfg.auto_create && (version < 4 || req.allow_auto_topic_creation);
 
@@ -136,23 +146,51 @@ pub async fn metadata(
             })
     };
 
+    // One answer lists at most QUEEN_KAFKA_METADATA_MAX_PARTITIONS
+    // partitions: every topic of the default width is 1,024 of them, and an
+    // all-topics answer would otherwise grow with every queue of the tenant.
+    // The topics past it are answered with an error and no partitions; asked
+    // for by name, a few at a time, they are answered in full.
+    let cap = crate::config::metadata_max_partitions();
+    let mut listed = 0usize;
+    let mut fits = |width: i32| {
+        let width = width.max(0) as usize;
+        if listed + width > cap {
+            false
+        } else {
+            listed += width;
+            true
+        }
+    };
     let mut topics = Vec::new();
     match requested {
         None => {
             let mut names: Vec<(&String, &i32)> = snap.widths.iter().collect();
             names.sort();
             for (name, width) in names {
-                topics.push(topic(name, NONE, *width));
+                if fits(*width) {
+                    topics.push(topic(name, NONE, *width));
+                } else {
+                    topics.push(topic(name, POLICY_VIOLATION, 0));
+                }
             }
         }
         Some(names) => {
             let mut created = false;
+            let mut creates = 0usize;
             for name in names {
                 if !valid_topic_name(&name) {
                     topics.push(topic(&name, INVALID_TOPIC_EXCEPTION, 0));
                 } else if let Some(w) = snap.widths.get(&name) {
-                    topics.push(topic(&name, NONE, *w));
+                    if fits(*w) {
+                        topics.push(topic(&name, NONE, *w));
+                    } else {
+                        topics.push(topic(&name, POLICY_VIOLATION, 0));
+                    }
+                } else if allow_create && creates >= MAX_AUTO_CREATES {
+                    topics.push(topic(&name, LEADER_NOT_AVAILABLE, 0));
                 } else if allow_create {
+                    creates += 1;
                     // The width row first: a node that lists the queue has
                     // applied it, and the console knows a Kafka topic by it.
                     // Only where no row is: a topic created a moment ago
@@ -171,7 +209,12 @@ pub async fn metadata(
                         Ok(()) => {
                             created = true;
                             tracing::info!(target: "kafka", topic = %name, "topic created on first use");
-                            topics.push(topic(&name, NONE, ctx.topics.default_partitions()));
+                            let width = ctx.topics.default_partitions();
+                            if fits(width) {
+                                topics.push(topic(&name, NONE, width));
+                            } else {
+                                topics.push(topic(&name, LEADER_NOT_AVAILABLE, 0));
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(target: "kafka", topic = %name, error = %e, "cannot create the topic");
