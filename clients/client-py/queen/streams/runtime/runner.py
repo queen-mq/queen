@@ -18,7 +18,15 @@ Lifecycle:
         - build push_items / run foreach effects
         - commit cycle (state ops + push items + ack) atomically
 
-    flush timer:
+    flush timer, processing-time windows on a broker with claims (2.7):
+      keep per partition when its earliest open window closes (from each
+      committed cycle, and from a sweep of the partitions holding state) ->
+      when that time comes, claim the partition (a lease with an empty batch)
+      -> read its state, close what is ripe on the broker's clock -> commit a
+      cycle that acks the claim's empty batch (count 0). The broker refuses
+      that cycle if the lease is gone, so two runners never close one window.
+
+    flush timer, event-time windows or a broker before 2.7:
       periodically wake -> for partitions touched recently, query state for
       ripe windows -> apply post-reducer ops + foreach + sink push, commit
       no-ack cycle (state deletes + sink push, no source ack).
@@ -37,16 +45,44 @@ from typing import Any, Optional
 from ..util.logger import make_logger
 from ..util.backoff import sleep
 from ..operators.reduce_op import state_key_for, parse_state_key
-from .streams_http_client import StreamsHttpClient
+from .streams_http_client import StreamsHttpClient, StreamsHttpError
 from .register import register_query
-from .state import get_state
-from .cycle import commit_cycle
+from .state import get_state, list_state_partitions
+from .cycle import claim_partitions, commit_cycle
 
 
 _DEFAULT_BATCH_SIZE = 200
 _DEFAULT_MAX_PARTITIONS = 4
 _DEFAULT_IDLE_SLEEP_MS = 100
+# How long a partition stays eligible for the old idle flush after we last saw
+# it. Only for a broker without POST /streams/v1/claim (before 2.7), and for
+# event-time windows.
 _PARTITION_RECENCY_MS = 5 * 60 * 1000
+
+# Closes under a claim (broker 2.7, issue #153).
+# How often a runner asks for the partitions holding the query's state: after
+# a restart, a scale-down, or for partitions another runner left, these are
+# the windows nobody tracks.
+_SWEEP_EVERY_MS = 30_000
+# How old a partition's newest state row must be before a later sweep takes
+# it: a younger one is some runner's live work, which tracks it already. The
+# first sweep after a start takes every partition: this runner tracks nothing.
+_SWEEP_UNTOUCHED_MS = 30_000
+_SWEEP_PAGE = 1_000
+# Partitions per claim, which is also the most one flush tick closes: after an
+# outage the sweep may find thousands, and they go a batch per tick.
+_CLAIM_BATCH = 100
+# The lease a claim asks for. A close is one state read and one commit.
+_CLAIM_LEASE_S = 30
+# How soon to try again a partition someone else holds, or a failed close.
+_CLAIM_RETRY_MS = 1_000
+# How long stop() waits for a close in flight before cutting it short.
+_STOP_FLUSH_WAIT_S = 10.0
+
+# Whether the broker serves POST /streams/v1/claim.
+_CLAIMS_UNKNOWN = "unknown"
+_CLAIMS_YES = "yes"
+_CLAIMS_NO = "no"
 
 _WATERMARK_STATE_KEY = "__wm__"
 
@@ -110,6 +146,15 @@ class Runner:
         # two in-process tasks removes the race at its source.
         self._partition_locks: dict = {}
         self._partition_watermarks: dict = {}
+        # Processing-time windows still open, by partition id:
+        # {"partition": name, "atMs": when the earliest closes, on the
+        # broker's clock}. What the flush claims and closes when it is time.
+        self._due: dict = {}
+        # _CLAIMS_UNKNOWN, _CLAIMS_YES, or _CLAIMS_NO (an older broker: the
+        # old flush of recent partitions).
+        self._claims = _CLAIMS_UNKNOWN
+        # Wakes the flush task early, on stop. Made in start(), inside the loop.
+        self._wake: Optional[asyncio.Event] = None
         self._stats = {
             "cyclesTotal": 0,
             "flushCyclesTotal": 0,
@@ -154,6 +199,7 @@ class Runner:
 
         # Spawn idle-flush timer if any window has it.
         if stages.window and getattr(stages.window, "idle_flush_ms", 0) > 0:
+            self._wake = asyncio.Event()
             self._flush_task = asyncio.create_task(self._flush_loop(stages.window.idle_flush_ms))
             self.logger.info(
                 "idle-flush timer armed",
@@ -165,22 +211,24 @@ class Runner:
 
     async def stop(self) -> None:
         self._stopped = True
-        if self._flush_task:
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        # Wake the flush task instead of cancelling it: a close cut short
+        # would keep its claim on the partition until the lease ran out, so
+        # the close in flight gets 10 seconds to end.
+        if self._wake is not None:
+            self._wake.set()
         if self._loop_task:
             try:
                 await self._loop_task
             except (asyncio.CancelledError, Exception):
                 pass
-        # Drain any in-flight flush.
-        for _ in range(50):
-            if not self._flush_in_flight:
-                break
-            await sleep(20)
+        if self._flush_task:
+            done, _ = await asyncio.wait({self._flush_task}, timeout=_STOP_FLUSH_WAIT_S)
+            if not done:
+                self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await self.http.close()
 
     def metrics(self) -> dict:
@@ -201,7 +249,9 @@ class Runner:
                 for group in groups:
                     if self._stopped:
                         break
-                    self._touch_partition(group["partitionId"], group["partitionName"])
+                    # Under claims the closes do not need the recent list.
+                    if not self._leased_closes() or self._claims != _CLAIMS_YES:
+                        self._touch_partition(group["partitionId"], group["partitionName"])
                     try:
                         await self._process_partition_cycle(group)
                         self._stats["cyclesTotal"] += 1
@@ -345,13 +395,15 @@ class Runner:
         # 3. window + reducer
         state_ops: list = []
         emits: list = []
+        next_close_ms = None
         if stages.window:
             if getattr(stages.window, "window_kind", None) == "session":
-                result = await self._process_session_window(stages, envelopes, partition_id)
+                result = await self._process_session_window(stages, envelopes, partition_id, ordered)
             else:
                 result = await self._process_stateless_window(stages, envelopes, partition_id, ordered)
             state_ops = result["stateOps"]
             emits = result["emits"]
+            next_close_ms = result.get("nextCloseMs")
         else:
             emits = [{"key": env["key"], "value": env.get("value"), "sourceMsg": env["msg"]} for env in envelopes]
 
@@ -398,6 +450,9 @@ class Runner:
             push_items=push_items,
             ack=ack,
         )
+        # What stays open closes when its time comes, under a claim.
+        if self._leased_closes() and self._claims != _CLAIMS_NO:
+            self._set_due(partition_id, partition_name, next_close_ms)
 
     # --------------------------------------------------------------- gate path
 
@@ -598,7 +653,7 @@ class Runner:
 
     # ----------------------------------------------------- session window path
 
-    async def _process_session_window(self, stages, envelopes, partition_id):
+    async def _process_session_window(self, stages, envelopes, partition_id, ordered):
         window = stages.window
         reducer = stages.reducer
         if not reducer:
@@ -648,23 +703,18 @@ class Runner:
             self._partition_watermarks[partition_id] = advanced
             now_ms = advanced
         else:
-            now_ms = max_observed_event_time if max_observed_event_time > float("-inf") else int(_time.time() * 1000)
-
-        reducer_fn = reducer.fn
-
-        def reducer_initial():
-            init = reducer.initial
-            if init is None:
-                return 0
-            if isinstance(init, (int, float, str, bool)):
-                return init
-            return copy.deepcopy(init)
+            # Processing time: the batch's newest createdAt, the broker's
+            # clock, which closes under a claim use too. The wall clock would
+            # close, while a backlog is read after a restart, sessions that
+            # the next messages of the backlog still extend.
+            created = [t for t in (_parse_iso_ms(m.get("createdAt")) for m in ordered) if t is not None]
+            now_ms = max(created) if created else int(_time.time() * 1000)
 
         result = await window.run_session(
             envelopes=enriched,
             loaded_state=session_state,
-            reducer_fn=reducer_fn,
-            reducer_initial=reducer_initial,
+            reducer_fn=reducer.fn,
+            reducer_initial=_initial_of(reducer),
             now_ms=now_ms,
         )
 
@@ -710,17 +760,262 @@ class Runner:
     # ------------------------------------------------ idle flush (per-window)
 
     async def _flush_loop(self, interval_ms: int) -> None:
+        # The first sweep runs at once and takes every partition holding
+        # state; later ones only those nobody touched for a while.
+        next_sweep_at = 0.0
+        untouched_ms = 0
+        first = True
         try:
             while not self._stopped:
-                await asyncio.sleep(interval_ms / 1000.0)
+                if not (first and self._leased_closes()):
+                    await self._wait_tick(interval_ms)
+                first = False
                 if self._stopped:
                     break
                 try:
-                    await self._flush_tick()
+                    if not self._leased_closes() or self._claims == _CLAIMS_NO:
+                        await self._flush_tick()
+                        continue
+                    if _time.monotonic() >= next_sweep_at:
+                        await self._sweep(untouched_ms)
+                        next_sweep_at = _time.monotonic() + _SWEEP_EVERY_MS / 1000.0
+                        untouched_ms = _SWEEP_UNTOUCHED_MS
+                        self._drop_idle_locks()
+                    if self._claims != _CLAIMS_NO:
+                        await self._close_due()
                 except Exception as err:
                     self._report_error(err, {"phase": "flush-tick"})
         except asyncio.CancelledError:
             pass
+
+    async def _wait_tick(self, interval_ms: int) -> None:
+        """Sleep one flush interval, or less if stop() wakes us."""
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=interval_ms / 1000.0)
+        except asyncio.TimeoutError:
+            pass
+
+    # ------------------------------------------------- closes under a claim
+    #
+    # A processing-time window closes when its time comes even if its
+    # partition gets no more messages. The runner keeps, per partition, when
+    # the earliest open window closes (from each cycle it commits, and from
+    # the sweep), claims the partition when that time has come
+    # (POST /streams/v1/claim: a lease with an empty batch, granted only when
+    # nobody holds the partition and the group has read all of it), and
+    # closes the windows in a cycle that acks the empty batch. The broker
+    # refuses that cycle whole when the lease is gone, so two runners never
+    # close one window, and a close never deletes a window another runner
+    # just extended. The clock is the broker's, the one createdAt comes from.
+
+    def _leased_closes(self) -> bool:
+        """Whether this stream closes its windows under claims: processing-time
+        windows with a reducer and an idle flush. Event-time windows close on
+        the watermark, which only events move."""
+        stages = self.stream.stages
+        window = stages.window
+        return (
+            window is not None
+            and getattr(window, "event_time_fn", None) is None
+            and getattr(window, "idle_flush_ms", 0) > 0
+            and stages.reducer is not None
+        )
+
+    def _set_due(self, partition_id: str, partition_name: Optional[str], at_ms: Optional[int]) -> None:
+        """Track (or forget, at_ms None) when the partition's earliest open
+        window closes."""
+        if not partition_id:
+            return
+        if at_ms is None:
+            self._due.pop(partition_id, None)
+        else:
+            self._due[partition_id] = {"partition": partition_name or "", "atMs": int(at_ms)}
+
+    def _retry_due(self, partition_id: str, at_ms: int) -> None:
+        d = self._due.get(partition_id)
+        if d is not None:
+            d["atMs"] = max(d["atMs"], at_ms)
+
+    def _claims_off(self) -> None:
+        # A broker before 2.7: no claims, the old flush from now on. The due
+        # list is of no use there, and nothing would empty it.
+        self._claims = _CLAIMS_NO
+        self._due.clear()
+        self.logger.info(
+            "broker has no stream claims; idle flush of recent partitions",
+            {"queryId": self.query_id},
+        )
+
+    def _drop_idle_locks(self) -> None:
+        # Under claims the recent list, which used to drop the locks of
+        # partitions gone quiet, is not kept: drop here those with no open
+        # window that nobody holds. This runs in the flush task between ticks,
+        # when the flush holds no lock, so no one waits on a dropped one.
+        if self._claims != _CLAIMS_YES:
+            return
+        for pid, lock in list(self._partition_locks.items()):
+            if pid not in self._due and not lock.locked():
+                del self._partition_locks[pid]
+
+    async def _sweep(self, untouched_ms: int) -> None:
+        """Track as due now the partitions holding the query's state that
+        nobody touched for untouched_ms (0: all) and this runner does not
+        track yet, so the next ticks claim them a batch at a time."""
+        after = None
+        while not self._stopped:
+            try:
+                page = await list_state_partitions(
+                    self.http,
+                    query_id=self._server_query_id,
+                    untouched_for_ms=untouched_ms or None,
+                    after=after,
+                    limit=_SWEEP_PAGE,
+                )
+            except Exception as err:
+                if isinstance(err, StreamsHttpError) and err.status == 404:
+                    self._claims_off()
+                else:
+                    self._report_error(err, {"phase": "sweep"})
+                return
+            now = _now_ms()
+            for p in page.get("partitions") or []:
+                pid = str(p.get("partition_id") or "")
+                if pid and pid not in self._due:
+                    self._due[pid] = {"partition": p.get("partition") or "", "atMs": now}
+            after = page.get("next")
+            if not after:
+                return
+
+    async def _close_due(self) -> None:
+        """Claim the partitions whose windows are due, and close them."""
+        now = _now_ms()
+        ready = sorted(
+            ((pid, d["atMs"]) for pid, d in self._due.items() if d["atMs"] <= now),
+            key=lambda e: e[1],
+        )[:_CLAIM_BATCH]
+        if not ready:
+            return
+        pids = [pid for pid, _ in ready]
+        try:
+            res = await claim_partitions(
+                self.http,
+                query_id=self._server_query_id,
+                partition_ids=pids,
+                consumer_group=self.consumer_group,
+                lease_seconds=_CLAIM_LEASE_S,
+            )
+        except Exception as err:
+            if isinstance(err, StreamsHttpError) and err.status == 404:
+                self._claims_off()
+                return
+            self._report_error(err, {"phase": "claim"})
+            retry = _now_ms() + _CLAIM_RETRY_MS
+            for pid in pids:
+                self._retry_due(pid, retry)
+            return
+        self._claims = _CLAIMS_YES
+        if not isinstance(res, dict) or res.get("success") is False:
+            reason = res.get("error") if isinstance(res, dict) and res.get("error") else "no reason given"
+            self._report_error(RuntimeError(f"stream claim refused: {reason}"), {"phase": "claim"})
+            return
+
+        lease_id = res.get("lease_id") or ""
+        clock_ms = res.get("now_ms")
+        if not isinstance(clock_ms, (int, float)) or clock_ms <= 0:
+            clock_ms = _now_ms()
+        idle_flush_ms = getattr(self.stream.stages.window, "idle_flush_ms", 0)
+        for p in res.get("partitions") or []:
+            pid = str(p.get("partition_id") or "")
+            if not pid:
+                continue
+            name = p.get("partition") or (self._due.get(pid) or {}).get("partition") or ""
+            status = p.get("status")
+            if status == "claimed":
+                # Stopping: the claims not closed yet lapse with their lease,
+                # nothing is lost.
+                if self._stopped:
+                    continue
+                try:
+                    next_close_ms = await self._close_claimed(pid, name, lease_id, int(clock_ms))
+                except Exception as err:
+                    self._report_error(err, {"phase": "close", "partition": pid})
+                    self._retry_due(pid, _now_ms() + _CLAIM_RETRY_MS)
+                    continue
+                self._set_due(pid, name, next_close_ms)
+            elif status == "busy":
+                self._retry_due(pid, _now_ms() + max(idle_flush_ms, _CLAIM_RETRY_MS))
+            else:
+                # backlog: the cycle that takes the messages tracks the
+                # partition again. missing: nothing to close there.
+                self._set_due(pid, name, None)
+
+    async def _close_claimed(
+        self, partition_id: str, partition_name: str, lease_id: str, clock_ms: int
+    ) -> Optional[int]:
+        """Close what is ripe on a claimed partition at clock_ms (the broker's
+        time at the claim), in a cycle that acks the claim's empty batch.
+        Answers when the windows left open close."""
+        async with self._partition_lock(partition_id):
+            stages = self.stream.stages
+            window = stages.window
+            reducer = stages.reducer
+            # Every row: the windows left open say when to come back.
+            loaded_all = await get_state(
+                self.http, query_id=self._server_query_id, partition_id=partition_id, keys=[]
+            )
+            if getattr(window, "window_kind", None) == "session":
+                prefix = window.operator_tag + "\u001fopen\u001f"
+                result = await window.run_session(
+                    envelopes=[],
+                    loaded_state={k: v for k, v in loaded_all.items() if k.startswith(prefix)},
+                    reducer_fn=reducer.fn,
+                    reducer_initial=_initial_of(reducer),
+                    now_ms=clock_ms,
+                )
+            else:
+                result = await reducer.run(
+                    envelopes=[],
+                    loaded_state=loaded_all,
+                    stream_time_ms=clock_ms,
+                    operator_tag=window.operator_tag,
+                    grace_period_ms=window.grace_period_ms,
+                )
+            closed = bool(result["emits"])
+            emits = await self._apply_post_stages(stages.post, result["emits"], partition_id, partition_name)
+
+            push_items: list = []
+            if stages.sink and stages.sink.kind == "sink":
+                push_items = stages.sink.build_push_items(
+                    [{"key": e["key"], "value": e["value"], "sourceMsg": None} for e in emits],
+                    partition_name,
+                )
+            elif stages.sink and stages.sink.kind == "foreach":
+                await stages.sink.run_effects(
+                    [
+                        {"value": e["value"], "ctx": self._build_emit_ctx(e, partition_name, partition_id)}
+                        for e in emits
+                    ]
+                )
+
+            # The empty batch's ack: the cursor stays and the lease goes, also
+            # when nothing was ripe (another runner closed it first).
+            ack = {"transactionId": "", "leaseId": lease_id, "status": "completed", "count": 0}
+            self._stats["stateOpsTotal"] += len(result["stateOps"])
+            self._stats["pushItemsTotal"] += len(push_items)
+            await commit_cycle(
+                self.http,
+                query_id=self._server_query_id,
+                partition_id=partition_id,
+                consumer_group=self.consumer_group,
+                state_ops=result["stateOps"],
+                push_items=push_items,
+                ack=ack,
+                release_lease=True,
+            )
+            if closed:
+                self._stats["flushCyclesTotal"] += 1
+                self._stats["lastFlushAt"] = _now_iso()
+            return result.get("nextCloseMs")
 
     async def _flush_tick(self) -> None:
         if self._stopped or self._flush_in_flight:
@@ -929,6 +1224,24 @@ def _parse_iso_ms(s: Any) -> Optional[int]:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _now_ms() -> int:
+    return int(_time.time() * 1000)
+
+
+def _initial_of(reducer):
+    """A session reducer's starting value, fresh for each session."""
+
+    def initial():
+        init = reducer.initial
+        if init is None:
+            return 0
+        if isinstance(init, (int, float, str, bool)):
+            return init
+        return copy.deepcopy(init)
+
+    return initial
 
 
 def _as_dict(m: Any) -> dict:

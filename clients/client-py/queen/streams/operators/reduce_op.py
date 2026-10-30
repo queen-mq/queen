@@ -100,8 +100,15 @@ class ReduceOperator:
 
         state_ops: list = []
         emits: list = []
+        # When the earliest window still open closes (windowEnd + grace), so
+        # the runner knows when to come back to a partition that goes quiet.
+        # Stored windows this batch did not touch count too. None: nothing open.
+        next_close_ms: Optional[int] = None
         for sk, entry in accumulators.items():
-            closed = (entry["windowEnd"] + grace_period_ms) <= effective_stream_time
+            closes_at = entry["windowEnd"] + grace_period_ms
+            closed = closes_at <= effective_stream_time
+            if not closed and (next_close_ms is None or closes_at < next_close_ms):
+                next_close_ms = closes_at
             if closed:
                 emits.append({
                     "key": entry["key"],
@@ -122,7 +129,7 @@ class ReduceOperator:
                         "windowEnd": entry["windowEnd"],
                     },
                 })
-        return {"stateOps": state_ops, "emits": emits}
+        return {"stateOps": state_ops, "emits": emits, "nextCloseMs": next_close_ms}
 
     def _initial(self) -> Any:
         if self.initial is None:

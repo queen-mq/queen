@@ -141,10 +141,17 @@ class WindowSessionOperator:
                 closed_emits.append(self._build_emit(user_key, s))
                 s["closed"] = True
 
-        # Build state ops.
+        # Build state ops, and note when the earliest session still open
+        # closes (lastEventTime + gap + grace), so the runner knows when to
+        # come back to a partition that goes quiet. None: nothing open.
         state_ops: list = []
+        next_close_ms: Optional[int] = None
         for user_key, s in sessions.items():
             state_key = self.open_session_state_key(user_key)
+            if not s.get("closed") and s.get("lastEventTime") is not None:
+                closes_at = s["lastEventTime"] + self.gap_ms + self.grace_period_ms
+                if next_close_ms is None or closes_at < next_close_ms:
+                    next_close_ms = closes_at
             if s.get("closed"):
                 if s.get("seeded"):
                     state_ops.append({"type": "delete", "key": state_key})
@@ -159,7 +166,7 @@ class WindowSessionOperator:
                     },
                 })
 
-        return {"stateOps": state_ops, "emits": closed_emits}
+        return {"stateOps": state_ops, "emits": closed_emits, "nextCloseMs": next_close_ms}
 
     def _build_emit(self, user_key: str, s: dict) -> dict:
         return {
