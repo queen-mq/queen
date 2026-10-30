@@ -5,6 +5,24 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Streams: a window on a quiet partition closes, also after a restart and with several runners
+(issue #153).** A stream's idle flush used to know only the partitions its own process had read in
+the last five minutes, and it wrote with no lease. A window open when a runner restarted never
+closed (its result was never sent, and its state kept the partition from being cleaned up), and
+two runners could send one window twice or delete a window the other had just extended. The broker
+gains `POST /streams/v1/claim`, which leases idle partitions of a stream's source queue with an
+empty batch: only when nobody holds them and the stream's group has read all of them. A cycle that
+acks that empty batch (`count: 0`) closes the windows under the lease, and is refused whole when
+the lease is gone, like every cycle. `POST /streams/v1/state/partitions` lists the partitions
+holding a query's state, so a starting runner finds the windows nobody tracks. The Rust, Go,
+JavaScript and Python clients use both: each keeps when every open window ends, claims the partition
+then, closes on the broker's clock, and on an older broker falls back to the old flush; `stop()`
+waits for a close in flight. In Go, JavaScript and Python a processing-time session now closes on
+its messages' `createdAt`, as in Rust, not on the process clock, so a backlog no longer splits it.
+Also fixed: a cycle naming a lease on a partition its group never read, or one that is gone, skipped
+the ack and committed its state and pushes with no lease; it is now refused (`bad_lease`). Why: a
+session per visit or per trace ends with silence, so closing it cannot wait for the next message.
+
 **Broker and dashboard: network, disk and Raft traffic.** System charts what each node moves per
 second: its network in and out (Linux), its disk reads and writes, and the bytes of its Raft port
 by channel: replication, forwarding, snapshots, the standby link and control. The Raft table gains
