@@ -33,6 +33,7 @@ sourceOfTruth:
   - app/src/composables/consumerStatus.js
   - app/src/views/System.vue
   - app/src/composables/useTraffic.js
+  - app/src/composables/useBrokerStatus.js
   - server/src/rsm/replicator/raft/traffic.rs
   - server/src/syscollect.rs
 # sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): metrics.rs exports
@@ -40,6 +41,9 @@ sourceOfTruth:
 # raft/mod.rs declares raft/traffic.rs, which counts the Raft port's bytes by channel; System.vue
 # charts all three and RaftCluster.vue adds a Traffic column. The dashboard paragraph and the
 # metrics table say so; System.vue, useTraffic.js, raft/traffic.rs and syscollect.rs join the sources.
+# Then useBrokerStatus.js's cellIssues puts the cell's problems in the Overview's verdict for an
+# operator, and the top bar shows the Raft port's bytes: the paragraph and table after the dashboard
+# one say so, and useBrokerStatus.js joins the sources.
 ---
 
 ## Upgrade one node at a time
@@ -92,6 +96,21 @@ Every node serves three things on port 6632: the dashboard at `/`, its health at
 **The dashboard.** Its System page shows the replicated log and every node, with its role, its term, how far it has applied the log and how much disk it uses. A bar at the top of every page says when a node refuses writes because its disk is full.
 
 System also charts what each node moves, per second: its network in and out (Linux only), its disk reads and writes, and its Raft traffic by channel: `replication` (the leader's appends), `forward` (client commands a follower hands to the leader), `snapshot`, `link` (a standby cluster's reads) and `control` (votes, membership). The Raft table adds what each node sent and received in the last minute; hover a cell for the channels. The figures are averages over the metrics interval (`METRICS_FLUSH_MS`, 60 s), and the Raft traffic counts message bodies, so it reads a little below the network.
+
+For an operator, the Overview's verdict also covers the cell, not only the queues. Its Open issues list starts with what is wrong under them, each row linked to System:
+
+| Problem | Amber | Red |
+| --- | --- | --- |
+| A member is being sent a snapshot | any snapshot bytes in the last interval | |
+| A follower is behind the leader | 5,000 log entries | |
+| A follower stopped answering the leader | 500 ms | 2 s |
+| Voters unreachable | one down, quorum holds | quorum lost |
+| A node's disk | past the gate's low line | at its high line, where writes answer 507 |
+| A node's memory or CPU | 80% of its limit, 90% of its cores | 90% of its limit |
+
+These are the lines that colour the top bar, so the two never disagree. The top bar adds the bytes on the Raft port's wire beside Raft (`Raft 3/3 · 12 MB/s`), and its panel each node's network, disk writes and Raft traffic.
+
+<Why>a cell in trouble is trouble for every queue on it. A follower that falls behind or a snapshot that runs for minutes shows in the verdict before it shows as latency.</Why>
 
 **/health.** It answers 200 `healthy` when the node knows a leader, is less than two seconds behind, and the leader has heard from a majority in the last five seconds. Otherwise it answers 503 `settling`.
 

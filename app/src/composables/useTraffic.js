@@ -75,16 +75,21 @@ export function memberTraffic(member) {
   const t = member?.traffic
   const raft = t?.raft
   if (!raft || typeof raft !== 'object') return null
+  const channels = RAFT_CHANNELS.map((c) => ({
+    key: c.key,
+    label: c.label,
+    sent: num(raft[c.key]?.sentBytesPerSec),
+    received: num(raft[c.key]?.receivedBytesPerSec),
+  }))
   return {
     sent: num(raft.sentBytesPerSec),
     received: num(raft.receivedBytesPerSec),
     windowSeconds: num(t.windowSeconds),
-    channels: RAFT_CHANNELS.map((c) => ({
-      key: c.key,
-      label: c.label,
-      sent: num(raft[c.key]?.sentBytesPerSec),
-      received: num(raft[c.key]?.receivedBytesPerSec),
-    })),
+    channels,
+    snapshot: channels.find((c) => c.key === 'snapshot'),
+    // Where the platform says (the network: Linux only); else null.
+    network: t.network ? { received: num(t.network.receivedBytesPerSec), sent: num(t.network.sentBytesPerSec) } : null,
+    disk: t.disk ? { read: num(t.disk.readBytesPerSec), written: num(t.disk.writtenBytesPerSec) } : null,
   }
 }
 

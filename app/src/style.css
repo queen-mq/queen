@@ -20,18 +20,19 @@
     /* ---- Surfaces: sidebar < page < card ---------------------------------- */
     --rail:  #000000;  /* the sidebar column: one visible step below the page;
                           #070606 was 1.3 L* away and read as the same black */
-    --ink-0: #0c0b0a;  /* page                                               */
-    --ink-1: #080707;  /* deepest well inside the page                       */
-    --ink-2: #191817;  /* card: 1.11:1 on the page, so a panel reads as one  */
-    --ink-3: #201f1d;  /* input, recessed                                    */
-    --ink-4: #262422;  /* hover                                              */
-    --ink-5: #2c2a27;  /* active / selected                                  */
+    /* One dark sheet: a card sits barely above the page (1.04:1) and is told
+       apart by its content, not by a lighter box. Brighter surfaces (#154,
+       card 1.11:1) were tried and turned back on 2026-10-30. */
+    --ink-0: #0b0a0a;  /* page                                               */
+    --ink-1: #070606;  /* deepest well inside the page                       */
+    --ink-2: #111010;  /* card                                               */
+    --ink-3: #171615;  /* input, recessed                                    */
+    --ink-4: #1c1b19;  /* hover                                              */
+    --ink-5: #242220;  /* active / selected                                  */
 
     --recessed: var(--ink-1);
     --card:     var(--ink-2);
-    /* Selection is a neutral step; the yellow stays on the label and the
-       primary action, not on the fill of every chosen tab. */
-    --selected: var(--ink-5);
+    --selected: color-mix(in srgb, var(--accent) 14%, var(--ink-2));
 
     /* ---- Text: warm white down to warm grey. Every tier that carries words
        holds 4.5:1 on every surface it sits on (--text-low: 4.8:1 on the
@@ -94,11 +95,10 @@
     --cat-4: #a3b56f;
     --cat-5: #d08fae;
 
-    /* ---- Lines: card edge 1.24:1 on a card, control outline 1.9:1, so an
-       outlined control reads as clickable without a fill. ----------------- */
-    --bd:      #2c2a27;
-    --bd-hi:   #4a4743;
-    --bd-soft: #22201e;
+    /* ---- Lines ----------------------------------------------------------- */
+    --bd:      #1f1d1b;
+    --bd-hi:   #34312e;
+    --bd-soft: #181716;
 
     --ring: var(--accent-text);
 
@@ -111,7 +111,7 @@
     --shadow-sm: none;
     --shadow:    none;
     --shadow-lg: none;
-    --shadow-pop: 0 14px 34px -14px rgba(0, 0, 0, 0.7), 0 0 0 1px #4a4743;
+    --shadow-pop: 0 14px 34px -14px rgba(0, 0, 0, 0.7), 0 0 0 1px #34312e;
     --scrim: rgba(7, 6, 6, 0.62);
 
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
@@ -312,6 +312,11 @@
 .bbar-node { color: var(--text-hi); }
 .bbar-node .g { margin-right: 7px; width: 6px; height: 6px; }
 .bbar-none, .bbar-raft { color: var(--text-low); }
+/* Traffic: a rate in the bar beside Raft, and three columns in the panel,
+   which widens for them. */
+.bbar-rate { color: var(--text-low); font-variant-numeric: tabular-nums; }
+.bbar-rates { color: var(--text-mid); font-variant-numeric: tabular-nums; }
+.bbar-panel.bbar-wide { width: min(920px, calc(100vw - 24px)); }
 .bbar-msg { padding: 14px; font-size: 12px; color: var(--text-low); }
 .bbar-foot { margin: 0; padding: 9px 14px 11px; border-top: 1px solid var(--bd); font-size: 11.5px; line-height: 1.5; color: var(--text-low); }
 /* A bar too narrow for four figures says one word and the worst mark. */
@@ -987,10 +992,14 @@
    SHELL: identity, cluster selector, notifications, boot + empty states
    ========================================================================= */
 
-/* The wordmark's letters sit low in a tall drawing: at 46px they match
-   Gate's and Traceflow's (shell.css, .brand-mark). Not a theme colour, so not
-   in the token blocks above. */
-.sidebar { --brand-height: 46px; }
+/* The wordmark's letters sit low in a tall drawing: at 46px they matched
+   Gate's and Traceflow's (shell.css, .brand-mark). Queen's is smaller by
+   choice (2026-10-30): a quieter mark beside the navigation. Not a theme
+   colour, so not in the token blocks above. */
+.sidebar { --brand-height: 34px; }
+/* At that size, hung 3px from the top of the 52px row (shell.css) it has no
+   room above it: centre it in the row, as the rail does. */
+.sidebar .brand-mark { align-self: center; margin-top: 0; }
 
 /* The cluster picker in the sidebar's footer opens upward. */
 .sidebar-foot .cluster-menu { top: auto; bottom: calc(100% + 6px); }

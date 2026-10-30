@@ -6,6 +6,19 @@
       <span v-else class="triage-count">Status unconfirmed</span>
     </div>
 
+    <!-- The cell under every queue, an operator's only: what the top bar
+         colours, said as issues. Each opens System, where the node is. -->
+    <ul v-if="cellIssues.length" class="triage-list triage-cell" aria-label="Cell issues">
+      <li v-for="issue in cellIssues" :key="issue.key">
+        <RouterLink class="triage-row" :to="issue.to">
+          <span class="g" :class="issue.sev" aria-hidden="true" />
+          <span class="triage-name">{{ issue.name }}<i class="cell-chip" title="The cell: shared by every tenant on it">cell</i></span>
+          <span class="triage-finding" :class="issue.sev">{{ issue.why }}</span>
+          <span class="triage-open" aria-hidden="true">System ›</span>
+        </RouterLink>
+      </li>
+    </ul>
+
     <div v-if="!known" class="triage-empty" role="status">
       {{ errorText || 'Reading queues and consumer groups…' }}
       <p v-if="errorText">Queue health cannot be assessed until both sources are available.</p>
@@ -110,6 +123,8 @@ const props = defineProps({
   sampleAt: { default: null }, groupsAt: { default: null },
   queuesError: { type: String, default: '' }, groupsError: { type: String, default: '' },
   tenantIssues: { type: Array, default: () => [] },
+  /** The cell's problems (useBrokerStatus cellIssues): rows that open System. */
+  cellIssues: { type: Array, default: () => [] },
   tenantError: { type: String, default: '' },
 })
 const observation = shallowRef(null)
@@ -225,6 +240,16 @@ function nextCheck(row) {
 .triage .btn { font-size: 11px; }
 .triage-pagination button:disabled { opacity: .4; cursor: default; }
 .triage-tenant { border-top: 1px solid var(--bd); }
+.triage-cell { border-bottom: 1px solid var(--bd); }
+/* A cell finding is a sentence, not a count: the name keeps its width and
+   the sentence wraps beside it. */
+.triage-cell .triage-row { grid-template-columns: 12px max-content minmax(0, 1fr) 65px; }
+.triage-cell .triage-finding { text-align: right; }
+@media (max-width: 760px) {
+  .triage-cell .triage-row { grid-template-columns: 12px minmax(0, 1fr) auto; }
+  .triage-cell .triage-finding { text-align: left; grid-column: 2 / -1; }
+}
+a.triage-row { text-decoration: none; }
 .triage-empty { padding: 16px; color: var(--text-mid); font-size: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .triage-empty p { margin: 0; }
 .triage-drawer { inset: 0 0 0 auto; margin: 0 0 0 auto; padding: 0; width: min(540px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; border: 0; border-left: 1px solid var(--bd); color: var(--text-hi); background: var(--ink-2); overscroll-behavior: contain; }

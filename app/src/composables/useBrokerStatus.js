@@ -21,11 +21,12 @@
 // is summed up by its fullest node, the one that runs out first; the meters
 // show every node. Pure, like useRaftCluster: test/broker-status.test.js.
 
-import { clusterView } from './useRaftCluster.js'
+import { clusterAlert, clusterView } from './useRaftCluster.js'
 import {
   SEV_BAD, SEV_NONE, SEV_WARN,
   cpuShareSeverity, diskSeverity, memoryShareSeverity,
 } from './useSeverity.js'
+import { formatRate, memberTraffic } from './useTraffic.js'
 
 const num = (v) => {
   if (v === null || v === undefined || v === '') return null
@@ -99,6 +100,11 @@ export function brokerStatus(payload) {
     isLeader: row.isLeader,
     unreachable: row.unreachable,
     lag: row.lag,
+    lagSeverity: row.lagSeverity,
+    heartbeatMs: row.heartbeatMs,
+    heartbeatSeverity: row.heartbeatSeverity,
+    // What it moved over the metrics collector's last interval (useTraffic.js).
+    traffic: row.unreachable ? null : memberTraffic(members[i]),
     ...hostReading(members[i]),
   }))
 
@@ -117,6 +123,10 @@ export function brokerStatus(payload) {
     term: view.term,
     lagMax,
     sev: raftSev,
+    alert: clusterAlert(view),
+    // Bytes per second on the Raft port's wire: every node's sent, summed (a
+    // byte is sent once). null when no node reports its traffic.
+    wire: nodes.reduce((sum, n) => (n.traffic?.sent == null ? sum : (sum ?? 0) + n.traffic.sent), null),
   }
 
   const cpu = summarise(nodes, 'cpu')
@@ -130,4 +140,63 @@ export function brokerStatus(payload) {
     raft,
     sev: [cpu.sev, mem.sev, disk.sev, raft.sev].reduce(worst, SEV_NONE),
   }
+}
+
+const count = (v) => Math.round(v).toLocaleString('en-US')
+const share = (s) => `${Math.round(s * 100)}%`
+const ms = (v) => (v < 1000 ? `${Math.round(v)} ms` : `${(v / 1000).toFixed(1)} s`)
+
+/**
+ * What is wrong in the cell, as Overview issues, worst first:
+ * `{key, sev, name, title, why, to}`, `title` the headline when it is the worst
+ * one. The lines are brokerStatus's own (the top bar colours by them), so the
+ * two never disagree; the snapshot rule is the only new one, from the Raft
+ * port's traffic. A node nobody reached is the quorum line's, not an issue of
+ * its own.
+ */
+export function cellIssues(status) {
+  if (!status) return []
+  const out = []
+  const add = (key, sev, name, title, why) => {
+    if (sev === SEV_WARN || sev === SEV_BAD) out.push({ key: `cell:${key}`, sev, name, title, why, to: '/system', cell: true })
+  }
+  const alert = status.raft.alert
+  if (alert) add('quorum', alert.level, 'Raft', alert.title, `${alert.title}: ${alert.detail}`)
+
+  // A snapshot is a whole store over the network: name the node it goes to,
+  // or, when that node does not say (an older build), the one sending it.
+  const live = status.nodes.filter((n) => !n.unreachable && n.traffic)
+  const window = (n) => (n.traffic.windowSeconds ? `last ${n.traffic.windowSeconds} s` : 'last interval')
+  const receiving = live.filter((n) => (n.traffic.snapshot?.received || 0) > 0)
+  for (const n of receiving) {
+    add(`${n.name}:snapshot`, SEV_WARN, n.name, `${n.name} is being sent a snapshot`,
+      `Receiving the whole store · ${formatRate(n.traffic.snapshot.received)} over the ${window(n)}`)
+  }
+  if (!receiving.length) {
+    for (const n of live.filter((x) => (x.traffic.snapshot?.sent || 0) > 0)) {
+      add(`${n.name}:snapshot`, SEV_WARN, n.name, `${n.name} is sending a snapshot`,
+        `Sending the whole store to a member · ${formatRate(n.traffic.snapshot.sent)} over the ${window(n)}`)
+    }
+  }
+
+  for (const n of status.nodes) {
+    if (n.unreachable) continue
+    if (n.heartbeatMs !== null) {
+      add(`${n.name}:heartbeat`, n.heartbeatSeverity, n.name, `${n.name} stopped answering the leader`,
+        `The leader last heard from it ${ms(n.heartbeatMs)} ago`)
+    }
+    if (n.lag !== null) {
+      add(`${n.name}:lag`, n.lagSeverity, n.name, `${n.name} is falling behind the leader`,
+        `${count(n.lag)} log entries behind`)
+    }
+    const d = n.disk
+    if (d.usedPct !== null) {
+      add(`${n.name}:disk`, d.sev, n.name,
+        d.refused ? `${n.name} refuses writes: its disk is full` : `${n.name}'s disk is nearly full`,
+        d.refused ? `Disk ${Math.round(d.usedPct)}% used · writes answer 507` : `Disk ${Math.round(d.usedPct)}% used${d.gate && d.highPct !== null ? ` · stops taking writes at ${d.highPct}%` : ''}`)
+    }
+    if (n.mem.share !== null) add(`${n.name}:memory`, n.mem.sev, n.name, `${n.name} is short of memory`, `Memory ${share(n.mem.share)} of its limit`)
+    if (n.cpu.share !== null) add(`${n.name}:cpu`, n.cpu.sev, n.name, `${n.name} is busy`, `CPU ${share(n.cpu.share)} of the cores it may use`)
+  }
+  return out.sort((a, b) => (RANK[b.sev] || 0) - (RANK[a.sev] || 0))
 }

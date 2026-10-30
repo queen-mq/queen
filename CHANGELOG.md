@@ -14,6 +14,16 @@ a Traffic column, each node's last minute, with the channels on hover. The same 
 follower falling behind, a snapshot sent for minutes or a disk writing twice as much shows there
 before it shows as latency.
 
+**Dashboard: the Overview flags the cell, not only the queues.** For an operator, the verdict and
+the Open issues list now include what is wrong under the queues, each row linked to System: a
+member being sent a snapshot, a follower behind or silent, voters unreachable or quorum lost, and a
+node's disk, memory or CPU past its line. They are the lines that already coloured the top bar,
+which now also shows the bytes on the Raft port's wire beside Raft, and per node in its panel.
+
+**Dashboard: dark cards stay near-black, the logo is smaller.** The contrast pass keeps its
+brighter text and 11px floor, but the dark theme's cards, inputs and borders are back to their
+earlier values; the Queen wordmark is 34px, centred in its row.
+
 **Docs: rebuilt from the little book of QueenMQ.** The site now follows the book, chapter by
 chapter: introduction, writing applications, patterns, integrations, managing clusters and
 architecture, with every example in JavaScript, Python, Go, Rust, PHP and C++, cut from programs

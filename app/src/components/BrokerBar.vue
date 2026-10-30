@@ -38,6 +38,8 @@
         </span>
         <span class="bbar-item bbar-full">
           <span class="k">Raft</span><b :class="status.raft.sev">{{ raftShort }}</b>
+          <!-- What crosses the Raft port: a rate has no "full", so no meter. -->
+          <span v-if="status.raft.wire !== null" class="bbar-rate">· {{ formatRate(status.raft.wire) }}</span>
         </span>
         <!-- Narrow screens: one word and the worst mark. -->
         <span class="bbar-item bbar-sum">
@@ -49,7 +51,7 @@
       </span>
     </button>
 
-    <div v-if="open" class="bbar-panel" role="dialog" aria-label="Broker">
+    <div v-if="open" class="bbar-panel" :class="{ 'bbar-wide': moving }" role="dialog" aria-label="Broker">
       <div class="bbar-head">
         <span><b>Cell {{ cellLabel }}</b> · shared by every tenant, not just {{ tenantLabel }}</span>
         <router-link to="/system" class="bbar-link" @click="open = false">System ›</router-link>
@@ -61,7 +63,10 @@
         <div class="bbar-scroll">
           <table class="t bbar-table">
             <thead>
-              <tr><th>Node</th><template v-if="measured"><th>CPU</th><th>Memory</th><th>Disk</th></template><th>Raft</th></tr>
+              <tr>
+                <th>Node</th><template v-if="measured"><th>CPU</th><th>Memory</th><th>Disk</th></template><th>Raft</th>
+                <template v-if="moving"><th title="Bytes per second on the node's network interfaces (Linux only)">Network in / out</th><th>Disk write</th><th title="Bytes per second this node sent and received on the Raft port">Raft out / in</th></template>
+              </tr>
             </thead>
             <tbody>
               <tr v-for="n in status.nodes" :key="n.name">
@@ -88,6 +93,11 @@
                   </td>
                 </template>
                 <td class="bbar-raft">{{ raftOf(n) }}</td>
+                <template v-if="moving">
+                  <td class="bbar-rates">{{ n.traffic?.network ? `${formatRate(n.traffic.network.received)} / ${formatRate(n.traffic.network.sent)}` : '—' }}</td>
+                  <td class="bbar-rates">{{ formatRate(n.traffic?.disk?.written) }}</td>
+                  <td class="bbar-rates" :title="trafficTitle(n.traffic)">{{ n.traffic ? `${formatRate(n.traffic.sent)} / ${formatRate(n.traffic.received)}` : '—' }}</td>
+                </template>
               </tr>
             </tbody>
           </table>
@@ -95,6 +105,7 @@
         <p v-if="measured" class="bbar-foot">
           {{ raftLine }}. CPU is the average of the last {{ status.cpu.top?.windowSeconds || 60 }} s, of the cores the node may use;
           memory is what the process holds, not the page cache it maps, against the limit it runs under; the mark on a disk bar is where that node stops taking writes.
+          <template v-if="moving">Traffic is per second over the same interval; hover a Raft figure for its channels.</template>
         </p>
         <p v-else class="bbar-foot">
           {{ raftLine }}. This broker does not report its CPU, memory or disk; a newer build does.
@@ -112,6 +123,7 @@ import { operator } from '@/api'
 import { describeApiError } from '@/api/errors'
 import { formatNumber, useApi } from '@/composables/useApi'
 import { brokerStatus } from '@/composables/useBrokerStatus'
+import { formatRate, trafficTitle } from '@/composables/useTraffic'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useIdentity } from '@/stores/identity'
 import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
@@ -133,6 +145,9 @@ const status = computed(() => brokerStatus(members.data.value))
 // A broker older than the `host` block reports Raft only: its CPU, memory
 // and disk read "—", and the tooltip and the panel say why.
 const measured = computed(() => (members.data.value?.members || []).some((m) => m && m.host))
+// A broker older than the `traffic` block, or one before its first metrics
+// interval, has no traffic columns at all rather than a row of dashes.
+const moving = computed(() => (status.value?.nodes || []).some((n) => n.traffic))
 const buttonTitle = computed(() => (measured.value
   ? `Cell ${cellLabel.value}: the broker, shared by every tenant. Click for every node.`
   : `Cell ${cellLabel.value}: this broker reports Raft only, not its CPU, memory or disk; a newer build does. Click for every node.`))

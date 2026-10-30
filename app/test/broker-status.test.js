@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { brokerStatus, hostReading } from '../src/composables/useBrokerStatus.js'
+import { brokerStatus, cellIssues, hostReading } from '../src/composables/useBrokerStatus.js'
 
 const GiB = 1024 ** 3
 
@@ -111,4 +111,97 @@ test('a broker older than `host` has readings of nothing', () => {
   assert.equal(r.disk.sev, '')
   assert.equal(brokerStatus(null), null)
   assert.equal(brokerStatus({ members: 'nope' }), null)
+})
+
+// ---------------------------------------------------------------------------
+// The cell's issues on the Overview: the top bar's lines, plus the snapshot.
+// ---------------------------------------------------------------------------
+
+const MB = 1024 * 1024
+const traffic = (over = {}) => ({
+  windowSeconds: 60,
+  raft: {
+    sentBytesPerSec: 0,
+    receivedBytesPerSec: 0,
+    replication: { sentBytesPerSec: 0, receivedBytesPerSec: 0 },
+    snapshot: { sentBytesPerSec: 0, receivedBytesPerSec: 0 },
+    ...over,
+  },
+})
+const three = (overs = {}) => ({
+  leaderId: 1,
+  term: 14,
+  members: [
+    member(1, { state: 'leader', lagEntries: null, heartbeatAgeMs: null, traffic: traffic(), ...(overs[1] || {}) }),
+    member(2, { traffic: traffic(), ...(overs[2] || {}) }),
+    member(3, { traffic: traffic(), ...(overs[3] || {}) }),
+  ],
+})
+const issuesOf = (payload) => cellIssues(brokerStatus(payload))
+
+test('a healthy cell has no issues, and the wire is every node sent, summed', () => {
+  const s = brokerStatus(three({
+    1: { traffic: traffic({ sentBytesPerSec: 12 * MB }) },
+    2: { traffic: traffic({ sentBytesPerSec: 1 * MB }) },
+  }))
+  assert.deepEqual(cellIssues(s), [])
+  assert.equal(s.raft.wire, 13 * MB)
+  // No node reports traffic (an older build): the wire is unknown, not 0.
+  assert.equal(brokerStatus({ leaderId: 1, members: [member(1, { state: 'leader' })] }).raft.wire, null)
+  assert.deepEqual(cellIssues(null), [])
+})
+
+test('a snapshot names the node it goes to, or the sender when that node says nothing', () => {
+  const to3 = issuesOf(three({
+    1: { traffic: traffic({ snapshot: { sentBytesPerSec: 85 * MB, receivedBytesPerSec: 0 } }) },
+    3: { traffic: traffic({ snapshot: { sentBytesPerSec: 0, receivedBytesPerSec: 85 * MB } }) },
+  }))
+  assert.equal(to3.length, 1)
+  assert.equal(to3[0].sev, 'warn')
+  assert.equal(to3[0].name, 'node-3')
+  assert.equal(to3[0].title, 'node-3 is being sent a snapshot')
+  assert.match(to3[0].why, /85 MB\/s over the last 60 s/)
+  assert.equal(to3[0].to, '/system')
+  const fromLeader = issuesOf(three({
+    1: { traffic: traffic({ snapshot: { sentBytesPerSec: 40 * MB, receivedBytesPerSec: 0 } }) },
+    3: { traffic: undefined },
+  }))
+  assert.equal(fromLeader.length, 1)
+  assert.equal(fromLeader[0].title, 'node-1 is sending a snapshot')
+})
+
+test('a follower behind or silent, by the same lines as the Raft table', () => {
+  const behind = issuesOf(three({ 2: { lagEntries: 12000 } }))
+  assert.deepEqual(behind.map((i) => [i.name, i.sev, i.why]), [['node-2', 'warn', '12,000 log entries behind']])
+  const silent = issuesOf(three({ 3: { heartbeatAgeMs: 2600 } }))
+  assert.deepEqual(silent.map((i) => [i.title, i.sev, i.why]), [['node-3 stopped answering the leader', 'bad', 'The leader last heard from it 2.6 s ago']])
+  assert.equal(issuesOf(three({ 3: { heartbeatAgeMs: 700 } }))[0].sev, 'warn')
+})
+
+test('quorum: one voter down is amber, a lost majority red, and a down node is not its own issue', () => {
+  const down = (id) => ({ state: 'unreachable', reachable: false, host: undefined, traffic: undefined, error: 'connect refused' })
+  const one = issuesOf(three({ 3: down(3) }))
+  assert.equal(one.length, 1)
+  assert.equal(one[0].name, 'Raft')
+  assert.equal(one[0].sev, 'warn')
+  const lost = issuesOf(three({ 2: down(2), 3: down(3) }))
+  assert.equal(lost[0].sev, 'bad')
+  assert.equal(lost[0].title, 'Quorum lost')
+})
+
+test('disk, memory and CPU past their lines, worst first', () => {
+  const list = issuesOf(three({
+    1: { host: host({ cpuPct: 390 }) },
+    2: { host: host({ disk: { totalBytes: 100 * GiB, usedBytes: 86 * GiB, usedPct: 86, gate: true, highPct: 85, lowPct: 80, writesRefused: true } }) },
+    3: { host: host({ rssBytes: 7.4 * GiB }) },
+  }))
+  assert.equal(list[0].sev, 'bad')
+  assert.equal(list[0].title, 'node-2 refuses writes: its disk is full')
+  assert.match(list[0].why, /writes answer 507/)
+  const titles = list.map((i) => i.title)
+  assert.ok(titles.includes('node-1 is busy'))
+  assert.ok(titles.includes('node-3 is short of memory'))
+  // Every rank after the first is no worse than the one before it.
+  const rank = { bad: 2, warn: 1 }
+  list.reduce((prev, i) => { assert.ok(rank[i.sev] <= rank[prev.sev]); return i })
 })

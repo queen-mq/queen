@@ -59,6 +59,7 @@
           :queues-error="queuesFailed ? queuesErrorText : ''"
           :groups-error="consumersFailed ? consumersErrorText : ''"
           :tenant-issues="issues.filter(i => i.tenant)"
+          :cell-issues="cellIssueList"
           :tenant-error="opsError ? describeApiError(opsError) : ''"
         >
           <template #rules>
@@ -530,6 +531,7 @@ import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
+import { brokerStatus, cellIssues } from '@/composables/useBrokerStatus'
 import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
 import MetricTile from '@/components/MetricTile.vue'
 import PartitionSunflower, { MAX_SEEDS } from '@/components/PartitionSunflower.vue'
@@ -583,6 +585,12 @@ const opsQ       = useApi((config) => systemApi.getQueueOps(getTimeRangeParams()
 const retentionQ = useApi((config) => systemApi.getRetention(getTimeRangeParams(), config), { immediate: false })
 const statusQ    = useApi((config) => operatorApi.getStatus(getTimeRangeParams(), config), { immediate: false })
 const sysQ       = useApi((config) => operatorApi.getSystemMetrics(getTimeRangeParams(), config), { immediate: false })
+// The cell's nodes, for the verdict: the read the top bar makes, guarded the
+// same way, so a broker without the route is asked once and stays quiet.
+const membersQ   = useApi(
+  routeSupport.guard('raft-members', (config) => operatorApi.getRaftMembers({ ...config, probe: true })),
+  { immediate: false },
+)
 
 const overview = overviewQ.data
 const queues = computed(() => {
@@ -1338,14 +1346,25 @@ const groupGlyph = (g) => {
   return s === 'bad' || s === 'warn' ? s : s === 'mute' ? 'idle' : 'ok'
 }
 
+// The cell's own problems, an operator's only (cell-level, like the top bar
+// that colours by the same lines): a follower behind or silent, a snapshot on
+// the wire, quorum, a node's disk, memory or CPU (useBrokerStatus cellIssues).
+// A failed read adds nothing here; the top bar says it could not read.
+const cellIssueList = computed(() => (can('operator') ? cellIssues(brokerStatus(membersQ.data.value)) : []))
+
 const statusKnown = computed(() =>
   !loadingQueues.value && !loadingConsumers.value && !queuesFailed.value && !consumersFailed.value
 )
 const statusSev = computed(() => {
+  // A failing cell is a fact even while the queues cannot be read.
+  if (cellIssueList.value.some(i => i.sev === 'bad')) return 'bad'
   if (!statusKnown.value) return 'unknown'
-  if (issues.value.some(i => i.sev === 'bad')) return 'bad'
-  return issues.value.length ? 'warn' : 'ok'
+  const all = [...cellIssueList.value, ...issues.value]
+  if (all.some(i => i.sev === 'bad')) return 'bad'
+  return all.length ? 'warn' : 'ok'
 })
+/** One cell issue says itself; several are counted. */
+const cellHeadline = (list) => (list.length === 1 ? list[0].title : `${list.length} problems in the cell`)
 const statusGlyph = computed(() => statusSev.value === 'unknown' ? 'idle' : statusSev.value)
 const statusWord = computed(() => {
   const w = { ok: 'Healthy', warn: 'Degraded', bad: 'Failing' }[statusSev.value]
@@ -1353,6 +1372,9 @@ const statusWord = computed(() => {
   return loadingQueues.value || loadingConsumers.value ? 'Checking' : 'Unknown'
 })
 const headline = computed(() => {
+  // The cell first when it is failing: every queue stands on it.
+  const cellBad = cellIssueList.value.filter(i => i.sev === 'bad')
+  if (cellBad.length) return cellHeadline(cellBad)
   if (loadingQueues.value || loadingConsumers.value) return 'Checking your queues…'
   if (!statusKnown.value) return 'Status unknown'
   const qIssues = issues.value.filter(i => !i.tenant)
@@ -1361,6 +1383,7 @@ const headline = computed(() => {
   if (bad.length > 1) return `${bad.length} queues are falling behind`
   if (qIssues.length) return `${qIssues.length} ${qIssues.length === 1 ? 'queue needs' : 'queues need'} attention`
   if (issues.value.length) return 'Ack failures need attention'
+  if (cellIssueList.value.length) return cellHeadline(cellIssueList.value)
   return 'All queues are healthy'
 })
 
@@ -1419,7 +1442,7 @@ const fetchAll = async () => {
   ]
   // The two cell-level sources are operator routes: for anyone else the proxy
   // answers 404 route_blocked, so we don't ask and don't render their rows.
-  if (can('operator')) jobs.push(statusQ.refresh(), sysQ.refresh())
+  if (can('operator')) jobs.push(statusQ.refresh(), sysQ.refresh(), membersQ.refresh())
   await Promise.all(jobs)
   lastRefreshAt.value = Date.now()
 }
