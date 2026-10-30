@@ -55,6 +55,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-22 (b68756955, entries count as dead): qlog/set.rs rewrites a file
 # once its dead messages plus the raft entries it carries reach the threshold (per-queue logs: half
 # the file in entries). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): maintenance.rs (202956b64): maintenance adds dead-letter
+# caps, an optional streams-state TTL, and paces a retention round from the larger of the last and
+# the current round. Nothing this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

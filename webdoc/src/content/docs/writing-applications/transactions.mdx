@@ -29,6 +29,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-30 (JS and Python consumers wait out a broker that cannot answer):
 # ConsumerManager.js polls again after a 408, 429 or 5xx, a timeout or a lost connection instead of
 # stopping (said on writing-applications/pop). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): groups.rs, real.rs (7fe23f4ed): KV reads put each stored
+# value's text into the answer instead of building a JSON tree; every answer is the same, byte for
+# byte; raft.rs (f9c9a37f2): a transaction's KV writes spend their own rate, QUEEN_KV_TXN_WRITE_RATE
+# (10,000/s), on the same quota. Nothing this page states changes.
 ---
 
 The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.

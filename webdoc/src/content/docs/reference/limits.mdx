@@ -26,6 +26,14 @@ sourceOfTruth:
   - server/src/rsm/planner/timers.rs
   - server/src/rsm/planner/positions.rs
   - server/src/rsm/maintenance.rs
+  - server/src/memguard.rs
+  - server/src/frames.rs
+  - server/src/rsm/consume/wait.rs
+  - server/src/ephemeral.rs
+  - server/src/rsm/facade/real/phase2/streams.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - protocols/queen-kafka/src/config.rs
+  - protocols/queen-kafka/src/txn.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): defaults checked against 2.0.1; traces are on disk and expire in bounded steps; a trace key over 511 bytes is answered 400.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs read the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. No limit or default changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its existing limit and offset handling; the listed request limits are unchanged.
@@ -88,6 +96,13 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-22 (the reclaim pass's row cache): maintenance.rs keeps only the
 # partition rows a pass found and reads a missing one again (no row can mean not applied yet).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0, the hardening, 96672fac3..f9c9a37f2): every limit the
+# release adds is on this page, read from memguard.rs, main.rs, frames.rs, consume/wait.rs,
+# maintenance.rs (DlqCaps, the streams-state TTL), phase2.rs (the dedup clamp, the depth and
+# lagging lists), phase2/reads.rs (pages, traces, the fetch total, /messages offsets),
+# phase2/streams.rs, phase2/admin.rs (chunked admin effects), real.rs (push items, the timers of a
+# transaction), ephemeral.rs, quota.rs (the transaction KV bucket), the Kafka facade's config.rs and
+# txn.rs, proxy/src/harden.rs and handlers/connectors.rs. Values are the code's defaults.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -97,7 +112,7 @@ partition's history may grow: your disk and your memory bound those, and a proxy
 per tenant (see [tenants](/manage/tenants/)).
 
 Each limit below comes with the setting that moves it, when there is one, and the file that
-applies it. The values are the defaults of server 2.0.1; the full list of settings is on
+applies it. The values are the defaults of server 2.7.0; the full list of settings is on
 [configuration](/reference/configuration/).
 
 ## Requests
@@ -107,13 +122,35 @@ applies it. The values are the defaults of server 2.0.1; the full list of settin
 | Request body | 64 MiB | `QUEEN_MAX_BODY_BYTES` | `server/src/handlers/raft.rs` |
 | One planned command (a push to one partition, a KV call, a timers call, a positions list) | 96 MiB | `QUEEN_RAFT_ENTRY_MAX_BYTES` | `server/src/rsm/planner/push.rs` |
 | Message `payload` | any JSON value, inside the two limits above | | `server/src/rsm/facade/real.rs` |
-| Items per push | no count limit | | `server/src/rsm/facade/real.rs` |
+| Items per push | 10,000; more is refused 400 `too_many_items` | `QUEEN_PUSH_MAX_ITEMS` | `server/src/rsm/facade/real.rs` |
+| An admin command that touches many rows: a DLQ purge, a seek, a group, queue or tenant delete, a streams reset | sent as commands of at most 4,096 rows each; one still over `QUEEN_RAFT_ENTRY_MAX_BYTES` is refused `too_large` | | `server/src/rsm/facade/real/phase2/admin.rs` |
 | `transactionId` | 65,535 bytes | | `server/src/rsm/facade/real.rs` |
 | Deadline of a push | 30 s, at most 60 s | `POP_DEFAULT_TIMEOUT_MS` | `server/src/handlers/raft.rs` |
 | Deadline of an ack, a lease extension or a transaction | 30 s, at most 60 s | `QUEEN_STMT_TIMEOUT_MS` | `server/src/handlers/raft.rs` |
 
 The pushes to one partition travel as one command, so items for one partition that together exceed
 the command limit are refused, and those items answer `status: "error"` in the 201 body.
+
+## Memory and connections
+
+| Limit | Default | Setting | Applied in |
+|---|---|---|---|
+| The node's memory limit, which the guard below compares the process's anonymous memory with | the cgroup's `memory.max`; with neither, the guard is off | `QUEEN_MEMORY_LIMIT_BYTES` | `server/src/memguard.rs` |
+| Large reads (message, dead-letter and trace pages, analytics, status, resources and KV listings, consumer groups, stream states, fetch) answer 503 `memory_pressure` | past 80 % of the limit | `QUEEN_MEMGUARD_SOFT_PCT` | same |
+| Writes that grow the stored state (push, transaction, stream cycle, KV, timer and trace writes) answer 503 `memory_pressure` too | past 90 % | `QUEEN_MEMGUARD_HARD_PCT` | same |
+| Large reads served at once; one that waits 2 s for a slot answers 503 `busy` | 32 | `QUEEN_HEAVY_READS_MAX` | same |
+| Open connections on the broker port; past it a new one is closed as it is accepted | 20,000 | `QUEEN_MAX_CONNECTIONS` | `server/src/main.rs` |
+| Time to send a request's head, and to send a next request on a kept-alive connection | 120 s | `QUEEN_HTTP_HEADER_READ_TIMEOUT_MS` | same |
+| Long polls waiting at once on a node; past it a pop answers empty at once, and the client polls again | 50,000 | `QUEEN_MAX_PARKED_POPS` | `server/src/rsm/consume/wait.rs` |
+| Pops and acks a follower has in flight to the leader | 64 MiB | `QUEEN_RAFT_FWD_DRAIN_INFLIGHT_MB` | `server/src/rsm/replicator/raft/forward.rs` |
+
+Pops, acks, renewals, deletes, `/health`, metrics and Raft are never refused by the memory guard,
+so a node near its limit can still be drained. The refusals carry `Retry-After`, 1 to 5 s, which
+every SDK waits out.
+
+<Why>a broker that runs out of memory loses every client at once, and its data is reloaded into
+memory at start. Refusing the requests that would grow it first keeps the node up while the cause
+is found.</Why>
 
 ## Names
 
@@ -126,6 +163,14 @@ the command limit are refused, and those items answer `status: "error"` in the 2
 | KV namespace (`ns`) | `^[a-z0-9][a-z0-9._-]{0,63}$` | `server/src/rsm/planner/kv.rs` |
 | KV key | 1 to 512 bytes, no NUL, and tenant + namespace + key within the store's 511-byte key | `server/src/rsm/planner/kv.rs` |
 | Position metadata | 4096 bytes | `server/src/rsm/planner/positions.rs` |
+
+A request with a name that breaks these rules is refused 413 `name_too_long` before anything is
+written. The broker measures every key the command makes from a name: a `0x00` byte is stored as
+two, and a consumer group's counters and the timers' due index add a few bytes to the key they
+start from.
+
+<Why>a store key longer than LMDB's 511 bytes fails when the command is applied, on every node, and
+again at every restart. Before 2.7.0 one such request stopped the cluster.</Why>
 
 ## Queues, leases and retries
 
@@ -145,11 +190,26 @@ A pop's `leaseSeconds` overrides `leaseTime` for that pop, and
 default: an option you leave out keeps its value, and `null` restores its default. With
 `"mode": "replace"`, every option you leave out goes back to its default.
 
+## Dead letters
+
+| Limit | Default | Setting |
+|---|---|---|
+| Dead letters kept in one queue | 100,000 | `QUEEN_DLQ_MAX_ROWS_PER_QUEUE` |
+| Bytes of one queue's dead letters, estimated from its oldest ones | 1 GiB | `QUEEN_DLQ_MAX_BYTES_PER_QUEUE` |
+| Age of a dead letter | 14 days | `QUEEN_DLQ_MAX_AGE_S` |
+
+Past any of the three the oldest dead letters go first, at most 1,024 per maintenance pass. `0`
+turns a cap off. Applied in `server/src/rsm/maintenance.rs`.
+
+<Why>a dead letter is a full copy of its message, in memory on every node and reloaded at start.
+Before 2.7.0 only a delete removed one, so a consumer that failed every message filled the nodes'
+memory as fast as it failed.</Why>
+
 ## Dedup
 
 | Limit | Default | Setting | Applied in |
 |---|---|---|---|
-| Dedup window, per queue, checked per partition | 3600 s; `0` turns dedup off; no upper bound | `dedupWindowSeconds` on `configure` | `server/src/rsm/planner/push.rs` |
+| Dedup window, per queue, checked per partition | 3600 s; `0` turns dedup off; at most 7 days, and a longer window is cut to it, also on a queue configured before | `dedupWindowSeconds` on `configure`, `QUEEN_MAX_DEDUP_WINDOW_S` | `server/src/rsm/planner/push.rs`, `server/src/rsm/facade/real/phase2.rs` |
 | How long the hashes behind it are kept | the window, and never less than 900 s | `QUEEN_RAFT_TXN_WINDOW_MIN_S` | `server/src/rsm/maintenance.rs` |
 | How long a push keeps its index row in memory | the same time, then the row goes even if the message stays (cluster version 6) | `QUEEN_RAFT_ROWS_WINDOW` | `server/src/rsm/maintenance.rs` |
 | A committed command answers a retry of its request id | 60 s | `QUEEN_RAFT_REQUEST_ID_WINDOW_S` | `server/src/rsm/batcher.rs` |
@@ -161,7 +221,7 @@ whatever the window.
 
 | Parameter | Default | Bound | Applied in |
 |---|---|---|---|
-| `batch` | 200 | none in the broker | `server/src/handlers/data.rs` |
+| `batch` | 200 | 10,000 messages and 64 MiB of payloads (`QUEEN_POP_MAX_BATCH`, `QUEEN_POP_MAX_BYTES`); always at least one message | `server/src/frames.rs` |
 | `partitions` (wildcard pop) | 1 | 1 to 64 | `server/src/handlers/data.rs` |
 | `timeout` with `wait=true` | 30,000 ms (`POP_DEFAULT_TIMEOUT_MS`) | 60 s | `server/src/handlers/raft.rs` |
 
@@ -183,8 +243,20 @@ default, then answers 504 `upstream_timeout`. The edge waits `timeout` plus
 | Bytes per entry | `maxBytes`, 1 MiB by default, 1 byte to 8 MiB | | |
 | Long-poll | `maxWaitMs`, at most 30,000 | none | none |
 | Partitions per entry | | | `limit`, 1000 by default and at most |
+| Bytes per call | the call's `maxBytes`, or 50 MiB (`QUEEN_FETCH_MAX_BYTES`) | | 100,000 partitions over all entries |
 
 Applied in `server/src/rsm/facade/real/phase2/reads.rs` and `offsets.rs`.
+
+## Pages and lists
+
+| Limit | Default | Setting |
+|---|---|---|
+| Bytes in one page of messages, dead letters or traces; the page stops early and says where to go on | 16 MiB | `QUEEN_READ_PAGE_MAX_BYTES` |
+| `offset` of `GET /api/v1/messages`; past it, 400 `bad_request`: page by time instead | 10,000 | `QUEEN_MESSAGES_MAX_OFFSET` |
+| One trace's `data`; more answers 413 `payload_too_large` | 1 MiB | `QUEEN_TRACE_MAX_BYTES` |
+| Partitions listed by `/depth`, `/consumer-groups/lagging` and a queue's detail | 1,000, or `limit` up to 10,000. The totals count every partition, and `partitionsTruncated` says the list was cut | |
+
+Applied in `server/src/rsm/facade/real/phase2.rs` and `phase2/reads.rs`.
 
 ## KV
 
@@ -221,10 +293,15 @@ is short; and a query with a large state answers in pages instead of one long re
 | Limit | `POST /streams/v1/cycle` | Setting |
 |---|---|---|
 | One state value | 16 MiB of JSON. A cycle with a larger one answers 413 `state_too_large` and stores nothing | `QUEEN_STREAMS_MAX_STATE_BYTES` |
+| State operations in one cycle | 10,000. More answers 413 `too_many_state_ops` and stores nothing | `QUEEN_STREAMS_MAX_STATE_OPS` |
+| One state key | a key that would make a store key over 511 bytes (about 485 bytes of key) answers 400 `state_key_too_long` | |
 
 Why: a window's state is read and written whole on every cycle of its partition, so its size is
 paid on every event. Keep large data out of the state: put it in a message or your own storage, and
 keep a reference. Applied in `server/src/rsm/facade/real/phase2/streams.rs`.
+
+`QUEEN_STREAMS_STATE_TTL_S` removes the state rows nobody wrote for that many seconds. It is off by
+default, because a window may rightly stay open longer than any default would guess.
 
 ## Locks
 
@@ -248,9 +325,9 @@ renew in the background do so every third of the lifetime.
 
 | Limit | `POST /api/v1/timers` | Inside a transaction | Setting |
 |---|---|---|---|
-| Horizon (`delayMs`) | 90 days, narrowed by a tenant's quota | not checked | `QUEEN_TIMERS_MAX_HORIZON_S` |
-| Payload, decoded | 1 MiB | not checked | `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` |
-| Operations per call | 256 | not checked | `QUEEN_TIMERS_MAX_OPS_PER_CALL` |
+| Horizon (`delayMs`) | 90 days, narrowed by a tenant's quota | 90 days | `QUEEN_TIMERS_MAX_HORIZON_S` |
+| Payload, decoded | 1 MiB | 1 MiB | `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` |
+| Operations per call | 256 | 256 | `QUEEN_TIMERS_MAX_OPS_PER_CALL` (the route only) |
 | Schedules per tenant | share the KV write rate | not counted | `QUEEN_KV_WRITE_RATE` |
 | One `(queue, timerKey)` per call | yes | yes | |
 
@@ -271,13 +348,40 @@ Ephemeral queues live in memory, so their limits are memory budgets. Each is a c
 | Messages per queue | 10,000 | `QUEEN_EPHEMERAL_QUEUE_MAX_LENGTH` |
 | Lease | 30 s (at most a day) | `QUEEN_EPHEMERAL_LEASE_S` |
 | Attempts before a message is dropped (there is no DLQ) | 5 | `QUEEN_EPHEMERAL_RETRY_LIMIT` |
-| Idle time before an implicit queue is collected | 300 s; `0` never | `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` |
+| Idle time before an empty implicit queue is collected | 300 s; `0` never | `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` |
+| Time before an implicit queue nobody pushed to, popped or acked is collected, even with messages in it | 600 s; `0` never | `QUEEN_EPHEMERAL_IMPLICIT_TTL_S` |
+| Ephemeral queues per node, declared and implicit | 100,000; past it, creating one answers 503 | `QUEEN_EPHEMERAL_MAX_QUEUES` |
+| Bytes one pop answers | 16 MiB, and always at least one message | `QUEEN_EPHEMERAL_POP_MAX_BYTES` |
 | Pushed messages per tenant | 5,000/s, burst 10,000 | `QUEEN_EPHEMERAL_RATE`, `QUEEN_EPHEMERAL_BURST` |
 | Items per push or ack call, and pop `batch` | 10,000 | |
 | Pop `timeout` | 300,000 ms | |
 | Queue, partition and group names | 512 bytes | |
 
 The last three are constants in `server/src/handlers/ephemeral.rs`.
+
+## Kafka port
+
+| Limit | Default | Setting |
+|---|---|---|
+| A request frame before the client authenticates | 512 KiB | |
+| Time for the rest of a frame once its first byte arrived | 30 s | `QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS` |
+| A connection that sends no request is closed after | 600 s (Kafka's `connections.max.idle.ms`) | `QUEEN_KAFKA_IDLE_TIMEOUT_MS` |
+| Request frames held at once, over every connection; the next one waits in its socket | 256 MiB | `QUEEN_KAFKA_INFLIGHT_BYTES` |
+| One Fetch answer, whatever the request asks | 50 MiB (Kafka's `fetch.max.bytes`) | `QUEEN_KAFKA_FETCH_MAX_BYTES` |
+| Partitions one Metadata answer lists; topics past it answer an error | 100,000 | `QUEEN_KAFKA_METADATA_MAX_PARTITIONS` |
+| Topics one request creates by itself | 16 | |
+| Members of one consumer group | 1,000 (Kafka's `group.max.size`) | `QUEEN_KAFKA_GROUP_MAX_MEMBERS` |
+| A `transactional.id` nobody used is forgotten after | 7 days (Kafka's `transactional.id.expiration.ms`); the next InitProducerId starts it again | |
+
+Applied in `protocols/queen-kafka/src/config.rs`, `conn.rs` and `txn.rs`.
+
+## Proxy and connectors
+
+| Limit | Default | Setting |
+|---|---|---|
+| Requests with no credential, per client address, at the proxy | 20 a second, burst 60; they are refused 401 anyway | `QUEEN_EDGE_ANON_RPS_PER_IP` |
+| Connectors on a cluster, every tenant together | 256 | `QUEEN_CONNECTORS_MAX` |
+| Text one PostgreSQL snapshot chunk reads, and its rows | 64 MiB, 10,000 rows | `QUEEN_PG_SNAPSHOT_CHUNK_MAX_BYTES` |
 
 ## Retention
 

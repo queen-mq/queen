@@ -31,7 +31,7 @@ JavaScript, Python, Go, Rust and PHP. Every snippet, here and on the site, is cu
 ### 1. Run a node
 
 ```bash
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 npm install queen-mq
 ```
 

@@ -60,6 +60,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (stream claims): ack.rs and txn.rs refuse a positional ack
 # (Streams cycles only) whose lease names a partition its group has no row on, or one that is gone
 # (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): kv.rs, real.rs (7fe23f4ed): KV reads put each stored
+# value's text into the answer instead of building a JSON tree; every answer is the same, byte for
+# byte; raft.rs (f9c9a37f2): a transaction's KV writes spend their own rate, QUEEN_KV_TXN_WRITE_RATE
+# (10,000/s), on the same quota. The KV operations name their rate and quota, the timer codes of a
+# transaction are listed, and memory_pressure joins the engine answers.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
@@ -178,7 +183,10 @@ The same operations as `POST /api/v1/kv`, without `getPrefix`.
 Every `put`, `putIfAbsent` and `incr` carries exactly one expiry: `ttlSeconds` (an integer greater
 than 0) or `forever: true`; the JS SDK turns `ttl: '30d'` into `ttlSeconds`. A `value` is any JSON
 value of at most `QUEEN_KV_MAX_VALUE_BYTES` (64 KiB) as compact JSON. `expect` is a version number,
-and `0` means the key must not exist.
+and `0` means the key must not exist. The writes count against the tenant's KV quota and spend the
+transaction KV rate, `QUEEN_KV_TXN_WRITE_RATE` (10,000 a second, burst 20,000), not the KV routes'
+100 a second: over either, the whole transaction is refused before it runs, with the KV route's
+answer, 429 `rate_limited` or 403 `kv_quota_exceeded`.
 
 `required: true` turns an operation into a gate. If its precondition loses (`exists`, `absent`,
 `version`, `limit`, `type`), the whole transaction rolls back with `reason: "kv_precondition"`.
@@ -356,14 +364,15 @@ A lost `required` KV operation adds the operation that lost:
 | `name_too_long`, `kv_key_too_large` | 200 | A name passed the edge check but not the store's key limit. | Shorten it. |
 | `bad_request` | 400 or 200 | 400: the body is not valid JSON of this shape, an operation `type` is missing or not `push`/`ack`, or a timer op is invalid. 200: no parts at all, an inline push without `queue` or `payload`, a non-numeric `partitionId`, an invalid position, or `encrypted` on a timer for a queue that encrypts at rest. | Fix the request. |
 | `timers_server_owned_field` | 400 | A timer op carries `producerSub` or a field starting with `_`. | Remove it. |
+| `timers_too_many_ops`, `timer_horizon_exceeded`, `timers_payload_too_large` | 400 | A timer op is past what `POST /api/v1/timers` takes: more than 256 timer ops, a delay beyond `QUEEN_TIMERS_MAX_HORIZON_S` (90 days), a payload over `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` (1 MiB). | Split the timers, or shorten them. |
 | `kv_*` | 400, 413 | A KV operation fails validation: `kv_bad_request`, `kv_unknown_op`, `kv_bad_namespace`, `kv_bad_key`, `kv_bad_ttl`, `kv_expiry_not_specified`, `kv_bad_expect`, `kv_too_many_ops`, `kv_too_many_keys`, `kv_duplicate_key_in_call`, `kv_tenant_not_an_input`, `kv_get_prefix_not_allowed_in_transaction`; 413 for `kv_key_too_large` and `kv_value_too_large`. | Fix the request. |
 | `internal`, `entry_encode_failed` | 200 | A broker fault. | Report it. |
 
 Some failures use the engine's error body `{"error", "code"}` instead, with no `reason`: 413
 `name_too_long` (a pushed queue or partition name over the key budget), 400 `bad_request` (a
 `transactionId` over 65,535 bytes), 429 `overloaded`, 503 `retry`, `no_leader` or `timeout`, 503
-`standby` on a [standby cluster](/manage/standby/), 507 `storage_full`, 500 `internal`, and the
-401/403 of authentication. See [errors](/reference/errors/).
+`standby` on a [standby cluster](/manage/standby/), 503 `memory_pressure` from a node near its memory
+limit, 507 `storage_full`, 500 `internal`, and the 401/403 of authentication. See [errors](/reference/errors/).
 
 ## Retries
 

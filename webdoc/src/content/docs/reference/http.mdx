@@ -62,6 +62,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (stream claims): auth.rs makes POST /streams/v1/state/partitions
 # read-only; the generated route table lists it and POST /streams/v1/claim (baa27c5c0). Nothing else
 # this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): config.rs, raft.rs (f9c9a37f2): a transaction's KV
+# writes spend their own rate, QUEEN_KV_TXN_WRITE_RATE (10,000/s), on the same quota; data.rs
+# (d1c81376e): the in-process Kafka facade's commit row skips the transaction KV rate; mod.rs, real.rs
+# (7fe23f4ed): KV reads put each stored value's text into the answer instead of building a JSON
+# tree; every answer is the same, byte for byte. Nothing this page states changes.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no

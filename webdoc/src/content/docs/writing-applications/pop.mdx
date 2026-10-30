@@ -54,6 +54,12 @@ verifiedBy:
 # ConsumerManager.js and consumer_manager.py poll again after a 408, 429 or 5xx (but a 503
 # raft_phase1_unsupported), a timeout or a lost connection, waiting Retry-After or 1 s doubling up
 # to 30 s; a 4xx still stops them. "Running a consumer for real" says so, with the other SDKs.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): pop.rs (04d2effca): the pinned long-poll wake
+# (e82652798) merged with the hardening's batched partition drops; data.rs (d1c81376e): the in-
+# process Kafka facade's commit row skips the transaction KV rate; config.rs, raft.rs (f9c9a37f2): a transaction's
+# KV writes spend their own rate, QUEEN_KV_TXN_WRITE_RATE (10,000/s), on the same quota; real.rs
+# (7fe23f4ed): KV reads put each stored value's text into the answer instead of building a JSON
+# tree; every answer is the same, byte for byte. Nothing this page states changes.
 ---
 
 There are two ways to read. `consume()` is a loop: it takes messages, calls your handler, acks them when the handler returns, and goes on. `pop()` is one call: it hands you the messages and leaves the ack to you.

@@ -12,7 +12,7 @@
  */
 
 /** The image every copy-paste command on the page runs. One place to bump it. */
-export const IMAGE = "ghcr.io/queen-mq/queen:2.6.0";
+export const IMAGE = "ghcr.io/queen-mq/queen:2.7.0";
 
 /**
  * The `<title>`. NimbusHead appends " | Queen MQ" because this differs from

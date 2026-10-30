@@ -10,7 +10,7 @@ Quick guide to running the Queen Python client test suite.
 docker run -d --name queen -p 6632:6632 \
   -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
   -v queen-data:/var/lib/queen/raft \
-  ghcr.io/queen-mq/queen:2.6.0
+  ghcr.io/queen-mq/queen:2.7.0
 ```
 
 The tests expect an empty broker and nothing cleans up after them, so start a

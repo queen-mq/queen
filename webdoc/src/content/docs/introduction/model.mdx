@@ -30,6 +30,13 @@ digest: >-
 # sourceOfTruth re-read 2026-10-30 (stream claims): txn.rs refuses a streams cycle whose lease names
 # a partition that is gone; phase2.rs adds POST /streams/v1/claim and /streams/v1/state/partitions
 # (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): pop.rs (04d2effca): the pinned long-poll wake
+# (e82652798) merged with the hardening's batched partition drops; groups.rs, real.rs (7fe23f4ed):
+# KV reads put each stored value's text into the answer instead of building a JSON tree; every
+# answer is the same, byte for byte; phase2.rs (00d7670ca): the hardening merged: /depth and lagging
+# lists capped at 1,000 (totals still count every partition, lagging sorted most lagging first),
+# dedup window clamped to 7 days, admin effects chunked, the memory guard's metrics, the follower
+# drain window. Nothing this page states changes.
 ---
 
 The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases, transactions and a simple interface.

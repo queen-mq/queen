@@ -11,6 +11,11 @@ sourceOfTruth:
   - server/src/rsm/planner/push.rs
   - server/src/rsm/facade/groups.rs
   - protocols/queen-kafka/src/handlers/admin.rs
+# sourceOfTruth re-read 2026-10-30 (2.7.0): push.rs, txn.rs (96672fac3): the planner refuses a name
+# whose store keys pass 511 bytes (name_too_long); groups.rs (7fe23f4ed): KV reads put each stored
+# value's text into the answer instead of building a JSON tree; every answer is the same, byte for
+# byte; admin.rs (3e6b92631): the Kafka facade bounds frames, records, fetches, metadata and groups.
+# Nothing this page states changes.
 ---
 
 Two questions separate these systems more than any feature list: how you keep order per entity when there are millions of entities, and what one commit covers when a service handles an event. QueenMQ's answers are a partition per entity, created by its first message, and one transaction that writes the ack, the state, the next events and the timers as one entry. Every system below answers differently, and each one is better than QueenMQ at something. Laravel teams on Horizon have their own comparison: [Queen or Horizon](/integrations/laravel/queen-vs-horizon/).

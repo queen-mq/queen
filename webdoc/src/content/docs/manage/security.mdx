@@ -78,7 +78,7 @@ The proxy built into the binary (`QUEEN_PROXY_EMBEDDED=true`) is the second fron
 
 ## TLS
 
-The broker port does not terminate TLS. The proxy's port does (`QUEEN_TLS_CERT`, `QUEEN_TLS_KEY`). The Kafka port has none in 2.6, so with SASL its passwords cross the network in clear: keep it private, or terminate TLS in front of it. For anything else, terminate TLS at your ingress, with the hop to the node on a private network.
+The broker port does not terminate TLS. The proxy's port does (`QUEEN_TLS_CERT`, `QUEEN_TLS_KEY`). The Kafka port has none in 2.7, so with SASL its passwords cross the network in clear: keep it private, or terminate TLS in front of it. For anything else, terminate TLS at your ingress, with the hop to the node on a private network.
 
 ## The raft token
 

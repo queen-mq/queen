@@ -79,7 +79,7 @@ settings, as they did before 2.6; the others are accepted and not applied yet.
 
 A topic created on first use, by a metadata request, has no configs and keeps every record. The
 facade also sets the queue's dedup window to `QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`. The configs are read
-at creation only: AlterConfigs and IncrementalAlterConfigs are not offered in 2.6, so change a
+at creation only: AlterConfigs and IncrementalAlterConfigs are not offered in 2.7, so change a
 topic's retention afterwards through Queen ([queue options](/writing-applications/queues/)),
 and DescribeConfigs answers no entries.
 

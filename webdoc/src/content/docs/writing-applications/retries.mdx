@@ -48,6 +48,13 @@ verifiedBy:
 # ConsumerManager.js and consumer_manager.py poll again after a 408, 429 or 5xx, a timeout or a lost
 # connection instead of stopping (said on writing-applications/pop). Failed messages, retries and the
 # DLQ are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): pop.rs (04d2effca): the pinned long-poll wake
+# (e82652798) merged with the hardening's batched partition drops; data.rs (d1c81376e): the in-
+# process Kafka facade's commit row skips the transaction KV rate; config.rs, raft.rs (f9c9a37f2): a transaction's
+# KV writes spend their own rate, QUEEN_KV_TXN_WRITE_RATE (10,000/s), on the same quota; real.rs
+# (7fe23f4ed): KV reads put each stored value's text into the answer instead of building a JSON
+# tree; every answer is the same, byte for byte. A dead letter now stays until its queue's caps
+# remove it; the page says so.
 ---
 
 Every `failed` ack spends one retry. The message comes back after the queue's `retryDelay`, and its partition waits with it, for that consumer group. After `retryLimit` failures, the message goes to the dead-letter queue and the group moves on. You set both on the queue (see [Create and configure queues](/writing-applications/queues/)).
@@ -60,7 +67,7 @@ Two cases do not spend a retry: a `retry` ack, and a lease that runs out. So a m
 
 ## What a dead letter keeps
 
-A dead letter keeps the payload, the error the worker sent, the number of retries, and the consumer group that gave up on it. It stays until you replay it or delete it. Each group has its own: a message that failed for billing can be fine for analytics.
+A dead letter keeps the payload, the error the worker sent, the number of retries, and the consumer group that gave up on it. It stays until you replay it or delete it, or until its queue holds too many: past 100,000 dead letters, 1 GiB or 14 days in one queue, the oldest go first (each cap is a setting on [limits](/reference/limits/#dead-letters), and `0` turns it off). Each group has its own: a message that failed for billing can be fine for analytics.
 
 <Why>a failure you cannot see is a failure you cannot fix. The dead-letter queue is where they wait for a person, or for a fix in the code.</Why>
 

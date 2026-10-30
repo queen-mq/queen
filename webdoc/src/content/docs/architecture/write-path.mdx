@@ -24,6 +24,10 @@ sourceOfTruth:
 # empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
 # lease names a partition its group has no row on, or one that is gone (bad_lease), instead of
 # skipping it (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): raft.rs (f9c9a37f2): a transaction's KV writes spend
+# their own rate, QUEEN_KV_TXN_WRITE_RATE (10,000/s), on the same quota; real.rs (7fe23f4ed): KV
+# reads put each stored value's text into the answer instead of building a JSON tree; every answer
+# is the same, byte for byte. Nothing this page states changes.
 ---
 
 A write goes through four steps.

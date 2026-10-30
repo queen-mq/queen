@@ -18,6 +18,8 @@ sourceOfTruth:
   - connectors/queen-pg/src/sink/progress.rs
   - server/src/pg_inproc.rs
   - server/src/handlers/connectors.rs
+# sourceOfTruth re-read 2026-10-30 (2.7.0): connectors.rs (1cb8192c2): at most QUEEN_CONNECTORS_MAX
+# (256) connectors. Nothing this page states changes.
 ---
 
 The broker can stream a PostgreSQL table into a queue, and a queue into a table, with no other process. The **source** reads committed changes through logical replication and turns each one into a message, in a partition named after the row's key, in commit order. The **sink** is a consumer group the broker runs for you, and it writes every message into a table. Each one is set up with one HTTP call, runs on every node of a cluster, and gives exactly-once effects.

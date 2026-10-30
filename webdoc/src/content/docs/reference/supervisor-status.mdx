@@ -106,6 +106,10 @@ verifiedBy:
 # ConsumerManager.js and consumer_manager.py poll again after a 408, 429 or 5xx, a timeout or a lost
 # connection instead of stopping; the status document they publish is unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): SupervisorActivity.vue, SupervisorGroupCard.vue,
+# Supervisors.vue (cc23f6381): the dashboard lists each page's items in a column beside it. The
+# Supervisors page is a list beside one card per group; the first sentence of the application
+# overview says so.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
@@ -117,8 +121,9 @@ integration.
 
 ## Application overview
 
-The dashboard shows one horizontal card per publication group, across all SDK languages
-and the PHP/Rust process supervisors. Each card includes current worker capacity, pools
+The dashboard's Supervisors page shows one card per publication group, across all SDK languages
+and the PHP/Rust process supervisors; the list beside it names every group, and picking one
+narrows the page to it. A queue's Supervisors tab shows the groups that report that queue. Each card includes current worker capacity, pools
 needing attention, heartbeat age and runtime-specific diagnostics: busy workers and cumulative
 handler failures for SDK consumers, or draining workers and free process slots for process
 supervisors. Expand the instances line to see every loaded instance, then

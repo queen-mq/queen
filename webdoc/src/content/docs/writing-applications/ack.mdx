@@ -48,6 +48,12 @@ verifiedBy:
 # ConsumerManager.js and consumer_manager.py poll again after a 408, 429 or 5xx, a timeout or a lost
 # connection instead of stopping (said on writing-applications/pop). The acks they send are
 # unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): pop.rs (04d2effca): the pinned long-poll wake
+# (e82652798) merged with the hardening's batched partition drops; data.rs (d1c81376e): the in-
+# process Kafka facade's commit row skips the transaction KV rate; config.rs, raft.rs (f9c9a37f2): a transaction's
+# KV writes spend their own rate, QUEEN_KV_TXN_WRITE_RATE (10,000/s), on the same quota; real.rs
+# (7fe23f4ed): KV reads put each stored value's text into the answer instead of building a JSON
+# tree; every answer is the same, byte for byte. Nothing this page states changes.
 ---
 
 An ack tells the broker what happened to a message. A `completed` ack moves the consumer group's cursor past it, and that is all: the message stays in its partition until retention removes it.

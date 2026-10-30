@@ -41,6 +41,10 @@ digest: >-
 # sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): raft/mod.rs declares
 # raft/traffic.rs, which counts the Raft port's bytes by channel (23cee6523). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): apply.rs, mod.rs, real.rs (7fe23f4ed): KV reads put each
+# stored value's text into the answer instead of building a JSON tree; every answer is the same,
+# byte for byte; raft.rs (f9c9a37f2): a transaction's KV writes spend their own rate,
+# QUEEN_KV_TXN_WRITE_RATE (10,000/s), on the same quota. Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes catches up from the leader when it starts again. A leader that gets SIGTERM hands its job to a peer before it stops. A node that was away too long gets a snapshot from the leader, exits with code 75, and loads it when it starts again. This section is for the rest: a lost disk, a lost majority, a full disk, a bad day.

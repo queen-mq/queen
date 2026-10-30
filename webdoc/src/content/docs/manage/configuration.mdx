@@ -61,7 +61,7 @@ Every setting is an environment variable, and most installations need very few o
 One command, no settings:
 
 ```bash
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 ```
 
 Without a volume, the data lives inside the container and is gone when the container is removed. That is usually what you want on a laptop.
@@ -73,7 +73,7 @@ One node with its data on a volume:
 ```bash
 docker run -d --name queen --restart unless-stopped --stop-timeout 60 \
   -p 6632:6632 -v /var/lib/queen:/var/lib/queen/raft \
-  ghcr.io/queen-mq/queen:2.6.0
+  ghcr.io/queen-mq/queen:2.7.0
 ```
 
 A single node writes every message to disk (fsync) before it answers. A crash, a kill -9 or a power cut loses nothing it acknowledged: it starts again and reads its log. What it cannot survive is losing its disk, so take backups (see [Recovery](/manage/recovery/)). An upgrade stops it for a few seconds, and its ephemeral queues, which live in memory, are empty after every restart. Port 6632 stays on a private network, as on a cluster (see [To keep strangers out](/manage/configuration/#to-keep-strangers-out)).
@@ -123,7 +123,7 @@ docker run -d --name queen -p 6711:6711 -p 127.0.0.1:6632:6632 \
   -e QUEEN_PROXY_BOOTSTRAP_TENANT=acme \
   -e QUEEN_PROXY_BOOTSTRAP_API_KEY="$QUEEN_KEY" \
   -e QUEEN_PROXY_DEFAULT_CLUSTER=acme \
-  ghcr.io/queen-mq/queen:2.6.0
+  ghcr.io/queen-mq/queen:2.7.0
 ```
 
 The first start creates the tenant `acme` and its key. Clients now use port 6711, with the key (`bearerToken` in the JavaScript client); without it they get `401 unauthorized`. Port 6632 is the broker itself, with no keys: the nodes talk to each other on it, so it stays inside your network.
@@ -179,7 +179,7 @@ docker run -d --name queen -p 6632:6632 -v /var/lib/queen:/var/lib/queen/raft \
   -e PARTITION_CLEANUP_SECONDS=60 \
   -e QUEEN_RAFT_TXN_WINDOW_MIN_S=60 \
   -e QUEEN_RAFT_RETENTION_SCAN_PER_S=40000 \
-  ghcr.io/queen-mq/queen:2.6.0
+  ghcr.io/queen-mq/queen:2.7.0
 ```
 
 and give the queue retention and a short dedup window:
@@ -200,7 +200,7 @@ On 2.6.0 the third setting matters when partitions come and go fast: we saw the 
 
 ## Kafka clients
 
-`QUEEN_KAFKA_EMBEDDED=true` opens a Kafka port (9092) on every node, so existing Kafka producers and consumers work without code changes. On a cluster, each node also needs `QUEEN_KAFKA_ADVERTISED_ADDR`, the address at which clients reach that node's Kafka port. The Kafka port has no TLS in 2.6, and passwords (`QUEEN_KAFKA_SASL=plain`) cross the network in clear: keep it on a private network. [Kafka clients](/integrations/kafka/) has the details.
+`QUEEN_KAFKA_EMBEDDED=true` opens a Kafka port (9092) on every node, so existing Kafka producers and consumers work without code changes. On a cluster, each node also needs `QUEEN_KAFKA_ADVERTISED_ADDR`, the address at which clients reach that node's Kafka port. The Kafka port has no TLS in 2.7, and passwords (`QUEEN_KAFKA_SASL=plain`) cross the network in clear: keep it on a private network. [Kafka clients](/integrations/kafka/) has the details.
 
 ## Thousands of queues
 

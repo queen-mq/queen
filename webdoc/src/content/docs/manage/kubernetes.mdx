@@ -76,7 +76,7 @@ metadata:
   name: queen
   namespace: queen
 spec:
-  version: "2.6.0"
+  version: "2.7.0"
   replicas: 3
   secretName: queen
   storage:
@@ -86,7 +86,7 @@ spec:
 ```bash
 kubectl -n queen get queencluster
 NAME    VERSION   VOTERS    COMMITS   PHASE   AGE
-queen   2.6.0     [1,2,3]   true      Ready   40s
+queen   2.7.0     [1,2,3]   true      Ready   40s
 ```
 
 `COMMITS` is a write the operator makes once a minute: `true` while the cluster can commit. The pods and Services have the same names as in the manifest.
@@ -155,7 +155,7 @@ spec:
             labelSelector: { matchLabels: { app: queen } } }
       containers:
         - name: queen
-          image: ghcr.io/queen-mq/queen:2.6.0
+          image: ghcr.io/queen-mq/queen:2.7.0
           ports:
             - { name: http, containerPort: 6632 }
             - { name: raft, containerPort: 7400 }

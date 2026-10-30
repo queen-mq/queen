@@ -27,6 +27,9 @@ sourceOfTruth:
 # this page is the first facade's, on the builds each section names. 2.6 takes produce on the raft
 # leader only and has no relay, pipelining knobs or produce coalescing; the page says so up front and
 # gives the 2.6-against-2.5.0 measurement of 2026-10-20.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): fetch.rs, produce.rs, queen-kafka conn.rs (3e6b92631):
+# the Kafka facade bounds frames, records, fetches, metadata and groups. Nothing this page states
+# changes.
 ---
 
 Queen speaks the Kafka wire protocol from inside the broker process (`QUEEN_KAFKA_EMBEDDED=true`),

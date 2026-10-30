@@ -133,6 +133,12 @@ sourceOfTruth:
 # this page states changes.
 # sourceOfTruth re-read 2026-10-30 (stream claims): phase2.rs adds POST /streams/v1/claim and
 # /streams/v1/state/partitions (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): phase2.rs (00d7670ca): the hardening merged: /depth and
+# lagging lists capped at 1,000 (totals still count every partition, lagging sorted most lagging
+# first), dedup window clamped to 7 days, admin effects chunked, the memory guard's metrics, the
+# follower drain window; kv.rs (7fe23f4ed): KV reads put each stored value's text into the answer
+# instead of building a JSON tree; every answer is the same, byte for byte; index.js (cc23f6381):
+# the dashboard lists each page's items in a column beside it. Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

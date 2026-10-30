@@ -31,6 +31,13 @@ verifiedBy:
   - examples/tutorials/cpp/book-client-guide.cpp
 # sourceOfTruth re-read 2026-10-30 (stream claims): phase2.rs adds POST /streams/v1/claim and
 # /streams/v1/state/partitions (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): real.rs (7fe23f4ed): KV reads put each stored value's
+# text into the answer instead of building a JSON tree; every answer is the same, byte for byte;
+# phase2.rs (00d7670ca): the hardening merged: /depth and lagging lists capped at 1,000 (totals
+# still count every partition, lagging sorted most lagging first), dedup window clamped to 7 days,
+# admin effects chunked, the memory guard's metrics, the follower drain window; pop.rs (04d2effca):
+# the pinned long-poll wake (e82652798) merged with the hardening's batched partition drops. The
+# dedupWindowSeconds row gives the 7-day maximum.
 ---
 
 A queue is a named set of partitions that share one configuration. You never have to create one: the first push that names a queue creates it, with the defaults. Configure it when you want other settings.
@@ -55,7 +62,7 @@ Here is a queue that sets most of them, and the table below says what each one d
 | `deadLetterQueue`, `dlqAfterMaxRetries` | true | File a message that ran out of retries in the dead-letter queue. With both off, it is dropped. |
 | `delayedProcessing` | 0 s | How long every new message waits after its push before anyone can take it. |
 | `windowBuffer` | 0 s | How long new messages wait in their partition, so a burst is handed over as one batch. |
-| `dedupWindowSeconds` | 3600 s | How long a partition remembers `transactionId`s. `0` turns deduplication off. |
+| `dedupWindowSeconds` | 3600 s | How long a partition remembers `transactionId`s. `0` turns deduplication off. At most 7 days (`QUEEN_MAX_DEDUP_WINDOW_S`): a longer window is cut to it, also on a queue configured before 2.7.0. |
 | `retentionEnabled` | false | Must be true for the two options below to do anything. |
 | `retentionSeconds` | 0 | Remove messages older than this, consumed or not. |
 | `completedRetentionSeconds` | 0 | Remove messages older than this that every consumer group has already acked. |

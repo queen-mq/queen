@@ -40,6 +40,10 @@ digest: >-
 # empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
 # lease names a partition its group has no row on, or one that is gone (bad_lease); auth.rs makes
 # POST /streams/v1/state/partitions read-only (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): apply.rs, groups.rs (7fe23f4ed): KV reads put each
+# stored value's text into the answer instead of building a JSON tree; every answer is the same,
+# byte for byte; hooks.rs (04d2effca): the pinned long-poll wake (e82652798) merged with the
+# hardening's batched partition drops. Nothing this page states changes.
 ---
 
 A Queen node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.

@@ -12,6 +12,10 @@ sourceOfTruth:
   - protocols/queen-kafka/src/topics.rs
   - protocols/queen-kafka/src/txn.rs
   - server/src/rsm/facade/real/phase2/offsets.rs
+# sourceOfTruth re-read 2026-10-30 (2.7.0): admin.rs, fetch.rs (3e6b92631): the Kafka facade bounds
+# frames, records, fetches, metadata and groups; queen-kafka txn.rs (3d24969b3): the Kafka
+# coordinator locks per transactional id and forgets ids idle for 7 days. The Transactions row says
+# a transactional id idle for 7 days is forgotten.
 ---
 
 Kafka Streams, Kafka Connect and Flink ask more of a broker than produce and consume: they create topics with configs, keep state in compacted topics, start reading from a point in time, and commit transactions that outlive a process. This page says what the 2.6 Kafka port does with each of those requests, and what has run against QueenMQ.
@@ -30,7 +34,7 @@ On the first Kafka port (2.0.0-beta.5), Kafka 4.3.1's own distribution ran again
 | Compacted topics | Kept whole: QueenMQ does not compact yet. Folding the whole log gives the same state as folding a compacted one, so changelog restores and Connect's topics work; the cost is size, and a restore reads all of history. |
 | A start from a point in time | Answered from the time each record was appended (`POST /api/v1/fetch/offsets`). A time after the last append answers "no offset". |
 | DeleteRecords | Not offered: Streams' repartition topics keep everything. Give their queues a retention through QueenMQ. |
-| Transactions | Served by the raft leader, up to one hour each. A change of leader aborts the ones that were open. |
+| Transactions | Served by the raft leader, up to one hour each. A change of leader aborts the ones that were open. A `transactional.id` nobody used for 7 days is forgotten, as Kafka's `transactional.id.expiration.ms` does by default. |
 | Static membership, the KIP-848 protocol | Not supported. All three frameworks leave both off by default. |
 
 ## Kafka Streams

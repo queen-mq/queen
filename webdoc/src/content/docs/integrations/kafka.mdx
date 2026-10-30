@@ -36,7 +36,7 @@ docker run -d --name queen -p 6632:6632 -p 127.0.0.1:9092:9092 \
   -v /var/lib/queen:/var/lib/queen/raft \
   -e QUEEN_KAFKA_EMBEDDED=true \
   -e QUEEN_KAFKA_ADVERTISED_ADDR=127.0.0.1:9092 \
-  ghcr.io/queen-mq/queen:2.6.0
+  ghcr.io/queen-mq/queen:2.7.0
 ```
 
 `QUEEN_KAFKA_ADVERTISED_ADDR` is the address Kafka clients come back to after their first request, so they must be able to reach it. It has no default: without it the node refuses to start. Send three keyed records with kcat, and read them back:

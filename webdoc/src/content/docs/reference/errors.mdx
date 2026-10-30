@@ -89,6 +89,12 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (JS and Python consumers wait out a broker that cannot answer):
 # HttpClient.js reads Retry-After on every error answer, not only a 429, so consume() can wait it
 # after a 503. The JS client list gains the consume() line; the codes and statuses are unchanged.
+# sourceOfTruth re-read 2026-10-30 (2.7.0): kv.rs, mod.rs, real.rs (7fe23f4ed): KV reads put each
+# stored value's text into the answer instead of building a JSON tree; every answer is the same,
+# byte for byte; quota.rs, raft.rs, switches.rs (f9c9a37f2): a transaction's KV writes spend their
+# own rate, QUEEN_KV_TXN_WRITE_RATE (10,000/s), on the same quota; data.rs (d1c81376e): the in-
+# process Kafka facade's commit row skips the transaction KV rate. The engine codes gain too_many_items,
+# memory_pressure and busy; rate_limited names the transaction KV rate.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -130,7 +136,10 @@ The `code` of the first shape.
 | `standby` | 503 | The cluster is a [standby](/manage/standby/): it replays another cluster and takes no writes until it is promoted. Every write route answers it, on every node, and nothing was applied. | Retry after `Retry-After` (1 s) if a switch to this cluster is under way: the call is served once the standby is promoted. Otherwise you are pointed at the wrong cluster. |
 | `overloaded` | 429 | The node's admission budget for writes stayed full for the whole hold. | Retry after `Retry-After` (1 to 5 s). |
 | `storage_full` | 507 | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Pushes, KV writes and timer schedules are refused; acks and deletes still work. | Free disk or add space, then retry. |
-| `name_too_long` | 413 | The tenant, queue and partition or group names together exceed the store's key budget. | Shorten the name. |
+| `name_too_long` | 413 | The tenant, queue and partition or group names together exceed the store's key budget, counting every key the command derives from them. | Shorten the name. |
+| `too_many_items` | 400 | A push carries more than `QUEEN_PUSH_MAX_ITEMS` (10,000) messages. | Split the push. |
+| `memory_pressure` | 503 | The node is near its memory limit: past `QUEEN_MEMGUARD_SOFT_PCT` (80 %) it refuses page reads and other large reads, past `QUEEN_MEMGUARD_HARD_PCT` (90 %) also writes that grow the stored state. Pops, acks, renewals and deletes are always served. `Retry-After` is 1 to 5 s. | Retry after `Retry-After`. |
+| `busy` | 503 | Every one of the node's large-read slots (`QUEEN_HEAVY_READS_MAX`, 32) stayed taken for 2 s. `Retry-After` is 1 to 5 s. | Retry after `Retry-After`. |
 | `bad_body` | 400 | The body is not the route's JSON shape. | Fix the request. |
 | `bad_request` | 400 | A field is missing or invalid. | Fix the request. |
 | any other code | 400 | The engine refused this request for the reason the message gives. | Fix the request; do not retry it unchanged. |
@@ -179,7 +188,7 @@ quota, the grant, the rates and the pause are KV's.
 | `timer_horizon_exceeded` | 403 | `timers_horizon`: `delayMs` is beyond the horizon in force. | Use a shorter delay. |
 | `kv_quota_exceeded`, `timers_quota_exceeded` | 403 | The tenant is over its KV rows or bytes, or its timer count. Deletes and cancels are never refused for this. | Free space or raise the quota; do not retry unchanged. |
 | `feature_gated` | 403 | The tenant has no grant for this surface (`QUEEN_KV_REQUIRE_GRANT`). | An operator grants it. |
-| `rate_limited` | 429 | The tenant's KV read or write rate. | Retry after `Retry-After`. |
+| `rate_limited` | 429 | The tenant's KV read or write rate, or the transaction KV rate for the KV writes of a transaction. | Retry after `Retry-After`. |
 | `kv_unavailable`, `timers_unavailable` | 503 | `kv_timeout`, `kv_retry`, `kv_no_leader`, `timers_timeout`, `timers_retry`, `no_leader`; `kv_check_needs_cluster_version_5` for a `check` while a node of the cluster still runs a release without it; or `kv_unavailable` when the node already tracks `QUEEN_KV_MAX_TENANTS` (10,000) tenants. | Retry after `Retry-After`. A lock call that failed this way may have applied some of its operations: send it again with the same owners. |
 | `kv_disabled`, `timers_disabled` | 503 | An operator paused the surface at runtime. | Retry later. |
 | `kv_error`, `timers_error` | 500 | A broker fault. | Report it. |
