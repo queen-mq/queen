@@ -178,6 +178,48 @@ impl RaftFacade {
         }
     }
 
+    /// [`Self::submit_effects`] for a route that makes one effect per row (a
+    /// DLQ purge, a seek, a group delete, a streams reset): sent as several
+    /// commands of at most 4,096 effects and 8 MiB planned, in order. One entry
+    /// of a million effects holds apply on every node for seconds, and past the
+    /// follower's frame limit it never replicates (the planner refuses it,
+    /// `check_planned_size`). The chunks are not atomic together: each route
+    /// orders its effects so that a retry finishes what an interrupted run
+    /// left. Every chunk after the first gets its own request id: a command
+    /// that repeated one would be answered as the first, not applied.
+    pub(super) async fn submit_effects_chunked(
+        &self,
+        ctx: &ReqCtx,
+        effects: Vec<Effect>,
+    ) -> Result<(), RsmError> {
+        const MAX_EFFECTS: usize = 4096;
+        const MAX_BYTES: usize = 8 * 1024 * 1024;
+        let mut chunk: Vec<Effect> = Vec::new();
+        let mut bytes = 0usize;
+        let mut sent = 0usize;
+        let mut ctx_n = ctx.clone();
+        for e in effects {
+            let b = crate::rsm::planner::keycheck::planned_bytes(std::slice::from_ref(&e));
+            if !chunk.is_empty() && (chunk.len() >= MAX_EFFECTS || bytes + b > MAX_BYTES) {
+                if sent > 0 {
+                    ctx_n.request_id = crate::util::uuidv7_bytes();
+                }
+                self.submit_effects(&ctx_n, std::mem::take(&mut chunk)).await?;
+                sent += 1;
+                bytes = 0;
+            }
+            bytes += b;
+            chunk.push(e);
+        }
+        if !chunk.is_empty() {
+            if sent > 0 {
+                ctx_n.request_id = crate::util::uuidv7_bytes();
+            }
+            self.submit_effects(&ctx_n, chunk).await?;
+        }
+        Ok(())
+    }
+
     /// Wait until this node has applied everything the cluster had committed
     /// when the read began (a no-op on a single node). In a cluster every node
     /// serves its own clients and a write waits only for the node that took it,
@@ -326,8 +368,10 @@ impl RaftFacade {
                 scope: GarbageScope::Queue,
                 deleted_at_us: super::wall_micros(),
             });
+            // The first chunk of rows goes with the delete; the rest follow in
+            // bounded chunks (finish_delete_chunks).
             effects.push(Effect::DeleteChunk {
-                pids: pids.clone(),
+                pids: pids.iter().copied().take(4096).collect(),
                 scope: GarbageScope::Queue,
                 resume: Vec::new(),
                 limit: 1_000,
@@ -356,25 +400,43 @@ impl RaftFacade {
         if pids.is_empty() {
             return Ok(());
         }
+        // Each chunk names only pids that still have garbage, at most
+        // CHUNK_PIDS of them, and the scan resumes where the last one stopped
+        // (a finished pid never has garbage again). Sending every pid in every
+        // chunk made each entry 8 bytes per partition and each round a read of
+        // every partition: quadratic for a queue with a million of them.
+        const CHUNK_PIDS: usize = 4096;
+        let all: std::sync::Arc<Vec<u64>> = std::sync::Arc::new(pids.to_vec());
+        let mut start = 0usize;
         loop {
             let store = self.store.clone();
-            let check = pids.to_vec();
-            let pending = tokio::task::spawn_blocking(move || {
+            let check = all.clone();
+            let from = start;
+            let (next_start, pending) = tokio::task::spawn_blocking(move || {
                 store.read(|r| {
-                    for pid in check {
-                        if r.garbage(pid)?.is_some() {
-                            return Ok(true);
+                    let mut pending = Vec::new();
+                    let mut first_live = check.len();
+                    for (i, pid) in check.iter().enumerate().skip(from) {
+                        if r.garbage(*pid)?.is_some() {
+                            if first_live == check.len() {
+                                first_live = i;
+                            }
+                            pending.push(*pid);
+                            if pending.len() >= CHUNK_PIDS {
+                                break;
+                            }
                         }
                     }
-                    Ok(false)
+                    Ok((first_live, pending))
                 })
             })
             .await
             .map_err(|e| RsmError::Internal(format!("delete progress read: {e}")))?
             .map_err(read_error)?;
-            if !pending {
+            if pending.is_empty() {
                 return Ok(());
             }
+            start = next_start;
             let chunk_ctx = ReqCtx {
                 tenant: ctx.tenant.clone(),
                 request_id: crate::util::uuidv7_bytes(),
@@ -389,7 +451,7 @@ impl RaftFacade {
             self.submit_effects(
                 &chunk_ctx,
                 vec![Effect::DeleteChunk {
-                    pids: pids.to_vec(),
+                    pids: pending,
                     scope: scope.clone(),
                     resume: Vec::new(),
                     limit: 1_000,
@@ -458,7 +520,7 @@ impl RaftFacade {
                 deleted_at_us: super::wall_micros(),
             });
             effects.push(Effect::DeleteChunk {
-                pids: pids.clone(),
+                pids: pids.iter().copied().take(4096).collect(),
                 scope: GarbageScope::Tenant,
                 resume: Vec::new(),
                 limit: 1_000,
@@ -1035,12 +1097,12 @@ impl RaftFacade {
                 updated_at_us: now,
             };
             let did_reset = old.config_hash != hash && reset;
-            let mut effects = Vec::with_capacity(state.len() + 1);
-            effects.push(Effect::StreamsQueryUpsert {
-                query_id: id,
-                tenant: ctx.tenant.clone(),
-                row,
-            });
+            // A reset deletes every state row of the query: one effect per row,
+            // sent in chunks. The deletes go first and the new config hash
+            // last, so a reset cut short leaves the OLD hash in place (a runner
+            // with the new one is still refused 409) and its retry deletes what
+            // is left before the new hash is written.
+            let mut effects: Vec<Effect> = Vec::with_capacity(state.len() + 1);
             effects.extend(
                 state
                     .into_iter()
@@ -1050,7 +1112,12 @@ impl RaftFacade {
                         key,
                     }),
             );
-            self.submit_effects(&ctx, effects).await?;
+            effects.push(Effect::StreamsQueryUpsert {
+                query_id: id,
+                tenant: ctx.tenant.clone(),
+                row,
+            });
+            self.submit_effects_chunked(&ctx, effects).await?;
             return Ok(ApiOut::json(200, json!({"success":true,"query_id":uuid_bytes_to_string(&id),"name":name,"config_hash":hash,"fresh":false,"reset":did_reset}).to_string()));
         }
         if ctx.tenant != crate::config::DEFAULT_TENANT {
@@ -1232,6 +1299,19 @@ fn configured_defaults(now: i64) -> QueueConfig {
     }
 }
 
+/// `QUEEN_MAX_DEDUP_WINDOW_S`: the longest dedup window a queue may have, in
+/// seconds (default 604,800 = 7 days).
+fn max_dedup_window_seconds() -> i32 {
+    static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_MAX_DEDUP_WINDOW_S")
+            .ok()
+            .and_then(|v| v.trim().parse::<i32>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(604_800)
+    })
+}
+
 fn apply_config_options(cfg: &mut QueueConfig, o: &Map<String, Value>) -> Result<(), RsmError> {
     // A queue created implicitly by a push stores 0 here (no sink hold was ever
     // configured): read it as the default, so a later merge-mode configure of
@@ -1306,7 +1386,12 @@ fn apply_config_options(cfg: &mut QueueConfig, o: &Map<String, Value>) -> Result
     set_b!("retentionEnabled", retention_enabled);
     set_b!("encryptionEnabled", encryption_enabled);
     cfg.min_pop_wait_time = cfg.min_pop_wait_time.clamp(0, 60000);
-    cfg.dedup_window_seconds = cfg.dedup_window_seconds.max(0);
+    // The dedup window decides how long every pushed message's transaction
+    // row stays in RAM on every node, and nothing of the queue is reclaimed
+    // inside it (its partitions, its log): years of it is unbounded memory.
+    // Clamped to QUEEN_MAX_DEDUP_WINDOW_S (7 days by default), not refused, so a
+    // configure of another option on an older queue still goes through.
+    cfg.dedup_window_seconds = cfg.dedup_window_seconds.clamp(0, max_dedup_window_seconds());
     if let Some(v) = s("retentionSinkHold") {
         cfg.retention_sink_hold = v;
     }

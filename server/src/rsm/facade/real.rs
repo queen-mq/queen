@@ -2270,6 +2270,64 @@ impl RaftFacade {
             Ok(o) => o,
             Err(e) => return Ok(refuse("bad_request", &e.message)),
         };
+        // The rider gets the checks POST /timers makes (handlers/timers.rs and
+        // `Self::timers`): at most 256 ops, names that fit the store with the
+        // route's slack (a schedule's partition becomes a key at the fire),
+        // the horizon, and the payload ceiling. Without them a transaction
+        // could schedule what the route refuses, and a key that does not fit
+        // stops every node in apply.
+        if timer_ops.len() > 256 {
+            return Ok(refuse(
+                "timers_too_many_ops",
+                &format!("{} timer ops in one transaction, at most 256", timer_ops.len()),
+            ));
+        }
+        {
+            static HORIZON_US: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+            static MAX_FRAME: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+            let horizon_us = *HORIZON_US.get_or_init(|| {
+                std::env::var("QUEEN_TIMERS_MAX_HORIZON_S")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or(7_776_000)
+                    .saturating_mul(1_000_000)
+            });
+            // The payload ceiling plus room for the frame's own fields.
+            let max_frame = *MAX_FRAME.get_or_init(|| {
+                std::env::var("QUEEN_TIMERS_MAX_PAYLOAD_BYTES")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or(1024 * 1024)
+                    .saturating_add(64 * 1024)
+            });
+            for (i, op) in timer_ops.iter().enumerate() {
+                super::check_message_key_names(&ctx.tenant, op.queue(), None, Some(op.key()))?;
+                if let crate::rsm::planner::timers::TimerOp::Schedule(s) = op {
+                    super::check_message_key_names(&ctx.tenant, &s.queue, None, Some(&s.partition))?;
+                    if s.delay_us > horizon_us {
+                        return Ok(refuse(
+                            "timer_horizon_exceeded",
+                            &format!(
+                                "timers[{i}]: the delay is beyond the {} s horizon in force here",
+                                horizon_us / 1_000_000
+                            ),
+                        ));
+                    }
+                    if s.frame.len() > max_frame {
+                        return Ok(refuse(
+                            "timers_payload_too_large",
+                            &format!(
+                                "timers[{i}]: the payload is {} bytes, above the timer payload \
+                                 ceiling",
+                                s.frame.len()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         // The KV rider, validated with the WIRE's limits (024: fewer ops, no
         // getPrefix inside a transaction).
         let kv_values: Vec<serde_json::Value> = body

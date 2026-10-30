@@ -701,6 +701,38 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 ));
             }
         }
+        // Apply also writes the due index, 8 bytes longer than the timer key
+        // read below, and the schedule's partition becomes a key at the fire.
+        // Both must fit now: a key over the store's limit stops every node in
+        // apply (keycheck). The HTTP receiver checks the names with slack; a
+        // transaction's timers reach this with no other check.
+        let max = self.reads().max_key_len();
+        for op in ops {
+            let due = super::keycheck::timers_due_len(tenant, op.queue(), op.key());
+            if due > max {
+                return Err(Refusal::client(
+                    "name_too_long",
+                    format!(
+                        "QTIMER timerKey {} B with queue {} B makes a {due} B store key, the \
+                         limit is {max} B",
+                        op.key().len(),
+                        op.queue().len()
+                    ),
+                ));
+            }
+            if let TimerOp::Schedule(s) = op {
+                let part = super::keycheck::partitions_by_key_len(tenant, &s.queue, &s.partition);
+                if part > max {
+                    return Err(Refusal::client(
+                        "name_too_long",
+                        format!(
+                            "QTIMER partition {} B makes a {part} B store key, the limit is {max} B",
+                            s.partition.len()
+                        ),
+                    ));
+                }
+            }
+        }
         // Every read first: nothing below may fail once the overlay moves.
         let mut current: Vec<Option<TimerRow>> = Vec::with_capacity(ops.len());
         for op in ops {

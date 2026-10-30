@@ -403,12 +403,49 @@ impl RaftFacade {
 
         let now = super::super::wall_micros();
         let max_state = crate::rsm::facade::streams_max_state_bytes();
+        // Every state op is one effect applied on every node in one step.
+        let max_ops = crate::rsm::facade::streams_max_state_ops();
+        if cycle.ops.len() > max_ops {
+            return Ok(ApiOut::json(
+                413,
+                json!({
+                    "success": false,
+                    "error": format!(
+                        "{} state ops in one cycle, the ceiling is {max_ops} \
+                         (QUEEN_STREAMS_MAX_STATE_OPS)",
+                        cycle.ops.len()
+                    ),
+                    "reason": "too_many_state_ops",
+                })
+                .to_string(),
+            ));
+        }
         let mut extra = Vec::new();
         let mut state_count = 0usize;
         for op in cycle.ops {
             let Some(key) = op.key.as_ref().and_then(Value::as_str) else {
                 continue;
             };
+            // The key goes into a store key with the query and partition ids: a
+            // longer one is refused by apply on every node, which stops them
+            // all (upserts and deletes alike), so it is refused here.
+            if !crate::rsm::facade::streams_state_key_fits(key) {
+                return Ok(ApiOut::json(
+                    400,
+                    json!({
+                        "success": false,
+                        "error": format!(
+                            "state op at index {}: the key is {} bytes, too long for a state key \
+                             (at most {} bytes)",
+                            op.index,
+                            key.len(),
+                            crate::rsm::facade::MAX_STORE_KEY_BYTES - 26
+                        ),
+                        "reason": "state_key_too_long",
+                    })
+                    .to_string(),
+                ));
+            }
             match op.ty.as_ref().and_then(Value::as_str).unwrap_or("upsert") {
                 "delete" => extra.push(Effect::StreamsStateDelete {
                     query_id: qid,

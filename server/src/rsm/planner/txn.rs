@@ -184,6 +184,12 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // The engine's cursor and dead-letter rows name partitions it read
         // before this was planned: checked first, before anything folds.
         self.check_partition_rows(ov, &cmd.extra_effects)?;
+        // Their keys (a Streams state key is the client's) must fit the store,
+        // and the Streams ceilings hold here too: a command a follower
+        // prepared is planned here, and a follower on an older build may not
+        // have checked them.
+        self.check_effect_keys(ov, &cmd.extra_effects)?;
+        check_streams_state_ops(&cmd.extra_effects)?;
         if cmd.pushes.is_empty() && cmd.timers.is_empty() {
             return self.plan_riders_bundle(ov, cmd);
         }
@@ -353,4 +359,40 @@ fn failed_kv(f: crate::rsm::entry::KvPrecondition) -> Planned {
         ..TxnOutcome::default()
     };
     failed.into_outcome().map(Plan::Empty)
+}
+
+/// The Streams ceilings on a cycle's state ops, applied where the command is
+/// planned: the value ceiling (`QUEEN_STREAMS_MAX_STATE_BYTES`) and the op
+/// count (`QUEEN_STREAMS_MAX_STATE_OPS`). The receiver checks both first with a
+/// clearer answer; this is the planner's copy for commands it did not receive.
+fn check_streams_state_ops(effects: &[Effect]) -> Result<(), Refusal> {
+    let max_value = crate::rsm::facade::streams_max_state_bytes();
+    let max_ops = crate::rsm::facade::streams_max_state_ops();
+    let mut ops = 0usize;
+    for e in effects {
+        match e {
+            Effect::StreamsStatePut { value, .. } => {
+                ops += 1;
+                if value.len() > max_value {
+                    return Err(Refusal::client(
+                        "state_too_large",
+                        format!(
+                            "a state value is {} bytes, the ceiling is {max_value} \
+                             (QUEEN_STREAMS_MAX_STATE_BYTES)",
+                            value.len()
+                        ),
+                    ));
+                }
+            }
+            Effect::StreamsStateDelete { .. } => ops += 1,
+            _ => {}
+        }
+    }
+    if ops > max_ops {
+        return Err(Refusal::client(
+            "too_many_state_ops",
+            format!("{ops} state ops in one cycle, the ceiling is {max_ops} (QUEEN_STREAMS_MAX_STATE_OPS)"),
+        ));
+    }
+    Ok(())
 }
