@@ -55,6 +55,14 @@ pub struct WorkerRow {
 /// leaf `{avg,min,max,last}`), with a `raft` family in place of the old
 /// database-pool family. Kept as a string so the row encodes in any serde
 /// format.
+///
+/// A new gauge goes inside `metrics_json` (as `disk.used_bytes` /
+/// `disk.total_bytes` did), not as a field here. This struct is what each
+/// node's dash.db journals and what a gather carries, and it has had these
+/// six fields since the raft port: every release reads every other's rows,
+/// both ways of a rolling upgrade or a rollback. An older binary copies the
+/// string as it is when it rewrites its journal, so a rollback keeps the new
+/// gauges too, and the views read a gauge an older row lacks as a null leaf.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SystemRow {
     pub at_us: i64,
@@ -483,6 +491,67 @@ mod tests {
         let back: crate::rsm::dashboard::store::Rows =
             serde_json::from_value(rows).expect("old rows gather");
         assert_eq!(back.queue[0].fetch_messages, 0);
+    }
+
+    /// The disk space gauges ride inside `metrics_json`: a rolling upgrade and
+    /// a rollback both read the other binary's system rows, and neither drops
+    /// the gauges.
+    #[test]
+    fn system_rows_cross_a_rolling_upgrade() {
+        let g = |v: f64| serde_json::json!({"avg": v, "min": v, "max": v, "last": v});
+        // A 2.7.0-beta.1 row, as its dash.db record holds it: the disk rates,
+        // no space.
+        let old_metrics = serde_json::json!({
+            "cpu": {"user_us": g(1.0), "system_us": g(1.0)},
+            "disk": {"read_bytes_per_sec": g(10.0), "written_bytes_per_sec": g(20.0)},
+        })
+        .to_string();
+        let old = serde_json::json!({
+            "at_us": 1_790_238_190_000_000i64, "hostname": "n1", "port": 6632,
+            "worker_id": "worker-0", "sample_count": 60, "metrics_json": old_metrics,
+        });
+        let r: SystemRow = serde_json::from_value(old.clone()).expect("an old row reads");
+        assert_eq!(
+            (r.sample_count, r.metrics_json.as_str()),
+            (60, old_metrics.as_str())
+        );
+        let rows: crate::rsm::dashboard::store::Rows =
+            serde_json::from_value(serde_json::json!({ "system": [old] }))
+                .expect("an old record reads, journaled or gathered");
+        assert_eq!(rows.system, vec![r]);
+
+        // A new row, read by the old binary: its SystemRow is this one (copied
+        // here as it stood), denying unknown fields to show there are none to
+        // lose when it rewrites its journal.
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct OldSystemRow {
+            at_us: i64,
+            hostname: String,
+            port: i32,
+            worker_id: String,
+            sample_count: i32,
+            metrics_json: String,
+        }
+        let new = SystemRow {
+            at_us: 1_790_238_250_000_000,
+            hostname: "n1".into(),
+            port: 6632,
+            worker_id: "worker-0".into(),
+            sample_count: 60,
+            metrics_json: serde_json::json!({
+                "disk": {
+                    "read_bytes_per_sec": g(10.0), "written_bytes_per_sec": g(20.0),
+                    "used_bytes": g(4e11), "total_bytes": g(1e12),
+                },
+            })
+            .to_string(),
+        };
+        let json = serde_json::to_string(&new).expect("encode");
+        let o: OldSystemRow =
+            serde_json::from_str(&json).expect("a new row reads on an old binary");
+        assert_eq!(o.metrics_json, new.metrics_json, "the space travels inside");
     }
 
     /// A row nobody fetched from is written as it was before the field: the

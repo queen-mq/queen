@@ -4,7 +4,8 @@
 //!
 //! Every `METRICS_FLUSH_MS` (default 60 s) it diffs the process counters the
 //! raft facade feeds ([`crate::metrics::global`]) into one [`WorkerRow`], one
-//! [`SystemRow`] (CPU, RSS, and the raft family), and a [`QueueRow`] /
+//! [`SystemRow`] (CPU, RSS, the raft family, the bytes moved, and how full the
+//! data directory's filesystem is), and a [`QueueRow`] /
 //! [`ParkedRow`] per queue with activity (a Kafka fetch is activity); and it
 //! reads each tenant's backlog through the facades' [`BacklogSampler`]s into
 //! one [`BacklogRow`] per tenant.
@@ -194,6 +195,9 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
         let traffic = bytes.since(&last_bytes);
         last_bytes = bytes;
         super::set_traffic(traffic);
+        // One statvfs per flush, of the directory the disk gate watches: the
+        // history behind the dashboard's "disk used over time".
+        let disk_space = super::disk_gate().and_then(|g| disk_usage(&g.dir));
         let system = SystemRow {
             at_us,
             hostname: hostname.clone(),
@@ -207,6 +211,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
                 rss,
                 gauges(),
                 &traffic,
+                disk_space,
             )
             .to_string(),
         };
@@ -377,9 +382,21 @@ impl ByteCounters {
     }
 }
 
+/// The filesystem holding `dir` as `(used, total)` bytes, measured the way
+/// the disk gate measures it: used is the size less what an unprivileged
+/// writer may still take ([`crate::syscollect::filesystem_usage`]), so the
+/// blocks reserved for root count as used. The same figures
+/// `/api/v1/raft/status` reports as `host.disk`. `None` when statvfs fails.
+fn disk_usage(dir: &std::path::Path) -> Option<(u64, u64)> {
+    let (total, available) = crate::syscollect::filesystem_usage(dir)?;
+    Some((total.saturating_sub(available), total))
+}
+
 /// The `metrics` JSON of a [`SystemRow`] (every leaf `{avg,min,max,last}`),
 /// plus `raft`, and the bytes per second the node moved: `disk` and `network`
 /// where the platform says, and `raft_traffic` (its total and each channel).
+/// `disk` also carries `used_bytes` / `total_bytes`, the data directory's
+/// filesystem at flush time (`disk_space`, [`disk_usage`]).
 fn system_json(
     uptime: u64,
     cpu_user: f64,
@@ -387,6 +404,7 @@ fn system_json(
     rss: u64,
     raft: Option<[f64; 5]>,
     traffic: &Traffic,
+    disk_space: Option<(u64, u64)>,
 ) -> Value {
     fn m(v: f64) -> Value {
         json!({ "avg": v, "min": v, "max": v, "last": v })
@@ -412,11 +430,20 @@ fn system_json(
             }),
         );
     }
+    // The rates and the space are measured apart, and each pair is left out
+    // on its own when it was not measured: a null leaf in the view, never a 0
+    // that would chart as an empty disk.
+    let mut disk = serde_json::Map::new();
     if let Some((read, written)) = traffic.disk {
-        o.insert(
-            "disk".into(),
-            json!({ "read_bytes_per_sec": m(read), "written_bytes_per_sec": m(written) }),
-        );
+        disk.insert("read_bytes_per_sec".into(), m(read));
+        disk.insert("written_bytes_per_sec".into(), m(written));
+    }
+    if let Some((used, total)) = disk_space {
+        disk.insert("used_bytes".into(), m(used as f64));
+        disk.insert("total_bytes".into(), m(total as f64));
+    }
+    if !disk.is_empty() {
+        o.insert("disk".into(), Value::Object(disk));
     }
     if let Some((received, sent)) = traffic.net {
         o.insert(
@@ -512,7 +539,7 @@ mod tests {
         };
         t.raft[0] = [100.0, 10.0];
         t.raft[1] = [5.0, 50.0];
-        let v = system_json(10, 1.0, 2.0, 3, None, &t);
+        let v = system_json(10, 1.0, 2.0, 3, None, &t, None);
         assert_eq!(v["disk"]["read_bytes_per_sec"]["last"], 1.0);
         assert_eq!(v["disk"]["written_bytes_per_sec"]["avg"], 2.0);
         assert!(
@@ -531,7 +558,53 @@ mod tests {
         );
         assert_eq!(v["raft_traffic"]["link"]["sent_bytes_per_sec"]["last"], 0.0);
         // The raft gauges keep their family beside it.
-        let with_gauges = system_json(10, 1.0, 2.0, 3, Some([1.0, 2.0, 3.0, 4.0, 5.0]), &t);
+        let with_gauges = system_json(10, 1.0, 2.0, 3, Some([1.0, 2.0, 3.0, 4.0, 5.0]), &t, None);
         assert_eq!(with_gauges["raft"]["log_files"]["last"], 4.0);
+    }
+
+    #[test]
+    fn the_row_carries_the_data_disk_space_when_statvfs_answers() {
+        let leaf = |v: f64| json!({ "avg": v, "min": v, "max": v, "last": v });
+        let mut t = Traffic {
+            window_s: 60,
+            disk: Some((1.0, 2.0)),
+            net: None,
+            raft: [[0.0; 2]; 5],
+        };
+        let (used, total) = (400_000_000_000u64, 1_000_000_000_000u64);
+        let v = system_json(10, 1.0, 2.0, 3, None, &t, Some((used, total)));
+        assert_eq!(v["disk"]["used_bytes"], leaf(4e11));
+        assert_eq!(v["disk"]["total_bytes"], leaf(1e12));
+        assert_eq!(
+            v["disk"]["read_bytes_per_sec"],
+            leaf(1.0),
+            "beside the rates"
+        );
+        // A failed statvfs: no space leaves (the view serves null), never 0.
+        let v = system_json(10, 1.0, 2.0, 3, None, &t, None);
+        let disk = v["disk"].as_object().expect("the rates still");
+        assert!(
+            !disk.contains_key("used_bytes") && !disk.contains_key("total_bytes"),
+            "{disk:?}"
+        );
+        // A platform without disk rates still records the space, alone.
+        t.disk = None;
+        let v = system_json(10, 1.0, 2.0, 3, None, &t, Some((used, total)));
+        let disk = v["disk"].as_object().expect("the space alone");
+        assert_eq!(disk.len(), 2, "{disk:?}");
+        assert_eq!(disk["used_bytes"]["last"], 4e11);
+        // Neither measured: no `disk` family at all, as before.
+        assert!(system_json(10, 1.0, 2.0, 3, None, &t, None)
+            .get("disk")
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_usage_answers_on_a_real_directory_and_none_where_statvfs_fails() {
+        let dir = std::env::temp_dir();
+        let (used, total) = disk_usage(&dir).expect("statvfs of the temp dir");
+        assert!(total > 0 && used <= total, "{used} {total}");
+        assert_eq!(disk_usage(&dir.join("queen-no-such-dir/x")), None);
     }
 }

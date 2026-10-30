@@ -206,7 +206,12 @@ pub struct DlqErrorCount {
 /// `disk.{read,written}_bytes_per_sec` and
 /// `network.{received,sent}_bytes_per_sec` (null where its platform does not
 /// say) and `raft_traffic.{sent,received}_bytes_per_sec`, in total and per
-/// channel; all aggregated the same way as the other gauges. Replicas are
+/// channel; and how full the data directory's filesystem was at each flush,
+/// `disk.{used,total}_bytes` (the disk gate's measure; null on rows written
+/// before the collector recorded it, 2.7.0-beta.1 and older, and where statvfs
+/// failed). All aggregated the same way as the other gauges: a chart of the
+/// space reads `last` or `max`, since `avg` counts a row without the leaf in
+/// its denominator (the bucket a node was upgraded in reads low). Replicas are
 /// ordered by `(hostname, port, workerId)`, points by time ascending.
 pub fn system_metrics_json(filters: &Map<String, Value>, now_us: i64, rows: &[SystemRow]) -> Value {
     let range = match Range::resolve(filters, now_us) {
@@ -363,6 +368,8 @@ fn gauge_metrics(s: &[GaugeSample]) -> Value {
         "disk": {
             "read_bytes_per_sec": g(&["disk", "read_bytes_per_sec"]),
             "written_bytes_per_sec": g(&["disk", "written_bytes_per_sec"]),
+            "used_bytes": g(&["disk", "used_bytes"]),
+            "total_bytes": g(&["disk", "total_bytes"]),
         },
         "network": {
             "received_bytes_per_sec": g(&["network", "received_bytes_per_sec"]),
@@ -1813,6 +1820,92 @@ mod tests {
             m["raft_traffic"]["forward"]["sent_bytes_per_sec"],
             null_leaf
         );
+    }
+
+    #[test]
+    fn system_metrics_serves_the_disk_space_and_leaves_rows_without_it_null() {
+        const GIB: f64 = 1_073_741_824.0;
+        let now = t("2026-09-24T10:30:00Z");
+        // The collector's `disk` family: the rates, and the space where
+        // statvfs answered.
+        let with_disk = |used: Option<f64>| {
+            let mut m = raft_metrics(1000.0, 100.0, 2.0);
+            let mut disk =
+                json!({"read_bytes_per_sec": gauge(1.0), "written_bytes_per_sec": gauge(2.0)});
+            if let Some(used) = used {
+                disk["used_bytes"] = gauge(used);
+                disk["total_bytes"] = gauge(500.0 * GIB);
+            }
+            m.as_object_mut().unwrap().insert("disk".into(), disk);
+            m
+        };
+        let a = sys(
+            "n1",
+            t("2026-09-24T10:05:10Z"),
+            60,
+            with_disk(Some(100.0 * GIB)),
+        );
+        let b = sys(
+            "n1",
+            t("2026-09-24T10:05:50Z"),
+            20,
+            with_disk(Some(104.0 * GIB)),
+        );
+        let v = system_metrics_json(&Map::new(), now, &[a, b]);
+        let disk = &v["replicas"][0]["timeSeries"][0]["metrics"]["disk"];
+        assert_eq!(
+            disk["used_bytes"],
+            json!({"avg": 101.0 * GIB, "min": 100.0 * GIB, "max": 104.0 * GIB, "last": 104.0 * GIB})
+        );
+        let total = 500.0 * GIB;
+        assert_eq!(
+            disk["total_bytes"],
+            json!({"avg": total, "min": total, "max": total, "last": total})
+        );
+        assert_eq!(disk["written_bytes_per_sec"]["last"], json!(2.0));
+
+        // A row from before the space was recorded (2.7.0-beta.1 and older;
+        // this one predates the disk rates too), and a row whose statvfs
+        // failed (the rates, no space): null leaves, never zeros.
+        let null_leaf = json!({"avg": null, "min": null, "max": null, "last": null});
+        let old = sys(
+            "n2",
+            t("2026-09-24T10:05:10Z"),
+            60,
+            raft_metrics(1.0, 1.0, 1.0),
+        );
+        let failed = sys("n3", t("2026-09-24T10:05:10Z"), 60, with_disk(None));
+        let v = system_metrics_json(&Map::new(), now, &[old, failed]);
+        let replicas = v["replicas"].as_array().expect("replicas");
+        assert_eq!(replicas.len(), 2);
+        for r in replicas {
+            let disk = &r["timeSeries"][0]["metrics"]["disk"];
+            assert_eq!(disk["used_bytes"], null_leaf, "{}", r["hostname"]);
+            assert_eq!(disk["total_bytes"], null_leaf, "{}", r["hostname"]);
+        }
+        let n3 = &replicas[1]["timeSeries"][0]["metrics"]["disk"];
+        assert_eq!(n3["read_bytes_per_sec"]["last"], json!(1.0));
+
+        // The bucket a node was upgraded in holds rows of both: `last` and
+        // `max` are the new row's, while `avg` counts the old row in its
+        // denominator, as for every gauge.
+        let before = sys(
+            "n1",
+            t("2026-09-24T10:06:10Z"),
+            60,
+            raft_metrics(1.0, 1.0, 1.0),
+        );
+        let after = sys(
+            "n1",
+            t("2026-09-24T10:06:40Z"),
+            60,
+            with_disk(Some(100.0 * GIB)),
+        );
+        let v = system_metrics_json(&Map::new(), now, &[before, after]);
+        let used = &v["replicas"][0]["timeSeries"][0]["metrics"]["disk"]["used_bytes"];
+        assert_eq!(used["last"], json!(100.0 * GIB));
+        assert_eq!(used["max"], json!(100.0 * GIB));
+        assert_eq!(used["avg"], json!(50.0 * GIB));
     }
 
     #[test]
