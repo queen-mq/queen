@@ -37,6 +37,10 @@ verifiedBy:
   - examples/tutorials/rust/src/bin/book_client_guide.rs
   - examples/tutorials/php/book-client-guide.php
   - examples/tutorials/cpp/book-client-guide.cpp
+# sourceOfTruth re-read 2026-10-30 (JS and Python consumers wait out a broker that cannot answer):
+# ConsumerManager.js and consumer_manager.py poll again after a 408, 429 or 5xx, a timeout or a lost
+# connection instead of stopping (said on writing-applications/pop). Failed messages, retries and the
+# DLQ are unchanged. Nothing this page states changes.
 ---
 
 Every `failed` ack spends one retry. The message comes back after the queue's `retryDelay`, and its partition waits with it, for that consumer group. After `retryLimit` failures, the message goes to the dead-letter queue and the group moves on. You set both on the queue (see [Create and configure queues](/writing-applications/queues/)).

@@ -22,6 +22,59 @@ function pause(ms, signal) {
   })
 }
 
+// After a pop that failed for a reason waiting can fix, the next one waits:
+// the broker's Retry-After when it sent one (1 s on its 503s), else 1 s
+// doubling with each failure in a row. Never more than 30 s, so a consumer
+// resumes within 30 s of the broker answering again; ±20 % so a fleet of
+// workers does not come back in step.
+const TRANSIENT_BASE_MILLIS = 1000
+const TRANSIENT_CAP_MILLIS = 30000
+
+/**
+ * Whether a failed pop is worth polling again, because the broker or the way
+ * to it could not answer for a while and waiting changes that:
+ *
+ * - HTTP 408, 429 or any 5xx. The broker's own retryable answers are all a 503
+ *   with Retry-After: no leader (`no_leader`, `retry`), an elapsed deadline
+ *   (`timeout`, "the request deadline elapsed"), a leader change mid-commit
+ *   (`outcome_unknown`), a standby cluster (`standby`). A 500 on a pop comes
+ *   from a node shutting down or a roll between versions; a 502 or 504 from a
+ *   gateway in front of a node that is restarting.
+ * - No HTTP answer at all: this client's request timeout, or a connection that
+ *   could not be made or was cut before or while the answer was read.
+ *
+ * Not worth it, so the consumer stops as before: a 503
+ * `raft_phase1_unsupported` (the broker cannot serve the route at all), every
+ * other 4xx (a request or a credential refused the same way next time), a stop
+ * by the caller, and an error without an HTTP status that is not a transport
+ * fault (a bug, a `hostHeader` this runtime cannot send).
+ */
+export function isTransientPopError(error) {
+  if (!error || error.aborted) return false
+  if (typeof error.status === 'number') {
+    if (error.code === 'raft_phase1_unsupported') return false
+    return error.status === 408 || error.status === 429 || error.status >= 500
+  }
+  const message = typeof error.message === 'string' ? error.message : ''
+  return error.name === 'AbortError' ||   // this client's request timeout
+    message.includes('fetch failed') ||   // no connection, or it dropped before the answer
+    message === 'terminated' ||           // it dropped while the answer was read
+    message.includes('ECONNREFUSED') || error.code === 'ECONNREFUSED'
+}
+
+/**
+ * The wait before the next pop, after `failures` transient failures in a row.
+ * `random` stands in for Math.random in tests.
+ */
+export function transientDelayMillis(failures, retryAfterSeconds, random = Math.random) {
+  const hasRetryAfter = typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0
+  const base = hasRetryAfter
+    ? retryAfterSeconds * 1000
+    : TRANSIENT_BASE_MILLIS * 2 ** Math.max(0, failures - 1)
+  const jittered = Math.min(base, TRANSIENT_CAP_MILLIS) * (0.8 + 0.4 * random())
+  return Math.round(Math.min(jittered, TRANSIENT_CAP_MILLIS))
+}
+
 export class ConsumerManager {
   #httpClient
   #queen
@@ -154,6 +207,9 @@ export class ConsumerManager {
     
     let processedCount = 0
     let lastMessageTime = idleMillis ? Date.now() : null
+    // Pops that failed in a row for a reason waiting can fix, and since when.
+    let transientFailures = 0
+    let failingSince = null
 
     while (true) {
       // Check abort signal
@@ -186,6 +242,12 @@ export class ConsumerManager {
         // whose caller is gone, so a stopped consumer is never given a message
         // it would only sit on until the lease expires.
         const result = await this.#httpClient.get(`${path}?${baseParams}`, clientTimeout, affinityKey, wait ? 'pop' : null, signal)
+
+        if (transientFailures > 0) {
+          logger.warn('ConsumerManager.worker', { workerId, status: 'pop-recovered', failedPops: transientFailures, failingMillis: Date.now() - failingSince })
+          transientFailures = 0
+          failingSince = null
+        }
 
         // Degrade-loudly (PLAN_CONFLATION §4). Checked BEFORE the empty-response
         // branch on purpose: a pre-1.1.0 broker answers an empty pop with a
@@ -299,37 +361,35 @@ export class ConsumerManager {
           throw error
         }
 
-        // Check if this is a timeout error (expected for long polling)
-        const isTimeoutError = error.name === 'AbortError' ||
-                              error.message?.includes('timeout')
-
-        if (isTimeoutError && wait) {
-          continue // Retry on timeout
-        }
-
-        // 429 (rate limited): HttpClient already retries this internally
-        // with backoff (unbounded for wait=true pop, per retry429 policy) --
-        // this branch is a defensive fallback for the case where an explicit
-        // retry429.maxAttempts override got exhausted. Back off and keep
-        // polling instead of hot-looping or rethrowing/dying.
-        if (error.status === 429) {
-          const retryAfterMs = typeof error.retryAfterSeconds === 'number' && error.retryAfterSeconds >= 0
-            ? error.retryAfterSeconds * 1000
-            : 1000
-          logger.warn('ConsumerManager.worker', { workerId, status: 'rate-limited', code: error.code, retryAfterMs })
-          await pause(retryAfterMs, signal)
+        // This client's own timeout on a long poll: the poll already waited
+        // its whole time, so poll again at once. Checked on the error's kind,
+        // not its text: a 4xx whose message says "timeout" is a refusal.
+        if (wait && error.name === 'AbortError' && error.status === undefined) {
           continue
         }
 
-        // Check if network error
-        const isNetworkError = error.message?.includes('fetch failed') ||
-                              error.message?.includes('ECONNREFUSED') ||
-                              error.code === 'ECONNREFUSED'
-
-        if (isNetworkError) {
-          logger.warn('ConsumerManager.worker', { workerId, error: 'network', message: error.message })
-          // Wait before retry
-          await pause(1000, signal)
+        // The broker, or the way to it, could not answer for a while: a
+        // leader election, a node restarting, a gateway timing out, a lost
+        // connection, a 429 the HttpClient stopped retrying. Wait, then poll
+        // again, for as long as it takes (see isTransientPopError). Before
+        // this only a 429 and a refused connection were retried here: on
+        // 2026-10-29 the 503s of a leader election stopped every consumer of
+        // a service whose process stayed up, and nothing was consumed until
+        // it was restarted by hand.
+        if (isTransientPopError(error)) {
+          transientFailures++
+          if (failingSince === null) failingSince = Date.now()
+          const delay = transientDelayMillis(transientFailures, error.retryAfterSeconds)
+          logger.warn('ConsumerManager.worker', {
+            workerId,
+            status: 'pop-failed-retrying',
+            httpStatus: error.status,
+            code: error.code,
+            error: error.message,
+            failedPops: transientFailures,
+            retryInMillis: delay
+          })
+          await pause(delay, signal)
           continue
         }
 
@@ -343,8 +403,10 @@ export class ConsumerManager {
           throw error
         }
 
-        // Other errors - rethrow
-        logger.error('ConsumerManager.worker', { workerId, error: error.message, code: error.code })
+        // Anything else stops this worker and rejects consume(): another 4xx
+        // (refused the same way next time), a 503 raft_phase1_unsupported, or
+        // an error that is not a transport fault.
+        logger.error('ConsumerManager.worker', { workerId, error: error.message, httpStatus: error.status, code: error.code })
         throw error
       }
     }

@@ -468,11 +468,14 @@ export class HttpClient {
         // 'storage_quota_exceeded' | 'feature_gated' | 'forbidden' }. `.code`
         // is attached whenever the body has one so callers can branch without
         // string-matching `.message`.
-        if (response.status === 429) {
-          const retryAfterHeader = response.headers.get('retry-after')
-          const retryAfterSeconds = retryAfterHeader != null ? Number(retryAfterHeader) : NaN
-          error.retryAfterSeconds = Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : null
-        }
+        //
+        // Retry-After is read on every error, not only a 429: the broker also
+        // sends it (1 s) with each 503 it means to be retried (no leader, a
+        // leader change, an elapsed deadline), and consume() waits that long
+        // before its next pop. null when absent or not a number of seconds.
+        const retryAfterHeader = response.headers.get('retry-after')
+        const retryAfterSeconds = retryAfterHeader != null ? Number(retryAfterHeader) : NaN
+        error.retryAfterSeconds = Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : null
 
         try {
           const text = await response.text()
