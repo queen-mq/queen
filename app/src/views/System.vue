@@ -205,6 +205,56 @@
               </div>
             </div>
 
+            <!-- What the nodes move, in bytes per second: each chart in the
+                 unit its largest value reads best in. -->
+            <div class="sys-grid-2" style="margin-bottom:16px;">
+              <div class="card">
+                <div class="card-header" title="What each node's network interfaces received and sent: every client, the Raft port and anything else on them. In a container, its own interfaces; loopback and bridges are left out.">
+                  <h3>Network</h3>
+                  <span class="card-sub">{{ viewMode === 'individual' ? 'solid in · dashed out' : replicaCountLabel }}</span>
+                  <span class="muted">{{ stamp(metrics) }}</span>
+                </div>
+                <div class="card-body">
+                  <BaseChart
+                    v-if="networkChart.hasData"
+                    type="line" :data="networkChart" :options="networkOptions" height="240px"
+                  />
+                  <div v-else class="panel-msg">No network samples in this range. A broker records them on Linux only, and older releases not at all.</div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header" title="What the broker process read from and wrote to storage. A read the page cache serves is not a disk read.">
+                  <h3>Disk I/O</h3>
+                  <span class="card-sub">{{ viewMode === 'individual' ? 'solid read · dashed write' : replicaCountLabel }}</span>
+                  <span class="muted">{{ stamp(metrics) }}</span>
+                </div>
+                <div class="card-body">
+                  <BaseChart
+                    v-if="diskChart.hasData"
+                    type="line" :data="diskChart" :options="diskOptions" height="240px"
+                  />
+                  <div v-else class="panel-msg">No disk samples in this range. Older releases do not record them.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header" :title="raftTrafficHelp">
+                <h3>Raft traffic</h3>
+                <span class="card-sub">{{ viewMode === 'individual' ? 'solid sent · dashed received' : 'bytes on the wire, by channel' }}</span>
+                <span class="muted">{{ stamp(metrics) }}</span>
+              </div>
+              <div class="card-body">
+                <div v-if="node?.singleNode" class="panel-msg">One node, one copy of the log: nothing crosses the Raft port.</div>
+                <BaseChart
+                  v-else-if="raftTrafficChart.hasData"
+                  type="line" :data="raftTrafficChart" :options="raftTrafficOptions" height="240px"
+                />
+                <div v-else class="panel-msg">No Raft traffic samples in this range. Older releases do not record them.</div>
+              </div>
+            </div>
+
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Broker workers</h3>
@@ -245,7 +295,7 @@
                 <span class="muted">{{ stamp(metrics) }}</span>
               </div>
               <div class="card-body">
-                <div class="stat-grid stat-grid-5">
+                <div class="stat-grid stat-grid-4">
                   <div class="stat">
                     <div class="stat-label">Replicas</div>
                     <div class="stat-value">{{ metric(toNum(systemData.replicaCount)) }}</div>
@@ -268,6 +318,21 @@
                     <div class="stat-value">{{ mb(latest.rss) }}</div>
                     <div class="stat-foot">{{ acrossLabel }}</div>
                   </div>
+                  <div class="stat">
+                    <div class="stat-label">Network</div>
+                    <div class="stat-value">{{ formatRate(latest.netIn) }}</div>
+                    <div class="stat-foot">{{ latest.netIn === null ? 'not reported' : `in · ${formatRate(latest.netOut)} out` }}</div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">Disk</div>
+                    <div class="stat-value">{{ formatRate(latest.diskWrite) }}</div>
+                    <div class="stat-foot">{{ latest.diskWrite === null ? 'not reported' : `written · ${formatRate(latest.diskRead)} read` }}</div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">Raft port</div>
+                    <div class="stat-value">{{ formatRate(latest.raftWire) }}</div>
+                    <div class="stat-foot">{{ latest.raftWire === null ? 'not reported' : 'on the wire' }}</div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -288,6 +353,9 @@
                         <th class="right">CPU (user)</th>
                         <th class="right">CPU (sys)</th>
                         <th class="right">Memory</th>
+                        <th class="right">Network in / out</th>
+                        <th class="right">Disk read / write</th>
+                        <th class="right">Raft out / in</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -297,6 +365,15 @@
                         <td class="right tabular-nums">{{ pct(cpuOf(replica, 'user_us')) }}</td>
                         <td class="right tabular-nums">{{ pct(cpuOf(replica, 'system_us')) }}</td>
                         <td class="right tabular-nums">{{ mb(lastOf(replica, ['memory', 'rss_bytes'])) }}</td>
+                        <td class="right tabular-nums sys-pair">
+                          {{ formatRate(lastOf(replica, ['network', 'received_bytes_per_sec'])) }}<span class="sys-sep"> / </span>{{ formatRate(lastOf(replica, ['network', 'sent_bytes_per_sec'])) }}
+                        </td>
+                        <td class="right tabular-nums sys-pair">
+                          {{ formatRate(lastOf(replica, ['disk', 'read_bytes_per_sec'])) }}<span class="sys-sep"> / </span>{{ formatRate(lastOf(replica, ['disk', 'written_bytes_per_sec'])) }}
+                        </td>
+                        <td class="right tabular-nums sys-pair">
+                          {{ formatRate(lastOf(replica, ['raft_traffic', 'sent_bytes_per_sec'])) }}<span class="sys-sep"> / </span>{{ formatRate(lastOf(replica, ['raft_traffic', 'received_bytes_per_sec'])) }}
+                        </td>
                       </tr>
                     </tbody>
                   </table>
@@ -339,6 +416,7 @@ import {
 } from '@/composables/useRaftCluster'
 import { useRefresh } from '@/composables/useRefresh'
 import { numTone } from '@/composables/useSeverity'
+import { RAFT_CHANNELS, formatRate, inUnit, rateUnit } from '@/composables/useTraffic'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
 import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
@@ -627,6 +705,98 @@ const memoryChart = computed(() => buildChart(
 ))
 
 // ---------------------------------------------------------------------------
+// What the nodes move, in bytes per second (useTraffic.js). Each chart takes
+// the unit its largest value reads best in, and names it in every label.
+// ---------------------------------------------------------------------------
+const largest = (datasets) => {
+  let max = 0
+  for (const d of datasets) for (const v of d.data) if (v !== null && v > max) max = v
+  return max
+}
+
+/**
+ * Aggregate: one filled line per spec, summed across replicas. Per server:
+ * every spec of every replica in the replica's colour, the second dashed.
+ */
+const buildRateChart = (specs) => {
+  const empty = { labels: [], datasets: [], unit: rateUnit(0), hasData: false }
+  if (!replicas.value.length || !timeline.value.length) return empty
+  const raw = viewMode.value === 'individual'
+    ? replicas.value.flatMap((replica, i) => specs.map((spec, j) => ({
+      label: `${replica.hostname} · ${spec.short}`,
+      data: replicaSeries(replica, spec.path),
+      borderColor: chartColor(i).line,
+      borderDash: j === 0 ? [] : [5, 4],
+      fill: false,
+    })))
+    : specs.map((spec, i) => ({
+      label: spec.label,
+      data: summedSeries(spec.path),
+      borderColor: chartColor(spec.color ?? i).line,
+      backgroundColor: chartColor(spec.color ?? i).fill,
+      fill: true,
+    }))
+  if (!raw.some(d => d.data.some(v => v !== null))) return empty
+  const unit = rateUnit(largest(raw))
+  return {
+    labels: chartLabels.value,
+    unit,
+    hasData: true,
+    datasets: raw.map(d => ({
+      ...d,
+      label: `${d.label} (${unit.label})`,
+      tension: 0,
+      data: d.data.map(v => inUnit(v, unit)),
+    })),
+  }
+}
+
+const networkChart = computed(() => buildRateChart([
+  { label: 'Received', short: 'in', path: ['network', 'received_bytes_per_sec'] },
+  { label: 'Sent', short: 'out', path: ['network', 'sent_bytes_per_sec'] },
+]))
+
+const diskChart = computed(() => buildRateChart([
+  { label: 'Read', short: 'read', path: ['disk', 'read_bytes_per_sec'] },
+  { label: 'Written', short: 'write', path: ['disk', 'written_bytes_per_sec'] },
+]))
+
+// Aggregate: what crossed the wire, by channel. A byte is sent by one node and
+// received by another, so the nodes' SENT bytes, summed, count it once. A
+// channel that carried nothing in the range stays off the chart; replication
+// always shows. Per server: each node's total out and in.
+const raftTrafficChart = computed(() => {
+  if (viewMode.value === 'individual') {
+    return buildRateChart([
+      { label: 'Sent', short: 'out', path: ['raft_traffic', 'sent_bytes_per_sec'] },
+      { label: 'Received', short: 'in', path: ['raft_traffic', 'received_bytes_per_sec'] },
+    ])
+  }
+  return buildRateChart(RAFT_CHANNELS
+    .map((c, i) => ({ key: c.key, label: c.label, color: i, path: ['raft_traffic', c.key, 'sent_bytes_per_sec'] }))
+    .filter(s => s.key === 'replication' || summedSeries(s.path).some(v => v !== null && v > 0)))
+})
+
+const raftTrafficHelp = [
+  'Bytes over the Raft RPC port, by what they carry:',
+  ...RAFT_CHANNELS.map(c => `${c.label}: ${c.note}.`),
+  'Aggregate sums what each node sent: every byte on the wire once.',
+].join('\n')
+
+// A new options object only when a chart's unit changes: BaseChart redraws
+// the whole chart for new options, and only re-plots for new data.
+const rateOptions = (unitLabel) => ({
+  plugins: { legend: { display: true, position: 'top' } },
+  scales: { y: { title: { display: true, text: unitLabel, font: { size: 11 } } } },
+})
+const networkUnit = computed(() => networkChart.value.unit.label)
+const diskUnit = computed(() => diskChart.value.unit.label)
+const raftTrafficUnit = computed(() => raftTrafficChart.value.unit.label)
+const networkOptions = computed(() => rateOptions(networkUnit.value))
+const diskOptions = computed(() => rateOptions(diskUnit.value))
+const raftTrafficOptions = computed(() => rateOptions(raftTrafficUnit.value))
+
+// ---------------------------------------------------------------------------
 // Latest sample. Reduced ACROSS replicas — the old card printed replicas[0]
 // beside a "Replicas: N" counter, which reads as a cell figure and is not one.
 // ---------------------------------------------------------------------------
@@ -653,6 +823,12 @@ const sumLatest = (path) => {
 const latest = computed(() => ({
   cpuUser: sumLatest(['cpu', 'user_us']),
   rss: sumLatest(['memory', 'rss_bytes']),
+  netIn: sumLatest(['network', 'received_bytes_per_sec']),
+  netOut: sumLatest(['network', 'sent_bytes_per_sec']),
+  diskRead: sumLatest(['disk', 'read_bytes_per_sec']),
+  diskWrite: sumLatest(['disk', 'written_bytes_per_sec']),
+  // Every node's sent bytes: what crossed the wire, once.
+  raftWire: sumLatest(['raft_traffic', 'sent_bytes_per_sec']),
 }))
 
 // Chart options
@@ -687,6 +863,9 @@ const capital = (label) => (label ? label.charAt(0).toUpperCase() + label.slice(
 
 .sys-note { margin-top: 10px; font-size: 11.5px; color: var(--text-low); }
 .sys-scroll { overflow-x: auto; }
+/* "12.4 MB/s / 3.1 MB/s": one cell, two figures, the slash quiet. */
+.sys-pair { white-space: nowrap; }
+.sys-sep { color: var(--text-low); }
 .right { text-align: right; }
 
 /* The panel pair. Not a stat grid: it lays out CARDS, at the 16px block

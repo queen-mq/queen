@@ -187,6 +187,8 @@ pub async fn http_snapshot(
     if !placement.is_single() {
         req = req.header(PLACEMENT_HEADER, placement.header());
     }
+    use crate::rsm::replicator::raft::traffic::{add, Channel, Dir};
+    let sent = body.len();
     let req = req
         .body(Body::from(body))
         .map_err(|e| format!("{url}: {e}"))?;
@@ -197,6 +199,7 @@ pub async fn http_snapshot(
         Ok(Err(e)) => return Err(format!("{url}: {e}")),
         Ok(Ok(r)) => r,
     };
+    add(Channel::Link, Dir::Sent, sent);
     match resp.status() {
         StatusCode::OK => {
             let stated = resp
@@ -232,7 +235,10 @@ pub async fn http_snapshot(
     // A source that stops sending must not hold this node's boot for ever.
     let paced = futures_util::stream::unfold(stream, move |mut s| async move {
         match tokio::time::timeout(STALL, s.next()).await {
-            Ok(Some(Ok(b))) => Some((Ok(b), s)),
+            Ok(Some(Ok(b))) => {
+                add(Channel::Link, Dir::Received, b.len());
+                Some((Ok(b), s))
+            }
             Ok(Some(Err(e))) => Some((Err(e.to_string()), s)),
             Ok(None) => None,
             Err(_) => Some((

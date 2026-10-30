@@ -31,6 +31,10 @@ sourceOfTruth:
   - app/src/composables/supervisorActivity.js
   - app/src/composables/supervisorStatus.js
   - app/src/composables/consumerStatus.js
+  - app/src/views/System.vue
+  - app/src/composables/useTraffic.js
+  - server/src/rsm/replicator/raft/traffic.rs
+  - server/src/syscollect.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): health examples now show 2.0.1 at cluster version 4; the memory row names anonBytes and container_memory_rss, plus rows for the engine parts and the trace store gauges.
 # sourceOfTruth re-read 2026-10-07 (supervisors refresh): Supervisors.vue drops its "Refresh every 30s" checkbox and always follows the dashboard's 30-second ticker, which is what this page says. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (78970a242, 2.0.2): both /health examples show 2.0.2; nothing else this page states changes.
@@ -101,6 +105,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-22 (a38ba74f9, a test helper): raft/mod.rs's snapshot_and_purge_for_test,
 # test code only, waits for the durable index to pass the purge point before it asks for a snapshot.
 # The broker is unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): metrics.rs exports
+# queen_raft_traffic_bytes_total, queen_network_bytes_total and queen_process_disk_bytes_total;
+# raft/mod.rs declares raft/traffic.rs, which counts the Raft port's bytes by channel; System.vue
+# charts all three and RaftCluster.vue adds a Traffic column. The dashboard section and the alert
+# table say so; System.vue, useTraffic.js, raft/traffic.rs and syscollect.rs join the sources.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -119,6 +128,21 @@ the page of a list are part of the address, so a reload, a shared link and the b
 on the same view. System shows the replicated log, each node with its role, term, indexes and store usage,
 and the members; the bar at the top of every page says when a node refuses writes because its
 disk is full.
+
+System also charts what each node moves, per second: its network in and out, its disk reads and
+writes, and its Raft traffic. Why: a follower falling behind, a snapshot sent for minutes or a disk
+writing twice as much shows there before it shows as latency. The Raft table adds a Traffic
+column, what each node sent and received over the last minute; hover it for each channel.
+
+| Chart | What it counts |
+|---|---|
+| Network | Every byte on the node's network interfaces: clients, the Raft port, the rest. In a container, its own interfaces; loopback and bridges are left out. Linux only |
+| Disk I/O | What the broker process read from and wrote to storage. A read the page cache serves is not a disk read |
+| Raft traffic | The bytes of the Raft port, by channel: `replication` (the leader's appends), `forward` (client commands a follower hands to the leader), `snapshot`, `link` (a standby cluster's reads) and `control` (votes, membership, the members view) |
+
+The figures are averages over the metrics interval (`METRICS_FLUSH_MS`, 60 s): a burst of a few
+seconds is spread over its minute. Raft traffic counts message bodies, not HTTP headers, so it
+reads a little below what the network chart shows for the same bytes.
 
 Kafka clients count too. The records a Kafka consumer fetches are counted beside pops ("Fetch
 (Kafka)" on the Overview, "Fetched (Kafka)" in Workload), and a Kafka group's commit counts as
@@ -310,6 +334,7 @@ the families in [metrics](/reference/metrics/). These are the series worth an al
 | Ephemeral messages are dropped | `rate(queen_ephemeral_dropped_total[5m])` by `cause`: `bounds`, `ttl` or `retry` |
 | An ephemeral hand-over failed | `increase(queen_ephemeral_wipes_total[15m]) > 0` |
 | A standby stopped replaying its source, or fell behind | The `queen_link_*` series, with the thresholds under [standby](/operate/standby/#watch-it) |
+| A member is sent a snapshot: the whole store over the network, which can take minutes | `rate(queen_raft_traffic_bytes_total{channel="snapshot",direction="sent"}[5m]) > 0` |
 
 Pop lag is measured per process from deliveries, so a consumer that stopped popping altogether
 shows no lag at all; watch the dead letters and the dashboard's pending counts as well. With

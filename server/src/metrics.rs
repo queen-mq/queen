@@ -1657,6 +1657,59 @@ impl Metrics {
             "",
             resident_bytes().to_string(),
         );
+        // What this node moved (syscollect.rs, rsm/replicator/raft/traffic.rs):
+        // counters, so their rate is the System page's bytes per second.
+        if let Some((read, written)) = crate::syscollect::disk_io_bytes() {
+            ht(
+                &mut s,
+                "queen_process_disk_bytes_total",
+                "Bytes this process read from and wrote to storage (on Linux /proc/self/io; a read the page cache serves is not counted)",
+                "counter",
+            );
+            for (dir, v) in [("read", read), ("written", written)] {
+                g(
+                    &mut s,
+                    "queen_process_disk_bytes_total",
+                    &format!("{{direction=\"{dir}\"}}"),
+                    v.to_string(),
+                );
+            }
+        }
+        if let Some((received, sent)) = crate::syscollect::net_bytes() {
+            ht(
+                &mut s,
+                "queen_network_bytes_total",
+                "Bytes received and sent on this node's network interfaces since they came up (in a container its own; loopback, bridges, veth pairs and tunnels left out)",
+                "counter",
+            );
+            for (dir, v) in [("received", received), ("sent", sent)] {
+                g(
+                    &mut s,
+                    "queen_network_bytes_total",
+                    &format!("{{direction=\"{dir}\"}}"),
+                    v.to_string(),
+                );
+            }
+        }
+        {
+            use crate::rsm::replicator::raft::traffic::{totals, Channel};
+            ht(
+                &mut s,
+                "queen_raft_traffic_bytes_total",
+                "Bytes this node sent and received on the Raft RPC port, by channel (bodies only)",
+                "counter",
+            );
+            for (ch, [sent, received]) in Channel::ALL.into_iter().zip(totals()) {
+                for (dir, v) in [("sent", sent), ("received", received)] {
+                    g(
+                        &mut s,
+                        "queen_raft_traffic_bytes_total",
+                        &format!("{{channel=\"{}\",direction=\"{dir}\"}}", ch.as_str()),
+                        v.to_string(),
+                    );
+                }
+            }
+        }
         // RUSTFIX item 24: these are PER-PROCESS counters (reset on restart), so they
         // are named queen_process_* — the queen_cluster_* namespace is reclaimed by
         // the DB-backed lifetime totals in status.rs (which survive restart).
@@ -2097,8 +2150,18 @@ mod kv_timers_tests {
             "queen_ephemeral_dropped_total",
             "queen_ephemeral_bytes",
             "queen_ephemeral_queues",
+            // Every channel of the Raft RPC port, before a byte has moved.
+            "queen_raft_traffic_bytes_total{channel=\"replication\",direction=\"sent\"}",
+            "queen_raft_traffic_bytes_total{channel=\"control\",direction=\"received\"}",
         ] {
             assert!(out.contains(probe), "{probe} missing on a fresh broker");
+        }
+        // Read from the OS: where it reports them.
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert!(out.contains("queen_process_disk_bytes_total{direction=\"written\"}"));
+        }
+        if cfg!(target_os = "linux") {
+            assert!(out.contains("queen_network_bytes_total{direction=\"received\"}"));
         }
     }
 

@@ -38,6 +38,9 @@ sourceOfTruth:
 # reads a member's 404 from the answer's status; the Kafka facade was rewritten (config.rs, conn.rs):
 # no TLS listener, SASL/PLAIN with QUEEN_KAFKA_SASL=plain, and an unauthenticated connection's calls
 # carry no token. The ports table and the TLS paragraph say so.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): network.rs counts the bytes
+# every Raft route reads and writes, refused calls included, in a layer outside the token guard;
+# what the port serves and whom it admits is unchanged. Nothing this page states changes.
 ---
 
 Out of the box a node authenticates nobody: its HTTP port is plain HTTP, and every route answers

@@ -5,6 +5,15 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Broker and dashboard: network, disk and Raft traffic.** System charts what each node moves per
+second: its network in and out (Linux), its disk reads and writes, and the bytes of its Raft port
+by channel: replication, forwarding, snapshots, the standby link and control. The Raft table gains
+a Traffic column, each node's last minute, with the channels on hover. The same counters are on
+`/metrics/prometheus`: `queen_raft_traffic_bytes_total{channel,direction}`,
+`queen_network_bytes_total{direction}` and `queen_process_disk_bytes_total{direction}`. Why: a
+follower falling behind, a snapshot sent for minutes or a disk writing twice as much shows there
+before it shows as latency.
+
 Supervisor fixes made after supervisor 0.8.1, which PHP client 2.5.0 pins: they ship with the next
 supervisor release.
 

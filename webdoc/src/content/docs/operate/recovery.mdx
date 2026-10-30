@@ -116,6 +116,9 @@ digest: >-
 # sourceOfTruth re-read 2026-10-22 (b68756955, entries count as dead): qlog/set.rs rewrites a file
 # once its dead messages plus the raft entries it carries reach the threshold (per-queue logs: half
 # the file in entries). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): raft/mod.rs declares
+# raft/traffic.rs, which counts the Raft port's bytes by channel for the dashboard and
+# /metrics/prometheus. Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and

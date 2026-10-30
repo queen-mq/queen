@@ -18,6 +18,8 @@ sourceOfTruth:
   - server/src/handlers/raft.rs
   - server/src/proxy_embed.rs
   - proxy/src/cp.rs
+  - server/src/rsm/replicator/raft/traffic.rs
+  - server/src/syscollect.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
@@ -55,6 +57,11 @@ sourceOfTruth:
 # consumers fetch (11a0a5f3a), which feeds the dashboard rows, not a Prometheus series; real.rs counts
 # a Kafka group's commit as consumption in the same rows (cd737c40a); collector.rs flushes the new
 # count. No series on this page changes.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): metrics.rs exports
+# queen_raft_traffic_bytes_total{channel,direction}, queen_network_bytes_total{direction} (Linux)
+# and queen_process_disk_bytes_total{direction}; forward.rs counts the forward streams' bytes;
+# collector.rs writes the same bytes per second into the dashboard rows. The new Traffic section
+# says so; raft/traffic.rs and syscollect.rs join the sources.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node
@@ -99,6 +106,36 @@ queen_raft_index{kind="committed"} - ignoring(kind) queen_raft_index{kind="appli
 
 # entries committed or proposed but not applied, as the node counts them itself
 queen_raft_inflight
+```
+
+## Traffic
+
+Three counters say what a node moves, in bytes since it started. Their rate is what the
+dashboard's System page charts.
+
+| Family | Labels | What it counts |
+|---|---|---|
+| `queen_raft_traffic_bytes_total` | `channel`, `direction` (`sent`, `received`) | The bodies this node wrote and read on the Raft RPC port. Every channel is there from the start, at 0 |
+| `queen_network_bytes_total` | `direction` (`received`, `sent`) | Every byte on the node's network interfaces since they came up: in a container its own, loopback, bridges, veth pairs and tunnels left out. Linux only |
+| `queen_process_disk_bytes_total` | `direction` (`read`, `written`) | What the broker process read from and wrote to storage. On Linux, `/proc/self/io`: a read the page cache serves is not a disk read |
+
+| `channel` | Carries |
+|---|---|
+| `replication` | The leader's appends to its followers, and their answers |
+| `forward` | The client commands a follower hands to the leader, and their answers |
+| `snapshot` | A whole store, sent to a member too far behind the leader's log |
+| `link` | A standby cluster's reads of this one |
+| `control` | Votes, membership changes, the members view and the dashboard's gathers |
+
+A byte is sent by one node and received by another: summed over the nodes of a cluster, `sent`
+counts each byte once.
+
+```text
+# bytes per second on the wire, by channel, for the whole cluster
+sum by (channel) (rate(queen_raft_traffic_bytes_total{direction="sent"}[1m]))
+
+# the share of a node's network the Raft port takes
+sum(rate(queen_raft_traffic_bytes_total[1m])) / sum(rate(queen_network_bytes_total[1m]))
 ```
 
 ## Families

@@ -202,9 +202,12 @@ pub struct DlqErrorCount {
 /// `last`, `queue_backoff_summary` the latest value present; the raft
 /// collector writes no `shared_state`, so all of it is null there; no view
 /// reads it). There is also a `raft.{inflight, applied_lag, log_bytes,
-/// log_files, map_used_pct}` family, aggregated the same way as the other
-/// gauges. Replicas are ordered by `(hostname, port, workerId)`, points by
-/// time ascending.
+/// log_files, map_used_pct}` family, and the bytes per second the node moved:
+/// `disk.{read,written}_bytes_per_sec` and
+/// `network.{received,sent}_bytes_per_sec` (null where its platform does not
+/// say) and `raft_traffic.{sent,received}_bytes_per_sec`, in total and per
+/// channel; all aggregated the same way as the other gauges. Replicas are
+/// ordered by `(hostname, port, workerId)`, points by time ascending.
 pub fn system_metrics_json(filters: &Map<String, Value>, now_us: i64, rows: &[SystemRow]) -> Value {
     let range = match Range::resolve(filters, now_us) {
         Ok(r) => r,
@@ -357,7 +360,42 @@ fn gauge_metrics(s: &[GaugeSample]) -> Value {
             "log_files": g(&["raft", "log_files"]),
             "map_used_pct": g(&["raft", "map_used_pct"]),
         },
+        "disk": {
+            "read_bytes_per_sec": g(&["disk", "read_bytes_per_sec"]),
+            "written_bytes_per_sec": g(&["disk", "written_bytes_per_sec"]),
+        },
+        "network": {
+            "received_bytes_per_sec": g(&["network", "received_bytes_per_sec"]),
+            "sent_bytes_per_sec": g(&["network", "sent_bytes_per_sec"]),
+        },
+        "raft_traffic": raft_traffic_stats(s),
     })
+}
+
+/// The `raft_traffic` family of one point: the node's total over the Raft
+/// RPC port and each channel, every leaf `{avg, min, max, last}` like the
+/// other gauges.
+fn raft_traffic_stats(s: &[GaugeSample]) -> Value {
+    use crate::rsm::replicator::raft::traffic::Channel;
+    let pair = |base: &[&str]| {
+        let at = |leaf: &str| {
+            let mut path = base.to_vec();
+            path.push(leaf);
+            leaf_stats(s, &path)
+        };
+        json!({
+            "sent_bytes_per_sec": at("sent_bytes_per_sec"),
+            "received_bytes_per_sec": at("received_bytes_per_sec"),
+        })
+    };
+    let mut out = match pair(&["raft_traffic"]) {
+        Value::Object(o) => o,
+        _ => Map::new(),
+    };
+    for ch in Channel::ALL {
+        out.insert(ch.as_str().into(), pair(&["raft_traffic", ch.as_str()]));
+    }
+    Value::Object(out)
 }
 
 /// `{avg, min, max, last}` of one gauge leaf over a bucket's samples.
@@ -1703,6 +1741,57 @@ mod tests {
         assert_eq!(replica["hostname"], "n1");
         assert_eq!(replica["port"], 6632);
         assert_eq!(replica["workerId"], "worker-0");
+    }
+
+    #[test]
+    fn system_metrics_rolls_up_the_traffic_families_and_leaves_old_rows_null() {
+        let now = t("2026-09-24T10:30:00Z");
+        let with_traffic = |read: f64, sent: f64| {
+            let mut m = raft_metrics(1000.0, 100.0, 2.0);
+            let o = m.as_object_mut().unwrap();
+            o.insert(
+                "disk".into(),
+                json!({"read_bytes_per_sec": gauge(read), "written_bytes_per_sec": gauge(7.0)}),
+            );
+            o.insert(
+                "network".into(),
+                json!({"received_bytes_per_sec": gauge(1.0), "sent_bytes_per_sec": gauge(sent)}),
+            );
+            o.insert(
+                "raft_traffic".into(),
+                json!({
+                    "sent_bytes_per_sec": gauge(sent),
+                    "received_bytes_per_sec": gauge(3.0),
+                    "replication": {"sent_bytes_per_sec": gauge(sent), "received_bytes_per_sec": gauge(3.0)},
+                    "snapshot": {"sent_bytes_per_sec": gauge(0.0), "received_bytes_per_sec": gauge(0.0)},
+                }),
+            );
+            m
+        };
+        let a = sys("n1", t("2026-09-24T10:05:10Z"), 60, with_traffic(100.0, 1000.0));
+        let b = sys("n1", t("2026-09-24T10:05:50Z"), 20, with_traffic(500.0, 3000.0));
+        let v = system_metrics_json(&Map::new(), now, &[a, b]);
+        let m = &v["replicas"][0]["timeSeries"][0]["metrics"];
+        let read = &m["disk"]["read_bytes_per_sec"];
+        assert_eq!(read["avg"], json!((100.0 * 60.0 + 500.0 * 20.0) / 80.0));
+        assert_eq!(read["max"], json!(500.0));
+        assert_eq!(read["last"], json!(500.0));
+        assert_eq!(m["network"]["sent_bytes_per_sec"]["min"], json!(1000.0));
+        let rt = &m["raft_traffic"];
+        assert_eq!(rt["sent_bytes_per_sec"]["last"], json!(3000.0));
+        assert_eq!(rt["replication"]["sent_bytes_per_sec"]["max"], json!(3000.0));
+        assert_eq!(rt["snapshot"]["received_bytes_per_sec"]["last"], json!(0.0));
+        // A channel the rows did not carry, and every family on a row from a
+        // release before them: null leaves, never zeros.
+        let null_leaf = json!({"avg": null, "min": null, "max": null, "last": null});
+        assert_eq!(rt["link"]["sent_bytes_per_sec"], null_leaf);
+        let old = sys("n2", t("2026-09-24T10:05:10Z"), 60, raft_metrics(1.0, 1.0, 1.0));
+        let v = system_metrics_json(&Map::new(), now, &[old]);
+        let m = &v["replicas"][0]["timeSeries"][0]["metrics"];
+        assert_eq!(m["disk"]["written_bytes_per_sec"], null_leaf);
+        assert_eq!(m["network"]["received_bytes_per_sec"], null_leaf);
+        assert_eq!(m["raft_traffic"]["received_bytes_per_sec"], null_leaf);
+        assert_eq!(m["raft_traffic"]["forward"]["sent_bytes_per_sec"], null_leaf);
     }
 
     #[test]

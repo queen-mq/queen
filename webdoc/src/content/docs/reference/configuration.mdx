@@ -84,6 +84,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-22 (2.6.0, the reclaim boost): maintenance.rs and qlog/set.rs give a
 # reclaim pass QUEEN_QLOG_RECLAIM_BOOST (4) times its budget, rewrites included, while the last pass
 # left work. The queue-log table lists it.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): raft/mod.rs, forward.rs and
+# link/driver.rs count bytes for raft/traffic.rs; no setting is added or changed. Nothing this page
+# states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

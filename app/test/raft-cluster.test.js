@@ -141,7 +141,7 @@ test('an unreachable member row carries its error and no figure at all', () => {
   assert.equal(row.error, 'connect: connection refused')
   assert.equal(row.raftAddr, '127.0.0.1:7403')
   assert.equal(row.httpAddr, '127.0.0.1:6633')
-  for (const k of ['term', 'applied', 'committed', 'durable', 'lag', 'heartbeatMs', 'logBytes', 'logFiles', 'mapPct']) {
+  for (const k of ['term', 'applied', 'committed', 'durable', 'lag', 'heartbeatMs', 'logBytes', 'logFiles', 'mapPct', 'traffic']) {
     assert.equal(row[k], null, k)
   }
   // Unknown is not zero, and it has no colour.
@@ -150,6 +150,24 @@ test('an unreachable member row carries its error and no figure at all', () => {
   assert.equal(row.mapSeverity, '')
   // The state may also arrive spelled out.
   assert.equal(memberRow({ ...down(3), state: 'unreachable', reachable: undefined }).unreachable, true)
+})
+
+test("a member's Raft traffic rides on its row; a member that says nothing has none", () => {
+  const traffic = {
+    windowSeconds: 60,
+    raft: {
+      sentBytesPerSec: 2048,
+      receivedBytesPerSec: 512,
+      replication: { sentBytesPerSec: 2000, receivedBytesPerSec: 500 },
+    },
+  }
+  const row = memberRow(member(1, { state: 'leader', traffic }), { leaderId: 1, self: 1 })
+  assert.equal(row.traffic.sent, 2048)
+  assert.equal(row.traffic.received, 512)
+  assert.equal(row.traffic.windowSeconds, 60)
+  assert.equal(row.traffic.channels[0].sent, 2000)
+  // A broker before the field: no cell, never zeros.
+  assert.equal(memberRow(member(2), { leaderId: 1, self: 1 }).traffic, null)
 })
 
 test('one voter of three down: quorum holds, with nothing to spare', () => {

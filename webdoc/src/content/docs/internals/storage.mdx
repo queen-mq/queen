@@ -73,6 +73,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-22 (the reclaim pass's row cache): maintenance.rs keeps only the
 # partition rows a pass found and reads a missing one again (no row can mean not applied yet).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): raft/mod.rs declares
+# raft/traffic.rs, which counts the Raft port's bytes by channel for the dashboard and
+# /metrics/prometheus. Nothing this page states changes.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are

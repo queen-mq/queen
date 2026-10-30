@@ -22,6 +22,7 @@ import {
   SEV_BAD, SEV_NONE, SEV_WARN,
   quorumSeverity, raftHeartbeatSeverity, raftLagSeverity, storeMapSeverity,
 } from './useSeverity.js'
+import { memberTraffic } from './useTraffic.js'
 
 /** Finite number or null: a missing field must never format as 0. */
 const num = (v) => {
@@ -150,6 +151,9 @@ export function memberRow(member, { leaderId = null, self = null } = {}) {
     readers: num(store.readersInUse),
     maxReaders: num(store.maxReaders),
     mapSeverity: storeMapSeverity(mapPct),
+    // What the node moved over the Raft port in the collector's last
+    // interval (useTraffic.js); null when it says nothing.
+    traffic: unreachable ? null : memberTraffic(m),
     version: m.version || null,
     uptimeSeconds: num(m.uptimeSeconds),
   }

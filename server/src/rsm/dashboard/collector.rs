@@ -21,6 +21,8 @@ use super::model::{
     trunc_us, BacklogRow, ParkedRow, QueueRow, SystemRow, WorkerRow, US_PER_MIN, US_PER_SEC,
 };
 use super::store::{DashStore, Flush};
+use super::Traffic;
+use crate::rsm::replicator::raft::traffic::Channel;
 
 /// The raft family of a [`SystemRow`]: what this node's log and store look
 /// like at flush time (`inflight`, `applied_lag`, `log_bytes`, `log_files`,
@@ -117,6 +119,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
     let (mut last_user_us, mut last_sys_us, _) = crate::syscollect::rusage();
     let mut last_evl_sum = metrics.evl_sum_us.load(Ordering::Relaxed);
     let mut last_evl_cnt = metrics.evl_count.load(Ordering::Relaxed);
+    let mut last_bytes = ByteCounters::read();
 
     loop {
         std::thread::sleep(interval);
@@ -187,6 +190,10 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
         super::set_cpu_pct((cpu_user + cpu_sys) / 100.0, secs.round() as u64);
         last_user_us = user_us;
         last_sys_us = sys_us;
+        let bytes = ByteCounters::read();
+        let traffic = bytes.since(&last_bytes);
+        last_bytes = bytes;
+        super::set_traffic(traffic);
         let system = SystemRow {
             at_us,
             hostname: hostname.clone(),
@@ -199,6 +206,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
                 cpu_sys,
                 rss,
                 gauges(),
+                &traffic,
             )
             .to_string(),
         };
@@ -321,14 +329,64 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
     }
 }
 
+/// The byte counters a flush turns into rates: cumulative, read together.
+struct ByteCounters {
+    at: Instant,
+    /// Storage, `(read, written)` ([`crate::syscollect::disk_io_bytes`]).
+    disk: Option<(u64, u64)>,
+    /// The network interfaces, `(received, sent)` ([`crate::syscollect::net_bytes`]).
+    net: Option<(u64, u64)>,
+    /// The Raft RPC port ([`crate::rsm::replicator::raft::traffic::totals`]).
+    raft: [[u64; 2]; 5],
+}
+
+impl ByteCounters {
+    fn read() -> ByteCounters {
+        ByteCounters {
+            at: Instant::now(),
+            disk: crate::syscollect::disk_io_bytes(),
+            net: crate::syscollect::net_bytes(),
+            raft: crate::rsm::replicator::raft::traffic::totals(),
+        }
+    }
+
+    /// Bytes per second from `prev` to this read, over the time measured
+    /// between the two reads. A counter that went back (an interface that
+    /// came up again) gives 0 for that interval.
+    fn since(&self, prev: &ByteCounters) -> Traffic {
+        let secs = self
+            .at
+            .saturating_duration_since(prev.at)
+            .as_secs_f64()
+            .max(1.0);
+        let rate = |was: u64, now: u64| (now.saturating_sub(was) as f64 / secs).round();
+        let pair = |was: Option<(u64, u64)>, now: Option<(u64, u64)>| {
+            let ((a0, b0), (a1, b1)) = (was?, now?);
+            Some((rate(a0, a1), rate(b0, b1)))
+        };
+        let mut raft = [[0.0; 2]; 5];
+        for (out, (was, now)) in raft.iter_mut().zip(prev.raft.iter().zip(&self.raft)) {
+            *out = [rate(was[0], now[0]), rate(was[1], now[1])];
+        }
+        Traffic {
+            window_s: secs.round() as u64,
+            disk: pair(prev.disk, self.disk),
+            net: pair(prev.net, self.net),
+            raft,
+        }
+    }
+}
+
 /// The `metrics` JSON of a [`SystemRow`] (every leaf `{avg,min,max,last}`),
-/// plus `raft`.
+/// plus `raft`, and the bytes per second the node moved: `disk` and `network`
+/// where the platform says, and `raft_traffic` (its total and each channel).
 fn system_json(
     uptime: u64,
     cpu_user: f64,
     cpu_sys: f64,
     rss: u64,
     raft: Option<[f64; 5]>,
+    traffic: &Traffic,
 ) -> Value {
     fn m(v: f64) -> Value {
         json!({ "avg": v, "min": v, "max": v, "last": v })
@@ -339,9 +397,10 @@ fn system_json(
         "registries": { "response": m(0.0) },
         "uptime_seconds": uptime,
     });
-    if let (Some([inflight, applied_lag, log_bytes, log_files, map_used_pct]), Some(o)) =
-        (raft, body.as_object_mut())
-    {
+    let Some(o) = body.as_object_mut() else {
+        return body;
+    };
+    if let Some([inflight, applied_lag, log_bytes, log_files, map_used_pct]) = raft {
         o.insert(
             "raft".into(),
             json!({
@@ -353,6 +412,31 @@ fn system_json(
             }),
         );
     }
+    if let Some((read, written)) = traffic.disk {
+        o.insert(
+            "disk".into(),
+            json!({ "read_bytes_per_sec": m(read), "written_bytes_per_sec": m(written) }),
+        );
+    }
+    if let Some((received, sent)) = traffic.net {
+        o.insert(
+            "network".into(),
+            json!({ "received_bytes_per_sec": m(received), "sent_bytes_per_sec": m(sent) }),
+        );
+    }
+    let mut rt = serde_json::Map::new();
+    let (mut sent, mut received) = (0.0, 0.0);
+    for (ch, [s, r]) in Channel::ALL.into_iter().zip(traffic.raft) {
+        sent += s;
+        received += r;
+        rt.insert(
+            ch.as_str().into(),
+            json!({ "sent_bytes_per_sec": m(s), "received_bytes_per_sec": m(r) }),
+        );
+    }
+    rt.insert("sent_bytes_per_sec".into(), m(sent));
+    rt.insert("received_bytes_per_sec".into(), m(received));
+    o.insert("raft_traffic".into(), Value::Object(rt));
     body
 }
 
@@ -378,4 +462,76 @@ pub(crate) fn last_queue_lag() -> Vec<(String, String, i64, i64)> {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rates_are_per_second_over_the_time_between_the_reads() {
+        let t0 = Instant::now();
+        let prev = ByteCounters {
+            at: t0,
+            disk: Some((1_000, 2_000)),
+            net: Some((10, 20)),
+            raft: [[0, 0]; 5],
+        };
+        let mut raft = [[0, 0]; 5];
+        raft[0] = [6_000, 600];
+        let now = ByteCounters {
+            at: t0 + Duration::from_secs(60),
+            disk: Some((61_000, 2_000)),
+            net: Some((5, 620)),
+            raft,
+        };
+        let t = now.since(&prev);
+        assert_eq!(t.window_s, 60);
+        assert_eq!(t.disk, Some((1_000.0, 0.0)));
+        // Received went back (the interface came up again): 0, not a wrap.
+        assert_eq!(t.net, Some((0.0, 10.0)));
+        assert_eq!(t.raft[0], [100.0, 10.0]);
+        assert_eq!(t.raft[4], [0.0, 0.0]);
+        // A platform that does not say, at either read, says nothing.
+        let blind = ByteCounters {
+            disk: None,
+            net: None,
+            ..now
+        };
+        assert_eq!(blind.since(&prev).disk, None);
+        assert_eq!(prev.since(&blind).net, None);
+    }
+
+    #[test]
+    fn the_row_carries_the_traffic_families() {
+        let mut t = Traffic {
+            window_s: 60,
+            disk: Some((1.0, 2.0)),
+            net: None,
+            raft: [[0.0; 2]; 5],
+        };
+        t.raft[0] = [100.0, 10.0];
+        t.raft[1] = [5.0, 50.0];
+        let v = system_json(10, 1.0, 2.0, 3, None, &t);
+        assert_eq!(v["disk"]["read_bytes_per_sec"]["last"], 1.0);
+        assert_eq!(v["disk"]["written_bytes_per_sec"]["avg"], 2.0);
+        assert!(
+            v.get("network").is_none(),
+            "no network family where the platform does not say"
+        );
+        assert_eq!(v["raft_traffic"]["sent_bytes_per_sec"]["last"], 105.0);
+        assert_eq!(v["raft_traffic"]["received_bytes_per_sec"]["last"], 60.0);
+        assert_eq!(
+            v["raft_traffic"]["replication"]["sent_bytes_per_sec"]["last"],
+            100.0
+        );
+        assert_eq!(
+            v["raft_traffic"]["forward"]["received_bytes_per_sec"]["last"],
+            50.0
+        );
+        assert_eq!(v["raft_traffic"]["link"]["sent_bytes_per_sec"]["last"], 0.0);
+        // The raft gauges keep their family beside it.
+        let with_gauges = system_json(10, 1.0, 2.0, 3, Some([1.0, 2.0, 3.0, 4.0, 5.0]), &t);
+        assert_eq!(with_gauges["raft"]["log_files"]["last"], 4.0);
+    }
 }

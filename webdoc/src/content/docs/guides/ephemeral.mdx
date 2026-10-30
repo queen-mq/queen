@@ -34,6 +34,9 @@ sidebar:
 # changes.
 # sourceOfTruth re-read 2026-10-21: metrics.rs counts the records Kafka fetches serve, per queue
 # (11a0a5f3a); no ephemeral metric changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): metrics.rs exports three
+# traffic families (the Raft port, the network, the disk); the ephemeral families this page names
+# are unchanged. Nothing this page states changes.
 ---
 
 An ephemeral queue keeps its messages in memory and nowhere else. A push is a memory write and a

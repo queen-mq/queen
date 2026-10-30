@@ -33,6 +33,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-21: link.rs's holds were generalized so a cluster also keeps its log
 # for an away member (dc606d9de, member_holds.json beside link_holds.json); what a source keeps for
 # a standby, and the QUEEN_LINK_HOLD_* settings, are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): link/driver.rs and link/seed.rs
+# count a standby's reads and its seed as the `link` channel of queen_raft_traffic_bytes_total; what
+# a standby reads, and when, is unchanged. Nothing this page states changes.
 ---
 
 Three replicas protect you from losing a machine, and a [backup](/operate/recovery-backups/)

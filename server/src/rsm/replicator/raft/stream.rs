@@ -78,6 +78,7 @@ use tokio::sync::mpsc;
 
 use super::cluster::TOKEN_HEADER;
 use super::network::{append_ttl, HttpClient};
+use super::traffic::{Channel, Dir};
 #[cfg(test)]
 use super::types::REntry;
 use super::types::{NodeId, TypeConfig};
@@ -301,10 +302,12 @@ async fn connect(
     token: Option<Arc<str>>,
 ) -> Result<Conn, ConnectFail> {
     let (tx, rx) = mpsc::channel::<Bytes>(16);
+    // Each frame counts as the connection takes it.
     let body = Body::from_stream(futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv()
-            .await
-            .map(|b| (Ok::<Bytes, std::convert::Infallible>(b), rx))
+        rx.recv().await.map(|b| {
+            super::traffic::add(Channel::Replication, Dir::Sent, b.len());
+            (Ok::<Bytes, std::convert::Infallible>(b), rx)
+        })
     }));
     let mut req = Request::builder()
         .method(Method::POST)
@@ -365,6 +368,7 @@ async fn connect(
                     return;
                 }
             };
+            super::traffic::add(Channel::Replication, Dir::Received, chunk.len());
             d.push(&chunk);
             loop {
                 let answer = match d.next_frame() {

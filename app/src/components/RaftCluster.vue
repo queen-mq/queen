@@ -115,6 +115,7 @@
                 <th class="right" title="The last entry a durable point of this node's store covers">Durable</th>
                 <th class="right" title="Entries the leader holds that this follower has not matched">Lag</th>
                 <th class="right" title="Time since the leader last heard from this follower">Heartbeat</th>
+                <th class="right" title="What this node sent (out) and received (in) over the Raft port, per second over the metrics collector's last minute; hover a cell for each channel">Traffic</th>
                 <th class="right">Log</th>
                 <th class="right" title="Share of the store's map in use; from 85% the broker refuses new writes">Store</th>
               </tr>
@@ -146,6 +147,13 @@
                   <td class="right tabular-nums">{{ formatIndex(row.durable) }}</td>
                   <td class="right num" :class="numTone(row.lagSeverity)">{{ count(row.lag) }}</td>
                   <td class="right num" :class="numTone(row.heartbeatSeverity)">{{ ms(row.heartbeatMs) }}</td>
+                  <td class="right tabular-nums" :title="trafficTitle(row.traffic)">
+                    <template v-if="row.traffic">
+                      {{ formatRate(row.traffic.sent) }}<span class="rc-sub"> out</span>
+                      <span class="rc-sub"> · </span>{{ formatRate(row.traffic.received) }}<span class="rc-sub"> in</span>
+                    </template>
+                    <template v-else>—</template>
+                  </td>
                   <td class="right tabular-nums">
                     {{ bytes(row.logBytes) }}<span v-if="row.logFiles !== null" class="rc-sub"> · {{ count(row.logFiles) }} files</span>
                   </td>
@@ -178,6 +186,7 @@ import {
   clusterAlert, clusterView, formatIndex, formatMapPct,
 } from '@/composables/useRaftCluster'
 import { SEV_BAD, SEV_NONE, SEV_WARN, numTone } from '@/composables/useSeverity'
+import { formatRate, trafficTitle } from '@/composables/useTraffic'
 
 // Presentational: System.vue owns the fetch (it is one of the page's Source
 // options, refreshed by the page's own refresh) and hands over the last good
@@ -195,7 +204,7 @@ const props = defineProps({
 defineEmits(['recheck'])
 
 // Every column after Node and State; an unreachable row spans them all.
-const DATA_COLUMNS = 8
+const DATA_COLUMNS = 9
 
 const view = computed(() => clusterView(props.members))
 const alert = computed(() => clusterAlert(view.value))

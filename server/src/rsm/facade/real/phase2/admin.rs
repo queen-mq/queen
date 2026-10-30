@@ -1206,6 +1206,10 @@ pub(crate) fn local_node_json(
         "version":crate::VERSION,
         "uptimeSeconds":crate::rsm::dashboard::started().elapsed().as_secs(),
         "host":host_json(),
+        // Bytes per second over the metrics collector's last interval: the
+        // Raft RPC port by channel, the network, the disk. Null until the
+        // first interval closes.
+        "traffic":crate::rsm::dashboard::traffic().map_or(Value::Null, |t| t.to_json()),
         "replication":replication,
         "error":Value::Null
     })

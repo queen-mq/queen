@@ -54,6 +54,61 @@ pub fn cpu_pct() -> Option<(f64, u64)> {
     (bits != u64::MAX).then(|| (f64::from_bits(bits), CPU_WINDOW_S.load(Ordering::Relaxed)))
 }
 
+/// What this node moved over the collector's last interval, in bytes per
+/// second.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Traffic {
+    /// The interval, in seconds.
+    pub window_s: u64,
+    /// Storage, `(read, written)`; `None` where the platform does not say.
+    pub disk: Option<(f64, f64)>,
+    /// The network interfaces, `(received, sent)`; `None` where the platform
+    /// does not say.
+    pub net: Option<(f64, f64)>,
+    /// The Raft RPC port, per channel in
+    /// [`Channel::ALL`](crate::rsm::replicator::raft::traffic::Channel::ALL)
+    /// order: `[sent, received]`.
+    pub raft: [[f64; 2]; 5],
+}
+
+impl Traffic {
+    /// The Raft view's per-node `traffic` block.
+    pub fn to_json(self) -> serde_json::Value {
+        use crate::rsm::replicator::raft::traffic::Channel;
+        use serde_json::json;
+        let mut raft = serde_json::Map::new();
+        let (mut sent, mut received) = (0.0, 0.0);
+        for (ch, [s, r]) in Channel::ALL.into_iter().zip(self.raft) {
+            sent += s;
+            received += r;
+            raft.insert(
+                ch.as_str().into(),
+                json!({"sentBytesPerSec": s, "receivedBytesPerSec": r}),
+            );
+        }
+        raft.insert("sentBytesPerSec".into(), json!(sent));
+        raft.insert("receivedBytesPerSec".into(), json!(received));
+        json!({
+            "windowSeconds": self.window_s,
+            "raft": raft,
+            "network": self.net.map(|(r, s)| json!({"receivedBytesPerSec": r, "sentBytesPerSec": s})),
+            "disk": self.disk.map(|(r, w)| json!({"readBytesPerSec": r, "writtenBytesPerSec": w})),
+        })
+    }
+}
+
+static TRAFFIC: std::sync::Mutex<Option<Traffic>> = std::sync::Mutex::new(None);
+
+/// Record what the collector measured over its last interval.
+pub fn set_traffic(t: Traffic) {
+    *TRAFFIC.lock().unwrap_or_else(|p| p.into_inner()) = Some(t);
+}
+
+/// The collector's last interval; `None` before the first one closes.
+pub fn traffic() -> Option<Traffic> {
+    *TRAFFIC.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// The disk gate of this node's data directory: writes are refused once the
 /// filesystem is `high_pct` used and accepted again below `low_pct`.
 /// `enabled` is false where the gate is off (tests).

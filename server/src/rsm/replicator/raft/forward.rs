@@ -860,6 +860,11 @@ async fn write_commands(
             pending.kill(&format!("the forward stream broke: {e}"));
             return;
         }
+        super::traffic::add(
+            super::traffic::Channel::Forward,
+            super::traffic::Dir::Sent,
+            frames.len(),
+        );
         if frames.capacity() > 4 * cfg.batch_bytes {
             frames = Vec::with_capacity(64 * 1024);
         }
@@ -880,6 +885,11 @@ async fn read_answers(mut body: ChunkedReader, mut frames: FrameBuf, pending: Ar
     let why = loop {
         match body.next_chunk().await {
             Ok(Some(chunk)) => {
+                super::traffic::add(
+                    super::traffic::Channel::Forward,
+                    super::traffic::Dir::Received,
+                    chunk.len(),
+                );
                 if let Err(e) = frames.feed(chunk, &mut ready) {
                     break e;
                 }

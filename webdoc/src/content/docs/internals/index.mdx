@@ -77,6 +77,10 @@ digest: >-
 # sourceOfTruth re-read 2026-10-22 (a38ba74f9, a test helper): raft/mod.rs's snapshot_and_purge_for_test,
 # test code only, waits for the durable index to pass the purge point before it asks for a snapshot.
 # The broker is unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): stream.rs counts the bytes a
+# leader sends and reads on each append stream; raft/mod.rs declares raft/traffic.rs, which counts
+# the Raft port's bytes by channel for the dashboard and /metrics/prometheus. Nothing this page
+# states changes.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and

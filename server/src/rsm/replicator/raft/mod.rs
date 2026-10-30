@@ -77,6 +77,7 @@ mod repair;
 pub mod snapshot;
 pub(crate) mod state_machine;
 mod stream;
+pub(crate) mod traffic;
 pub mod types;
 mod waiters;
 mod wire;

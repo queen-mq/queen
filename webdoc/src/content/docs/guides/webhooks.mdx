@@ -64,6 +64,8 @@ sidebar:
 # the queue detail read takes includePartitions=false and then returns queue-wide totals without
 # per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): admin.rs adds a `traffic` block
+# to each node of /api/v1/raft/status and /api/v1/raft/members. Nothing this page states changes.
 ---
 
 Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the

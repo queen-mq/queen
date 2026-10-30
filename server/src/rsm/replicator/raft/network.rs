@@ -351,6 +351,14 @@ async fn post_raw(
     if let Some(v) = members {
         req = req.header(super::members::MEMBERS_HEADER, v);
     }
+    // A body of known length counts once an answer shows it went out (a peer
+    // that is down took none of it); a stream (a snapshot) as it is sent.
+    let channel = super::traffic::channel_of(url);
+    let known = axum::body::HttpBody::size_hint(&body).exact();
+    let body = match known {
+        Some(_) => body,
+        None => super::traffic::counted(body, channel, super::traffic::Dir::Sent),
+    };
     let req = req.body(body).map_err(|e| Fail::Network(e.to_string()))?;
     let resp = match tokio::time::timeout(ttl, client.request(req)).await {
         Err(_) => return Err(Fail::Network(format!("{url}: no answer within {ttl:?}"))),
@@ -358,6 +366,9 @@ async fn post_raw(
         Ok(Err(e)) => return Err(Fail::Network(format!("{url}: {e}"))),
         Ok(Ok(r)) => r,
     };
+    if let Some(n) = known {
+        super::traffic::add(channel, super::traffic::Dir::Sent, n as usize);
+    }
     let status = resp.status();
     let reads_zstd = wire::reads_zstd(resp.headers().get(wire::WIRE_HEADER).map(|v| v.as_bytes()));
     let kinds = super::members::kinds_of_header(
@@ -370,6 +381,7 @@ async fn post_raw(
         Ok(Err(e)) => return Err(Fail::Network(format!("{url}: {e}"))),
         Ok(Ok(b)) => b.to_bytes(),
     };
+    super::traffic::add(channel, super::traffic::Dir::Received, bytes.len());
     Ok(Raw {
         status,
         bytes,
@@ -759,6 +771,18 @@ mod server {
             return r;
         }
         crate::obs::panic_policy::non_core(next.run(req)).await
+    }
+
+    /// Every route, refused ones and the standby link's included: the bytes
+    /// it reads and writes, on its channel ([`super::super::traffic`]).
+    async fn count_traffic(
+        req: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> Response {
+        use super::super::traffic::{channel_of, counted, Dir};
+        let ch = channel_of(req.uri().path());
+        let req = req.map(|b| counted(b, ch, Dir::Received));
+        next.run(req).await.map(|b| counted(b, ch, Dir::Sent))
     }
 
     /// Body cap of the RPCs that carry log entries or a client command (an
@@ -1296,6 +1320,8 @@ mod server {
                     )
                     .layer(DefaultBodyLimit::max(CONTROL_BODY_CAP)),
             )
+            // Outermost: every route's bytes, the guard's refusals included.
+            .layer(axum::middleware::from_fn(count_traffic))
             .with_state(state);
         // No Nagle: the append stream's answers are small frames written one
         // at a time, and a unary answer is one small body; either would wait

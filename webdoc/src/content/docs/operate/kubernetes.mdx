@@ -65,6 +65,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-19 (the ephemeral pop's lost wake-up): handlers/ephemeral.rs's
 # waiting pop takes its queue's gate and arms its wake before it looks, so a push that lands as it
 # parks wakes it instead of its timeout. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (network, disk and Raft traffic): raft/mod.rs declares
+# raft/traffic.rs, which counts the Raft port's bytes by channel for the dashboard and
+# /metrics/prometheus. Nothing this page states changes.
 ---
 
 On Kubernetes a Queen cluster is a StatefulSet of three (or five) pods. Each pod gets its own

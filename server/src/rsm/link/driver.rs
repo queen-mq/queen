@@ -303,6 +303,8 @@ pub fn http_fetch(token: Option<String>, placement: Placement) -> Fetch {
             if !placement.is_single() {
                 http = http.header(PLACEMENT_HEADER, placement.header());
             }
+            use crate::rsm::replicator::raft::traffic::{add, Channel, Dir};
+            let sent = body.len();
             let http = http
                 .body(Body::from(body))
                 .map_err(|e| format!("{url}: {e}"))?;
@@ -311,6 +313,7 @@ pub fn http_fetch(token: Option<String>, placement: Placement) -> Fetch {
                 Ok(Err(e)) => return Err(format!("{url}: {}", chain(&e))),
                 Ok(Ok(r)) => r,
             };
+            add(Channel::Link, Dir::Sent, sent);
             let status = resp.status();
             let stated = resp
                 .headers()
@@ -322,6 +325,7 @@ pub fn http_fetch(token: Option<String>, placement: Placement) -> Fetch {
                 Ok(Err(e)) => return Err(format!("{url}: {e}")),
                 Ok(Ok(b)) => b.to_bytes(),
             };
+            add(Channel::Link, Dir::Received, bytes.len());
             match status {
                 StatusCode::OK => {
                     placement

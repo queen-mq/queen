@@ -138,6 +138,111 @@ pub(crate) fn cpus() -> Option<usize> {
     std::thread::available_parallelism().ok().map(|n| n.get())
 }
 
+/// What this process moved to and from storage since it started, in bytes:
+/// `(read, written)`. On Linux, `/proc/self/io`: `read_bytes` is what it made
+/// the block layer fetch (a read the page cache serves is not one), and
+/// `write_bytes` what it caused to be written (counted when a page is
+/// dirtied). On macOS, the disk I/O `proc_pid_rusage` reports. `None`
+/// elsewhere, or when the figures cannot be read.
+#[cfg(target_os = "linux")]
+pub(crate) fn disk_io_bytes() -> Option<(u64, u64)> {
+    parse_proc_io(&std::fs::read_to_string("/proc/self/io").ok()?)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn disk_io_bytes() -> Option<(u64, u64)> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+    // SAFETY: RUSAGE_INFO_V2 asks for a rusage_info_v2, the buffer passed.
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V2,
+            info.as_mut_ptr() as *mut libc::rusage_info_t,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: zeroed, then filled by the successful call.
+    let info = unsafe { info.assume_init() };
+    Some((info.ri_diskio_bytesread, info.ri_diskio_byteswritten))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn disk_io_bytes() -> Option<(u64, u64)> {
+    None
+}
+
+/// `/proc/self/io` as `(read_bytes, write_bytes)`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_proc_io(text: &str) -> Option<(u64, u64)> {
+    let field = |name: &str| {
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            if key.trim() == name {
+                value.trim().parse::<u64>().ok()
+            } else {
+                None
+            }
+        })
+    };
+    Some((field("read_bytes")?, field("write_bytes")?))
+}
+
+/// What this node's network interfaces received and sent since they came up,
+/// in bytes: `(received, sent)`. On Linux, `/proc/self/net/dev`, which lists
+/// the interfaces of this process's network namespace: in a container its own
+/// (a Kubernetes pod's `eth0`), on a host the host's. Loopback is left out,
+/// and so are bridges, veth pairs and tunnels ([`NOT_COUNTED`]): they carry
+/// again what a host's real interfaces already counted for its containers.
+/// `None` elsewhere, or when the file cannot be read.
+#[cfg(target_os = "linux")]
+pub(crate) fn net_bytes() -> Option<(u64, u64)> {
+    parse_net_dev(&std::fs::read_to_string("/proc/self/net/dev").ok()?)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn net_bytes() -> Option<(u64, u64)> {
+    None
+}
+
+/// The interfaces [`net_bytes`] leaves out, by name prefix: loopback, the
+/// bridges and veth pairs of Docker, libvirt and the Kubernetes network
+/// plugins, and tunnels.
+const NOT_COUNTED: [&str; 20] = [
+    "lo", "docker", "br-", "veth", "virbr", "vnet", "cni", "flannel", "cali", "cilium", "lxc",
+    "weave", "kube-", "vxlan", "tun", "tap", "gre", "ip6", "sit", "wg",
+];
+
+/// `/proc/net/dev` as `(received, sent)` over the counted interfaces; `None`
+/// when no interface line parses.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_net_dev(text: &str) -> Option<(u64, u64)> {
+    let mut parsed = false;
+    let (mut received, mut sent) = (0u64, 0u64);
+    // `  eth0: <8 receive fields> <8 transmit fields>`, bytes first in each;
+    // the two head lines have no colon.
+    for line in text.lines() {
+        let Some((name, fields)) = line.split_once(':') else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace();
+        let rx = fields.next().and_then(|v| v.parse::<u64>().ok());
+        let tx = fields.nth(7).and_then(|v| v.parse::<u64>().ok());
+        let (Some(rx), Some(tx)) = (rx, tx) else {
+            continue;
+        };
+        parsed = true;
+        let name = name.trim();
+        if NOT_COUNTED.iter().any(|p| name.starts_with(p)) {
+            continue;
+        }
+        received = received.saturating_add(rx);
+        sent = sent.saturating_add(tx);
+    }
+    parsed.then_some((received, sent))
+}
+
 /// The memory this process may use before the kernel steps in: its cgroup's
 /// limit when the container has one, else the machine's RAM. Read once: a
 /// limit does not move under a running process in practice.
@@ -226,5 +331,38 @@ mod tests {
                 super::filesystem_usage(&std::env::temp_dir()).expect("statvfs of the temp dir");
             assert!(total > 0 && available <= total, "{total} {available}");
         }
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert!(super::disk_io_bytes().is_some(), "disk I/O of this process");
+        }
+        if cfg!(target_os = "linux") {
+            assert!(super::net_bytes().is_some(), "/proc/self/net/dev");
+        }
+    }
+
+    #[test]
+    fn proc_io_gives_the_bytes_that_reached_the_device() {
+        let text = "rchar: 2075\nwchar: 10\nsyscr: 6\nsyscw: 1\nread_bytes: 4096\n\
+                    write_bytes: 8192\ncancelled_write_bytes: 4096\n";
+        assert_eq!(super::parse_proc_io(text), Some((4096, 8192)));
+        assert_eq!(super::parse_proc_io("rchar: 1\nwchar: 2\n"), None);
+    }
+
+    #[test]
+    fn net_dev_sums_the_real_interfaces_only() {
+        let text = "\
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo:     999       9    0    0    0     0          0         0      999       9    0    0    0     0       0          0
+  eth0:     110       1    0    0    0     0          0         0       42       1    0    0    0     0       0          0
+  ens5:    1000       1    0    0    0     0          0         0     2000       1    0    0    0     0       0          0
+docker0:      5       1    0    0    0     0          0         0        5       1    0    0    0     0       0          0
+veth1a2b:     7       1    0    0    0     0          0         0        7       1    0    0    0     0       0          0
+ tunl0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+";
+        assert_eq!(super::parse_net_dev(text), Some((1110, 2042)));
+        // Only loopback: nothing crossed a real interface, and that is known.
+        let lo_only = "    lo: 9 1 0 0 0 0 0 0 9 1 0 0 0 0 0 0\n";
+        assert_eq!(super::parse_net_dev(lo_only), Some((0, 0)));
+        assert_eq!(super::parse_net_dev("not the file\n"), None);
     }
 }

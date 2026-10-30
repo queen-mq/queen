@@ -146,6 +146,10 @@ watch(() => props.data, () => {
 // instance when the scheme flips. Cheap — it only fires on an operator click.
 watch(themeVersion, () => { if (chart) createChart() })
 
+// New options (a chart whose axis names the unit its data picked) rebuild it
+// too; a caller hands over a new object only when they change.
+watch(() => props.options, () => { if (chart) createChart() })
+
 onMounted(() => { nextTick(createChart) })
 onUnmounted(() => { if (chart) { chart.destroy(); chart = null } })
 </script>
