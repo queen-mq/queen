@@ -248,6 +248,8 @@ impl Switches {
 pub enum Surface {
     KvRead,
     KvWrite,
+    /// The KV writes of one transaction: `KvWrite`'s rungs, its own rate.
+    KvTxnWrite,
     TimerSchedule,
     TimerCancel,
     TimerRead,
@@ -282,7 +284,7 @@ enum Family {
 impl Family {
     fn of(s: Surface) -> Family {
         match s {
-            Surface::KvRead | Surface::KvWrite => Family::Kv,
+            Surface::KvRead | Surface::KvWrite | Surface::KvTxnWrite => Family::Kv,
             Surface::TimerSchedule | Surface::TimerCancel | Surface::TimerRead => Family::Timers,
             Surface::EphPush | Surface::EphPop | Surface::EphAck | Surface::EphAdmin => {
                 Family::Ephemeral
@@ -382,7 +384,7 @@ impl Answer {
 /// cell that runs this binary — so nothing here can answer "not on this cell".
 ///
 /// `add_rows` / `add_bytes` are the upper bound this call could add, and are
-/// ignored for every surface but `KvWrite`.
+/// ignored for every surface but `KvWrite` and `KvTxnWrite`.
 pub fn decide(
     sw: &Switches,
     q: &Quotas,
@@ -396,7 +398,7 @@ pub fn decide(
     // would stop a caller finding out whether a timer it can no longer cancel is
     // still pending.
     let runtime_on = match surface {
-        Surface::KvRead | Surface::KvWrite => sw.kv_on(),
+        Surface::KvRead | Surface::KvWrite | Surface::KvTxnWrite => sw.kv_on(),
         Surface::TimerSchedule => sw.timers_schedule_on(),
         Surface::TimerCancel | Surface::TimerRead => true,
         // The ephemeral family never passes through here — see
@@ -420,6 +422,7 @@ pub fn decide(
     let v = match surface {
         Surface::KvRead => q.check_kv_read(tenant),
         Surface::KvWrite => q.charge_kv_write(tenant, add_rows, add_bytes),
+        Surface::KvTxnWrite => q.charge_kv_txn_write(tenant, add_rows, add_bytes),
         Surface::TimerSchedule => q.charge_timers(tenant, add_rows.max(1)),
         Surface::TimerCancel => q.check_timers_cancel(tenant),
         Surface::TimerRead => Verdict::Allow,

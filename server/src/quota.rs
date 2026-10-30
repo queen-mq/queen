@@ -212,6 +212,12 @@ pub struct Knobs {
     pub read_burst: u32,
     pub write_rate: u32,
     pub write_burst: u32,
+    /// KV writes inside a transaction (`once()` gates, `kv` riders): their own
+    /// bucket. A gate per step is the documented pattern, and the KV routes'
+    /// rate would cap every app that follows it. A tenant's
+    /// `max_writes_per_sec` applies to the routes only.
+    pub txn_write_rate: u32,
+    pub txn_write_burst: u32,
     /// The watermark above which a tenant makes the cell "hot" and the rollup
     /// drops to the refresh cadence (§9.3). 0.8, because with a soft quota 80%
     /// is already late (§14.3 point 5).
@@ -230,6 +236,8 @@ impl Default for Knobs {
             read_burst: u32::MAX,
             write_rate: u32::MAX,
             write_burst: u32::MAX,
+            txn_write_rate: u32::MAX,
+            txn_write_burst: u32::MAX,
             hot_ratio: 0.8,
         }
     }
@@ -243,6 +251,15 @@ pub(crate) type TestKnobs = Knobs;
 struct Snap {
     limits: Option<Limits>,
     measure: Measure,
+}
+
+/// Which write bucket a charge spends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lane {
+    /// The KV and timer routes.
+    Route,
+    /// KV writes inside a transaction.
+    Txn,
 }
 
 /// A token bucket. Each carries its OWN last-refill instant: sharing one would
@@ -291,6 +308,7 @@ struct Live {
     blocked_timers: bool,
     read: Bucket,
     write: Bucket,
+    txn_write: Bucket,
 }
 
 impl Live {
@@ -304,6 +322,7 @@ impl Live {
             blocked_timers: false,
             read: Bucket::new(k.read_burst),
             write: Bucket::new(k.write_burst),
+            txn_write: Bucket::new(k.txn_write_burst),
         }
     }
 }
@@ -562,13 +581,19 @@ impl Quotas {
     /// the call could ADD; a call that adds neither is a delete or an in-place
     /// update and is never refused on occupancy.
     pub fn charge_kv_write(&self, tenant: &str, add_rows: i64, add_bytes: i64) -> Verdict {
-        self.charge(tenant, add_rows, add_bytes, 0)
+        self.charge(tenant, add_rows, add_bytes, 0, Lane::Route)
+    }
+
+    /// The KV writes of one transaction: the same grant and occupancy as
+    /// [`Quotas::charge_kv_write`], the transaction bucket's rate.
+    pub fn charge_kv_txn_write(&self, tenant: &str, add_rows: i64, add_bytes: i64) -> Verdict {
+        self.charge(tenant, add_rows, add_bytes, 0, Lane::Txn)
     }
 
     /// A timer schedule, `n` timers. A reschedule counts as a schedule: it is the
     /// same upsert and, at schedule time, indistinguishable (§9.7).
     pub fn charge_timers(&self, tenant: &str, n: i64) -> Verdict {
-        self.charge(tenant, 0, 0, n)
+        self.charge(tenant, 0, 0, n, Lane::Route)
     }
 
     /// §9.6 — never blocked, by anything, ever. Not by quota, not by a grant, not
@@ -614,7 +639,14 @@ impl Quotas {
     // Internals.
     // -----------------------------------------------------------------------
 
-    fn charge(&self, tenant: &str, add_rows: i64, add_bytes: i64, add_timers: i64) -> Verdict {
+    fn charge(
+        &self,
+        tenant: &str,
+        add_rows: i64,
+        add_bytes: i64,
+        add_timers: i64,
+        lane: Lane,
+    ) -> Verdict {
         // Rung 3, before anything else is spent: no grant, no answer.
         let snap = match self.snapshot.read() {
             Ok(g) => g.get(tenant).copied(),
@@ -643,8 +675,13 @@ impl Quotas {
 
         // Rung 1: the bucket, before the occupancy test, because a client over
         // its rate must hear 429 ("slow down") and not 403 ("you are full").
-        let (rate, burst) = write_rate(&self.k, &snap);
-        let v = e.write.take(rate, burst);
+        let v = match lane {
+            Lane::Route => {
+                let (rate, burst) = write_rate(&self.k, &snap);
+                e.write.take(rate, burst)
+            }
+            Lane::Txn => e.txn_write.take(self.k.txn_write_rate, self.k.txn_write_burst),
+        };
         if v != Verdict::Allow {
             return v;
         }
@@ -813,6 +850,8 @@ pub fn from_config(cfg: &crate::config::Config) -> Arc<Quotas> {
         read_burst: cfg.kv_read_burst,
         write_rate: cfg.kv_write_rate,
         write_burst: cfg.kv_write_burst,
+        txn_write_rate: cfg.kv_txn_write_rate,
+        txn_write_burst: cfg.kv_txn_write_burst,
         hot_ratio: cfg.kv_quota_hot_percent as f64 / 100.0,
     })
 }

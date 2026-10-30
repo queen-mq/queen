@@ -252,6 +252,10 @@ pub struct Config {
     /// 100 writes/s: every write is a durable commit (~4 ms fsync).
     pub kv_write_rate: u32,
     pub kv_write_burst: u32,
+    /// KV writes inside a transaction (`once()` gates, `kv` riders), their own
+    /// bucket: 10,000/s, because a gate per step runs at the app's step rate.
+    pub kv_txn_write_rate: u32,
+    pub kv_txn_write_burst: u32,
     /// Size cap on the per-tenant in-RAM maps (token bucket, quota cache). The cap
     /// DENIES, it does not evict (§9.4 correction 2) — eviction under an unvalidated,
     /// attacker-chosen tenant id is just a slower unbounded map. The house precedent
@@ -618,8 +622,9 @@ pub fn log_effective(cfg: &Config) {
         target: "boot",
         kv_require_grant = cfg.kv_require_grant,
         kv_rate = %format!(
-            "{}r/{}rb/{}w/{}wb",
-            cfg.kv_read_rate, cfg.kv_read_burst, cfg.kv_write_rate, cfg.kv_write_burst),
+            "{}r/{}rb/{}w/{}wb/{}tw/{}twb",
+            cfg.kv_read_rate, cfg.kv_read_burst, cfg.kv_write_rate, cfg.kv_write_burst,
+            cfg.kv_txn_write_rate, cfg.kv_txn_write_burst),
         kv_max_tenants = cfg.kv_max_tenants,
         kv_max_value_bytes = crate::rsm::planner::kv::max_value_bytes(),
         kv_quota = %format!(
@@ -742,6 +747,8 @@ pub fn load() -> Config {
         kv_read_burst: env_int("QUEEN_KV_READ_BURST", 400).max(1) as u32,
         kv_write_rate: env_int("QUEEN_KV_WRITE_RATE", 100).max(1) as u32,
         kv_write_burst: env_int("QUEEN_KV_WRITE_BURST", 200).max(1) as u32,
+        kv_txn_write_rate: env_int("QUEEN_KV_TXN_WRITE_RATE", 10_000).max(1) as u32,
+        kv_txn_write_burst: env_int("QUEEN_KV_TXN_WRITE_BURST", 20_000).max(1) as u32,
         kv_max_tenants: env_int("QUEEN_KV_MAX_TENANTS", 10_000).max(1) as usize,
         // Clamped to 1..=99: 100 would mean "release exactly at the cap", i.e. no
         // band and the oscillation the band exists to remove; 0 would mean a tenant

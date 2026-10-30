@@ -29,7 +29,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/s3_inproc.rs
 */}
 
-The broker is configured entirely through environment variables: 117 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 119 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set.
 
@@ -56,6 +56,8 @@ The broker is configured entirely through environment variables: 117 of them, li
 | `QUEEN_KV_READ_RATE` | integer | `200` |  |
 | `QUEEN_KV_REQUIRE_GRANT` | boolean | `the value of QUEEN_TENANCY_HEADER (so: false)` |  |
 | `QUEEN_KV_TRUSTED_PROXY` | boolean | `false` |  |
+| `QUEEN_KV_TXN_WRITE_BURST` | integer | `20_000` |  |
+| `QUEEN_KV_TXN_WRITE_RATE` | integer | `10_000` |  |
 | `QUEEN_KV_WRITE_BURST` | integer | `200` |  |
 | `QUEEN_KV_WRITE_RATE` | integer | `100` |  |
 | `QUEEN_RAFT_KV_SWEEP_LIMIT` | integer | `512` |  |

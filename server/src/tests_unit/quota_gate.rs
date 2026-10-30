@@ -412,6 +412,34 @@ fn the_bucket_limits_writes_and_reads_on_separate_budgets() {
     assert_eq!(q.check_kv_read(T), Verdict::Allow);
 }
 
+/// A transaction's KV writes (`once()` gates, `kv` riders) spend their own
+/// bucket: the KV routes at their limit do not refuse them, their own limit
+/// does, and they are charged to the same occupancy.
+#[test]
+fn transaction_kv_writes_have_their_own_rate() {
+    let q = Quotas::for_test(TestKnobs {
+        write_rate: 1,
+        write_burst: 1,
+        txn_write_rate: 1,
+        txn_write_burst: 3,
+        ..TestKnobs::default()
+    });
+    q.refresh(vec![]);
+    assert_eq!(q.charge_kv_write(T, 1, 1), Verdict::Allow);
+    assert!(matches!(
+        q.charge_kv_write(T, 1, 1),
+        Verdict::RateLimited(_)
+    ));
+    for i in 0..3 {
+        assert_eq!(q.charge_kv_txn_write(T, 1, 1), Verdict::Allow, "txn write {i}");
+    }
+    assert!(matches!(
+        q.charge_kv_txn_write(T, 1, 1),
+        Verdict::RateLimited(_)
+    ));
+    assert_eq!(q.delta_of(T), (4, 4, 0), "both lanes charge the same occupancy");
+}
+
 /// `Retry-After` must be a number a client can act on: at least one second, and
 /// never zero (which reads as "immediately" and produces a spin).
 #[test]

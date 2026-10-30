@@ -198,9 +198,11 @@ Applied in `server/src/rsm/facade/real/phase2/reads.rs` and `offsets.rs`.
 | Writes of one key per call | 1 | 1 | |
 | Expiry | `ttlSeconds` above 0 or `forever: true`, required on every `put`, `putIfAbsent` and `incr` | the same | |
 | `check` | needs cluster format version 5 (503 below it) | the same | |
-| Calls per tenant | reads 200/s (burst 400), writes 100/s (burst 200) | not counted | `QUEEN_KV_READ_RATE`, `QUEEN_KV_READ_BURST`, `QUEEN_KV_WRITE_RATE`, `QUEEN_KV_WRITE_BURST` |
+| Calls per tenant | reads 200/s (burst 400), writes 100/s (burst 200) | writes 10,000/s (burst 20,000), on the same quota | `QUEEN_KV_READ_RATE`, `QUEEN_KV_READ_BURST`, `QUEEN_KV_WRITE_RATE`, `QUEEN_KV_WRITE_BURST`; in a transaction `QUEEN_KV_TXN_WRITE_RATE`, `QUEEN_KV_TXN_WRITE_BURST` |
 
-A call over a tenant's rate answers 429 `rate_limited`. A tenant's quota row can set its own rates
+A call over a tenant's rate answers 429 `rate_limited`, a transaction too, and writes nothing.
+The writes of a transaction (a `once()` gate, a `kv` rider) have their own rate because a gate per
+step runs at the app's step rate; the Kafka facade's own rows are not counted. A tenant's quota row can set its own rates
 and row and byte caps; see [tenants](/manage/tenants/).
 
 ## Streams

@@ -70,8 +70,8 @@ first.
 (it removed at most 512 a second). A Streams cycle carries at most `QUEEN_STREAMS_MAX_STATE_OPS`
 (10,000) state ops; `QUEEN_STREAMS_STATE_TTL_S` removes state rows not written for that long (off
 by default). KV operations inside a transaction (a `once()` gate, a `kv` rider) take the tenant's
-KV quota and KV write rate (`QUEEN_KV_WRITE_RATE`, 100 a second) as `POST /api/v1/kv` does; the
-Kafka facade's own commit row does not. The Raft log cache counts each entry's real size, and the
+KV quota as `POST /api/v1/kv` does, and their own rate, `QUEEN_KV_TXN_WRITE_RATE` (10,000 a second,
+burst `QUEEN_KV_TXN_WRITE_BURST` 20,000); the Kafka facade's own commit row takes neither. The Raft log cache counts each entry's real size, and the
 retention scan finishes its rounds while partitions grow fast. Why: every row lives in memory on every node and is reloaded at
 start, so state that only grows ends in a node that cannot start.
 

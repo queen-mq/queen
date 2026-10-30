@@ -402,7 +402,7 @@ pub(crate) async fn dispatch_transaction(
         Some(ops) if !facade && kv_ops_write(&ops) => {
             let (rows, bytes) = super::kv::write_footprint(&ops);
             if let Some(resp) =
-                super::kv::gated(st, tenant, crate::switches::Surface::KvWrite, rows, bytes)
+                super::kv::gated(st, tenant, crate::switches::Surface::KvTxnWrite, rows, bytes)
             {
                 return resp;
             }
