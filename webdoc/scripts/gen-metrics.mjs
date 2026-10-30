@@ -160,6 +160,12 @@ function collect(text, families) {
     put(m[1], m[2], typed ? typed[1] : summary ? "summary" : "");
   }
 
+  // fam("name", "help", "type", &[rows]): the local closure in metrics.rs that
+  // writes one family's HELP/TYPE pair and its rows (the memory guard's block).
+  for (const m of text.matchAll(/\bfam\(\s*"(queen_[a-z_]+)"\s*,\s*"([^"]*)"\s*,\s*"(\w+)"\s*,/g)) {
+    put(m[1], m[2], m[3]);
+  }
+
   // "# HELP name help\n# TYPE name type", in one literal.
   for (const m of text.matchAll(/# HELP (queen_[a-z_]+) ([^\\"]*)\\n# TYPE \1 (\w+)/g)) {
     put(m[1], m[2].trim(), m[3]);
@@ -207,7 +213,7 @@ function universe(text) {
 }
 
 const GROUPS = [
-  ["Process (this broker instance)", (n) => n.startsWith("queen_process_") || ["queen_uptime_seconds", "queen_event_loop_lag_avg_milliseconds", "queen_parked_long_polls", "queen_malloc_bytes"].includes(n)],
+  ["Process (this broker instance)", (n) => n.startsWith("queen_process_") || n.startsWith("queen_memguard_") || ["queen_uptime_seconds", "queen_event_loop_lag_avg_milliseconds", "queen_parked_long_polls", "queen_parked_pops", "queen_malloc_bytes"].includes(n)],
   ["Replicated log and storage", (n) =>
     n.startsWith("queen_raft_store_") || n.startsWith("queen_raft_index") || n === "queen_raft_inflight" ||
     n === "queen_raft_proposals_total" || n === "queen_raft_log_storage" || n === "queen_raft_storage_full"],
