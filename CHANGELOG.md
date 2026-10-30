@@ -112,9 +112,13 @@ without end, and one slow commit held back every other producer.
 `QUEEN_EPHEMERAL_IMPLICIT_TTL_S` (600 s) idle even when it still holds messages, at most
 `QUEEN_EPHEMERAL_MAX_QUEUES` (100,000) queues exist, a pop answers at most
 `QUEEN_EPHEMERAL_POP_MAX_BYTES` (16 MiB), and messages and queues are charged their overhead.
-Long-poll wake gates are freed again when idle. The proxy reads a KV batch's names without parsing
-the whole body before authentication, and gives requests with no credential their own per-address
-limit (`QUEEN_EDGE_ANON_RPS_PER_IP`, 20 a second). A PG source snapshot reads chunks of at most
+Long-poll wake gates are freed again when idle. The proxy reads no request body before the caller
+authenticates: a KV batch, read up to 16 MiB to tell the Kafka facade's own batches apart, was read
+before authentication, so a caller with no credential made a node hold 16 MiB per open request. It
+is now read after, and only its names are scanned; a KV batch with no credential gets 401 where it
+got 403 `feature_gated`. Requests with no credential, or with one refused 401, share a
+per-address limit (`QUEEN_EDGE_ANON_RPS_PER_IP`, 20 a second); any `Authorization` header used to
+skip it. A PG source snapshot reads chunks of at most
 `QUEEN_PG_SNAPSHOT_CHUNK_MAX_BYTES` (64 MiB) and at most 10,000 rows; at most `QUEEN_CONNECTORS_MAX`
 (256) connectors exist. Why: each of these grew with what clients sent.
 

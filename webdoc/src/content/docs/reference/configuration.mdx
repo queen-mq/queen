@@ -94,6 +94,10 @@ sourceOfTruth:
 # proxy app.rs, proxy config.rs, proxy harden.rs, rsm/apply.rs, rsm/facade/real.rs,
 # rsm/link/driver.rs, rsm/replicator/raft/forward.rs, rsm/replicator/raft/link.rs reformatted, line
 # wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (failed credentials and the anonymous limit): harden.rs charges
+# a request whose credential is refused 401 to the per-address budget for requests with no
+# credential (QUEEN_EDGE_ANON_RPS_PER_IP), and refuses the address 429 once it is spent. Nothing this page states changes; the
+# HSTS row now says when `auto` sends the header.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
@@ -315,7 +319,7 @@ default, because a fleet of producers behind one NAT would otherwise be throttle
 | `QUEEN_PUBLIC_ORIGINS` | the origin of `QUEEN_PROXY_PUBLIC_URL` | Origins allowed to send cookie-carrying requests. |
 | `QUEEN_EDGE_SESSION_COOKIES` | empty | More cookie names treated as session cookies, beside `QUEEN_PROXY_COOKIE_NAME` and its cell variants. |
 | `QUEEN_EDGE_CORS_ORIGINS`, `QUEEN_EDGE_CORS_HEADERS` | none; `authorization, content-type, x-request-id` | CORS. |
-| `QUEEN_EDGE_HSTS`, `QUEEN_EDGE_HSTS_MAX_AGE_S` | `auto`, `31536000` | HSTS: `auto`, `on` or `off`. |
+| `QUEEN_EDGE_HSTS`, `QUEEN_EDGE_HSTS_MAX_AGE_S` | `auto`, `31536000` | HSTS: `auto`, `on` or `off`. `auto` sends it only on HTTPS the proxy can see: its own TLS, or `X-Forwarded-Proto: https` from a trusted proxy. Behind a load balancer that ends TLS, set `on`. |
 
 Password sign-in is throttled per IP and per account: after the free failures, each further
 failure doubles a backoff that starts at `QUEEN_LOGIN_BACKOFF_BASE_MS`.

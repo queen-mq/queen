@@ -123,10 +123,12 @@ pub fn effective_class(class: RouteClass, body: &[u8]) -> RouteClass {
 /// batch", or an empty array would be a way to reach `Consume` on a route the
 /// tenant's plan does not grant.
 pub fn is_kafka_only_batch(body: &[u8]) -> bool {
-    // A TYPED SCAN, not a `serde_json::Value` tree. On a non-shielded
-    // listener this runs before authentication, and a 16 MiB body of small
-    // values built a ~300-400 MB tree before the 401. The scan keeps a few
-    // flags per op and drops every value as it is read.
+    // A TYPED SCAN, not a `serde_json::Value` tree. This used to run before
+    // authentication on a non-shielded listener, where a 16 MiB body of small
+    // values built a ~300-400 MB tree before the 401. It now runs after
+    // authentication (gateway.rs step 3b), and the scan still keeps an
+    // authenticated caller's batch from costing more than its bytes: it keeps
+    // a few flags per op and drops every value as it is read.
     //
     // It answers exactly what the tree did. Every value goes through
     // `deserialize_any`, the path `Value` itself takes, so the depth limit,

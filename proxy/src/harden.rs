@@ -522,6 +522,32 @@ impl IpRateLimiter {
         }
     }
 
+    /// Whether `ip` has a token to spend, without taking it. A key with no
+    /// bucket has a full one, and none is created for it.
+    pub fn peek(&self, ip: IpAddr) -> Result<(), Duration> {
+        self.peek_at(ip, Instant::now())
+    }
+
+    pub fn peek_at(&self, ip: IpAddr, now: Instant) -> Result<(), Duration> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        let key = self.key(ip);
+        let idx = (self.hasher.hash_one(key) as usize) % SHARDS;
+        let shard = lock(&self.shards[idx]);
+        let Some(b) = shard.map.get(&key) else {
+            return Ok(());
+        };
+        let (rps, burst) = (self.cfg.rps, self.cfg.burst);
+        let elapsed = now.saturating_duration_since(b.last).as_secs_f64();
+        let tokens = (b.tokens + elapsed * rps).min(burst);
+        if tokens >= 1.0 {
+            Ok(())
+        } else {
+            Err(Duration::from_secs_f64(((1.0 - tokens) / rps).max(0.001)))
+        }
+    }
+
     fn make_room(&self, shard: &mut Shard, now: Instant) {
         let due = shard
             .last_sweep
@@ -557,27 +583,46 @@ pub async fn rate_limit_mw(
     if !l.enabled() {
         return next.run(req).await;
     }
-    let ip = req
-        .extensions()
-        .get::<ClientIp>()
-        .map(|c| c.0)
-        .or_else(|| peer_of(&req).map(|p| p.ip()));
-    let Some(ip) = ip else {
+    let Some(ip) = limit_key(&req) else {
         return next.run(req).await;
     };
     match l.check(ip) {
         Ok(()) => next.run(req).await,
-        Err(retry) => errors::err_429(
-            errors::CODE_RATE_LIMITED,
-            ceil_secs(retry),
-            "too many requests from this address",
-        ),
+        Err(retry) => too_many(retry),
     }
 }
 
-/// [`rate_limit_mw`] for requests that carry no credential at all (no
-/// `Authorization`, no API key header, no cookie): those are refused 401
-/// after the gates, so they get their own small per-address budget.
+/// The address a per-IP limiter keys on: [`ClientIp`], else the raw peer.
+fn limit_key(req: &Request) -> Option<IpAddr> {
+    req.extensions()
+        .get::<ClientIp>()
+        .map(|c| c.0)
+        .or_else(|| peer_of(req).map(|p| p.ip()))
+}
+
+fn too_many(retry: Duration) -> Response {
+    errors::err_429(
+        errors::CODE_RATE_LIMITED,
+        ceil_secs(retry),
+        "too many requests from this address",
+    )
+}
+
+/// [`rate_limit_mw`] for requests that carry no credential (no
+/// `Authorization`, no API key header, no cookie) and for those whose
+/// credential fails authentication: both end in a 401, so they share one
+/// small per-address budget.
+///
+/// A credential HEADER is not a credential. A request that carries one goes
+/// through while its address has budget left and is charged when it is
+/// answered 401; once the budget is spent, that address is refused 429
+/// before its next credential is even checked. Without this, `Authorization:
+/// Bearer junk` skipped the budget entirely. A credential that authenticates
+/// is never charged, whatever it is refused for next (a 403 included).
+///
+/// The budget is per address, so behind a load balancer it only means
+/// something once `QUEEN_EDGE_TRUSTED_PROXIES` names it: until then every
+/// client arrives from the balancer's own addresses.
 pub async fn anon_rate_limit_mw(
     State(l): State<Arc<IpRateLimiter>>,
     req: Request,
@@ -587,10 +632,23 @@ pub async fn anon_rate_limit_mw(
     let credentialed = h.contains_key(axum::http::header::AUTHORIZATION)
         || h.contains_key(axum::http::header::COOKIE)
         || h.contains_key("x-api-key");
-    if credentialed {
+    if !credentialed {
+        return rate_limit_mw(State(l), req, next).await;
+    }
+    if !l.enabled() {
         return next.run(req).await;
     }
-    rate_limit_mw(State(l), req, next).await
+    let Some(ip) = limit_key(&req) else {
+        return next.run(req).await;
+    };
+    if let Err(retry) = l.peek(ip) {
+        return too_many(retry);
+    }
+    let resp = next.run(req).await;
+    if resp.status() == StatusCode::UNAUTHORIZED {
+        let _ = l.check(ip);
+    }
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -1166,12 +1224,11 @@ pub struct Edge {
     pub limiter: Arc<IpRateLimiter>,
     /// Web plane: `QUEEN_EDGE_WEB_RPS_PER_IP` (default 20, burst 60).
     pub web_limiter: Arc<IpRateLimiter>,
-    /// Data-plane requests that carry NO credential:
-    /// `QUEEN_EDGE_ANON_RPS_PER_IP` (default 20, burst 60). They are refused
-    /// 401 anyway, but each one reaches the gates first (a body is read for
-    /// the KV sniff): an unauthenticated flood must not cost the broker
-    /// memory. Authenticated traffic is limited only by the data-plane
-    /// limiter above.
+    /// Requests that carry NO credential, or one that fails authentication:
+    /// `QUEEN_EDGE_ANON_RPS_PER_IP` (default 20, burst 60). They end in a 401
+    /// anyway; an unauthenticated flood must not cost a node more than that
+    /// ([`anon_rate_limit_mw`]). Authenticated traffic is limited only by the
+    /// data-plane limiter above.
     pub anon_limiter: Arc<IpRateLimiter>,
     pub limits: Arc<RequestLimits>,
     pub web: Arc<WebRules>,
@@ -1911,6 +1968,34 @@ mod tests {
     }
 
     #[test]
+    fn peek_reads_a_bucket_without_spending_or_creating_it() {
+        let l = limiter(10.0, 2.0, 1000);
+        let t0 = Instant::now();
+        let a = ip("198.51.100.1");
+        // An address never seen has a full bucket, and peeking adds no key.
+        assert!(l.peek_at(a, t0).is_ok());
+        assert_eq!(l.tracked(), 0);
+        assert!(l.check_at(a, t0).is_ok());
+        assert!(l.check_at(a, t0).is_ok());
+        // Spent: peek says so, as often as it is asked, and takes nothing.
+        for _ in 0..3 {
+            let retry = l.peek_at(a, t0).unwrap_err();
+            assert!(
+                retry > Duration::ZERO && retry <= Duration::from_millis(100),
+                "{retry:?}"
+            );
+        }
+        // 100 ms later the token peek saw coming is there, still unspent.
+        let later = t0 + Duration::from_millis(100);
+        assert!(l.peek_at(a, later).is_ok());
+        assert!(l.peek_at(a, later).is_ok());
+        assert!(l.check_at(a, later).is_ok());
+        assert!(l.check_at(a, later).is_err());
+        // A disabled limiter never refuses.
+        assert!(limiter(0.0, 1.0, 10).peek_at(a, t0).is_ok());
+    }
+
+    #[test]
     fn token_bucket_burst_then_refill() {
         let l = limiter(10.0, 3.0, 1000);
         let t0 = Instant::now();
@@ -2325,6 +2410,53 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(&body[..], b"198.51.100.4");
         assert_eq!(resp_headers_nosniff(&app).await, "nosniff");
+    }
+
+    /// A credential header is not a credential. One that fails authentication
+    /// spends the same per-address budget as no credential at all; once it is
+    /// spent, the address is refused before its next credential is checked.
+    /// One that authenticates is never charged.
+    #[tokio::test]
+    async fn a_failed_credential_spends_the_anonymous_budget() {
+        let mut e = edge(0.0, 1.0);
+        // Only the anonymous budget is on: two requests, and none come back.
+        e.anon_limiter = Arc::new(limiter(0.001, 2.0, 1000));
+        let app = e.data_plane(Router::new().route(
+            "/api/v1/resources/queues",
+            get(|h: HeaderMap| async move {
+                match h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+                    Some("Bearer good") => StatusCode::OK,
+                    Some("Bearer viewer") => StatusCode::FORBIDDEN,
+                    _ => StatusCode::UNAUTHORIZED,
+                }
+            }),
+        ));
+        let call = |peer: &'static str, auth: Option<&'static str>| {
+            let app = app.clone();
+            async move {
+                let hdrs: Vec<(&str, &str)> =
+                    auth.map(|a| vec![("authorization", a)]).unwrap_or_default();
+                let r = req("GET", "/api/v1/resources/queues", peer, &hdrs, "");
+                app.oneshot(r).await.unwrap().status().as_u16()
+            }
+        };
+        let a = "203.0.113.7";
+        // A credential that authenticates is never charged, refused or not.
+        for _ in 0..5 {
+            assert_eq!(call(a, Some("Bearer good")).await, 200);
+            assert_eq!(call(a, Some("Bearer viewer")).await, 403);
+        }
+        // Junk spends the budget, then is refused before it is checked...
+        let mut codes = Vec::new();
+        for _ in 0..4 {
+            codes.push(call(a, Some("Bearer junk")).await);
+        }
+        assert_eq!(codes, vec![401, 401, 429, 429]);
+        // ...and so is everything else from that address while it is spent.
+        assert_eq!(call(a, None).await, 429);
+        assert_eq!(call(a, Some("Bearer good")).await, 429);
+        // Another address is untouched.
+        assert_eq!(call("203.0.113.8", Some("Bearer junk")).await, 401);
     }
 
     #[tokio::test]

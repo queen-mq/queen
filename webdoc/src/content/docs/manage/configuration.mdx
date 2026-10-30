@@ -42,6 +42,9 @@ sourceOfTruth:
 # proxy app.rs, proxy config.rs, proxy harden.rs, rsm/apply.rs, rsm/facade/real.rs,
 # rsm/link/driver.rs, rsm/replicator/raft/forward.rs, rsm/replicator/raft/link.rs reformatted, line
 # wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (failed credentials and the anonymous limit): harden.rs charges
+# a request whose credential is refused 401 to the per-address budget for requests with no
+# credential (QUEEN_EDGE_ANON_RPS_PER_IP), and refuses the address 429 once it is spent. Nothing this page states changes.
 ---
 
 Every setting is an environment variable, and most installations need very few of them. When a node starts, it prints the settings it is really using, in lines that start with `config:`. Read them after every change. A yes/no setting accepts `true` or `false`, `1` or `0`, `yes` or `no`, `on` or `off`; any other value stops the node at boot, so a typo cannot pass unnoticed.

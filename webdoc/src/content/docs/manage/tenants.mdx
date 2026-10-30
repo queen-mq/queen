@@ -26,6 +26,9 @@ sourceOfTruth:
 # proxy auth.rs, proxy cache.rs, proxy config.rs, proxy console.rs, proxy gateway.rs, proxy
 # limits.rs, proxy meter.rs, proxy oauth.rs, proxy routes.rs, proxy store/data.rs reformatted, line
 # wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (no body before authentication): gateway.rs reads a
+# POST /api/v1/kv body, and runs that batch's plan gates, after authentication; a KV batch with no
+# credential gets 401 where it got 403 feature_gated. Nothing this page states changes.
 ---
 
 The broker on its own has no users: anything that reaches its port can use it. The proxy built into the same binary adds them. With it on, every request presents an API key or a console session, and the proxy maps it to one tenant's cluster, checks it against the plan's limits, meters it, and hands it to the broker inside the same process. The proxy keeps its own state (tenants, users, key hashes, plans, usage) in the broker's replicated KV, so every node runs the same proxy and there is no database beside it.

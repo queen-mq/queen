@@ -21,7 +21,10 @@
 //!   2. cluster status gate (Suspended -> 403 suspended; Produce while blocked
 //!      -> 403 storage_quota_exceeded (live quota flag) or push_blocked (DB
 //!      lifecycle status) — two causes, two codes)
-//!   3. authenticate (auth::authenticate) + authorize (auth::authorize vs classify)
+//!   3. authenticate (auth::authenticate) + authorize (auth::authorize vs classify).
+//!      No body is read before authentication: a `POST /api/v1/kv` batch,
+//!      whose class depends on its body (the Kafka facade's carve-out, 3b),
+//!      is read between the two, and meets its plan gates there
 //!   4. limits: check_req; Produce -> buffer body (cap = cfg), weigh it
 //!      UNCOMPRESSED off its headers (wire.rs; a binary body that does not say
 //!      is refused, 400), registry.admit each (queue,partition) a JSON body
@@ -234,52 +237,13 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         return errors::err_404(errors::CODE_ROUTE_BLOCKED, "not available");
     }
 
-    // ----- 3b. the Kafka facade's own bookkeeping -----
-    // A `POST /api/v1/kv` batch that addresses NOTHING but the facade's
-    // reserved key space (`queen-kafka` / `qk:`) is reclassified `Consume` —
-    // the authority of the fetch it serves. See `kafka_kv.rs` for the rule and
-    // the fail-closed direction; `classify()` is unchanged, because this is a
-    // property of the BODY and that function has none.
-    //
-    // Here, and not later, because the gates whose answer it changes run below:
-    // `plan_gates` (the `kv` plan flag) on the next line, `auth::authorize` at
-    // step 3, and the `mixed_block` verdict at step 4. The body does not
-    // otherwise exist until step 4's `into_parts`, so the decision that feeds
-    // an AUTHORIZATION and FEATURE question cannot be deferred to the point
-    // where reading it is free.
-    //
-    // TWO COSTS, both accepted and neither hidden:
-    //
-    //  - every `POST /api/v1/kv` now buffers and parses once, against §9.6's
-    //    "on an unblocked cluster the body is never buffered". A KV batch is
-    //    small by construction (the facade bounds itself to 256 ops per call)
-    //    and `max_body_bytes` is the same ceiling `enforce_produce` and
-    //    `enforce_configure` already buffer under, so nothing new is unbounded.
-    //  - on a NON-shielded listener the gates below run before authentication,
-    //    so this buffer is taken before the caller has proven anything. That is
-    //    one route, under one existing cap. The alternative — deferring the kv
-    //    plan gate past authentication for everyone — would move when a plain
-    //    KV tenant gets its 403, which is a change to a surface this track was
-    //    not asked to move.
-    //
-    // Metering is deliberately NOT touched: `bytes_in` stays 0 for a batch that
-    // travels on, exactly as it did when this route was never buffered, so no
-    // tenant's bill changes because of a classification.
-    let (class, req) = if crate::kafka_kv::is_kv_batch(class) {
-        let (parts, body) = req.into_parts();
-        let buffered = match axum::body::to_bytes(body, st.cfg.max_body_bytes).await {
-            Ok(b) => b,
-            Err(_) => return errors::err_413("request body exceeds cap"),
-        };
-        // The carve-out demands that EVERY op of the batch sit in the Kafka
-        // facade's own namespace; a body that does not comes back unchanged.
-        let class = crate::kafka_kv::effective_class(class, &buffered);
-        (class, Request::from_parts(parts, Body::from(buffered)))
-    } else {
-        (class, req)
-    };
-
-    if !shielded {
+    // The plan gates, before authentication on a non-shielded listener, for
+    // every route whose class is already final. A KV batch is the exception:
+    // its class depends on its body, and its body waits for a credential
+    // (3b), so its plan gates run there.
+    let kv_batch = crate::kafka_kv::is_kv_batch(class);
+    let gated_before_auth = !shielded && fixed.is_some() && !kv_batch;
+    if gated_before_auth {
         if let Some(ctx) = &fixed {
             if let Some(resp) = plan_gates(&st, ctx, class, req.method(), req.uri().path()) {
                 return resp;
@@ -297,15 +261,12 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
                 Ok(p) => p,
                 Err(resp) => return resp,
             };
-            // Deferred from step 2 on a shielded listener, in the same order
-            // and through the same two functions, so a Host-named cluster
-            // there gets exactly the gates it gets everywhere else — only
-            // after the caller has earned an answer about it.
+            // Deferred from step 2 on a shielded listener, through the same
+            // function, so a Host-named cluster there gets exactly the gate it
+            // gets everywhere else — only after the caller has earned an
+            // answer about it. Its plan gates follow at 3b.
             if shielded {
                 if let Some(resp) = status_gate(&ctx) {
-                    return resp;
-                }
-                if let Some(resp) = plan_gates(&st, &ctx, class, req.method(), req.uri().path()) {
                     return resp;
                 }
             }
@@ -316,19 +277,68 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
-            // The same two gates, in the same order, now that the credential
-            // has named the cluster. A suspended tenant on a shared host is
-            // still a 403 `cluster_suspended`, and a Produce into a
-            // storage-blocked one is still a 403 `storage_quota_exceeded`.
+            // The same gate now that the credential has named the cluster: a
+            // suspended tenant on a shared host is still a 403
+            // `cluster_suspended`. Its plan gates follow at 3b, so a Produce
+            // into a storage-blocked one is still a 403
+            // `storage_quota_exceeded`.
             if let Some(resp) = status_gate(&ctx) {
-                return resp;
-            }
-            if let Some(resp) = plan_gates(&st, &ctx, class, req.method(), req.uri().path()) {
                 return resp;
             }
             (ctx, p)
         }
     };
+
+    // ----- 3b. the Kafka facade's own bookkeeping -----
+    // A `POST /api/v1/kv` batch that addresses NOTHING but the facade's
+    // reserved key space (`queen-kafka` / `qk:`) is reclassified `Consume` —
+    // the authority of the fetch it serves. See `kafka_kv.rs` for the rule and
+    // the fail-closed direction; `classify()` is unchanged, because this is a
+    // property of the BODY and that function has none.
+    //
+    // Here, before the gates whose answer it changes: `plan_gates` (the `kv`
+    // plan flag) just below, `auth::authorize` next, and the `mixed_block`
+    // verdict at step 4. The body does not otherwise exist until step 4's
+    // `into_parts`, so the decision that feeds an AUTHORIZATION and FEATURE
+    // question cannot be deferred to the point where reading it is free.
+    //
+    // And AFTER authentication, never before it. This buffer holds up to
+    // `max_body_bytes` (16 MiB), and it used to be taken on a non-shielded
+    // listener before the caller had proven anything: any client on the
+    // internet could make a node hold 16 MiB per open request (measured on
+    // stage 2026-10-30: 413 after a 17 MB upload carrying no credential, while
+    // a push with no credential was refused 401 after 0.3 MB). The price is
+    // that a KV batch meets its plan gates after authentication on every
+    // listener, so a caller with no credential gets its 401 instead of
+    // learning whether the plan has `kv`.
+    //
+    // One cost, accepted and not hidden: every authenticated `POST /api/v1/kv`
+    // buffers and parses once, against §9.6's "on an unblocked cluster the
+    // body is never buffered". A KV batch is small by construction (the facade
+    // bounds itself to 256 ops per call) and `max_body_bytes` is the same
+    // ceiling `enforce_produce` and `enforce_configure` already buffer under.
+    //
+    // Metering is deliberately NOT touched: `bytes_in` stays 0 for a batch that
+    // travels on, exactly as it did when this route was never buffered, so no
+    // tenant's bill changes because of a classification.
+    let (class, req) = if kv_batch {
+        let (parts, body) = req.into_parts();
+        let buffered = match axum::body::to_bytes(body, st.cfg.max_body_bytes).await {
+            Ok(b) => b,
+            Err(_) => return errors::err_413("request body exceeds cap"),
+        };
+        // The carve-out demands that EVERY op of the batch sit in the Kafka
+        // facade's own namespace; a body that does not comes back unchanged.
+        let class = crate::kafka_kv::effective_class(class, &buffered);
+        (class, Request::from_parts(parts, Body::from(buffered)))
+    } else {
+        (class, req)
+    };
+    if !gated_before_auth {
+        if let Some(resp) = plan_gates(&st, &ctx, class, req.method(), req.uri().path()) {
+            return resp;
+        }
+    }
     if let Err(resp) = crate::auth::authorize(&principal, class) {
         // An operator route refused is answered as if it did not exist — the
         // same 404 the flag-off cell gives — rather than a 403 that tells a
@@ -4407,6 +4417,72 @@ mod tests {
         assert!(st.upstream.in_process());
 
         assert_internal_headers_never_reach(&st, &heads).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- no body is read before the caller has a credential ------------------
+    //
+    // `POST /api/v1/kv` is the one route whose class depends on its body (the
+    // Kafka facade's carve-out, step 3b), and up to 2026-10-30 that body was
+    // read up to `max_body_bytes` (16 MiB) BEFORE authentication on a
+    // non-shielded listener: anyone who could reach the port made a node hold
+    // 16 MiB per open request without a credential.
+
+    /// A request body that records being polled, then fails. Handed to the
+    /// pipeline, it tells a test whether the body was ever read.
+    struct Tripwire(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl hyper::body::Body for Tripwire {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, std::io::Error>>> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::task::Poll::Ready(Some(Err(std::io::Error::other("the body was read"))))
+        }
+    }
+
+    /// The same KV batch twice, on a listener with no shared hosts (the
+    /// default, and production's): with no credential it is refused 401 and
+    /// its body is never touched; with one, the body is read (and here, since
+    /// it fails, refused 413 like any body over the cap).
+    #[tokio::test]
+    async fn a_kv_batch_body_is_read_only_after_authentication() {
+        let dir =
+            std::env::temp_dir().join(format!("queen-proxy-kv-preauth-{}", uuid::Uuid::new_v4()));
+        let dir = dir.to_str().expect("temp path").to_string();
+        let (cell, _broker) = stub_broker().await;
+        let send = |st: St| async move {
+            let read = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/kv")
+                .header(header::HOST, "cell.test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::new(Tripwire(read.clone())))
+                .expect("request");
+            let status = handle(State(st), req).await.status();
+            (status, read.load(std::sync::atomic::Ordering::SeqCst))
+        };
+
+        // dev-insecure off: the request has to carry a credential of its own.
+        let Ok(mut state) = std::sync::Arc::try_unwrap(replay_st(&cell, &dir).await) else {
+            panic!("a freshly built St has exactly one owner");
+        };
+        state.cfg.dev_insecure = false;
+        let anonymous = std::sync::Arc::new(state);
+        assert!(!anonymous.cfg.has_shared_hosts());
+        assert_eq!(send(anonymous).await, (StatusCode::UNAUTHORIZED, false));
+
+        // dev-insecure on: every request authenticates, and the body is read.
+        let authenticated = replay_st(&cell, &dir).await;
+        assert_eq!(
+            send(authenticated).await,
+            (StatusCode::PAYLOAD_TOO_LARGE, true)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

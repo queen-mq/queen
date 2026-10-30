@@ -110,6 +110,9 @@ sourceOfTruth:
 # rsm/facade/real.rs, rsm/facade/real/phase2.rs, rsm/facade/real/phase2/admin.rs,
 # rsm/facade/real/phase2/reads.rs, rsm/facade/real/phase2/streams.rs, rsm/maintenance.rs
 # reformatted, line wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (failed credentials and the anonymous limit): harden.rs charges
+# a request whose credential is refused 401 to the per-address budget for requests with no
+# credential (QUEEN_EDGE_ANON_RPS_PER_IP), and refuses the address 429 once it is spent. The anonymous-limit row now says so.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -386,7 +389,7 @@ Applied in `protocols/queen-kafka/src/config.rs`, `conn.rs` and `txn.rs`.
 
 | Limit | Default | Setting |
 |---|---|---|
-| Requests with no credential, per client address, at the proxy | 20 a second, burst 60; they are refused 401 anyway | `QUEEN_EDGE_ANON_RPS_PER_IP` |
+| Requests with no credential, or with one refused 401, per client address, at the proxy | 20 a second, burst 60; once spent, the address gets 429 before its next credential is checked | `QUEEN_EDGE_ANON_RPS_PER_IP` |
 | Connectors on a cluster, every tenant together | 256 | `QUEEN_CONNECTORS_MAX` |
 | Text one PostgreSQL snapshot chunk reads, and its rows | 64 MiB, 10,000 rows | `QUEEN_PG_SNAPSHOT_CHUNK_MAX_BYTES` |
 
