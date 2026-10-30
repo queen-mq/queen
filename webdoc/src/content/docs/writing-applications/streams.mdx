@@ -8,6 +8,8 @@ sidebar:
   order: 11
 sourceOfTruth:
   - clients/client-rust/src/streams/runner.rs
+  - clients/client-go/streams/runtime/runner.go
+  - clients/client-py/queen/streams/runtime/runner.py
   - server/src/rsm/consume/idle.rs
   - clients/client-js/client-v2/streams/Stream.js
   - clients/client-js/client-v2/streams/runtime/Runner.js
@@ -96,7 +98,7 @@ A message the gate refuses stops its partition there: it and the ones after it a
 
 <Why>a stream is a long-running worker like any other: it has to survive restarts, scale out, and stop during a deploy without losing its place.</Why>
 
-A window on a partition that goes quiet still closes on time. The Rust client keeps the time each open window ends, and at that time leases the quiet partition from the broker (`POST /streams/v1/claim`, broker 2.7) and closes the window under that lease. A partition someone else holds, or one with messages still waiting, is not leased: the window then closes in that cycle. So a window closes once, even with several processes on one `queryId`, and a process that starts asks the broker which partitions hold state (`POST /streams/v1/state/partitions`), so windows left open by a restart or a scale-down close too. The JavaScript, Python and Go clients, and the Rust client on an older broker, close only the windows of partitions their own process read in the last five minutes.
+A window on a partition that goes quiet still closes on time. The client keeps the time each open window ends, and at that time leases the quiet partition from the broker (`POST /streams/v1/claim`, broker 2.7) and closes the window under that lease, on the broker's clock. A partition someone else holds, or one with messages still waiting, is not leased: the window then closes in that cycle. So a window closes once, even with several processes on one `queryId`, and a process that starts asks the broker which partitions hold state (`POST /streams/v1/state/partitions`), so windows left open by a restart or a scale-down close too. On an older broker a client closes only the windows of partitions its own process read in the last five minutes. Event-time windows close on their watermark, as before.
 
 <Why>a session per visit or per trace ends with silence, not with a message. If closing it waited for the next message, a deploy or a crash would leave it open for good, and its result would never be sent.</Why>
 
