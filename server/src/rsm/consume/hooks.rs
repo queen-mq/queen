@@ -194,7 +194,10 @@ impl Engine {
             let hold = sh.groups.get(&gid).and_then(|gs| {
                 let q = &gs.g.cfg().queue;
                 let p = gs.parts.get(&pid)?;
-                if p.queued || p.cur.committed < idle_before {
+                // A part left in the ready list by a claim of the partition
+                // by name is no evidence of pending work
+                // ([`super::state::Part::ready_stale`]).
+                if (p.queued && !p.ready_stale) || p.cur.committed < idle_before {
                     return None;
                 }
                 let d = q.delayed_processing.max(0) as i64 * super::SEC_US;

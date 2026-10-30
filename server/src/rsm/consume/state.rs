@@ -259,6 +259,14 @@ pub(crate) struct Part {
     pub retry_at: i64,
     /// In the group shard's ready list.
     pub queued: bool,
+    /// `queued`, but a claim ran on the part since it went into the ready
+    /// list: a pop that names the partition claims it where it is, and only a
+    /// wildcard walk takes it out of the list. The part may be leased, held or
+    /// caught up now, and the wake that queued it is spent: the next time
+    /// [`super::pop::arm`] finds it claimable it wakes the group again, or a
+    /// long poll parked on the partition would sleep to its deadline through
+    /// a push, an ack and the end of a hold. `false` whenever `queued` is.
+    pub ready_stale: bool,
     /// Changed since the last checkpoint took it.
     pub dirty: bool,
     /// A `CursorDelete` is owed (a forgotten position): the row goes, the part
@@ -297,6 +305,7 @@ impl Part {
             ready_at: 0,
             retry_at: 0,
             queued: false,
+            ready_stale: false,
             dirty: false,
             delete_row: false,
             ver: 0,

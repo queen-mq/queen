@@ -40,7 +40,10 @@ pub(crate) enum Kind {
 }
 
 /// Arm `(gid, pid)`: into the ready list when claimable now, or a timer when
-/// a lease or a hold ends later. `true` when it became ready.
+/// a lease or a hold ends later. `true` when it became ready: the caller
+/// wakes the group. A part still in the ready list from before a claim
+/// ([`Part::ready_stale`](super::state::Part::ready_stale)) that is claimable
+/// again stays where it is and answers `true` too.
 pub(crate) fn arm(sh: &mut Shard, gid: Gid, pid: Pid, now_us: i64, grace_us: i64) -> bool {
     let Shard {
         pids,
@@ -54,7 +57,7 @@ pub(crate) fn arm(sh: &mut Shard, gid: Gid, pid: Pid, now_us: i64, grace_us: i64
     let Some(part) = gs.parts.get_mut(&pid) else {
         return false;
     };
-    if part.queued || part.reserved.is_some() {
+    if (part.queued && !part.ready_stale) || part.reserved.is_some() {
         return false;
     }
     if part.cur.leased(now_us, grace_us) {
@@ -72,6 +75,12 @@ pub(crate) fn arm(sh: &mut Shard, gid: Gid, pid: Pid, now_us: i64, grace_us: i64
         return false;
     }
     part.ready_at = 0;
+    if part.queued {
+        // Still in the ready list: claimable again, and news to the group.
+        part.ready_stale = false;
+        gs.g.bump();
+        return true;
+    }
     part.queued = true;
     gs.ready.push_back(pid);
     gs.g.ready_n.fetch_add(1, Ordering::AcqRel);
@@ -802,6 +811,7 @@ impl Engine {
                     g.unready();
                     if let Some(p) = gs.parts.get_mut(&pid) {
                         p.queued = false;
+                        p.ready_stale = false;
                     } else {
                         continue;
                     }
@@ -856,12 +866,25 @@ impl Engine {
         grace: i64,
         walk: &mut Walk,
     ) -> Result<()> {
-        let ver_before = sh
+        let (ver_before, was_queued) = sh
             .groups
             .get(&gid)
             .and_then(|gs| gs.parts.get(&pid))
-            .map(|p| p.ver);
-        match claim_one(fr, sh, gid, pid, cfg, req, *budget, walk.bytes, now, grace)? {
+            .map_or((None, false), |p| (Some(p.ver), p.queued));
+        let claimed = claim_one(fr, sh, gid, pid, cfg, req, *budget, walk.bytes, now, grace)?;
+        if was_queued && !matches!(claimed, Claimed::Cold(_)) {
+            // Claimed where it sits in the ready list (a pop that names the
+            // partition): whatever makes it claimable again must wake the
+            // group ([`arm`]).
+            if let Some(p) = sh
+                .groups
+                .get_mut(&gid)
+                .and_then(|gs| gs.parts.get_mut(&pid))
+            {
+                p.ready_stale = true;
+            }
+        }
+        match claimed {
             Claimed::Took(claim, taken, bytes, full) => {
                 *budget -= taken;
                 walk.bytes = walk.bytes.saturating_add(bytes);
