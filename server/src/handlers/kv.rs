@@ -487,7 +487,7 @@ async fn raft_apply(
     use crate::rsm::facade::{Deadline, KvFailure, KvReq, ReqCtx, RsmError};
     let ctx = ReqCtx::new(tenant, Deadline::after(st.stmt_timeout));
     let t0 = std::time::Instant::now();
-    let res = st.rsm.kv(ctx, KvReq { ops }).await;
+    let res = st.rsm.kv_raw(ctx, KvReq { ops }).await;
     // One duration per call, shared out over its ops (see `apply_ops`).
     let ms = t0.elapsed().as_secs_f64() * 1000.0 / (kinds.len().max(1) as f64);
     match res {
@@ -562,12 +562,12 @@ fn record_results(st: &AppState, results: &[Value], ms: f64, bytes_in: u64) {
         };
         st.metrics.kvt.kv_op(op, outcome, ms);
         if let Some(v) = r.get("value") {
-            out += v.to_string().len() as u64;
+            out += crate::rsm::planner::kv::spliced_len(v) as u64;
         }
         if let Some(rows) = r.get("rows").and_then(|v| v.as_array()) {
             for row in rows {
                 if let Some(v) = row.get("value") {
-                    out += v.to_string().len() as u64;
+                    out += crate::rsm::planner::kv::spliced_len(v) as u64;
                 }
             }
         }
@@ -600,7 +600,7 @@ pub fn facade_kv(
     use crate::rsm::facade::{Deadline, KvReq, ReqCtx};
     async move {
         let ctx = ReqCtx::new(tenant, Deadline::after(budget));
-        match rsm.kv(ctx, KvReq { ops }).await {
+        match rsm.kv_raw(ctx, KvReq { ops }).await {
             Ok(out) => batch_response(out.results),
             Err(f) => raft_failure(f),
         }
@@ -610,11 +610,10 @@ pub fn facade_kv(
 pub(super) fn batch_response(results: Vec<Value>) -> Response {
     json(
         StatusCode::OK,
-        Value::Object(Map::from_iter([(
+        crate::rsm::planner::kv::to_json_spliced(&Value::Object(Map::from_iter([(
             "results".to_string(),
             Value::Array(results),
-        )]))
-        .to_string(),
+        )]))),
     )
 }
 
@@ -623,7 +622,7 @@ pub(super) fn batch_response(results: Vec<Value>) -> Response {
 /// envelope would make the sugar taste of the batch.
 fn single_response(results: Vec<Value>) -> Response {
     match results.into_iter().next() {
-        Some(v) => json(StatusCode::OK, v.to_string()),
+        Some(v) => json(StatusCode::OK, crate::rsm::planner::kv::to_json_spliced(&v)),
         None => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             err("kv_error", Some("kv_result_missing"), None),
@@ -863,10 +862,10 @@ fn get_response(results: Vec<Value>) -> Response {
                 (header::CONTENT_TYPE, "application/json".to_string()),
                 (header::ETAG, tag),
             ],
-            elem.to_string(),
+            crate::rsm::planner::kv::to_json_spliced(&elem),
         )
             .into_response(),
-        None => json(StatusCode::OK, elem.to_string()),
+        None => json(StatusCode::OK, crate::rsm::planner::kv::to_json_spliced(&elem)),
     }
 }
 

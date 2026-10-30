@@ -1871,10 +1871,10 @@ fn a_writing_calls_reads_see_nothing_planned_after_it() {
     ]);
     let reads = crate::rsm::kv_reads::global();
     let ra = reads
-        .register(rid(ida), TENANT, &ops_for(TENANT, &a))
+        .register(rid(ida), TENANT, &ops_for(TENANT, &a), false)
         .expect("register a");
     let rb = reads
-        .register(rid(idb), TENANT, &ops_for(TENANT, &b))
+        .register(rid(idb), TENANT, &ops_for(TENANT, &b), false)
         .expect("register b");
     let cycle = c.run(&[kv_cmd(ida, a.clone()), kv_cmd(idb, b.clone())]);
     assert!(cycle.logged, "both calls write");
@@ -1967,4 +1967,76 @@ fn a_read_at_the_entry_gate_never_sees_half_a_batch() {
         b"\"new\"".to_vec(),
         "the whole entry, after it applied"
     );
+}
+
+/// The HTTP routes render stored values raw (`render_call_raw`, printed by
+/// `to_json_spliced`): byte for byte the answer the tree prints, for every
+/// read op and every value shape, with no tree built for the values.
+#[test]
+fn raw_rendering_prints_the_same_answer_as_the_tree() {
+    use crate::rsm::planner::kv::{render_call_raw, to_json_spliced};
+    let mut c = Cell::new("kv-raw-render");
+    let values = [
+        json!({"z": 1, "a": [1, 2.5, -3e7, null, true], "m": {"y": "q\"uote", "b": "\u{e9}\u{0}\n"}}),
+        json!("plain string"),
+        json!(12345678901234i64),
+        json!([{"k": {"deep": [[], {}]}}]),
+        json!(null),
+        json!(false),
+    ];
+    for (i, v) in values.iter().enumerate() {
+        let r = one(
+            &mut c,
+            100 + i as u64,
+            json!({"op":"put","ns":"raw","key": format!("k{i}"),"value": v,"forever":true}),
+        );
+        assert!(applied(&r), "{r}");
+    }
+    let reads = json!([
+        {"op":"get","ns":"raw","key":"k0"},
+        {"op":"get","ns":"raw","key":"k3"},
+        {"op":"get","ns":"raw","key":"missing"},
+        {"op":"getMany","ns":"raw","keys":["k1","k2","k4","k5","nope"]},
+        {"op":"getPrefix","ns":"raw","prefix":"k"}
+    ]);
+    let ops = ops_for(TENANT, &reads);
+    let pre = vec![KvOpOutcome::Deferred; ops.len()];
+    let now = c.now();
+    let (tree, raw) = c
+        .node
+        .store()
+        .read(|r| {
+            let now = now.max(r.last_now_us()?);
+            Ok((render_call(r, TENANT, &ops, &pre, now)?, render_call_raw(r, TENANT, &ops, &pre, now)?))
+        })
+        .expect("render");
+    let tree = Value::Array(tree).to_string();
+    let raw_printed = to_json_spliced(&Value::Array(raw.clone()));
+    assert_eq!(raw_printed, tree, "the raw answer prints byte for byte as the tree");
+    // And the values really were not trees: each is one raw string.
+    let first = &raw[0]["value"];
+    assert!(first.is_string(), "a raw value is carried as its text: {first}");
+    // The metered answer bytes are the printed ones, not the marker string's.
+    let tree_values: Vec<Value> = c
+        .node
+        .store()
+        .read(|r| render_call(r, TENANT, &ops, &pre, now.max(r.last_now_us()?)))
+        .expect("render");
+    for (t, r) in tree_values.iter().zip(raw.iter()) {
+        if let (Some(tv), Some(rv)) = (t.get("value"), r.get("value")) {
+            assert_eq!(crate::rsm::planner::kv::spliced_len(rv), tv.to_string().len(), "{tv}");
+        }
+        let (tr, rr) = (t.get("rows").and_then(Value::as_array), r.get("rows").and_then(Value::as_array));
+        for (trow, rrow) in tr.into_iter().flatten().zip(rr.into_iter().flatten()) {
+            let (tv, rv) = (&trow["value"], &rrow["value"]);
+            assert_eq!(crate::rsm::planner::kv::spliced_len(rv), tv.to_string().len(), "{tv}");
+        }
+    }
+    // The raw mode never leaks into a later plain render on this thread.
+    let again = c
+        .node
+        .store()
+        .read(|r| render_call(r, TENANT, &ops, &pre, now.max(r.last_now_us()?)))
+        .expect("render");
+    assert!(again[0]["value"].is_object(), "plain render after raw: {}", again[0]["value"]);
 }

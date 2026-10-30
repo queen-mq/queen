@@ -1642,9 +1642,90 @@ pub fn ts_list(us: i64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{frac:06}Z")
 }
 
-/// A stored value, as the JSON the answer embeds.
+thread_local! {
+    /// Set while [`render_call_raw`] renders on this thread: stored values go
+    /// into the answer as their own JSON text, not as a tree.
+    static RAW_VALUES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What opens a raw value inside a rendered answer: a `Value::String` that
+/// starts with it carries the value's JSON text, which [`to_json_spliced`]
+/// writes as it is. Random per process, so no client string can match it.
+fn raw_marker() -> &'static str {
+    static M: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    M.get_or_init(|| format!("\u{1}qkvraw{:016x}\u{1}", rand::random::<u64>()))
+}
+
+/// A stored value, as the JSON the answer embeds. Under [`render_call_raw`]
+/// it is its own text behind [`raw_marker`] (its size once), else a tree.
 fn json_value(bytes: &[u8]) -> Value {
+    if RAW_VALUES.with(|r| r.get()) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            // Checked without building anything: what the tree path would
+            // refuse is answered as it would be (null).
+            if serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok() {
+                let m = raw_marker();
+                let mut s = String::with_capacity(m.len() + text.len());
+                s.push_str(m);
+                s.push_str(text);
+                return Value::String(s);
+            }
+        }
+    }
     serde_json::from_slice(bytes).unwrap_or(Value::Null)
+}
+
+/// `v` as JSON text, the raw values of [`render_call_raw`] written as they are
+/// stored. Objects keep `Value`'s sorted key order, so the answer is the one
+/// `v.to_string()` gives for the same values.
+pub fn to_json_spliced(v: &Value) -> String {
+    let mut out = String::with_capacity(256);
+    write_spliced(v, &mut out);
+    out
+}
+
+/// The length of `v` as [`to_json_spliced`] writes it, without writing a raw
+/// value again.
+pub fn spliced_len(v: &Value) -> usize {
+    match v {
+        Value::String(s) => match s.strip_prefix(raw_marker()) {
+            Some(raw) => raw.len(),
+            None => v.to_string().len(),
+        },
+        _ => v.to_string().len(),
+    }
+}
+
+fn write_spliced(v: &Value, out: &mut String) {
+    match v {
+        Value::String(s) => match s.strip_prefix(raw_marker()) {
+            Some(raw) => out.push_str(raw),
+            None => out.push_str(&serde_json::to_string(s).unwrap_or_else(|_| "null".into())),
+        },
+        Value::Array(a) => {
+            out.push('[');
+            for (i, x) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_spliced(x, out);
+            }
+            out.push(']');
+        }
+        Value::Object(m) => {
+            out.push('{');
+            for (i, (k, x)) in m.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into()));
+                out.push(':');
+                write_spliced(x, out);
+            }
+            out.push('}');
+        }
+        other => out.push_str(&other.to_string()),
+    }
 }
 
 fn opt_ts(us: Option<i64>, f: fn(i64) -> String) -> Value {
@@ -1732,6 +1813,30 @@ pub fn precondition_detail(ops: &[KvOp], f: &KvPrecondition) -> String {
 /// and plan-time gets from `pre`, every [`KvOpOutcome::Deferred`] read
 /// evaluated NOW against `r` at `now_us`, spending ONE read budget across the
 /// call in apply order.
+/// [`render_call`] with every stored value written as its own JSON text,
+/// for an answer that goes straight to an HTTP client and is printed with
+/// [`to_json_spliced`]: a value's tree took 10 to 25 times its size, and one
+/// call renders up to 256 values of 64 KiB. In-process readers (locks, the
+/// proxy, the Kafka facade, a transaction's riders) read the values
+/// themselves and keep [`render_call`].
+pub fn render_call_raw<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    ops: &[KvOp],
+    pre: &[KvOpOutcome],
+    now_us: i64,
+) -> crate::rsm::store::Result<Vec<Value>> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RAW_VALUES.with(|f| f.set(false));
+        }
+    }
+    RAW_VALUES.with(|f| f.set(true));
+    let _reset = Reset;
+    render_call(r, tenant, ops, pre, now_us)
+}
+
 pub fn render_call<R: Reads + ?Sized>(
     r: &R,
     tenant: &str,

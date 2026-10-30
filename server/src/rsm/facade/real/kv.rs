@@ -90,7 +90,9 @@ impl RaftFacade {
     }
 
     /// `POST /api/v1/kv` and the path routes (024 `kv_apply_v1`, HTTP surface).
-    pub(super) async fn kv_impl(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
+    /// `raw`: the answer goes to an HTTP client (`Rsm::kv_raw`), so stored
+    /// values are rendered as their own text (`kvp::render_call_raw`).
+    pub(super) async fn kv_impl(&self, ctx: ReqCtx, req: KvReq, raw: bool) -> Result<KvOut, KvFailure> {
         let max_key = self.store.max_key_len();
         let ops = kvp::parse_ops(
             &req.ops,
@@ -111,7 +113,7 @@ impl RaftFacade {
             let registered = ops
                 .iter()
                 .any(KvOp::is_read)
-                .then(|| crate::rsm::kv_reads::global().register(ctx.request_id, &ctx.tenant, &ops))
+                .then(|| crate::rsm::kv_reads::global().register(ctx.request_id, &ctx.tenant, &ops, raw))
                 .flatten();
             let cmd = Command::Kv(KvCommand {
                 request_id: ctx.request_id,
@@ -192,7 +194,11 @@ impl RaftFacade {
 
         let results = self
             .kv_read(&ctx, true, move |r, tenant, now| {
-                kvp::render_call(r, tenant, &ops, &pre, now)
+                if raw {
+                    kvp::render_call_raw(r, tenant, &ops, &pre, now)
+                } else {
+                    kvp::render_call(r, tenant, &ops, &pre, now)
+                }
             })
             .await?;
         Ok(KvOut { results })

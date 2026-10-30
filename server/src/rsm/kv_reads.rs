@@ -28,6 +28,8 @@ use crate::rsm::planner::kv::KvOp;
 struct Pending {
     tenant: Arc<str>,
     ops: Arc<Vec<KvOp>>,
+    /// The answer goes to an HTTP client: stored values rendered raw.
+    raw: bool,
     /// Apply rendered it (the answer may have been taken since).
     rendered: bool,
     answer: Option<Result<Vec<Value>, String>>,
@@ -79,7 +81,7 @@ impl KvReads {
     /// Register a call's reads before it is submitted. `None` when the id is
     /// already registered (a retry racing its original): that call reads at
     /// the receiver, as before.
-    pub fn register(&self, id: RequestId, tenant: &str, ops: &[KvOp]) -> Option<Registration> {
+    pub fn register(&self, id: RequestId, tenant: &str, ops: &[KvOp], raw: bool) -> Option<Registration> {
         let mut g = self.pending.lock().expect("kv reads");
         if g.contains_key(&id) {
             return None;
@@ -89,6 +91,7 @@ impl KvReads {
             Pending {
                 tenant: Arc::from(tenant),
                 ops: Arc::new(ops.to_vec()),
+                raw,
                 rendered: false,
                 answer: None,
             },
@@ -103,11 +106,11 @@ impl KvReads {
     }
 
     /// Apply: the call `id`, if it still waits for its answer.
-    pub fn call(&self, id: &RequestId) -> Option<(Arc<str>, Arc<Vec<KvOp>>)> {
+    pub fn call(&self, id: &RequestId) -> Option<(Arc<str>, Arc<Vec<KvOp>>, bool)> {
         let g = self.pending.lock().expect("kv reads");
         g.get(id)
             .filter(|p| !p.rendered)
-            .map(|p| (p.tenant.clone(), p.ops.clone()))
+            .map(|p| (p.tenant.clone(), p.ops.clone(), p.raw))
     }
 
     /// Apply: the call's answer, rendered at its position.

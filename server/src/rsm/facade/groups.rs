@@ -335,6 +335,9 @@ impl Rsm for GroupRouter {
     async fn kv(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
         self.pick(&ctx.tenant).kv(ctx, req).await
     }
+    async fn kv_raw(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
+        self.pick(&ctx.tenant).kv_raw(ctx, req).await
+    }
     async fn kv_list(&self, ctx: ReqCtx, req: KvListReq) -> Result<String, KvFailure> {
         self.pick(&ctx.tenant).kv_list(ctx, req).await
     }

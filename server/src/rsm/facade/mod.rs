@@ -1158,6 +1158,14 @@ pub trait Rsm: Send + Sync {
         Err(KvFailure::Rsm(RsmError::Unsupported))
     }
 
+    /// [`Rsm::kv`] for an answer that goes straight to an HTTP client: stored
+    /// values may come back as raw text inside the results, which only
+    /// `planner::kv::to_json_spliced` prints correctly. Never for a caller
+    /// that reads the values itself. The default is [`Rsm::kv`].
+    async fn kv_raw(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
+        self.kv(ctx, req).await
+    }
+
     /// The console's page of one namespace (`kv_list_v1`): the JSON object
     /// `{rows, truncated, nextAfter, bytes}`, rendered.
     async fn kv_list(&self, _ctx: ReqCtx, _req: KvListReq) -> Result<String, KvFailure> {

@@ -1804,17 +1804,16 @@ impl<'s, S: Store> Applier<'s, S> {
             let Outcome::Kv(o) = &cmd.outcome else {
                 continue;
             };
-            let Some((tenant, ops)) = reads.call(&cmd.request_id) else {
+            let Some((tenant, ops, raw)) = reads.call(&cmd.request_id) else {
                 continue;
             };
-            let answer = crate::rsm::planner::kv::render_call(
-                &self.writes,
-                &tenant,
-                &ops,
-                &o.results,
-                c.entry.now_us,
-            )
-            .map_err(|e| e.to_string());
+            let render = if raw {
+                crate::rsm::planner::kv::render_call_raw
+            } else {
+                crate::rsm::planner::kv::render_call
+            };
+            let answer = render(&self.writes, &tenant, &ops, &o.results, c.entry.now_us)
+                .map_err(|e| e.to_string());
             reads.answer(&cmd.request_id, answer);
         }
     }

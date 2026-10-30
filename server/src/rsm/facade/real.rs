@@ -6783,7 +6783,11 @@ impl Rsm for RaftFacade {
     }
 
     async fn kv(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
-        self.kv_impl(ctx, req).await
+        self.kv_impl(ctx, req, false).await
+    }
+
+    async fn kv_raw(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
+        self.kv_impl(ctx, req, true).await
     }
 
     async fn kv_list(&self, ctx: ReqCtx, req: KvListReq) -> Result<String, KvFailure> {
