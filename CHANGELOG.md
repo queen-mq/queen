@@ -3,7 +3,19 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.7.0 - unreleased
+
+**Before upgrading: what 2.7.0 refuses, trims or removes that 2.6 kept.** Most of what 2.7.0 adds
+is a limit on something a client could grow without end; each is in the entries below and on
+[Limits](https://queenmq.com/reference/limits/). Four can change what an application sees. Dead
+letters are removed oldest first past 100,000 rows, 1 GiB or 14 days in a queue
+(`QUEEN_DLQ_MAX_ROWS_PER_QUEUE`, `QUEEN_DLQ_MAX_BYTES_PER_QUEUE`, `QUEEN_DLQ_MAX_AGE_S`; `0` turns
+one off). A pop answers at most 10,000 messages and 64 MiB, and a push of more than 10,000 messages
+is refused `too_many_items`. A name whose store keys would pass LMDB's 511 bytes is refused
+`name_too_long`, where 2.6 stopped every node. And a node near its memory limit answers 503
+`memory_pressure`: page reads past 80 %, writes that grow the stored state past 90 %. Stream runners
+use claims once every node runs 2.7.0 and they restart (the last entry says why). Why: a broker that
+runs out of memory or stops on one bad key loses every client, so it now refuses the request first.
 
 **Streams: a window on a quiet partition closes, also after a restart and with several runners
 (issue #153).** A stream's idle flush used to know only the partitions its own process had read in
@@ -150,6 +162,15 @@ than `QUEEN_STREAMS_MAX_STATE_BYTES` (16 MiB by default) answers 413 `state_too_
 nothing, its pushes and ack included. Why: a window's state is read and written whole on every cycle
 of its partition. A delete is never refused.
 
+**Broker: a long poll of a partition by name wakes when the partition has work again.** After a
+pop that named the partition (`.partition(...)` in the SDKs), a long poll of that partition that
+was already waiting was not woken by a push, by the end of a `failed` ack's `retryDelay`, or by the
+end of a `delayedProcessing` or `windowBuffer` hold: it answered empty at its timeout, and the next
+pop got the message. A retry could so wait the SDKs' 30 s poll timeout instead of `retryDelay` (1 s
+by default). On 2.6.0 such a long poll with a 3 s timeout answered empty after 2.7 s; it now gets
+the failed message after about `retryDelay`. Long polls of the whole queue, and those after a pop of
+the whole queue, were not affected. The push case is older than 2.6.0: 2.5.0 has it too.
+
 **Docs: rebuilt from the little book of QueenMQ.** The site now follows the book, chapter by
 chapter: introduction, writing applications, patterns, integrations, managing clusters and
 architecture, with every example in JavaScript, Python, Go, Rust, PHP and C++, cut from programs
@@ -176,6 +197,10 @@ owner, and is sent again with the current token.
 
 Supervisor fixes made after supervisor 0.8.1, which PHP client 2.5.0 pins: they ship with the next
 supervisor release.
+
+**Clients 2.7.0.** The JavaScript, Python, Rust, Go, PHP and C++ clients are 2.7.0 and talk to
+any 2.x broker. Stream claims need a 2.7.0 broker: on an older one a runner falls back to 2.6's idle
+flush of recently read partitions.
 
 **Laravel and supervisor: a SIGTERM during a broker call reaches the workers sooner.** A SIGTERM
 that arrived while the master waited on the broker, for a heartbeat, a depth read or a status
@@ -231,6 +256,11 @@ document that was expired, malformed or dated in the future by a clock step made
 drain every worker and exit. It is now removed with one log line and supervision goes on, as in the
 PHP engine; one that cannot be removed still stops the master, as a fault of the state directory.
 
+**The cluster version stays 7.** Nothing in 2.7.0 raises it: its log entries and stored rows are
+those of 2.6.0, so a cluster rolls from 2.6 to 2.7.0 one node at a time, and back. During the roll
+a stream runner whose claim reaches a 2.6 node turns claims off and keeps 2.6's idle flush until it
+restarts: restart stream runners once every node runs 2.7.0.
+
 ## queenctl 2.6.1 and Go client 2.6.1 - 2026-10-24
 
 **queenctl: binaries for 2.6, on a release of their own.** queenctl 2.6.1 is built against Go
@@ -252,15 +282,6 @@ Rust clients already could; until now a Go caller had to spell it with `Option()
 turning deduplication off or redelivering at once still goes through
 `Option("dedupWindowSeconds", 0)` and `Option("retryDelay", 0)`. queenctl 2.6.1 accepts the three
 keys in an `apply` manifest's `config:` block; 2.3.0 refused them as unknown fields.
-
-**Broker: a long poll of a partition by name wakes when the partition has work again.** After a
-pop that named the partition (`.partition(...)` in the SDKs), a long poll of that partition that
-was already waiting was not woken by a push, by the end of a `failed` ack's `retryDelay`, or by the
-end of a `delayedProcessing` or `windowBuffer` hold: it answered empty at its timeout, and the next
-pop got the message. A retry could so wait the SDKs' 30 s poll timeout instead of `retryDelay` (1 s
-by default). On 2.6.0 such a long poll with a 3 s timeout answered empty after 2.7 s; it now gets
-the failed message after about `retryDelay`. Long polls of the whole queue, and those after a pop of
-the whole queue, were not affected. The push case is older than 2.6.0: 2.5.0 has it too.
 
 ## 2.6.0 - 2026-10-22
 
