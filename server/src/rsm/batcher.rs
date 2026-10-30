@@ -523,6 +523,10 @@ impl BatcherConfig {
                 rows_window: flag("QUEEN_RAFT_ROWS_WINDOW", d.maintenance.rows_window),
                 // The driver hands over its queue-log reader when it starts.
                 qlog: None,
+                dlq: crate::rsm::maintenance::DlqCaps::from_env(),
+                dlq_walk: Default::default(),
+                streams_state_ttl_s: crate::rsm::maintenance::streams_state_ttl_s(),
+                streams_walk: Default::default(),
             },
             keep_overlay: flag("QUEEN_RAFT_KEEP_OVERLAY", d.keep_overlay),
             lanes: std::env::var("QUEEN_LANES")
@@ -710,10 +714,18 @@ impl Command {
                 .any(|op| matches!(op, KvOp::Put { .. } | KvOp::Incr { .. }))
         };
         let timers_grow = |ops: &[TimerOp]| ops.iter().any(|op| matches!(op, TimerOp::Schedule(_)));
+        // A streams state write grows storage too: a `/streams/v1/cycle` that
+        // only writes state (up to 16 MiB a cell) skipped admission and the
+        // disk gate (§11.8) when only its pushes counted.
         let effects_grow = |effects: &[Effect]| {
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::TraceAppend { .. } | Effect::TraceRecord { .. }))
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::TraceAppend { .. }
+                        | Effect::TraceRecord { .. }
+                        | Effect::StreamsStatePut { .. }
+                )
+            })
         };
         match self {
             Command::Push(_) | Command::MultiPush(_) => true,
@@ -1628,9 +1640,12 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
             // Retention judges a partition dead from committed state alone. One
             // a push wrote this cycle or in an entry still in flight is not
             // dead: deleting it would drop the message that push was answered
-            // for. A later tick judges it again.
+            // for. A later tick judges it again. The same for a streams state
+            // cell past its TTL whose partition is being written.
             planned.effects.retain(|e| match e {
-                Effect::PartitionDelete { pid } => !ov.touches_partition(*pid),
+                Effect::PartitionDelete { pid } | Effect::StreamsStateDelete { pid, .. } => {
+                    !ov.touches_partition(*pid)
+                }
                 _ => true,
             });
             if !planned.effects.is_empty() {
@@ -3352,7 +3367,21 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             self.expire_due = out.expire_more;
         }
         if out.kv_swept {
-            self.kv_sweep_due = false;
+            // A step that deleted its full limit leaves the sweep due, so the
+            // next cycle sweeps again at once, as the timer fire and the
+            // request-id expiry do: at one step a tick, keys with a TTL
+            // written faster than the limit a second (a `once()` gate per
+            // message) were never all swept, and piled up in RAM. Read from
+            // the entry, so the single planner and the lanes agree; a client's
+            // KV deletes in the same entry can only add one more sweep.
+            let limit = self.cfg.kv_sweep_limit.max(1);
+            self.kv_sweep_due = out.entry.as_ref().is_some_and(|e| {
+                e.effects
+                    .iter()
+                    .filter(|x| matches!(x, Effect::KvDelete { .. }))
+                    .count()
+                    >= limit
+            });
         }
         if out.fired {
             // A step that hit a bound runs again at once; otherwise the next

@@ -320,7 +320,18 @@ fn run<S: Store>(
             last_size = 0;
             hot.clear();
         }
-        let (slice, pace) = spread(last_size, every, full_slice, scan.per_s);
+        // Paced from the bigger of the last finished round and what this
+        // round has visited so far: with the last round alone, partitions
+        // created faster than a step's share of it kept a round from ever
+        // ending (2026-10-23: 1k new partitions/s, 594k partitions, no round
+        // finished, +120 MB/min). A leadership's first round keeps the full
+        // pace (`last_size` 0).
+        let basis = if last_size == 0 {
+            0
+        } else {
+            last_size.max(round_visited)
+        };
+        let (slice, pace) = spread(basis, every, full_slice, scan.per_s);
         // The hot partitions that are due, before the round's next slice.
         let now = Instant::now();
         let mut due: Vec<Pid> = Vec::new();

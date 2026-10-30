@@ -73,6 +73,101 @@ pub struct Config {
     /// (a batcher without a facade, or the queue log off): rows are never let
     /// past `log_start` by this leader, and such messages are not judged.
     pub qlog: Option<QLogReader>,
+    /// The dead-letter caps per queue ([`DlqCaps`]): past them the oldest
+    /// dead letters are deleted, at most [`DLQ_DELETES_PER_PASS`] a pass
+    /// ([`plan_dlq_caps`]). Off in `Default`; the batcher's environment
+    /// config reads them ([`DlqCaps::from_env`]).
+    pub dlq: DlqCaps,
+    /// Where the dead-letter walk resumes, and the dead letters it planned
+    /// lately. Leader-local and advisory, like [`Config::walk`].
+    pub dlq_walk: std::sync::Arc<std::sync::Mutex<DlqWalk>>,
+    /// `QUEEN_STREAMS_STATE_TTL_S` (0 = off, the default): a streams state
+    /// cell not updated for this long is deleted, at most
+    /// [`STREAMS_TTL_DELETES_PER_PASS`] a pass ([`plan_streams_state_ttl`]).
+    pub streams_state_ttl_s: i64,
+    /// Where the streams-state walk resumes (`None`: at the first cell).
+    pub streams_walk: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+}
+
+/// Dead letters kept per queue. Each is a full copy of its message's payload,
+/// in RAM on every node and reloaded at boot, and until these caps nothing but
+/// an admin delete removed one: a consumer that failed every message filled the
+/// nodes' memory at its failure rate. `0` turns a cap off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DlqCaps {
+    /// `QUEEN_DLQ_MAX_ROWS_PER_QUEUE` (default 100,000).
+    pub max_rows: u64,
+    /// `QUEEN_DLQ_MAX_BYTES_PER_QUEUE` (default 1 GiB), estimated from the
+    /// average size of the queue's oldest dead letters.
+    pub max_bytes: u64,
+    /// `QUEEN_DLQ_MAX_AGE_S` (default 1,209,600 = 14 days).
+    pub max_age_s: i64,
+}
+
+impl DlqCaps {
+    /// The caps from the environment, read once per process.
+    pub fn from_env() -> DlqCaps {
+        static V: std::sync::OnceLock<DlqCaps> = std::sync::OnceLock::new();
+        *V.get_or_init(|| {
+            let num = |k: &str, d: u64| -> u64 {
+                std::env::var(k)
+                    .ok()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(d)
+            };
+            DlqCaps {
+                max_rows: num("QUEEN_DLQ_MAX_ROWS_PER_QUEUE", 100_000),
+                max_bytes: num("QUEEN_DLQ_MAX_BYTES_PER_QUEUE", 1 << 30),
+                max_age_s: num("QUEEN_DLQ_MAX_AGE_S", 1_209_600).min(i64::MAX as u64 / 1_000_000)
+                    as i64,
+            }
+        })
+    }
+
+    fn on(&self) -> bool {
+        self.max_rows > 0 || self.max_bytes > 0 || self.max_age_s > 0
+    }
+}
+
+/// The dead-letter walk's leader-local state ([`plan_dlq_caps`]).
+#[derive(Debug, Default)]
+pub struct DlqWalk {
+    /// The key the next pass starts at (empty: the first queue).
+    from: Vec<u8>,
+    /// Dead letters this leader planned to delete lately, and when: a pass
+    /// that runs before their entry is applied steps over them instead of
+    /// planning them twice, and counts them as gone.
+    recent: std::collections::HashMap<[u8; 16], i64>,
+    /// Deletes planned since the last log line: `(past a count or byte cap,
+    /// past the age cap)`, and when that line was written.
+    unlogged: (u64, u64),
+    logged_at_us: i64,
+}
+
+/// `QUEEN_STREAMS_STATE_TTL_S` (default 0 = off), read once per process.
+pub fn streams_state_ttl_s() -> i64 {
+    static V: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_STREAMS_STATE_TTL_S")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .map_or(0, |v| v.min(i64::MAX / 1_000_000))
+    })
+}
+
+/// `QUEEN_MAX_DEDUP_WINDOW_S` (default 604,800 = 7 days): the longest dedup
+/// window maintenance honours, whatever a queue was configured with. A window
+/// of years kept every push's row, and every idle partition, for years.
+pub fn max_dedup_window_s() -> i64 {
+    static V: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_MAX_DEDUP_WINDOW_S")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(604_800)
+    })
 }
 
 /// The cleanup age when neither setting is given: 30 days.
@@ -101,7 +196,11 @@ pub fn cleanup_age_s(seconds: Option<&str>, days: Option<&str>) -> i64 {
 /// its dedup window (`dedup_window_s`), never under the node's floor
 /// (`txn_window_min_s`).
 pub(crate) fn txns_cutoff(now_us: i64, txn_window_min_s: i64, dedup_window_s: i32) -> i64 {
-    let window_s = i64::from(dedup_window_s).max(txn_window_min_s.max(0));
+    // Clamped at use, so queues configured before the ceiling existed are
+    // held to it too ([`max_dedup_window_s`]).
+    let window_s = i64::from(dedup_window_s)
+        .min(max_dedup_window_s())
+        .max(txn_window_min_s.max(0));
     now_us.saturating_sub(window_s.saturating_mul(1_000_000))
 }
 
@@ -137,6 +236,10 @@ impl Default for Config {
             trace_trim_limit: 512,
             rows_window: true,
             qlog: None,
+            dlq: DlqCaps::default(),
+            dlq_walk: Default::default(),
+            streams_state_ttl_s: 0,
+            streams_walk: Default::default(),
         }
     }
 }
@@ -328,25 +431,29 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
 
     let mut queues = Vec::new();
     // The queue keyspace has no all-tenants typed iterator. Decode its
-    // self-delimiting key and retain the config row.
+    // self-delimiting key and retain the config row. Only for the walk: with
+    // the background scanner on, decoding every queue row here every pass was
+    // pure cost on the planning thread (1M queues: about 1 s a pass).
     let mut bad_queue = false;
-    r.scan_raw(Keyspace::Queues, &[], &[], usize::MAX, &mut |key, value| {
-        let parsed = (|| {
-            let (tenant, at) = keys::read_name(key, 0)?;
-            let (queue, end) = keys::read_name(key, at)?;
-            (end == key.len()).then_some((tenant, queue))
-        })();
-        match (parsed, rows::queue_decode(value)) {
-            (Some((tenant, queue)), Ok(config)) => {
-                queues.push((tenant, queue, config));
-                true
+    if cfg.partition_walk {
+        r.scan_raw(Keyspace::Queues, &[], &[], usize::MAX, &mut |key, value| {
+            let parsed = (|| {
+                let (tenant, at) = keys::read_name(key, 0)?;
+                let (queue, end) = keys::read_name(key, at)?;
+                (end == key.len()).then_some((tenant, queue))
+            })();
+            match (parsed, rows::queue_decode(value)) {
+                (Some((tenant, queue)), Ok(config)) => {
+                    queues.push((tenant, queue, config));
+                    true
+                }
+                _ => {
+                    bad_queue = true;
+                    false
+                }
             }
-            _ => {
-                bad_queue = true;
-                false
-            }
-        }
-    })?;
+        })?;
+    }
     if bad_queue {
         return Err(crate::rsm::store::StoreError::corrupt(
             Keyspace::Queues,
@@ -471,6 +578,11 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
     }
     *cfg.walk_queue.lock().expect("retention walk") = stopped_at;
 
+    // Bounded growth: dead letters past their queue's caps, streams states
+    // past their TTL.
+    plan_dlq_caps(r, now_us, cfg, &mut out)?;
+    plan_streams_state_ttl(r, now_us, cfg, &mut out)?;
+
     // D18: only log an expiry command when the oldest index row is due.
     let trace_cutoff = now_us.saturating_sub(cfg.trace_retention_s.max(1) * 1_000_000);
     if crate::rsm::effect::cluster_allows(r.cluster_version()?, crate::rsm::effect::VERSION_4) {
@@ -488,6 +600,272 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
         });
     }
     Ok(out)
+}
+
+/// The most dead letters one maintenance pass deletes.
+pub const DLQ_DELETES_PER_PASS: usize = 1024;
+/// The most queues holding dead letters one pass looks at.
+const DLQ_QUEUES_PER_PASS: usize = 64;
+/// The most dead letters one pass reads, over every queue it looks at.
+const DLQ_VISITS_PER_PASS: usize = 16_384;
+/// The oldest dead letters of a queue read to estimate its bytes and age.
+const DLQ_SAMPLE_ROWS: usize = 64;
+/// How long a planned delete is remembered ([`DlqWalk::recent`]): far longer
+/// than an entry takes to apply.
+const DLQ_RECENT_US: i64 = 60_000_000;
+/// The most planned deletes remembered; past it a pass plans no more.
+const DLQ_RECENT_MAX: usize = 65_536;
+/// The least time between two log lines of the dead-letter caps.
+const DLQ_LOG_EVERY_US: i64 = 10_000_000;
+
+/// The milliseconds a UUIDv7 dead-letter id was minted at (its first 48 bits):
+/// when the message was dead-lettered, without decoding the row.
+fn uuidv7_ms(id: &[u8; 16]) -> i64 {
+    id[..6]
+        .iter()
+        .fold(0u64, |acc, b| (acc << 8) | u64::from(*b)) as i64
+}
+
+/// Delete the oldest dead letters of the queues over their caps
+/// ([`Config::dlq`]): past the row cap, past the byte cap (estimated from the
+/// average size of the queue's oldest [`DLQ_SAMPLE_ROWS`] and its
+/// `DlqCount`), and older than the age cap. Bounded: [`DLQ_QUEUES_PER_PASS`]
+/// queues, [`DLQ_VISITS_PER_PASS`] rows read and [`DLQ_DELETES_PER_PASS`]
+/// deletes a pass, resuming where the last pass stopped. A dead letter's id is
+/// a UUIDv7, so a queue's rows come oldest first and the id says its age.
+fn plan_dlq_caps<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    cfg: &Config,
+    out: &mut Planned,
+) -> Result<()> {
+    use crate::rsm::store::keys::Counter;
+    let caps = cfg.dlq;
+    if !caps.on() {
+        return Ok(());
+    }
+    let mut guard = cfg.dlq_walk.lock().unwrap_or_else(|p| p.into_inner());
+    let walk = &mut *guard;
+    walk.recent
+        .retain(|_, at| now_us.saturating_sub(*at) < DLQ_RECENT_US);
+    let age_cut_ms = (caps.max_age_s > 0)
+        .then(|| (now_us / 1000).saturating_sub(caps.max_age_s.saturating_mul(1000)));
+    let mut deletes: Vec<Effect> = Vec::new();
+    let (mut over_cap, mut over_age) = (0u64, 0u64);
+    let mut visits = 0usize;
+    let mut queues = 0usize;
+    let mut from = std::mem::take(&mut walk.from);
+    loop {
+        if queues >= DLQ_QUEUES_PER_PASS
+            || visits >= DLQ_VISITS_PER_PASS
+            || deletes.len() >= DLQ_DELETES_PER_PASS
+            || walk.recent.len() >= DLQ_RECENT_MAX
+        {
+            break;
+        }
+        // The next queue holding dead letters: the first key at or past `from`.
+        let mut first: Option<Vec<u8>> = None;
+        r.scan_raw(Keyspace::Dlq, &from, &[], 1, &mut |k, _| {
+            first = Some(k.to_vec());
+            false
+        })?;
+        let Some(first) = first else {
+            // The end: the next pass starts again at the first queue.
+            from.clear();
+            break;
+        };
+        let Some((tenant, queue, _)) = keys::dlq_parts(&first) else {
+            // Not a dead letter's key: step over it.
+            match crate::rsm::store::resume_after(&first, r.max_key_len()) {
+                Some(next) => {
+                    from = next;
+                    continue;
+                }
+                None => {
+                    from.clear();
+                    break;
+                }
+            }
+        };
+        queues += 1;
+        let prefix = keys::dlq_prefix(&tenant, &queue);
+        // The next queue's rows start past this one's prefix range.
+        let next_queue = crate::rsm::store::prefix_end(&prefix);
+        let count = r
+            .queue_counter(&tenant, &queue, Counter::DlqCount)?
+            .max(0) as u64;
+        let (mut sample_n, mut sample_bytes, mut oldest_ms) = (0u64, 0u64, None::<i64>);
+        r.scan_raw(Keyspace::Dlq, &[], &prefix, DLQ_SAMPLE_ROWS, &mut |k, v| {
+            if oldest_ms.is_none() {
+                oldest_ms = keys::dlq_parts(k).map(|(_, _, id)| uuidv7_ms(&id));
+            }
+            sample_n += 1;
+            sample_bytes += (k.len() + v.len()) as u64;
+            true
+        })?;
+        visits += sample_n as usize;
+        // A deleted queue's dead letters are not in the live queue's counter:
+        // never fewer than the sample saw.
+        let count = count.max(sample_n);
+        let avg = (sample_bytes / sample_n.max(1)).max(1);
+        let keep_rows = if caps.max_rows > 0 {
+            caps.max_rows
+        } else {
+            u64::MAX
+        };
+        let keep_bytes = if caps.max_bytes > 0 {
+            caps.max_bytes / avg
+        } else {
+            u64::MAX
+        };
+        let over = count.saturating_sub(keep_rows.min(keep_bytes));
+        let aged = matches!((age_cut_ms, oldest_ms), (Some(cut), Some(ms)) if ms < cut);
+        let mut stopped_inside = false;
+        if over > 0 || aged {
+            let visit_room = DLQ_VISITS_PER_PASS.saturating_sub(visits).max(1);
+            let mut i = 0u64;
+            let mut seen = 0usize;
+            r.scan_raw(Keyspace::Dlq, &[], &prefix, visit_room, &mut |k, _| {
+                seen += 1;
+                let Some((_, _, id)) = keys::dlq_parts(k) else {
+                    i += 1;
+                    return true;
+                };
+                let capped = i < over;
+                let expired = age_cut_ms.is_some_and(|cut| uuidv7_ms(&id) < cut);
+                i += 1;
+                if !capped && !expired {
+                    // Oldest first: nothing after this one is due.
+                    return false;
+                }
+                if walk.recent.contains_key(&id) {
+                    // Planned already, its entry not applied yet.
+                    return true;
+                }
+                if capped {
+                    over_cap += 1;
+                } else {
+                    over_age += 1;
+                }
+                deletes.push(Effect::DlqDelete {
+                    dlq_id: id,
+                    tenant: tenant.clone(),
+                    queue: queue.clone(),
+                });
+                walk.recent.insert(id, now_us);
+                if deletes.len() >= DLQ_DELETES_PER_PASS || walk.recent.len() >= DLQ_RECENT_MAX
+                {
+                    stopped_inside = true;
+                    return false;
+                }
+                true
+            })?;
+            visits += seen;
+        }
+        if stopped_inside {
+            // More of this queue is due: the next pass starts with it.
+            from = prefix;
+            break;
+        }
+        match next_queue {
+            Some(next) => from = next,
+            None => {
+                from.clear();
+                break;
+            }
+        }
+    }
+    walk.from = from;
+    if !deletes.is_empty() {
+        out.more |= deletes.len() >= DLQ_DELETES_PER_PASS;
+        walk.unlogged.0 += over_cap;
+        walk.unlogged.1 += over_age;
+        if now_us.saturating_sub(walk.logged_at_us) >= DLQ_LOG_EVERY_US {
+            tracing::info!(
+                target: "rsm",
+                over_cap = walk.unlogged.0,
+                over_age = walk.unlogged.1,
+                max_rows = caps.max_rows,
+                max_bytes = caps.max_bytes,
+                max_age_s = caps.max_age_s,
+                "maintenance: deleting the oldest dead letters of queues past their caps \
+                 (QUEEN_DLQ_MAX_ROWS_PER_QUEUE, QUEEN_DLQ_MAX_BYTES_PER_QUEUE, QUEEN_DLQ_MAX_AGE_S)"
+            );
+            walk.unlogged = (0, 0);
+            walk.logged_at_us = now_us;
+        }
+        out.effects.extend(deletes);
+    }
+    Ok(())
+}
+
+/// The most streams state cells one maintenance pass reads for the TTL.
+const STREAMS_TTL_VISITS_PER_PASS: usize = 4096;
+/// The most streams state cells one pass deletes for the TTL.
+pub const STREAMS_TTL_DELETES_PER_PASS: usize = 1024;
+
+/// Delete the streams state cells not updated for
+/// [`Config::streams_state_ttl_s`] (off at 0): a window that never closes (a
+/// partition that stopped receiving, a query nobody runs any more) kept its
+/// state in every node's RAM for ever. Bounded: [`STREAMS_TTL_VISITS_PER_PASS`]
+/// cells read and [`STREAMS_TTL_DELETES_PER_PASS`] deleted a pass, resuming
+/// where the last pass stopped.
+fn plan_streams_state_ttl<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    cfg: &Config,
+    out: &mut Planned,
+) -> Result<()> {
+    if cfg.streams_state_ttl_s <= 0 {
+        return Ok(());
+    }
+    let cut = now_us.saturating_sub(cfg.streams_state_ttl_s.saturating_mul(1_000_000));
+    let mut guard = cfg.streams_walk.lock().unwrap_or_else(|p| p.into_inner());
+    let from = guard.take().unwrap_or_default();
+    let mut deletes: Vec<Effect> = Vec::new();
+    let mut last: Option<Vec<u8>> = None;
+    let mut seen = 0usize;
+    r.scan_raw(
+        Keyspace::StreamsState,
+        &from,
+        &[],
+        STREAMS_TTL_VISITS_PER_PASS,
+        &mut |k, v| {
+            seen += 1;
+            last = Some(k.to_vec());
+            let Ok((_, updated_at_us)) = rows::streams_state_view(v) else {
+                return true;
+            };
+            if updated_at_us >= cut {
+                return true;
+            }
+            if let Some((query_id, pid, key)) = keys::streams_state_parts(k) {
+                deletes.push(Effect::StreamsStateDelete {
+                    query_id,
+                    pid,
+                    key,
+                });
+            }
+            deletes.len() < STREAMS_TTL_DELETES_PER_PASS
+        },
+    )?;
+    // A pass that read to the end starts the next one at the first cell.
+    let ended = seen < STREAMS_TTL_VISITS_PER_PASS && deletes.len() < STREAMS_TTL_DELETES_PER_PASS;
+    *guard = if ended {
+        None
+    } else {
+        last.and_then(|k| crate::rsm::store::resume_after(&k, r.max_key_len()))
+    };
+    if !deletes.is_empty() {
+        tracing::debug!(
+            target: "rsm",
+            deleted = deletes.len(),
+            ttl_s = cfg.streams_state_ttl_s,
+            "maintenance: deleting streams state cells past QUEEN_STREAMS_STATE_TTL_S"
+        );
+        out.effects.extend(deletes);
+    }
+    Ok(())
 }
 
 /// Catalogue version 4 (traces on disk): one BOUNDED trim step when a legacy

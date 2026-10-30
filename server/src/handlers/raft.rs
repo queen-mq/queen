@@ -385,16 +385,98 @@ pub(crate) async fn dispatch_transaction(
     producer_sub: Option<String>,
     body: axum::body::Bytes,
 ) -> Response {
+    // The KV rider takes the tenant's KV write rate and quota charge, as POST
+    // /api/v1/kv does (`kv::gated`): without it a transaction was a way
+    // around both, e.g. a `once()` gate per message at thousands a second.
+    let kv_charge = match transaction_kv_ops(&body) {
+        Some(ops) if kv_ops_write(&ops) => {
+            let (rows, bytes) = super::kv::write_footprint(&ops);
+            if let Some(resp) =
+                super::kv::gated(st, tenant, crate::switches::Surface::KvWrite, rows, bytes)
+            {
+                return resp;
+            }
+            Some((rows, bytes))
+        }
+        _ => None,
+    };
     let ctx = ReqCtx::new(tenant, deadline_for(st.stmt_timeout.as_millis() as u64))
         .with_producer_sub(producer_sub);
     let req = crate::rsm::facade::TxnReq { raw: body.to_vec() };
     match st.rsm.transaction(ctx, req).await {
-        Ok(out) => json(
-            StatusCode::from_u16(out.status).unwrap_or(StatusCode::OK),
-            out.body,
-        ),
-        Err(e) => err_response(e),
+        Ok(out) => {
+            // A refused body or a rolled-back bundle wrote nothing: the
+            // charge goes back, as on the KV route.
+            if let Some((rows, bytes)) = kv_charge {
+                if out.status != 200 || txn_rolled_back(&out.body) {
+                    st.quota.refund(tenant, rows, bytes, 0);
+                }
+            }
+            json(
+                StatusCode::from_u16(out.status).unwrap_or(StatusCode::OK),
+                out.body,
+            )
+        }
+        Err(e) => {
+            // Nothing was written, unless the outcome is unknown (the KV
+            // route's rule: over-counting blocks early, under-counting late).
+            let unknown = matches!(
+                e,
+                RsmError::Timeout | RsmError::Retry { .. } | RsmError::InDoubt
+            );
+            if let (Some((rows, bytes)), false) = (kv_charge, unknown) {
+                st.quota.refund(tenant, rows, bytes, 0);
+            }
+            err_response(e)
+        }
     }
+}
+
+/// The binary transaction body's magic (`rsm::facade::real`'s
+/// `TXN_BINARY_MAGIC`): `"QTB1" | u8 flags | u32 LE len | head | groups`.
+const TXN_BINARY_MAGIC: &[u8] = b"QTB1";
+
+/// The `kv` rider of a transaction body (JSON, or the JSON head of a binary
+/// body), `None` when it has none. The body is parsed again only when its
+/// head names a `kv` key at all: a transaction of pushes pays one byte scan.
+fn transaction_kv_ops(body: &[u8]) -> Option<Vec<serde_json::Value>> {
+    let head: &[u8] = match body.strip_prefix(TXN_BINARY_MAGIC) {
+        Some(b) => {
+            let len = u32::from_le_bytes(b.get(1..5)?.try_into().ok()?) as usize;
+            b.get(5..5usize.checked_add(len)?)?
+        }
+        None => body,
+    };
+    if !head.windows(4).any(|w| w == b"\"kv\"") {
+        return None;
+    }
+    #[derive(serde::Deserialize)]
+    struct Rider {
+        #[serde(default)]
+        kv: Option<Vec<serde_json::Value>>,
+    }
+    serde_json::from_slice::<Rider>(head).ok()?.kv
+}
+
+/// Whether a KV op list writes (the KV batch route's rule: a `check` is
+/// judged by the planner like a write's `expect`, so it is charged as one).
+fn kv_ops_write(ops: &[serde_json::Value]) -> bool {
+    ops.iter().any(|o| {
+        matches!(
+            o.get("op").and_then(|v| v.as_str()),
+            Some("put" | "putIfAbsent" | "delete" | "incr" | "check")
+        )
+    })
+}
+
+/// Whether a transaction answer is a rollback verdict (`success:false`). A
+/// rollback's body is small; a committed one is not parsed past that size.
+fn txn_rolled_back(body: &str) -> bool {
+    body.len() <= 64 * 1024
+        && serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("success").and_then(|s| s.as_bool()))
+            == Some(false)
 }
 
 /// `POST /api/v1/lease/:leaseId/extend`.
@@ -1114,6 +1196,10 @@ pub(crate) fn build_raft_router(
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(64 * 1024 * 1024),
         ))
+        // Inside auth and tenancy (an unauthenticated request never takes a
+        // heavy-read slot), around every handler and the fallback: the
+        // memory guard and the heavy-read slots (`memguard.rs`).
+        .layer(axum::middleware::from_fn(memory_guard))
         // Inside tenancy: it reads the tenant the layer below resolved.
         .layer(axum::middleware::from_fn(refuse_reserved_tenant))
         .layer(axum::middleware::from_fn_with_state(
@@ -1164,6 +1250,86 @@ async fn admit_edge(req: axum::extract::Request, next: axum::middleware::Next) -
             retry_after_s: o.retry_after_s,
         }),
     }
+}
+
+/// The memory guard at the HTTP edge ([`crate::memguard`]). Over the soft
+/// level a heavy read (message pages, DLQ, traces, analytics, status,
+/// resource lists, consumer groups, `state/get`, `fetch`) answers `503
+/// memory_pressure`; over the hard level a write that grows the stored state
+/// (push, transaction, cycle, KV write, timer schedule, traces) does too, with
+/// a `Retry-After` of 1 to 5 s. Pops, acks, renewals, deletes, health,
+/// metrics, raft and auth routes are never refused: they are how memory
+/// drains.
+///
+/// Heavy reads also take one of [`crate::memguard::heavy_reads_max`] slots for
+/// as long as their handler runs, and answer `503 busy` when none frees up
+/// within [`crate::memguard::HEAVY_READ_WAIT`]: a burst of page reads cannot
+/// hold more answers in memory at once than that.
+#[cfg(feature = "server")]
+async fn memory_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    use crate::memguard::{self, RouteClass};
+    let class = memguard::classify(req.method(), req.uri().path());
+    if class == RouteClass::Free {
+        return next.run(req).await;
+    }
+    let level = memguard::level();
+    let refused = match class {
+        RouteClass::Grows => level >= memguard::LEVEL_HARD,
+        RouteClass::HeavyRead => level >= memguard::LEVEL_SOFT,
+        RouteClass::Free => false,
+    };
+    if refused {
+        memguard::note_refused_pressure();
+        return guard_refusal(
+            "memory_pressure",
+            "the broker is near its memory limit; retry after the Retry-After delay",
+        );
+    }
+    if class != RouteClass::HeavyRead {
+        return next.run(req).await;
+    }
+    let slot = tokio::time::timeout(
+        memguard::HEAVY_READ_WAIT,
+        memguard::heavy_reads().clone().acquire_owned(),
+    )
+    .await;
+    match slot {
+        Ok(Ok(permit)) => {
+            let resp = next.run(req).await;
+            drop(permit);
+            resp
+        }
+        _ => {
+            memguard::note_refused_busy();
+            guard_refusal(
+                "busy",
+                "too many large reads in progress on this node; retry after the Retry-After delay",
+            )
+        }
+    }
+}
+
+/// A memory-guard refusal: `503`, `Retry-After` of 1 to 5 s, and the usual
+/// `{"error","code"}` body.
+#[cfg(feature = "server")]
+fn guard_refusal(code: &'static str, error: &str) -> Response {
+    let mut body = String::from("{\"error\":\"");
+    crate::util::json_escape_into(&mut body, error);
+    body.push_str("\",\"code\":\"");
+    body.push_str(code);
+    body.push_str("\"}");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (
+                header::RETRY_AFTER,
+                crate::memguard::retry_after_s().to_string(),
+            ),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// No request is served as a reserved tenant ([`crate::config::is_reserved_tenant`]):

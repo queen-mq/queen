@@ -42,6 +42,9 @@ mod kafka_inproc;
 // is turned into KV calls by the node that received it. Twin of the
 // `mod locks;` in main.rs.
 mod locks;
+// The memory guard (memguard.rs): refuses heavy reads and storage-growing
+// writes near the memory limit. Twin of the `mod memguard;` in main.rs.
+mod memguard;
 mod metrics;
 mod notify;
 mod obs;

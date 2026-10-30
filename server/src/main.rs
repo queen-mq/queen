@@ -24,6 +24,10 @@ mod kafka_inproc;
 // it. Twin of the `mod locks;` in lib.rs (the twin-list rule of its header).
 #[allow(dead_code)]
 mod locks;
+// The memory guard: refuses heavy reads and storage-growing writes near the
+// memory limit. Twin of the `mod memguard;` in lib.rs.
+#[allow(dead_code)]
+mod memguard;
 #[allow(dead_code)]
 mod metrics;
 #[allow(dead_code)]
@@ -275,6 +279,10 @@ async fn run_raft(cfg: config::Config) {
     // The event-loop lag probe and the 1 Hz parked sampler: the dashboard
     // collector flushes them with everything else.
     metrics::spawn_samplers(state.metrics.clone());
+    // The memory guard: reads the memory limit and this process's anonymous
+    // memory every 250 ms; the router refuses heavy reads and
+    // storage-growing writes near the limit (memguard.rs).
+    memguard::spawn();
     // The ephemeral (RAM) queues' lease/ttl/idle backstop.
     ephemeral::spawn_backstop(state.ephemeral.clone());
     // Ephemeral partitions across the raft nodes: placement over the members'
@@ -480,15 +488,7 @@ async fn run_raft(cfg: config::Config) {
     if let Some((proxy_listener, public)) = proxy_front {
         // Two listeners, one shutdown: the hand-off runs once, then both drain.
         let shutdown = futures_util::FutureExt::shared(shutdown);
-        let broker = async {
-            if let Err(e) = axum::serve(listener, app)
-                .tcp_nodelay(true)
-                .with_graceful_shutdown(shutdown.clone())
-                .await
-            {
-                tracing::error!(target: "boot", error = %e, "serve loop ended with error");
-            }
-        };
+        let broker = serve_port(listener, app, shutdown.clone());
         // W7 on the proxy's port only: TLS, connection limits, the edge.
         let proxy = async {
             if let Err(e) = proxy_embed::serve(proxy_listener, public, shutdown.clone()).await {
@@ -501,12 +501,8 @@ async fn run_raft(cfg: config::Config) {
         if let Err(e) = proxy_embed::serve(listener, app, shutdown).await {
             obs::fatal(format!("single binary: {e}"));
         }
-    } else if let Err(e) = axum::serve(listener, app)
-        .tcp_nodelay(true)
-        .with_graceful_shutdown(shutdown)
-        .await
-    {
-        tracing::error!(target: "boot", error = %e, "serve loop ended with error");
+    } else {
+        serve_port(listener, app, shutdown).await;
     }
     // The facade goes down with the broker, and this AWAITS it (bounded by
     // QUEEN_KAFKA_SHUTDOWN_GRACE_MS): a cluster-mode facade hands its registry
@@ -540,6 +536,127 @@ async fn run_raft(cfg: config::Config) {
     // more before exiting.
     handoff_rsm.hand_off_leadership(HAND_OFF_WAIT).await;
     tracing::info!(target: "shutdown", "shutdown complete");
+}
+
+/// `QUEEN_MAX_CONNECTIONS` (default 20,000): open connections PORT serves at
+/// once; past it a new connection is closed as soon as it is accepted.
+fn port_max_connections() -> usize {
+    std::env::var("QUEEN_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(20_000)
+        .min(u32::MAX as usize)
+}
+
+/// `QUEEN_HTTP_HEADER_READ_TIMEOUT_MS` (default 120,000): how long a
+/// connection on PORT may take to send a request's head. It also closes a
+/// keep-alive connection that sends nothing for that long.
+fn port_header_read_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("QUEEN_HTTP_HEADER_READ_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(120_000),
+    )
+}
+
+/// Serve the broker router on PORT, where every in-cluster client connects.
+/// `axum::serve` gave hyper no timer, so a connection could hold its socket
+/// and task for ever without finishing a request head, and nothing capped
+/// the connections: here a header-read timeout
+/// ([`port_header_read_timeout`]) and a connection cap
+/// ([`port_max_connections`]) bound both. As before: TCP_NODELAY, HTTP/1.1
+/// with upgrades, and on `shutdown` no new connection is accepted, idle ones
+/// close, and the requests in flight finish before this returns.
+async fn serve_port(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) {
+    use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+    let max_conns = port_max_connections();
+    let header_timeout = port_header_read_timeout();
+    tracing::info!(
+        target: "boot",
+        max_connections = max_conns,
+        header_read_timeout_ms = header_timeout.as_millis() as u64,
+        "PORT serve loop"
+    );
+    let conns = std::sync::Arc::new(tokio::sync::Semaphore::new(max_conns));
+    let (shut_tx, shut_rx) = tokio::sync::watch::channel(false);
+    let mut shutdown = std::pin::pin!(shutdown);
+    // Refusals are logged at most once a second, with their count.
+    let mut refused = 0u64;
+    let mut refused_logged: Option<std::time::Instant> = None;
+    loop {
+        let accepted = tokio::select! {
+            _ = &mut shutdown => break,
+            a = listener.accept() => a,
+        };
+        let (stream, peer) = match accepted {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(target: "boot", error = %e, "accept failed");
+                // EMFILE and friends: do not spin on the listener.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let Ok(permit) = conns.clone().try_acquire_owned() else {
+            drop(stream);
+            refused += 1;
+            if refused_logged.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+                tracing::warn!(
+                    target: "boot",
+                    peer = %peer,
+                    max_connections = max_conns,
+                    refused,
+                    "PORT connection cap reached: closing new connections"
+                );
+                refused = 0;
+                refused_logged = Some(std::time::Instant::now());
+            }
+            continue;
+        };
+        let _ = stream.set_nodelay(true);
+        let app = app.clone();
+        let mut shut_rx = shut_rx.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let svc = hyper_util::service::TowerToHyperService::new(app);
+            let mut builder =
+                hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+            builder
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(header_timeout);
+            let conn = builder.serve_connection_with_upgrades(TokioIo::new(stream), svc);
+            tokio::pin!(conn);
+            let mut asked = false;
+            loop {
+                tokio::select! {
+                    res = conn.as_mut() => {
+                        if let Err(e) = res {
+                            tracing::trace!(target: "boot", peer = %peer, error = %e, "connection ended");
+                        }
+                        break;
+                    }
+                    _ = shut_rx.changed(), if !asked => {
+                        asked = true;
+                        conn.as_mut().graceful_shutdown();
+                    }
+                }
+            }
+        });
+    }
+    let _ = shut_tx.send(true);
+    drop(listener);
+    // Every live connection holds a permit: all of them back = every request
+    // in flight answered (axum::serve waited the same way, with no limit).
+    let all = u32::try_from(max_conns).unwrap_or(u32::MAX);
+    let _ = conns.acquire_many(all).await;
 }
 
 /// How long a node on its way out waits for another node to take its

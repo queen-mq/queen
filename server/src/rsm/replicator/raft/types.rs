@@ -144,6 +144,90 @@ struct AppEntryInner {
     /// reads it ([`AppEntry::wire_zstd`]); `Some(None)` when compressing it
     /// saves too little.
     wire_z: tokio::sync::OnceCell<Option<Bytes>>,
+    /// [`AppEntry::mem_bytes`], fixed at its first call: the raft cache adds
+    /// it at append and takes it away at evict, so it must not change in
+    /// between as the encoded forms appear.
+    mem: OnceLock<usize>,
+}
+
+/// What one effect holds in memory: its variable-length fields, plus a fixed
+/// 64 B for the rest. Every body counts — a KV value, a streams state, a dead
+/// letter's payload, a timer's frame, a trace's data — not only `Append`'s.
+pub(crate) fn effect_mem_bytes(eff: &crate::rsm::effect::Effect) -> usize {
+    use crate::rsm::effect::Effect;
+    64 + match eff {
+        Effect::Append { blob, hashes, .. } => blob.len() + hashes.len(),
+        Effect::KvPut {
+            tenant,
+            ns,
+            key,
+            value,
+            ..
+        } => tenant.len() + ns.len() + key.len() + value.len(),
+        Effect::KvDelete { tenant, ns, key } => tenant.len() + ns.len() + key.len(),
+        Effect::StreamsStatePut { key, value, .. } => key.len() + value.len(),
+        Effect::StreamsStateDelete { key, .. } => key.len(),
+        Effect::DlqInsert {
+            tenant,
+            queue,
+            group,
+            txn,
+            payload,
+            error,
+            ..
+        } => tenant.len() + queue.len() + group.len() + txn.len() + payload.len() + error.len(),
+        Effect::DlqDelete { tenant, queue, .. } => tenant.len() + queue.len(),
+        Effect::TimerUpsert {
+            tenant,
+            queue,
+            key,
+            row,
+        } => {
+            tenant.len()
+                + queue.len()
+                + key.len()
+                + row.frame.len()
+                + row.partition.len()
+                + row.txn.len()
+                + row.last_error.as_ref().map_or(0, |e| e.len())
+                + row.producer_sub.as_ref().map_or(0, |p| p.len())
+        }
+        Effect::TimerDelete { tenant, queue, key } => tenant.len() + queue.len() + key.len(),
+        Effect::TraceAppend { event } | Effect::TraceRecord { event } => {
+            event.tenant.len()
+                + event.txn.len()
+                + event.event_type.len()
+                + event.data.len()
+                + event.consumer_group.as_ref().map_or(0, |g| g.len())
+                + event.worker.as_ref().map_or(0, |w| w.len())
+                + event.names.iter().map(|n| n.len() + 24).sum::<usize>()
+        }
+        Effect::FlagSet { key, value } => key.len() + value.len(),
+        Effect::EphemeralConfigSet {
+            tenant,
+            queue,
+            options,
+            ..
+        } => tenant.len() + queue.len() + options.len(),
+        Effect::GarbageAdd { pids, .. } => pids.len() * 8,
+        Effect::DeleteChunk { pids, resume, .. } => pids.len() * 8 + resume.len(),
+        Effect::CursorSet { group, row, .. } => {
+            group.len()
+                + row.metadata.len()
+                + row.delivered.len() * 16
+                + row.worker.as_ref().map_or(0, |w| w.len())
+        }
+        Effect::QueueUpsert { tenant, queue, .. } | Effect::QueueDelete { tenant, queue } => {
+            tenant.len() + queue.len()
+        }
+        Effect::PartitionCreate {
+            tenant,
+            queue,
+            partition,
+            ..
+        } => tenant.len() + queue.len() + partition.len(),
+        _ => 0,
+    }
 }
 
 fn appends_of(e: &Entry) -> usize {
@@ -185,6 +269,7 @@ impl AppEntry {
             stored,
             wire: w,
             wire_z: tokio::sync::OnceCell::new(),
+            mem: OnceLock::new(),
         }))
     }
 
@@ -451,19 +536,32 @@ impl AppEntry {
         Ok(b)
     }
 
-    /// The payload bytes this entry holds in memory (a cache gauge).
+    /// The bytes this entry holds in memory: what the raft log cache counts
+    /// against its cap (`log_store.rs` `evict`), and a gauge. Every effect's
+    /// body counts ([`effect_mem_bytes`]), in each decoded form the entry
+    /// holds, and each encoded form: when only the `Append` payloads counted,
+    /// a cache of state, KV and dead-letter entries "at" its 512 MB cap held
+    /// several times that.
     pub fn mem_bytes(&self) -> usize {
-        use crate::rsm::effect::Effect;
-        let blobs = |e: &Entry| -> usize {
-            e.effects
-                .iter()
-                .map(|eff| match eff {
-                    Effect::Append { blob, hashes, .. } => blob.len() + hashes.len() + 64,
-                    _ => 64,
-                })
-                .sum()
+        *self.0.mem.get_or_init(|| self.mem_estimate())
+    }
+
+    /// [`AppEntry::mem_bytes`]'s value: every decoded and encoded form held
+    /// now, and for a proposed entry that has none of its encodings yet (the
+    /// raft cache counts it at append, before the writer and the wire make
+    /// them), one more copy of its bodies for them.
+    fn mem_estimate(&self) -> usize {
+        let blobs = |e: &Entry| -> usize { e.effects.iter().map(effect_mem_bytes).sum() };
+        let decoded = self.0.full.as_ref().map(|e| blobs(e)).unwrap_or(0)
+            + self.0.payload_free.get().map(|e| blobs(e)).unwrap_or(0);
+        let encoded = self.0.pf_bytes.get().map(|b| b.len()).unwrap_or(0)
+            + self.0.wire.get().map(|b| b.len()).unwrap_or(0);
+        let ahead = if self.0.full.is_some() && encoded == 0 {
+            decoded
+        } else {
+            0
         };
-        let full = self.0.full.as_ref().map(|e| blobs(e)).unwrap_or(0);
+        let full = decoded + ahead;
         let z: usize = self
             .0
             .z
@@ -476,11 +574,14 @@ impl AppEntry {
             .as_ref()
             .map(|s| s.iter().map(|p| p.bytes.len() + 16).sum())
             .unwrap_or(0);
-        let wire = self.0.wire.get().map(|b| b.len()).unwrap_or(0);
-        (full + z + stored).max(64) + wire
+        (full + z + stored).max(64) + encoded
     }
 
     /// The entry with its payloads, when this node proposed it.
+    ///
+    /// Kept for the entry's whole life in the cache, beside its encoded forms
+    /// (dropping it once `pf_bytes`/`wire` exist would need every reader of
+    /// this borrow audited first; [`AppEntry::mem_bytes`] counts it instead).
     pub fn full(&self) -> Option<&Arc<Entry>> {
         self.0.full.as_ref()
     }

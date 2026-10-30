@@ -414,6 +414,11 @@ pub(crate) struct Forwarder {
     /// Command bytes in flight.
     room: Arc<tokio::sync::Semaphore>,
     room_cap: u64,
+    /// The `drain` calls' own window ([`drain_inflight_bytes`]): their bytes
+    /// plus [`DRAIN_CALL_COST`] each, so a flood of long polls forwarded to
+    /// the leader is bounded too, without queueing an ack behind pushes.
+    drain_room: Arc<tokio::sync::Semaphore>,
+    drain_cap: u64,
     /// The streams to the current leader.
     link: std::sync::RwLock<Option<Arc<Link>>>,
     /// A leader that answered the route 404, and until when it is not asked
@@ -528,17 +533,45 @@ impl Pending {
     }
 }
 
+/// What a `drain` call in flight holds beyond its body (its pending entry,
+/// its answer channel, and on the leader a parked pop), charged to the drain
+/// window ([`drain_inflight_bytes`]).
+const DRAIN_CALL_COST: u64 = 1024;
+
+/// `QUEEN_RAFT_FWD_DRAIN_INFLIGHT_MB` (default 64): the window of the `drain`
+/// calls (pops and acks) a follower has in flight to the leader. They take no
+/// room in the command window (an ack queued behind megabytes of pushes held
+/// consumers ~0.55 s), and until this had no bound at all: every long poll a
+/// follower's clients opened was held open at the leader. At the default, about
+/// 65,000 small calls.
+fn drain_inflight_bytes() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_RAFT_FWD_DRAIN_INFLIGHT_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(64)
+            .saturating_mul(1024 * 1024)
+            .min(tokio::sync::Semaphore::MAX_PERMITS as u64)
+            .min(u32::MAX as u64)
+    })
+}
+
 impl Forwarder {
     pub(crate) fn new(from: u64, token: Option<Arc<str>>, cfg: FwdConfig) -> Forwarder {
         let room_cap = cfg
             .inflight_bytes
             .min(tokio::sync::Semaphore::MAX_PERMITS as u64)
             .min(u32::MAX as u64);
+        let drain_cap = drain_inflight_bytes().max(DRAIN_CALL_COST);
         Forwarder {
             from,
             token,
             room: Arc::new(tokio::sync::Semaphore::new(room_cap as usize)),
             room_cap,
+            drain_room: Arc::new(tokio::sync::Semaphore::new(drain_cap as usize)),
+            drain_cap,
             cfg,
             link: std::sync::RwLock::new(None),
             legacy: std::sync::RwLock::new(None),
@@ -568,7 +601,8 @@ impl Forwarder {
     /// `addr` and return its answer, within `ttl`. A `drain` command (it
     /// stores nothing: a pop, an ack) takes no room in the window: the window
     /// is FIFO, and an ack queued behind megabytes of pushes held a follower's
-    /// consumers ~0.55 s per ack (2026-09-30).
+    /// consumers ~0.55 s per ack (2026-09-30). It takes room in the drain
+    /// window instead ([`drain_inflight_bytes`]).
     pub(crate) async fn call(
         &self,
         addr: &Arc<str>,
@@ -577,21 +611,22 @@ impl Forwarder {
         drain: bool,
     ) -> Result<Bytes, FwdError> {
         let deadline = tokio::time::Instant::now() + ttl;
-        let charge = ((body.len() + 12) as u64).clamp(1, self.room_cap) as u32;
-        let _room = if drain {
-            None
+        let (window, cap, extra) = if drain {
+            (&self.drain_room, self.drain_cap, DRAIN_CALL_COST)
         } else {
-            match tokio::time::timeout_at(deadline, self.room.clone().acquire_many_owned(charge))
-                .await
+            (&self.room, self.room_cap, 12)
+        };
+        let charge = (body.len() as u64).saturating_add(extra).clamp(1, cap) as u32;
+        let _room =
+            match tokio::time::timeout_at(deadline, window.clone().acquire_many_owned(charge)).await
             {
-                Ok(Ok(p)) => Some(p),
+                Ok(Ok(p)) => p,
                 _ => {
                     return Err(FwdError::Transport(
                         "no room to forward within the deadline".into(),
                     ))
                 }
-            }
-        };
+            };
         let link = self.link_to(addr);
         // A stream that died between our pick and our registration is
         // replaced once; after that the caller's loop retries.
