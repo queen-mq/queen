@@ -19,9 +19,72 @@ JavaScript and Python clients use both: each keeps when every open window ends, 
 then, closes on the broker's clock, and on an older broker falls back to the old flush; `stop()`
 waits for a close in flight. In Go, JavaScript and Python a processing-time session now closes on
 its messages' `createdAt`, as in Rust, not on the process clock, so a backlog no longer splits it.
+On a cluster, a claim that reaches a follower is forwarded to the leader, where the leases live.
 Also fixed: a cycle naming a lease on a partition its group never read, or one that is gone, skipped
 the ack and committed its state and pushes with no lease; it is now refused (`bad_lease`). Why: a
 session per visit or per trace ends with silence, so closing it cannot wait for the next message.
+
+**Broker: no client request can stop the cluster.** A store key longer than LMDB accepts (511
+bytes) fails in apply on every node, and a restart replays the entry and fails again, until an
+operator skips it by hand. Several client names reached apply in longer keys than any receiver
+checked: a Streams state key over 485 bytes, an `ephemeral/configure` queue name, the consumer
+group of a seek, timers sent inside a transaction (their due index is 8 bytes longer than the key
+that was checked), quota and tenant names, and names whose `0x00` bytes are stored twice. The
+planner now measures every key each command makes apply write, derived keys and escaping included,
+and refuses a long one as `name_too_long` (4xx) before anything is written; the routes answer the
+same first. An admin command that carried one effect per row (DLQ purge, seek, group delete, a
+streams reset, a queue or tenant delete) is sent in chunks of at most 4,096 effects, and one over
+`QUEEN_RAFT_ENTRY_MAX_BYTES` is refused. Why: one request with a long key stopped every node.
+
+**Broker: one request can no longer use gigabytes of a node's memory.** A pop takes at most
+`QUEEN_POP_MAX_BATCH` (10,000) messages and stops at `QUEEN_POP_MAX_BYTES` (64 MiB, always at
+least one message); a fetch without `maxBytes` totals at most `QUEEN_FETCH_MAX_BYTES` (50 MiB); a
+push carries at most `QUEEN_PUSH_MAX_ITEMS` (10,000) messages. The message, dead-letter and trace
+pages write payloads as stored, with no JSON tree, up to `QUEEN_READ_PAGE_MAX_BYTES` (16 MiB) a
+page; a trace's data is at most `QUEEN_TRACE_MAX_BYTES` (1 MiB). A zstd payload is decompressed
+with a limit, and a binary push is admitted at its inflated size. `/depth` and
+`/consumer-groups/lagging` list at most `?limit` (1,000, up to 10,000) partitions, `/status`
+counts dead letters without reading their payloads, `/messages` refuses an `offset` past 10,000.
+Why: a read built many times its size in memory, and a few at once took a node down.
+
+**Broker: a memory guard and connection limits.** Each node reads its cgroup memory limit and its
+anonymous memory every 250 ms. Past `QUEEN_MEMGUARD_SOFT_PCT` (80 %) heavy reads answer 503
+`memory_pressure` with a `Retry-After`; past `QUEEN_MEMGUARD_HARD_PCT` (90 %) writes that grow the
+stored state do too. Acks, deletes, pops, renewals, health and Raft are never refused. At most
+`QUEEN_HEAVY_READS_MAX` (32) heavy reads run at once. The HTTP port holds at most
+`QUEEN_MAX_CONNECTIONS` (20,000) connections and closes one that sends no request headers within
+`QUEEN_HTTP_HEADER_READ_TIMEOUT_MS` (120 s); at most `QUEEN_MAX_PARKED_POPS` (50,000) long polls
+wait at once. Why: a broker that runs out of memory loses every client, so it now refuses work
+first.
+
+**Broker: state that clients grow has a bound.** Dead letters: at most
+`QUEEN_DLQ_MAX_ROWS_PER_QUEUE` (100,000) rows, `QUEEN_DLQ_MAX_BYTES_PER_QUEUE` (1 GiB) and
+`QUEEN_DLQ_MAX_AGE_S` (14 days) per queue, oldest removed first. `dedupWindowSeconds` is at most
+`QUEEN_MAX_DEDUP_WINDOW_S` (7 days). The KV expiry sweep keeps going while it has expired rows
+(it removed at most 512 a second). A Streams cycle carries at most `QUEEN_STREAMS_MAX_STATE_OPS`
+(10,000) state ops; `QUEEN_STREAMS_STATE_TTL_S` removes state rows not written for that long (off
+by default). The Raft log cache counts each entry's real size, and the retention scan finishes its
+rounds while partitions grow fast. Why: every row lives in memory on every node and is reloaded at
+start, so state that only grows ends in a node that cannot start.
+
+**Kafka facade: bounded requests.** Before a client authenticates its frames are at most 512 KiB,
+and a frame or an idle connection times out. A produce batch's record and header counts are
+checked against its bytes before they are decoded; fetches are clamped to
+`QUEEN_KAFKA_FETCH_MAX_BYTES` (50 MiB) and pass stored payloads through; a metadata answer lists at
+most `QUEEN_KAFKA_METADATA_MAX_PARTITIONS` (100,000) partitions and a request auto-creates at most
+16 topics; offset requests are checked against their limits before anything is built; a group
+holds at most `QUEEN_KAFKA_GROUP_MAX_MEMBERS` (1,000) members; token checks are cached. Why: a
+client could make the broker reserve memory from counts it declared.
+
+**Ephemeral queues, proxy and PG connectors: bounded.** An implicit inbox is removed after
+`QUEEN_EPHEMERAL_IMPLICIT_TTL_S` (600 s) idle even when it still holds messages, at most
+`QUEEN_EPHEMERAL_MAX_QUEUES` (100,000) queues exist, a pop answers at most
+`QUEEN_EPHEMERAL_POP_MAX_BYTES` (16 MiB), and messages and queues are charged their overhead.
+Long-poll wake gates are freed again when idle. The proxy reads a KV batch's names without parsing
+the whole body before authentication, and gives requests with no credential their own per-address
+limit (`QUEEN_EDGE_ANON_RPS_PER_IP`, 20 a second). A PG source snapshot reads chunks of at most
+`QUEEN_PG_SNAPSHOT_CHUNK_MAX_BYTES` (64 MiB) and at most 10,000 rows; at most `QUEEN_CONNECTORS_MAX`
+(256) connectors exist. Why: each of these grew with what clients sent.
 
 **Broker and dashboard: network, disk and Raft traffic.** System charts what each node moves per
 second: its network in and out (Linux), its disk reads and writes, and the bytes of its Raft port
