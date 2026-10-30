@@ -848,12 +848,16 @@ impl RaftFacade {
     ) -> Result<ApiOut, RsmError> {
         self.linearizable(&ctx).await?;
         let group = query_value(query, "group");
+        let limit = query_value(query, "limit")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEPTH_PARTITIONS_DEFAULT)
+            .clamp(1, DEPTH_PARTITIONS_MAX);
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
         let queue = queue.to_string();
         let now = super::wall_micros();
         let out = tokio::task::spawn_blocking(move || {
-            store.read(|r| depth_json(r, &tenant, &queue, group.as_deref(), now))
+            store.read(|r| depth_json_limited(r, &tenant, &queue, group.as_deref(), now, limit))
         })
         .await
         .map_err(|e| RsmError::Internal(format!("depth read: {e}")))?
@@ -1862,10 +1866,31 @@ pub(super) fn depth_json<R: Reads + ?Sized>(
     group: Option<&str>,
     now: i64,
 ) -> crate::rsm::store::Result<Option<Value>> {
+    depth_json_limited(r, tenant, queue, group, now, DEPTH_PARTITIONS_DEFAULT)
+}
+
+/// The per-partition rows a depth answer lists by default (`?limit=` up to
+/// [`DEPTH_PARTITIONS_MAX`]); the totals always count every partition.
+pub(super) const DEPTH_PARTITIONS_DEFAULT: usize = 1000;
+pub(super) const DEPTH_PARTITIONS_MAX: usize = 10_000;
+
+/// [`depth_json`] listing at most `limit` partitions (by name), with
+/// `partitionsTruncated` when it cut: a queue of a million partitions made a
+/// million JSON objects per call.
+pub(super) fn depth_json_limited<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    queue: &str,
+    group: Option<&str>,
+    now: i64,
+    limit: usize,
+) -> crate::rsm::store::Result<Option<Value>> {
     let Some(_) = r.queue(tenant, queue)? else {
         return Ok(None);
     };
-    let mut parts = Vec::new();
+    // (partition, pending, processing): small rows, the JSON is built only
+    // for the ones listed.
+    let mut parts: Vec<(String, i64, i64)> = Vec::new();
     let mut conflation = false;
     if let Some(g) = group {
         conflation = r
@@ -1922,24 +1947,26 @@ pub(super) fn depth_json<R: Reads + ?Sized>(
             };
             let pending = p.pending_from(committed) as i64;
             let processing = processing.min(pending);
-            parts.push(json!({"partition":p.partition,"pending":pending,"processing":processing,"ready":pending-processing}));
+            parts.push((p.partition.to_string(), pending, processing));
         }
         true
     })?;
-    parts.sort_by(|a, b| a["partition"].as_str().cmp(&b["partition"].as_str()));
-    let pending: i64 = parts.iter().filter_map(|v| v["pending"].as_i64()).sum();
-    let processing: i64 = parts.iter().filter_map(|v| v["processing"].as_i64()).sum();
+    parts.sort_by(|a, b| a.0.cmp(&b.0));
+    let pending: i64 = parts.iter().map(|p| p.1).sum();
+    let processing: i64 = parts.iter().map(|p| p.2).sum();
     let ready = pending - processing;
-    let pp = parts
+    let pp = parts.iter().filter(|p| p.1 > 0).count() as i64;
+    let pr = parts.iter().filter(|p| p.1 - p.2 > 0).count() as i64;
+    let truncated = parts.len() > limit;
+    let listed: Vec<Value> = parts
         .iter()
-        .filter(|v| v["pending"].as_i64().unwrap_or(0) > 0)
-        .count() as i64;
-    let pr = parts
-        .iter()
-        .filter(|v| v["ready"].as_i64().unwrap_or(0) > 0)
-        .count() as i64;
+        .take(limit)
+        .map(|(partition, pending, processing)| {
+            json!({"partition":partition,"pending":pending,"processing":processing,"ready":pending-processing})
+        })
+        .collect();
     Ok(Some(
-        json!({"queue":queue,"group":group,"pending":pending,"processing":processing,"ready":ready,"partitionsPending":pp,"partitionsReady":pr,"conflation":conflation,"effectivePending":if conflation{pp}else{pending},"effectiveReady":if conflation{pr}else{ready},"partitions":parts}),
+        json!({"queue":queue,"group":group,"pending":pending,"processing":processing,"ready":ready,"partitionsPending":pp,"partitionsReady":pr,"conflation":conflation,"effectivePending":if conflation{pp}else{pending},"effectiveReady":if conflation{pr}else{ready},"partitions":listed,"partitionsTruncated":truncated}),
     ))
 }
 

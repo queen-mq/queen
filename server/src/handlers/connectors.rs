@@ -380,6 +380,45 @@ pub async fn handle_connector_resync(
     resync(&st, tenant.as_str(), &name).await
 }
 
+/// `QUEEN_CONNECTORS_MAX` (default 256): connector documents the cluster may
+/// hold, every tenant together.
+fn max_connectors() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_CONNECTORS_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(256)
+    })
+}
+
+/// The connector documents stored, every tenant, counted up to `stop_at`.
+async fn count_docs(st: &AppState, stop_at: usize) -> Result<usize, Response> {
+    let mut n = 0usize;
+    let mut after: Option<String> = None;
+    loop {
+        let mut op = serde_json::json!({
+            "op": "getPrefix", "ns": KV_NAMESPACE, "prefix": DOC_PREFIX,
+            "limit": queen_pg::queen::MAX_KV_PREFIX_LIMIT,
+        });
+        if let Some(a) = &after {
+            op["after"] = Value::String(a.clone());
+        }
+        let page = kv(st, SYSTEM_TENANT, vec![op]).await?.swap_remove(0);
+        n += page["rows"].as_array().map_or(0, Vec::len);
+        if n >= stop_at {
+            return Ok(n);
+        }
+        match page["nextAfter"].as_str() {
+            Some(next) if !next.is_empty() && after.as_deref() != Some(next) => {
+                after = Some(next.to_string())
+            }
+            _ => return Ok(n),
+        }
+    }
+}
+
 pub(crate) async fn list(st: &AppState, tenant: &str) -> Response {
     if let Some(r) = reserved(tenant) {
         return r;
@@ -527,6 +566,25 @@ pub(crate) async fn put(
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    // Every node runs every connector document: their number is capped
+    // (QUEEN_CONNECTORS_MAX, 256), on create only, so an update always works.
+    if stored.is_none() {
+        let max = max_connectors();
+        match count_docs(st, max + 1).await {
+            Ok(n) if n >= max => {
+                return refuse(
+                    StatusCode::CONFLICT,
+                    "too_many_connectors",
+                    format!(
+                        "this cluster already runs {n} connectors, the ceiling is {max} \
+                         (QUEEN_CONNECTORS_MAX): delete one first"
+                    ),
+                )
+            }
+            Ok(_) => {}
+            Err(resp) => return resp,
+        }
+    }
     if let Some(old) = stored
         .as_ref()
         .and_then(|s| s.value["kind"].as_str())

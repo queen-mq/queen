@@ -724,6 +724,17 @@ impl RaftFacade {
                     }),
             });
         }
+        // The rows one call may answer, every entry together: 1,024 entries
+        // of 1,000 rows (repeats allowed) made a million rows in one answer.
+        // Past the total each entry's limit shrinks to its share; an entry
+        // pages on with its own cursor as before.
+        let asked: usize = asks.iter().map(|a| a.limit).sum();
+        if asked > CHANGED_MAX_TOTAL_ROWS {
+            let share = (CHANGED_MAX_TOTAL_ROWS / asks.len().max(1)).max(1);
+            for a in &mut asks {
+                a.limit = a.limit.min(share);
+            }
+        }
         let queues: Vec<String> = asks.iter().map(|a| a.queue.clone()).collect();
         let answer = self.changed_read(&ctx, asks).await?;
         let entries: Vec<Value> = queues
@@ -1380,17 +1391,26 @@ impl RaftFacade {
         ctx: ReqCtx,
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
-        let min = query_map(query)
+        let q = query_map(query);
+        let min = q
             .get("minLagSeconds")
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(3600);
+        // The most lagging first, at most `limit` rows (default 1,000, at
+        // most 10,000): a group stuck on a million partitions answered a
+        // million objects.
+        let limit = q
+            .get("limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1000)
+            .clamp(1, 10_000);
         let now = super::super::wall_micros();
         let store = self.store.clone();
         let qlog = self.qlog_reader.clone();
         let reader = self.reader.clone();
         let tenant = ctx.tenant.clone();
         let rows = tokio::task::spawn_blocking(move || {
-            store.read(|r| lagging_partitions(r, qlog.as_ref(), &reader, &tenant, min, now))
+            store.read(|r| lagging_partitions(r, qlog.as_ref(), &reader, &tenant, min, now, limit))
         })
         .await
         .map_err(|e| RsmError::Internal(format!("lag read: {e}")))?
@@ -2588,11 +2608,19 @@ fn lagging_partitions<R: Reads + ?Sized>(
     tenant: &str,
     min_lag_seconds: i64,
     now: i64,
+    limit: usize,
 ) -> crate::rsm::store::Result<Vec<Value>> {
-    let lagging: Vec<CursorLag> = cursor_lags(r, qlog, reader, tenant, None, now)?
+    let mut lagging: Vec<(i64, CursorLag)> = cursor_lags(r, qlog, reader, tenant, None, now)?
         .into_iter()
-        .filter(|l| l.lag_seconds(now).is_some_and(|lag| lag > min_lag_seconds))
+        .filter_map(|l| {
+            let lag = l.lag_seconds(now)?;
+            (lag > min_lag_seconds && l.oldest_unconsumed_us.is_some()).then_some((lag, l))
+        })
         .collect();
+    // Sorted and cut on the small rows, before any JSON is built.
+    lagging.sort_by(|a, b| b.0.cmp(&a.0));
+    lagging.truncate(limit);
+    let lagging: Vec<CursorLag> = lagging.into_iter().map(|(_, l)| l).collect();
     let kafka =
         kafka_groups::kafka_groups(r, tenant, lagging.iter().map(|l| l.group.as_str()), now)?;
     let mut rows: Vec<(i64, Value)> = lagging
@@ -2855,6 +2883,8 @@ fn trace_fields(e: &TraceEvent, location: Option<(String, String)>) -> Vec<(&'st
 /// cut short: a dropped entry would leave its caller waiting on a queue
 /// nobody looked at.
 const CHANGED_MAX_ENTRIES: usize = 1024;
+/// The rows all entries of one `POST /partitions/changed` may ask for.
+const CHANGED_MAX_TOTAL_ROWS: usize = 100_000;
 
 /// Partitions per discovery page: the default, and the ceiling `limit` is
 /// clamped to (never refused).

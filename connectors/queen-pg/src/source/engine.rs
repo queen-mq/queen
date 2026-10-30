@@ -79,6 +79,9 @@ pub(super) struct Engine<'a> {
     next_lag_at: Instant,
     heartbeat: Duration,
     chunk_rows: usize,
+    /// The document's chunk size, clamped to [`SNAPSHOT_CHUNK_ROWS_CEILING`]:
+    /// what `chunk_rows` may grow back to.
+    chunk_rows_max: usize,
 }
 
 /// The bundle task's answer, or pending forever when nothing is in flight.
@@ -121,7 +124,12 @@ impl<'a> Engine<'a> {
             last_idle_at: None,
             next_lag_at: now,
             heartbeat: Duration::from_secs(src.spec.heartbeat_seconds.max(1)),
-            chunk_rows: src.spec.snapshot_chunk_rows.max(1) as usize,
+            // Start small: the rows' width is unknown until a chunk is read,
+            // and a chunk is held whole (adapted per chunk in read_chunk).
+            chunk_rows: (src.spec.snapshot_chunk_rows.max(1) as usize)
+                .min(SNAPSHOT_FIRST_CHUNK_ROWS),
+            chunk_rows_max: (src.spec.snapshot_chunk_rows.max(1) as usize)
+                .min(SNAPSHOT_CHUNK_ROWS_CEILING),
         }
     }
 
@@ -409,12 +417,31 @@ impl<'a> Engine<'a> {
         let epoch = self.pipe.epoch.clone();
         slot::emit(&self.pg, &lw_sql(&epoch, n)).await?;
         let read_at = crate::status::now_us();
+        let limit = self.chunk_rows;
         let msgs = self
             .pg
-            .simple_query(&chunk_sql(&t, after.as_deref(), self.chunk_rows, &epoch, n))
+            .simple_query(&chunk_sql(&t, after.as_deref(), limit, &epoch, n))
             .await
             .map_err(|e| classify(&e))?;
+        drop(after);
         let ans = parse_chunk(&msgs, t.cols.len())?;
+        drop(msgs);
+        // A chunk is held whole as text and then as units: its rows are sized
+        // by bytes, not by count. The next chunk shrinks to fit
+        // QUEEN_PG_SNAPSHOT_CHUNK_MAX_BYTES, and grows back (doubling, up to
+        // the document's size) while chunks stay under a quarter of it.
+        let bytes: usize = ans
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.as_ref().map_or(1, |v| v.len() + 8)).sum::<usize>())
+            .sum();
+        let budget = snapshot_chunk_max_bytes();
+        if bytes > budget && !ans.rows.is_empty() {
+            let per_row = (bytes / ans.rows.len()).max(1);
+            self.chunk_rows = (budget / per_row).clamp(1, self.chunk_rows_max);
+        } else if bytes < budget / 4 && ans.rows.len() == limit {
+            self.chunk_rows = (limit.saturating_mul(2)).min(self.chunk_rows_max);
+        }
         tracing::debug!(
             target: crate::LOG_TARGET,
             connector = %self.src.ctx.name,
@@ -428,7 +455,7 @@ impl<'a> Engine<'a> {
             n,
             idx,
             &t,
-            self.chunk_rows,
+            limit,
             ans.rows,
             ans.vis,
             read_at,
@@ -543,4 +570,23 @@ impl<'a> Engine<'a> {
         self.stream.close(Duration::from_secs(2)).await;
         r.map(|()| RunEnd::Stopped)
     }
+}
+
+/// Rows of the first snapshot chunk of a table, before its width is known.
+const SNAPSHOT_FIRST_CHUNK_ROWS: usize = 256;
+/// The largest chunk a document may ask for, whatever it says (validation
+/// allows 100,000; a chunk is held whole in the broker's memory).
+const SNAPSHOT_CHUNK_ROWS_CEILING: usize = 10_000;
+
+/// `QUEEN_PG_SNAPSHOT_CHUNK_MAX_BYTES` (default 64 MiB): the text one snapshot
+/// chunk may hold before the next chunk is made smaller.
+fn snapshot_chunk_max_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_PG_SNAPSHOT_CHUNK_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(64 * 1024 * 1024)
+    })
 }
