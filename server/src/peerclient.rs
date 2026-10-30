@@ -242,7 +242,9 @@ impl PeerClient {
             .await
             .map_err(|_| "peer response body stalled".to_string())?
             .map_err(|e| {
-                if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() {
+                if e.downcast_ref::<http_body_util::LengthLimitError>()
+                    .is_some()
+                {
                     "peer response exceeds the relay cap".to_string()
                 } else {
                     e.to_string()

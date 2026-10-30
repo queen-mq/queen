@@ -124,9 +124,7 @@ pub fn promote_entry(
     own_entry(
         cursor,
         request_id,
-        vec![
-            RoleDoc::promoted(id, source, cursor.last_now_us, wall_us, cursor.position).effect(),
-        ],
+        vec![RoleDoc::promoted(id, source, cursor.last_now_us, wall_us, cursor.position).effect()],
     )
 }
 

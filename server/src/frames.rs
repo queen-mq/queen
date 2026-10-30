@@ -337,7 +337,6 @@ pub fn zstd_compress(raw: &[u8], level: i32) -> Vec<u8> {
     zstd::stream::encode_all(raw, level).unwrap_or_default()
 }
 
-
 /// Why [`zstd_decompress_bounded`] gave nothing back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZstdBound {

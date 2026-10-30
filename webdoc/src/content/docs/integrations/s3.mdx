@@ -24,6 +24,8 @@ sourceOfTruth:
   - server/src/rsm/maintenance.rs
   - proxy/src/cp.rs
   - proxy/src/s3.rs
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): rsm/maintenance.rs
+# reformatted, line wrapping only. Nothing this page states changes.
 ---
 
 The broker can copy its queues into an S3 bucket, as JSONL or Parquet files in folders that DuckDB, Spark or ClickHouse read directly. The sink runs inside the broker, on every node of a cluster, and it is exactly once: each record lands in one file, and a crash or a retried upload rewrites the same bytes under the same name instead of adding a copy.

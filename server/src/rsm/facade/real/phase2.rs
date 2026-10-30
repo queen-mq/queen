@@ -168,9 +168,7 @@ impl RaftFacade {
         });
         match self.submit(ctx, cmd).await? {
             Reply::Done { .. } => Ok(()),
-            Reply::Refused(r) if r.code == crate::rsm::link::STANDBY_CODE => {
-                Err(RsmError::Standby)
-            }
+            Reply::Refused(r) if r.code == crate::rsm::link::STANDBY_CODE => Err(RsmError::Standby),
             Reply::Refused(r) if r.retryable => Err(RsmError::Retry { leader_hint: None }),
             Reply::Refused(r) => Err(RsmError::Rejected {
                 code: r.code,
@@ -208,7 +206,8 @@ impl RaftFacade {
                 if sent > 0 {
                     ctx_n.request_id = crate::util::uuidv7_bytes();
                 }
-                self.submit_effects(&ctx_n, std::mem::take(&mut chunk)).await?;
+                self.submit_effects(&ctx_n, std::mem::take(&mut chunk))
+                    .await?;
                 sent += 1;
                 bytes = 0;
             }
@@ -1198,7 +1197,9 @@ impl RaftFacade {
         let tenant = ctx.tenant.clone();
         let rows = tokio::task::spawn_blocking(move || {
             store.read(|r| {
-                if r.streams_query(&tenant, &qid)?.is_none() { return Ok(None); }
+                if r.streams_query(&tenant, &qid)?.is_none() {
+                    return Ok(None);
+                }
                 let mut pid = match partition_id.parse::<u64>() {
                     Ok(pid) => r
                         .partition(pid)?
@@ -1207,22 +1208,34 @@ impl RaftFacade {
                     Err(_) => None,
                 };
                 if pid.is_none() {
-                    let Some(puid) = uuid_string_to_bytes(&partition_id) else { return Ok(None); };
-                    r.scan_raw(Keyspace::Partitions, &[], &[], usize::MAX, &mut |k,v| {
+                    let Some(puid) = uuid_string_to_bytes(&partition_id) else {
+                        return Ok(None);
+                    };
+                    r.scan_raw(Keyspace::Partitions, &[], &[], usize::MAX, &mut |k, v| {
                         if let Ok(p) = crate::rsm::store::rows::partition_decode(v) {
-                            if p.tenant == tenant && p.uuid == puid { pid = keys::pid_of(k); return false; }
+                            if p.tenant == tenant && p.uuid == puid {
+                                pid = keys::pid_of(k);
+                                return false;
+                            }
                         }
                         true
                     })?;
                 }
-                let Some(pid) = pid else { return Ok(None); };
+                let Some(pid) = pid else {
+                    return Ok(None);
+                };
                 let sp = keys::streams_state_prefix(&qid, pid);
                 // Each value written into the answer as it is stored
                 // (json_out): a tree of a large window took 25 times its size.
                 let mut answer = json_out::StateAnswer::new();
-                r.scan_raw(Keyspace::StreamsState, &sp, &sp, usize::MAX, &mut |k,v| {
-                    if let (Some(key), Ok((value, updated_at_us))) = (keys::streams_state_key_of(k), crate::rsm::store::rows::streams_state_view(v)) {
-                        if (keys_wanted.is_empty() || keys_wanted.contains(&key)) && key.starts_with(&prefix) {
+                r.scan_raw(Keyspace::StreamsState, &sp, &sp, usize::MAX, &mut |k, v| {
+                    if let (Some(key), Ok((value, updated_at_us))) = (
+                        keys::streams_state_key_of(k),
+                        crate::rsm::store::rows::streams_state_view(v),
+                    ) {
+                        if (keys_wanted.is_empty() || keys_wanted.contains(&key))
+                            && key.starts_with(&prefix)
+                        {
                             answer.row(&key, value, updated_at_us, ripe_at_or_before);
                         }
                     }
@@ -1230,7 +1243,10 @@ impl RaftFacade {
                 })?;
                 Ok(Some(answer.finish()))
             })
-        }).await.map_err(|e| RsmError::Internal(format!("streams state read: {e}")))?.map_err(read_error)?;
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("streams state read: {e}")))?
+        .map_err(read_error)?;
         match rows {
             Some(body) => Ok(ApiOut::json(200, body)),
             None => Ok(ApiOut::json(404, json!({"error":"not found"}).to_string())),
@@ -1714,7 +1730,9 @@ fn apply_config_options(cfg: &mut QueueConfig, o: &Map<String, Value>) -> Result
     // inside it (its partitions, its log): years of it is unbounded memory.
     // Clamped to QUEEN_MAX_DEDUP_WINDOW_S (7 days by default), not refused, so a
     // configure of another option on an older queue still goes through.
-    cfg.dedup_window_seconds = cfg.dedup_window_seconds.clamp(0, max_dedup_window_seconds());
+    cfg.dedup_window_seconds = cfg
+        .dedup_window_seconds
+        .clamp(0, max_dedup_window_seconds());
     if let Some(v) = s("retentionSinkHold") {
         cfg.retention_sink_hold = v;
     }
@@ -1836,7 +1854,12 @@ fn queue_detail<R: TypedReads + ?Sized>(
     let mut dlq_by_pid: BTreeMap<u64, i64> = BTreeMap::new();
     if max > 0 {
         // Counted from the rows' heads: no payload is copied.
-        reads::each_dlq_head(r, tenant, Some(queue), None, usize::MAX, &mut |(_, _, _, row)| {
+        reads::each_dlq_head(r, tenant, Some(queue), None, usize::MAX, &mut |(
+            _,
+            _,
+            _,
+            row,
+        )| {
             *dlq_by_pid.entry(row.pid).or_default() += 1;
         })?;
     }
@@ -1913,7 +1936,11 @@ fn queue_detail<R: TypedReads + ?Sized>(
         segments = f.segments;
         retained = r.queue_counter(tenant, queue, Counter::RetainedBytes)?;
         consumed_total = f.consumed;
-        partition_count = if f.at_us > 0 { json!(f.parts) } else { Value::Null };
+        partition_count = if f.at_us > 0 {
+            json!(f.parts)
+        } else {
+            Value::Null
+        };
         if !exact {
             stats_age = if f.at_us > 0 {
                 json!((now - f.at_us).max(0) / 1_000_000)

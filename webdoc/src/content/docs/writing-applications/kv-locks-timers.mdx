@@ -40,6 +40,9 @@ verifiedBy:
 # value's text into the answer instead of building a JSON tree; every answer is the same, byte for
 # byte; config.rs, quota.rs, switches.rs (f9c9a37f2): a transaction's KV writes spend their own
 # rate, QUEEN_KV_TXN_WRITE_RATE (10,000/s), on the same quota. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): auth.rs,
+# handlers/kv.rs, proxy routes.rs, quota.rs, rsm/facade/real/kv.rs, rsm/kv_reads.rs reformatted,
+# line wrapping only. Nothing this page states changes.
 ---
 
 The transaction above already used two of the three: `kv.put` stored the order's state, and `timer()` scheduled tomorrow's reminder, which arrives as a message.

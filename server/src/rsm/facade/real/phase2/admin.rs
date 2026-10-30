@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use super::reads::{scan_dlq_rows, walk_records};
-use super::{query_map, query_value, read_error, sizes_max, ApiOut, Effect, RaftFacade, ReqCtx, RsmError};
+use super::{
+    query_map, query_value, read_error, sizes_max, ApiOut, Effect, RaftFacade, ReqCtx, RsmError,
+};
 use crate::frames::{pack_frames, uuid_bytes_to_string, uuid_string_to_bytes, FrameIn};
 use crate::rsm::batcher::Command;
 use crate::rsm::effect::{CursorRow, SubscriptionMode};

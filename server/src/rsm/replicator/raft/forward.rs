@@ -617,16 +617,19 @@ impl Forwarder {
             (&self.room, self.room_cap, 12)
         };
         let charge = (body.len() as u64).saturating_add(extra).clamp(1, cap) as u32;
-        let _room =
-            match tokio::time::timeout_at(deadline, window.clone().acquire_many_owned(charge)).await
-            {
-                Ok(Ok(p)) => p,
-                _ => {
-                    return Err(FwdError::Transport(
-                        "no room to forward within the deadline".into(),
-                    ))
-                }
-            };
+        let _room = match tokio::time::timeout_at(
+            deadline,
+            window.clone().acquire_many_owned(charge),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            _ => {
+                return Err(FwdError::Transport(
+                    "no room to forward within the deadline".into(),
+                ))
+            }
+        };
         let link = self.link_to(addr);
         // A stream that died between our pick and our registration is
         // replaced once; after that the caller's loop retries.

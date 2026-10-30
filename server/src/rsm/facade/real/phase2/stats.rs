@@ -322,10 +322,7 @@ pub(super) fn queue_figures<R: TypedReads + ?Sized>(
         known.remember(tenant, queue, f);
         return Ok((f, true));
     }
-    Ok((
-        last.unwrap_or_else(|| estimate(r, tenant, queue)),
-        false,
-    ))
+    Ok((last.unwrap_or_else(|| estimate(r, tenant, queue)), false))
 }
 
 /// `(tenant, queue, pending, processing)`: one row of the backlog chart.

@@ -865,7 +865,10 @@ fn get_response(results: Vec<Value>) -> Response {
             crate::rsm::planner::kv::to_json_spliced(&elem),
         )
             .into_response(),
-        None => json(StatusCode::OK, crate::rsm::planner::kv::to_json_spliced(&elem)),
+        None => json(
+            StatusCode::OK,
+            crate::rsm::planner::kv::to_json_spliced(&elem),
+        ),
     }
 }
 

@@ -318,7 +318,8 @@ impl RaftFacade {
         };
         // The same (queue, partition, offset) asked twice is read once: the
         // first entry stays, with the larger of the two per-entry ceilings.
-        let mut asks: Vec<crate::rsm::facade::RecordFetch> = Vec::with_capacity(request.entries.len());
+        let mut asks: Vec<crate::rsm::facade::RecordFetch> =
+            Vec::with_capacity(request.entries.len());
         let mut seen: HashMap<(String, String, u64), usize> = HashMap::new();
         for e in request.entries {
             let ask = crate::rsm::facade::RecordFetch {
@@ -1136,7 +1137,10 @@ impl RaftFacade {
                 ),
                 (
                     "queuePath",
-                    Field::Json(json!(format!("{}/{}", c.part.row.queue, c.part.row.partition))),
+                    Field::Json(json!(format!(
+                        "{}/{}",
+                        c.part.row.queue, c.part.row.partition
+                    ))),
                 ),
                 ("namespace", Field::Json(json!(c.namespace))),
                 ("task", Field::Json(json!(c.task))),
@@ -1214,20 +1218,49 @@ impl RaftFacade {
             ("transactionId", Field::Json(json!(rec.txn))),
             ("data", Field::Payload(&rec.payload)),
             ("payload", Field::Payload(&rec.payload)),
-            ("traceId", Field::Json(json!(rec.trace_id.map(|x| uuid_bytes_to_string(&x))))),
+            (
+                "traceId",
+                Field::Json(json!(rec.trace_id.map(|x| uuid_bytes_to_string(&x)))),
+            ),
             ("producerSub", Field::Json(json!(rec.producer_sub))),
-            ("createdAt", Field::Json(json!(crate::rsm::planner::timers::iso_us(rec.created_at_us)))),
-            ("partitionId", Field::Json(json!(uuid_bytes_to_string(&part.row.uuid)))),
+            (
+                "createdAt",
+                Field::Json(json!(crate::rsm::planner::timers::iso_us(
+                    rec.created_at_us
+                ))),
+            ),
+            (
+                "partitionId",
+                Field::Json(json!(uuid_bytes_to_string(&part.row.uuid))),
+            ),
             ("partition", Field::Json(json!(part.row.partition))),
             ("queue", Field::Json(json!(part.row.queue))),
-            ("queuePath", Field::Json(json!(format!("{}/{}", part.row.queue, part.row.partition)))),
-            ("namespace", Field::Json(json!(cfg.as_ref().and_then(|x| x.namespace.clone())))),
-            ("task", Field::Json(json!(cfg.as_ref().and_then(|x| x.task.clone())))),
+            (
+                "queuePath",
+                Field::Json(json!(format!("{}/{}", part.row.queue, part.row.partition))),
+            ),
+            (
+                "namespace",
+                Field::Json(json!(cfg.as_ref().and_then(|x| x.namespace.clone()))),
+            ),
+            (
+                "task",
+                Field::Json(json!(cfg.as_ref().and_then(|x| x.task.clone()))),
+            ),
             ("status", Field::Json(json!(status))),
-            ("errorMessage", Field::Json(json!(dlq.as_ref().map(|x| x.error.clone())))),
-            ("retryCount", Field::Json(json!(dlq.as_ref().map(|x| x.retry_count).unwrap_or(0)))),
+            (
+                "errorMessage",
+                Field::Json(json!(dlq.as_ref().map(|x| x.error.clone()))),
+            ),
+            (
+                "retryCount",
+                Field::Json(json!(dlq.as_ref().map(|x| x.retry_count).unwrap_or(0))),
+            ),
             ("isEncrypted", Field::Json(json!(rec.encrypted))),
-            ("queueConfig", Field::Json(json!(cfg.as_ref().map(super::config_options)))),
+            (
+                "queueConfig",
+                Field::Json(json!(cfg.as_ref().map(super::config_options))),
+            ),
         ];
         let ty = match (has_queue_mode, bus_groups > 0) {
             (false, false) => "none",
@@ -1237,7 +1270,9 @@ impl RaftFacade {
         };
         fields.push((
             "mode",
-            Field::Json(json!({"hasQueueMode":has_queue_mode,"busGroupsCount":bus_groups,"type":ty})),
+            Field::Json(
+                json!({"hasQueueMode":has_queue_mode,"busGroupsCount":bus_groups,"type":ty}),
+            ),
         ));
         fields.push(("consumerGroups", Field::Json(Value::Array(groups))));
         let mut out = String::with_capacity(2 * rec.payload.len() + 1024);
@@ -1510,7 +1545,11 @@ impl RaftFacade {
                 .map(str::to_string),
             event_type: s(&v.event_type, &v.type_).unwrap_or_else(|| "event".to_string()),
             data: data.as_bytes().to_vec(),
-            worker: v.worker.as_ref().and_then(Value::as_str).map(str::to_string),
+            worker: v
+                .worker
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(str::to_string),
             names,
             created_at_us: super::super::wall_micros(),
         };
@@ -1714,7 +1753,9 @@ impl RaftFacade {
         .map_err(|e| RsmError::Internal(format!("traces: {e}")))?
         .map_err(read_error)?;
         let pagination = match cut {
-            Some(n) => json!({"limit":limit,"offset":offset,"nextOffset":offset + n,"hasMore":true}),
+            Some(n) => {
+                json!({"limit":limit,"offset":offset,"nextOffset":offset + n,"hasMore":true})
+            }
             None => json!({"limit":limit,"offset":offset}),
         };
         let mut out = String::with_capacity(2 * events.len() + 128);
@@ -1768,7 +1809,8 @@ impl RaftFacade {
                     &[],
                     UUID_SCAN_MAX_ROWS,
                     &mut |k, v| {
-                        if let (Some(pid), Ok(p)) = (keys::pid_of(k), rows::partition_ref_decode(v)) {
+                        if let (Some(pid), Ok(p)) = (keys::pid_of(k), rows::partition_ref_decode(v))
+                        {
                             if p.head.uuid == uuid && p.tenant == tenant {
                                 found = Some(pid);
                                 return false;
@@ -2299,35 +2341,29 @@ pub(super) fn each_dlq_head<R: Reads + ?Sized>(
     let mut err = None;
     let mut seen = 0usize;
     let mut capped = false;
-    r.scan_raw(
-        Keyspace::Dlq,
-        &prefix,
-        &prefix,
-        usize::MAX,
-        &mut |k, v| {
-            if seen >= max_rows {
-                capped = true;
-                return false;
+    r.scan_raw(Keyspace::Dlq, &prefix, &prefix, usize::MAX, &mut |k, v| {
+        if seen >= max_rows {
+            capped = true;
+            return false;
+        }
+        seen += 1;
+        match (keys::dlq_parts(k), dlq_head_decode(v)) {
+            (Some((t, q, id)), Some(row))
+                if queue.is_none_or(|x| x == q) && group.is_none_or(|x| x == row.group) =>
+            {
+                each((t, q, id, row));
+                true
             }
-            seen += 1;
-            match (keys::dlq_parts(k), dlq_head_decode(v)) {
-                (Some((t, q, id)), Some(row))
-                    if queue.is_none_or(|x| x == q) && group.is_none_or(|x| x == row.group) =>
-                {
-                    each((t, q, id, row));
-                    true
-                }
-                (Some(_), Some(_)) => true,
-                _ => {
-                    err = Some(crate::rsm::store::StoreError::corrupt(
-                        Keyspace::Dlq,
-                        "dlq row",
-                    ));
-                    false
-                }
+            (Some(_), Some(_)) => true,
+            _ => {
+                err = Some(crate::rsm::store::StoreError::corrupt(
+                    Keyspace::Dlq,
+                    "dlq row",
+                ));
+                false
             }
-        },
-    )?;
+        }
+    })?;
     match err {
         Some(e) => Err(e),
         None => Ok(capped),
@@ -2367,7 +2403,10 @@ fn dlq_fields<'a>(
     vec![
         ("id", Field::Json(json!(uuid_bytes_to_string(id)))),
         ("queue", Field::Json(json!(q))),
-        ("partition", Field::Json(json!(partition.map(|p| p.0.clone())))),
+        (
+            "partition",
+            Field::Json(json!(partition.map(|p| p.0.clone()))),
+        ),
         ("partitionId", Field::Json(json!(r.pid.to_string()))),
         (
             "createdAt",
@@ -2845,7 +2884,10 @@ fn legacy_traces<R: Reads + ?Sized>(
 
 /// One trace event's fields, its `data` copied in as stored
 /// (`trace_json` before 2.6.1 parsed it into a tree).
-fn trace_fields(e: &TraceEvent, location: Option<(String, String)>) -> Vec<(&'static str, Field<'_>)> {
+fn trace_fields(
+    e: &TraceEvent,
+    location: Option<(String, String)>,
+) -> Vec<(&'static str, Field<'_>)> {
     let trace_id = json!(uuid_bytes_to_string(&e.trace_id));
     let partition_id = json!(e.pid.map(|p| p.to_string()));
     let message_id = json!(e.message_id.map(|x| uuid_bytes_to_string(&x)));

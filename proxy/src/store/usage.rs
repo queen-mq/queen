@@ -67,7 +67,13 @@ pub fn node_label(raw: &str) -> String {
     let s: String = raw
         .trim()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(64)
         .collect();
     if s.is_empty() {
@@ -96,7 +102,10 @@ pub fn keep_days_from_env() -> u64 {
 }
 
 pub fn now_us() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
 }
 
 /// Days since 1970-01-01 of a proleptic-Gregorian date (H. Hinnant's
@@ -157,7 +166,11 @@ pub fn parse_day(s: &str) -> Option<i64> {
 pub fn month_of(day: i64) -> (i64, i64, String) {
     let (y, m, _) = civil_from_days(day);
     let start = days_from_civil(y, m, 1);
-    let next = if m == 12 { days_from_civil(y + 1, 1, 1) } else { days_from_civil(y, m + 1, 1) };
+    let next = if m == 12 {
+        days_from_civil(y + 1, 1, 1)
+    } else {
+        days_from_civil(y, m + 1, 1)
+    };
     (start, next, format!("{y:04}-{m:02}"))
 }
 
@@ -185,7 +198,11 @@ pub fn minute_ttl_secs(minute_us: i64, keep_days: u64, now_us: i64) -> Option<u6
 
 /// `#<cluster>/<minute_us 20 digits>/<op_class>/<node>` (ns::USAGE_MIN).
 pub fn minute_key(cluster: Uuid, minute_us: i64, op_class: &str, node: &str) -> String {
-    format!("{}{cluster}/{}/{op_class}/{node}", schema::K, schema::ordered(minute_us))
+    format!(
+        "{}{cluster}/{}/{op_class}/{node}",
+        schema::K,
+        schema::ordered(minute_us)
+    )
 }
 
 /// `#<cluster>/<YYYY-MM-DD>/<op_class>` (ns::USAGE_DAY).
@@ -241,7 +258,12 @@ fn clamp(v: u64) -> i64 {
 
 /// A spool/flush row's figures as a document.
 pub fn row_doc(r: &UsageRow) -> UsageDoc {
-    UsageDoc { msgs: clamp(r.msgs), reqs: clamp(r.reqs), bytes_in: clamp(r.bytes_in), bytes_out: clamp(r.bytes_out) }
+    UsageDoc {
+        msgs: clamp(r.msgs),
+        reqs: clamp(r.reqs),
+        bytes_in: clamp(r.bytes_in),
+        bytes_out: clamp(r.bytes_out),
+    }
 }
 
 fn doc_of(v: &Value) -> Option<UsageDoc> {
@@ -318,10 +340,17 @@ pub async fn kv_read_own(
 ) -> Result<Vec<UsageDoc>, String> {
     let mut out = Vec::with_capacity(keys.len());
     for chunk in keys.chunks(KV_BATCH) {
-        let ks: Vec<String> =
-            chunk.iter().map(|(c, m, op)| minute_key(*c, (*m as i64) * MINUTE_US, op, node)).collect();
-        let got = kv::get_many::<UsageDoc>(kv, ns::USAGE_MIN, &ks).await.map_err(kv_err)?;
-        out.extend(got.into_iter().map(|d| d.map(|d| d.value).unwrap_or_default()));
+        let ks: Vec<String> = chunk
+            .iter()
+            .map(|(c, m, op)| minute_key(*c, (*m as i64) * MINUTE_US, op, node))
+            .collect();
+        let got = kv::get_many::<UsageDoc>(kv, ns::USAGE_MIN, &ks)
+            .await
+            .map_err(kv_err)?;
+        out.extend(
+            got.into_iter()
+                .map(|d| d.map(|d| d.value).unwrap_or_default()),
+        );
     }
     Ok(out)
 }
@@ -339,7 +368,9 @@ pub async fn kv_write_totals(
     let mut ops = Vec::with_capacity(rows.len());
     for r in rows {
         let minute_us = (r.minute as i64) * MINUTE_US;
-        let Some(ttl) = minute_ttl_secs(minute_us, keep_days, now_us) else { continue };
+        let Some(ttl) = minute_ttl_secs(minute_us, keep_days, now_us) else {
+            continue;
+        };
         ops.push(kv::put_op(
             ns::USAGE_MIN,
             &minute_key(r.cluster_id, minute_us, &r.op, node),
@@ -375,7 +406,12 @@ pub async fn kv_add_minutes(
     // key: the broker takes one write per key per call.
     let mut merged: BTreeMap<(Uuid, u64, String), UsageDoc> = BTreeMap::new();
     for r in rows {
-        add_doc(merged.entry((r.cluster_id, r.minute, r.op.clone())).or_default(), &row_doc(r));
+        add_doc(
+            merged
+                .entry((r.cluster_id, r.minute, r.op.clone()))
+                .or_default(),
+            &row_doc(r),
+        );
     }
     let merged: Vec<((Uuid, u64, String), UsageDoc)> = merged.into_iter().collect();
     let mut touched: Vec<(Uuid, i64)> = Vec::new();
@@ -431,19 +467,34 @@ async fn scan_range(
             op["after"] = Value::String(a.clone());
         }
         let res = kv.kv(vec![op]).await.map_err(kv_err)?;
-        let Some(r) = res.into_iter().next() else { break };
-        let rows = r.get("rows").and_then(Value::as_array).cloned().unwrap_or_default();
+        let Some(r) = res.into_iter().next() else {
+            break;
+        };
+        let rows = r
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let mut last = None;
         for row in &rows {
-            let Some(k) = row.get("key").and_then(Value::as_str) else { continue };
+            let Some(k) = row.get("key").and_then(Value::as_str) else {
+                continue;
+            };
             if until.is_some_and(|u| k >= u) {
                 return Ok(out);
             }
             last = Some(k.to_string());
-            out.push((k.to_string(), row.get("value").cloned().unwrap_or(Value::Null)));
+            out.push((
+                k.to_string(),
+                row.get("value").cloned().unwrap_or(Value::Null),
+            ));
         }
         let truncated = r.get("truncated").and_then(Value::as_bool).unwrap_or(false);
-        let next = r.get("nextAfter").and_then(Value::as_str).map(str::to_string).or(last);
+        let next = r
+            .get("nextAfter")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or(last);
         if !truncated || rows.is_empty() || next.is_none() {
             break;
         }
@@ -490,11 +541,18 @@ async fn kv_days(
         return Ok(out);
     }
     let until = bound(cluster, &day_str(to + 1));
-    let rows =
-        scan_range(kv, ns::USAGE_DAY, &schema::prefix(cluster), Some(bound(cluster, &day_str(from))), Some(&until))
-            .await?;
+    let rows = scan_range(
+        kv,
+        ns::USAGE_DAY,
+        &schema::prefix(cluster),
+        Some(bound(cluster, &day_str(from))),
+        Some(&until),
+    )
+    .await?;
     for (k, v) in rows {
-        let (Some((day, op)), Some(doc)) = (parse_day_key(&k), doc_of(&v)) else { continue };
+        let (Some((day, op)), Some(doc)) = (parse_day_key(&k), doc_of(&v)) else {
+            continue;
+        };
         out.insert((day, op.to_string()), doc);
     }
     Ok(out)
@@ -528,12 +586,20 @@ pub async fn kv_usage_by_minute(
     for (minute, op, doc) in kv_minutes(kv, cluster, from_us, to_us).await? {
         add_doc(agg.entry((minute, op)).or_default(), &doc);
     }
-    Ok(agg.into_iter().map(|((m, op), d)| minute_out(m, op, &d)).collect())
+    Ok(agg
+        .into_iter()
+        .map(|((m, op), d)| minute_out(m, op, &d))
+        .collect())
 }
 
 /// A cluster's days `from..=to`: rolled, or live for the days from the one
 /// before the last rolled day onward, the larger per field.
-pub async fn kv_usage_by_day(kv: &dyn KvBackend, cluster: Uuid, from: i64, to: i64) -> Result<Vec<UsageDay>, String> {
+pub async fn kv_usage_by_day(
+    kv: &dyn KvBackend,
+    cluster: Uuid,
+    from: i64,
+    to: i64,
+) -> Result<Vec<UsageDay>, String> {
     let rolled = kv_days(kv, cluster, from, to).await?;
     let last = rolled.keys().map(|(d, _)| *d).max();
     let live_from = last.map_or(from, |d| (d - 1).max(from));
@@ -562,7 +628,11 @@ pub async fn kv_usage_by_day(kv: &dyn KvBackend, cluster: Uuid, from: i64, to: i
 
 /// `cluster_month_msgs` over the KV, for the month containing `now_us`: per
 /// day, the larger of the rolled figure and the live minutes.
-pub async fn kv_month_msgs(kv: &dyn KvBackend, cluster: Uuid, now_us: i64) -> Result<MonthMsgs, String> {
+pub async fn kv_month_msgs(
+    kv: &dyn KvBackend,
+    cluster: Uuid,
+    now_us: i64,
+) -> Result<MonthMsgs, String> {
     let (start, next, month) = month_of(day_of(now_us));
     let mut per_day: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
     for ((day, _op), d) in kv_days(kv, cluster, start, next - 1).await? {
@@ -571,11 +641,14 @@ pub async fn kv_month_msgs(kv: &dyn KvBackend, cluster: Uuid, now_us: i64) -> Re
     }
     let last = per_day.keys().max().copied();
     let live_from = last.map_or(start, |d| (d - 1).max(start));
-    for (minute, _op, d) in kv_minutes(kv, cluster, live_from * DAY_US, Some(next * DAY_US)).await? {
+    for (minute, _op, d) in kv_minutes(kv, cluster, live_from * DAY_US, Some(next * DAY_US)).await?
+    {
         let e = per_day.entry(day_of(minute)).or_default();
         e.1 = e.1.saturating_add(d.msgs);
     }
-    let msgs = per_day.values().fold(0i64, |acc, (rolled, live)| acc.saturating_add((*rolled).max(*live)));
+    let msgs = per_day.values().fold(0i64, |acc, (rolled, live)| {
+        acc.saturating_add((*rolled).max(*live))
+    });
     Ok(MonthMsgs { month, msgs })
 }
 
@@ -718,7 +791,12 @@ async fn newest_traffic_minute(
 /// spool replay wrote to, are recomputed from the minutes (all nodes) and
 /// written where they differ. Days whose minutes are within a day of their
 /// TTL are never recomputed. Returns the rows written.
-pub async fn kv_rollup(kv: &dyn KvBackend, keep_days: u64, extra: &[(Uuid, i64)], now_us: i64) -> Result<u64, String> {
+pub async fn kv_rollup(
+    kv: &dyn KvBackend,
+    keep_days: u64,
+    extra: &[(Uuid, i64)],
+    now_us: i64,
+) -> Result<u64, String> {
     let today = day_of(now_us);
     let yesterday = today - 1;
     let floor = today - keep_days.max(1) as i64;
@@ -733,12 +811,21 @@ pub async fn kv_rollup(kv: &dyn KvBackend, keep_days: u64, extra: &[(Uuid, i64)]
         .await
         .map_err(kv_err)?
         .iter()
-        .filter_map(|k| k.strip_prefix(schema::K).and_then(|s| Uuid::parse_str(s).ok()))
+        .filter_map(|k| {
+            k.strip_prefix(schema::K)
+                .and_then(|s| Uuid::parse_str(s).ok())
+        })
         .collect();
     let mut written = 0u64;
     for c in clusters {
-        written +=
-            kv_rollup_cluster(kv, c, floor, yesterday, extra_by.get(&c).map(Vec::as_slice).unwrap_or(&[])).await?;
+        written += kv_rollup_cluster(
+            kv,
+            c,
+            floor,
+            yesterday,
+            extra_by.get(&c).map(Vec::as_slice).unwrap_or(&[]),
+        )
+        .await?;
     }
     Ok(written)
 }
@@ -755,7 +842,11 @@ async fn kv_rollup_cluster(
     let from = last.map_or(floor, |d| (d - 1).max(floor));
     let mut agg: BTreeMap<(i64, String), UsageDoc> = BTreeMap::new();
     fold_days(kv, cluster, from, yesterday + 1, &mut agg).await?;
-    let mut behind: Vec<i64> = extra.iter().copied().filter(|d| *d >= floor && *d < from).collect();
+    let mut behind: Vec<i64> = extra
+        .iter()
+        .copied()
+        .filter(|d| *d >= floor && *d < from)
+        .collect();
     behind.sort_unstable();
     behind.dedup();
     for d in behind {
@@ -765,7 +856,14 @@ async fn kv_rollup_cluster(
         .iter()
         .filter(|(k, doc)| rolled.get(k) != Some(doc))
         .map(|((day, op), doc)| {
-            kv::put_op(ns::USAGE_DAY, &day_key(cluster, &day_str(*day), op), doc, Expect::Any, Ttl::Forever, false)
+            kv::put_op(
+                ns::USAGE_DAY,
+                &day_key(cluster, &day_str(*day), op),
+                doc,
+                Expect::Any,
+                Ttl::Forever,
+                false,
+            )
         })
         .collect();
     for chunk in ops.chunks(KV_BATCH) {
@@ -787,14 +885,18 @@ pub async fn kv_quota_rows(kv: &dyn KvBackend, now_us: i64) -> Result<Vec<QuotaR
         .into_iter()
         .map(|(_, d)| (d.value.id, d.value))
         .collect();
-    let clusters = kv::scan::<ClusterDoc>(kv, ns::CLUSTERS, schema::K).await.map_err(kv_err)?;
+    let clusters = kv::scan::<ClusterDoc>(kv, ns::CLUSTERS, schema::K)
+        .await
+        .map_err(kv_err)?;
     let mut out = Vec::new();
     for (_, doc) in clusters {
         let c = doc.value;
         if c.status == "deleting" {
             continue;
         }
-        let Some(plan) = plans.get(&c.plan_id) else { continue };
+        let Some(plan) = plans.get(&c.plan_id) else {
+            continue;
+        };
         let overridden = c.limit_overrides.get("monthly_msgs_quota").is_some();
         if plan.monthly_msgs_quota.is_none() && !overridden {
             continue;
@@ -816,11 +918,19 @@ pub async fn kv_quota_rows(kv: &dyn KvBackend, now_us: i64) -> Result<Vec<QuotaR
 /// Is there an outbox event of `kind` for (`cluster_id`, `month`)? Events for
 /// a month are written during it or after, so the scan starts at its first
 /// instant (outbox keys sort by creation time).
-pub async fn kv_outbox_seen(kv: &dyn KvBackend, kind: &str, cluster_id: &str, month: &str) -> Result<bool, String> {
-    let start_day = parse_day(&format!("{month}-01")).ok_or_else(|| format!("bad month {month:?}"))?;
+pub async fn kv_outbox_seen(
+    kv: &dyn KvBackend,
+    kind: &str,
+    cluster_id: &str,
+    month: &str,
+) -> Result<bool, String> {
+    let start_day =
+        parse_day(&format!("{month}-01")).ok_or_else(|| format!("bad month {month:?}"))?;
     let after = format!("{}{}", schema::K, schema::ordered(start_day * DAY_US));
     for (_, v) in scan_range(kv, ns::OUTBOX, schema::K, Some(after), None).await? {
-        let Ok(doc) = serde_json::from_value::<OutboxDoc>(v) else { continue };
+        let Ok(doc) = serde_json::from_value::<OutboxDoc>(v) else {
+            continue;
+        };
         if doc.kind == kind
             && doc.payload.get("cluster_id").and_then(Value::as_str) == Some(cluster_id)
             && doc.payload.get("month").and_then(Value::as_str) == Some(month)
@@ -834,7 +944,12 @@ pub async fn kv_outbox_seen(kv: &dyn KvBackend, kind: &str, cluster_id: &str, mo
 /// `emit_outbox(kind, payload)` over the KV: one [`OutboxDoc`] at
 /// `#<created_us>/<id>` (schema.rs; the same doc the web plane's outbox
 /// writer produces).
-pub async fn kv_emit_outbox(kv: &dyn KvBackend, kind: &str, payload: &Value, now_us: i64) -> Result<Uuid, String> {
+pub async fn kv_emit_outbox(
+    kv: &dyn KvBackend,
+    kind: &str,
+    payload: &Value,
+    now_us: i64,
+) -> Result<Uuid, String> {
     let kind = kind.trim();
     if kind.is_empty() {
         return Err("emit_outbox: kind must not be empty".to_string());
@@ -843,12 +958,22 @@ pub async fn kv_emit_outbox(kv: &dyn KvBackend, kind: &str, payload: &Value, now
     let doc = OutboxDoc {
         id,
         kind: kind.to_string(),
-        payload: if payload.is_null() { json!({}) } else { payload.clone() },
+        payload: if payload.is_null() {
+            json!({})
+        } else {
+            payload.clone()
+        },
         created_at_us: now_us,
         consumed_at_us: None,
     };
-    let op =
-        kv::put_op(ns::OUTBOX, &schema::key2(schema::ordered(now_us), id), &doc, Expect::Absent, Ttl::Forever, true);
+    let op = kv::put_op(
+        ns::OUTBOX,
+        &schema::key2(schema::ordered(now_us), id),
+        &doc,
+        Expect::Absent,
+        Ttl::Forever,
+        true,
+    );
     kv::write(kv, vec![op]).await.map_err(kv_err)?;
     Ok(id)
 }
@@ -874,7 +999,11 @@ pub struct QuotaRow {
 
 /// Fold every closed day into usage_days ([`kv_rollup`], with `extra` days
 /// to recompute). Returns the rows written.
-pub async fn rollup_days(store: &Store, keep_days: u64, extra: &[(Uuid, i64)]) -> Result<u64, String> {
+pub async fn rollup_days(
+    store: &Store,
+    keep_days: u64,
+    extra: &[(Uuid, i64)],
+) -> Result<u64, String> {
     match store {
         Store::Kv(kv) => kv_rollup(kv.as_ref(), keep_days, extra, now_us()).await,
         Store::None => Ok(0),
@@ -892,7 +1021,12 @@ pub async fn quota_rows(store: &Store) -> Result<Vec<QuotaRow>, String> {
 
 /// Has this exact (kind, cluster, month) event already been written? Covers a
 /// restart mid-month (and, in the single binary, a second node).
-pub async fn quota_event_seen(store: &Store, kind: &str, cluster_id: &str, month: &str) -> Result<bool, String> {
+pub async fn quota_event_seen(
+    store: &Store,
+    kind: &str,
+    cluster_id: &str,
+    month: &str,
+) -> Result<bool, String> {
     match store {
         Store::Kv(kv) => kv_outbox_seen(kv.as_ref(), kind, cluster_id, month).await,
         Store::None => Ok(false),
@@ -902,14 +1036,20 @@ pub async fn quota_event_seen(store: &Store, kind: &str, cluster_id: &str, month
 /// `emit_outbox(kind, payload)`: a control-plane-bound event.
 pub async fn emit_outbox(store: &Store, kind: &str, payload: &Value) -> Result<(), String> {
     match store {
-        Store::Kv(kv) => kv_emit_outbox(kv.as_ref(), kind, payload, now_us()).await.map(|_| ()),
+        Store::Kv(kv) => kv_emit_outbox(kv.as_ref(), kind, payload, now_us())
+            .await
+            .map(|_| ()),
         Store::None => Ok(()),
     }
 }
 
 /// The console's `/usage?hours=N`: a cluster's minutes from `now - hours`
 /// onward, per (minute, op_class) ascending, summed over nodes.
-pub async fn cluster_usage_recent(store: &Store, cluster: Uuid, hours: i64) -> Result<Vec<UsageMinute>, String> {
+pub async fn cluster_usage_recent(
+    store: &Store,
+    cluster: Uuid,
+    hours: i64,
+) -> Result<Vec<UsageMinute>, String> {
     match store {
         Store::Kv(kv) => {
             let from = now_us().saturating_sub(hours.saturating_mul(3_600_000_000));
@@ -964,7 +1104,10 @@ pub async fn cluster_activity(store: &Store, cluster: Uuid) -> Result<Activity, 
 pub async fn cluster_month_msgs(store: &Store, cluster: Uuid) -> Result<MonthMsgs, String> {
     match store {
         Store::Kv(kv) => kv_month_msgs(kv.as_ref(), cluster, now_us()).await,
-        Store::None => Ok(MonthMsgs { month: month_of(day_of(now_us())).2, msgs: 0 }),
+        Store::None => Ok(MonthMsgs {
+            month: month_of(day_of(now_us())).2,
+            msgs: 0,
+        }),
     }
 }
 
@@ -974,9 +1117,14 @@ pub async fn delete_cluster_usage(store: &Store, cluster: Uuid) -> Result<u64, S
     let Some(kv) = store.kv() else { return Ok(0) };
     let mut n = 0u64;
     for space in [ns::USAGE_MIN, ns::USAGE_DAY] {
-        let keys = kv::scan_keys(kv.as_ref(), space, &schema::prefix(cluster)).await.map_err(kv_err)?;
+        let keys = kv::scan_keys(kv.as_ref(), space, &schema::prefix(cluster))
+            .await
+            .map_err(kv_err)?;
         for chunk in keys.chunks(KV_BATCH) {
-            let ops = chunk.iter().map(|k| kv::delete_op(space, k, Expect::Any, false)).collect();
+            let ops = chunk
+                .iter()
+                .map(|k| kv::delete_op(space, k, Expect::Any, false))
+                .collect();
             kv::write(kv.as_ref(), ops).await.map_err(kv_err)?;
             n += chunk.len() as u64;
         }
@@ -1013,7 +1161,12 @@ mod tests {
     }
 
     async fn put_min(kv: &MemKv, cluster: Uuid, minute_us: i64, op: &str, node: &str, msgs: i64) {
-        let doc = UsageDoc { msgs, reqs: 1, bytes_in: msgs * 10, bytes_out: 0 };
+        let doc = UsageDoc {
+            msgs,
+            reqs: 1,
+            bytes_in: msgs * 10,
+            bytes_out: 0,
+        };
         kv::write(
             kv,
             vec![kv::put_op(
@@ -1030,7 +1183,12 @@ mod tests {
     }
 
     async fn put_day(kv: &MemKv, cluster: Uuid, day: i64, op: &str, msgs: i64) {
-        let doc = UsageDoc { msgs, reqs: 1, bytes_in: msgs * 10, bytes_out: 0 };
+        let doc = UsageDoc {
+            msgs,
+            reqs: 1,
+            bytes_in: msgs * 10,
+            bytes_out: 0,
+        };
         kv::write(
             kv,
             vec![kv::put_op(
@@ -1047,7 +1205,10 @@ mod tests {
     }
 
     async fn day_doc(kv: &MemKv, cluster: Uuid, day: i64, op: &str) -> Option<UsageDoc> {
-        kv::get::<UsageDoc>(kv, ns::USAGE_DAY, &day_key(cluster, &day_str(day), op)).await.unwrap().map(|d| d.value)
+        kv::get::<UsageDoc>(kv, ns::USAGE_DAY, &day_key(cluster, &day_str(day), op))
+            .await
+            .unwrap()
+            .map(|d| d.value)
     }
 
     async fn put_cluster(kv: &MemKv, id: Uuid, plan: Uuid, status: &str, overrides: Value) {
@@ -1062,9 +1223,19 @@ mod tests {
             limit_overrides: overrides,
             created_at_us: 0,
         };
-        kv::write(kv, vec![kv::put_op(ns::CLUSTERS, &schema::key(id), &doc, Expect::Any, Ttl::Forever, false)])
-            .await
-            .unwrap();
+        kv::write(
+            kv,
+            vec![kv::put_op(
+                ns::CLUSTERS,
+                &schema::key(id),
+                &doc,
+                Expect::Any,
+                Ttl::Forever,
+                false,
+            )],
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -1084,8 +1255,14 @@ mod tests {
         assert_eq!(parse_day("2026-02-30"), None, "not a date");
         assert_eq!(parse_day("2026-9-24"), None);
         let (s, n, label) = month_of(days_from_civil(2026, 12, 31));
-        assert_eq!((day_str(s), day_str(n), label.as_str()), ("2026-12-01".into(), "2027-01-01".into(), "2026-12"));
-        assert_eq!(iso_minute(noon_0924() + 31 * MINUTE_US), "2026-09-24T12:31:00Z");
+        assert_eq!(
+            (day_str(s), day_str(n), label.as_str()),
+            ("2026-12-01".into(), "2027-01-01".into(), "2026-12")
+        );
+        assert_eq!(
+            iso_minute(noon_0924() + 31 * MINUTE_US),
+            "2026-09-24T12:31:00Z"
+        );
         assert_eq!(iso_minute(0), "1970-01-01T00:00:00Z");
     }
 
@@ -1094,9 +1271,15 @@ mod tests {
         let a = minute_key(c1(), 9 * MINUTE_US, "push", "n1");
         let b = minute_key(c1(), 10 * MINUTE_US, "delivery", "n0");
         assert!(a < b, "zero-padded minutes sort chronologically");
-        assert_eq!(parse_minute_key(&b), Some((10 * MINUTE_US, "delivery", "n0")));
+        assert_eq!(
+            parse_minute_key(&b),
+            Some((10 * MINUTE_US, "delivery", "n0"))
+        );
         let d = day_key(c1(), "2026-09-24", "push");
-        assert_eq!(parse_day_key(&d), Some((days_from_civil(2026, 9, 24), "push")));
+        assert_eq!(
+            parse_day_key(&d),
+            Some((days_from_civil(2026, 9, 24), "push"))
+        );
         assert_eq!(node_label(" node/1 ä "), "node_1__");
         assert_eq!(node_label(""), "node");
     }
@@ -1122,18 +1305,32 @@ mod tests {
         let now = noon_0924();
         let m = now - 5 * MINUTE_US;
         let m = m - m.rem_euclid(MINUTE_US);
-        kv_write_totals(&kv, "n1", 90, &[row(c1(), m, "push", 3)], now).await.unwrap();
-        kv_write_totals(&kv, "n2", 90, &[row(c1(), m, "push", 4)], now).await.unwrap();
+        kv_write_totals(&kv, "n1", 90, &[row(c1(), m, "push", 3)], now)
+            .await
+            .unwrap();
+        kv_write_totals(&kv, "n2", 90, &[row(c1(), m, "push", 4)], now)
+            .await
+            .unwrap();
         // n1's cumulative value grows: overwritten, not added.
-        kv_write_totals(&kv, "n1", 90, &[row(c1(), m, "push", 5)], now).await.unwrap();
+        kv_write_totals(&kv, "n1", 90, &[row(c1(), m, "push", 5)], now)
+            .await
+            .unwrap();
         assert_eq!(kv.keys(ns::USAGE_MIN).len(), 2, "one row per node");
-        let got = kv_usage_by_minute(&kv, c1(), m, Some(m + MINUTE_US)).await.unwrap();
+        let got = kv_usage_by_minute(&kv, c1(), m, Some(m + MINUTE_US))
+            .await
+            .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].msgs, got[0].reqs, got[0].bytes_in), (9, 2, 90));
         assert_eq!(got[0].minute, iso_minute(m));
         // The range is half-open and minute-aligned.
-        assert!(kv_usage_by_minute(&kv, c1(), m + 1, None).await.unwrap().is_empty());
-        assert!(kv_usage_by_minute(&kv, c1(), 0, Some(m)).await.unwrap().is_empty());
+        assert!(kv_usage_by_minute(&kv, c1(), m + 1, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(kv_usage_by_minute(&kv, c1(), 0, Some(m))
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1142,14 +1339,28 @@ mod tests {
         let now = noon_0924();
         let m = day_of(now) * DAY_US - 3 * DAY_US; // three days back
         put_min(&kv, c1(), m, "push", "n1", 10).await;
-        let touched =
-            kv_add_minutes(&kv, "n1", 90, &[row(c1(), m, "push", 2), row(c1(), m, "push", 3)], now).await.unwrap();
+        let touched = kv_add_minutes(
+            &kv,
+            "n1",
+            90,
+            &[row(c1(), m, "push", 2), row(c1(), m, "push", 3)],
+            now,
+        )
+        .await
+        .unwrap();
         assert_eq!(touched, vec![(c1(), day_of(m))]);
-        let got = kv_usage_by_minute(&kv, c1(), m, Some(m + MINUTE_US)).await.unwrap();
+        let got = kv_usage_by_minute(&kv, c1(), m, Some(m + MINUTE_US))
+            .await
+            .unwrap();
         assert_eq!(got[0].msgs, 15, "10 already there + 2 + 3 replayed");
         // Past retention: dropped, nothing touched.
         let old = (day_of(now) - 200) * DAY_US;
-        assert!(kv_add_minutes(&kv, "n1", 90, &[row(c1(), old, "push", 1)], now).await.unwrap().is_empty());
+        assert!(
+            kv_add_minutes(&kv, "n1", 90, &[row(c1(), old, "push", 1)], now)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1167,7 +1378,10 @@ mod tests {
         assert_eq!(kv_rollup(&kv, 90, &[], now).await.unwrap(), 2);
         assert_eq!(day_doc(&kv, c1(), y, "push").await.unwrap().msgs, 7);
         assert_eq!(day_doc(&kv, c1(), y, "read").await.unwrap().msgs, 1);
-        assert!(day_doc(&kv, c1(), today, "push").await.is_none(), "today is not closed");
+        assert!(
+            day_doc(&kv, c1(), today, "push").await.is_none(),
+            "today is not closed"
+        );
 
         // Same inputs, any node: nothing to write.
         assert_eq!(kv_rollup(&kv, 90, &[], now).await.unwrap(), 0);
@@ -1194,11 +1408,30 @@ mod tests {
 
         // A spool replay adds to day -30, which is behind the re-roll window
         // now (last rolled = yesterday): only the explicit day brings it back.
-        put_min(&kv, c1(), (today - 30) * DAY_US + MINUTE_US, "push", "n2", 5).await;
+        put_min(
+            &kv,
+            c1(),
+            (today - 30) * DAY_US + MINUTE_US,
+            "push",
+            "n2",
+            5,
+        )
+        .await;
         assert_eq!(kv_rollup(&kv, 90, &[], now).await.unwrap(), 0);
-        assert_eq!(day_doc(&kv, c1(), today - 30, "push").await.unwrap().msgs, 2);
-        assert_eq!(kv_rollup(&kv, 90, &[(c1(), today - 30)], now).await.unwrap(), 1);
-        assert_eq!(day_doc(&kv, c1(), today - 30, "push").await.unwrap().msgs, 7);
+        assert_eq!(
+            day_doc(&kv, c1(), today - 30, "push").await.unwrap().msgs,
+            2
+        );
+        assert_eq!(
+            kv_rollup(&kv, 90, &[(c1(), today - 30)], now)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            day_doc(&kv, c1(), today - 30, "push").await.unwrap().msgs,
+            7
+        );
 
         // A rolled day whose minutes are gone (expired) keeps its figure:
         // only days WITH minutes are written.
@@ -1212,7 +1445,11 @@ mod tests {
         let kv = MemKv::new();
         let now = noon_0924();
         put_min(&kv, c1(), (day_of(now) - 1) * DAY_US, "push", "n1", 1).await;
-        assert_eq!(kv_rollup(&kv, 90, &[], now).await.unwrap(), 0, "no cluster row: FK cascade semantics");
+        assert_eq!(
+            kv_rollup(&kv, 90, &[], now).await.unwrap(),
+            0,
+            "no cluster row: FK cascade semantics"
+        );
     }
 
     #[tokio::test]
@@ -1252,19 +1489,57 @@ mod tests {
     async fn quota_rows_select_like_the_sql() {
         let kv = MemKv::new();
         let now = noon_0924();
-        let quota_plan =
-            PlanDoc { id: Uuid::new_v4(), code: "q".into(), monthly_msgs_quota: Some(1000), ..Default::default() };
-        let free_plan =
-            PlanDoc { id: Uuid::new_v4(), code: "free".into(), monthly_msgs_quota: None, ..Default::default() };
+        let quota_plan = PlanDoc {
+            id: Uuid::new_v4(),
+            code: "q".into(),
+            monthly_msgs_quota: Some(1000),
+            ..Default::default()
+        };
+        let free_plan = PlanDoc {
+            id: Uuid::new_v4(),
+            code: "free".into(),
+            monthly_msgs_quota: None,
+            ..Default::default()
+        };
         for p in [&quota_plan, &free_plan] {
-            kv::write(&kv, vec![kv::put_op(ns::PLANS, &schema::key(p.id), p, Expect::Any, Ttl::Forever, false)])
-                .await
-                .unwrap();
+            kv::write(
+                &kv,
+                vec![kv::put_op(
+                    ns::PLANS,
+                    &schema::key(p.id),
+                    p,
+                    Expect::Any,
+                    Ttl::Forever,
+                    false,
+                )],
+            )
+            .await
+            .unwrap();
         }
-        let (a, b, c, d, e) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (a, b, c, d, e) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
         put_cluster(&kv, a, quota_plan.id, "active", json!({})).await; // plan quota
-        put_cluster(&kv, b, free_plan.id, "push_blocked", json!({"monthly_msgs_quota": 5})).await; // override
-        put_cluster(&kv, c, free_plan.id, "active", json!({"monthly_msgs_quota": null})).await; // key present
+        put_cluster(
+            &kv,
+            b,
+            free_plan.id,
+            "push_blocked",
+            json!({"monthly_msgs_quota": 5}),
+        )
+        .await; // override
+        put_cluster(
+            &kv,
+            c,
+            free_plan.id,
+            "active",
+            json!({"monthly_msgs_quota": null}),
+        )
+        .await; // key present
         put_cluster(&kv, d, free_plan.id, "active", json!({"max_queues": 3})).await; // no allowance
         put_cluster(&kv, e, quota_plan.id, "deleting", json!({})).await; // being deleted
         put_min(&kv, a, now - MINUTE_US, "push", "n1", 7).await;
@@ -1276,9 +1551,15 @@ mod tests {
         want.sort();
         assert_eq!(ids, want);
         let ra = rows.iter().find(|r| r.cluster_id == a).unwrap();
-        assert_eq!((ra.plan_quota, ra.msgs, ra.month.as_str()), (Some(1000), 7, "2026-09"));
+        assert_eq!(
+            (ra.plan_quota, ra.msgs, ra.month.as_str()),
+            (Some(1000), 7, "2026-09")
+        );
         let rb = rows.iter().find(|r| r.cluster_id == b).unwrap();
-        assert_eq!(crate::cache::override_or(&rb.overrides, "monthly_msgs_quota", rb.plan_quota), Some(5));
+        assert_eq!(
+            crate::cache::override_or(&rb.overrides, "monthly_msgs_quota", rb.plan_quota),
+            Some(5)
+        );
     }
 
     #[tokio::test]
@@ -1286,15 +1567,38 @@ mod tests {
         let kv = MemKv::new();
         let now = noon_0924();
         let payload = json!({"cluster_id": C1, "month": "2026-09", "msgs": 1});
-        assert!(!kv_outbox_seen(&kv, "cluster_monthly_quota_warning", C1, "2026-09").await.unwrap());
-        kv_emit_outbox(&kv, " cluster_monthly_quota_warning ", &payload, now).await.unwrap();
-        assert!(kv_outbox_seen(&kv, "cluster_monthly_quota_warning", C1, "2026-09").await.unwrap());
-        assert!(!kv_outbox_seen(&kv, "cluster_monthly_quota_blocked", C1, "2026-09").await.unwrap());
-        assert!(!kv_outbox_seen(&kv, "cluster_monthly_quota_warning", C1, "2026-10").await.unwrap());
+        assert!(
+            !kv_outbox_seen(&kv, "cluster_monthly_quota_warning", C1, "2026-09")
+                .await
+                .unwrap()
+        );
+        kv_emit_outbox(&kv, " cluster_monthly_quota_warning ", &payload, now)
+            .await
+            .unwrap();
+        assert!(
+            kv_outbox_seen(&kv, "cluster_monthly_quota_warning", C1, "2026-09")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !kv_outbox_seen(&kv, "cluster_monthly_quota_blocked", C1, "2026-09")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !kv_outbox_seen(&kv, "cluster_monthly_quota_warning", C1, "2026-10")
+                .await
+                .unwrap()
+        );
         let docs: Vec<(String, kv::Doc<OutboxDoc>)> = kv::scan(&kv, ns::OUTBOX, "#").await.unwrap();
         assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].1.value.kind, "cluster_monthly_quota_warning", "kind is trimmed like btrim");
-        assert!(docs[0].0.starts_with(&format!("#{}/", schema::ordered(now))));
+        assert_eq!(
+            docs[0].1.value.kind, "cluster_monthly_quota_warning",
+            "kind is trimmed like btrim"
+        );
+        assert!(docs[0]
+            .0
+            .starts_with(&format!("#{}/", schema::ordered(now))));
         assert!(kv_emit_outbox(&kv, "  ", &payload, now).await.is_err());
     }
 
@@ -1308,9 +1612,13 @@ mod tests {
         put_min(&kv, c1(), (today - 1) * DAY_US + MINUTE_US, "push", "n1", 6).await; // late
         put_min(&kv, c1(), today * DAY_US + MINUTE_US, "read", "n1", 2).await;
         let store = Store::Kv(std::sync::Arc::new(kv));
-        let got = cluster_usage_by_day(&store, c1(), &day_str(today - 3), &day_str(today)).await.unwrap();
-        let flat: Vec<(String, String, i64)> =
-            got.iter().map(|d| (d.day.clone(), d.op_class.clone(), d.msgs)).collect();
+        let got = cluster_usage_by_day(&store, c1(), &day_str(today - 3), &day_str(today))
+            .await
+            .unwrap();
+        let flat: Vec<(String, String, i64)> = got
+            .iter()
+            .map(|d| (d.day.clone(), d.op_class.clone(), d.msgs))
+            .collect();
         assert_eq!(
             flat,
             vec![
@@ -1319,7 +1627,11 @@ mod tests {
                 (day_str(today), "read".into(), 2),
             ]
         );
-        assert!(cluster_usage_by_day(&store, c1(), "2026-13-01", "2026-09-01").await.is_err());
+        assert!(
+            cluster_usage_by_day(&store, c1(), "2026-13-01", "2026-09-01")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1516,7 +1828,11 @@ mod tests {
         put_min(&kv, other, now, "push", "n1", 1).await;
         let store = Store::Kv(kv.clone());
         assert_eq!(delete_cluster_usage(&store, c1()).await.unwrap(), 2);
-        assert_eq!(kv.keys(ns::USAGE_MIN).len(), 1, "the other cluster keeps its row");
+        assert_eq!(
+            kv.keys(ns::USAGE_MIN).len(),
+            1,
+            "the other cluster keeps its row"
+        );
         assert!(kv.keys(ns::USAGE_DAY).is_empty());
     }
 }

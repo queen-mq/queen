@@ -238,9 +238,10 @@ pub async fn unknown_host_refusal(st: &St, headers: &HeaderMap) -> Response {
 pub async fn peek_ctx(st: &St, headers: &HeaderMap) -> Option<Arc<ClusterCtx>> {
     match resolve_route(st, headers).await.ok()? {
         Route::Fixed(ctx) => Some(ctx),
-        Route::FromCredential => {
-            resolve_from_credential(st, headers).await.ok().map(|(ctx, _)| ctx)
-        }
+        Route::FromCredential => resolve_from_credential(st, headers)
+            .await
+            .ok()
+            .map(|(ctx, _)| ctx),
         // The Host names nothing. `acting_cluster: null`, the same answer a
         // shared host gives a session that has not picked one yet.
         Route::UnknownHost => None,
@@ -278,7 +279,11 @@ pub async fn resolve_from_credential(
     match auth::read_credential(&st.cfg.cookie_name, secure, headers) {
         // Answered through the same `decide_shared` the arms below go through,
         // so the matrix its tests pin is the one that runs.
-        Credential::None => Err(shared_refusal(decide_shared(CredKind::None, act.as_deref(), None))),
+        Credential::None => Err(shared_refusal(decide_shared(
+            CredKind::None,
+            act.as_deref(),
+            None,
+        ))),
 
         Credential::ApiKey(key) => match decide_shared(CredKind::ApiKey, act.as_deref(), None) {
             SharedRoute::ByKey => {
@@ -383,7 +388,10 @@ async fn session_principal(
     // claim wins. (Session cookies are minted unscoped, so this is inert
     // today — it exists so a future scoped token cannot be retargeted.)
     if matches!(session.claims.cluster, Some(c) if c != ctx.cluster_id) {
-        return Err(errors::err_403(errors::CODE_FORBIDDEN, "token not valid for this cluster"));
+        return Err(errors::err_403(
+            errors::CODE_FORBIDDEN,
+            "token not valid for this cluster",
+        ));
     }
 
     // An operator needs no membership row, so no membership query is made for
@@ -391,7 +399,9 @@ async fn session_principal(
     let membership = if session.operator {
         None
     } else {
-        st.keys.cluster_role(&st.store, session.claims.user_id, ctx.cluster_id).await
+        st.keys
+            .cluster_role(&st.store, session.claims.user_id, ctx.cluster_id)
+            .await
     };
     // `cluster_exists` is true by construction: the caller already returned
     // this exact refusal for a reference that resolved to nothing, which is
@@ -402,7 +412,11 @@ async fn session_principal(
                 target: "auth", user = %session.claims.user_id, cluster = %ctx.slug,
                 role = ?role, operator = session.operator, "session acting on cluster"
             );
-            Ok(Principal::User { user_id: session.claims.user_id, role, operator: session.operator })
+            Ok(Principal::User {
+                user_id: session.claims.user_id,
+                role,
+                operator: session.operator,
+            })
         }
         ActDecision::RefuseCluster => {
             // A signature-valid session whose user row is gone (user deleted,
@@ -584,7 +598,10 @@ struct LogGate {
 
 impl LogGate {
     const fn new() -> LogGate {
-        LogGate { next: None, suppressed: 0 }
+        LogGate {
+            next: None,
+            suppressed: 0,
+        }
     }
 
     fn tick(&mut self, now: std::time::Instant, every: std::time::Duration) -> Option<u64> {
@@ -606,7 +623,9 @@ impl LogGate {
 /// Non-blocking `try_lock`, like the other sampled gates in this crate: a
 /// concurrent responder skips its line instead of waiting on the request path.
 pub fn note_operator_access(user_id: uuid::Uuid, cluster: &str, path: &str) {
-    let Ok(mut gate) = OPERATOR_LOG.try_lock() else { return };
+    let Ok(mut gate) = OPERATOR_LOG.try_lock() else {
+        return;
+    };
     let Some(suppressed) = gate.tick(std::time::Instant::now(), OPERATOR_LOG_INTERVAL) else {
         return;
     };
@@ -664,7 +683,10 @@ mod tests {
 
     fn host_hdrs(host: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert(axum::http::header::HOST, HeaderValue::from_str(host).unwrap());
+        h.insert(
+            axum::http::header::HOST,
+            HeaderValue::from_str(host).unwrap(),
+        );
         h
     }
 
@@ -743,10 +765,20 @@ mod tests {
         let mut h = host_hdrs("dev.example.test");
         h.insert(ACT_CLUSTER_HEADER, HeaderValue::from_static("other"));
 
-        let data = resolve_route(&st, &h).await.err().expect("no cluster exists here");
-        assert_eq!(data.status(), axum::http::StatusCode::FORBIDDEN, "the data plane honours it");
+        let data = resolve_route(&st, &h)
+            .await
+            .err()
+            .expect("no cluster exists here");
+        assert_eq!(
+            data.status(),
+            axum::http::StatusCode::FORBIDDEN,
+            "the data plane honours it"
+        );
 
-        let console = resolve_route_console(&st, &h).await.err().expect("no cluster exists here");
+        let console = resolve_route_console(&st, &h)
+            .await
+            .err()
+            .expect("no cluster exists here");
         assert_eq!(
             console.status(),
             axum::http::StatusCode::MISDIRECTED_REQUEST,
@@ -849,8 +881,14 @@ mod tests {
 
     #[test]
     fn no_credential_is_a_401_not_a_403() {
-        assert_eq!(decide_act(CredKind::None, false, true, Some(Role::Admin)), ActDecision::Unauthenticated);
-        assert_eq!(decide_act(CredKind::None, true, true, None), ActDecision::Unauthenticated);
+        assert_eq!(
+            decide_act(CredKind::None, false, true, Some(Role::Admin)),
+            ActDecision::Unauthenticated
+        );
+        assert_eq!(
+            decide_act(CredKind::None, true, true, None),
+            ActDecision::Unauthenticated
+        );
     }
 
     // ---- the shared-host routing matrix (decision z) -----------------------
@@ -865,7 +903,10 @@ mod tests {
     fn an_api_key_names_its_own_cluster_on_a_shared_host() {
         // The whole feature: no Host label, no header, just the key — and the
         // key's own row is what resolves the cluster.
-        assert_eq!(decide_shared(CredKind::ApiKey, None, None), SharedRoute::ByKey);
+        assert_eq!(
+            decide_shared(CredKind::ApiKey, None, None),
+            SharedRoute::ByKey
+        );
     }
 
     #[test]
@@ -873,8 +914,14 @@ mod tests {
         // Decision z, the property SDKs depend on: 421 means "wrong host", and
         // on a shared host the host was right. Both with and without a header,
         // since a header is not a credential.
-        assert_eq!(decide_shared(CredKind::None, None, None), SharedRoute::Unauthenticated);
-        assert_eq!(decide_shared(CredKind::None, Some("acme"), None), SharedRoute::Unauthenticated);
+        assert_eq!(
+            decide_shared(CredKind::None, None, None),
+            SharedRoute::Unauthenticated
+        );
+        assert_eq!(
+            decide_shared(CredKind::None, Some("acme"), None),
+            SharedRoute::Unauthenticated
+        );
         assert_eq!(
             shared_refusal(decide_shared(CredKind::None, None, None)).status(),
             axum::http::StatusCode::UNAUTHORIZED
@@ -886,8 +933,14 @@ mod tests {
         // `ByKey` is the decision; the lookup that follows answers 401 for a
         // hash that matches no live row (resolve_from_credential). Pinned here
         // as the contract both halves must keep: 401, and never 421.
-        assert_eq!(decide_shared(CredKind::ApiKey, None, None), SharedRoute::ByKey);
-        assert_eq!(errors::err_401("unknown or revoked api key").status(), axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            decide_shared(CredKind::ApiKey, None, None),
+            SharedRoute::ByKey
+        );
+        assert_eq!(
+            errors::err_401("unknown or revoked api key").status(),
+            axum::http::StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
@@ -942,7 +995,10 @@ mod tests {
     fn a_session_that_names_no_cluster_is_403_not_401_and_not_421() {
         // The session is valid; what is missing is the choice. 401 would bounce
         // a logged-in user to the login page in a loop, and 421 would be a lie.
-        assert_eq!(decide_shared(CredKind::Session, None, None), SharedRoute::NoClusterNamed);
+        assert_eq!(
+            decide_shared(CredKind::Session, None, None),
+            SharedRoute::NoClusterNamed
+        );
         assert_eq!(
             shared_refusal(SharedRoute::NoClusterNamed).status(),
             axum::http::StatusCode::FORBIDDEN
@@ -974,9 +1030,18 @@ mod tests {
         // `decide_shared` only picks WHICH cluster; whether the caller may act
         // on it is still `decide_act`, so membership and operator rules cannot
         // drift between a shared host and a per-cluster one.
-        assert_eq!(decide_act(CredKind::Session, false, true, Some(Role::Viewer)), ActDecision::Act(Role::Viewer));
-        assert_eq!(decide_act(CredKind::Session, false, true, None), ActDecision::RefuseCluster);
-        assert_eq!(decide_act(CredKind::Session, true, true, None), ActDecision::Act(Role::Admin));
+        assert_eq!(
+            decide_act(CredKind::Session, false, true, Some(Role::Viewer)),
+            ActDecision::Act(Role::Viewer)
+        );
+        assert_eq!(
+            decide_act(CredKind::Session, false, true, None),
+            ActDecision::RefuseCluster
+        );
+        assert_eq!(
+            decide_act(CredKind::Session, true, true, None),
+            ActDecision::Act(Role::Admin)
+        );
     }
 
     // ---- sampled operator log ----------------------------------------------
@@ -990,8 +1055,14 @@ mod tests {
         assert_eq!(g.tick(t0 + std::time::Duration::from_secs(1), every), None);
         assert_eq!(g.tick(t0 + std::time::Duration::from_secs(59), every), None);
         // window elapsed: log again, reporting the two polls it stood in for
-        assert_eq!(g.tick(t0 + std::time::Duration::from_secs(60), every), Some(2));
+        assert_eq!(
+            g.tick(t0 + std::time::Duration::from_secs(60), every),
+            Some(2)
+        );
         assert_eq!(g.tick(t0 + std::time::Duration::from_secs(61), every), None);
-        assert_eq!(g.tick(t0 + std::time::Duration::from_secs(121), every), Some(1));
+        assert_eq!(
+            g.tick(t0 + std::time::Duration::from_secs(121), every),
+            Some(1)
+        );
     }
 }

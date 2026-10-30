@@ -306,7 +306,10 @@ pub const ROLE_PROMOTED: &str = "promoted";
 /// A standby's id, from a request id — the standby entry's, or one drawn for
 /// a seed: the random end of it (the start of a UUIDv7 is the time).
 pub fn link_id(request_id: &super::entry::RequestId) -> String {
-    request_id[12..].iter().map(|b| format!("{b:02x}")).collect()
+    request_id[12..]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// What a standby calls itself when it reads its source: the name it was

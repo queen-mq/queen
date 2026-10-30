@@ -691,9 +691,7 @@ fn plan_dlq_caps<R: Reads + ?Sized>(
         let prefix = keys::dlq_prefix(&tenant, &queue);
         // The next queue's rows start past this one's prefix range.
         let next_queue = crate::rsm::store::prefix_end(&prefix);
-        let count = r
-            .queue_counter(&tenant, &queue, Counter::DlqCount)?
-            .max(0) as u64;
+        let count = r.queue_counter(&tenant, &queue, Counter::DlqCount)?.max(0) as u64;
         let (mut sample_n, mut sample_bytes, mut oldest_ms) = (0u64, 0u64, None::<i64>);
         r.scan_raw(Keyspace::Dlq, &[], &prefix, DLQ_SAMPLE_ROWS, &mut |k, v| {
             if oldest_ms.is_none() {
@@ -753,8 +751,7 @@ fn plan_dlq_caps<R: Reads + ?Sized>(
                     queue: queue.clone(),
                 });
                 walk.recent.insert(id, now_us);
-                if deletes.len() >= DLQ_DELETES_PER_PASS || walk.recent.len() >= DLQ_RECENT_MAX
-                {
+                if deletes.len() >= DLQ_DELETES_PER_PASS || walk.recent.len() >= DLQ_RECENT_MAX {
                     stopped_inside = true;
                     return false;
                 }
@@ -840,11 +837,7 @@ fn plan_streams_state_ttl<R: Reads + ?Sized>(
                 return true;
             }
             if let Some((query_id, pid, key)) = keys::streams_state_parts(k) {
-                deletes.push(Effect::StreamsStateDelete {
-                    query_id,
-                    pid,
-                    key,
-                });
+                deletes.push(Effect::StreamsStateDelete { query_id, pid, key });
             }
             deletes.len() < STREAMS_TTL_DELETES_PER_PASS
         },

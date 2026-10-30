@@ -69,7 +69,9 @@ impl LogGate {
     }
 
     fn due(&self, now: Instant) -> bool {
-        let Ok(mut next) = self.0.try_lock() else { return false };
+        let Ok(mut next) = self.0.try_lock() else {
+            return false;
+        };
         match *next {
             Some(at) if now < at => false,
             _ => {
@@ -112,7 +114,12 @@ enum Fallback {
 /// The PLAN §2 degradation rule, kept free of I/O so it can be tested:
 /// fail-open for known good, fail-closed for unknowns and for anything the
 /// store positively denied.
-fn fallback(miss: Miss, stale_expires_at: Option<Instant>, now: Instant, grace: Duration) -> Fallback {
+fn fallback(
+    miss: Miss,
+    stale_expires_at: Option<Instant>,
+    now: Instant,
+    grace: Duration,
+) -> Fallback {
     if miss == Miss::NoSuchRow {
         return Fallback::FailClosed;
     }
@@ -187,7 +194,11 @@ struct FlightCleanup<T> {
 
 impl<T> Drop for FlightCleanup<T> {
     fn drop(&mut self) {
-        self.flights.map.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
+        self.flights
+            .map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.key);
         self.flight.finished.store(true, Ordering::SeqCst);
         self.flight.done.notify_waiters();
     }
@@ -195,7 +206,9 @@ impl<T> Drop for FlightCleanup<T> {
 
 impl<T: Clone + Send + 'static> Flights<T> {
     fn new() -> Arc<Self> {
-        Arc::new(Flights { map: Mutex::new(HashMap::new()) })
+        Arc::new(Flights {
+            map: Mutex::new(HashMap::new()),
+        })
     }
 
     /// The flight for `key`: the one in progress, or a new task running
@@ -215,10 +228,18 @@ impl<T: Clone + Send + 'static> Flights<T> {
             result: Mutex::new(None),
         });
         map.insert(key.to_string(), f.clone());
-        let cleanup = FlightCleanup { flights: self.clone(), key: key.to_string(), flight: f.clone() };
+        let cleanup = FlightCleanup {
+            flights: self.clone(),
+            key: key.to_string(),
+            flight: f.clone(),
+        };
         tokio::spawn(async move {
             let out = work.await;
-            *cleanup.flight.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);
+            *cleanup
+                .flight
+                .result
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(out);
             drop(cleanup); // publishes: removes the entry, wakes the waiters
         });
         f
@@ -243,7 +264,11 @@ impl<T: Clone + Send + 'static> Flights<T> {
         if !flight.finished.load(Ordering::SeqCst) {
             notified.await;
         }
-        flight.result.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        flight
+            .result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -340,7 +365,8 @@ impl ClusterCache {
     }
 
     async fn resolve_slug(&self, slug: String) -> Option<Arc<ClusterCtx>> {
-        self.resolve_keyed(slug.clone(), ClusterKey::Slug(slug)).await
+        self.resolve_keyed(slug.clone(), ClusterKey::Slug(slug))
+            .await
     }
 
     /// The shared body behind both lookups: `cache_key` names the entry,
@@ -371,10 +397,13 @@ impl ClusterCache {
         };
 
         if let Some((ctx, expires_at, refresh_after)) = &stale {
-            if fallback(Miss::NoAnswer, Some(*expires_at), now, self.stale_grace) == Fallback::ServeStale {
+            if fallback(Miss::NoAnswer, Some(*expires_at), now, self.stale_grace)
+                == Fallback::ServeStale
+            {
                 if now >= *refresh_after {
                     // Fire-and-forget: one task per key, a second start is a no-op.
-                    let work = host_lookup_work(&self.store, &self.host_cache, cache_key.clone(), key);
+                    let work =
+                        host_lookup_work(&self.store, &self.host_cache, cache_key.clone(), key);
                     self.host_flights.start(&cache_key, work);
                 }
                 return Some(ctx.clone());
@@ -383,14 +412,22 @@ impl ClusterCache {
 
         let looked = self
             .host_flights
-            .join(&cache_key, host_lookup_work(&self.store, &self.host_cache, cache_key.clone(), key))
+            .join(
+                &cache_key,
+                host_lookup_work(&self.store, &self.host_cache, cache_key.clone(), key),
+            )
             .await;
         let miss = match looked {
             Some(Lookup::Found(ctx)) => return Some(ctx),
             Some(Lookup::Absent) => Miss::NoSuchRow,
             Some(Lookup::Unavailable) | None => Miss::NoAnswer,
         };
-        match fallback(miss, stale.as_ref().map(|(_, at, _)| *at), now, self.stale_grace) {
+        match fallback(
+            miss,
+            stale.as_ref().map(|(_, at, _)| *at),
+            now,
+            self.stale_grace,
+        ) {
             // Served above in practice; kept so the decision stays the one
             // `fallback`'s tests pin.
             Fallback::ServeStale => stale.map(|(ctx, _, _)| ctx),
@@ -418,9 +455,12 @@ impl ClusterCache {
         };
 
         if let Some(e) = &stale {
-            if fallback(Miss::NoAnswer, Some(e.expires_at), now, self.stale_grace) == Fallback::ServeStale {
+            if fallback(Miss::NoAnswer, Some(e.expires_at), now, self.stale_grace)
+                == Fallback::ServeStale
+            {
                 if now >= e.refresh_after {
-                    let work = key_lookup_work(&self.store, &self.key_cache, &self.touched, hash_hex);
+                    let work =
+                        key_lookup_work(&self.store, &self.key_cache, &self.touched, hash_hex);
                     self.key_flights.start(hash_hex, work);
                 }
                 return e.value.clone();
@@ -429,14 +469,22 @@ impl ClusterCache {
 
         let looked = self
             .key_flights
-            .join(hash_hex, key_lookup_work(&self.store, &self.key_cache, &self.touched, hash_hex))
+            .join(
+                hash_hex,
+                key_lookup_work(&self.store, &self.key_cache, &self.touched, hash_hex),
+            )
             .await;
         let miss = match looked {
             Some(Lookup::Found(result)) => return Some(result),
             Some(Lookup::Absent) => Miss::NoSuchRow,
             Some(Lookup::Unavailable) | None => Miss::NoAnswer,
         };
-        match fallback(miss, stale.as_ref().map(|e| e.expires_at), now, self.stale_grace) {
+        match fallback(
+            miss,
+            stale.as_ref().map(|e| e.expires_at),
+            now,
+            self.stale_grace,
+        ) {
             Fallback::ServeStale => stale.and_then(|e| e.value),
             Fallback::FailClosed | Fallback::Deny => None,
         }
@@ -444,7 +492,12 @@ impl ClusterCache {
 
     /// Invalidate a cluster (invalidation feed or admin action).
     pub fn invalidate(&self, cluster_id: Uuid) {
-        fan_out_invalidation(&self.host_cache, &self.key_cache, &self.inval_subscribers, cluster_id);
+        fan_out_invalidation(
+            &self.host_cache,
+            &self.key_cache,
+            &self.inval_subscribers,
+            cluster_id,
+        );
     }
 
     /// Spawn the invalidation task: poll the KV invalidation feed every
@@ -555,7 +608,11 @@ fn apply_host_lookup(cache: &HostMap, key: &str, looked: &Lookup<Arc<ClusterCtx>
             let now = Instant::now();
             cache.write().unwrap().insert(
                 key.to_string(),
-                HostEntry { ctx: ctx.clone(), expires_at: now + HOST_TTL, refresh_after: now + HOST_TTL },
+                HostEntry {
+                    ctx: ctx.clone(),
+                    expires_at: now + HOST_TTL,
+                    refresh_after: now + HOST_TTL,
+                },
             );
         }
         // The store answered "no such row": forget any expired entry so a later
@@ -628,8 +685,11 @@ fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &
         Lookup::Absent => {
             let now = Instant::now();
             let mut w = cache.write().unwrap();
-            let entry =
-                KeyEntry { value: None, expires_at: now + KEY_NEGATIVE_TTL, refresh_after: now + KEY_NEGATIVE_TTL };
+            let entry = KeyEntry {
+                value: None,
+                expires_at: now + KEY_NEGATIVE_TTL,
+                refresh_after: now + KEY_NEGATIVE_TTL,
+            };
             // Replacing an entry (including an expired POSITIVE one, which is
             // the revoked-key case) never grows the map, so it is never capped.
             if w.contains_key(hash_hex) {
@@ -681,7 +741,9 @@ fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &
             // Only a positive entry is a fail-open worth reporting; a stale
             // negative just keeps denying.
             if positive && stale_log_due(now) {
-                tracing::warn!("store unreachable: serving api key from expired cache (fail-open, PLAN §2)");
+                tracing::warn!(
+                    "store unreachable: serving api key from expired cache (fail-open, PLAN §2)"
+                );
             }
         }
     }
@@ -702,7 +764,10 @@ async fn flush_touched(store: &Store, touched: &Touched) {
 }
 
 fn invalidate_caches(host_cache: &HostMap, key_cache: &KeyMap, cluster_id: Uuid) {
-    host_cache.write().unwrap().retain(|_, e| e.ctx.cluster_id != cluster_id);
+    host_cache
+        .write()
+        .unwrap()
+        .retain(|_, e| e.ctx.cluster_id != cluster_id);
     key_cache.write().unwrap().retain(|_, e| match &e.value {
         Some((ctx, _, _)) => ctx.cluster_id != cluster_id,
         // Negative entries (unknown/garbage hash) aren't tied to any real
@@ -735,8 +800,19 @@ fn fan_out_invalidation(
 
 /// Cluster ids this process currently holds anything for.
 fn cached_clusters(host_cache: &HostMap, key_cache: &KeyMap) -> HashSet<Uuid> {
-    let mut ids: HashSet<Uuid> = host_cache.read().unwrap().values().map(|e| e.ctx.cluster_id).collect();
-    ids.extend(key_cache.read().unwrap().values().filter_map(|e| e.value.as_ref().map(|(ctx, _, _)| ctx.cluster_id)));
+    let mut ids: HashSet<Uuid> = host_cache
+        .read()
+        .unwrap()
+        .values()
+        .map(|e| e.ctx.cluster_id)
+        .collect();
+    ids.extend(
+        key_cache
+            .read()
+            .unwrap()
+            .values()
+            .filter_map(|e| e.value.as_ref().map(|(ctx, _, _)| ctx.cluster_id)),
+    );
     ids
 }
 
@@ -748,7 +824,8 @@ async fn poll_forever(
     key_cache: Arc<KeyMap>,
     subscribers: Arc<RwLock<Vec<InvalHook>>>,
 ) {
-    let every = Duration::from_millis(crate::config::env_u64("QUEEN_PROXY_INVAL_POLL_MS", 1_000).max(100));
+    let every =
+        Duration::from_millis(crate::config::env_u64("QUEEN_PROXY_INVAL_POLL_MS", 1_000).max(100));
     let mut tick = tokio::time::interval(every);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut feed = data::InvalFeed::new();
@@ -758,7 +835,10 @@ async fn poll_forever(
         match feed.poll(kv.as_ref()).await {
             Ok(InvalPoll::Quiet) => {}
             Ok(InvalPoll::Baseline) => {
-                tracing::info!(poll_ms = every.as_millis() as u64, "kv invalidation feed connected");
+                tracing::info!(
+                    poll_ms = every.as_millis() as u64,
+                    "kv invalidation feed connected"
+                );
                 // Whatever was cached before the feed's first answer cannot be
                 // vouched for (empty at a clean boot).
                 for id in cached_clusters(&host_cache, &key_cache) {
@@ -829,17 +909,28 @@ pub fn merge_status(tenant_status: &str, cluster_status: &str) -> ClusterStatus 
 /// Merge a cluster's `limit_overrides` JSON onto its plan's base limits.
 /// Convention: key absent -> inherit the plan value; key present as JSON
 /// null -> force unlimited; key present as a number -> that value wins.
-pub(crate) fn merge_limits(base: EffectiveLimits, overrides: &serde_json::Value) -> EffectiveLimits {
+pub(crate) fn merge_limits(
+    base: EffectiveLimits,
+    overrides: &serde_json::Value,
+) -> EffectiveLimits {
     EffectiveLimits {
         max_req_per_sec: override_or(overrides, "max_req_per_sec", base.max_req_per_sec),
         req_burst: override_or(overrides, "req_burst", base.req_burst),
         max_bytes_per_sec: override_or(overrides, "max_bytes_per_sec", base.max_bytes_per_sec),
         bytes_burst: override_or(overrides, "bytes_burst", base.bytes_burst),
         max_queues: override_or(overrides, "max_queues", base.max_queues),
-        max_partitions_per_queue: override_or(overrides, "max_partitions_per_queue", base.max_partitions_per_queue),
+        max_partitions_per_queue: override_or(
+            overrides,
+            "max_partitions_per_queue",
+            base.max_partitions_per_queue,
+        ),
         max_parked_pops: override_or(overrides, "max_parked_pops", base.max_parked_pops),
         max_retained_bytes: override_or(overrides, "max_retained_bytes", base.max_retained_bytes),
-        max_retention_seconds: override_or(overrides, "max_retention_seconds", base.max_retention_seconds),
+        max_retention_seconds: override_or(
+            overrides,
+            "max_retention_seconds",
+            base.max_retention_seconds,
+        ),
     }
 }
 
@@ -849,7 +940,11 @@ pub(crate) fn merge_limits(base: EffectiveLimits, overrides: &serde_json::Value)
 /// the limit). `pub(crate)` so registry.rs's storage-quota reconciler can
 /// resolve a single effective limit (max_retained_bytes) without
 /// duplicating this three-way rule.
-pub(crate) fn override_or(overrides: &serde_json::Value, key: &str, base: Option<i64>) -> Option<i64> {
+pub(crate) fn override_or(
+    overrides: &serde_json::Value,
+    key: &str,
+    base: Option<i64>,
+) -> Option<i64> {
     match overrides.get(key) {
         None => base,
         Some(serde_json::Value::Null) => None,
@@ -880,7 +975,10 @@ pub(crate) fn parse_features_value(v: &serde_json::Value) -> Features {
         // EPHEMERAL_QUEUES.md §5.1: same rule again, and the reason the family
         // ships "OSS on, cloud off" without a second mechanism — the plan row
         // that does not name it is the plan that does not have it.
-        ephemeral: v.get("ephemeral").and_then(|b| b.as_bool()).unwrap_or(false),
+        ephemeral: v
+            .get("ephemeral")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
     }
 }
 
@@ -909,15 +1007,24 @@ mod tests {
 
     #[test]
     fn slug_from_host_strips_port_and_lowercases() {
-        assert_eq!(slug_from_host("Acme.eu1.queenmq.cloud:6711").as_deref(), Some("acme"));
-        assert_eq!(slug_from_host("acme.eu1.queenmq.cloud").as_deref(), Some("acme"));
+        assert_eq!(
+            slug_from_host("Acme.eu1.queenmq.cloud:6711").as_deref(),
+            Some("acme")
+        );
+        assert_eq!(
+            slug_from_host("acme.eu1.queenmq.cloud").as_deref(),
+            Some("acme")
+        );
         assert_eq!(slug_from_host("acme").as_deref(), Some("acme"));
         assert_eq!(slug_from_host(""), None);
         assert_eq!(slug_from_host(":6711"), None); // empty label once the port is stripped
-        // Fully-qualified: the same name, so the same slug. (The first label
-        // was never affected by the root dot; this pins that the shared
-        // `canonical_host` did not change it either.)
-        assert_eq!(slug_from_host("acme.eu1.queenmq.cloud.").as_deref(), Some("acme"));
+                                                   // Fully-qualified: the same name, so the same slug. (The first label
+                                                   // was never affected by the root dot; this pins that the shared
+                                                   // `canonical_host` did not change it either.)
+        assert_eq!(
+            slug_from_host("acme.eu1.queenmq.cloud.").as_deref(),
+            Some("acme")
+        );
         assert_eq!(slug_from_host("acme.:6711").as_deref(), Some("acme"));
         assert_eq!(slug_from_host("."), None);
     }
@@ -934,26 +1041,38 @@ mod tests {
         // match a real clusters.slug (its CHECK constraint forbids ':'), so
         // resolve_host just misses -> 421, exactly as it should for
         // garbage input.
-        assert_eq!(slug_from_host("weird:notaport.example.com").as_deref(), Some("weird:notaport"));
+        assert_eq!(
+            slug_from_host("weird:notaport.example.com").as_deref(),
+            Some("weird:notaport")
+        );
     }
 
     #[test]
     fn merge_limits_absent_key_inherits_plan() {
-        let base = EffectiveLimits { max_queues: Some(20), ..Default::default() };
+        let base = EffectiveLimits {
+            max_queues: Some(20),
+            ..Default::default()
+        };
         let merged = merge_limits(base, &serde_json::json!({}));
         assert_eq!(merged.max_queues, Some(20));
     }
 
     #[test]
     fn merge_limits_null_forces_unlimited() {
-        let base = EffectiveLimits { max_queues: Some(20), ..Default::default() };
+        let base = EffectiveLimits {
+            max_queues: Some(20),
+            ..Default::default()
+        };
         let merged = merge_limits(base, &serde_json::json!({ "max_queues": null }));
         assert_eq!(merged.max_queues, None);
     }
 
     #[test]
     fn merge_limits_number_overrides() {
-        let base = EffectiveLimits { max_queues: Some(20), ..Default::default() };
+        let base = EffectiveLimits {
+            max_queues: Some(20),
+            ..Default::default()
+        };
         let merged = merge_limits(base, &serde_json::json!({ "max_queues": 500 }));
         assert_eq!(merged.max_queues, Some(500));
     }
@@ -974,8 +1093,14 @@ mod tests {
     fn merge_status_worst_wins() {
         assert_eq!(merge_status("active", "active"), ClusterStatus::Active);
         assert_eq!(merge_status("grace", "active"), ClusterStatus::PushBlocked);
-        assert_eq!(merge_status("active", "push_blocked"), ClusterStatus::PushBlocked);
-        assert_eq!(merge_status("suspended", "active"), ClusterStatus::Suspended);
+        assert_eq!(
+            merge_status("active", "push_blocked"),
+            ClusterStatus::PushBlocked
+        );
+        assert_eq!(
+            merge_status("suspended", "active"),
+            ClusterStatus::Suspended
+        );
         assert_eq!(merge_status("active", "deleting"), ClusterStatus::Deleting);
         assert_eq!(merge_status("deleting", "active"), ClusterStatus::Deleting);
         assert_eq!(merge_status("grace", "suspended"), ClusterStatus::Suspended);
@@ -983,7 +1108,10 @@ mod tests {
 
     #[test]
     fn merge_status_unknown_fails_closed() {
-        assert_eq!(merge_status("something_new", "active"), ClusterStatus::Suspended);
+        assert_eq!(
+            merge_status("something_new", "active"),
+            ClusterStatus::Suspended
+        );
     }
 
     // ---- fail-open on a store outage (PLAN §2) ----
@@ -995,12 +1123,23 @@ mod tests {
         let now = Instant::now();
         // TTL blew 1s ago: the store didn't answer, entry is last known-good.
         let expired = now - Duration::from_secs(1);
-        assert_eq!(fallback(Miss::NoAnswer, Some(expired), now, GRACE), Fallback::ServeStale);
+        assert_eq!(
+            fallback(Miss::NoAnswer, Some(expired), now, GRACE),
+            Fallback::ServeStale
+        );
         // Exactly at the edge of the window still counts as good.
-        assert_eq!(fallback(Miss::NoAnswer, Some(now - GRACE), now, GRACE), Fallback::ServeStale);
+        assert_eq!(
+            fallback(Miss::NoAnswer, Some(now - GRACE), now, GRACE),
+            Fallback::ServeStale
+        );
         // One tick past it: the entry is too old to vouch for anything.
         assert_eq!(
-            fallback(Miss::NoAnswer, Some(now - GRACE - Duration::from_millis(1)), now, GRACE),
+            fallback(
+                Miss::NoAnswer,
+                Some(now - GRACE - Duration::from_millis(1)),
+                now,
+                GRACE
+            ),
             Fallback::Deny
         );
     }
@@ -1011,10 +1150,18 @@ mod tests {
         // The whole correctness of the change: a clean "no such row" fails
         // closed even with a perfectly fresh-looking cached entry behind it.
         assert_eq!(
-            fallback(Miss::NoSuchRow, Some(now + Duration::from_secs(30)), now, GRACE),
+            fallback(
+                Miss::NoSuchRow,
+                Some(now + Duration::from_secs(30)),
+                now,
+                GRACE
+            ),
             Fallback::FailClosed
         );
-        assert_eq!(fallback(Miss::NoSuchRow, None, now, GRACE), Fallback::FailClosed);
+        assert_eq!(
+            fallback(Miss::NoSuchRow, None, now, GRACE),
+            Fallback::FailClosed
+        );
     }
 
     #[test]
@@ -1031,7 +1178,12 @@ mod tests {
         // then only servable in the same instant it expired.
         let now = Instant::now();
         assert_eq!(
-            fallback(Miss::NoAnswer, Some(now - Duration::from_millis(1)), now, Duration::ZERO),
+            fallback(
+                Miss::NoAnswer,
+                Some(now - Duration::from_millis(1)),
+                now,
+                Duration::ZERO
+            ),
             Fallback::Deny
         );
     }
@@ -1041,8 +1193,14 @@ mod tests {
         let gate = LogGate::new();
         let t0 = Instant::now();
         assert!(gate.due(t0), "first line is always due");
-        assert!(!gate.due(t0), "a second stale serve in the same instant is sampled out");
-        assert!(gate.due(t0 + STALE_LOG_INTERVAL), "due again once the interval elapses");
+        assert!(
+            !gate.due(t0),
+            "a second stale serve in the same instant is sampled out"
+        );
+        assert!(
+            gate.due(t0 + STALE_LOG_INTERVAL),
+            "due again once the interval elapses"
+        );
     }
 
     #[test]
@@ -1079,7 +1237,11 @@ mod tests {
     /// tenant gets from gateway.rs is this `false` travelling downstream.
     #[test]
     fn ephemeral_defaults_off_and_is_independent() {
-        for json in ["{}", r#"{"streams":true,"traces":true,"kv":true,"timers":true}"#, "not json"] {
+        for json in [
+            "{}",
+            r#"{"streams":true,"traces":true,"kv":true,"timers":true}"#,
+            "not json",
+        ] {
             assert!(!parse_features(json).ephemeral, "features: {json}");
         }
         let f = parse_features(r#"{"ephemeral":true}"#);
@@ -1123,9 +1285,20 @@ mod tests {
         for w in waiters {
             assert_eq!(w.await, Some(7));
         }
-        assert_eq!(runs.load(Ordering::SeqCst), 1, "32 concurrent callers, one lookup");
-        assert!(flights.map.lock().unwrap().is_empty(), "released once published");
-        assert_eq!(flights.join("other", async { 9 }).await, Some(9), "keys do not share");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "32 concurrent callers, one lookup"
+        );
+        assert!(
+            flights.map.lock().unwrap().is_empty(),
+            "released once published"
+        );
+        assert_eq!(
+            flights.join("other", async { 9 }).await,
+            Some(9),
+            "keys do not share"
+        );
     }
 
     #[tokio::test]
@@ -1139,7 +1312,11 @@ mod tests {
             1
         }));
         tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(runs.load(Ordering::SeqCst), 1, "the task was spawned before the future was dropped");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the task was spawned before the future was dropped"
+        );
         assert!(flights.map.lock().unwrap().is_empty());
     }
 
@@ -1150,8 +1327,15 @@ mod tests {
         let w2 = flights.join("k", async { 1 }); // joins the doomed flight
         assert_eq!(w1.await, None);
         assert_eq!(w2.await, None);
-        assert!(flights.map.lock().unwrap().is_empty(), "a dead flight must not pin the key");
-        assert_eq!(flights.join("k", async { 2 }).await, Some(2), "the key is usable again");
+        assert!(
+            flights.map.lock().unwrap().is_empty(),
+            "a dead flight must not pin the key"
+        );
+        assert_eq!(
+            flights.join("k", async { 2 }).await,
+            Some(2),
+            "the key is usable again"
+        );
     }
 
     #[test]
@@ -1169,13 +1353,25 @@ mod tests {
             e.refresh_after = past;
         }
         apply_host_lookup(&cache, "acme", &Lookup::Unavailable);
-        assert!(cache.read().unwrap().contains_key("acme"), "kept: it is the fail-open material");
-        assert!(cache.read().unwrap()["acme"].refresh_after > Instant::now(), "no second refresh inside the backoff");
+        assert!(
+            cache.read().unwrap().contains_key("acme"),
+            "kept: it is the fail-open material"
+        );
+        assert!(
+            cache.read().unwrap()["acme"].refresh_after > Instant::now(),
+            "no second refresh inside the backoff"
+        );
 
         apply_host_lookup(&cache, "acme", &Lookup::Absent);
-        assert!(!cache.read().unwrap().contains_key("acme"), "the store said no: nothing left to resurrect");
+        assert!(
+            !cache.read().unwrap().contains_key("acme"),
+            "the store said no: nothing left to resurrect"
+        );
         apply_host_lookup(&cache, "garbage", &Lookup::Absent);
-        assert!(!cache.read().unwrap().contains_key("garbage"), "unknown hosts are never cached");
+        assert!(
+            !cache.read().unwrap().contains_key("garbage"),
+            "unknown hosts are never cached"
+        );
     }
 
     #[test]
@@ -1183,9 +1379,17 @@ mod tests {
         let cache: Arc<KeyMap> = Arc::new(RwLock::new(HashMap::new()));
         let touched: Arc<Touched> = Arc::new(Mutex::new(HashSet::new()));
         let key_id = Uuid::from_u128(7);
-        apply_key_lookup(&cache, &touched, "h1", &Lookup::Found((ctx(1), key_id, Scopes::all())));
+        apply_key_lookup(
+            &cache,
+            &touched,
+            "h1",
+            &Lookup::Found((ctx(1), key_id, Scopes::all())),
+        );
         assert!(cache.read().unwrap()["h1"].value.is_some());
-        assert!(touched.lock().unwrap().contains(&key_id), "last_used_at is written by the batch");
+        assert!(
+            touched.lock().unwrap().contains(&key_id),
+            "last_used_at is written by the batch"
+        );
 
         // Revoked since: the negative replaces the positive, so no grace
         // window can serve it again.
@@ -1216,14 +1420,22 @@ mod tests {
 
         // A live key, cached before the flood starts.
         let key_id = Uuid::from_u128(7);
-        apply_key_lookup(&cache, &touched, "live", &Lookup::Found((ctx(1), key_id, Scopes::all())));
+        apply_key_lookup(
+            &cache,
+            &touched,
+            "live",
+            &Lookup::Found((ctx(1), key_id, Scopes::all())),
+        );
 
         for i in 0..(KEY_NEGATIVE_MAX * 2) {
             apply_key_lookup(&cache, &touched, &format!("{i:064x}"), &Lookup::Absent);
         }
         let map = cache.read().unwrap();
         let negatives = map.values().filter(|e| e.value.is_none()).count();
-        assert!(negatives <= KEY_NEGATIVE_MAX, "negatives unbounded: {negatives}");
+        assert!(
+            negatives <= KEY_NEGATIVE_MAX,
+            "negatives unbounded: {negatives}"
+        );
         // The flood must not be able to evict a live key: that would turn a
         // memory problem into a fail-closed one for real traffic.
         assert!(map["live"].value.is_some(), "the flood evicted a live key");
@@ -1246,9 +1458,17 @@ mod tests {
         // And a REVOKED key still replaces its positive at the cap, or the
         // grace window would keep serving it.
         let key_id = Uuid::from_u128(9);
-        apply_key_lookup(&cache, &touched, "revoked", &Lookup::Found((ctx(2), key_id, Scopes::all())));
+        apply_key_lookup(
+            &cache,
+            &touched,
+            "revoked",
+            &Lookup::Found((ctx(2), key_id, Scopes::all())),
+        );
         apply_key_lookup(&cache, &touched, "revoked", &Lookup::Absent);
-        assert!(cache.read().unwrap()["revoked"].value.is_none(), "a revoked key must not survive");
+        assert!(
+            cache.read().unwrap()["revoked"].value.is_none(),
+            "a revoked key must not survive"
+        );
     }
 
     // ---- the single binary: the broker's KV behind the same cache ----
@@ -1291,12 +1511,25 @@ mod tests {
     async fn a_kv_store_resolves_hosts_refs_and_keys() {
         let (store, cluster, key) = kv_world().await;
         let cache = ClusterCache::new(&crate::config::test_config(&[]), store);
-        let ctx = cache.resolve_host("acme.eu1.queenmq.cloud:6711").await.expect("resolved");
+        let ctx = cache
+            .resolve_host("acme.eu1.queenmq.cloud:6711")
+            .await
+            .expect("resolved");
         assert_eq!(ctx.cluster_id, cluster);
         assert_eq!(ctx.limits.max_queues, Some(20), "the plan came along");
-        assert_eq!(cache.resolve_ref(&cluster.to_string()).await.expect("by id").slug, "acme");
+        assert_eq!(
+            cache
+                .resolve_ref(&cluster.to_string())
+                .await
+                .expect("by id")
+                .slug,
+            "acme"
+        );
         assert!(cache.resolve_host("nope.eu1").await.is_none());
-        let (kctx, _, scopes) = cache.by_key_hash(&crate::auth::key_hash_hex(&key)).await.expect("key");
+        let (kctx, _, scopes) = cache
+            .by_key_hash(&crate::auth::key_hash_hex(&key))
+            .await
+            .expect("key");
         assert_eq!((kctx.cluster_id, scopes), (cluster, Scopes::all()));
         assert!(cache.by_key_hash(&"0".repeat(64)).await.is_none());
     }
@@ -1318,12 +1551,20 @@ mod tests {
         assert!(cache.resolve_host("acme").await.is_some());
         heard.lock().unwrap().clear();
 
-        crate::store::data::revoke_api_key(&store, key_id).await.unwrap();
+        crate::store::data::revoke_api_key(&store, key_id)
+            .await
+            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while cache.by_key_hash(&hash).await.is_some() {
-            assert!(Instant::now() < deadline, "the revocation never reached the cache");
+            assert!(
+                Instant::now() < deadline,
+                "the revocation never reached the cache"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(heard.lock().unwrap().contains(&cluster), "subscribers (the registry) hear it too");
+        assert!(
+            heard.lock().unwrap().contains(&cluster),
+            "subscribers (the registry) hear it too"
+        );
     }
 }

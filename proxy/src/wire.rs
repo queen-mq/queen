@@ -159,8 +159,9 @@ fn with_groups_at_their_size(body: &[u8], mut p: usize) -> Result<u64, Unreadabl
         take(body, &mut p, 4)?; // n
         let z_len = u32le(body, &mut p)?;
         let z = take(body, &mut p, z_len)?;
-        let size = frame_content_size(z)
-            .ok_or(Unreadable("a group's zstd frame does not declare its content size"))?;
+        let size = frame_content_size(z).ok_or(Unreadable(
+            "a group's zstd frame does not declare its content size",
+        ))?;
         stored += z_len as u64;
         declared = declared
             .checked_add(size)
@@ -190,7 +191,9 @@ fn frame_content_size(z: &[u8]) -> Option<u64> {
         0 if single_segment => Some(u64::from(*z.get(p)?)),
         0 => None,
         1 => Some(u64::from(u16::from_le_bytes(z.get(p..p + 2)?.try_into().ok()?)) + 256),
-        2 => Some(u64::from(u32::from_le_bytes(z.get(p..p + 4)?.try_into().ok()?))),
+        2 => Some(u64::from(u32::from_le_bytes(
+            z.get(p..p + 4)?.try_into().ok()?,
+        ))),
         _ => Some(u64::from_le_bytes(z.get(p..p + 8)?.try_into().ok()?)),
     }
 }
@@ -279,7 +282,11 @@ pub(crate) mod fixtures {
         let bin = |fixture: &str| hex::decode(fixture).expect("fixture");
         let items = three_items();
         vec![
-            ("json push", "/api/v1/push", format!(r#"{{"items":[{items}]}}"#).into_bytes()),
+            (
+                "json push",
+                "/api/v1/push",
+                format!(r#"{{"items":[{items}]}}"#).into_bytes(),
+            ),
             ("QPB1", "/api/v1/push", bin(QPB1_PLAIN)),
             ("QPB1 zstd, counts", "/api/v1/push", bin(QPB1_ZSTD_COUNTS)),
             ("QPB1 frames", "/api/v1/push", bin(QPB1_FRAMES)),
@@ -368,8 +375,11 @@ pub(crate) mod fixtures {
             b.extend_from_slice(s.as_bytes());
         }
         let frames: Vec<u8> = (10..14).flat_map(stored_frame).collect();
-        let record =
-            if compressed { zstd_frame(&frames, Some(frames.len() as u64)) } else { frames };
+        let record = if compressed {
+            zstd_frame(&frames, Some(frames.len() as u64))
+        } else {
+            frames
+        };
         let own_keys = r#"{"frames":true}"#;
         let mut b = b"QPF1\x01".to_vec();
         b.extend_from_slice(&(own_keys.len() as u32).to_le_bytes());
@@ -433,7 +443,11 @@ mod tests {
             assert_eq!(frame_content_size(&z), Some(size), "{size}");
             let body = framed_push(FLAG_FRAMES, &[group("q", "p", 1, &z)]);
             let around = (body.len() - z.len()) as u64;
-            assert_eq!(request_bytes("/api/v1/push", &body), Ok(around + size), "{size}");
+            assert_eq!(
+                request_bytes("/api/v1/push", &body),
+                Ok(around + size),
+                "{size}"
+            );
         }
         // A dictionary id and a window descriptor sit in front of the size.
         let mut z = vec![0x28, 0xb5, 0x2f, 0xfd, 0x40 | 0x02, 0x38, 0xaa, 0xbb];
@@ -443,7 +457,10 @@ mod tests {
 
     #[test]
     fn two_groups_and_what_follows_them_are_counted_once_each() {
-        let (a, b) = (zstd_frame(b"aaaa", Some(1_000)), zstd_frame(b"bb", Some(50)));
+        let (a, b) = (
+            zstd_frame(b"aaaa", Some(1_000)),
+            zstd_frame(b"bb", Some(50)),
+        );
         let groups = [group("q", "p", 3, &a), group("r", "", 1, &b)];
         let mut body = framed_push(FLAG_FRAMES | FLAG_COUNTS, &groups);
         let around = (body.len() - a.len() - b.len()) as u64;
@@ -474,7 +491,10 @@ mod tests {
         body.extend_from_slice(&1u32.to_le_bytes());
         body.extend_from_slice(&group("q", "p", 2, &z));
         let around = (body.len() - z.len()) as u64;
-        assert_eq!(request_bytes("/api/v1/transaction", &body), Ok(around + 4_096));
+        assert_eq!(
+            request_bytes("/api/v1/transaction", &body),
+            Ok(around + 4_096)
+        );
     }
 
     #[test]
@@ -486,9 +506,15 @@ mod tests {
         // The broker reads these as JSON too, and answers its own 400.
         let push = framed_push(FLAG_FRAMES, &[]);
         assert!(!is_binary("/api/v1/transaction", &push));
-        assert_eq!(request_bytes("/api/v1/transaction", &push), Ok(push.len() as u64));
+        assert_eq!(
+            request_bytes("/api/v1/transaction", &push),
+            Ok(push.len() as u64)
+        );
         assert_eq!(request_bytes("/api/v1/push", b"QTB1\x00"), Ok(5));
-        assert_eq!(request_bytes("/streams/v1/cycle", &push), Ok(push.len() as u64));
+        assert_eq!(
+            request_bytes("/streams/v1/cycle", &push),
+            Ok(push.len() as u64)
+        );
     }
 
     /// Fail closed: every one of these is a binary body with no size, and the
@@ -539,7 +565,11 @@ mod tests {
             b
         };
         assert!(request_bytes("/api/v1/transaction", &txn(0, 2)).is_ok());
-        let unreadable = |body: &[u8]| request_bytes("/api/v1/transaction", body).expect_err("no size").0;
+        let unreadable = |body: &[u8]| {
+            request_bytes("/api/v1/transaction", body)
+                .expect_err("no size")
+                .0
+        };
         assert_eq!(unreadable(&txn(1, 2)), "unknown flags");
         assert_eq!(unreadable(&txn(0, 900)), "truncated");
     }
@@ -555,7 +585,10 @@ mod tests {
         assert_eq!(pop_answer_bytes(&raw), raw.len() as u64);
         let compressed = framed_pop_answer(true);
         assert_eq!(pop_answer_bytes(&compressed), raw.len() as u64);
-        assert!(compressed.len() > raw.len(), "raw blocks: the frame only adds its header");
+        assert!(
+            compressed.len() > raw.len(),
+            "raw blocks: the frame only adds its header"
+        );
 
         // An answer this reader cannot follow weighs what it measures: cut
         // short, bytes after the last record, another version, another codec.

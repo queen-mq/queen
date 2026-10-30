@@ -774,7 +774,8 @@ pub async fn handle_ephemeral_pop(
         }
 
         let waited_ms = first_at.map_or(0, |t| t.elapsed().as_millis() as i64);
-        if ephemeral::window_ready(held.len(), batch, waited_ms, window) || held_bytes >= max_bytes {
+        if ephemeral::window_ready(held.len(), batch, waited_ms, window) || held_bytes >= max_bytes
+        {
             break;
         }
         // Only a waiting pop armed a wake.

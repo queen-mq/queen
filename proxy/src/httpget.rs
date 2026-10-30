@@ -39,9 +39,12 @@ pub async fn post_form(
         ("Content-Type", "application/x-www-form-urlencoded"),
         ("Accept", "application/json"),
     ];
-    let bytes = tokio::time::timeout(timeout, send("POST", url, &headers, Some(body.into_bytes())))
-        .await
-        .map_err(|_| format!("timeout after {}ms", timeout.as_millis()))??;
+    let bytes = tokio::time::timeout(
+        timeout,
+        send("POST", url, &headers, Some(body.into_bytes())),
+    )
+    .await
+    .map_err(|_| format!("timeout after {}ms", timeout.as_millis()))??;
     serde_json::from_slice(&bytes).map_err(|e| format!("json parse: {e}"))
 }
 
@@ -126,7 +129,10 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n");
-    if !extra.iter().any(|(k, _)| k.eq_ignore_ascii_case("user-agent")) {
+    if !extra
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+    {
         req.push_str("User-Agent: queen-proxy\r\n");
     }
     for (k, v) in extra {
@@ -141,7 +147,10 @@ where
         .await
         .map_err(|e| format!("write: {e}"))?;
     if let Some(b) = body {
-        stream.write_all(b).await.map_err(|e| format!("write body: {e}"))?;
+        stream
+            .write_all(b)
+            .await
+            .map_err(|e| format!("write body: {e}"))?;
     }
     stream.flush().await.ok();
     let mut buf = Vec::new();
@@ -315,7 +324,8 @@ fn dechunk(mut body: &[u8]) -> Result<Vec<u8>, String> {
         let nl = find_subslice(body, b"\r\n").ok_or("chunk: missing size line")?;
         let size_line = String::from_utf8_lossy(&body[..nl]);
         let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_hex, 16).map_err(|_| "chunk: bad size".to_string())?;
+        let size =
+            usize::from_str_radix(size_hex, 16).map_err(|_| "chunk: bad size".to_string())?;
         body = &body[nl + 2..];
         if size == 0 {
             break;
@@ -391,10 +401,7 @@ mod tests {
         );
         assert_eq!(parse_response(&r).unwrap(), b"hello");
 
-        let truncated = res(
-            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked",
-            "5\r\nhel",
-        );
+        let truncated = res("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked", "5\r\nhel");
         assert!(parse_response(&truncated).is_err());
     }
 

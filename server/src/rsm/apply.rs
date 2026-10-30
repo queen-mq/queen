@@ -4803,8 +4803,8 @@ pub(crate) fn run<S: Store>(
     let mut last_commit = clock.now();
     let durable_period_ms = applier.cfg.durable_every_ms;
     let durable_phase_ms = applier.cfg.durable_phase_ms;
-    let mut last_durable =
-        durable_grid(clock, last_commit, durable_period_ms, durable_phase_ms).unwrap_or(last_commit);
+    let mut last_durable = durable_grid(clock, last_commit, durable_period_ms, durable_phase_ms)
+        .unwrap_or(last_commit);
     if let Some(phase) = durable_phase_ms {
         tracing::info!(
             target: "rsm",

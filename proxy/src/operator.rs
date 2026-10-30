@@ -105,7 +105,9 @@ async fn list_users(State(st): State<St>, headers: HeaderMap) -> Response {
     let clusters: Vec<Value> = listing
         .clusters
         .into_iter()
-        .map(|c| json!({ "id": c.id, "slug": c.slug, "tenant_id": c.tenant_id, "status": c.status }))
+        .map(
+            |c| json!({ "id": c.id, "slug": c.slug, "tenant_id": c.tenant_id, "status": c.status }),
+        )
         .collect();
 
     let mut user_index = HashMap::new();
@@ -231,10 +233,11 @@ async fn create_user(
         password_hash,
         role: &role,
     };
-    let user_id = match web::operator_create_user(&st.store, ctx.cluster_id, &new_user, actor_id).await {
-        Ok(id) => id,
-        Err(refusal) => return refusal.response(),
-    };
+    let user_id =
+        match web::operator_create_user(&st.store, ctx.cluster_id, &new_user, actor_id).await {
+            Ok(id) => id,
+            Err(refusal) => return refusal.response(),
+        };
     web::invalidate_local(&st, &[cluster_id]);
 
     json_created(json!({
@@ -272,7 +275,9 @@ async fn update_user(
     };
 
     // Unchanged or renamed, the answer is the same: the name it now has.
-    if let Err(refusal) = web::operator_rename_user(&st.store, ctx.cluster_id, user_id, &name, actor_id).await {
+    if let Err(refusal) =
+        web::operator_rename_user(&st.store, ctx.cluster_id, user_id, &name, actor_id).await
+    {
         return refusal.response();
     }
 

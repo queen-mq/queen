@@ -894,7 +894,11 @@ mod tests {
         assert!(full.holding(), "nothing was asked yet");
         assert_eq!(full.floor(), u64::MAX, "nobody reads");
         full.note("a", 10);
-        assert_eq!(full.floor(), u64::MAX, "the purge goes on as if nobody read");
+        assert_eq!(
+            full.floor(),
+            u64::MAX,
+            "the purge goes on as if nobody read"
+        );
         assert!(!full.holding());
         assert_eq!(full.readers().len(), 1, "the standby is still known");
 

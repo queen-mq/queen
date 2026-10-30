@@ -300,7 +300,10 @@ mod tests {
                 ("data", super::Field::Payload(payload)),
                 ("id", super::Field::Json(serde_json::json!("x"))),
                 ("status", super::Field::Json(serde_json::json!("completed"))),
-                ("busStatus", super::Field::Json(serde_json::json!({"z":1,"a":2}))),
+                (
+                    "busStatus",
+                    super::Field::Json(serde_json::json!({"z":1,"a":2})),
+                ),
             ],
         );
         let tree = serde_json::json!({

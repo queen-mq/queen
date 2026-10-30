@@ -383,16 +383,28 @@ mod tests {
         assert_eq!(c(Method::GET, "/health"), RouteClass::Free);
         assert_eq!(c(Method::GET, "/metrics/prometheus"), RouteClass::Free);
         assert_eq!(c(Method::GET, "/api/v1/raft/status"), RouteClass::Free);
-        assert_eq!(c(Method::GET, "/api/v1/system/raft/membership"), RouteClass::Free);
+        assert_eq!(
+            c(Method::GET, "/api/v1/system/raft/membership"),
+            RouteClass::Free
+        );
         assert_eq!(c(Method::GET, "/auth/me"), RouteClass::Free);
         assert_eq!(c(Method::POST, "/api/v1/push"), RouteClass::Grows);
         assert_eq!(c(Method::POST, "/streams/v1/cycle"), RouteClass::Grows);
         assert_eq!(c(Method::PUT, "/api/v1/kv/ns/k"), RouteClass::Grows);
         assert_eq!(c(Method::GET, "/api/v1/messages"), RouteClass::HeavyRead);
-        assert_eq!(c(Method::GET, "/api/v1/messages/q/p"), RouteClass::HeavyRead);
+        assert_eq!(
+            c(Method::GET, "/api/v1/messages/q/p"),
+            RouteClass::HeavyRead
+        );
         assert_eq!(c(Method::GET, "/api/v1/messagesx"), RouteClass::Free);
-        assert_eq!(c(Method::POST, "/streams/v1/state/get"), RouteClass::HeavyRead);
+        assert_eq!(
+            c(Method::POST, "/streams/v1/state/get"),
+            RouteClass::HeavyRead
+        );
         assert_eq!(c(Method::POST, "/api/v1/fetch"), RouteClass::HeavyRead);
-        assert_eq!(c(Method::GET, "/api/v1/resources/queues"), RouteClass::HeavyRead);
+        assert_eq!(
+            c(Method::GET, "/api/v1/resources/queues"),
+            RouteClass::HeavyRead
+        );
     }
 }

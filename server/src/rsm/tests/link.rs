@@ -272,7 +272,10 @@ async fn a_standby_fed_the_mirrored_entries_holds_the_sources_state() {
     let source = open_raft(&dir_a);
     let mut landed: Vec<(AppliedAt, Bytes)> = Vec::with_capacity(entries.len());
     for e in entries {
-        let at = source.propose(e.clone(), deadline()).await.expect("propose");
+        let at = source
+            .propose(e.clone(), deadline())
+            .await
+            .expect("propose");
         landed.push((at, e));
     }
     let last = landed.last().expect("entries").0;
@@ -296,7 +299,10 @@ async fn a_standby_fed_the_mirrored_entries_holds_the_sources_state() {
     )
     .expect("the standby entry");
     standby
-        .propose(Bytes::from(encode_entry(&first).expect("encode")), deadline())
+        .propose(
+            Bytes::from(encode_entry(&first).expect("encode")),
+            deadline(),
+        )
         .await
         .expect("become a standby");
 
@@ -308,7 +314,10 @@ async fn a_standby_fed_the_mirrored_entries_holds_the_sources_state() {
             .unwrap_or_else(|why| panic!("source entry {} was not admitted: {why}", at.index));
         let mirrored = mirror_entry(&src, at.index, at.term).expect("mirror");
         standby
-            .propose(Bytes::from(encode_entry(&mirrored).expect("encode")), deadline())
+            .propose(
+                Bytes::from(encode_entry(&mirrored).expect("encode")),
+                deadline(),
+            )
             .await
             .expect("propose the mirrored entry");
         cursor.advance(at.index, at.term, &src);
@@ -329,7 +338,10 @@ async fn a_standby_fed_the_mirrored_entries_holds_the_sources_state() {
         comparable(&a.digest),
         "the standby built different replicated state from the source's entries"
     );
-    assert_eq!(b.groups, a.groups, "the group rows differ beyond their log position");
+    assert_eq!(
+        b.groups, a.groups,
+        "the group rows differ beyond their log position"
+    );
     assert_eq!(b.flags, a.flags, "the flags differ beyond the link's own");
     assert_eq!(
         b.requests.len(),
@@ -337,7 +349,11 @@ async fn a_standby_fed_the_mirrored_entries_holds_the_sources_state() {
         "the standby records the source's request ids and its own entry's, no other"
     );
     assert!(b.requests == a.requests, "the request-id rows differ");
-    assert_eq!(a.role, Role::Primary, "the source knows nothing of the link");
+    assert_eq!(
+        a.role,
+        Role::Primary,
+        "the source knows nothing of the link"
+    );
     assert!(b.role.is_standby(), "the standby's role row says so");
     assert_eq!(
         (b.position.index, b.position.term),
@@ -780,10 +796,7 @@ async fn a_standby_replays_its_source_restarts_and_is_promoted() {
     let n2 = replicate(&a, &b).await;
     assert!(n2 >= 2, "the standby resumed from its position ({n2})");
     assert_same(&a, &b, "after the restart");
-    let last = b
-        .store
-        .read(|r| link::read_position(r))
-        .expect("position");
+    let last = b.store.read(|r| link::read_position(r)).expect("position");
     assert!(last.index > 0 && last.now_us > 0);
 
     // Promotion: an ordinary cluster from that entry on.
@@ -1791,7 +1804,10 @@ async fn the_follower_follows_its_source_and_says_why_when_it_cannot() {
     let readers = a.repl.link_source().readers();
     assert_eq!(readers.len(), 1, "{readers:?}");
     assert_eq!(readers[0].name, "the-standby");
-    assert_eq!(readers[0].after, s.position.index, "its hold is at its position");
+    assert_eq!(
+        readers[0].after, s.position.index,
+        "its hold is at its position"
+    );
     // One node is read; the other is only told where the standby is, so it
     // keeps the entries after that too.
     status_is(&follower, "the other node is told the position", |_| {
@@ -1810,7 +1826,10 @@ async fn the_follower_follows_its_source_and_says_why_when_it_cannot() {
 
     // And goes on following: what the source logs next arrives by itself.
     push_created(&a.command(push(3, "q", "p2", &["d"])).await);
-    status_is(&follower, "a later entry", |s| following(s) && s.entries >= 3).await;
+    status_is(&follower, "a later entry", |s| {
+        following(s) && s.entries >= 3
+    })
+    .await;
     assert_same(&a, &b, "after a later entry");
 
     // A source that does not answer: it waits, and tries the other node.

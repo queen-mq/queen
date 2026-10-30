@@ -620,7 +620,11 @@ fn ttl_returns_the_bytes_to_every_budget() {
     assert!(e.global_bytes() > 0);
     // Any touch past the deadline runs the drop.
     e.pop(T, "q", Some("Default"), Some("g"), 1, true, 5_000);
-    assert_eq!(e.global_bytes(), QUEUE_OVERHEAD, "only the queue itself is left");
+    assert_eq!(
+        e.global_bytes(),
+        QUEUE_OVERHEAD,
+        "only the queue itself is left"
+    );
     assert_eq!(e.depth(T, "q"), Some((0, 0)));
 }
 
@@ -1241,7 +1245,10 @@ fn groups_are_capped_per_ring_and_idle_ones_expire() {
             .is_empty(),
         "past the cap a new group is served nothing"
     );
-    assert_eq!(e.pop(T, "q", Some("Default"), Some("g0"), 1, true, 0).len(), 1);
+    assert_eq!(
+        e.pop(T, "q", Some("Default"), Some("g0"), 1, true, 0).len(),
+        1
+    );
     let s = e.sweep(5_000);
     assert_eq!(s.gc_groups, RING_GROUPS_CAP as u64);
     assert_eq!(

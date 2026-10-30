@@ -38,6 +38,10 @@ sourceOfTruth:
 # empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
 # lease names a partition its group has no row on, or one that is gone (bad_lease); auth.rs makes
 # POST /streams/v1/state/partitions read-only (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): handlers/ephemeral.rs,
+# proxy app.rs, proxy config.rs, proxy harden.rs, rsm/apply.rs, rsm/facade/real.rs,
+# rsm/link/driver.rs, rsm/replicator/raft/forward.rs, rsm/replicator/raft/link.rs reformatted, line
+# wrapping only. Nothing this page states changes.
 ---
 
 Every setting is an environment variable, and most installations need very few of them. When a node starts, it prints the settings it is really using, in lines that start with `config:`. Read them after every change. A yes/no setting accepts `true` or `false`, `1` or `0`, `yes` or `no`, `on` or `off`; any other value stops the node at boot, so a typo cannot pass unnoticed.

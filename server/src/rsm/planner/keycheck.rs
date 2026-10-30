@@ -152,13 +152,11 @@ fn over(len: usize, max: usize, names: &[(&'static str, &str)]) -> Option<Overlo
 /// (`traces::check_keys`).
 pub fn overlong(e: &Effect, max: usize) -> Option<Overlong> {
     match e {
-        Effect::QueueUpsert { tenant, queue, .. } | Effect::QueueDelete { tenant, queue } => {
-            over(
-                counter_queue_len(tenant, queue),
-                max,
-                &[("tenant", tenant), ("queue", queue)],
-            )
-        }
+        Effect::QueueUpsert { tenant, queue, .. } | Effect::QueueDelete { tenant, queue } => over(
+            counter_queue_len(tenant, queue),
+            max,
+            &[("tenant", tenant), ("queue", queue)],
+        ),
         Effect::GroupUpsert {
             tenant,
             queue,
@@ -172,7 +170,11 @@ pub fn overlong(e: &Effect, max: usize) -> Option<Overlong> {
         } => over(
             counter_group_len(tenant, queue, group),
             max,
-            &[("tenant", tenant), ("queue", queue), ("consumerGroup", group)],
+            &[
+                ("tenant", tenant),
+                ("queue", queue),
+                ("consumerGroup", group),
+            ],
         ),
         Effect::PartitionCreate {
             tenant,
@@ -182,7 +184,11 @@ pub fn overlong(e: &Effect, max: usize) -> Option<Overlong> {
         } => over(
             partition_keys_len(tenant, queue, partition),
             max,
-            &[("tenant", tenant), ("queue", queue), ("partition", partition)],
+            &[
+                ("tenant", tenant),
+                ("queue", queue),
+                ("partition", partition),
+            ],
         ),
         Effect::CursorSet { group, .. } | Effect::CursorDelete { group, .. } => {
             over(cursors_len(group), max, &[("consumerGroup", group)])
@@ -197,12 +203,21 @@ pub fn overlong(e: &Effect, max: usize) -> Option<Overlong> {
                 .max(dlq_by_pos_len(group))
                 .max(counter_group_len(tenant, queue, group)),
             max,
-            &[("tenant", tenant), ("queue", queue), ("consumerGroup", group)],
+            &[
+                ("tenant", tenant),
+                ("queue", queue),
+                ("consumerGroup", group),
+            ],
         ),
-        Effect::DlqDelete { tenant, queue, .. } => {
-            over(dlq_len(tenant, queue), max, &[("tenant", tenant), ("queue", queue)])
+        Effect::DlqDelete { tenant, queue, .. } => over(
+            dlq_len(tenant, queue),
+            max,
+            &[("tenant", tenant), ("queue", queue)],
+        ),
+        Effect::KvPut {
+            tenant, ns, key, ..
         }
-        Effect::KvPut { tenant, ns, key, .. } | Effect::KvDelete { tenant, ns, key } => over(
+        | Effect::KvDelete { tenant, ns, key } => over(
             crate::rsm::store::keys::kv_len(tenant, ns, key),
             max,
             &[("tenant", tenant), ("ns", ns), ("key", key)],
@@ -213,8 +228,11 @@ pub fn overlong(e: &Effect, max: usize) -> Option<Overlong> {
             key,
             row,
         } => over(
-            timers_due_len(tenant, queue, key)
-                .max(partitions_by_key_len(tenant, queue, &row.partition)),
+            timers_due_len(tenant, queue, key).max(partitions_by_key_len(
+                tenant,
+                queue,
+                &row.partition,
+            )),
             max,
             &[
                 ("tenant", tenant),
@@ -240,12 +258,16 @@ pub fn overlong(e: &Effect, max: usize) -> Option<Overlong> {
         Effect::FlagSet { key, .. } => over(flag_len(key), max, &[("flag", key)]),
         Effect::QuotaSet { tenant, .. } => over(quota_len(tenant), max, &[("tenant", tenant)]),
         Effect::EphemeralConfigSet { tenant, queue, .. }
-        | Effect::EphemeralConfigDelete { tenant, queue } => {
-            over(queues_len(tenant, queue), max, &[("tenant", tenant), ("queue", queue)])
-        }
-        Effect::TenantPurge { tenant } => {
-            over(counter_tenant_len(tenant).max(quota_len(tenant)), max, &[("tenant", tenant)])
-        }
+        | Effect::EphemeralConfigDelete { tenant, queue } => over(
+            queues_len(tenant, queue),
+            max,
+            &[("tenant", tenant), ("queue", queue)],
+        ),
+        Effect::TenantPurge { tenant } => over(
+            counter_tenant_len(tenant).max(quota_len(tenant)),
+            max,
+            &[("tenant", tenant)],
+        ),
         Effect::GarbageAdd {
             scope: GarbageScope::Group { group },
             ..
@@ -338,10 +360,7 @@ fn effect_bytes(e: &Effect) -> usize {
                 last_error,
                 ..
             } => {
-                tenant.len()
-                    + queue.len()
-                    + key.len()
-                    + last_error.as_ref().map_or(0, String::len)
+                tenant.len() + queue.len() + key.len() + last_error.as_ref().map_or(0, String::len)
             }
             Effect::StreamsQueryUpsert { tenant, .. } => tenant.len() + 256,
             Effect::StreamsStatePut { key, value, .. } => key.len() + value.len(),
@@ -389,13 +408,19 @@ mod tests {
                         partitions_by_key_len(t, q, g),
                         keys::partitions_by_key(t, q, g).len()
                     );
-                    assert_eq!(queue_partitions_len(t, q), keys::queue_partitions(t, q, 7).len());
+                    assert_eq!(
+                        queue_partitions_len(t, q),
+                        keys::queue_partitions(t, q, 7).len()
+                    );
                     assert_eq!(cursors_len(g), keys::cursors(7, g).len());
                     assert_eq!(dlq_len(t, q), keys::dlq(t, q, &[1; 16]).len());
                     assert_eq!(dlq_by_pos_len(g), keys::dlq_by_pos(7, g, 9).len());
                     assert_eq!(timers_due_len(t, q, g), keys::timers_due(-5, t, q, g).len());
                     assert!(timers_due_len(t, q, g) > keys::timers(t, q, g).len());
-                    assert_eq!(streams_state_len(g), keys::streams_state(&[2; 16], 7, g).len());
+                    assert_eq!(
+                        streams_state_len(g),
+                        keys::streams_state(&[2; 16], 7, g).len()
+                    );
                     assert_eq!(streams_query_len(t), keys::streams_query(t, &[3; 16]).len());
                     assert_eq!(flag_len(t), keys::flag(t).len());
                     assert_eq!(
@@ -434,7 +459,10 @@ mod tests {
             pid: 1,
             key,
         };
-        assert!(overlong(&e, 511).is_some(), "485 bytes, one of them NUL, makes 512");
+        assert!(
+            overlong(&e, 511).is_some(),
+            "485 bytes, one of them NUL, makes 512"
+        );
     }
 
     #[test]

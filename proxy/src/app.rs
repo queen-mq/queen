@@ -164,9 +164,15 @@ pub fn build_embedded(e: Embedded) -> Result<(St, Router), String> {
     let boot = config::jwt_boot(config::JwtMaterial {
         // The replicated KV is the persistence a console session needs.
         has_users: true,
-        ed_private: cfg.jwt_ed25519_pem.as_deref().is_some_and(|s| !s.trim().is_empty()),
+        ed_private: cfg
+            .jwt_ed25519_pem
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty()),
         ed_public: config::jwt_ed25519_pub_pem().is_some(),
-        hs_secret: cfg.jwt_hs_secret.as_deref().is_some_and(|s| !s.trim().is_empty()),
+        hs_secret: cfg
+            .jwt_hs_secret
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty()),
         can_mint: keys.can_mint(),
         can_verify: keys.can_verify(),
     });
@@ -241,8 +247,12 @@ pub fn build_embedded(e: Embedded) -> Result<(St, Router), String> {
 pub async fn seed_embedded(st: &St) -> Result<(), String> {
     use crate::store::data;
     let kv = st.store.kv().ok_or("no KV store")?;
-    crate::store::seed::seed(kv.as_ref()).await.map_err(|e| e.to_string())?;
-    data::seed_default_plans(&st.store).await.map_err(|e| e.to_string())?;
+    crate::store::seed::seed(kv.as_ref())
+        .await
+        .map_err(|e| e.to_string())?;
+    data::seed_default_plans(&st.store)
+        .await
+        .map_err(|e| e.to_string())?;
     let cell = data::upsert_cell(
         &st.store,
         &data::CellSpec {
@@ -266,7 +276,8 @@ pub async fn seed_embedded(st: &St) -> Result<(), String> {
                 cluster_slug: slug.clone(),
                 plan_code: env("QUEEN_PROXY_BOOTSTRAP_PLAN").unwrap_or_else(|| "dev".into()),
                 cell: Some(cell),
-                admin_email: env("QUEEN_PROXY_BOOTSTRAP_EMAIL").unwrap_or_else(|| "admin@localhost".into()),
+                admin_email: env("QUEEN_PROXY_BOOTSTRAP_EMAIL")
+                    .unwrap_or_else(|| "admin@localhost".into()),
                 password: env("QUEEN_PROXY_BOOTSTRAP_PASSWORD"),
                 key_name: Some("bootstrap".into()),
             },
@@ -279,8 +290,19 @@ pub async fn seed_embedded(st: &St) -> Result<(), String> {
                 .and_then(|v| v.as_str())
                 .and_then(|v| uuid::Uuid::parse_str(v).ok()),
         ) {
-            let scopes: Vec<String> = ["produce", "consume", "admin", "read"].iter().map(|s| s.to_string()).collect();
-            match data::issue_api_key(&st.store, cluster, "bootstrap (env)", &auth::key_hash_hex(&key), &scopes).await {
+            let scopes: Vec<String> = ["produce", "consume", "admin", "read"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            match data::issue_api_key(
+                &st.store,
+                cluster,
+                "bootstrap (env)",
+                &auth::key_hash_hex(&key),
+                &scopes,
+            )
+            .await
+            {
                 Ok(_) => {}
                 // Already issued by an earlier boot or another node.
                 Err(data::DataError::Conflict(_)) => {}
@@ -291,7 +313,9 @@ pub async fn seed_embedded(st: &St) -> Result<(), String> {
     }
     // After the bootstrap, so its admin can be one of the operators.
     if let Some(listed) = &st.cfg.operators {
-        let out = crate::store::web::sync_operators(&st.store, listed).await.map_err(|e| e.to_string())?;
+        let out = crate::store::web::sync_operators(&st.store, listed)
+            .await
+            .map_err(|e| e.to_string())?;
         tracing::info!(
             target: "proxy",
             granted = ?out.granted,

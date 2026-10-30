@@ -67,6 +67,10 @@ sourceOfTruth:
 # (d1c81376e): the in-process Kafka facade's commit row skips the transaction KV rate; mod.rs, real.rs
 # (7fe23f4ed): KV reads put each stored value's text into the answer instead of building a JSON
 # tree; every answer is the same, byte for byte. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): auth.rs,
+# handlers/raft.rs, main.rs, proxy app.rs, proxy auth.rs, rsm/facade/real.rs,
+# rsm/facade/real/phase2/reads.rs, rsm/facade/remote.rs reformatted, line wrapping only. Nothing
+# this page states changes.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no

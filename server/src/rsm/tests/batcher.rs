@@ -296,7 +296,11 @@ async fn a_write_the_log_refused_while_this_node_leads_is_planned_again() {
         push(1, "q", "p0", &["a"]),
     )
     .await;
-    assert_eq!(done(&retry).1, Some(1), "planned at the log's end: {retry:?}");
+    assert_eq!(
+        done(&retry).1,
+        Some(1),
+        "planned at the log's end: {retry:?}"
+    );
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "restarted at once, not by the stranded driver's wait: {:?}",

@@ -372,10 +372,16 @@ impl Broker for RouterDispatch {
             m.pop.record_request(total as usize);
         }
         for f in from {
-            m.per_queue.add_fetched(tenant.as_str(), &f.queue, f.records);
-            m.per_queue.add_pop(tenant.as_str(), &f.queue, f.records);
             m.per_queue
-                .add_pop_lag(tenant.as_str(), &f.queue, f.lag_sum_ms, f.lag_max_ms, f.records);
+                .add_fetched(tenant.as_str(), &f.queue, f.records);
+            m.per_queue.add_pop(tenant.as_str(), &f.queue, f.records);
+            m.per_queue.add_pop_lag(
+                tenant.as_str(),
+                &f.queue,
+                f.lag_sum_ms,
+                f.lag_max_ms,
+                f.records,
+            );
         }
     }
 }

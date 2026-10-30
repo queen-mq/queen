@@ -196,7 +196,11 @@ fn norm(s: &str) -> String {
 fn dns_label_ok(s: &str) -> bool {
     let b = s.as_bytes();
     let edge = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
-    !b.is_empty() && b.len() <= 63 && edge(b[0]) && edge(b[b.len() - 1]) && b.iter().all(|&c| edge(c) || c == b'-')
+    !b.is_empty()
+        && b.len() <= 63
+        && edge(b[0])
+        && edge(b[b.len() - 1])
+        && b.iter().all(|&c| edge(c) || c == b'-')
 }
 
 /// The one spelling of a tenant or cluster slug, for the writers that store
@@ -251,7 +255,9 @@ fn email_of(who: &str, email: &str) -> Result<String, DataError> {
 
 /// The CHECK on api_keys.key_hash: `^[0-9a-f]{64}$`.
 fn key_hash_ok(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    s.len() == 64
+        && s.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
 /// The CHECK on plans.code: `^[a-z][a-z0-9-]*$`.
@@ -318,7 +324,11 @@ async fn gets(kv: &dyn KvBackend, keys: &[(&str, String)]) -> Result<Vec<Value>,
     kv.kv(ops).await.map_err(DataError::kv)
 }
 
-async fn read1<T: DeserializeOwned>(kv: &dyn KvBackend, ns: &str, key: &str) -> Result<Option<Doc<T>>, DataError> {
+async fn read1<T: DeserializeOwned>(
+    kv: &dyn KvBackend,
+    ns: &str,
+    key: &str,
+) -> Result<Option<Doc<T>>, DataError> {
     let out = gets(kv, &[(ns, key.to_string())]).await?;
     got(out.first())
 }
@@ -335,7 +345,11 @@ async fn index_ids(kv: &dyn KvBackend, ns: &str, of: Uuid) -> Result<Vec<Uuid>, 
 }
 
 /// Documents by id, missing ones dropped.
-async fn docs_by_id<T: DeserializeOwned>(kv: &dyn KvBackend, ns: &str, ids: &[Uuid]) -> Result<Vec<Doc<T>>, DataError> {
+async fn docs_by_id<T: DeserializeOwned>(
+    kv: &dyn KvBackend,
+    ns: &str,
+    ids: &[Uuid],
+) -> Result<Vec<Doc<T>>, DataError> {
     let keys: Vec<String> = ids.iter().map(schema::key).collect();
     Ok(kv::get_many::<T>(kv, ns, &keys)
         .await
@@ -366,11 +380,25 @@ impl Batch {
     }
     /// A new row: the key must not exist (the whole batch fails otherwise).
     fn put_new(&mut self, ns: &str, key: &str, value: &impl Serialize) {
-        self.op(kv::put_op(ns, key, value, Expect::Absent, Ttl::Forever, true));
+        self.op(kv::put_op(
+            ns,
+            key,
+            value,
+            Expect::Absent,
+            Ttl::Forever,
+            true,
+        ));
     }
     /// A read-modify-write: the row must still be at `version`.
     fn put_at(&mut self, ns: &str, key: &str, value: &impl Serialize, version: u64) {
-        self.op(kv::put_op(ns, key, value, Expect::Version(version), Ttl::Forever, true));
+        self.op(kv::put_op(
+            ns,
+            key,
+            value,
+            Expect::Version(version),
+            Ttl::Forever,
+            true,
+        ));
     }
     /// A UNIQUE index claim: `#<value> -> id`, absent or the batch fails as a
     /// [`DataError::Conflict`] naming `constraint`.
@@ -389,7 +417,12 @@ impl Batch {
         self.inval.insert(cluster);
     }
     fn len(&self) -> usize {
-        self.ops.len() + if self.inval.is_empty() { 0 } else { 1 + self.inval.len() }
+        self.ops.len()
+            + if self.inval.is_empty() {
+                0
+            } else {
+                1 + self.inval.len()
+            }
     }
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -449,7 +482,11 @@ pub fn invalidation_ops(clusters: &[Uuid]) -> Vec<Value> {
 /// they fit (always, but for a fan-out over hundreds of clusters); otherwise
 /// they follow the change in calls of their own.
 async fn commit(kv: &dyn KvBackend, b: Batch) -> Result<Vec<kv::Written>, WriteErr> {
-    let Batch { mut ops, unique, inval } = b;
+    let Batch {
+        mut ops,
+        unique,
+        inval,
+    } = b;
     let mut marks = inval_chunks(&inval, now_us());
     if marks.len() == 1 && ops.len() + marks[0].len() <= MAX_OPS {
         ops.append(&mut marks[0]);
@@ -462,7 +499,10 @@ async fn commit(kv: &dyn KvBackend, b: Batch) -> Result<Vec<kv::Written>, WriteE
         match kv::write(kv, ops).await {
             Ok(w) => w,
             Err(e @ KvError::Precondition { .. }) => {
-                return match e.precondition_index().and_then(|i| unique.get(i).copied().flatten()) {
+                return match e
+                    .precondition_index()
+                    .and_then(|i| unique.get(i).copied().flatten())
+                {
                     Some(constraint) => Err(WriteErr::Conflict(format!(
                         "duplicate key value violates unique constraint \"{constraint}\""
                     ))),
@@ -524,7 +564,11 @@ fn emit_outbox(b: &mut Batch, at_us: i64, kind: &str, payload: Value) {
         created_at_us: at_us,
         consumed_at_us: None,
     };
-    b.put(ns::OUTBOX, &format!("{K}{}/{id}", schema::ordered(at_us)), &doc);
+    b.put(
+        ns::OUTBOX,
+        &format!("{K}{}/{id}", schema::ordered(at_us)),
+        &doc,
+    );
 }
 
 /// Run `batches` one after the other (a cascade too large for one call).
@@ -534,7 +578,11 @@ async fn commit_all(kv: &dyn KvBackend, batches: Vec<Batch>) -> Result<(), DataE
             Ok(_) => {}
             Err(WriteErr::Fail(e)) => return Err(e),
             Err(WriteErr::Conflict(m)) => return Err(DataError::Conflict(m)),
-            Err(WriteErr::Moved) => return Err(DataError::Unavailable("kv: concurrent change, retry".into())),
+            Err(WriteErr::Moved) => {
+                return Err(DataError::Unavailable(
+                    "kv: concurrent change, retry".into(),
+                ))
+            }
         }
     }
     Ok(())
@@ -662,7 +710,9 @@ async fn kv_ctx_for(kv: &dyn KvBackend, c: &ClusterDoc) -> Lookup<ClusterCtx> {
     let ce = got::<CellDoc>(out.get(1));
     let p = got::<PlanDoc>(out.get(2));
     match (t, ce, p) {
-        (Ok(Some(t)), Ok(Some(ce)), Ok(Some(p))) => Lookup::Found(ctx_from_docs(c, &t.value, &ce.value, &p.value)),
+        (Ok(Some(t)), Ok(Some(ce)), Ok(Some(p))) => {
+            Lookup::Found(ctx_from_docs(c, &t.value, &ce.value, &p.value))
+        }
         (Err(_), _, _) | (_, Err(_), _) | (_, _, Err(_)) => Lookup::Unavailable,
         _ => Lookup::Absent,
     }
@@ -701,7 +751,10 @@ async fn kv_lookup_key(kv: &dyn KvBackend, hash_hex: &str) -> Lookup<(ClusterCtx
         Ok(d) => d.value,
         Err(g) => return g.lookup(),
     };
-    let key = match lookup_of(read1::<ApiKeyDoc>(kv, ns::KEYS, &schema::key(id)).await, "by_key_hash") {
+    let key = match lookup_of(
+        read1::<ApiKeyDoc>(kv, ns::KEYS, &schema::key(id)).await,
+        "by_key_hash",
+    ) {
         Ok(d) => d.value,
         Err(g) => return g.lookup(),
     };
@@ -737,7 +790,10 @@ pub async fn touch_api_keys(store: &Store, ids: &[Uuid]) -> Result<(), DataError
             let mut cur = Batch::default();
             let mut batches = Vec::new();
             for d in docs {
-                if d.value.last_used_at_us.is_some_and(|t| now - t < TOUCH_MIN_INTERVAL_US) {
+                if d.value
+                    .last_used_at_us
+                    .is_some_and(|t| now - t < TOUCH_MIN_INTERVAL_US)
+                {
                     continue;
                 }
                 let mut v = d.value;
@@ -803,7 +859,9 @@ impl InvalFeed {
         if self.head == Some(head) {
             return Ok(InvalPoll::Quiet);
         }
-        let rows: Vec<(String, Doc<Value>)> = kv::scan(kv, ns::META, INVAL_MARK_PREFIX).await.map_err(DataError::kv)?;
+        let rows: Vec<(String, Doc<Value>)> = kv::scan(kv, ns::META, INVAL_MARK_PREFIX)
+            .await
+            .map_err(DataError::kv)?;
         let now: HashMap<Uuid, u64> = rows
             .into_iter()
             .filter_map(|(k, d)| {
@@ -842,9 +900,11 @@ impl InvalFeed {
 /// answer: auth.rs applies its fail-open/closed policy to that.
 pub async fn is_jti_revoked(store: &Store, jti: &str) -> Result<bool, DataError> {
     match store {
-        Store::Kv(kv) => Ok(read1::<RevokedDoc>(kv.as_ref(), ns::REVOKED, &schema::key(jti))
-            .await?
-            .is_some()),
+        Store::Kv(kv) => Ok(
+            read1::<RevokedDoc>(kv.as_ref(), ns::REVOKED, &schema::key(jti))
+                .await?
+                .is_some(),
+        ),
         Store::None => Ok(false),
     }
 }
@@ -852,21 +912,29 @@ pub async fn is_jti_revoked(store: &Store, jti: &str) -> Result<bool, DataError>
 /// Does this user row exist?
 pub async fn user_exists(store: &Store, user_id: Uuid) -> Result<bool, DataError> {
     match store {
-        Store::Kv(kv) => Ok(read1::<UserDoc>(kv.as_ref(), ns::USERS, &schema::key(user_id))
-            .await?
-            .is_some()),
+        Store::Kv(kv) => Ok(
+            read1::<UserDoc>(kv.as_ref(), ns::USERS, &schema::key(user_id))
+                .await?
+                .is_some(),
+        ),
         Store::None => Ok(false),
     }
 }
 
 /// The user's role on the cluster (`cluster_roles.role`), if any.
-pub async fn cluster_role(store: &Store, user_id: Uuid, cluster_id: Uuid) -> Result<Option<String>, DataError> {
+pub async fn cluster_role(
+    store: &Store,
+    user_id: Uuid,
+    cluster_id: Uuid,
+) -> Result<Option<String>, DataError> {
     match store {
-        Store::Kv(kv) => Ok(
-            read1::<RoleDoc>(kv.as_ref(), ns::ROLES, &schema::key2(user_id, cluster_id))
-                .await?
-                .map(|d| d.value.role),
-        ),
+        Store::Kv(kv) => {
+            Ok(
+                read1::<RoleDoc>(kv.as_ref(), ns::ROLES, &schema::key2(user_id, cluster_id))
+                    .await?
+                    .map(|d| d.value.role),
+            )
+        }
         Store::None => Ok(None),
     }
 }
@@ -874,9 +942,11 @@ pub async fn cluster_role(store: &Store, user_id: Uuid, cluster_id: Uuid) -> Res
 /// The stored operator bit (`users.is_operator`); false for no such user.
 pub async fn user_is_operator(store: &Store, user_id: Uuid) -> Result<bool, DataError> {
     match store {
-        Store::Kv(kv) => Ok(read1::<UserDoc>(kv.as_ref(), ns::USERS, &schema::key(user_id))
-            .await?
-            .is_some_and(|d| d.value.is_operator)),
+        Store::Kv(kv) => Ok(
+            read1::<UserDoc>(kv.as_ref(), ns::USERS, &schema::key(user_id))
+                .await?
+                .is_some_and(|d| d.value.is_operator),
+        ),
         Store::None => Ok(false),
     }
 }
@@ -896,7 +966,9 @@ pub async fn revoke_session(
             let kv = kv.as_ref();
             let jti = btrim(jti);
             if jti.is_empty() {
-                return Err(DataError::Invalid("revoke_session: jti must not be empty".into()));
+                return Err(DataError::Invalid(
+                    "revoke_session: jti must not be empty".into(),
+                ));
             }
             let Some(user) = read1::<UserDoc>(kv, ns::USERS, &schema::key(actor_id)).await? else {
                 return Err(DataError::Invalid(format!(
@@ -904,7 +976,9 @@ pub async fn revoke_session(
                 )));
             };
             if !ACTORS.contains(&actor) {
-                return Err(DataError::Invalid(format!("record_operation: invalid actor {actor}")));
+                return Err(DataError::Invalid(format!(
+                    "record_operation: invalid actor {actor}"
+                )));
             }
             let now = now_us();
             let exp_us = expires_at_unix.saturating_mul(1_000_000);
@@ -952,7 +1026,8 @@ pub async fn sweep_revoked_tokens(store: &Store) -> Result<i64, DataError> {
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let now = now_us();
-            let rows: Vec<(String, Doc<RevokedDoc>)> = kv::scan(kv, ns::REVOKED, K).await.map_err(DataError::kv)?;
+            let rows: Vec<(String, Doc<RevokedDoc>)> =
+                kv::scan(kv, ns::REVOKED, K).await.map_err(DataError::kv)?;
             let mut batches = Vec::new();
             let mut cur = Batch::default();
             let mut n = 0i64;
@@ -963,7 +1038,12 @@ pub async fn sweep_revoked_tokens(store: &Store) -> Result<i64, DataError> {
                 if cur.len() >= CHUNK_OPS {
                     batches.push(std::mem::take(&mut cur));
                 }
-                cur.op(kv::delete_op(ns::REVOKED, &k, Expect::Version(d.version), false));
+                cur.op(kv::delete_op(
+                    ns::REVOKED,
+                    &k,
+                    Expect::Version(d.version),
+                    false,
+                ));
                 n += 1;
             }
             if !cur.is_empty() {
@@ -987,7 +1067,9 @@ pub async fn live_queues(store: &Store, cluster_id: Uuid) -> Result<Vec<(String,
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let pfx = schema::prefix(cluster_id);
-            let idx: Vec<(String, Doc<Uuid>)> = kv::scan(kv, ns::QUEUE_NAME, &pfx).await.map_err(DataError::kv)?;
+            let idx: Vec<(String, Doc<Uuid>)> = kv::scan(kv, ns::QUEUE_NAME, &pfx)
+                .await
+                .map_err(DataError::kv)?;
             let ids: Vec<Uuid> = idx.iter().map(|(_, d)| d.value).collect();
             let docs: HashMap<Uuid, QueueDoc> = docs_by_id::<QueueDoc>(kv, ns::QUEUES, &ids)
                 .await?
@@ -1010,7 +1092,10 @@ pub async fn live_queues(store: &Store, cluster_id: Uuid) -> Result<Vec<(String,
 /// The registry persister's write: each (cluster, queue) row raised to at
 /// least `count` (created when absent). All or nothing from the caller's view:
 /// Err means "put the batch back for the next tick".
-pub async fn persist_queue_floors(store: &Store, rows: &[(Uuid, String, i64)]) -> Result<(), DataError> {
+pub async fn persist_queue_floors(
+    store: &Store,
+    rows: &[(Uuid, String, i64)],
+) -> Result<(), DataError> {
     if rows.is_empty() {
         return Ok(());
     }
@@ -1046,7 +1131,10 @@ async fn kv_upsert_queues(
         let mut failed = Vec::new();
         // 2 writes per new row at most.
         for chunk in todo.chunks(CHUNK_OPS / 2) {
-            let idx_keys: Vec<String> = chunk.iter().map(|&i| schema::key2(rows[i].0, &rows[i].1)).collect();
+            let idx_keys: Vec<String> = chunk
+                .iter()
+                .map(|&i| schema::key2(rows[i].0, &rows[i].1))
+                .collect();
             let idx = kv::get_many::<Uuid>(kv, ns::QUEUE_NAME, &idx_keys)
                 .await
                 .map_err(DataError::kv)?;
@@ -1092,7 +1180,12 @@ async fn kv_upsert_queues(
                     },
                     None => {
                         let q = fresh();
-                        b.claim(ns::QUEUE_NAME, &idx_keys[j], q.id, "uq_queues_cluster_name_live");
+                        b.claim(
+                            ns::QUEUE_NAME,
+                            &idx_keys[j],
+                            q.id,
+                            "uq_queues_cluster_name_live",
+                        );
                         b.put_new(ns::QUEUES, &schema::key(q.id), &q);
                     }
                 }
@@ -1222,13 +1315,19 @@ pub async fn reconcile_queue_counts(
 
 /// Soft-delete the live queue rows of a cluster the broker no longer lists
 /// (`deleted_at = now()`); the name becomes reusable.
-pub async fn sweep_deleted_queues(store: &Store, cluster_id: Uuid, seen_names: &[String]) -> Result<(), DataError> {
+pub async fn sweep_deleted_queues(
+    store: &Store,
+    cluster_id: Uuid,
+    seen_names: &[String],
+) -> Result<(), DataError> {
     match store {
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let pfx = schema::prefix(cluster_id);
             let seen: HashSet<&str> = seen_names.iter().map(String::as_str).collect();
-            let idx: Vec<(String, Doc<Uuid>)> = kv::scan(kv, ns::QUEUE_NAME, &pfx).await.map_err(DataError::kv)?;
+            let idx: Vec<(String, Doc<Uuid>)> = kv::scan(kv, ns::QUEUE_NAME, &pfx)
+                .await
+                .map_err(DataError::kv)?;
             let gone: Vec<(String, Doc<Uuid>)> = idx
                 .into_iter()
                 .filter(|(k, _)| !seen.contains(&k[pfx.len()..]))
@@ -1249,7 +1348,10 @@ pub async fn sweep_deleted_queues(store: &Store, cluster_id: Uuid, seen_names: &
                 if cur.len() + 2 > CHUNK_OPS {
                     batches.push(std::mem::take(&mut cur));
                 }
-                if let Some(d) = docs.get(&ix.value).filter(|d| d.value.deleted_at_us.is_none()) {
+                if let Some(d) = docs
+                    .get(&ix.value)
+                    .filter(|d| d.value.deleted_at_us.is_none())
+                {
                     let mut q = d.value.clone();
                     q.deleted_at_us = Some(now);
                     cur.put_at(ns::QUEUES, &schema::key(q.id), &q, d.version);
@@ -1349,7 +1451,14 @@ fn new_tenant(b: &mut Batch, now: i64, slug: &str, name: &str) -> Uuid {
 }
 
 /// The rows of a new cluster (the cluster, its audit row, its invalidation).
-fn new_cluster(b: &mut Batch, now: i64, tenant: Uuid, slug: &str, plan: &PlanDoc, cell: Uuid) -> Uuid {
+fn new_cluster(
+    b: &mut Batch,
+    now: i64,
+    tenant: Uuid,
+    slug: &str,
+    plan: &PlanDoc,
+    cell: Uuid,
+) -> Uuid {
     new_cluster_doc(b, now, tenant, slug, plan, cell, json!({})).id
 }
 
@@ -1376,7 +1485,12 @@ fn new_cluster_doc(
         limit_overrides: overrides,
         created_at_us: now,
     };
-    b.claim(ns::CLUSTER_SLUG, &schema::key(slug), id, "clusters_slug_key");
+    b.claim(
+        ns::CLUSTER_SLUG,
+        &schema::key(slug),
+        id,
+        "clusters_slug_key",
+    );
     b.put_new(ns::CLUSTERS, &schema::key(id), &doc);
     b.put(ns::CLUSTER_TENANT, &schema::key2(tenant, id), &"");
     b.put(ns::CLUSTER_CELL, &schema::key2(cell, id), &"");
@@ -1396,7 +1510,14 @@ fn new_cluster_doc(
 
 /// The rows of a new user (create_user's INSERT + audit). users is the web
 /// plane's table (store/web.rs); bootstrap_tenant needs to create one.
-fn new_user(b: &mut Batch, now: i64, tenant: Uuid, email: &str, password_hash: Option<String>, provider: &str) -> Uuid {
+fn new_user(
+    b: &mut Batch,
+    now: i64,
+    tenant: Uuid,
+    email: &str,
+    password_hash: Option<String>,
+    provider: &str,
+) -> Uuid {
     let id = Uuid::new_v4();
     b.claim(ns::USER_EMAIL, &schema::key(email), id, "users_email_key");
     user_rows(b, now, tenant, id, email, password_hash, provider);
@@ -1491,7 +1612,14 @@ fn new_api_key(
 }
 
 /// grant_cluster_role's upsert: the role row keeps its created_at.
-fn put_role(b: &mut Batch, now: i64, existing: Option<&RoleDoc>, user: Uuid, cluster: Uuid, role: &str) {
+fn put_role(
+    b: &mut Batch,
+    now: i64,
+    existing: Option<&RoleDoc>,
+    user: Uuid,
+    cluster: Uuid,
+    role: &str,
+) {
     let doc = RoleDoc {
         user_id: user,
         cluster_id: cluster,
@@ -1508,10 +1636,14 @@ pub async fn create_tenant(store: &Store, slug: &str, name: &str) -> Result<Uuid
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             if btrim(slug).is_empty() {
-                return Err(DataError::Invalid("create_tenant: slug must not be empty".into()));
+                return Err(DataError::Invalid(
+                    "create_tenant: slug must not be empty".into(),
+                ));
             }
             if btrim(name).is_empty() {
-                return Err(DataError::Invalid("create_tenant: name must not be empty".into()));
+                return Err(DataError::Invalid(
+                    "create_tenant: name must not be empty".into(),
+                ));
             }
             check_name("create_tenant", "name", btrim(name))?;
             let Some(slug) = slug_of(slug) else {
@@ -1545,7 +1677,9 @@ pub async fn create_cluster(
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             if btrim(slug).is_empty() {
-                return Err(DataError::Invalid("create_cluster: slug must not be empty".into()));
+                return Err(DataError::Invalid(
+                    "create_cluster: slug must not be empty".into(),
+                ));
             }
             if read1::<TenantDoc>(kv, ns::TENANTS, &schema::key(tenant_id))
                 .await?
@@ -1560,8 +1694,13 @@ pub async fn create_cluster(
                     "create_cluster: unknown plan code {plan_code}"
                 )));
             };
-            if read1::<CellDoc>(kv, ns::CELLS, &schema::key(cell_id)).await?.is_none() {
-                return Err(DataError::Invalid(format!("create_cluster: unknown cell {cell_id}")));
+            if read1::<CellDoc>(kv, ns::CELLS, &schema::key(cell_id))
+                .await?
+                .is_none()
+            {
+                return Err(DataError::Invalid(format!(
+                    "create_cluster: unknown cell {cell_id}"
+                )));
             }
             let Some(slug) = slug_of(slug) else {
                 return Err(check_violation("clusters", "slug"));
@@ -1586,7 +1725,9 @@ async fn kv_edit_cluster(
     attempts!(
         async {
             let Some(c) = cluster_doc(kv, cluster_id).await? else {
-                return Err(WriteErr::Fail(DataError::Invalid(format!("{unknown} {cluster_id}"))));
+                return Err(WriteErr::Fail(DataError::Invalid(format!(
+                    "{unknown} {cluster_id}"
+                ))));
             };
             let mut doc = c.value.clone();
             edit(&mut doc);
@@ -1611,7 +1752,11 @@ async fn kv_edit_cluster(
 }
 
 /// `assign_plan(cluster, plan_code)`.
-pub async fn assign_plan(store: &Store, cluster_id: Uuid, plan_code: &str) -> Result<(), DataError> {
+pub async fn assign_plan(
+    store: &Store,
+    cluster_id: Uuid,
+    plan_code: &str,
+) -> Result<(), DataError> {
     match store {
         Store::Kv(kv) => {
             let kv = kv.as_ref();
@@ -1635,7 +1780,11 @@ pub async fn assign_plan(store: &Store, cluster_id: Uuid, plan_code: &str) -> Re
 }
 
 /// `set_cluster_status(cluster, status)`.
-pub async fn set_cluster_status(store: &Store, cluster_id: Uuid, status: &str) -> Result<(), DataError> {
+pub async fn set_cluster_status(
+    store: &Store,
+    cluster_id: Uuid,
+    status: &str,
+) -> Result<(), DataError> {
     match store {
         Store::Kv(kv) => {
             if !CLUSTER_STATUSES.contains(&status) {
@@ -1659,7 +1808,11 @@ pub async fn set_cluster_status(store: &Store, cluster_id: Uuid, status: &str) -
 
 /// `set_limit_override(cluster, overrides)`; None clears (`'{}'`). The
 /// document is refused unless [`check_overrides`] accepts it.
-pub async fn set_limit_override(store: &Store, cluster_id: Uuid, overrides: Option<&Value>) -> Result<(), DataError> {
+pub async fn set_limit_override(
+    store: &Store,
+    cluster_id: Uuid,
+    overrides: Option<&Value>,
+) -> Result<(), DataError> {
     match store {
         Store::Kv(kv) => {
             let o = overrides.cloned().unwrap_or_else(|| json!({}));
@@ -1682,7 +1835,11 @@ pub async fn set_limit_override(store: &Store, cluster_id: Uuid, overrides: Opti
 
 /// `set_tenant_status(tenant, status)`: every cluster of the
 /// tenant is invalidated (its effective status is the worse of the two).
-pub async fn set_tenant_status(store: &Store, tenant_id: Uuid, status: &str) -> Result<(), DataError> {
+pub async fn set_tenant_status(
+    store: &Store,
+    tenant_id: Uuid,
+    status: &str,
+) -> Result<(), DataError> {
     match store {
         Store::Kv(kv) => {
             let kv = kv.as_ref();
@@ -1693,7 +1850,9 @@ pub async fn set_tenant_status(store: &Store, tenant_id: Uuid, status: &str) -> 
             }
             attempts!(
                 async {
-                    let Some(t) = read1::<TenantDoc>(kv, ns::TENANTS, &schema::key(tenant_id)).await? else {
+                    let Some(t) =
+                        read1::<TenantDoc>(kv, ns::TENANTS, &schema::key(tenant_id)).await?
+                    else {
                         return Err(WriteErr::Fail(DataError::Invalid(format!(
                             "set_tenant_status: unknown tenant {tenant_id}"
                         ))));
@@ -1808,7 +1967,8 @@ pub async fn revoke_api_key(store: &Store, key_id: Uuid) -> Result<(), DataError
             };
             attempts!(
                 async {
-                    let Some(k) = read1::<ApiKeyDoc>(kv, ns::KEYS, &schema::key(key_id)).await? else {
+                    let Some(k) = read1::<ApiKeyDoc>(kv, ns::KEYS, &schema::key(key_id)).await?
+                    else {
                         return Err(unknown());
                     };
                     if k.value.revoked_at_us.is_some() {
@@ -1853,15 +2013,24 @@ fn revoke_batch(k: &Doc<ApiKeyDoc>, tenant: Uuid) -> Batch {
 
 /// `grant_cluster_role(cluster, email, role)`: upsert. The user
 /// and the cluster MUST share a tenant (a security boundary).
-pub async fn grant_cluster_role(store: &Store, cluster_id: Uuid, email: &str, role: &str) -> Result<(), DataError> {
+pub async fn grant_cluster_role(
+    store: &Store,
+    cluster_id: Uuid,
+    email: &str,
+    role: &str,
+) -> Result<(), DataError> {
     match store {
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             if !ROLES.contains(&role) {
-                return Err(DataError::Invalid(format!("grant_cluster_role: invalid role {role}")));
+                return Err(DataError::Invalid(format!(
+                    "grant_cluster_role: invalid role {role}"
+                )));
             }
             if !email.contains('@') {
-                return Err(DataError::Invalid(format!("grant_cluster_role: invalid email {email}")));
+                return Err(DataError::Invalid(format!(
+                    "grant_cluster_role: invalid email {email}"
+                )));
             }
             let email = norm(email);
             let Some(c) = cluster_doc(kv, cluster_id).await? else {
@@ -1870,7 +2039,9 @@ pub async fn grant_cluster_role(store: &Store, cluster_id: Uuid, email: &str, ro
                 )));
             };
             let Some(u) = user_by_email(kv, &email).await? else {
-                return Err(DataError::Invalid(format!("grant_cluster_role: unknown user {email}")));
+                return Err(DataError::Invalid(format!(
+                    "grant_cluster_role: unknown user {email}"
+                )));
             };
             let tenant = c.value.tenant_id;
             if u.value.tenant_id != tenant {
@@ -1883,7 +2054,14 @@ pub async fn grant_cluster_role(store: &Store, cluster_id: Uuid, email: &str, ro
             let existing = read1::<RoleDoc>(kv, ns::ROLES, &schema::key2(user, cluster_id)).await?;
             let now = now_us();
             let mut b = Batch::default();
-            put_role(&mut b, now, existing.as_ref().map(|d| &d.value), user, cluster_id, role);
+            put_role(
+                &mut b,
+                now,
+                existing.as_ref().map(|d| &d.value),
+                user,
+                cluster_id,
+                role,
+            );
             record_op(
                 &mut b,
                 now,
@@ -1903,7 +2081,11 @@ pub async fn grant_cluster_role(store: &Store, cluster_id: Uuid, email: &str, ro
 
 /// `revoke_cluster_role(cluster, email)`: refuses when there is no
 /// grant to remove.
-pub async fn revoke_cluster_role(store: &Store, cluster_id: Uuid, email: &str) -> Result<(), DataError> {
+pub async fn revoke_cluster_role(
+    store: &Store,
+    cluster_id: Uuid,
+    email: &str,
+) -> Result<(), DataError> {
     match store {
         Store::Kv(kv) => {
             let kv = kv.as_ref();
@@ -1926,7 +2108,9 @@ pub async fn revoke_cluster_role(store: &Store, cluster_id: Uuid, email: &str) -
                         ))));
                     };
                     let user = u.value.id;
-                    let Some(r) = read1::<RoleDoc>(kv, ns::ROLES, &schema::key2(user, cluster_id)).await? else {
+                    let Some(r) =
+                        read1::<RoleDoc>(kv, ns::ROLES, &schema::key2(user, cluster_id)).await?
+                    else {
                         return Err(WriteErr::Fail(DataError::Invalid(format!(
                             "revoke_cluster_role: user {email} has no role on cluster {cluster_id}"
                         ))));
@@ -1997,7 +2181,9 @@ pub async fn bootstrap_tenant(store: &Store, a: &Bootstrap) -> Result<Value, Dat
                 )));
             }
             let Some(cell) = a.cell else {
-                return Err(DataError::Invalid("bootstrap_tenant: cell is required".into()));
+                return Err(DataError::Invalid(
+                    "bootstrap_tenant: cell is required".into(),
+                ));
             };
             if btrim(&key_name).is_empty() {
                 return Err(DataError::Invalid(
@@ -2036,9 +2222,11 @@ pub async fn bootstrap_tenant(store: &Store, a: &Bootstrap) -> Result<Value, Dat
                 }
                 None => None,
             };
-            let mut last = DataError::Unavailable("bootstrap_tenant: concurrent change, gave up".into());
+            let mut last =
+                DataError::Unavailable("bootstrap_tenant: concurrent change, gave up".into());
             for _ in 0..ATTEMPTS {
-                match kv_bootstrap_once(kv, a, cell, btrim(&key_name), password_hash.clone()).await {
+                match kv_bootstrap_once(kv, a, cell, btrim(&key_name), password_hash.clone()).await
+                {
                     Ok(v) => return Ok(v),
                     // A concurrent bootstrap created the same slug/email: the
                     // re-read finds it and takes the idempotent path.
@@ -2071,51 +2259,67 @@ async fn kv_bootstrap_once(
     let mut b = Batch::default();
 
     // tenant
-    let (tenant, new_tenant_created) = match read1::<Uuid>(kv, ns::TENANT_SLUG, &schema::key(&tenant_slug)).await? {
-        Some(id) => (id.value, false),
-        None => {
-            let name = match &a.tenant_name {
-                Some(n) => btrim(n).to_string(),
-                None => tenant_slug.clone(),
-            };
-            if name.is_empty() {
-                return Err(DataError::Invalid("create_tenant: name must not be empty".into()).into());
+    let (tenant, new_tenant_created) =
+        match read1::<Uuid>(kv, ns::TENANT_SLUG, &schema::key(&tenant_slug)).await? {
+            Some(id) => (id.value, false),
+            None => {
+                let name = match &a.tenant_name {
+                    Some(n) => btrim(n).to_string(),
+                    None => tenant_slug.clone(),
+                };
+                if name.is_empty() {
+                    return Err(
+                        DataError::Invalid("create_tenant: name must not be empty".into()).into(),
+                    );
+                }
+                if !dns_label_ok(&tenant_slug) {
+                    return Err(check_violation("tenants", "slug").into());
+                }
+                (new_tenant(&mut b, now, &tenant_slug, &name), true)
             }
-            if !dns_label_ok(&tenant_slug) {
-                return Err(check_violation("tenants", "slug").into());
-            }
-            (new_tenant(&mut b, now, &tenant_slug, &name), true)
-        }
-    };
+        };
 
     // cluster (plan + cell are validated as create_cluster does)
-    let (cluster, cluster_is_new) = match read1::<Uuid>(kv, ns::CLUSTER_SLUG, &schema::key(&cluster_slug)).await? {
-        Some(id) => {
-            let Some(c) = cluster_doc(kv, id.value).await? else {
-                return Err(WriteErr::Moved);
-            };
-            if c.value.tenant_id != tenant {
-                return Err(DataError::Invalid(format!(
+    let (cluster, cluster_is_new) =
+        match read1::<Uuid>(kv, ns::CLUSTER_SLUG, &schema::key(&cluster_slug)).await? {
+            Some(id) => {
+                let Some(c) = cluster_doc(kv, id.value).await? else {
+                    return Err(WriteErr::Moved);
+                };
+                if c.value.tenant_id != tenant {
+                    return Err(DataError::Invalid(format!(
                     "bootstrap_tenant: cluster slug {cluster_slug} already belongs to tenant {}",
                     c.value.tenant_id
                 ))
-                .into());
+                    .into());
+                }
+                (c.value.id, false)
             }
-            (c.value.id, false)
-        }
-        None => {
-            let Some(plan) = plan_by_code(kv, &a.plan_code).await? else {
-                return Err(DataError::Invalid(format!("create_cluster: unknown plan code {}", a.plan_code)).into());
-            };
-            if read1::<CellDoc>(kv, ns::CELLS, &schema::key(cell)).await?.is_none() {
-                return Err(DataError::Invalid(format!("create_cluster: unknown cell {cell}")).into());
+            None => {
+                let Some(plan) = plan_by_code(kv, &a.plan_code).await? else {
+                    return Err(DataError::Invalid(format!(
+                        "create_cluster: unknown plan code {}",
+                        a.plan_code
+                    ))
+                    .into());
+                };
+                if read1::<CellDoc>(kv, ns::CELLS, &schema::key(cell))
+                    .await?
+                    .is_none()
+                {
+                    return Err(
+                        DataError::Invalid(format!("create_cluster: unknown cell {cell}")).into(),
+                    );
+                }
+                if !dns_label_ok(&cluster_slug) {
+                    return Err(check_violation("clusters", "slug").into());
+                }
+                (
+                    new_cluster(&mut b, now, tenant, &cluster_slug, &plan, cell),
+                    true,
+                )
             }
-            if !dns_label_ok(&cluster_slug) {
-                return Err(check_violation("clusters", "slug").into());
-            }
-            (new_cluster(&mut b, now, tenant, &cluster_slug, &plan, cell), true)
-        }
-    };
+        };
 
     // admin user
     let (user, user_doc) = match user_by_email(kv, &email).await? {
@@ -2244,11 +2448,16 @@ async fn kv_bootstrap_once(
 /// Kv: the cascade is explicit and runs in several batches when it does not
 /// fit one (schema.rs "Cascades"), the tenant row LAST, so a re-run after a
 /// partial failure finds the tenant and finishes the job.
-pub async fn delete_tenant(store: &Store, tenant_id: Uuid, force: bool) -> Result<Value, DataError> {
+pub async fn delete_tenant(
+    store: &Store,
+    tenant_id: Uuid,
+    force: bool,
+) -> Result<Value, DataError> {
     match store {
         Store::Kv(kv) => {
             let kv = kv.as_ref();
-            let mut last = DataError::Unavailable("delete_tenant: concurrent change, gave up".into());
+            let mut last =
+                DataError::Unavailable("delete_tenant: concurrent change, gave up".into());
             for _ in 0..ATTEMPTS {
                 match kv_delete_tenant_once(kv, tenant_id, force).await {
                     Ok(v) => return Ok(v),
@@ -2266,7 +2475,11 @@ pub async fn delete_tenant(store: &Store, tenant_id: Uuid, force: bool) -> Resul
     }
 }
 
-async fn kv_delete_tenant_once(kv: &dyn KvBackend, tenant_id: Uuid, force: bool) -> Result<Value, WriteErr> {
+async fn kv_delete_tenant_once(
+    kv: &dyn KvBackend,
+    tenant_id: Uuid,
+    force: bool,
+) -> Result<Value, WriteErr> {
     let Some(t) = read1::<TenantDoc>(kv, ns::TENANTS, &schema::key(tenant_id)).await? else {
         return Ok(json!({"deleted": false, "existed": false, "tenant_id": tenant_id}));
     };
@@ -2359,7 +2572,10 @@ async fn kv_delete_tenant_once(kv: &dyn KvBackend, tenant_id: Uuid, force: bool)
             dels.push((ns::QUEUE_NAME, k));
         }
         for n in [ns::USAGE_MIN, ns::USAGE_DAY, ns::OPS_CLUSTER] {
-            for k in kv::scan_keys(kv, n, &schema::prefix(c)).await.map_err(DataError::kv)? {
+            for k in kv::scan_keys(kv, n, &schema::prefix(c))
+                .await
+                .map_err(DataError::kv)?
+            {
                 dels.push((n, k));
             }
         }
@@ -2377,7 +2593,10 @@ async fn kv_delete_tenant_once(kv: &dyn KvBackend, tenant_id: Uuid, force: bool)
     // queues: live AND tombstoned rows (the name index only holds live ones).
     let mut queues = 0i64;
     if !ids.is_empty() {
-        for (k, d) in kv::scan::<QueueDoc>(kv, ns::QUEUES, K).await.map_err(DataError::kv)? {
+        for (k, d) in kv::scan::<QueueDoc>(kv, ns::QUEUES, K)
+            .await
+            .map_err(DataError::kv)?
+        {
             if ids.contains(&d.value.cluster_id) {
                 queues += 1;
                 dels.push((ns::QUEUES, k));
@@ -2433,9 +2652,13 @@ async fn kv_delete_tenant_once(kv: &dyn KvBackend, tenant_id: Uuid, force: bool)
         ));
     }
     let mut redacted = 0i64;
-    for (k, d) in kv::scan::<OutboxDoc>(kv, ns::OUTBOX, K).await.map_err(DataError::kv)? {
+    for (k, d) in kv::scan::<OutboxDoc>(kv, ns::OUTBOX, K)
+        .await
+        .map_err(DataError::kv)?
+    {
         let p = &d.value.payload;
-        let mine = p.get("tenant_id").and_then(Value::as_str) == Some(tenant_id.to_string().as_str())
+        let mine = p.get("tenant_id").and_then(Value::as_str)
+            == Some(tenant_id.to_string().as_str())
             || p.get("cluster_id")
                 .and_then(Value::as_str)
                 .is_some_and(|c| id_strs.contains(c));
@@ -2528,8 +2751,12 @@ pub const OVERRIDE_KEYS: [&str; 10] = [
 /// them with a provision, so an overrides document that carries one is taken
 /// and stored as it came, and nothing reads the key: refusing it would turn a
 /// signup into a 400 over a limit that no longer exists.
-pub const RETIRED_OVERRIDE_KEYS: [&str; 4] =
-    ["max_msgs_per_sec", "msgs_burst", "max_payload_bytes", "max_batch_items"];
+pub const RETIRED_OVERRIDE_KEYS: [&str; 4] = [
+    "max_msgs_per_sec",
+    "msgs_burst",
+    "max_payload_bytes",
+    "max_batch_items",
+];
 
 /// An overrides document the control plane may store: an object of
 /// [`OVERRIDE_KEYS`] (and, read by nothing, [`RETIRED_OVERRIDE_KEYS`]), each a
@@ -3722,24 +3949,25 @@ pub fn default_plans() -> Vec<PlanDoc> {
         }
         f
     };
-    let plan = |code: &str, class: &str, r: [i64; 2], q: [i64; 3], p: [i64; 2], features: Value| PlanDoc {
-        id: Uuid::new_v4(),
-        code: code.to_string(),
-        cell_class: class.to_string(),
-        max_req_per_sec: Some(r[0]),
-        req_burst: Some(r[1]),
-        // No byte rate by default: see store/seed.rs.
-        max_bytes_per_sec: None,
-        bytes_burst: None,
-        max_queues: Some(q[0]),
-        max_partitions_per_queue: Some(q[1]),
-        max_parked_pops: Some(q[2]),
-        max_retained_bytes: Some(p[0]),
-        max_retention_seconds: Some(p[1]),
-        monthly_msgs_quota: None,
-        features,
-        created_at_us: now_us(),
-    };
+    let plan =
+        |code: &str, class: &str, r: [i64; 2], q: [i64; 3], p: [i64; 2], features: Value| PlanDoc {
+            id: Uuid::new_v4(),
+            code: code.to_string(),
+            cell_class: class.to_string(),
+            max_req_per_sec: Some(r[0]),
+            req_burst: Some(r[1]),
+            // No byte rate by default: see store/seed.rs.
+            max_bytes_per_sec: None,
+            bytes_burst: None,
+            max_queues: Some(q[0]),
+            max_partitions_per_queue: Some(q[1]),
+            max_parked_pops: Some(q[2]),
+            max_retained_bytes: Some(p[0]),
+            max_retention_seconds: Some(p[1]),
+            monthly_msgs_quota: None,
+            features,
+            created_at_us: now_us(),
+        };
     vec![
         plan(
             "free",
@@ -3840,49 +4068,57 @@ pub async fn upsert_cell(store: &Store, spec: &CellSpec) -> Result<Uuid, DataErr
                 async {
                     let now = now_us();
                     let mut b = Batch::default();
-                    let id = match read1::<Uuid>(kv, ns::CELL_SLUG, &schema::key(&spec.slug)).await? {
-                        None => {
-                            let id = Uuid::new_v4();
-                            b.claim(ns::CELL_SLUG, &schema::key(&spec.slug), id, "cells_slug_key");
-                            b.put_new(
-                                ns::CELLS,
-                                &schema::key(id),
-                                &CellDoc {
+                    let id =
+                        match read1::<Uuid>(kv, ns::CELL_SLUG, &schema::key(&spec.slug)).await? {
+                            None => {
+                                let id = Uuid::new_v4();
+                                b.claim(
+                                    ns::CELL_SLUG,
+                                    &schema::key(&spec.slug),
                                     id,
-                                    slug: spec.slug.clone(),
-                                    region: spec.region.clone(),
-                                    base_url: spec.base_url.clone(),
-                                    class: spec.class.clone(),
-                                    capacity_slots: spec.capacity_slots,
-                                    used_slots: 0,
-                                    broker_version: None,
-                                    status: "active".into(),
-                                    cell_secret: spec.cell_secret.clone(),
-                                    created_at_us: now,
-                                },
-                            );
-                            id
-                        }
-                        Some(ix) => {
-                            let Some(d) = read1::<CellDoc>(kv, ns::CELLS, &schema::key(ix.value)).await? else {
-                                return Err(WriteErr::Moved);
-                            };
-                            let mut c = d.value.clone();
-                            c.region = spec.region.clone();
-                            c.base_url = spec.base_url.clone();
-                            c.class = spec.class.clone();
-                            c.capacity_slots = spec.capacity_slots;
-                            c.cell_secret = spec.cell_secret.clone();
-                            if c != d.value {
-                                b.put_at(ns::CELLS, &schema::key(c.id), &c, d.version);
-                                // every cluster on the cell carries its url/secret
-                                for cl in index_ids(kv, ns::CLUSTER_CELL, c.id).await? {
-                                    b.invalidate(cl);
-                                }
+                                    "cells_slug_key",
+                                );
+                                b.put_new(
+                                    ns::CELLS,
+                                    &schema::key(id),
+                                    &CellDoc {
+                                        id,
+                                        slug: spec.slug.clone(),
+                                        region: spec.region.clone(),
+                                        base_url: spec.base_url.clone(),
+                                        class: spec.class.clone(),
+                                        capacity_slots: spec.capacity_slots,
+                                        used_slots: 0,
+                                        broker_version: None,
+                                        status: "active".into(),
+                                        cell_secret: spec.cell_secret.clone(),
+                                        created_at_us: now,
+                                    },
+                                );
+                                id
                             }
-                            c.id
-                        }
-                    };
+                            Some(ix) => {
+                                let Some(d) =
+                                    read1::<CellDoc>(kv, ns::CELLS, &schema::key(ix.value)).await?
+                                else {
+                                    return Err(WriteErr::Moved);
+                                };
+                                let mut c = d.value.clone();
+                                c.region = spec.region.clone();
+                                c.base_url = spec.base_url.clone();
+                                c.class = spec.class.clone();
+                                c.capacity_slots = spec.capacity_slots;
+                                c.cell_secret = spec.cell_secret.clone();
+                                if c != d.value {
+                                    b.put_at(ns::CELLS, &schema::key(c.id), &c, d.version);
+                                    // every cluster on the cell carries its url/secret
+                                    for cl in index_ids(kv, ns::CLUSTER_CELL, c.id).await? {
+                                        b.invalidate(cl);
+                                    }
+                                }
+                                c.id
+                            }
+                        };
                     commit(kv, b).await.map(|_| id)
                 }
                 .await
@@ -4026,16 +4262,26 @@ mod tests {
     #[test]
     fn iso_utc_trims_the_fraction_and_names_the_offset() {
         assert_eq!(iso_utc(0), "1970-01-01T00:00:00+00:00");
-        assert_eq!(iso_utc(1_790_000_000_500_000), "2026-09-21T14:13:20.5+00:00");
-        assert_eq!(iso_utc(951_782_400_000_001), "2000-02-29T00:00:00.000001+00:00");
+        assert_eq!(
+            iso_utc(1_790_000_000_500_000),
+            "2026-09-21T14:13:20.5+00:00"
+        );
+        assert_eq!(
+            iso_utc(951_782_400_000_001),
+            "2000-02-29T00:00:00.000001+00:00"
+        );
     }
 
     #[test]
     fn the_check_constraints() {
         assert!(dns_label_ok("acme-prod") && dns_label_ok("a") && dns_label_ok("0x"));
-        assert!(!dns_label_ok("-a") && !dns_label_ok("a-") && !dns_label_ok("A") && !dns_label_ok(""));
+        assert!(
+            !dns_label_ok("-a") && !dns_label_ok("a-") && !dns_label_ok("A") && !dns_label_ok("")
+        );
         assert!(!dns_label_ok(&"a".repeat(64)) && dns_label_ok(&"a".repeat(63)));
-        assert!(key_hash_ok(&"ab".repeat(32)) && !key_hash_ok(&"AB".repeat(32)) && !key_hash_ok("ab"));
+        assert!(
+            key_hash_ok(&"ab".repeat(32)) && !key_hash_ok(&"AB".repeat(32)) && !key_hash_ok("ab")
+        );
         assert!(plan_code_ok("dedicated-s") && !plan_code_ok("1x"));
     }
 
@@ -4044,22 +4290,32 @@ mod tests {
         let (s, _) = store();
         let (t, c, _u, key) = world(&s).await;
         let ctx = found(lookup_cluster(&s, &ClusterKey::Slug("acme-prod".into())).await);
-        assert_eq!((ctx.cluster_id, ctx.tenant_id, ctx.slug.as_str()), (c, t, "acme-prod"));
+        assert_eq!(
+            (ctx.cluster_id, ctx.tenant_id, ctx.slug.as_str()),
+            (c, t, "acme-prod")
+        );
         assert_eq!(ctx.cell_base_url, "http://127.0.0.1:6632");
         assert_eq!(ctx.cell_token.as_deref(), Some("s3cret"));
         assert_eq!(ctx.status, ClusterStatus::Active);
         assert_eq!(ctx.limits.max_queues, Some(200), "pro's catalog numbers");
         assert!(ctx.features.streams && ctx.features.kv && ctx.features.ephemeral);
-        assert_eq!(found(lookup_cluster(&s, &ClusterKey::Id(c)).await).slug, "acme-prod");
+        assert_eq!(
+            found(lookup_cluster(&s, &ClusterKey::Id(c)).await).slug,
+            "acme-prod"
+        );
         assert!(matches!(
             lookup_cluster(&s, &ClusterKey::Slug("nope".into())).await,
             Lookup::Absent
         ));
 
-        let (kctx, _kid, scopes) = found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await);
+        let (kctx, _kid, scopes) =
+            found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await);
         assert_eq!(kctx.cluster_id, c);
         assert_eq!(scopes, Scopes::all());
-        assert!(matches!(lookup_api_key(&s, &"0".repeat(64)).await, Lookup::Absent));
+        assert!(matches!(
+            lookup_api_key(&s, &"0".repeat(64)).await,
+            Lookup::Absent
+        ));
     }
 
     #[tokio::test]
@@ -4090,8 +4346,15 @@ mod tests {
         assert_eq!(again["can_login"], json!(false));
         assert_eq!(kv.0.keys(ns::KEYS).len(), 1);
         assert_eq!(kv.0.keys(ns::TENANT_SLUG), vec!["#acme".to_string()]);
-        assert_eq!(kv.0.keys(ns::USER_EMAIL), vec!["#admin@acme.io".to_string()]);
-        let tenant: TenantDoc = read1(&kv.0, ns::TENANTS, &schema::key(t)).await.unwrap().unwrap().value;
+        assert_eq!(
+            kv.0.keys(ns::USER_EMAIL),
+            vec!["#admin@acme.io".to_string()]
+        );
+        let tenant: TenantDoc = read1(&kv.0, ns::TENANTS, &schema::key(t))
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
         assert_eq!(tenant.name, "Acme Inc");
         // one signup event, from the run that created the tenant
         assert_eq!(kv.0.keys(ns::OUTBOX).len(), 1);
@@ -4155,7 +4418,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err, DataError::Invalid("create_cluster: unknown plan code gold".into()));
+        assert_eq!(
+            err,
+            DataError::Invalid("create_cluster: unknown plan code gold".into())
+        );
     }
 
     #[tokio::test]
@@ -4182,7 +4448,11 @@ mod tests {
             (out["password_set"].clone(), out["can_login"].clone()),
             (json!(true), json!(true))
         );
-        let u: UserDoc = user_by_email(&kv.0, "a@pw.io").await.unwrap().unwrap().value;
+        let u: UserDoc = user_by_email(&kv.0, "a@pw.io")
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
         assert!(bcrypt::verify("hunter2", u.password_hash.as_deref().unwrap()).unwrap());
     }
 
@@ -4194,7 +4464,9 @@ mod tests {
         assert!(err.is_conflict(), "{err}");
         assert!(err.to_string().contains("tenants_slug_key"));
         let cell = cell(&s).await;
-        let err = create_cluster(&s, t, "acme-prod", "free", cell).await.unwrap_err();
+        let err = create_cluster(&s, t, "acme-prod", "free", cell)
+            .await
+            .unwrap_err();
         assert!(
             err.is_conflict() && err.to_string().contains("clusters_slug_key"),
             "{err}"
@@ -4205,11 +4477,15 @@ mod tests {
         );
         let ghost = Uuid::new_v4();
         assert_eq!(
-            create_cluster(&s, ghost, "c2", "free", cell).await.unwrap_err(),
+            create_cluster(&s, ghost, "c2", "free", cell)
+                .await
+                .unwrap_err(),
             DataError::Invalid(format!("create_cluster: unknown tenant {ghost}"))
         );
         assert_eq!(
-            create_cluster(&s, t, "c2", "free", ghost).await.unwrap_err(),
+            create_cluster(&s, t, "c2", "free", ghost)
+                .await
+                .unwrap_err(),
             DataError::Invalid(format!("create_cluster: unknown cell {ghost}"))
         );
     }
@@ -4220,14 +4496,18 @@ mod tests {
         let (_, c, _, key) = world(&s).await;
         let hash = crate::auth::key_hash_hex(&key);
         let scopes = vec!["produce".to_string()];
-        let err = issue_api_key(&s, c, "again", &hash, &scopes).await.unwrap_err();
+        let err = issue_api_key(&s, c, "again", &hash, &scopes)
+            .await
+            .unwrap_err();
         assert!(
             err.is_conflict() && err.to_string().contains("api_keys_key_hash_key"),
             "{err}"
         );
         let other = "ab".repeat(32);
         assert_eq!(
-            issue_api_key(&s, c, "  ", &other, &scopes).await.unwrap_err(),
+            issue_api_key(&s, c, "  ", &other, &scopes)
+                .await
+                .unwrap_err(),
             DataError::Invalid("issue_api_key: name must not be empty".into())
         );
         assert_eq!(
@@ -4238,7 +4518,9 @@ mod tests {
         );
         assert_eq!(
             issue_api_key(&s, c, "k", "XYZ", &scopes).await.unwrap_err(),
-            DataError::Invalid("issue_api_key: key_hash must be 64 lowercase hex chars (sha256)".into())
+            DataError::Invalid(
+                "issue_api_key: key_hash must be 64 lowercase hex chars (sha256)".into()
+            )
         );
         let id = issue_api_key(&s, c, " reader ", &other, &["read".to_string()])
             .await
@@ -4266,7 +4548,9 @@ mod tests {
         assert!(matches!(lookup_api_key(&s, &hash).await, Lookup::Absent));
         assert_eq!(
             revoke_api_key(&s, kid).await.unwrap_err(),
-            DataError::Invalid(format!("revoke_api_key: unknown or already-revoked key {kid}"))
+            DataError::Invalid(format!(
+                "revoke_api_key: unknown or already-revoked key {kid}"
+            ))
         );
         // the hash stays claimed, as the UNIQUE constraint on the row does
         assert_eq!(kv.0.keys(ns::KEY_HASH).len(), 1);
@@ -4278,26 +4562,47 @@ mod tests {
         let (_, _, _, key) = world(&s).await;
         let (_, kid, _) = found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await);
         touch_api_keys(&s, &[kid, Uuid::new_v4()]).await.unwrap();
-        let d: Doc<ApiKeyDoc> = read1(&kv.0, ns::KEYS, &schema::key(kid)).await.unwrap().unwrap();
+        let d: Doc<ApiKeyDoc> = read1(&kv.0, ns::KEYS, &schema::key(kid))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(d.value.last_used_at_us.is_some());
         touch_api_keys(&s, &[kid]).await.unwrap();
-        let again: Doc<ApiKeyDoc> = read1(&kv.0, ns::KEYS, &schema::key(kid)).await.unwrap().unwrap();
-        assert_eq!(again.version, d.version, "inside the window: no second write");
+        let again: Doc<ApiKeyDoc> = read1(&kv.0, ns::KEYS, &schema::key(kid))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            again.version, d.version,
+            "inside the window: no second write"
+        );
     }
 
     #[tokio::test]
     async fn roles_grant_upsert_and_revoke_with_the_tenant_boundary() {
         let (s, _) = store();
         let (t, c, u, _) = world(&s).await;
-        assert_eq!(cluster_role(&s, u, c).await.unwrap().as_deref(), Some("admin"));
-        grant_cluster_role(&s, c, "ADMIN@acme.io", "viewer").await.unwrap();
-        assert_eq!(cluster_role(&s, u, c).await.unwrap().as_deref(), Some("viewer"));
         assert_eq!(
-            grant_cluster_role(&s, c, "admin@acme.io", "owner").await.unwrap_err(),
+            cluster_role(&s, u, c).await.unwrap().as_deref(),
+            Some("admin")
+        );
+        grant_cluster_role(&s, c, "ADMIN@acme.io", "viewer")
+            .await
+            .unwrap();
+        assert_eq!(
+            cluster_role(&s, u, c).await.unwrap().as_deref(),
+            Some("viewer")
+        );
+        assert_eq!(
+            grant_cluster_role(&s, c, "admin@acme.io", "owner")
+                .await
+                .unwrap_err(),
             DataError::Invalid("grant_cluster_role: invalid role owner".into())
         );
         assert_eq!(
-            grant_cluster_role(&s, c, "ghost@acme.io", "viewer").await.unwrap_err(),
+            grant_cluster_role(&s, c, "ghost@acme.io", "viewer")
+                .await
+                .unwrap_err(),
             DataError::Invalid("grant_cluster_role: unknown user ghost@acme.io".into())
         );
         // a user of ANOTHER tenant can never be seated on this cluster
@@ -4315,7 +4620,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = grant_cluster_role(&s, c, "e@evil.io", "admin").await.unwrap_err();
+        let err = grant_cluster_role(&s, c, "e@evil.io", "admin")
+            .await
+            .unwrap_err();
         let want = format!(
             "grant_cluster_role: user e@evil.io belongs to tenant {}, cluster {c} to tenant {t}",
             other["tenant_id"].as_str().unwrap()
@@ -4325,7 +4632,9 @@ mod tests {
         revoke_cluster_role(&s, c, "admin@acme.io").await.unwrap();
         assert_eq!(cluster_role(&s, u, c).await.unwrap(), None);
         assert_eq!(
-            revoke_cluster_role(&s, c, "admin@acme.io").await.unwrap_err(),
+            revoke_cluster_role(&s, c, "admin@acme.io")
+                .await
+                .unwrap_err(),
             DataError::Invalid(format!(
                 "revoke_cluster_role: user admin@acme.io has no role on cluster {c}"
             ))
@@ -4336,11 +4645,18 @@ mod tests {
     async fn statuses_overrides_and_plans_reach_the_ctx() {
         let (s, _) = store();
         let (t, c, _, _) = world(&s).await;
-        set_limit_override(&s, c, Some(&json!({"max_queues": 5, "max_parked_pops": null})))
-            .await
-            .unwrap();
+        set_limit_override(
+            &s,
+            c,
+            Some(&json!({"max_queues": 5, "max_parked_pops": null})),
+        )
+        .await
+        .unwrap();
         let ctx = found(lookup_cluster(&s, &ClusterKey::Id(c)).await);
-        assert_eq!((ctx.limits.max_queues, ctx.limits.max_parked_pops), (Some(5), None));
+        assert_eq!(
+            (ctx.limits.max_queues, ctx.limits.max_parked_pops),
+            (Some(5), None)
+        );
         assign_plan(&s, c, "free").await.unwrap();
         set_limit_override(&s, c, None).await.unwrap();
         let ctx = found(lookup_cluster(&s, &ClusterKey::Id(c)).await);
@@ -4379,21 +4695,34 @@ mod tests {
         assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Baseline);
         assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Quiet);
         set_cluster_status(&s, c, "push_blocked").await.unwrap();
-        assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Changed(vec![c]));
+        assert_eq!(
+            feed.poll(kv.as_ref()).await.unwrap(),
+            InvalPoll::Changed(vec![c])
+        );
         assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Quiet);
         // queue rows, touches and session revocations do not invalidate
-        persist_queue_floors(&s, &[(c, "orders".into(), 3)]).await.unwrap();
+        persist_queue_floors(&s, &[(c, "orders".into(), 3)])
+            .await
+            .unwrap();
         let (_, kid, _) = found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await);
         touch_api_keys(&s, &[kid]).await.unwrap();
         assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Quiet);
         // a tenant status fans out to every cluster of the tenant
         let cell = cell(&s).await;
-        let c2 = create_cluster(&s, t, "acme-stage", "free", cell).await.unwrap();
-        assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Changed(vec![c2]));
+        let c2 = create_cluster(&s, t, "acme-stage", "free", cell)
+            .await
+            .unwrap();
+        assert_eq!(
+            feed.poll(kv.as_ref()).await.unwrap(),
+            InvalPoll::Changed(vec![c2])
+        );
         set_tenant_status(&s, t, "suspended").await.unwrap();
         let mut both = vec![c, c2];
         both.sort();
-        assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Changed(both));
+        assert_eq!(
+            feed.poll(kv.as_ref()).await.unwrap(),
+            InvalPoll::Changed(both)
+        );
     }
 
     #[tokio::test]
@@ -4403,7 +4732,9 @@ mod tests {
         persist_queue_floors(&s, &[(c, "orders".into(), 3), (c, "a/b".into(), 1)])
             .await
             .unwrap();
-        persist_queue_floors(&s, &[(c, "orders".into(), 2)]).await.unwrap();
+        persist_queue_floors(&s, &[(c, "orders".into(), 2)])
+            .await
+            .unwrap();
         let mut live = live_queues(&s, c).await.unwrap();
         live.sort();
         assert_eq!(
@@ -4418,12 +4749,22 @@ mod tests {
         assert!(res.iter().all(Result::is_ok));
         let mut live = live_queues(&s, c).await.unwrap();
         live.sort();
-        assert_eq!(live, vec![("a/b".into(), 1), ("new".into(), 4), ("orders".into(), 1)]);
+        assert_eq!(
+            live,
+            vec![("a/b".into(), 1), ("new".into(), 4), ("orders".into(), 1)]
+        );
         // the broker lists only "new": the rest are tombstoned, names reusable
-        sweep_deleted_queues(&s, c, &["new".to_string()]).await.unwrap();
-        assert_eq!(live_queues(&s, c).await.unwrap(), vec![("new".to_string(), 4)]);
+        sweep_deleted_queues(&s, c, &["new".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            live_queues(&s, c).await.unwrap(),
+            vec![("new".to_string(), 4)]
+        );
         assert_eq!(kv.0.keys(ns::QUEUES).len(), 3, "soft delete keeps the rows");
-        persist_queue_floors(&s, &[(c, "orders".into(), 7)]).await.unwrap();
+        persist_queue_floors(&s, &[(c, "orders".into(), 7)])
+            .await
+            .unwrap();
         let mut live = live_queues(&s, c).await.unwrap();
         live.sort();
         assert_eq!(
@@ -4451,7 +4792,9 @@ mod tests {
         let (s, _) = store();
         let (t, c, _, _) = world(&s).await;
         let cell = cell(&s).await;
-        let c2 = create_cluster(&s, t, "acme-gone", "free", cell).await.unwrap();
+        let c2 = create_cluster(&s, t, "acme-gone", "free", cell)
+            .await
+            .unwrap();
         set_cluster_status(&s, c2, "deleting").await.unwrap();
         set_limit_override(&s, c, Some(&json!({"max_retained_bytes": 1234})))
             .await
@@ -4474,8 +4817,13 @@ mod tests {
         revoke_session(&s, " j1 ", exp, "user", u).await.unwrap();
         assert!(is_jti_revoked(&s, "j1").await.unwrap());
         assert_eq!(
-            revoke_session(&s, "j2", exp, "user", Uuid::nil()).await.unwrap_err(),
-            DataError::Invalid(format!("revoke_session: actor_id must be a known user {}", Uuid::nil()))
+            revoke_session(&s, "j2", exp, "user", Uuid::nil())
+                .await
+                .unwrap_err(),
+            DataError::Invalid(format!(
+                "revoke_session: actor_id must be a known user {}",
+                Uuid::nil()
+            ))
         );
         assert_eq!(
             revoke_session(&s, " ", exp, "user", u).await.unwrap_err(),
@@ -4536,7 +4884,9 @@ mod tests {
             .await
             .unwrap();
         sweep_deleted_queues(&s, c, &[]).await.unwrap(); // a tombstone must go too
-        persist_queue_floors(&s, &[(c, "orders".into(), 1)]).await.unwrap();
+        persist_queue_floors(&s, &[(c, "orders".into(), 1)])
+            .await
+            .unwrap();
         revoke_session(&s, "j", now_us() / 1_000_000 + 60, "user", u)
             .await
             .unwrap();
@@ -4572,15 +4922,24 @@ mod tests {
             (json!(1), json!(1), json!(1), json!(2))
         );
         assert_eq!(
-            (counts["api_keys"].clone(), counts["api_keys_revoked"].clone()),
+            (
+                counts["api_keys"].clone(),
+                counts["api_keys_revoked"].clone()
+            ),
             (json!(1), json!(1))
         );
         assert!(counts["operations"].as_i64().unwrap() > 0);
         assert_eq!(counts["outbox_redacted"], json!(1));
-        assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Changed(vec![c]));
+        assert_eq!(
+            feed.poll(kv.as_ref()).await.unwrap(),
+            InvalPoll::Changed(vec![c])
+        );
 
         // nothing of the tenant is left; the other tenant is untouched
-        assert!(matches!(lookup_cluster(&s, &ClusterKey::Id(c)).await, Lookup::Absent));
+        assert!(matches!(
+            lookup_cluster(&s, &ClusterKey::Id(c)).await,
+            Lookup::Absent
+        ));
         assert!(matches!(
             lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await,
             Lookup::Absent
@@ -4600,7 +4959,11 @@ mod tests {
         assert_eq!(kv.0.keys(ns::QUEUES).len(), 1);
         assert_eq!(kv.0.keys(ns::QUEUE_NAME).len(), 1);
         assert_eq!(kv.0.keys(ns::S3SINKS), vec![schema::key(other_c)]);
-        assert!(kv.0.keys(ns::OPS).iter().all(|k| !k.starts_with(&schema::prefix(t))));
+        assert!(kv
+            .0
+            .keys(ns::OPS)
+            .iter()
+            .all(|k| !k.starts_with(&schema::prefix(t))));
         assert!(kv
             .0
             .keys(ns::OPS_CLUSTER)
@@ -4629,7 +4992,10 @@ mod tests {
             .any(|(_, d)| d.value.payload["admin_email"] == json!("k@keep.io")));
 
         let again = delete_tenant(&s, t, false).await.unwrap();
-        assert_eq!(again, json!({"deleted": false, "existed": false, "tenant_id": t}));
+        assert_eq!(
+            again,
+            json!({"deleted": false, "existed": false, "tenant_id": t})
+        );
     }
 
     /// Fan-outs wider than one call: 260 clusters under one tenant (the
@@ -4642,7 +5008,11 @@ mod tests {
         let cell = cell(&s).await;
         let mut all = vec![c];
         for i in 0..259 {
-            all.push(create_cluster(&s, t, &format!("acme-{i}"), "free", cell).await.unwrap());
+            all.push(
+                create_cluster(&s, t, &format!("acme-{i}"), "free", cell)
+                    .await
+                    .unwrap(),
+            );
         }
         for i in 0..250 {
             let hash = format!("{:064x}", i + 1);
@@ -4654,7 +5024,10 @@ mod tests {
         feed.poll(kv.as_ref()).await.unwrap();
         set_tenant_status(&s, t, "deleting").await.unwrap();
         all.sort();
-        assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Changed(all.clone()));
+        assert_eq!(
+            feed.poll(kv.as_ref()).await.unwrap(),
+            InvalPoll::Changed(all.clone())
+        );
         let out = delete_tenant(&s, t, false).await.unwrap();
         assert_eq!(out["counts"]["clusters"], json!(260));
         assert_eq!(
@@ -4665,9 +5038,14 @@ mod tests {
             (json!(251), json!(251))
         );
         assert!(
-            kv.0.keys(ns::CLUSTERS).is_empty() && kv.0.keys(ns::KEYS).is_empty() && kv.0.keys(ns::TENANTS).is_empty()
+            kv.0.keys(ns::CLUSTERS).is_empty()
+                && kv.0.keys(ns::KEYS).is_empty()
+                && kv.0.keys(ns::TENANTS).is_empty()
         );
-        assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Changed(all));
+        assert_eq!(
+            feed.poll(kv.as_ref()).await.unwrap(),
+            InvalPoll::Changed(all)
+        );
     }
 
     /// Of two concurrent deletes one wins, the other answers existed=false,
@@ -4679,11 +5057,17 @@ mod tests {
         set_tenant_status(&s, t, "deleting").await.unwrap();
         let (a, b) = tokio::join!(delete_tenant(&s, t, false), delete_tenant(&s, t, false));
         let (a, b) = (a.unwrap(), b.unwrap());
-        let winners = [&a, &b].iter().filter(|r| r["deleted"] == json!(true)).count();
+        let winners = [&a, &b]
+            .iter()
+            .filter(|r| r["deleted"] == json!(true))
+            .count();
         assert_eq!(winners, 1, "{a} / {b}");
         let events: Vec<(String, Doc<OutboxDoc>)> = kv::scan(&kv.0, ns::OUTBOX, K).await.unwrap();
         assert_eq!(
-            events.iter().filter(|(_, d)| d.value.kind == "tenant_deleted").count(),
+            events
+                .iter()
+                .filter(|(_, d)| d.value.kind == "tenant_deleted")
+                .count(),
             1
         );
         assert!(kv.0.keys(ns::TENANTS).is_empty());
@@ -4729,7 +5113,11 @@ mod tests {
         let t = create_tenant(&s, "lonely", "Lonely").await.unwrap();
         let out = delete_tenant(&s, t, true).await.unwrap();
         assert_eq!(
-            (out["deleted"].clone(), out["forced"].clone(), out["status_was"].clone()),
+            (
+                out["deleted"].clone(),
+                out["forced"].clone(),
+                out["status_was"].clone()
+            ),
             (json!(true), json!(true), json!("active"))
         );
         assert!(kv.0.keys(ns::TENANTS).is_empty() && kv.0.keys(ns::TENANT_SLUG).is_empty());
@@ -4762,13 +5150,20 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(moved, id);
-        assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Changed(vec![c]));
+        assert_eq!(
+            feed.poll(kv.as_ref()).await.unwrap(),
+            InvalPoll::Changed(vec![c])
+        );
         let ctx = found(lookup_cluster(&s, &ClusterKey::Id(c)).await);
         assert_eq!(
             (ctx.cell_base_url.as_str(), ctx.cell_token.clone()),
             ("http://10.0.0.1:6632", None)
         );
-        assert_eq!(seed_default_plans(&s).await.unwrap(), 0, "the catalog is seeded once");
+        assert_eq!(
+            seed_default_plans(&s).await.unwrap(),
+            0,
+            "the catalog is seeded once"
+        );
     }
 
     /// StrictKv that counts the calls carrying a write.
@@ -5484,7 +5879,13 @@ mod tests {
         ));
         assert!(!is_jti_revoked(&s, "j").await.unwrap());
         assert!(live_queues(&s, Uuid::nil()).await.unwrap().is_empty());
-        assert_eq!(create_tenant(&s, "a", "b").await.unwrap_err(), DataError::NoStore);
-        assert_eq!(seed_default_plans(&s).await.unwrap_err(), DataError::NoStore);
+        assert_eq!(
+            create_tenant(&s, "a", "b").await.unwrap_err(),
+            DataError::NoStore
+        );
+        assert_eq!(
+            seed_default_plans(&s).await.unwrap_err(),
+            DataError::NoStore
+        );
     }
 }

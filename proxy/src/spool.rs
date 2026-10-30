@@ -64,7 +64,13 @@ impl Spool {
         if let Err(e) = fs::create_dir_all(&dir) {
             tracing::warn!(target: "spool", dir = %dir.display(), error = %e, "could not create meter spool dir");
         }
-        Spool { dir, active: Mutex::new(None), rotate_bytes, cooldown, file_seq: AtomicU64::new(0) }
+        Spool {
+            dir,
+            active: Mutex::new(None),
+            rotate_bytes,
+            cooldown,
+            file_seq: AtomicU64::new(0),
+        }
     }
 
     /// Append rows as JSONL to the active spool file, rotating past
@@ -93,7 +99,13 @@ impl Spool {
             if need_new {
                 let path = self.new_path();
                 match OpenOptions::new().create(true).append(true).open(&path) {
-                    Ok(file) => *guard = Some(ActiveFile { file, path, bytes: 0 }),
+                    Ok(file) => {
+                        *guard = Some(ActiveFile {
+                            file,
+                            path,
+                            bytes: 0,
+                        })
+                    }
                     Err(e) => {
                         tracing::warn!(target: "spool", path = %path.display(), error = %e, "open spool file failed; dropping meter row");
                         continue;
@@ -113,7 +125,10 @@ impl Spool {
     }
 
     fn new_path(&self) -> PathBuf {
-        let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
         let seq = self.file_seq.fetch_add(1, Ordering::Relaxed);
         // epoch-ms prefix + monotonic sequence: same lexical-sort-is-FIFO
         // property as file_buffer.rs, and the sequence (not just the
@@ -282,7 +297,10 @@ fn done_path(path: &Path) -> PathBuf {
 }
 
 fn read_done(path: &Path) -> usize {
-    fs::read_to_string(done_path(path)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    fs::read_to_string(done_path(path))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// Write-then-rename, so a crash leaves the old count or the new one.
@@ -353,7 +371,15 @@ mod tests {
     }
 
     fn row(n: u64) -> UsageRow {
-        UsageRow { cluster_id: Uuid::new_v4(), minute: 1000 + n, op: "push".to_string(), reqs: n, msgs: n * 2, bytes_in: n * 10, bytes_out: n }
+        UsageRow {
+            cluster_id: Uuid::new_v4(),
+            minute: 1000 + n,
+            op: "push".to_string(),
+            reqs: n,
+            msgs: n * 2,
+            bytes_in: n * 10,
+            bytes_out: n,
+        }
     }
 
     #[tokio::test]
@@ -368,7 +394,11 @@ mod tests {
         writer.write(&rows[2..5]);
         drop(writer);
 
-        assert_eq!(list_buf_files(dir.path()).len(), 1, "under the 5MB rotation threshold, one file");
+        assert_eq!(
+            list_buf_files(dir.path()).len(),
+            1,
+            "under the 5MB rotation threshold, one file"
+        );
 
         let received: Arc<Mutex<Vec<UsageRow>>> = Arc::new(Mutex::new(Vec::new()));
         let received2 = received.clone();
@@ -388,7 +418,10 @@ mod tests {
         for r in &rows {
             assert!(got.contains(r), "row {r:?} should have been recovered");
         }
-        assert!(list_buf_files(dir.path()).is_empty(), "fully-recovered files must be deleted");
+        assert!(
+            list_buf_files(dir.path()).is_empty(),
+            "fully-recovered files must be deleted"
+        );
     }
 
     #[tokio::test]
@@ -433,7 +466,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert_eq!(calls.load(Ordering::SeqCst), 4, "all four files attempted");
-        assert!(elapsed >= cooldown, "breaker must have slept at least one cooldown, elapsed={elapsed:?}");
+        assert!(
+            elapsed >= cooldown,
+            "breaker must have slept at least one cooldown, elapsed={elapsed:?}"
+        );
         // 3 failed and were left in place; the 4th succeeded and was removed.
         assert_eq!(list_buf_files(dir.path()).len(), 3);
     }
@@ -464,8 +500,16 @@ mod tests {
                 }
             })
             .await;
-        assert_eq!(seen.lock().unwrap().len(), 6, "two chunks applied before the failure");
-        assert_eq!(list_buf_files(dir.path()).len(), 1, "the file stays for the next startup");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            6,
+            "two chunks applied before the failure"
+        );
+        assert_eq!(
+            list_buf_files(dir.path()).len(),
+            1,
+            "the file stays for the next startup"
+        );
 
         // Next startup: only the 4 rows not applied come back — with either
         // replay shape — and the file and its sidecar are gone after.

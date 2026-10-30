@@ -29,7 +29,16 @@ fn plans(now: i64) -> Vec<PlanDoc> {
         }
         f
     };
-    let p = |code: &str, class: &str, rps, rb, q, ppq, parked, retained: i64, ret_days: i64, features| PlanDoc {
+    let p = |code: &str,
+             class: &str,
+             rps,
+             rb,
+             q,
+             ppq,
+             parked,
+             retained: i64,
+             ret_days: i64,
+             features| PlanDoc {
         id: Uuid::new_v4(),
         code: code.into(),
         cell_class: class.into(),
@@ -51,9 +60,42 @@ fn plans(now: i64) -> Vec<PlanDoc> {
     const MIB: i64 = 1024 * 1024;
     vec![
         p("free", "shared", 5, 25, 20, 8, 50, 1024 * MIB, 7, fam(&[])),
-        p("dev", "shared", 10, 50, 50, 16, 150, 3 * 1024 * MIB, 14, fam(&[])),
-        p("pro", "shared", 50, 200, 200, 32, 1000, 20 * 1024 * MIB, 30, fam(&[("streams", true), ("traces", true)])),
-        p("dedicated-s", "dedicated", 200, 800, 1000, 64, 5000, 200 * 1024 * MIB, 90, fam(&[("streams", true), ("traces", true)])),
+        p(
+            "dev",
+            "shared",
+            10,
+            50,
+            50,
+            16,
+            150,
+            3 * 1024 * MIB,
+            14,
+            fam(&[]),
+        ),
+        p(
+            "pro",
+            "shared",
+            50,
+            200,
+            200,
+            32,
+            1000,
+            20 * 1024 * MIB,
+            30,
+            fam(&[("streams", true), ("traces", true)]),
+        ),
+        p(
+            "dedicated-s",
+            "dedicated",
+            200,
+            800,
+            1000,
+            64,
+            5000,
+            200 * 1024 * MIB,
+            90,
+            fam(&[("streams", true), ("traces", true)]),
+        ),
     ]
 }
 
@@ -62,14 +104,41 @@ fn plans(now: i64) -> Vec<PlanDoc> {
 pub async fn seed(kv: &dyn KvBackend) -> Result<bool, KvError> {
     let now = now_us();
     let mut wrote = false;
-    let meta = MetaDoc { version: schema::SCHEMA_VERSION };
-    wrote |= once(kv, vec![kv::put_op(ns::META, &schema::key("schema"), &meta, Expect::Absent, Ttl::Forever, true)]).await?;
+    let meta = MetaDoc {
+        version: schema::SCHEMA_VERSION,
+    };
+    wrote |= once(
+        kv,
+        vec![kv::put_op(
+            ns::META,
+            &schema::key("schema"),
+            &meta,
+            Expect::Absent,
+            Ttl::Forever,
+            true,
+        )],
+    )
+    .await?;
     for plan in plans(now) {
         wrote |= once(
             kv,
             vec![
-                kv::put_op(ns::PLAN_CODE, &schema::key(&plan.code), &plan.id, Expect::Absent, Ttl::Forever, true),
-                kv::put_op(ns::PLANS, &schema::key(plan.id), &plan, Expect::Absent, Ttl::Forever, true),
+                kv::put_op(
+                    ns::PLAN_CODE,
+                    &schema::key(&plan.code),
+                    &plan.id,
+                    Expect::Absent,
+                    Ttl::Forever,
+                    true,
+                ),
+                kv::put_op(
+                    ns::PLANS,
+                    &schema::key(plan.id),
+                    &plan,
+                    Expect::Absent,
+                    Ttl::Forever,
+                    true,
+                ),
             ],
         )
         .await?;
@@ -91,8 +160,22 @@ pub async fn seed(kv: &dyn KvBackend) -> Result<bool, KvError> {
     wrote |= once(
         kv,
         vec![
-            kv::put_op(ns::CELL_SLUG, &schema::key(SELF_CELL), &cell.id, Expect::Absent, Ttl::Forever, true),
-            kv::put_op(ns::CELLS, &schema::key(cell.id), &cell, Expect::Absent, Ttl::Forever, true),
+            kv::put_op(
+                ns::CELL_SLUG,
+                &schema::key(SELF_CELL),
+                &cell.id,
+                Expect::Absent,
+                Ttl::Forever,
+                true,
+            ),
+            kv::put_op(
+                ns::CELLS,
+                &schema::key(cell.id),
+                &cell,
+                Expect::Absent,
+                Ttl::Forever,
+                true,
+            ),
         ],
     )
     .await?;
@@ -122,8 +205,13 @@ mod tests {
         assert_eq!(m.keys(ns::PLANS).len(), 4);
         assert_eq!(m.keys(ns::PLAN_CODE).len(), 4);
         assert_eq!(m.keys(ns::CELLS).len(), 1);
-        let free: Option<kv::Doc<Uuid>> = kv::get(&m, ns::PLAN_CODE, &schema::key("free")).await.unwrap();
-        let plan: Option<kv::Doc<PlanDoc>> = kv::get(&m, ns::PLANS, &schema::key(free.unwrap().value)).await.unwrap();
+        let free: Option<kv::Doc<Uuid>> = kv::get(&m, ns::PLAN_CODE, &schema::key("free"))
+            .await
+            .unwrap();
+        let plan: Option<kv::Doc<PlanDoc>> =
+            kv::get(&m, ns::PLANS, &schema::key(free.unwrap().value))
+                .await
+                .unwrap();
         assert_eq!(plan.unwrap().value.features["kv"], true);
     }
 }

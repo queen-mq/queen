@@ -65,6 +65,9 @@ sourceOfTruth:
 # byte; raft.rs (f9c9a37f2): a transaction's KV writes spend their own rate, QUEEN_KV_TXN_WRITE_RATE
 # (10,000/s), on the same quota. The KV operations name their rate and quota, the timer codes of a
 # transaction are listed, and memory_pressure joins the engine answers.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): handlers/raft.rs,
+# rsm/consume/txn.rs, rsm/facade/real.rs reformatted, line wrapping only. Nothing this page states
+# changes.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step

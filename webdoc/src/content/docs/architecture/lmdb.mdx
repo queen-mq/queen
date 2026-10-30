@@ -30,6 +30,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (2.7.0): apply.rs (7fe23f4ed): KV reads put each stored value's
 # text into the answer instead of building a JSON tree; every answer is the same, byte for byte.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): rsm/apply.rs,
+# rsm/maintenance.rs reformatted, line wrapping only. Nothing this page states changes.
 ---
 
 The state in memory is saved to an LMDB file, `store/data.mdb`, four times a second. This is a checkpoint, and no client waits for it: it only decides how much of the log a restart has to replay.

@@ -626,8 +626,7 @@ async fn serve_port(
         tokio::spawn(async move {
             let _permit = permit;
             let svc = hyper_util::service::TowerToHyperService::new(app);
-            let mut builder =
-                hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+            let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
             builder
                 .http1()
                 .timer(TokioTimer::new())

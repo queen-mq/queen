@@ -146,7 +146,9 @@ pub(super) enum LinkMode {
     /// driver plans nothing.
     Unknown,
     /// An ordinary cluster. `promoted`: it was a standby once.
-    Primary { promoted: bool },
+    Primary {
+        promoted: bool,
+    },
     Standby(Standby),
 }
 
@@ -540,9 +542,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         match &self.link {
             LinkMode::Primary { .. } => None,
             LinkMode::Unknown => Some(false),
-            LinkMode::Standby(s) => Some(
-                s.promoting.is_none() && (s.attach.is_some() || !self.link_queue.is_empty()),
-            ),
+            LinkMode::Standby(s) => {
+                Some(s.promoting.is_none() && (s.attach.is_some() || !self.link_queue.is_empty()))
+            }
         }
     }
 
@@ -571,7 +573,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 LinkMode::Primary { .. } => false,
             }
         {
-            self.note_link_wait("a promotion was asked while the link role is unread or a promotion is in flight");
+            self.note_link_wait(
+                "a promotion was asked while the link role is unread or a promotion is in flight",
+            );
         }
         let answer = match (&self.link, &sub.op) {
             (LinkMode::Unknown, _) => self.link_refusal().map(Reply::Refused),
@@ -671,9 +675,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let kinds_floor = self.repl.kinds_floor();
         let store = self.store.clone();
         let answered = reply.is_some();
-        let rx = self.planner_thread.run(move |_kept| {
-            plan_link(&*store, job, cursor, &id, &source, kinds_floor, answered)
-        });
+        let rx = self
+            .planner_thread
+            .run(move |_kept| plan_link(&*store, job, cursor, &id, &source, kinds_floor, answered));
         let n = usize::from(answered);
         Some(Launched {
             rx,

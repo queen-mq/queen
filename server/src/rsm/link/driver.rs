@@ -168,8 +168,8 @@ pub fn parse_sources(raw: &str) -> Result<Vec<String>, String> {
             }
             _ => {
                 return Err(format!(
-                    "QUEEN_LINK_SOURCE: `{part}` is not `host:port` (a source node's Raft RPC address)"
-                ))
+                "QUEEN_LINK_SOURCE: `{part}` is not `host:port` (a source node's Raft RPC address)"
+            ))
             }
         }
     }
@@ -212,9 +212,7 @@ impl LinkSetup {
         }
         let seed = match std::env::var("QUEEN_LINK_SEED") {
             Ok(v) if !v.trim().is_empty() => Some(v.trim().parse().map_err(|_| {
-                format!(
-                    "QUEEN_LINK_SEED={v}: expected the id of the one node that takes the seed"
-                )
+                format!("QUEEN_LINK_SEED={v}: expected the id of the one node that takes the seed")
             })?),
             _ => None,
         };

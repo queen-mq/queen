@@ -299,7 +299,11 @@ pub async fn role_on_cluster(
     if session.operator {
         return Ok(Role::Admin);
     }
-    match st.keys.cluster_role(&st.store, session.claims.user_id, cluster_id).await {
+    match st
+        .keys
+        .cluster_role(&st.store, session.claims.user_id, cluster_id)
+        .await
+    {
         Some(role) => Ok(role),
         None => {
             // Distinguish "user exists but has no role here" (a real 403)
@@ -310,7 +314,10 @@ pub async fn role_on_cluster(
             if !st.keys.user_exists(&st.store, session.claims.user_id).await {
                 return Err(errors::err_401("session no longer valid"));
             }
-            Err(errors::err_403(errors::CODE_FORBIDDEN, "no role on this cluster"))
+            Err(errors::err_403(
+                errors::CODE_FORBIDDEN,
+                "no role on this cluster",
+            ))
         }
     }
 }
@@ -325,7 +332,10 @@ pub async fn authenticate(
     cluster_id: uuid::Uuid,
 ) -> Result<Principal, Response> {
     if st.cfg.dev_insecure {
-        return Ok(Principal::ApiKey { key_id: uuid::Uuid::nil(), scopes: Scopes::all() });
+        return Ok(Principal::ApiKey {
+            key_id: uuid::Uuid::nil(),
+            scopes: Scopes::all(),
+        });
     }
     let secure = crate::oauth::cookie_is_secure(st, headers);
     let token = match read_credential(&st.cfg.cookie_name, secure, headers) {
@@ -336,7 +346,10 @@ pub async fn authenticate(
                 Some((ctx, key_id, scopes)) if ctx.cluster_id == cluster_id => {
                     Ok(Principal::ApiKey { key_id, scopes })
                 }
-                Some(_) => Err(errors::err_403(errors::CODE_FORBIDDEN, "key/cluster mismatch")),
+                Some(_) => Err(errors::err_403(
+                    errors::CODE_FORBIDDEN,
+                    "key/cluster mismatch",
+                )),
                 None => Err(errors::err_401("unknown or revoked api key")),
             };
         }
@@ -352,12 +365,19 @@ pub async fn authenticate(
     let role = match bind_cluster(session.claims.cluster, session.claims.role, cluster_id) {
         ClusterBinding::Trust(role) => role,
         ClusterBinding::Mismatch => {
-            return Err(errors::err_403(errors::CODE_FORBIDDEN, "token not valid for this cluster"));
+            return Err(errors::err_403(
+                errors::CODE_FORBIDDEN,
+                "token not valid for this cluster",
+            ));
         }
         ClusterBinding::Lookup => role_on_cluster(st, &session, cluster_id).await?,
     };
 
-    Ok(Principal::User { user_id: session.claims.user_id, role, operator: session.operator })
+    Ok(Principal::User {
+        user_id: session.claims.user_id,
+        role,
+        operator: session.operator,
+    })
 }
 
 /// Outcome of matching a token's optional `cluster` claim against the request's
@@ -372,7 +392,11 @@ enum ClusterBinding {
     Mismatch,
 }
 
-fn bind_cluster(claim_cluster: Option<Uuid>, claim_role: Role, request_cluster: Uuid) -> ClusterBinding {
+fn bind_cluster(
+    claim_cluster: Option<Uuid>,
+    claim_role: Role,
+    request_cluster: Uuid,
+) -> ClusterBinding {
     match claim_cluster {
         Some(c) if c == request_cluster => ClusterBinding::Trust(claim_role),
         Some(_) => ClusterBinding::Mismatch,
@@ -392,9 +416,7 @@ pub fn authorize(p: &Principal, class: RouteClass) -> Result<(), Response> {
         (Principal::ApiKey { scopes, .. }, RouteClass::Produce) => scopes.produce,
         (Principal::ApiKey { scopes, .. }, RouteClass::Consume) => scopes.consume,
         (Principal::ApiKey { scopes, .. }, RouteClass::QueueAdmin) => scopes.admin,
-        (Principal::ApiKey { scopes, .. }, RouteClass::Read) => {
-            scopes.read || scopes.admin
-        }
+        (Principal::ApiKey { scopes, .. }, RouteClass::Read) => scopes.read || scopes.admin,
         // A gated READ is a read: a read-only key must be able to do
         // `GET /api/v1/kv/:ns/*key`, which PLAN_KV_TIMERS.md §8.1 puts at the
         // broker's `ReadOnly` access level. Only the kv/timers families ever
@@ -415,14 +437,15 @@ pub fn authorize(p: &Principal, class: RouteClass) -> Result<(), Response> {
         (Principal::User { role, .. }, RouteClass::QueueAdmin) => matches!(role, Role::Admin),
         (Principal::User { .. }, RouteClass::Read) => true,
         (Principal::User { .. }, RouteClass::Gated(_, crate::routes::GatedOp::Read)) => true,
-        (Principal::User { role, .. }, RouteClass::Gated(_, _)) => {
-            !matches!(role, Role::Viewer)
-        }
+        (Principal::User { role, .. }, RouteClass::Gated(_, _)) => !matches!(role, Role::Viewer),
     };
     if ok {
         Ok(())
     } else {
-        Err(errors::err_403(errors::CODE_FORBIDDEN, "operation not permitted for this credential"))
+        Err(errors::err_403(
+            errors::CODE_FORBIDDEN,
+            "operation not permitted for this credential",
+        ))
     }
 }
 
@@ -561,7 +584,9 @@ impl JwtReject {
             JwtReject::NotConfigured => "jwt signer not configured".to_string(),
             JwtReject::Expired => "token expired".to_string(),
             JwtReject::BadIssuer => "issuer mismatch".to_string(),
-            JwtReject::BadAudience => "audience mismatch (token minted for another cell)".to_string(),
+            JwtReject::BadAudience => {
+                "audience mismatch (token minted for another cell)".to_string()
+            }
             JwtReject::BadSignature => "signature invalid".to_string(),
             JwtReject::Malformed => "malformed token".to_string(),
             JwtReject::BadClaim(c) => format!("bad claim: {c}"),
@@ -727,7 +752,12 @@ impl Keys {
                                 "Ed25519 private key loaded but public key could not be derived; \
                                  set QUEEN_PROXY_JWT_ED25519_PUB_PEM. Minting works, verification DISABLED."
                             );
-                            Signer::Ed { enc: Some(enc), dec: None, kid: String::new(), x_b64: String::new() }
+                            Signer::Ed {
+                                enc: Some(enc),
+                                dec: None,
+                                kid: String::new(),
+                                x_b64: String::new(),
+                            }
                         }
                     }
                 }
@@ -802,7 +832,11 @@ impl Keys {
     #[allow(dead_code)]
     fn sign(&self, claims: &UserClaims) -> Result<String, String> {
         match &self.signer {
-            Signer::Ed { enc: Some(enc), kid, .. } => {
+            Signer::Ed {
+                enc: Some(enc),
+                kid,
+                ..
+            } => {
                 let mut h = Header::new(Algorithm::EdDSA);
                 h.kid = Some(kid.clone());
                 encode(&h, claims, enc).map_err(|e| e.to_string())
@@ -849,12 +883,23 @@ impl Keys {
         }
         let user_id = Uuid::parse_str(c.sub.trim()).map_err(|_| JwtReject::BadClaim("sub"))?;
         let role = role_from_str(&c.role).ok_or(JwtReject::BadClaim("role"))?;
-        let cluster = match c.cluster.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let cluster = match c
+            .cluster
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(s) => Some(Uuid::parse_str(s).map_err(|_| JwtReject::BadClaim("cluster"))?),
             None => None,
         };
 
-        Ok(VerifiedClaims { user_id, role, jti: c.jti, cluster, exp: c.exp })
+        Ok(VerifiedClaims {
+            user_id,
+            role,
+            jti: c.jti,
+            cluster,
+            exp: c.exp,
+        })
     }
 
     /// Is this jti on the deny-list? Cached 60s. `db == None` (dev) => not
@@ -877,7 +922,10 @@ impl Keys {
     /// Forget every cached revocation answer (a session was revoked on some
     /// node: the replicated revocation epoch moved).
     pub fn clear_revoked_cache(&self) {
-        self.revoked_cache.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        self.revoked_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     pub async fn is_revoked(&self, db: impl Into<Store>, jti: &str) -> bool {
@@ -916,7 +964,11 @@ impl Keys {
     /// the proxy is failing and the knob that flips it, so the behaviour is
     /// visible in the log of a deployment that never read this file.
     fn warn_deny_list_unavailable(&self, err: &str, what: &str) {
-        let sample = self.revoked_warn.lock().unwrap().tick(Instant::now(), REVOKED_WARN_EVERY);
+        let sample = self
+            .revoked_warn
+            .lock()
+            .unwrap()
+            .tick(Instant::now(), REVOKED_WARN_EVERY);
         let Some(suppressed) = sample else { return };
         if self.revocation_strict {
             tracing::warn!(
@@ -969,7 +1021,12 @@ impl Keys {
     /// Resolve a user's role on a cluster from `cluster_roles`. Cached 30s
     /// (positive memberships only). No store or no row => None (fail-closed:
     /// membership cannot be proven => caller returns 403).
-    pub async fn cluster_role(&self, db: impl Into<Store>, user_id: Uuid, cluster_id: Uuid) -> Option<Role> {
+    pub async fn cluster_role(
+        &self,
+        db: impl Into<Store>,
+        user_id: Uuid,
+        cluster_id: Uuid,
+    ) -> Option<Role> {
         let key = (user_id, cluster_id);
         if let Some((r, at)) = self.role_cache.lock().unwrap().get(&key) {
             if at.elapsed() < ROLE_TTL {
@@ -1004,7 +1061,10 @@ impl Keys {
     /// Revocations must take effect on the next request rather than after the
     /// normal short TTL expires.
     pub fn invalidate_role(&self, user_id: Uuid, cluster_id: Uuid) {
-        self.role_cache.lock().unwrap().remove(&(user_id, cluster_id));
+        self.role_cache
+            .lock()
+            .unwrap()
+            .remove(&(user_id, cluster_id));
     }
 
     /// Drop one cached operator answer after the flag was written here, so
@@ -1058,18 +1118,29 @@ impl Keys {
     /// serves a login it cannot satisfy says so at boot instead of 500ing every
     /// login for as long as nobody tries one.
     pub fn can_mint(&self) -> bool {
-        matches!(&self.signer, Signer::Ed { enc: Some(_), .. } | Signer::Hs { .. })
+        matches!(
+            &self.signer,
+            Signer::Ed { enc: Some(_), .. } | Signer::Hs { .. }
+        )
     }
 
     /// Can this proxy ACCEPT a session token? False when no verification key
     /// could be built — every session then answers 401 with the data plane green.
     pub fn can_verify(&self) -> bool {
-        matches!(&self.signer, Signer::Ed { dec: Some(_), .. } | Signer::Hs { .. })
+        matches!(
+            &self.signer,
+            Signer::Ed { dec: Some(_), .. } | Signer::Hs { .. }
+        )
     }
 
     pub fn jwks_json(&self) -> String {
         match &self.signer {
-            Signer::Ed { dec: Some(_), kid, x_b64, .. } => serde_json::json!({
+            Signer::Ed {
+                dec: Some(_),
+                kid,
+                x_b64,
+                ..
+            } => serde_json::json!({
                 "keys": [{
                     "kty": "OKP",
                     "crv": "Ed25519",
@@ -1240,8 +1311,9 @@ pub(crate) mod testkit {
         let kp = Ed25519KeyPair::from_pkcs8_maybe_unchecked(pkcs8.as_ref()).unwrap();
         // SubjectPublicKeyInfo for Ed25519 is a fixed 12-byte prefix + the raw
         // 32-byte key, the 44-byte shape `ed_pub_pem_to_raw` reads back.
-        let mut spki: Vec<u8> =
-            vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        let mut spki: Vec<u8> = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
         spki.extend_from_slice(kp.public_key().as_ref());
         let mint = Keys::build(
             Some(der_to_pem(pkcs8.as_ref(), "PRIVATE KEY")),
@@ -1303,11 +1375,23 @@ mod tests {
         let rng = SystemRandom::new();
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let pem = der_to_pem(pkcs8.as_ref(), "PRIVATE KEY");
-        Keys::build(Some(pem), None, None, issuer.to_string(), audience.map(str::to_string))
+        Keys::build(
+            Some(pem),
+            None,
+            None,
+            issuer.to_string(),
+            audience.map(str::to_string),
+        )
     }
 
     fn hs_keys(issuer: &str) -> Keys {
-        Keys::build(None, None, Some("dev-secret-value".to_string()), issuer.to_string(), None)
+        Keys::build(
+            None,
+            None,
+            Some("dev-secret-value".to_string()),
+            issuer.to_string(),
+            None,
+        )
     }
 
     #[test]
@@ -1317,7 +1401,8 @@ mod tests {
         assert_eq!(k.len(), "qk_live_".len() + 43, "43 base64url body chars");
         let body = &k["qk_live_".len()..];
         assert!(
-            body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            body.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
             "base64url alphabet only: {body}"
         );
         let h = key_hash_hex(&k);
@@ -1429,12 +1514,24 @@ mod tests {
     #[test]
     fn a_token_with_no_audience_is_accepted_by_a_cell_that_has_one() {
         let keys = ed_keys_aud("queen-proxy", Some("cell-a.queenmq.cloud"));
-        let token = keys.mint_user_jwt(Uuid::new_v4(), "admin", None, 3600).unwrap();
-        assert!(keys.verify_jwt_claims(&token).is_ok(), "an unstamped token must keep working");
+        let token = keys
+            .mint_user_jwt(Uuid::new_v4(), "admin", None, 3600)
+            .unwrap();
+        assert!(
+            keys.verify_jwt_claims(&token).is_ok(),
+            "an unstamped token must keep working"
+        );
         // ... including the explicitly-empty shapes, which name nobody.
-        for empty in [Audience::One(String::new()), Audience::One("  ".into()), Audience::Many(vec![])] {
+        for empty in [
+            Audience::One(String::new()),
+            Audience::One("  ".into()),
+            Audience::Many(vec![]),
+        ] {
             let t = token_with_aud(&keys, Some(empty));
-            assert!(keys.verify_jwt_claims(&t).is_ok(), "an empty aud names no cell");
+            assert!(
+                keys.verify_jwt_claims(&t).is_ok(),
+                "an empty aud names no cell"
+            );
         }
     }
 
@@ -1446,7 +1543,10 @@ mod tests {
             // The array form, which plenty of JWT libraries emit for a single
             // audience, and one naming several cells including this one.
             Audience::Many(vec!["cell-a.queenmq.cloud".into()]),
-            Audience::Many(vec!["cell-b.queenmq.cloud".into(), "cell-a.queenmq.cloud".into()]),
+            Audience::Many(vec![
+                "cell-b.queenmq.cloud".into(),
+                "cell-a.queenmq.cloud".into(),
+            ]),
             // A hostname is case-insensitive; a minter that stamps it mixed-case
             // must not lock the cell out of every session it was configured for.
             Audience::One("Cell-A.QueenMQ.Cloud".into()),
@@ -1461,7 +1561,10 @@ mod tests {
         let keys = ed_keys_aud("queen-proxy", Some("cell-a.queenmq.cloud"));
         for aud in [
             Audience::One("cell-b.queenmq.cloud".into()),
-            Audience::Many(vec!["cell-b.queenmq.cloud".into(), "cell-c.queenmq.cloud".into()]),
+            Audience::Many(vec![
+                "cell-b.queenmq.cloud".into(),
+                "cell-c.queenmq.cloud".into(),
+            ]),
             // A suffix is not a match: the audience is a whole name, exactly as
             // QUEEN_PROXY_SHARED_HOSTS is.
             Audience::One("queenmq.cloud".into()),
@@ -1479,17 +1582,33 @@ mod tests {
     #[test]
     fn a_stamped_token_does_not_replay_against_a_sibling_cell() {
         let (priv_pem, pub_pem, _) = ed_pair();
-        let control_plane = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string(), None);
+        let control_plane =
+            Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string(), None);
         let cell = |aud: &str| {
-            Keys::build(None, Some(pub_pem.clone()), None, "queen-proxy".to_string(), Some(aud.into()))
+            Keys::build(
+                None,
+                Some(pub_pem.clone()),
+                None,
+                "queen-proxy".to_string(),
+                Some(aud.into()),
+            )
         };
         let cell_a = cell("cell-a.queenmq.cloud");
         let cell_b = cell("cell-b.queenmq.cloud");
 
-        let for_a = token_with_aud(&control_plane, Some(Audience::One("cell-a.queenmq.cloud".into())));
-        assert!(cell_a.verify_jwt_claims(&for_a).is_ok(), "the cell it was minted for accepts it");
+        let for_a = token_with_aud(
+            &control_plane,
+            Some(Audience::One("cell-a.queenmq.cloud".into())),
+        );
         assert!(
-            matches!(cell_b.verify_jwt_claims(&for_a).unwrap_err(), JwtReject::BadAudience),
+            cell_a.verify_jwt_claims(&for_a).is_ok(),
+            "the cell it was minted for accepts it"
+        );
+        assert!(
+            matches!(
+                cell_b.verify_jwt_claims(&for_a).unwrap_err(),
+                JwtReject::BadAudience
+            ),
             "the sibling must refuse a token that names cell A"
         );
 
@@ -1513,11 +1632,20 @@ mod tests {
         assert!(audience_ok(want, Some(&Audience::Many(vec![]))));
         assert!(audience_ok(want, Some(&Audience::One("cell-a".into()))));
         assert!(audience_ok(want, Some(&Audience::One(" cell-a ".into()))));
-        assert!(audience_ok(want, Some(&Audience::Many(vec!["cell-b".into(), "cell-a".into()]))));
+        assert!(audience_ok(
+            want,
+            Some(&Audience::Many(vec!["cell-b".into(), "cell-a".into()]))
+        ));
         assert!(!audience_ok(want, Some(&Audience::One("cell-b".into()))));
-        assert!(!audience_ok(want, Some(&Audience::Many(vec!["cell-b".into(), "cell-c".into()]))));
+        assert!(!audience_ok(
+            want,
+            Some(&Audience::Many(vec!["cell-b".into(), "cell-c".into()]))
+        ));
         // A blank entry beside a real one does not turn the claim into "absent".
-        assert!(!audience_ok(want, Some(&Audience::Many(vec!["".into(), "cell-b".into()]))));
+        assert!(!audience_ok(
+            want,
+            Some(&Audience::Many(vec!["".into(), "cell-b".into()]))
+        ));
     }
 
     /// `aud` is read off the wire, so both JSON shapes have to survive serde.
@@ -1549,7 +1677,9 @@ mod tests {
     fn foreign_signature_rejected() {
         let a = ed_keys("queen-proxy");
         let b = ed_keys("queen-proxy");
-        let token = a.mint_user_jwt(Uuid::new_v4(), "viewer", None, 3600).unwrap();
+        let token = a
+            .mint_user_jwt(Uuid::new_v4(), "viewer", None, 3600)
+            .unwrap();
         let err = b.verify_jwt_claims(&token).unwrap_err();
         assert!(matches!(err, JwtReject::BadSignature), "got {err:?}");
     }
@@ -1559,9 +1689,15 @@ mod tests {
         let req = Uuid::new_v4();
         let other = Uuid::new_v4();
         // claim bound to this cluster -> trust claim role
-        assert_eq!(bind_cluster(Some(req), Role::Admin, req), ClusterBinding::Trust(Role::Admin));
+        assert_eq!(
+            bind_cluster(Some(req), Role::Admin, req),
+            ClusterBinding::Trust(Role::Admin)
+        );
         // claim bound elsewhere -> mismatch (403)
-        assert_eq!(bind_cluster(Some(other), Role::Admin, req), ClusterBinding::Mismatch);
+        assert_eq!(
+            bind_cluster(Some(other), Role::Admin, req),
+            ClusterBinding::Mismatch
+        );
         // no claim -> DB lookup
         assert_eq!(bind_cluster(None, Role::Admin, req), ClusterBinding::Lookup);
     }
@@ -1572,11 +1708,16 @@ mod tests {
         // authenticate's mismatch check has real data to compare.
         let keys = ed_keys("queen-proxy");
         let cl = Uuid::new_v4();
-        let token = keys.mint_user_jwt(Uuid::new_v4(), "consumer", Some(cl), 600).unwrap();
+        let token = keys
+            .mint_user_jwt(Uuid::new_v4(), "consumer", Some(cl), 600)
+            .unwrap();
         let vc = keys.verify_jwt_claims(&token).unwrap();
         assert_eq!(vc.cluster, Some(cl));
         // a different request cluster -> Mismatch
-        assert_eq!(bind_cluster(vc.cluster, vc.role, Uuid::new_v4()), ClusterBinding::Mismatch);
+        assert_eq!(
+            bind_cluster(vc.cluster, vc.role, Uuid::new_v4()),
+            ClusterBinding::Mismatch
+        );
     }
 
     #[test]
@@ -1598,7 +1739,9 @@ mod tests {
         assert_eq!(raw.len(), 32);
 
         // the minted header kid equals the JWKS kid (verifier can select the key)
-        let token = keys.mint_user_jwt(Uuid::new_v4(), "viewer", None, 60).unwrap();
+        let token = keys
+            .mint_user_jwt(Uuid::new_v4(), "viewer", None, 60)
+            .unwrap();
         let hdr = jsonwebtoken::decode_header(&token).unwrap();
         assert_eq!(hdr.kid.as_deref(), Some(kid));
     }
@@ -1621,12 +1764,22 @@ mod tests {
 
         let priv_pem = der_to_pem(pkcs8.as_ref(), "PRIVATE KEY");
         // hand-build the Ed25519 SPKI DER: fixed 12-byte prefix + raw key
-        let mut spki = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        let mut spki = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
         spki.extend_from_slice(&raw_pub);
         let pub_pem = der_to_pem(&spki, "PUBLIC KEY");
 
-        let keys = Keys::build(Some(priv_pem), Some(pub_pem), None, "queen-proxy".to_string(), None);
-        let token = keys.mint_user_jwt(Uuid::new_v4(), "consumer", None, 3600).unwrap();
+        let keys = Keys::build(
+            Some(priv_pem),
+            Some(pub_pem),
+            None,
+            "queen-proxy".to_string(),
+            None,
+        );
+        let token = keys
+            .mint_user_jwt(Uuid::new_v4(), "consumer", None, 3600)
+            .unwrap();
         assert!(keys.verify_jwt_claims(&token).is_ok());
 
         // JWKS x equals the real public key
@@ -1651,7 +1804,9 @@ mod tests {
     #[test]
     fn unknown_role_cannot_be_minted() {
         let keys = ed_keys("queen-proxy");
-        assert!(keys.mint_user_jwt(Uuid::new_v4(), "superuser", None, 60).is_err());
+        assert!(keys
+            .mint_user_jwt(Uuid::new_v4(), "superuser", None, 60)
+            .is_err());
     }
 
     #[test]
@@ -1717,9 +1872,15 @@ mod tests {
         // Cached positive answers are returned without touching the store, so
         // an unreachable store cannot resurrect a token this proxy just revoked.
         let db = unreachable_store();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         assert!(rt.block_on(keys.is_revoked(&db, "jti-1")));
-        assert!(!rt.block_on(keys.is_revoked(&db, "jti-2")), "unrelated jti unaffected (fail-open)");
+        assert!(
+            !rt.block_on(keys.is_revoked(&db, "jti-2")),
+            "unrelated jti unaffected (fail-open)"
+        );
     }
 
     #[test]
@@ -1743,7 +1904,9 @@ mod tests {
         // revoked_tokens row cannot be swept when the token dies on its own.
         let keys = ed_keys("queen-proxy");
         let before = now_secs();
-        let token = keys.mint_user_jwt(Uuid::new_v4(), "viewer", None, 3600).unwrap();
+        let token = keys
+            .mint_user_jwt(Uuid::new_v4(), "viewer", None, 3600)
+            .unwrap();
         let vc = keys.verify_jwt_claims(&token).unwrap();
         assert!(vc.exp >= before + 3600 && vc.exp <= now_secs() + 3600);
         assert!(!vc.jti.is_empty());
@@ -1752,7 +1915,11 @@ mod tests {
     // ---- operator gate (F3): the authorize half of the capability ----------
 
     fn user(role: Role, operator: bool) -> Principal {
-        Principal::User { user_id: Uuid::new_v4(), role, operator }
+        Principal::User {
+            user_id: Uuid::new_v4(),
+            role,
+            operator,
+        }
     }
 
     #[test]
@@ -1766,7 +1933,10 @@ mod tests {
             assert!(authorize(&user(r, true), RouteClass::Operator).is_ok());
         }
         // An api key can never be an operator — not even one with every scope.
-        let key = Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes::all() };
+        let key = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes::all(),
+        };
         assert!(authorize(&key, RouteClass::Operator).is_err());
     }
 
@@ -1776,7 +1946,10 @@ mod tests {
         // migration/internal/stats-refresh/discovery-pop are not dashboard
         // data, and the capability must not become a general skeleton key.
         assert!(authorize(&user(Role::Admin, true), RouteClass::Blocked).is_err());
-        let key = Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes::all() };
+        let key = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes::all(),
+        };
         assert!(authorize(&key, RouteClass::Blocked).is_err());
     }
 
@@ -1795,20 +1968,34 @@ mod tests {
     #[test]
     fn a_gated_read_is_a_read_for_authorization() {
         use crate::routes::{Feature, GatedOp};
-        let read_only =
-            Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes { read: true, ..Default::default() } };
+        let read_only = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes {
+                read: true,
+                ..Default::default()
+            },
+        };
         // GET /api/v1/kv/:ns/*key is `ReadOnly` in the broker's own access
         // table (§8.1); a read-scoped key must not be 403'd at the proxy for
         // an operation the broker would allow.
         assert!(authorize(&read_only, RouteClass::Gated(Feature::Kv, GatedOp::Read)).is_ok());
-        assert!(authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Kv, GatedOp::Read)).is_ok());
+        assert!(authorize(
+            &user(Role::Viewer, false),
+            RouteClass::Gated(Feature::Kv, GatedOp::Read)
+        )
+        .is_ok());
     }
 
     #[test]
     fn a_gated_write_still_needs_a_writing_credential() {
         use crate::routes::{Feature, GatedOp};
-        let read_only =
-            Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes { read: true, ..Default::default() } };
+        let read_only = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes {
+                read: true,
+                ..Default::default()
+            },
+        };
         // Reading a key does not license writing one, cancelling one, or
         // scheduling one — including on the never-quota-blocked `Open` half,
         // which is about quotas, not about credentials.
@@ -1817,13 +2004,24 @@ mod tests {
                 authorize(&read_only, RouteClass::Gated(Feature::Timers, op)).is_err(),
                 "{op:?} must not be reachable with a read-only key"
             );
-            assert!(authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Timers, op)).is_err());
+            assert!(authorize(
+                &user(Role::Viewer, false),
+                RouteClass::Gated(Feature::Timers, op)
+            )
+            .is_err());
         }
         let producer = Principal::ApiKey {
             key_id: Uuid::new_v4(),
-            scopes: Scopes { produce: true, ..Default::default() },
+            scopes: Scopes {
+                produce: true,
+                ..Default::default()
+            },
         };
-        assert!(authorize(&producer, RouteClass::Gated(Feature::Timers, GatedOp::Mixed)).is_ok());
+        assert!(authorize(
+            &producer,
+            RouteClass::Gated(Feature::Timers, GatedOp::Mixed)
+        )
+        .is_ok());
     }
 
     /// EPHEMERAL_QUEUES.md §5.1: the RAM family's writes need a writing
@@ -1833,36 +2031,61 @@ mod tests {
     #[test]
     fn ephemeral_authorization_follows_the_gated_matrix() {
         use crate::routes::{Feature, GatedOp};
-        let read_only =
-            Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes { read: true, ..Default::default() } };
+        let read_only = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes {
+                read: true,
+                ..Default::default()
+            },
+        };
         // depth/queues listings
-        assert!(authorize(&read_only, RouteClass::Gated(Feature::Ephemeral, GatedOp::Read)).is_ok());
-        assert!(
-            authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Ephemeral, GatedOp::Read))
-                .is_ok()
-        );
+        assert!(authorize(
+            &read_only,
+            RouteClass::Gated(Feature::Ephemeral, GatedOp::Read)
+        )
+        .is_ok());
+        assert!(authorize(
+            &user(Role::Viewer, false),
+            RouteClass::Gated(Feature::Ephemeral, GatedOp::Read)
+        )
+        .is_ok());
         // push (Grow) and ack/configure/reset/delete (Open) are writes
         for op in [GatedOp::Grow, GatedOp::Open] {
             assert!(
                 authorize(&read_only, RouteClass::Gated(Feature::Ephemeral, op)).is_err(),
                 "{op:?} must not be reachable with a read-only key"
             );
-            assert!(
-                authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Ephemeral, op))
-                    .is_err()
-            );
+            assert!(authorize(
+                &user(Role::Viewer, false),
+                RouteClass::Gated(Feature::Ephemeral, op)
+            )
+            .is_err());
         }
         // a consume-scoped key pops and acks; a produce-scoped one pushes
         let consumer = Principal::ApiKey {
             key_id: Uuid::new_v4(),
-            scopes: Scopes { consume: true, ..Default::default() },
+            scopes: Scopes {
+                consume: true,
+                ..Default::default()
+            },
         };
-        assert!(authorize(&consumer, RouteClass::Gated(Feature::Ephemeral, GatedOp::Open)).is_ok());
+        assert!(authorize(
+            &consumer,
+            RouteClass::Gated(Feature::Ephemeral, GatedOp::Open)
+        )
+        .is_ok());
         let producer = Principal::ApiKey {
             key_id: Uuid::new_v4(),
-            scopes: Scopes { produce: true, ..Default::default() },
+            scopes: Scopes {
+                produce: true,
+                ..Default::default()
+            },
         };
-        assert!(authorize(&producer, RouteClass::Gated(Feature::Ephemeral, GatedOp::Grow)).is_ok());
+        assert!(authorize(
+            &producer,
+            RouteClass::Gated(Feature::Ephemeral, GatedOp::Grow)
+        )
+        .is_ok());
     }
 
     /// The pre-existing gated surfaces must come out of this change with the
@@ -1881,27 +2104,53 @@ mod tests {
     #[test]
     fn streams_and_traces_authorization_is_unchanged() {
         use crate::routes::{Feature, GatedOp};
-        let read_only =
-            Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes { read: true, ..Default::default() } };
-        assert!(authorize(&read_only, RouteClass::Gated(Feature::Streams, GatedOp::Open)).is_err());
-        assert!(authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Traces, GatedOp::Open)).is_err());
-        assert!(authorize(&user(Role::Consumer, false), RouteClass::Gated(Feature::Streams, GatedOp::Open)).is_ok());
+        let read_only = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes {
+                read: true,
+                ..Default::default()
+            },
+        };
+        assert!(authorize(
+            &read_only,
+            RouteClass::Gated(Feature::Streams, GatedOp::Open)
+        )
+        .is_err());
+        assert!(authorize(
+            &user(Role::Viewer, false),
+            RouteClass::Gated(Feature::Traces, GatedOp::Open)
+        )
+        .is_err());
+        assert!(authorize(
+            &user(Role::Consumer, false),
+            RouteClass::Gated(Feature::Streams, GatedOp::Open)
+        )
+        .is_ok());
 
         // The cycle, principal by principal, before (`Open`) and after
         // (`Mixed`).
         let produce_key = Principal::ApiKey {
             key_id: Uuid::new_v4(),
-            scopes: Scopes { produce: true, ..Default::default() },
+            scopes: Scopes {
+                produce: true,
+                ..Default::default()
+            },
         };
         let consume_key = Principal::ApiKey {
             key_id: Uuid::new_v4(),
-            scopes: Scopes { consume: true, ..Default::default() },
+            scopes: Scopes {
+                consume: true,
+                ..Default::default()
+            },
         };
         for p in [
             &read_only,
             &produce_key,
             &consume_key,
-            &Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes::all() },
+            &Principal::ApiKey {
+                key_id: Uuid::new_v4(),
+                scopes: Scopes::all(),
+            },
             &user(Role::Admin, false),
             &user(Role::Producer, false),
             &user(Role::Consumer, false),
@@ -1917,10 +2166,26 @@ mod tests {
         // actually carries now. A streaming job runs on one key, so BOTH halves
         // of its wire — the source ack and the sink emits — have to be
         // reachable with a produce-scoped key and with a consume-scoped one.
-        assert!(authorize(&produce_key, RouteClass::Gated(Feature::Streams, GatedOp::Mixed)).is_ok());
-        assert!(authorize(&consume_key, RouteClass::Gated(Feature::Streams, GatedOp::Mixed)).is_ok());
-        assert!(authorize(&read_only, RouteClass::Gated(Feature::Streams, GatedOp::Mixed)).is_err());
-        assert!(authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Streams, GatedOp::Mixed)).is_err());
+        assert!(authorize(
+            &produce_key,
+            RouteClass::Gated(Feature::Streams, GatedOp::Mixed)
+        )
+        .is_ok());
+        assert!(authorize(
+            &consume_key,
+            RouteClass::Gated(Feature::Streams, GatedOp::Mixed)
+        )
+        .is_ok());
+        assert!(authorize(
+            &read_only,
+            RouteClass::Gated(Feature::Streams, GatedOp::Mixed)
+        )
+        .is_err());
+        assert!(authorize(
+            &user(Role::Viewer, false),
+            RouteClass::Gated(Feature::Streams, GatedOp::Mixed)
+        )
+        .is_err());
     }
 
     // ---- credential extraction ---------------------------------------------
@@ -1928,10 +2193,16 @@ mod tests {
     fn headers_with(cookie: Option<&str>, auth: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();
         if let Some(c) = cookie {
-            h.insert(axum::http::header::COOKIE, axum::http::HeaderValue::from_str(c).unwrap());
+            h.insert(
+                axum::http::header::COOKIE,
+                axum::http::HeaderValue::from_str(c).unwrap(),
+            );
         }
         if let Some(a) = auth {
-            h.insert(axum::http::header::AUTHORIZATION, axum::http::HeaderValue::from_str(a).unwrap());
+            h.insert(
+                axum::http::header::AUTHORIZATION,
+                axum::http::HeaderValue::from_str(a).unwrap(),
+            );
         }
         h
     }
@@ -1999,7 +2270,10 @@ mod tests {
         );
         // An empty cell cookie is not a session either: a cleared cookie the
         // browser still sends must fall through, not shadow a live fleet one.
-        let h = headers_with(Some("__Host-queen_session_cell=; queen_session=fleet"), None);
+        let h = headers_with(
+            Some("__Host-queen_session_cell=; queen_session=fleet"),
+            None,
+        );
         assert_eq!(
             read_credential("queen_session", true, &h),
             Credential::Session("fleet".to_string())
@@ -2011,8 +2285,14 @@ mod tests {
     /// the plain name is what both halves use.
     #[test]
     fn the_cell_cookie_carries_the_host_prefix_only_when_secure() {
-        assert_eq!(cell_cookie_name_of("queen_session", true), "__Host-queen_session_cell");
-        assert_eq!(cell_cookie_name_of("queen_session", false), "queen_session_cell");
+        assert_eq!(
+            cell_cookie_name_of("queen_session", true),
+            "__Host-queen_session_cell"
+        );
+        assert_eq!(
+            cell_cookie_name_of("queen_session", false),
+            "queen_session_cell"
+        );
 
         let h = headers_with(Some("queen_session_cell=cell; queen_session=fleet"), None);
         assert_eq!(
@@ -2030,11 +2310,17 @@ mod tests {
     #[test]
     fn credential_recognises_api_keys_by_prefix() {
         let h = headers_with(None, Some("Bearer qk_live_abc"));
-        assert_eq!(read_credential("queen_session", true, &h), Credential::ApiKey("qk_live_abc".to_string()));
+        assert_eq!(
+            read_credential("queen_session", true, &h),
+            Credential::ApiKey("qk_live_abc".to_string())
+        );
         // a bare (non-Bearer) Authorization value is accepted verbatim, as the
         // old bearer parse did
         let h2 = headers_with(None, Some("qk_live_abc"));
-        assert_eq!(read_credential("queen_session", true, &h2), Credential::ApiKey("qk_live_abc".to_string()));
+        assert_eq!(
+            read_credential("queen_session", true, &h2),
+            Credential::ApiKey("qk_live_abc".to_string())
+        );
     }
 
     #[test]
@@ -2052,7 +2338,10 @@ mod tests {
         // (/api/v1/pop leases messages). Script-issued calls never carry
         // Sec-Fetch-Mode: navigate.
         let mut h = headers_with(Some("queen_session=abc123"), None);
-        h.insert("sec-fetch-mode", axum::http::HeaderValue::from_static("navigate"));
+        h.insert(
+            "sec-fetch-mode",
+            axum::http::HeaderValue::from_static("navigate"),
+        );
         assert_eq!(read_credential("queen_session", true, &h), Credential::None);
         // ... but the app shell itself IS loaded by navigation, and serving
         // static bytes forges nothing.
@@ -2067,13 +2356,22 @@ mod tests {
         // An Authorization header is chosen per request; a third-party page
         // cannot attach one, so the navigation rule never applies to it.
         let mut h = headers_with(None, Some("Bearer qk_live_abc"));
-        h.insert("sec-fetch-mode", axum::http::HeaderValue::from_static("navigate"));
-        assert_eq!(read_credential("queen_session", true, &h), Credential::ApiKey("qk_live_abc".to_string()));
+        h.insert(
+            "sec-fetch-mode",
+            axum::http::HeaderValue::from_static("navigate"),
+        );
+        assert_eq!(
+            read_credential("queen_session", true, &h),
+            Credential::ApiKey("qk_live_abc".to_string())
+        );
 
         // The SPA's own XHR, and any non-browser client (no Sec-Fetch-* at all).
         for mode in ["cors", "same-origin", "no-cors"] {
             let mut h = headers_with(Some("queen_session=abc123"), None);
-            h.insert("sec-fetch-mode", axum::http::HeaderValue::from_str(mode).unwrap());
+            h.insert(
+                "sec-fetch-mode",
+                axum::http::HeaderValue::from_str(mode).unwrap(),
+            );
             assert_eq!(
                 read_credential("queen_session", true, &h),
                 Credential::Session("abc123".to_string()),
@@ -2081,19 +2379,33 @@ mod tests {
             );
         }
         let bare = headers_with(Some("queen_session=abc123"), None);
-        assert_eq!(read_credential("queen_session", true, &bare), Credential::Session("abc123".to_string()));
+        assert_eq!(
+            read_credential("queen_session", true, &bare),
+            Credential::Session("abc123".to_string())
+        );
     }
 
     #[test]
     fn credential_none_when_nothing_usable_is_present() {
-        assert_eq!(read_credential("queen_session", true, &headers_with(None, None)), Credential::None);
+        assert_eq!(
+            read_credential("queen_session", true, &headers_with(None, None)),
+            Credential::None
+        );
         // empty Authorization falls through to the (absent) cookie
         assert_eq!(
-            read_credential("queen_session", true, &headers_with(None, Some("Bearer   "))),
+            read_credential(
+                "queen_session",
+                true,
+                &headers_with(None, Some("Bearer   "))
+            ),
             Credential::None
         );
         assert_eq!(
-            read_credential("queen_session", true, &headers_with(Some("queen_session="), None)),
+            read_credential(
+                "queen_session",
+                true,
+                &headers_with(Some("queen_session="), None)
+            ),
             Credential::None
         );
     }
@@ -2114,8 +2426,13 @@ mod tests {
     #[test]
     fn no_signer_configured_cannot_mint_or_verify() {
         let keys = Keys::build(None, None, None, "queen-proxy".to_string(), None);
-        assert!(keys.mint_user_jwt(Uuid::new_v4(), "admin", None, 60).is_err());
-        assert!(matches!(keys.verify_jwt_claims("x.y.z"), Err(JwtReject::NotConfigured)));
+        assert!(keys
+            .mint_user_jwt(Uuid::new_v4(), "admin", None, 60)
+            .is_err());
+        assert!(matches!(
+            keys.verify_jwt_claims("x.y.z"),
+            Err(JwtReject::NotConfigured)
+        ));
         // What the boot gate reads, and the shape it refuses in mint mode.
         assert!(!keys.can_mint());
         assert!(!keys.can_verify());
@@ -2129,9 +2446,15 @@ mod tests {
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let kp = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
         let raw_pub = kp.public_key().as_ref().to_vec();
-        let mut spki = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        let mut spki = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
         spki.extend_from_slice(&raw_pub);
-        (der_to_pem(pkcs8.as_ref(), "PRIVATE KEY"), der_to_pem(&spki, "PUBLIC KEY"), raw_pub)
+        (
+            der_to_pem(pkcs8.as_ref(), "PRIVATE KEY"),
+            der_to_pem(&spki, "PUBLIC KEY"),
+            raw_pub,
+        )
     }
 
     #[test]
@@ -2150,17 +2473,27 @@ mod tests {
     fn a_public_key_alone_verifies_and_refuses_to_mint() {
         let (priv_pem, pub_pem, raw_pub) = ed_pair();
         let auth_host = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string(), None);
-        let token = auth_host.mint_user_jwt(Uuid::new_v4(), "admin", None, 3600).unwrap();
+        let token = auth_host
+            .mint_user_jwt(Uuid::new_v4(), "admin", None, 3600)
+            .unwrap();
 
         let cell = Keys::build(None, Some(pub_pem), None, "queen-proxy".to_string(), None);
         assert!(cell.can_verify(), "a verify-only host must verify");
         assert!(!cell.can_mint(), "a verify-only host holds no private key");
-        assert!(cell.verify_jwt_claims(&token).is_ok(), "the auth host's token must be accepted");
-        assert!(cell.mint_user_jwt(Uuid::new_v4(), "admin", None, 60).is_err());
+        assert!(
+            cell.verify_jwt_claims(&token).is_ok(),
+            "the auth host's token must be accepted"
+        );
+        assert!(cell
+            .mint_user_jwt(Uuid::new_v4(), "admin", None, 60)
+            .is_err());
 
         // It publishes the verification key, which is the whole point of JWKS.
         let j: serde_json::Value = serde_json::from_str(&cell.jwks_json()).unwrap();
-        assert_eq!(B64_URL.decode(j["keys"][0]["x"].as_str().unwrap()).unwrap(), raw_pub);
+        assert_eq!(
+            B64_URL.decode(j["keys"][0]["x"].as_str().unwrap()).unwrap(),
+            raw_pub
+        );
         // Same kid as the minting host: a verifier can select the key.
         assert_eq!(
             j["keys"][0]["kid"],
@@ -2174,7 +2507,13 @@ mod tests {
         // Boot-gate input: `can_verify == false` in verify-only mode is what
         // turns a typo'd CA-style paste into a refusal instead of a cell that
         // 401s every session with a green data plane.
-        let keys = Keys::build(None, Some("-----BEGIN PUBLIC KEY-----\nnope\n-----END PUBLIC KEY-----\n".to_string()), None, "queen-proxy".to_string(), None);
+        let keys = Keys::build(
+            None,
+            Some("-----BEGIN PUBLIC KEY-----\nnope\n-----END PUBLIC KEY-----\n".to_string()),
+            None,
+            "queen-proxy".to_string(),
+            None,
+        );
         assert!(!keys.can_verify());
         assert!(!keys.can_mint());
     }
@@ -2185,10 +2524,17 @@ mod tests {
         // sets QUEEN_PROXY_JWT_SECRET, and the verify-only arm must not be able
         // to take the signer out from under one that also carries a public key.
         let (priv_pem, pub_pem, _) = ed_pair();
-        let keys =
-            Keys::build(None, Some(pub_pem), Some("dev-secret-value".into()), "queen-proxy".into(), None);
+        let keys = Keys::build(
+            None,
+            Some(pub_pem),
+            Some("dev-secret-value".into()),
+            "queen-proxy".into(),
+            None,
+        );
         assert!(keys.can_mint(), "HS256 mints");
-        let own = keys.mint_user_jwt(Uuid::new_v4(), "viewer", None, 60).unwrap();
+        let own = keys
+            .mint_user_jwt(Uuid::new_v4(), "viewer", None, 60)
+            .unwrap();
         assert!(keys.verify_jwt_claims(&own).is_ok());
         // And the algorithm is still pinned to HS: the Ed token does not verify.
         let ed = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string(), None)
@@ -2232,14 +2578,23 @@ mod tests {
         let user = Uuid::parse_str(out["user_id"].as_str().unwrap()).unwrap();
         let cluster = Uuid::parse_str(out["cluster_id"].as_str().unwrap()).unwrap();
         let keys = hs_keys("queen-proxy");
-        assert_eq!(keys.cluster_role(&store, user, cluster).await, Some(Role::Admin));
+        assert_eq!(
+            keys.cluster_role(&store, user, cluster).await,
+            Some(Role::Admin)
+        );
         assert_eq!(keys.cluster_role(&store, user, Uuid::new_v4()).await, None);
         assert!(keys.user_exists(&store, user).await);
         assert!(!keys.user_exists(&store, Uuid::new_v4()).await);
         assert!(!keys.is_operator(&store, user).await);
         assert!(!keys.is_revoked(&store, "jti-x").await);
-        let exp = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 600) as i64;
-        data::revoke_session(&store, "jti-y", exp, "user", user).await.unwrap();
+        let exp = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600) as i64;
+        data::revoke_session(&store, "jti-y", exp, "user", user)
+            .await
+            .unwrap();
         assert!(keys.is_revoked(&store, "jti-y").await);
     }
 }

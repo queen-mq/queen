@@ -69,9 +69,7 @@ use crate::rsm::effect::Effect;
 use crate::rsm::entry::Entry;
 use crate::rsm::facade::groups::{group_of, placement, GroupRouter};
 use crate::rsm::facade::real::RaftFacade;
-use crate::rsm::facade::{
-    ApiReq, Deadline, PopReq, PushReq, ReqCtx, Rsm, RsmBuildCtx, RsmError,
-};
+use crate::rsm::facade::{ApiReq, Deadline, PopReq, PushReq, ReqCtx, Rsm, RsmBuildCtx, RsmError};
 use crate::rsm::link::driver::{http_fetch, LinkConfig, LinkSetup};
 use crate::rsm::link::wire::{full_entry, Answer, Placement, Request};
 use crate::rsm::replicator::raft::{ClusterConfig, RaftOpts};
@@ -246,9 +244,12 @@ async fn move_leadership(nodes: &Nodes) -> usize {
     let from = leader_of(nodes).await;
     let to = (from + 1) % nodes.len();
     let repl = nodes[from].repl_for_test();
-    repl.transfer_leadership(Some(to as u64 + 1), Instant::now() + Duration::from_secs(10))
-        .await
-        .expect("transfer leadership");
+    repl.transfer_leadership(
+        Some(to as u64 + 1),
+        Instant::now() + Duration::from_secs(10),
+    )
+    .await
+    .expect("transfer leadership");
     drop(repl);
     let end = Instant::now() + Duration::from_secs(30);
     loop {
@@ -477,9 +478,7 @@ async fn converge(source: &Nodes, standby: &Nodes, when: &str) {
         let read = f["scanned"].as_u64().unwrap_or(0) >= target
             && f["lagEntries"].as_u64() == Some(0)
             && f["state"] == "following";
-        if read
-            && held(&standby[b]) == held(&source[s])
-            && requests_follow(&source[s], &standby[b])
+        if read && held(&standby[b]) == held(&source[s]) && requests_follow(&source[s], &standby[b])
         {
             // And every node of the standby holds what its leader holds.
             let same = |n: &Arc<RaftFacade>| {
@@ -591,9 +590,10 @@ async fn a_standby_cluster_follows_its_source_and_is_promoted() {
     fn held_for(node: &RaftFacade) -> Vec<String> {
         readers(node).into_iter().map(|(name, _)| name).collect()
     }
-    wait_for("every node of the source holds its log for the standby", || {
-        source.iter().all(|node| held_for(node) == [name.clone()])
-    })
+    wait_for(
+        "every node of the source holds its log for the standby",
+        || source.iter().all(|node| held_for(node) == [name.clone()]),
+    )
     .await;
     let status = link_status(&source[0]).await;
     assert_eq!(status["readers"][0]["name"], name.as_str(), "{status}");
@@ -663,7 +663,10 @@ async fn a_standby_cluster_follows_its_source_and_is_promoted() {
     let (leased, leased_pop) = pop(&source[s], false).await.expect("pop");
     assert!(!leased.is_empty(), "the consumer got a partition's backlog");
     let leased_partition = leased[0] % 4;
-    assert!(leased.iter().all(|n| n % 4 == leased_partition), "{leased:?}");
+    assert!(
+        leased.iter().all(|n| n % 4 == leased_partition),
+        "{leased:?}"
+    );
     converge(&source, &standby, "after the lease").await;
 
     // Promotion, asked of a follower of the standby.
@@ -680,7 +683,9 @@ async fn a_standby_cluster_follows_its_source_and_is_promoted() {
     // source's messages — all but the ones the source's consumer acknowledged,
     // and the partition its other consumer still holds.
     for (i, node) in standby.iter().enumerate() {
-        push(node, 70 + i as u64).await.expect("push after the promotion");
+        push(node, 70 + i as u64)
+            .await
+            .expect("push after the promotion");
     }
     let want: Vec<u64> = (0..73)
         .filter(|n| !acked.contains(n) && n % 4 != leased_partition)
@@ -688,7 +693,9 @@ async fn a_standby_cluster_follows_its_source_and_is_promoted() {
     let mut served: Vec<u64> = Vec::new();
     let end = Instant::now() + Duration::from_secs(30);
     while served.len() < want.len() {
-        let (ns, _) = pop(&standby[b], true).await.expect("pop after the promotion");
+        let (ns, _) = pop(&standby[b], true)
+            .await
+            .expect("pop after the promotion");
         served.extend(ns);
         assert!(
             Instant::now() < end,
@@ -1081,11 +1088,15 @@ async fn a_standby_is_seeded_from_a_source_with_a_history() {
     })
     .await;
     assert!(
-        crate::rsm::link::seed::read(&sb_dirs[0]).expect("seed record").is_some(),
+        crate::rsm::link::seed::read(&sb_dirs[0])
+            .expect("seed record")
+            .is_some(),
         "the seeded node keeps the seed's record"
     );
     assert!(
-        crate::rsm::link::seed::read(&sb_dirs[1]).expect("seed record").is_none(),
+        crate::rsm::link::seed::read(&sb_dirs[1])
+            .expect("seed record")
+            .is_none(),
         "only the node the seed names takes it"
     );
 
@@ -1145,7 +1156,10 @@ async fn a_standby_is_seeded_from_a_source_with_a_history() {
         if status == 200 {
             break;
         }
-        assert!(Instant::now() < end, "the learners were never promoted: {body}");
+        assert!(
+            Instant::now() < end,
+            "the learners were never promoted: {body}"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     for n in 60..80 {
@@ -1286,12 +1300,11 @@ async fn a_source_keeps_its_log_for_the_seed_it_sent() {
         let (dir, cfg) = (sb_dirs[0].clone(), cfg.clone());
         move || crate::rsm::link::seed::take_blocking(&dir, 1, me, &cfg)
     });
-    let checkpoint = tokio::task::spawn_blocking(move || {
-        at_the_copy.recv_timeout(Duration::from_secs(60))
-    })
-    .await
-    .expect("join")
-    .expect("the source copied its store for the seed");
+    let checkpoint =
+        tokio::task::spawn_blocking(move || at_the_copy.recv_timeout(Duration::from_secs(60)))
+            .await
+            .expect("join")
+            .expect("the source copied its store for the seed");
     // The source already knows the standby, by the name it will read with,
     // and has held its log since before the copy.
     let record = crate::rsm::link::seed::read(&sb_dirs[0])
@@ -1361,7 +1374,12 @@ async fn a_source_keeps_its_log_for_the_seed_it_sent() {
         standby[0].health().role == "leader"
     })
     .await;
-    converge(&source, &standby, "a standby whose source went on under its seed").await;
+    converge(
+        &source,
+        &standby,
+        "a standby whose source went on under its seed",
+    )
+    .await;
 
     // One standby, one name, one hold: what the seed left is what the reads
     // move, and the purge follows it.
@@ -1435,7 +1453,10 @@ async fn a_source_refuses_a_standby_without_its_token() {
     // read until the entry is there.
     let end = Instant::now() + Duration::from_secs(10);
     loop {
-        match read(Some(TOKEN), ports[0]).await.expect("the token's holder reads") {
+        match read(Some(TOKEN), ports[0])
+            .await
+            .expect("the token's holder reads")
+        {
             Answer::Entries { entries, .. } if !entries.is_empty() => break,
             Answer::Entries { .. } => {
                 assert!(

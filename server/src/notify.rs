@@ -108,8 +108,7 @@ impl Notifier {
             let weak = Arc::downgrade(&n);
             rt.spawn(async move {
                 let period = std::time::Duration::from_secs(GATE_SWEEP_S);
-                let mut iv =
-                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                let mut iv = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
                 iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     iv.tick().await;

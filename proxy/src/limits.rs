@@ -51,7 +51,10 @@ const PARKED_RETRY_AFTER_S: u64 = 5;
 pub enum Decision {
     Allow,
     /// Deny with Retry-After seconds. Callers map to err_429.
-    Deny { retry_after_s: u64, code: &'static str },
+    Deny {
+        retry_after_s: u64,
+        code: &'static str,
+    },
 }
 
 /// Why a cluster's pushes are blocked by a live (in-process) flag. The two
@@ -101,7 +104,11 @@ struct StorageAccount {
 
 impl StorageAccount {
     fn new(now: Instant) -> StorageAccount {
-        StorageAccount { measured: 0, in_flight: 0, last_seen: now }
+        StorageAccount {
+            measured: 0,
+            in_flight: 0,
+            last_seen: now,
+        }
     }
 
     /// Estimated retained bytes right now. Saturating: a malformed or huge
@@ -141,7 +148,13 @@ struct TokenBucket {
 
 impl TokenBucket {
     fn new(now: Instant) -> TokenBucket {
-        TokenBucket { tokens: 0.0, capacity: 0.0, refill_per_sec: 0.0, updated: now, initialized: false }
+        TokenBucket {
+            tokens: 0.0,
+            capacity: 0.0,
+            refill_per_sec: 0.0,
+            updated: now,
+            initialized: false,
+        }
     }
 
     /// Apply the caller's current plan values. First call fills the bucket;
@@ -197,7 +210,11 @@ struct ClusterBuckets {
 
 impl ClusterBuckets {
     fn new(now: Instant) -> ClusterBuckets {
-        ClusterBuckets { req: TokenBucket::new(now), bytes: TokenBucket::new(now), last_seen: now }
+        ClusterBuckets {
+            req: TokenBucket::new(now),
+            bytes: TokenBucket::new(now),
+            last_seen: now,
+        }
     }
 }
 
@@ -274,9 +291,15 @@ impl Limits {
 
     /// One request token. Call once per proxied request, post-authn.
     pub fn check_req(&self, ctx: &ClusterCtx) -> Decision {
-        let Some(rate) = ctx.limits.max_req_per_sec else { return Decision::Allow };
+        let Some(rate) = ctx.limits.max_req_per_sec else {
+            return Decision::Allow;
+        };
         let rate = rate.max(0) as f64;
-        let capacity = ctx.limits.req_burst.map(|b| b.max(0) as f64).unwrap_or(rate * 2.0);
+        let capacity = ctx
+            .limits
+            .req_burst
+            .map(|b| b.max(0) as f64)
+            .unwrap_or(rate * 2.0);
         let now = Instant::now();
         self.maybe_gc(now);
         let decision = self.decide(ctx.cluster_id, now, capacity, rate, 1.0, Kind::Req);
@@ -298,9 +321,15 @@ impl Limits {
         if n == 0 {
             return Decision::Allow;
         }
-        let Some(rate) = ctx.limits.max_bytes_per_sec else { return Decision::Allow };
+        let Some(rate) = ctx.limits.max_bytes_per_sec else {
+            return Decision::Allow;
+        };
         let rate = rate.max(0) as f64;
-        let capacity = ctx.limits.bytes_burst.map(|b| b.max(0) as f64).unwrap_or(rate * 2.0);
+        let capacity = ctx
+            .limits
+            .bytes_burst
+            .map(|b| b.max(0) as f64)
+            .unwrap_or(rate * 2.0);
         let now = Instant::now();
         self.maybe_gc(now);
         let decision = self.decide(ctx.cluster_id, now, capacity, rate, n as f64, Kind::Bytes);
@@ -318,14 +347,22 @@ impl Limits {
         if n == 0 {
             return;
         }
-        let Some(rate) = ctx.limits.max_bytes_per_sec else { return };
+        let Some(rate) = ctx.limits.max_bytes_per_sec else {
+            return;
+        };
         let rate = rate.max(0) as f64;
-        let capacity = ctx.limits.bytes_burst.map(|b| b.max(0) as f64).unwrap_or(rate * 2.0);
+        let capacity = ctx
+            .limits
+            .bytes_burst
+            .map(|b| b.max(0) as f64)
+            .unwrap_or(rate * 2.0);
         let now = Instant::now();
         self.maybe_gc(now);
         let idx = shard_index(&ctx.cluster_id);
         let mut shard = self.buckets[idx].lock().unwrap();
-        let entry = shard.entry(ctx.cluster_id).or_insert_with(|| ClusterBuckets::new(now));
+        let entry = shard
+            .entry(ctx.cluster_id)
+            .or_insert_with(|| ClusterBuckets::new(now));
         entry.last_seen = now;
         entry.bytes.configure(capacity, rate);
         entry.bytes.refill(now);
@@ -342,7 +379,10 @@ impl Limits {
 
         let cluster_gauge = self.parked_gauge_for(ctx.cluster_id, now);
         let cluster_before = cluster_gauge.fetch_add(1, Ordering::Relaxed);
-        let cluster_over = ctx.limits.max_parked_pops.map_or(false, |m| cluster_before >= m);
+        let cluster_over = ctx
+            .limits
+            .max_parked_pops
+            .map_or(false, |m| cluster_before >= m);
 
         if cell_over || cluster_over {
             self.log_deny("parked", ctx.cluster_id, PARKED_RETRY_AFTER_S);
@@ -358,7 +398,10 @@ impl Limits {
             // bumped get correctly released on drop — the request proceeds
             // either way, so the gauge must track it either way.
         }
-        Ok(ParkedGuard { cell_gauge: Some(self.cell_parked.clone()), cluster_gauge: Some(cluster_gauge) })
+        Ok(ParkedGuard {
+            cell_gauge: Some(self.cell_parked.clone()),
+            cluster_gauge: Some(cluster_gauge),
+        })
     }
 
     /// Storage quota state, updated by the registry reconciler (the
@@ -432,10 +475,14 @@ impl Limits {
     /// the cell's disk nor the bill, so `enforcing()` is deliberately not
     /// consulted. `None` (unlimited) is answered without touching the shard.
     pub fn storage_over_cap(&self, ctx: &ClusterCtx) -> bool {
-        let Some(max) = ctx.limits.max_retained_bytes else { return false };
+        let Some(max) = ctx.limits.max_retained_bytes else {
+            return false;
+        };
         let idx = shard_index(&ctx.cluster_id);
         let shard = self.storage[idx].lock().unwrap();
-        shard.get(&ctx.cluster_id).is_some_and(|a| a.estimate() >= max)
+        shard
+            .get(&ctx.cluster_id)
+            .is_some_and(|a| a.estimate() >= max)
     }
 
     /// Record payload bytes the proxy has just accepted for forwarding.
@@ -454,9 +501,13 @@ impl Limits {
         let now = Instant::now();
         let idx = shard_index(&cluster_id);
         let mut shard = self.storage[idx].lock().unwrap();
-        let account = shard.entry(cluster_id).or_insert_with(|| StorageAccount::new(now));
+        let account = shard
+            .entry(cluster_id)
+            .or_insert_with(|| StorageAccount::new(now));
         account.last_seen = now;
-        account.in_flight = account.in_flight.saturating_add(bytes.min(i64::MAX as u64) as i64);
+        account.in_flight = account
+            .in_flight
+            .saturating_add(bytes.min(i64::MAX as u64) as i64);
     }
 
     /// Publish the reconciler's latest retained-bytes total for a cluster, from
@@ -482,7 +533,9 @@ impl Limits {
         let now = Instant::now();
         let idx = shard_index(&cluster_id);
         let mut shard = self.storage[idx].lock().unwrap();
-        let account = shard.entry(cluster_id).or_insert_with(|| StorageAccount::new(now));
+        let account = shard
+            .entry(cluster_id)
+            .or_insert_with(|| StorageAccount::new(now));
         account.last_seen = now;
         if account.measured != measured {
             account.measured = measured;
@@ -494,10 +547,20 @@ impl Limits {
     /// refresh it to the caller's current plan values, refill for elapsed
     /// time, then try to debit `n`. Only debits on success — a Deny never
     /// changes bucket state, so shadow-mode denies don't skew future decisions.
-    fn decide(&self, cluster_id: Uuid, now: Instant, capacity: f64, refill: f64, n: f64, kind: Kind) -> Decision {
+    fn decide(
+        &self,
+        cluster_id: Uuid,
+        now: Instant,
+        capacity: f64,
+        refill: f64,
+        n: f64,
+        kind: Kind,
+    ) -> Decision {
         let idx = shard_index(&cluster_id);
         let mut shard = self.buckets[idx].lock().unwrap();
-        let entry = shard.entry(cluster_id).or_insert_with(|| ClusterBuckets::new(now));
+        let entry = shard
+            .entry(cluster_id)
+            .or_insert_with(|| ClusterBuckets::new(now));
         entry.last_seen = now;
         let bucket = match kind {
             Kind::Req => &mut entry.req,
@@ -509,17 +572,25 @@ impl Limits {
             Decision::Allow
         } else {
             let deficit = bucket.deficit(n);
-            let secs = if refill > 0.0 { (deficit / refill).ceil() as u64 } else { 60 };
-            Decision::Deny { retry_after_s: secs.clamp(1, 60), code: crate::errors::CODE_RATE_LIMITED }
+            let secs = if refill > 0.0 {
+                (deficit / refill).ceil() as u64
+            } else {
+                60
+            };
+            Decision::Deny {
+                retry_after_s: secs.clamp(1, 60),
+                code: crate::errors::CODE_RATE_LIMITED,
+            }
         }
     }
 
     fn parked_gauge_for(&self, cluster_id: Uuid, now: Instant) -> Arc<AtomicI64> {
         let idx = shard_index(&cluster_id);
         let mut shard = self.parked[idx].lock().unwrap();
-        let entry = shard
-            .entry(cluster_id)
-            .or_insert_with(|| ParkedEntry { count: Arc::new(AtomicI64::new(0)), last_seen: now });
+        let entry = shard.entry(cluster_id).or_insert_with(|| ParkedEntry {
+            count: Arc::new(AtomicI64::new(0)),
+            last_seen: now,
+        });
         entry.last_seen = now;
         entry.count.clone()
     }
@@ -579,7 +650,8 @@ impl Limits {
             // dropping it from the map would orphan future accounting for
             // that cluster (a fresh entry would start recounting from 0).
             m.retain(|_, v| {
-                v.count.load(Ordering::Relaxed) > 0 || now.saturating_duration_since(v.last_seen) < IDLE_TTL
+                v.count.load(Ordering::Relaxed) > 0
+                    || now.saturating_duration_since(v.last_seen) < IDLE_TTL
             });
             parked_evicted += before - m.len();
         }
@@ -670,7 +742,11 @@ mod tests {
         assert_eq!(b.tokens, 0.0);
 
         b.refill(t0 + Duration::from_millis(1_000));
-        assert!((b.tokens - 5.0).abs() < 1e-9, "1s at 5/s refills 5 tokens, got {}", b.tokens);
+        assert!(
+            (b.tokens - 5.0).abs() < 1e-9,
+            "1s at 5/s refills 5 tokens, got {}",
+            b.tokens
+        );
 
         b.refill(t0 + Duration::from_millis(3_000));
         assert_eq!(b.tokens, 10.0, "refill caps at capacity");
@@ -710,12 +786,19 @@ mod tests {
     #[test]
     fn check_req_burst_then_denied_then_gateway_would_still_see_deny_in_shadow() {
         let limits = Limits::new_for_test(true); // enforcing — irrelevant to the Decision itself
-        let ctx = test_ctx(EffectiveLimits { max_req_per_sec: Some(1000), req_burst: Some(2), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_req_per_sec: Some(1000),
+            req_burst: Some(2),
+            ..Default::default()
+        });
 
         assert!(matches!(limits.check_req(&ctx), Decision::Allow));
         assert!(matches!(limits.check_req(&ctx), Decision::Allow));
         match limits.check_req(&ctx) {
-            Decision::Deny { retry_after_s, code } => {
+            Decision::Deny {
+                retry_after_s,
+                code,
+            } => {
                 assert!(retry_after_s >= 1 && retry_after_s <= 60);
                 assert_eq!(code, crate::errors::CODE_RATE_LIMITED);
             }
@@ -728,7 +811,11 @@ mod tests {
         // "shadow log non blocca": logging must not turn a Deny into an Allow —
         // the gateway is the one that decides whether to actually reject.
         let limits = Limits::new_for_test(false); // shadow mode
-        let ctx = test_ctx(EffectiveLimits { max_req_per_sec: Some(1000), req_burst: Some(1), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_req_per_sec: Some(1000),
+            req_burst: Some(1),
+            ..Default::default()
+        });
 
         assert!(matches!(limits.check_req(&ctx), Decision::Allow));
         assert!(
@@ -740,7 +827,11 @@ mod tests {
     #[test]
     fn check_bytes_zero_is_free() {
         let limits = Limits::new_for_test(true);
-        let ctx = test_ctx(EffectiveLimits { max_bytes_per_sec: Some(1), bytes_burst: Some(1), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_bytes_per_sec: Some(1),
+            bytes_burst: Some(1),
+            ..Default::default()
+        });
         // Drain the bucket, then confirm n=0 is still always Allow and doesn't
         // touch bucket state.
         assert!(matches!(limits.check_bytes(&ctx, 1), Decision::Allow));
@@ -751,10 +842,15 @@ mod tests {
     #[test]
     fn check_bytes_n_over_capacity_always_denies() {
         let limits = Limits::new_for_test(true);
-        let ctx =
-            test_ctx(EffectiveLimits { max_bytes_per_sec: Some(10), bytes_burst: Some(5), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_bytes_per_sec: Some(10),
+            bytes_burst: Some(5),
+            ..Default::default()
+        });
         match limits.check_bytes(&ctx, 999) {
-            Decision::Deny { retry_after_s, .. } => assert_eq!(retry_after_s, 60, "n far above capacity clamps to 60s"),
+            Decision::Deny { retry_after_s, .. } => {
+                assert_eq!(retry_after_s, 60, "n far above capacity clamps to 60s")
+            }
             Decision::Allow => panic!("n > capacity can never be satisfied"),
         }
     }
@@ -764,15 +860,25 @@ mod tests {
         let limits = Limits::new_for_test(true);
         // capacity=5, refill=5/s: draining 5 then asking for 2 more needs a
         // 0.4s wait, which clamps up to the 1s floor.
-        let ctx = test_ctx(EffectiveLimits { max_bytes_per_sec: Some(5), bytes_burst: Some(5), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_bytes_per_sec: Some(5),
+            bytes_burst: Some(5),
+            ..Default::default()
+        });
         assert!(matches!(limits.check_bytes(&ctx, 5), Decision::Allow));
         match limits.check_bytes(&ctx, 2) {
-            Decision::Deny { retry_after_s, .. } => assert_eq!(retry_after_s, 1, "sub-1s deficit floors to 1"),
+            Decision::Deny { retry_after_s, .. } => {
+                assert_eq!(retry_after_s, 1, "sub-1s deficit floors to 1")
+            }
             Decision::Allow => panic!("bucket should be empty"),
         }
 
         // A big deficit at a slow rate clamps at the 60s ceiling.
-        let ctx2 = test_ctx(EffectiveLimits { max_bytes_per_sec: Some(1), bytes_burst: Some(1), ..Default::default() });
+        let ctx2 = test_ctx(EffectiveLimits {
+            max_bytes_per_sec: Some(1),
+            bytes_burst: Some(1),
+            ..Default::default()
+        });
         assert!(matches!(limits.check_bytes(&ctx2, 1), Decision::Allow));
         match limits.check_bytes(&ctx2, 1) {
             Decision::Deny { retry_after_s, .. } => assert_eq!(retry_after_s, 1),
@@ -786,7 +892,10 @@ mod tests {
         let ctx = test_ctx(EffectiveLimits::default()); // everything None
         for _ in 0..5 {
             assert!(matches!(limits.check_req(&ctx), Decision::Allow));
-            assert!(matches!(limits.check_bytes(&ctx, 1_000_000), Decision::Allow));
+            assert!(matches!(
+                limits.check_bytes(&ctx, 1_000_000),
+                Decision::Allow
+            ));
         }
         assert_eq!(
             limits.debug_bytes_tokens(ctx.cluster_id),
@@ -800,13 +909,21 @@ mod tests {
     #[test]
     fn debit_bytes_goes_negative_and_then_throttles_checks() {
         let limits = Limits::new_for_test(true);
-        let ctx =
-            test_ctx(EffectiveLimits { max_bytes_per_sec: Some(10), bytes_burst: Some(10), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_bytes_per_sec: Some(10),
+            bytes_burst: Some(10),
+            ..Default::default()
+        });
 
         // What a pop answered, debited after the fact, well beyond the bucket.
         limits.debit_bytes(&ctx, 50);
-        let tokens = limits.debug_bytes_tokens(ctx.cluster_id).expect("entry created");
-        assert!(tokens < 0.0, "debit_bytes must be able to drive the bucket negative, got {tokens}");
+        let tokens = limits
+            .debug_bytes_tokens(ctx.cluster_id)
+            .expect("entry created");
+        assert!(
+            tokens < 0.0,
+            "debit_bytes must be able to drive the bucket negative, got {tokens}"
+        );
         assert_eq!(tokens, -40.0);
 
         // A subsequent check for even 1 token must deny while in debt.
@@ -818,7 +935,11 @@ mod tests {
         let limits = Limits::new_for_test(true);
         let ctx = test_ctx(EffectiveLimits::default());
         limits.debit_bytes(&ctx, 1_000_000);
-        assert_eq!(limits.debug_bytes_tokens(ctx.cluster_id), None, "unlimited debit must not touch the shard");
+        assert_eq!(
+            limits.debug_bytes_tokens(ctx.cluster_id),
+            None,
+            "unlimited debit must not touch the shard"
+        );
     }
 
     // ---- parked_slot / ParkedGuard ----
@@ -826,46 +947,88 @@ mod tests {
     #[test]
     fn parked_guard_drop_decrements_both_gauges() {
         let limits = Limits::new_for_test(true);
-        let ctx = test_ctx(EffectiveLimits { max_parked_pops: Some(10), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_parked_pops: Some(10),
+            ..Default::default()
+        });
 
         let guard = limits.parked_slot(&ctx).expect("under cap");
         assert_eq!(limits.cell_parked.load(Ordering::Relaxed), 1);
-        assert_eq!(limits.parked_gauge_for(ctx.cluster_id, Instant::now()).load(Ordering::Relaxed), 1);
+        assert_eq!(
+            limits
+                .parked_gauge_for(ctx.cluster_id, Instant::now())
+                .load(Ordering::Relaxed),
+            1
+        );
 
         drop(guard);
         assert_eq!(limits.cell_parked.load(Ordering::Relaxed), 0);
-        assert_eq!(limits.parked_gauge_for(ctx.cluster_id, Instant::now()).load(Ordering::Relaxed), 0);
+        assert_eq!(
+            limits
+                .parked_gauge_for(ctx.cluster_id, Instant::now())
+                .load(Ordering::Relaxed),
+            0
+        );
     }
 
     #[test]
     fn parked_over_cluster_cap_enforced_denies_and_rolls_back() {
         let limits = Limits::new_for_test(true); // enforcing
-        let ctx = test_ctx(EffectiveLimits { max_parked_pops: Some(1), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_parked_pops: Some(1),
+            ..Default::default()
+        });
 
         let _g1 = limits.parked_slot(&ctx).expect("first slot ok");
         match limits.parked_slot(&ctx) {
-            Err(Decision::Deny { retry_after_s, code }) => {
+            Err(Decision::Deny {
+                retry_after_s,
+                code,
+            }) => {
                 assert_eq!(retry_after_s, PARKED_RETRY_AFTER_S);
                 assert_eq!(code, crate::errors::CODE_RATE_LIMITED);
             }
-            other => panic!("expected Deny over cap, enforcing; got Ok={}", other.is_ok()),
+            other => panic!(
+                "expected Deny over cap, enforcing; got Ok={}",
+                other.is_ok()
+            ),
         }
         // Rolled back: gauge must still read exactly 1 (only _g1 outstanding).
-        assert_eq!(limits.parked_gauge_for(ctx.cluster_id, Instant::now()).load(Ordering::Relaxed), 1);
+        assert_eq!(
+            limits
+                .parked_gauge_for(ctx.cluster_id, Instant::now())
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
     fn parked_over_cap_shadow_still_grants_guard_and_tracks_gauge() {
         let limits = Limits::new_for_test(false); // shadow
-        let ctx = test_ctx(EffectiveLimits { max_parked_pops: Some(1), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_parked_pops: Some(1),
+            ..Default::default()
+        });
 
         let _g1 = limits.parked_slot(&ctx).expect("first slot ok");
-        let g2 = limits.parked_slot(&ctx).expect("shadow mode must still grant a guard over cap");
+        let g2 = limits
+            .parked_slot(&ctx)
+            .expect("shadow mode must still grant a guard over cap");
         // Both reservations are live: gauge reflects 2 outstanding even though
         // the plan cap is 1 — this is what makes shadow-mode observability honest.
-        assert_eq!(limits.parked_gauge_for(ctx.cluster_id, Instant::now()).load(Ordering::Relaxed), 2);
+        assert_eq!(
+            limits
+                .parked_gauge_for(ctx.cluster_id, Instant::now())
+                .load(Ordering::Relaxed),
+            2
+        );
         drop(g2);
-        assert_eq!(limits.parked_gauge_for(ctx.cluster_id, Instant::now()).load(Ordering::Relaxed), 1);
+        assert_eq!(
+            limits
+                .parked_gauge_for(ctx.cluster_id, Instant::now())
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
@@ -875,7 +1038,10 @@ mod tests {
         let ctx_b = test_ctx(EffectiveLimits::default());
 
         let _g1 = limits.parked_slot(&ctx_a).expect("first cell-wide slot ok");
-        assert!(limits.parked_slot(&ctx_b).is_err(), "second cluster still hits the cell-wide cap");
+        assert!(
+            limits.parked_slot(&ctx_b).is_err(),
+            "second cluster still hits the cell-wide cap"
+        );
     }
 
     // ---- push_blocked ----
@@ -922,7 +1088,11 @@ mod tests {
         let b = Uuid::new_v4();
         limits.set_push_blocked_reason(a, PushBlock::MonthlyQuota, true);
         assert_eq!(limits.push_block_reason(a), Some(PushBlock::MonthlyQuota));
-        assert_eq!(limits.push_block_reason(b), None, "one cluster's quota must not block another's");
+        assert_eq!(
+            limits.push_block_reason(b),
+            None,
+            "one cluster's quota must not block another's"
+        );
     }
 
     // ---- in-flight storage accounting (2026-09-03 blind-window defect) ----
@@ -934,14 +1104,23 @@ mod tests {
     #[test]
     fn accepted_bytes_refuse_inside_the_window_with_no_new_computation() {
         let limits = Limits::new_for_test(true);
-        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(1_000), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_retained_bytes: Some(1_000),
+            ..Default::default()
+        });
 
         limits.publish_retained(ctx.cluster_id, 999);
-        assert!(!limits.storage_over_cap(&ctx), "the measured figure is under the cap");
+        assert!(
+            !limits.storage_over_cap(&ctx),
+            "the measured figure is under the cap"
+        );
         assert_eq!(limits.push_block_reason_for(&ctx), None);
 
         limits.note_accepted_bytes(ctx.cluster_id, 1);
-        assert!(limits.storage_over_cap(&ctx), "999 measured + 1 accepted reaches the cap");
+        assert!(
+            limits.storage_over_cap(&ctx),
+            "999 measured + 1 accepted reaches the cap"
+        );
         assert_eq!(
             limits.push_block_reason_for(&ctx),
             Some(PushBlock::Storage),
@@ -955,7 +1134,10 @@ mod tests {
     #[test]
     fn a_new_computation_resets_the_in_flight_counter() {
         let limits = Limits::new_for_test(true);
-        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(1_000), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_retained_bytes: Some(1_000),
+            ..Default::default()
+        });
 
         limits.publish_retained(ctx.cluster_id, 500);
         limits.note_accepted_bytes(ctx.cluster_id, 600);
@@ -964,7 +1146,10 @@ mod tests {
         // The broker recomputed and the tenant had meanwhile deleted data: the
         // fresh figure supersedes everything counted against the old one.
         limits.publish_retained(ctx.cluster_id, 400);
-        assert!(!limits.storage_over_cap(&ctx), "a fresh computation clears the in-flight bytes");
+        assert!(
+            !limits.storage_over_cap(&ctx),
+            "a fresh computation clears the in-flight bytes"
+        );
         assert_eq!(limits.debug_storage_estimate(ctx.cluster_id), Some(400));
     }
 
@@ -975,7 +1160,10 @@ mod tests {
     #[test]
     fn republishing_an_unchanged_figure_neither_forgets_nor_double_counts() {
         let limits = Limits::new_for_test(true);
-        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(1_000), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_retained_bytes: Some(1_000),
+            ..Default::default()
+        });
 
         limits.publish_retained(ctx.cluster_id, 100);
         limits.note_accepted_bytes(ctx.cluster_id, 50);
@@ -1006,11 +1194,20 @@ mod tests {
     #[test]
     fn storage_estimate_is_per_cluster() {
         let limits = Limits::new_for_test(true);
-        let a = test_ctx(EffectiveLimits { max_retained_bytes: Some(100), ..Default::default() });
-        let b = test_ctx(EffectiveLimits { max_retained_bytes: Some(100), ..Default::default() });
+        let a = test_ctx(EffectiveLimits {
+            max_retained_bytes: Some(100),
+            ..Default::default()
+        });
+        let b = test_ctx(EffectiveLimits {
+            max_retained_bytes: Some(100),
+            ..Default::default()
+        });
         limits.note_accepted_bytes(a.cluster_id, 500);
         assert!(limits.storage_over_cap(&a));
-        assert!(!limits.storage_over_cap(&b), "one tenant's bytes must not block another's");
+        assert!(
+            !limits.storage_over_cap(&b),
+            "one tenant's bytes must not block another's"
+        );
     }
 
     /// Shadow mode does not soften this one, by the same rule the pump-set
@@ -1019,7 +1216,10 @@ mod tests {
     #[test]
     fn the_storage_estimate_is_a_hard_gate_in_shadow_mode() {
         let limits = Limits::new_for_test(false);
-        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(10), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_retained_bytes: Some(10),
+            ..Default::default()
+        });
         limits.note_accepted_bytes(ctx.cluster_id, 10);
         assert_eq!(limits.push_block_reason_for(&ctx), Some(PushBlock::Storage));
     }
@@ -1028,9 +1228,15 @@ mod tests {
     #[test]
     fn an_estimated_storage_block_still_outranks_a_monthly_quota_flag() {
         let limits = Limits::new_for_test(true);
-        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(10), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_retained_bytes: Some(10),
+            ..Default::default()
+        });
         limits.set_push_blocked_reason(ctx.cluster_id, PushBlock::MonthlyQuota, true);
-        assert_eq!(limits.push_block_reason_for(&ctx), Some(PushBlock::MonthlyQuota));
+        assert_eq!(
+            limits.push_block_reason_for(&ctx),
+            Some(PushBlock::MonthlyQuota)
+        );
         limits.note_accepted_bytes(ctx.cluster_id, 10);
         assert_eq!(limits.push_block_reason_for(&ctx), Some(PushBlock::Storage));
     }
@@ -1040,17 +1246,26 @@ mod tests {
     #[test]
     fn the_estimate_saturates_instead_of_wrapping() {
         let limits = Limits::new_for_test(true);
-        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(i64::MAX), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_retained_bytes: Some(i64::MAX),
+            ..Default::default()
+        });
         limits.publish_retained(ctx.cluster_id, i64::MAX - 1);
         limits.note_accepted_bytes(ctx.cluster_id, u64::MAX);
-        assert_eq!(limits.debug_storage_estimate(ctx.cluster_id), Some(i64::MAX));
+        assert_eq!(
+            limits.debug_storage_estimate(ctx.cluster_id),
+            Some(i64::MAX)
+        );
         assert!(limits.storage_over_cap(&ctx));
     }
 
     #[test]
     fn gc_prunes_a_storage_account_nobody_publishes_for_any_more() {
         let limits = Limits::new_for_test(true);
-        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(10), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_retained_bytes: Some(10),
+            ..Default::default()
+        });
         limits.note_accepted_bytes(ctx.cluster_id, 1);
         assert_eq!(limits.debug_storage_estimate(ctx.cluster_id), Some(1));
 
@@ -1067,16 +1282,26 @@ mod tests {
     #[test]
     fn gc_prunes_idle_bucket_entries_after_ttl() {
         let limits = Limits::new_for_test(true);
-        let ctx = test_ctx(EffectiveLimits { max_req_per_sec: Some(10), req_burst: Some(10), ..Default::default() });
+        let ctx = test_ctx(EffectiveLimits {
+            max_req_per_sec: Some(10),
+            req_burst: Some(10),
+            ..Default::default()
+        });
         assert!(matches!(limits.check_req(&ctx), Decision::Allow));
         let idx = shard_index(&ctx.cluster_id);
-        assert!(limits.buckets[idx].lock().unwrap().contains_key(&ctx.cluster_id));
+        assert!(limits.buckets[idx]
+            .lock()
+            .unwrap()
+            .contains_key(&ctx.cluster_id));
 
         let future = Instant::now() + IDLE_TTL + Duration::from_secs(1);
         limits.gc_sweep(future);
 
         assert!(
-            !limits.buckets[idx].lock().unwrap().contains_key(&ctx.cluster_id),
+            !limits.buckets[idx]
+                .lock()
+                .unwrap()
+                .contains_key(&ctx.cluster_id),
             "idle entry should have been pruned"
         );
     }
@@ -1092,7 +1317,10 @@ mod tests {
 
         let idx = shard_index(&ctx.cluster_id);
         assert!(
-            limits.parked[idx].lock().unwrap().contains_key(&ctx.cluster_id),
+            limits.parked[idx]
+                .lock()
+                .unwrap()
+                .contains_key(&ctx.cluster_id),
             "an entry with a live outstanding guard must survive GC regardless of idle time"
         );
         drop(guard);

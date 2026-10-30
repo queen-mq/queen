@@ -168,7 +168,11 @@ impl Registry {
         {
             let map = self.known.read().unwrap();
             if let Some(cr) = map.get(&ctx.cluster_id) {
-                if cr.partitions.get(queue).is_some_and(|p| p.contains(partition)) {
+                if cr
+                    .partitions
+                    .get(queue)
+                    .is_some_and(|p| p.contains(partition))
+                {
                     return Admit::Allowed;
                 }
             }
@@ -188,13 +192,18 @@ impl Registry {
 
             // Someone else may have admitted this exact pair while we
             // waited for the write lock.
-            if cr.partitions.get(queue).is_some_and(|p| p.contains(partition)) {
+            if cr
+                .partitions
+                .get(queue)
+                .is_some_and(|p| p.contains(partition))
+            {
                 return Admit::Allowed;
             }
 
             let is_new_queue = !cr.queue_names.contains(queue);
             if let Some(max_q) = ctx.limits.max_queues {
-                let projected_queues = cr.queue_names.len() as i64 + if is_new_queue { 1 } else { 0 };
+                let projected_queues =
+                    cr.queue_names.len() as i64 + if is_new_queue { 1 } else { 0 };
                 if projected_queues > max_q {
                     return Admit::OverQueues { max: max_q };
                 }
@@ -209,7 +218,10 @@ impl Registry {
                 }
             }
 
-            cr.partitions.entry(queue.to_string()).or_default().insert(partition.to_string());
+            cr.partitions
+                .entry(queue.to_string())
+                .or_default()
+                .insert(partition.to_string());
             cr.queue_names.insert(queue.to_string());
             projected_partitions
         };
@@ -270,8 +282,11 @@ impl Registry {
         let pending = self.pending.clone();
         tokio::spawn(async move {
             let interval = Duration::from_millis(
-                crate::config::env_u64("QUEEN_PROXY_REGISTRY_PERSIST_MS", PERSIST_INTERVAL.as_millis() as u64)
-                    .max(100),
+                crate::config::env_u64(
+                    "QUEEN_PROXY_REGISTRY_PERSIST_MS",
+                    PERSIST_INTERVAL.as_millis() as u64,
+                )
+                .max(100),
             );
             let mut tick = tokio::time::interval(interval);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -312,7 +327,12 @@ impl Registry {
     /// was computed instead of trusting a figure that may be a whole broker
     /// recompute period old.
     pub fn retained_totals(&self) -> Vec<(Uuid, i64)> {
-        self.retained.read().unwrap().iter().map(|(id, bytes)| (*id, *bytes)).collect()
+        self.retained
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(id, bytes)| (*id, *bytes))
+            .collect()
     }
 
     /// One cluster's last measured retained-bytes total (the figure the
@@ -412,8 +432,10 @@ async fn flush_pending(store: &Store, pending: &Pending) {
         }
         std::mem::take(&mut *p)
     };
-    let rows: Vec<(Uuid, String, i64)> =
-        batch.iter().map(|((cluster_id, name), count)| (*cluster_id, name.clone(), *count)).collect();
+    let rows: Vec<(Uuid, String, i64)> = batch
+        .iter()
+        .map(|((cluster_id, name), count)| (*cluster_id, name.clone(), *count))
+        .collect();
     match data::persist_queue_floors(store, &rows).await {
         Ok(()) => tracing::debug!(rows = batch.len(), "registry: queue rows persisted"),
         Err(e) => {
@@ -467,15 +489,23 @@ async fn reconcile_cluster(
     // per-poll live enrichment — until 2026-08-23 a pass over EVERY segment in
     // the cell, per cluster, per interval — is declined. A broker older than the
     // parameter ignores it and answers as before.
-    let url = format!("{}/api/v1/resources/queues?stats=cached", target.base_url.trim_end_matches('/'));
-    let auth_header = target.cell_secret.as_ref().map(|secret| format!("Bearer {secret}"));
+    let url = format!(
+        "{}/api/v1/resources/queues?stats=cached",
+        target.base_url.trim_end_matches('/')
+    );
+    let auth_header = target
+        .cell_secret
+        .as_ref()
+        .map(|secret| format!("Bearer {secret}"));
     let mut headers: Vec<(&str, &str)> = vec![("x-queen-tenant", target.broker_tenant.as_str())];
     if let Some(auth) = &auth_header {
         headers.push(("Authorization", auth.as_str()));
     }
 
     let fetched = match inventory {
-        Some(upstream) => get_json_in_process(upstream, &url, &headers, RECONCILE_HTTP_TIMEOUT).await,
+        Some(upstream) => {
+            get_json_in_process(upstream, &url, &headers, RECONCILE_HTTP_TIMEOUT).await
+        }
         None => get_json_with_headers(&url, &headers, RECONCILE_HTTP_TIMEOUT).await,
     };
     let body = match fetched {
@@ -501,7 +531,9 @@ async fn reconcile_cluster(
     let mut changed: Vec<(String, i64)> = Vec::new();
 
     for q in queues {
-        let Some(name) = q.get("name").and_then(|n| n.as_str()) else { continue };
+        let Some(name) = q.get("name").and_then(|n| n.as_str()) else {
+            continue;
+        };
         let name = name.to_string();
         seen_names.push(name.clone());
         let partitions = q.get("partitions").and_then(|p| p.as_i64()).unwrap_or(0);
@@ -609,7 +641,9 @@ async fn reconcile_cluster(
     // rows are what re-seeds `db_partition_floor` after a proxy restart
     // (module doc), so losing them loses the partition-cap floor. Which answers
     // are trustworthy enough to delete on is `Inventory`'s whole subject.
-    let listing = Inventory::Confirmed { empty: seen_names.is_empty() };
+    let listing = Inventory::Confirmed {
+        empty: seen_names.is_empty(),
+    };
     if sweep_allowed(listing) {
         if let Err(e) = data::sweep_deleted_queues(store, target.cluster_id, &seen_names).await {
             tracing::warn!(cluster = %target.cluster_id, error = %e, "registry reconciler: deleted-queue sweep failed");
@@ -631,7 +665,8 @@ async fn reconcile_cluster(
             let seen: HashSet<&str> = seen_names.iter().map(String::as_str).collect();
             let mut map = known.write().unwrap();
             if let Some(cr) = map.get_mut(&target.cluster_id) {
-                cr.db_partition_floor.retain(|name, _| seen.contains(name.as_str()));
+                cr.db_partition_floor
+                    .retain(|name, _| seen.contains(name.as_str()));
                 let before = cr.queue_names.len();
                 cr.queue_names.retain(|name| seen.contains(name.as_str()));
                 // The exact partition names of a swept queue go with it: they
@@ -657,7 +692,10 @@ async fn reconcile_cluster(
         // measurement, and `limits` is the one that knows whether this cluster
         // has anything to measure it against. Published BEFORE the verdict so
         // the two can never disagree about which computation they describe.
-        retained.write().unwrap().insert(target.cluster_id, total_bytes);
+        retained
+            .write()
+            .unwrap()
+            .insert(target.cluster_id, total_bytes);
         if let Some(max) = target.max_retained_bytes {
             let mut over = over_storage.write().unwrap();
             let blocked = over.contains(&target.cluster_id);
@@ -747,11 +785,16 @@ async fn get_json_in_process(
         Some((_, rest)) => rest.find('/').map(|i| &rest[i..]).unwrap_or("/"),
         None => url,
     };
-    let mut req = axum::http::Request::builder().method("GET").uri(path).header("accept", "application/json");
+    let mut req = axum::http::Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("accept", "application/json");
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
-    let req = req.body(axum::body::Body::empty()).map_err(|e| format!("request: {e}"))?;
+    let req = req
+        .body(axum::body::Body::empty())
+        .map_err(|e| format!("request: {e}"))?;
     let fetched = async {
         let resp = upstream.call(req).await?;
         let status = resp.status().as_u16();
@@ -789,9 +832,9 @@ async fn get_json_with_headers(
 }
 
 async fn fetch_once(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, String> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| "reconciler: cell base_url must be http:// (cell-internal traffic only)".to_string())?;
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        "reconciler: cell base_url must be http:// (cell-internal traffic only)".to_string()
+    })?;
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
@@ -820,18 +863,26 @@ async fn fetch_once(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, Stri
     }
     req.push_str("\r\n");
 
-    stream.write_all(req.as_bytes()).await.map_err(|e| format!("write: {e}"))?;
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .map_err(|e| format!("write: {e}"))?;
     stream.flush().await.ok();
 
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        let n = stream.read(&mut chunk).await.map_err(|e| format!("read: {e}"))?;
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
         if n == 0 {
             break; // EOF (Connection: close)
         }
         if buf.len() + n > MAX_RECONCILE_RESPONSE_BYTES {
-            return Err(format!("response exceeds {MAX_RECONCILE_RESPONSE_BYTES}-byte cap"));
+            return Err(format!(
+                "response exceeds {MAX_RECONCILE_RESPONSE_BYTES}-byte cap"
+            ));
         }
         buf.extend_from_slice(&chunk[..n]);
     }
@@ -841,7 +892,11 @@ async fn fetch_once(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, Stri
     let body = buf[sep + 4..].to_vec();
 
     let status_line = head.lines().next().unwrap_or("");
-    let code: u16 = status_line.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
     if !(200..300).contains(&code) {
         return Err(format!("http status {code}"));
     }
@@ -870,7 +925,11 @@ mod tests {
             cell_base_url: "http://127.0.0.1:1".to_string(),
             cell_token: None,
             status: ClusterStatus::Active,
-            limits: EffectiveLimits { max_queues, max_partitions_per_queue, ..Default::default() },
+            limits: EffectiveLimits {
+                max_queues,
+                max_partitions_per_queue,
+                ..Default::default()
+            },
             features: Features::default(),
         }
     }
@@ -886,12 +945,23 @@ mod tests {
         let reg = Registry::new(unreachable_store());
         let ctx = test_ctx(None, None);
         for i in 0..50 {
-            assert_eq!(reg.admit(&ctx, "orders", &format!("p{i}")).await, Admit::Allowed);
+            assert_eq!(
+                reg.admit(&ctx, "orders", &format!("p{i}")).await,
+                Admit::Allowed
+            );
         }
         assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::Allowed);
         let pending = reg.pending.lock().unwrap().clone();
-        assert_eq!(pending.len(), 2, "one row per (cluster, queue), not one per partition");
-        assert_eq!(pending[&(ctx.cluster_id, "orders".to_string())], 50, "the highest projected count wins");
+        assert_eq!(
+            pending.len(),
+            2,
+            "one row per (cluster, queue), not one per partition"
+        );
+        assert_eq!(
+            pending[&(ctx.cluster_id, "orders".to_string())],
+            50,
+            "the highest projected count wins"
+        );
         assert_eq!(pending[&(ctx.cluster_id, "shipments".to_string())], 1);
     }
 
@@ -902,7 +972,10 @@ mod tests {
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
         reg.drain().await; // store unreachable: the row must survive the failure
         let pending = reg.pending.lock().unwrap().clone();
-        assert_eq!(pending.get(&(ctx.cluster_id, "orders".to_string())), Some(&1));
+        assert_eq!(
+            pending.get(&(ctx.cluster_id, "orders".to_string())),
+            Some(&1)
+        );
     }
 
     #[tokio::test]
@@ -921,7 +994,10 @@ mod tests {
         let ctx = test_ctx(None, Some(2));
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
         assert_eq!(reg.admit(&ctx, "orders", "p1").await, Admit::Allowed);
-        assert_eq!(reg.admit(&ctx, "orders", "p2").await, Admit::OverPartitions { max: 2 });
+        assert_eq!(
+            reg.admit(&ctx, "orders", "p2").await,
+            Admit::OverPartitions { max: 2 }
+        );
     }
 
     #[tokio::test]
@@ -932,7 +1008,10 @@ mod tests {
         // A second partition of the SAME queue must not count against
         // max_queues.
         assert_eq!(reg.admit(&ctx, "orders", "p1").await, Admit::Allowed);
-        assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::OverQueues { max: 1 });
+        assert_eq!(
+            reg.admit(&ctx, "shipments", "p0").await,
+            Admit::OverQueues { max: 1 }
+        );
     }
 
     // ---- storage-quota hysteresis (PLAN §6.1) ----
@@ -942,7 +1021,10 @@ mod tests {
         // Nothing is remembered across a restart, so "already over" must
         // block immediately rather than waiting for a transition.
         assert!(decide_over_storage(false, 1_001, 1_000));
-        assert!(!decide_over_storage(false, 1_000, 1_000), "at the cap is not over it");
+        assert!(
+            !decide_over_storage(false, 1_000, 1_000),
+            "at the cap is not over it"
+        );
     }
 
     #[test]
@@ -951,12 +1033,18 @@ mod tests {
         // this released and the next tick blocked again -- 403/201/403/201.
         assert!(decide_over_storage(true, 1_000, 1_000));
         assert!(decide_over_storage(true, 999, 1_000));
-        assert!(decide_over_storage(true, 901, 1_000), "still inside the 90% band");
+        assert!(
+            decide_over_storage(true, 901, 1_000),
+            "still inside the 90% band"
+        );
     }
 
     #[test]
     fn storage_releases_only_below_the_band() {
-        assert!(!decide_over_storage(true, 900, 1_000), "at 90% of the cap: released");
+        assert!(
+            !decide_over_storage(true, 900, 1_000),
+            "at 90% of the cap: released"
+        );
         assert!(!decide_over_storage(true, 500, 1_000));
     }
 
@@ -993,7 +1081,9 @@ mod tests {
         );
         // A real cell with the feature switched off reports a real zero.
         assert_eq!(
-            kv_timer_bytes(&body(r#"{"queues":[],"kvRows":0,"kvBytes":0,"timerRows":0,"timerBytes":0}"#)),
+            kv_timer_bytes(&body(
+                r#"{"queues":[],"kvRows":0,"kvBytes":0,"timerRows":0,"timerBytes":0}"#
+            )),
             Some(0)
         );
     }
@@ -1004,21 +1094,33 @@ mod tests {
     /// caller to warn.
     #[test]
     fn a_cell_that_predates_the_feature_is_none_not_zero() {
-        assert_eq!(kv_timer_bytes(&body(r#"{"queues":[{"name":"orders"}]}"#)), None);
+        assert_eq!(
+            kv_timer_bytes(&body(r#"{"queues":[{"name":"orders"}]}"#)),
+            None
+        );
         // Half an answer is still an answer: the missing half is zero.
         assert_eq!(kv_timer_bytes(&body(r#"{"kvBytes":42}"#)), Some(42));
         assert_eq!(kv_timer_bytes(&body(r#"{"timerBytes":42}"#)), Some(42));
         // A non-numeric field is not a number.
-        assert_eq!(kv_timer_bytes(&body(r#"{"kvBytes":"42","timerBytes":null}"#)), None);
+        assert_eq!(
+            kv_timer_bytes(&body(r#"{"kvBytes":"42","timerBytes":null}"#)),
+            None
+        );
     }
 
     /// A byte count must never make the total smaller — that would be a quota
     /// bypass hidden in one malformed field.
     #[test]
     fn negative_usage_never_credits_the_tenant() {
-        assert_eq!(kv_timer_bytes(&body(r#"{"kvBytes":-5000,"timerBytes":10}"#)), Some(10));
         assert_eq!(
-            kv_timer_bytes(&body(&format!(r#"{{"kvBytes":{max},"timerBytes":{max}}}"#, max = i64::MAX))),
+            kv_timer_bytes(&body(r#"{"kvBytes":-5000,"timerBytes":10}"#)),
+            Some(10)
+        );
+        assert_eq!(
+            kv_timer_bytes(&body(&format!(
+                r#"{{"kvBytes":{max},"timerBytes":{max}}}"#,
+                max = i64::MAX
+            ))),
             Some(i64::MAX),
             "saturating, not wrapping: two huge counts must not become a small one"
         );
@@ -1087,7 +1189,10 @@ mod tests {
         let ctx = test_ctx(Some(2), None);
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
         assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::Allowed);
-        assert_eq!(reg.admit(&ctx, "invoices", "p0").await, Admit::OverQueues { max: 2 });
+        assert_eq!(
+            reg.admit(&ctx, "invoices", "p0").await,
+            Admit::OverQueues { max: 2 }
+        );
 
         // What the reconciler's sweep branch does to the in-memory registry
         // once the broker's inventory comes back empty.
@@ -1115,7 +1220,10 @@ mod tests {
         let reg = Registry::new(Store::None);
         let ctx = test_ctx(Some(1), None);
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
-        assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::OverQueues { max: 1 });
+        assert_eq!(
+            reg.admit(&ctx, "shipments", "p0").await,
+            Admit::OverQueues { max: 1 }
+        );
 
         reg.invalidate(ctx.cluster_id);
         assert_eq!(
@@ -1129,7 +1237,10 @@ mod tests {
     fn the_invalidator_closure_clears_the_same_state() {
         let reg = Registry::new(Store::None);
         let cluster_id = Uuid::from_u128(42);
-        reg.known.write().unwrap().insert(cluster_id, ClusterRegistry::default());
+        reg.known
+            .write()
+            .unwrap()
+            .insert(cluster_id, ClusterRegistry::default());
         reg.loaded.write().unwrap().insert(cluster_id);
 
         let invalidate = reg.invalidator();
@@ -1143,7 +1254,10 @@ mod tests {
     fn forget_clears_state() {
         let reg = Registry::new(Store::None);
         let cluster_id = Uuid::from_u128(42);
-        reg.known.write().unwrap().insert(cluster_id, ClusterRegistry::default());
+        reg.known
+            .write()
+            .unwrap()
+            .insert(cluster_id, ClusterRegistry::default());
         reg.loaded.write().unwrap().insert(cluster_id);
         reg.forget(cluster_id);
         assert!(!reg.known.read().unwrap().contains_key(&cluster_id));
@@ -1193,7 +1307,10 @@ mod tests {
         )
         .await
         .unwrap();
-        (store, Uuid::parse_str(out["cluster_id"].as_str().unwrap()).unwrap())
+        (
+            store,
+            Uuid::parse_str(out["cluster_id"].as_str().unwrap()).unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -1203,7 +1320,10 @@ mod tests {
         ctx.cluster_id = cluster;
         let reg = Registry::new(store.clone());
         for p in 0..3 {
-            assert_eq!(reg.admit(&ctx, "orders", &format!("p{p}")).await, Admit::Allowed);
+            assert_eq!(
+                reg.admit(&ctx, "orders", &format!("p{p}")).await,
+                Admit::Allowed
+            );
         }
         assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::Allowed);
         reg.drain().await;
@@ -1212,19 +1332,32 @@ mod tests {
         // A fresh process: no partition names, but the floor and the queue
         // names come back from the store, so a restart bypasses no cap.
         let reg2 = Registry::new(store);
-        assert_eq!(reg2.admit(&ctx, "orders", "p9").await, Admit::OverPartitions { max: 3 });
-        assert_eq!(reg2.admit(&ctx, "invoices", "p0").await, Admit::OverQueues { max: 2 });
+        assert_eq!(
+            reg2.admit(&ctx, "orders", "p9").await,
+            Admit::OverPartitions { max: 3 }
+        );
+        assert_eq!(
+            reg2.admit(&ctx, "invoices", "p0").await,
+            Admit::OverQueues { max: 2 }
+        );
     }
 
     #[tokio::test]
     async fn the_reconciler_reads_the_inventory_in_process_and_writes_the_kv() {
         let (store, cluster) = kv_cluster().await;
-        data::persist_queue_floors(&store, &[(cluster, "orders".into(), 1), (cluster, "gone".into(), 1)])
-            .await
-            .unwrap();
-        data::set_limit_override(&store, cluster, Some(&serde_json::json!({"max_retained_bytes": 1000})))
-            .await
-            .unwrap();
+        data::persist_queue_floors(
+            &store,
+            &[(cluster, "orders".into(), 1), (cluster, "gone".into(), 1)],
+        )
+        .await
+        .unwrap();
+        data::set_limit_override(
+            &store,
+            cluster,
+            Some(&serde_json::json!({"max_retained_bytes": 1000})),
+        )
+        .await
+        .unwrap();
         let router = axum::Router::new().route(
             "/api/v1/resources/queues",
             axum::routing::get(|headers: axum::http::HeaderMap| async move {
@@ -1240,12 +1373,27 @@ mod tests {
             }),
         );
         let reg = Registry::new(store.clone()).with_inventory(Upstream::InProcess(router));
-        reconcile_once(&reg.store, reg.inventory.as_ref(), &reg.known, &reg.over_storage, &reg.retained).await;
+        reconcile_once(
+            &reg.store,
+            reg.inventory.as_ref(),
+            &reg.known,
+            &reg.over_storage,
+            &reg.retained,
+        )
+        .await;
 
         let mut live = data::live_queues(&store, cluster).await.unwrap();
         live.sort();
-        assert_eq!(live, vec![("fresh".to_string(), 2), ("orders".to_string(), 4)], "set, created, swept");
+        assert_eq!(
+            live,
+            vec![("fresh".to_string(), 2), ("orders".to_string(), 4)],
+            "set, created, swept"
+        );
         assert_eq!(reg.retained_totals(), vec![(cluster, 1100)]);
-        assert_eq!(reg.over_storage(), vec![cluster], "the override's cap, not the plan's");
+        assert_eq!(
+            reg.over_storage(),
+            vec![cluster],
+            "the override's cap, not the plan's"
+        );
     }
 }

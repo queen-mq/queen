@@ -625,7 +625,8 @@ fn sweep_cost_at_one_million_parts() {
             .entry(g.id)
             .or_insert_with(|| GroupShard::new(g.clone()));
         for i in 0..per_shard as u64 {
-            gs.parts.insert(i * 16, Box::new(Part::new(Cur::fresh(5, 0), true)));
+            gs.parts
+                .insert(i * 16, Box::new(Part::new(Cur::fresh(5, 0), true)));
         }
         for i in 0..per_shard as u64 {
             sh.pids.insert(

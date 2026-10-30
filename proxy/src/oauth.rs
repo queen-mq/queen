@@ -152,7 +152,11 @@ async fn login_post(
     let guard = crate::harden::LoginGuard::global();
     let account = form.email.trim().to_ascii_lowercase();
     if let Err(retry) = guard.check(ip, &account) {
-        return errors::err_429(errors::CODE_RATE_LIMITED, retry.secs(), "too many login attempts");
+        return errors::err_429(
+            errors::CODE_RATE_LIMITED,
+            retry.secs(),
+            "too many login attempts",
+        );
     }
     match verify_local(&st, &form.email, &form.password).await {
         Some(user) => {
@@ -193,7 +197,10 @@ async fn verify_local(st: &St, email: &str, password: &str) -> Option<UserRef> {
 /// Mint a session JWT, record the successful login, and redirect to `next`
 /// with the session cookie set.
 async fn establish_session(st: &St, headers: &HeaderMap, user: UserRef, next: &str) -> Response {
-    let token = match st.keys.mint_user_jwt(user.user_id, SESSION_ROLE, None, st.cfg.jwt_ttl_s) {
+    let token = match st
+        .keys
+        .mint_user_jwt(user.user_id, SESSION_ROLE, None, st.cfg.jwt_ttl_s)
+    {
         Ok(t) => t,
         Err(e) => {
             tracing::error!(target: "oauth", err = %e, "session mint failed");
@@ -231,7 +238,9 @@ async fn record_login(st: &St, user_id: Uuid) {
 /// (OAuth auto-provision) holds the operator flag from its first session.
 /// Best-effort like `record_login`: the next boot's sync grants it anyway.
 async fn grant_listed_operator(st: &St, user_id: Uuid) {
-    let Some(listed) = st.cfg.operators.as_deref() else { return };
+    let Some(listed) = st.cfg.operators.as_deref() else {
+        return;
+    };
     if listed.is_empty() || !st.store.is_some() {
         return;
     }
@@ -241,7 +250,9 @@ async fn grant_listed_operator(st: &St, user_id: Uuid) {
             tracing::info!(target: "oauth", user = %user_id, "operator granted at sign-in (QUEEN_PROXY_OPERATORS)");
         }
         Ok(false) => {}
-        Err(e) => tracing::warn!(target: "oauth", err = %e, "operator grant at sign-in failed (non-fatal)"),
+        Err(e) => {
+            tracing::warn!(target: "oauth", err = %e, "operator grant at sign-in failed (non-fatal)")
+        }
     }
 }
 
@@ -273,8 +284,12 @@ async fn logout(State(st): State<St>, headers: HeaderMap) -> Response {
 /// is cleared either way. On the single binary the deny-list row is
 /// `px.revoked #<jti>`, living exactly as long as the token (store::web).
 async fn revoke_presented_session(st: &St, headers: &HeaderMap) {
-    let Some(tok) = presented_session(st, headers) else { return };
-    let Ok(claims) = st.keys.verify_jwt_claims(&tok) else { return };
+    let Some(tok) = presented_session(st, headers) else {
+        return;
+    };
+    let Ok(claims) = st.keys.verify_jwt_claims(&tok) else {
+        return;
+    };
     if !st.store.is_some() {
         return;
     }
@@ -348,7 +363,9 @@ async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
                 // login rather than an identity with no owner.
                 return errors::err_401("session no longer valid");
             }
-            Err(e) if e.is_unavailable() => tracing::warn!(target: "oauth", err = %e, "me: store unavailable"),
+            Err(e) if e.is_unavailable() => {
+                tracing::warn!(target: "oauth", err = %e, "me: store unavailable")
+            }
             Err(e) => tracing::warn!(target: "oauth", err = %e, "me: user lookup failed"),
         }
         // A live operator selects among ALL clusters, as admin — the
@@ -461,10 +478,12 @@ async fn session_token(
     if st.keys.is_revoked(&st.store, &claims.jti).await {
         return errors::err_401("invalid session");
     }
-    match st
-        .keys
-        .mint_user_jwt(claims.user_id, SESSION_ROLE, claims.cluster, SESSION_TOKEN_TTL_S)
-    {
+    match st.keys.mint_user_jwt(
+        claims.user_id,
+        SESSION_ROLE,
+        claims.cluster,
+        SESSION_TOKEN_TTL_S,
+    ) {
         Ok(token) => json_response(
             StatusCode::OK,
             json!({ "token": token, "expires_in": SESSION_TOKEN_TTL_S }),
@@ -496,7 +515,11 @@ fn is_handoff(can_mint: bool, token: Option<&str>) -> bool {
 enum Handoff {
     /// Verified. Adopt the presented token as the cookie for `max_age_s` and
     /// send the browser on to `next`.
-    Establish { next: String, max_age_s: u64, jti: String },
+    Establish {
+        next: String,
+        max_age_s: u64,
+        jti: String,
+    },
     /// Refused, carrying the reason for the LOG. Every one of them answers the
     /// client the same 401: which of these it was is not the browser's business,
     /// and the portal that sent it here can read its own audit trail.
@@ -557,7 +580,11 @@ async fn establish_handoff(
     next: Option<&str>,
 ) -> Response {
     let (next, max_age_s, jti) = match decide_handoff(&st.keys, token, next, now_secs()) {
-        Handoff::Establish { next, max_age_s, jti } => (next, max_age_s, jti),
+        Handoff::Establish {
+            next,
+            max_age_s,
+            jti,
+        } => (next, max_age_s, jti),
         Handoff::Refuse(reason) => {
             tracing::info!(target: "oauth", reason, "console handoff refused");
             return handoff_refused();
@@ -604,7 +631,9 @@ fn handoff_cookie(fleet_name: &str, token: &str, secure: bool, max_age_s: u64) -
 /// never a redirect. A cell that bounced the browser back toward the portal on
 /// a token it would refuse again would loop it between two hosts forever.
 fn handoff_refused() -> Response {
-    no_store(errors::err_401("this session token is not valid on this host"))
+    no_store(errors::err_401(
+        "this session token is not valid on this host",
+    ))
 }
 
 /// `Cache-Control: no-store` + `Referrer-Policy: no-referrer`, for the two
@@ -614,7 +643,10 @@ fn handoff_refused() -> Response {
 fn no_store(mut resp: Response) -> Response {
     let h = resp.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     resp
 }
 
@@ -672,7 +704,9 @@ async fn google_callback(
 ) -> Response {
     // Only carry a destination from a verified, browser-bound state. Expired
     // or foreign callbacks can retry from home, never from an untrusted URL.
-    let next = q.state.as_deref()
+    let next = q
+        .state
+        .as_deref()
         .and_then(|state| verify_state(state_key(), state))
         .filter(|(nonce, _)| state_bound(&st, &headers, nonce))
         .map(|(_, next)| next)
@@ -689,7 +723,12 @@ async fn google_callback(
 
 // Keep the JSON error contract for non-browser clients. Browsers get the same
 // status and a retryable sign-in page, without provider diagnostics or codes.
-async fn google_browser_response(st: &St, next: &str, cancelled: bool, mut response: Response) -> Response {
+async fn google_browser_response(
+    st: &St,
+    next: &str,
+    cancelled: bool,
+    mut response: Response,
+) -> Response {
     if !response.status().is_client_error() && !response.status().is_server_error() {
         return response;
     }
@@ -706,7 +745,10 @@ async fn google_browser_response(st: &St, next: &str, cancelled: bool, mut respo
         _ => "We couldn’t complete Google sign-in. Please try again in a moment.",
     };
     *response.body_mut() = axum::body::Body::from(render_login(st, next, Some(message)));
-    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
     response.headers_mut().remove(header::CONTENT_LENGTH);
     no_store(response)
 }
@@ -794,7 +836,9 @@ async fn google_callback_result(
 /// exp). Returns the decoded claims for `validate_google_claims`.
 async fn verify_google_id_token(id_token: &str, client_id: &str) -> Result<GoogleClaims, String> {
     let header = decode_header(id_token).map_err(|e| format!("id_token header: {e}"))?;
-    let kid = header.kid.ok_or_else(|| "id_token missing kid".to_string())?;
+    let kid = header
+        .kid
+        .ok_or_else(|| "id_token missing kid".to_string())?;
     let jwks = google_jwks().await?;
     let (n, e) = find_rsa_key(&jwks, &kid).ok_or_else(|| "no matching jwks key".to_string())?;
     let key = DecodingKey::from_rsa_components(&n, &e).map_err(|e| format!("jwks key: {e}"))?;
@@ -899,10 +943,22 @@ fn validate_google_claims(
         Some(n) if n == expected_nonce => {}
         _ => return Err(ClaimErr::NonceMismatch),
     }
-    let sub = claims.sub.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let Some(sub) = sub else { return Err(ClaimErr::MissingSub) };
-    let email = claims.email.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let Some(email) = email else { return Err(ClaimErr::MissingEmail) };
+    let sub = claims
+        .sub
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(sub) = sub else {
+        return Err(ClaimErr::MissingSub);
+    };
+    let email = claims
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(email) = email else {
+        return Err(ClaimErr::MissingEmail);
+    };
     if !json_truthy(claims.email_verified.as_ref()) {
         return Err(ClaimErr::EmailUnverified);
     }
@@ -916,7 +972,10 @@ fn validate_google_claims(
             return Err(ClaimErr::DomainNotAllowed);
         }
     }
-    Ok(OidcIdentity { sub: sub.to_string(), email })
+    Ok(OidcIdentity {
+        sub: sub.to_string(),
+        email,
+    })
 }
 
 fn claim_err_response(e: ClaimErr) -> Response {
@@ -1047,7 +1106,8 @@ async fn github_callback(
             return errors::err_502("github user lookup failed");
         }
     };
-    let emails = match httpget::get_json_with_headers(GITHUB_EMAILS_URL, &hdrs, HTTP_TIMEOUT).await {
+    let emails = match httpget::get_json_with_headers(GITHUB_EMAILS_URL, &hdrs, HTTP_TIMEOUT).await
+    {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(target: "oauth", err = %e, "github /user/emails failed");
@@ -1056,7 +1116,10 @@ async fn github_callback(
     };
 
     let Some(email) = select_github_email(&emails) else {
-        return errors::err_403("email_unverified", "github account has no verified primary email");
+        return errors::err_403(
+            "email_unverified",
+            "github account has no verified primary email",
+        );
     };
     let Some(provider_id) = github_user_id(&user) else {
         return errors::err_502("github user response missing id");
@@ -1145,9 +1208,10 @@ async fn finish_oauth(
 ) -> Response {
     match resolve_oauth(st, provider, provider_id, email).await {
         Ok(user) => establish_session(st, headers, user, next).await,
-        Err(ResolveErr::NotProvisioned) => {
-            errors::err_403("not_provisioned", "no account for this identity (auto-provision disabled)")
-        }
+        Err(ResolveErr::NotProvisioned) => errors::err_403(
+            "not_provisioned",
+            "no account for this identity (auto-provision disabled)",
+        ),
         Err(ResolveErr::NoTenant) => {
             err_500("auto-provision enabled but QUEEN_PROXY_AUTOPROVISION_TENANT is unset/unknown")
         }
@@ -1177,7 +1241,9 @@ async fn resolve_oauth(
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    let identity_hit = web::find_user_by_identity(store, provider, provider_id).await.map_err(db)?;
+    let identity_hit = web::find_user_by_identity(store, provider, provider_id)
+        .await
+        .map_err(db)?;
     let email_hit = if email_verified {
         web::find_user_by_email(store, email).await.map_err(db)?
     } else {
@@ -1187,7 +1253,9 @@ async fn resolve_oauth(
     match decide_resolution(identity_hit, email_hit, email_verified, autoprovision) {
         Resolution::Login(u) => Ok(u),
         Resolution::Link(u) => {
-            web::link_identity(store, &u, provider, provider_id, email).await.map_err(db)?;
+            web::link_identity(store, &u, provider, provider_id, email)
+                .await
+                .map_err(db)?;
             record_op(
                 st,
                 u.tenant_id,
@@ -1200,7 +1268,14 @@ async fn resolve_oauth(
             Ok(u)
         }
         Resolution::Provision => {
-            let u = provision_user(st, email, provider, provider_id, &st.cfg.autoprovision_default_role).await?;
+            let u = provision_user(
+                st,
+                email,
+                provider,
+                provider_id,
+                &st.cfg.autoprovision_default_role,
+            )
+            .await?;
             record_op(
                 st,
                 u.tenant_id,
@@ -1240,15 +1315,23 @@ async fn provision_user(
     let tenant_slug = std::env::var("QUEEN_PROXY_AUTOPROVISION_TENANT")
         .ok()
         .filter(|s| !s.trim().is_empty());
-    let Some(tenant_slug) = tenant_slug else { return Err(ResolveErr::NoTenant) };
+    let Some(tenant_slug) = tenant_slug else {
+        return Err(ResolveErr::NoTenant);
+    };
 
-    let web::Provisioned { user, granted } =
-        web::provision_oauth_user(&st.store, &tenant_slug, email, provider, provider_id, default_role)
-            .await
-            .map_err(|e| match e {
-                web::ProvisionError::NoTenant => ResolveErr::NoTenant,
-                web::ProvisionError::Db(m) => ResolveErr::Db(m),
-            })?;
+    let web::Provisioned { user, granted } = web::provision_oauth_user(
+        &st.store,
+        &tenant_slug,
+        email,
+        provider,
+        provider_id,
+        default_role,
+    )
+    .await
+    .map_err(|e| match e {
+        web::ProvisionError::NoTenant => ResolveErr::NoTenant,
+        web::ProvisionError::Db(m) => ResolveErr::Db(m),
+    })?;
 
     if granted == 0 {
         // Not an error: the tenant genuinely has no clusters yet. Say so, because
@@ -1299,7 +1382,9 @@ async fn record_op(
         Ok(()) => {}
         // The old path returned silently when the pool had no connection.
         Err(e) if e.is_unavailable() => {}
-        Err(e) => tracing::warn!(target: "oauth", action, err = %e, "record_operation failed (non-fatal)"),
+        Err(e) => {
+            tracing::warn!(target: "oauth", action, err = %e, "record_operation failed (non-fatal)")
+        }
     }
 }
 
@@ -1316,7 +1401,11 @@ fn state_key() -> &'static hmac::Key {
         let secret = std::env::var("QUEEN_PROXY_OAUTH_STATE_SECRET")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("QUEEN_PROXY_JWT_SECRET").ok().filter(|s| !s.is_empty()))
+            .or_else(|| {
+                std::env::var("QUEEN_PROXY_JWT_SECRET")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
             .map(String::into_bytes)
             .unwrap_or_else(|| {
                 let mut b = [0u8; 32];
@@ -1351,7 +1440,11 @@ fn verify_state(key: &hmac::Key, token: &str) -> Option<(String, String)> {
     }
     let nonce = v.get("n")?.as_str()?.to_string();
     let next_raw = v.get("x")?.as_str()?.to_string();
-    let next = if is_safe(&next_raw) { next_raw } else { "/".to_string() };
+    let next = if is_safe(&next_raw) {
+        next_raw
+    } else {
+        "/".to_string()
+    };
     Some((nonce, next))
 }
 
@@ -1405,7 +1498,9 @@ fn redirect_uri(st: &St, headers: &HeaderMap, provider: &str) -> Option<String> 
 /// handoff would set a cookie nothing ever looks for.
 pub(crate) fn cookie_is_secure(st: &St, headers: &HeaderMap) -> bool {
     st.cfg.cookie_domain.is_some()
-        || header_str(headers, "x-forwarded-proto").map(|v| v.eq_ignore_ascii_case("https")).unwrap_or(false)
+        || header_str(headers, "x-forwarded-proto")
+            .map(|v| v.eq_ignore_ascii_case("https"))
+            .unwrap_or(false)
 }
 
 /// The one place a session cookie's attributes are spelled out. Pure, so the
@@ -1444,11 +1539,21 @@ fn state_cookie_name(st: &St, secure: bool) -> String {
 
 fn state_cookie(st: &St, headers: &HeaderMap, nonce: &str, max_age_s: u64) -> String {
     let secure = cookie_is_secure(st, headers);
-    build_session_cookie(&state_cookie_name(st, secure), nonce, None, secure, max_age_s)
+    build_session_cookie(
+        &state_cookie_name(st, secure),
+        nonce,
+        None,
+        secure,
+        max_age_s,
+    )
 }
 
 fn state_bound(st: &St, headers: &HeaderMap, nonce: &str) -> bool {
-    cookie_carries(&state_cookie_name(st, cookie_is_secure(st, headers)), headers, nonce)
+    cookie_carries(
+        &state_cookie_name(st, cookie_is_secure(st, headers)),
+        headers,
+        nonce,
+    )
 }
 
 fn cookie_carries(name: &str, headers: &HeaderMap, nonce: &str) -> bool {
@@ -1542,7 +1647,10 @@ fn throttle(ip: &str) -> Result<(), u64> {
     if map.len() > 100_000 {
         map.retain(|_, b| now.duration_since(b.window_start) < LOGIN_WINDOW);
     }
-    let b = map.entry(ip.to_string()).or_insert(AttemptBucket { count: 0, window_start: now });
+    let b = map.entry(ip.to_string()).or_insert(AttemptBucket {
+        count: 0,
+        window_start: now,
+    });
     if now.duration_since(b.window_start) >= LOGIN_WINDOW {
         b.count = 0;
         b.window_start = now;
@@ -1573,7 +1681,10 @@ fn role_str(r: Role) -> &'static str {
 }
 
 fn now_secs() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn random_hex(n: usize) -> String {
@@ -1588,8 +1699,10 @@ fn html(status: StatusCode, body: String) -> Response {
 
 fn json_response(status: StatusCode, value: Value) -> Response {
     let mut resp = (status, value.to_string()).into_response();
-    resp.headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     resp
 }
 
@@ -1638,7 +1751,9 @@ pub(crate) fn pct(s: &str) -> String {
     let mut out = String::new();
     for &b in s.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -1762,7 +1877,10 @@ fn render_login(st: &St, next: &str, error: Option<&str>) -> String {
     login_html(
         sign_in_surface(st.keys.can_mint(), st.keys.can_verify()),
         &configured_providers(st),
-        st.cfg.auth_portal_url.as_deref().map(|u| (u, st.cfg.auth_portal_label.as_str())),
+        st.cfg
+            .auth_portal_url
+            .as_deref()
+            .map(|u| (u, st.cfg.auth_portal_label.as_str())),
         next,
         error,
     )
@@ -1784,7 +1902,10 @@ fn login_html(
     let next_e = esc(next);
     let next_q = pct(next);
     let err_html = match error {
-        Some(e) => format!("<div class=\"err\" role=\"alert\" tabindex=\"-1\">{}</div>", esc(e)),
+        Some(e) => format!(
+            "<div class=\"err\" role=\"alert\" tabindex=\"-1\">{}</div>",
+            esc(e)
+        ),
         None => String::new(),
     };
     let panel = match sign_in {
@@ -1808,7 +1929,11 @@ fn login_html(
             } else {
                 format!("<div class=\"providers\">{buttons}</div><div class=\"sep\">or sign in with email</div>")
             };
-            let autofocus = if providers.is_empty() && error.is_none() { " autofocus" } else { "" };
+            let autofocus = if providers.is_empty() && error.is_none() {
+                " autofocus"
+            } else {
+                ""
+            };
             format!(
                 "{divider}<form method=\"post\" action=\"/auth/login\">\
 <input type=\"hidden\" name=\"next\" value=\"{next_e}\">\
@@ -1826,7 +1951,11 @@ fn login_html(
         SignIn::Elsewhere => {
             let link = match portal {
                 Some((url, label)) => {
-                    format!("<a class=\"oauth\" href=\"{}\">{}</a>", esc(url), esc(label))
+                    format!(
+                        "<a class=\"oauth\" href=\"{}\">{}</a>",
+                        esc(url),
+                        esc(label)
+                    )
                 }
                 None => String::new(),
             };
@@ -1839,7 +1968,9 @@ Sign in through the control plane that operates it, then return here.</p>{link}"
     let favicon = favicon_data_uri();
     let mark = match wordmark_svg() {
         "" => "<span class=\"word\">queen</span>".to_string(),
-        svg => format!("<span class=\"mark\" role=\"img\" aria-label=\"Queen, message queue\">{svg}</span>"),
+        svg => format!(
+            "<span class=\"mark\" role=\"img\" aria-label=\"Queen, message queue\">{svg}</span>"
+        ),
     };
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
@@ -2030,7 +2161,10 @@ mod tests {
     }
 
     fn uref() -> UserRef {
-        UserRef { user_id: Uuid::new_v4(), tenant_id: Uuid::new_v4() }
+        UserRef {
+            user_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+        }
     }
 
     // --- signed state -------------------------------------------------------
@@ -2038,7 +2172,10 @@ mod tests {
     #[test]
     fn a_state_is_bound_to_the_browser_that_started_the_flow() {
         let mut h = HeaderMap::new();
-        h.insert(header::COOKIE, HeaderValue::from_static("a=1; __Host-q_oauth=n1; b=2"));
+        h.insert(
+            header::COOKIE,
+            HeaderValue::from_static("a=1; __Host-q_oauth=n1; b=2"),
+        );
         assert!(cookie_carries("__Host-q_oauth", &h, "n1"));
         // Someone else's callback URL: a valid signed state, another nonce.
         assert!(!cookie_carries("__Host-q_oauth", &h, "n2"));
@@ -2067,10 +2204,16 @@ mod tests {
         let mut pv: Vec<char> = p.chars().collect();
         pv[0] = if pv[0] == 'A' { 'B' } else { 'A' };
         let tampered = format!("{}.{}", pv.into_iter().collect::<String>(), s);
-        assert!(verify_state(&k, &tampered).is_none(), "tampered payload must be rejected");
+        assert!(
+            verify_state(&k, &tampered).is_none(),
+            "tampered payload must be rejected"
+        );
         // wrong key also rejected
         let other = hmac::Key::new(hmac::HMAC_SHA256, b"a-different-secret");
-        assert!(verify_state(&other, &tok).is_none(), "foreign signature must be rejected");
+        assert!(
+            verify_state(&other, &tok).is_none(),
+            "foreign signature must be rejected"
+        );
     }
 
     #[test]
@@ -2121,7 +2264,9 @@ mod tests {
 
     fn establish_of(h: Handoff) -> (String, u64) {
         match h {
-            Handoff::Establish { next, max_age_s, .. } => (next, max_age_s),
+            Handoff::Establish {
+                next, max_age_s, ..
+            } => (next, max_age_s),
             Handoff::Refuse(r) => panic!("expected an establish, got Refuse({r})"),
         }
     }
@@ -2130,15 +2275,17 @@ mod tests {
     fn verify_only_host_establishes_a_valid_handoff_and_sets_the_cookie() {
         let (auth_host, cell) = handoff_pair();
         assert!(auth_host.can_mint(), "the auth host mints");
-        assert!(!cell.can_mint(), "the cell holds a public key and no signer");
+        assert!(
+            !cell.can_mint(),
+            "the cell holds a public key and no signer"
+        );
         assert!(cell.can_verify(), "and it can still verify with it");
 
         let now = now_secs();
         let token =
             crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now + 3600, None).unwrap();
 
-        let (next, max_age_s) =
-            establish_of(decide_handoff(&cell, &token, Some("/console"), now));
+        let (next, max_age_s) = establish_of(decide_handoff(&cell, &token, Some("/console"), now));
         assert_eq!(next, "/console");
         // The cookie lives as long as the TOKEN, not as long as this host's
         // jwt_ttl_s: it cannot mint a replacement when the token dies.
@@ -2150,7 +2297,13 @@ mod tests {
             cookie.starts_with(&format!("__Host-queen_session_cell={token};")),
             "cookie is the token, under the cell name: {cookie}"
         );
-        for attr in ["Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=3600", "Secure"] {
+        for attr in [
+            "Path=/",
+            "HttpOnly",
+            "SameSite=Lax",
+            "Max-Age=3600",
+            "Secure",
+        ] {
             assert!(cookie.contains(attr), "missing {attr} in {cookie}");
         }
     }
@@ -2207,7 +2360,11 @@ mod tests {
         let cleared = clear_cookie_pair("queen_session", Some(".queenmq.cloud"), true);
         assert!(cleared[0].starts_with("queen_session=;"), "{}", cleared[0]);
         assert!(cleared[0].contains("Domain=.queenmq.cloud"));
-        assert!(cleared[1].starts_with("__Host-queen_session_cell=;"), "{}", cleared[1]);
+        assert!(
+            cleared[1].starts_with("__Host-queen_session_cell=;"),
+            "{}",
+            cleared[1]
+        );
         assert!(!cleared[1].contains("Domain="), "{}", cleared[1]);
         for c in &cleared {
             assert!(c.contains("Max-Age=0"), "a clear is Max-Age=0: {c}");
@@ -2258,12 +2415,16 @@ mod tests {
         // `cell-a`, and a token stamped for `cell-b` verifies on signature and
         // issuer alone. auth.rs owns the rule; this pins that the handoff
         // inherits it instead of routing around it.
-        let (auth_host, cell) = crate::auth::testkit::ed_handoff_pair("queen-proxy", Some("cell-a"));
+        let (auth_host, cell) =
+            crate::auth::testkit::ed_handoff_pair("queen-proxy", Some("cell-a"));
         let now = now_secs();
         let ours =
             crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now + 3600, Some("cell-a"))
                 .unwrap();
-        assert_eq!(establish_of(decide_handoff(&cell, &ours, Some("/"), now)).0, "/");
+        assert_eq!(
+            establish_of(decide_handoff(&cell, &ours, Some("/"), now)).0,
+            "/"
+        );
 
         let theirs =
             crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now + 3600, Some("cell-b"))
@@ -2282,8 +2443,14 @@ mod tests {
         let now = now_secs();
         let token =
             crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now + 3600, None).unwrap();
-        assert_eq!(establish_of(decide_handoff(&cell, &token, Some("//evil.com"), now)).0, "/");
-        assert_eq!(establish_of(decide_handoff(&cell, &token, None, now)).0, "/");
+        assert_eq!(
+            establish_of(decide_handoff(&cell, &token, Some("//evil.com"), now)).0,
+            "/"
+        );
+        assert_eq!(
+            establish_of(decide_handoff(&cell, &token, None, now)).0,
+            "/"
+        );
     }
 
     #[test]
@@ -2317,9 +2484,14 @@ mod tests {
         // (HTTP 503)" — measured against a real cell on 2026-08-29.
         let resp = err_no_signer();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "application/json");
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
 
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["code"], "not_configured");
         // The prose half belongs to the operator reading it, not to the
@@ -2332,21 +2504,30 @@ mod tests {
     #[test]
     fn resolve_existing_identity_logs_in() {
         let u = uref();
-        assert_eq!(decide_resolution(Some(u.clone()), None, true, false), Resolution::Login(u));
+        assert_eq!(
+            decide_resolution(Some(u.clone()), None, true, false),
+            Resolution::Login(u)
+        );
     }
 
     #[test]
     fn resolve_links_verified_email_match() {
         let u = uref();
         // no identity yet, but a verified email matches an existing user -> Link
-        assert_eq!(decide_resolution(None, Some(u.clone()), true, false), Resolution::Link(u));
+        assert_eq!(
+            decide_resolution(None, Some(u.clone()), true, false),
+            Resolution::Link(u)
+        );
     }
 
     #[test]
     fn resolve_unverified_email_does_not_link() {
         let u = uref();
         // email match present but NOT verified -> must not link; no autoprovision -> Deny
-        assert_eq!(decide_resolution(None, Some(u), false, false), Resolution::Deny);
+        assert_eq!(
+            decide_resolution(None, Some(u), false, false),
+            Resolution::Deny
+        );
     }
 
     #[test]
@@ -2356,7 +2537,10 @@ mod tests {
 
     #[test]
     fn resolve_autoprovision_on_provisions() {
-        assert_eq!(decide_resolution(None, None, true, true), Resolution::Provision);
+        assert_eq!(
+            decide_resolution(None, None, true, true),
+            Resolution::Provision
+        );
     }
 
     // --- Google claims ------------------------------------------------------
@@ -2392,15 +2576,24 @@ mod tests {
     #[test]
     fn google_unverified_email_rejected() {
         let c = gclaims(json!(false), "n1");
-        assert_eq!(validate_google_claims(&c, "n1", ANY_DOMAIN), Err(ClaimErr::EmailUnverified));
+        assert_eq!(
+            validate_google_claims(&c, "n1", ANY_DOMAIN),
+            Err(ClaimErr::EmailUnverified)
+        );
         let c2 = gclaims(json!("false"), "n1");
-        assert_eq!(validate_google_claims(&c2, "n1", ANY_DOMAIN), Err(ClaimErr::EmailUnverified));
+        assert_eq!(
+            validate_google_claims(&c2, "n1", ANY_DOMAIN),
+            Err(ClaimErr::EmailUnverified)
+        );
     }
 
     #[test]
     fn google_nonce_mismatch_rejected() {
         let c = gclaims(json!(true), "n1");
-        assert_eq!(validate_google_claims(&c, "different", ANY_DOMAIN), Err(ClaimErr::NonceMismatch));
+        assert_eq!(
+            validate_google_claims(&c, "different", ANY_DOMAIN),
+            Err(ClaimErr::NonceMismatch)
+        );
     }
 
     #[test]
@@ -2412,7 +2605,10 @@ mod tests {
             nonce: Some("n1".to_string()),
             hd: None,
         };
-        assert_eq!(validate_google_claims(&c, "n1", ANY_DOMAIN), Err(ClaimErr::MissingEmail));
+        assert_eq!(
+            validate_google_claims(&c, "n1", ANY_DOMAIN),
+            Err(ClaimErr::MissingEmail)
+        );
     }
 
     // --- Google domain allowlist --------------------------------------------
@@ -2478,7 +2674,10 @@ mod tests {
             Err(ClaimErr::DomainNotAllowed)
         );
         c.email = Some("u@smartness.com".to_string());
-        assert!(validate_google_claims(&c, "n1", &domains(&["smartpricing.it", "smartness.com"])).is_ok());
+        assert!(
+            validate_google_claims(&c, "n1", &domains(&["smartpricing.it", "smartness.com"]))
+                .is_ok()
+        );
     }
 
     // --- GitHub email selection --------------------------------------------
@@ -2498,13 +2697,19 @@ mod tests {
             { "email": "Other@example.com", "primary": false, "verified": true },
             { "email": "Primary@Example.com", "primary": true, "verified": true }
         ]);
-        assert_eq!(select_github_email(&emails), Some("primary@example.com".to_string()));
+        assert_eq!(
+            select_github_email(&emails),
+            Some("primary@example.com".to_string())
+        );
     }
 
     #[test]
     fn github_user_id_from_number_or_string() {
         assert_eq!(github_user_id(&json!({ "id": 42 })), Some("42".to_string()));
-        assert_eq!(github_user_id(&json!({ "id": "42" })), Some("42".to_string()));
+        assert_eq!(
+            github_user_id(&json!({ "id": "42" })),
+            Some("42".to_string())
+        );
         assert_eq!(github_user_id(&json!({ "login": "x" })), None);
     }
 
@@ -2512,8 +2717,14 @@ mod tests {
 
     #[test]
     fn qs_encodes_reserved() {
-        let s = qs(&[("scope", "openid email profile"), ("redirect_uri", "https://a/b?x=1")]);
-        assert_eq!(s, "scope=openid%20email%20profile&redirect_uri=https%3A%2F%2Fa%2Fb%3Fx%3D1");
+        let s = qs(&[
+            ("scope", "openid email profile"),
+            ("redirect_uri", "https://a/b?x=1"),
+        ]);
+        assert_eq!(
+            s,
+            "scope=openid%20email%20profile&redirect_uri=https%3A%2F%2Fa%2Fb%3Fx%3D1"
+        );
     }
 
     // --- sign-in providers --------------------------------------------------
@@ -2524,14 +2735,20 @@ mod tests {
         // on its client id alone, while the callback also needs the secret —
         // so a half-configured instance showed a Google button that walked the
         // user out to Google and 404'd them on return.
-        assert_eq!(provider_list(true, true, false, false), vec![("google", "Google")]);
+        assert_eq!(
+            provider_list(true, true, false, false),
+            vec![("google", "Google")]
+        );
         assert_eq!(provider_list(true, false, false, false), vec![]);
         assert_eq!(provider_list(false, true, false, false), vec![]);
     }
 
     #[test]
     fn github_is_offered_on_the_same_terms_and_comes_second() {
-        assert_eq!(provider_list(false, false, true, true), vec![("github", "GitHub")]);
+        assert_eq!(
+            provider_list(false, false, true, true),
+            vec![("github", "GitHub")]
+        );
         assert_eq!(provider_list(false, false, true, false), vec![]);
         assert_eq!(
             provider_list(true, true, true, true),
@@ -2572,26 +2789,51 @@ mod tests {
     }
 
     async fn response_text(response: Response) -> String {
-        String::from_utf8(axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap().to_vec()).unwrap()
+        String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
     async fn google_cancellation_renders_a_retry_and_preserves_only_a_bound_destination() {
         let st = google_test_state();
-        for (cookie_nonce, ttl, expected_next) in [("nonce", STATE_TTL_S, "/queues?range=12h"), ("foreign", STATE_TTL_S, "/"), ("nonce", -1, "/")] {
+        for (cookie_nonce, ttl, expected_next) in [
+            ("nonce", STATE_TTL_S, "/queues?range=12h"),
+            ("foreign", STATE_TTL_S, "/"),
+            ("nonce", -1, "/"),
+        ] {
             let mut headers = HeaderMap::new();
             headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
-            headers.insert(header::COOKIE, HeaderValue::from_str(&format!("{}={cookie_nonce}", state_cookie_name(&st, false))).unwrap());
-            let response = google_callback(State(st.clone()), headers, Query(CallbackQuery {
-                code: None,
-                state: Some(sign_state(state_key(), "nonce", "/queues?range=12h", ttl)),
-                error: Some("access_denied".into()),
-            })).await;
+            headers.insert(
+                header::COOKIE,
+                HeaderValue::from_str(&format!("{}={cookie_nonce}", state_cookie_name(&st, false)))
+                    .unwrap(),
+            );
+            let response = google_callback(
+                State(st.clone()),
+                headers,
+                Query(CallbackQuery {
+                    code: None,
+                    state: Some(sign_state(state_key(), "nonce", "/queues?range=12h", ttl)),
+                    error: Some("access_denied".into()),
+                }),
+            )
+            .await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/html; charset=utf-8"
+            );
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             let body = response_text(response).await;
-            assert!(body.contains(&format!("href=\"/auth/google?next={}\"", pct(expected_next))));
+            assert!(body.contains(&format!(
+                "href=\"/auth/google?next={}\"",
+                pct(expected_next)
+            )));
             if expected_next == "/" {
                 assert!(body.contains("expired or belongs to another browser"));
                 assert!(!body.contains("/queues?range=12h"));
@@ -2604,9 +2846,16 @@ mod tests {
     #[tokio::test]
     async fn google_callback_keeps_the_json_contract_for_api_clients() {
         let st = google_test_state();
-        let response = google_callback(State(st), HeaderMap::new(), Query(CallbackQuery {
-            code: None, state: None, error: None,
-        })).await;
+        let response = google_callback(
+            State(st),
+            HeaderMap::new(),
+            Query(CallbackQuery {
+                code: None,
+                state: None,
+                error: None,
+            }),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
         let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
@@ -2617,12 +2866,29 @@ mod tests {
     async fn google_browser_errors_keep_the_status_and_hide_provider_diagnostics() {
         let st = google_test_state();
         for (code, status, message) in [
-            ("domain_not_allowed", StatusCode::FORBIDDEN, "This Google account is not allowed"),
-            ("not_provisioned", StatusCode::FORBIDDEN, "does not have access to Queen"),
-            ("bad_gateway", StatusCode::BAD_GATEWAY, "try again in a moment"),
+            (
+                "domain_not_allowed",
+                StatusCode::FORBIDDEN,
+                "This Google account is not allowed",
+            ),
+            (
+                "not_provisioned",
+                StatusCode::FORBIDDEN,
+                "does not have access to Queen",
+            ),
+            (
+                "bad_gateway",
+                StatusCode::BAD_GATEWAY,
+                "try again in a moment",
+            ),
         ] {
-            let response = google_browser_response(&st, "/queues", false,
-                errors::json_error(status, code, "<script>private provider detail</script>")).await;
+            let response = google_browser_response(
+                &st,
+                "/queues",
+                false,
+                errors::json_error(status, code, "<script>private provider detail</script>"),
+            )
+            .await;
             assert_eq!(response.status(), status);
             let body = response_text(response).await;
             assert!(body.contains(message));
@@ -2634,11 +2900,23 @@ mod tests {
     #[tokio::test]
     async fn google_browser_success_keeps_the_redirect_and_session_cookie() {
         let st = google_test_state();
-        let response = google_browser_response(&st, "/", false,
-            redirect(StatusCode::SEE_OTHER, "/queues", Some("session=test; HttpOnly"))).await;
+        let response = google_browser_response(
+            &st,
+            "/",
+            false,
+            redirect(
+                StatusCode::SEE_OTHER,
+                "/queues",
+                Some("session=test; HttpOnly"),
+            ),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(response.headers()[header::LOCATION], "/queues");
-        assert_eq!(response.headers()[header::SET_COOKIE], "session=test; HttpOnly");
+        assert_eq!(
+            response.headers()[header::SET_COOKIE],
+            "session=test; HttpOnly"
+        );
     }
 
     #[test]
@@ -2662,17 +2940,32 @@ mod tests {
         // offered email/password on a host that cannot mint a session, so every
         // submission it invited came back 503.
         let html = login_html(SignIn::Elsewhere, BOTH, None, "/", None);
-        assert!(!html.contains("<form"), "no form on a host that cannot complete one");
-        assert!(!html.contains("type=\"password\""), "and nothing to type a password into");
+        assert!(
+            !html.contains("<form"),
+            "no form on a host that cannot complete one"
+        );
+        assert!(
+            !html.contains("type=\"password\""),
+            "and nothing to type a password into"
+        );
         assert!(
             html.contains("This host verifies sessions but does not issue them."),
             "the notice says why in the page's own voice"
         );
-        assert!(html.contains("control plane"), "and where sign-in actually happens");
+        assert!(
+            html.contains("control plane"),
+            "and where sign-in actually happens"
+        );
         // The provider buttons are the same dead end one redirect later: both
         // callbacks end in `establish_session`, which cannot mint here either.
-        assert!(!html.contains("Continue with Google"), "no OAuth button that 503s on return");
-        assert!(!html.contains("class=\"sep\""), "and no divider left over one");
+        assert!(
+            !html.contains("Continue with Google"),
+            "no OAuth button that 503s on return"
+        );
+        assert!(
+            !html.contains("class=\"sep\""),
+            "and no divider left over one"
+        );
     }
 
     #[test]
@@ -2680,7 +2973,10 @@ mod tests {
         let with = login_html(
             SignIn::Elsewhere,
             &[],
-            Some(("https://auth.example.test/login", "Continue to the control plane")),
+            Some((
+                "https://auth.example.test/login",
+                "Continue to the control plane",
+            )),
             "/",
             None,
         );
@@ -2688,12 +2984,21 @@ mod tests {
             with.contains("<a class=\"oauth\" href=\"https://auth.example.test/login\">"),
             "the configured URL is the link"
         );
-        assert!(with.contains(">Continue to the control plane</a>"), "labelled as configured");
+        assert!(
+            with.contains(">Continue to the control plane</a>"),
+            "labelled as configured"
+        );
         // Absent is a supported shape, not a broken one: the same notice, with
         // nothing to click.
         let without = login_html(SignIn::Elsewhere, &[], None, "/", None);
-        assert!(without.contains("This host verifies sessions"), "still explains");
-        assert!(!without.contains("<a class=\"oauth\""), "with no empty link left behind");
+        assert!(
+            without.contains("This host verifies sessions"),
+            "still explains"
+        );
+        assert!(
+            !without.contains("<a class=\"oauth\""),
+            "with no empty link left behind"
+        );
     }
 
     #[test]
@@ -2706,7 +3011,10 @@ mod tests {
             "/clusters/prod",
             None,
         );
-        assert!(!html.contains("/clusters/prod"), "the portal link is not a return path");
+        assert!(
+            !html.contains("/clusters/prod"),
+            "the portal link is not a return path"
+        );
         // Config refuses a non-http(s) URL long before this, but the page escapes
         // anyway: this is the one surface served with no session at all.
         let nasty = login_html(
@@ -2716,23 +3024,49 @@ mod tests {
             "/",
             None,
         );
-        assert!(!nasty.contains("<script>alert"), "no markup escapes the href");
+        assert!(
+            !nasty.contains("<script>alert"),
+            "no markup escapes the href"
+        );
         assert!(!nasty.contains("L<b>"), "nor the label");
     }
 
     #[test]
     fn a_minting_host_renders_the_form_exactly_as_before() {
-        let html = login_html(SignIn::Here, BOTH, None, "/clusters/prod", Some("Invalid email or password."));
+        let html = login_html(
+            SignIn::Here,
+            BOTH,
+            None,
+            "/clusters/prod",
+            Some("Invalid email or password."),
+        );
         assert!(html.contains("<form method=\"post\" action=\"/auth/login\">"));
         assert!(html.contains("autocomplete=\"current-password\""));
-        assert!(html.contains("value=\"/clusters/prod\""), "next rides the form");
+        assert!(
+            html.contains("value=\"/clusters/prod\""),
+            "next rides the form"
+        );
         assert!(html.contains("Continue with Google") && html.contains("Continue with GitHub"));
-        assert!(html.contains("Invalid email or password."), "and a failed post still says so");
+        assert!(
+            html.contains("Invalid email or password."),
+            "and a failed post still says so"
+        );
         // A portal URL set on a minting host is inert: it has a form that works.
-        let with_portal =
-            login_html(SignIn::Here, &[], Some(("https://auth.example.test", "Portal")), "/", None);
-        assert!(with_portal.contains("<form"), "the form is what this host offers");
-        assert!(!with_portal.contains("https://auth.example.test"), "the portal is not offered");
+        let with_portal = login_html(
+            SignIn::Here,
+            &[],
+            Some(("https://auth.example.test", "Portal")),
+            "/",
+            None,
+        );
+        assert!(
+            with_portal.contains("<form"),
+            "the form is what this host offers"
+        );
+        assert!(
+            !with_portal.contains("https://auth.example.test"),
+            "the portal is not offered"
+        );
     }
 
     #[test]
@@ -2742,7 +3076,10 @@ mod tests {
         // wearing it here would read as "something is broken" on every cloud
         // cell's sign-in page.
         let html = login_html(SignIn::Elsewhere, &[], None, "/", None);
-        assert!(!html.contains("class=\"err\""), "the notice is routine, not an alarm");
+        assert!(
+            !html.contains("class=\"err\""),
+            "the notice is routine, not an alarm"
+        );
         assert!(html.contains("class=\"note\""));
     }
 
@@ -2754,25 +3091,46 @@ mod tests {
         // If `app/public/queen-wordmark.svg` is renamed or the webapp is not
         // built, fail HERE rather than shipping a login page with no logo.
         let wordmark = wordmark_svg();
-        assert!(wordmark.starts_with("<svg"), "the wordmark is SVG markup, with no prolog for the page to print");
+        assert!(
+            wordmark.starts_with("<svg"),
+            "the wordmark is SVG markup, with no prolog for the page to print"
+        );
         assert!(wordmark.ends_with("</svg>"), "and nothing after it either");
         // One file for both schemes: its letters take the page's text colour.
-        assert!(wordmark.contains("fill=\"currentColor\""), "the letters follow the scheme");
-        assert!(!wordmark.contains("<script"), "markup that goes into the page as it is carries no code");
+        assert!(
+            wordmark.contains("fill=\"currentColor\""),
+            "the letters follow the scheme"
+        );
+        assert!(
+            !wordmark.contains("<script"),
+            "markup that goes into the page as it is carries no code"
+        );
 
         let favicon = favicon_data_uri()
             .strip_prefix("data:image/svg+xml;base64,")
             .expect("the favicon is an SVG data URI");
         let favicon = String::from_utf8(B64.decode(favicon).expect("valid base64")).unwrap();
-        assert!(favicon.contains("<svg"), "the favicon decodes back to an SVG");
+        assert!(
+            favicon.contains("<svg"),
+            "the favicon decodes back to an SVG"
+        );
 
         for (art, what) in [(wordmark, "wordmark"), (favicon.as_str(), "favicon")] {
             // Inlining is pointless if the art then reaches for a URL of its own:
             // webapp.rs would answer that with a 302 back to this page. It must
             // be self-contained geometry, with nothing to fetch.
-            assert!(!art.contains("href=\"/"), "no same-origin refs inside the {what}");
-            assert!(!art.contains("href=\"http"), "no remote refs inside the {what}");
-            assert!(!art.contains("<image"), "the {what} is vector, with no raster to fetch");
+            assert!(
+                !art.contains("href=\"/"),
+                "no same-origin refs inside the {what}"
+            );
+            assert!(
+                !art.contains("href=\"http"),
+                "no remote refs inside the {what}"
+            );
+            assert!(
+                !art.contains("<image"),
+                "the {what} is vector, with no raster to fetch"
+            );
         }
     }
 
@@ -2789,7 +3147,10 @@ mod tests {
             rest = rest[at..].split_once("*/").map_or("", |(_, after)| after);
         }
         plain.push_str(rest);
-        let from = plain.find(block).unwrap_or_else(|| panic!("no `{block}` block")) + block.len();
+        let from = plain
+            .find(block)
+            .unwrap_or_else(|| panic!("no `{block}` block"))
+            + block.len();
         let body = &plain[from..from + plain[from..].find('}').expect("the block closes")];
         body.split(';')
             .filter_map(|declaration| declaration.trim().split_once(':'))
@@ -2806,11 +3167,19 @@ mod tests {
         // the old dark greys. Every token the page declares must carry the
         // value app/src/style.css gives it, in both schemes.
         let app = include_str!("../../app/src/style.css");
-        for (page_block, app_block) in [(":root{", "  :root {"), ("html.light{", "  html.light {")] {
+        for (page_block, app_block) in [(":root{", "  :root {"), ("html.light{", "  html.light {")]
+        {
             let (page, app) = (tokens(SIGN_IN_CSS, page_block), tokens(app, app_block));
-            assert!(page.len() >= 16, "`{page_block}` declares the page's tokens");
+            assert!(
+                page.len() >= 16,
+                "`{page_block}` declares the page's tokens"
+            );
             for (name, value) in &page {
-                assert_eq!(Some(value), app.get(name), "{name} in `{page_block}` is the dashboard's");
+                assert_eq!(
+                    Some(value),
+                    app.get(name),
+                    "{name} in `{page_block}` is the dashboard's"
+                );
             }
         }
     }
@@ -2820,8 +3189,14 @@ mod tests {
         // Same key and same fallback as the script in app/index.html: a
         // different key here would be a page that ignores the dashboard's toggle.
         let app = include_str!("../../app/index.html");
-        for part in ["localStorage.getItem('queen-theme')", "(prefers-color-scheme: light)"] {
-            assert!(app.contains(part), "the dashboard resolves its scheme with {part}");
+        for part in [
+            "localStorage.getItem('queen-theme')",
+            "(prefers-color-scheme: light)",
+        ] {
+            assert!(
+                app.contains(part),
+                "the dashboard resolves its scheme with {part}"
+            );
             assert!(SIGN_IN_THEME.contains(part), "and so does this page");
         }
         let html = login_html(SignIn::Here, &[], None, "/", None);

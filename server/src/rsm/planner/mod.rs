@@ -1413,12 +1413,15 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// (`check_message_key_names`, at most `NAME_BUDGET_BYTES` together), so
     /// the names are read only for a group long enough to overflow even then:
     /// an ordinary ack, and a seek of an ordinary group, pay no read.
-    pub(crate) fn check_effect_keys(&self, ov: &Overlay, effects: &[Effect]) -> Result<(), Refusal> {
+    pub(crate) fn check_effect_keys(
+        &self,
+        ov: &Overlay,
+        effects: &[Effect],
+    ) -> Result<(), Refusal> {
         let max = self.reads().max_key_len();
         // counter_group = 1 + tenant+2 + queue+2 + group+2 + 2.
-        let group_safe = |g: &str| {
-            keycheck::name_len(g) + 3 + crate::rsm::facade::NAME_BUDGET_BYTES + 4 <= max
-        };
+        let group_safe =
+            |g: &str| keycheck::name_len(g) + 3 + crate::rsm::facade::NAME_BUDGET_BYTES + 4 <= max;
         for e in effects {
             match e {
                 Effect::TraceAppend { event } | Effect::TraceRecord { event } => {

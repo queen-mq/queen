@@ -78,7 +78,11 @@ fn shard_index(id: &Uuid) -> usize {
 }
 
 fn now_minute_epoch() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() / 60
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 60
 }
 
 #[derive(Clone, Debug)]
@@ -177,7 +181,11 @@ enum Sink {
     /// No store (tests): usage is discarded.
     None,
     /// The broker's KV: this node's rows, under `node`.
-    Kv { kv: Arc<dyn KvBackend>, node: String, keep_days: u64 },
+    Kv {
+        kv: Arc<dyn KvBackend>,
+        node: String,
+        keep_days: u64,
+    },
 }
 
 pub struct Meter {
@@ -218,7 +226,10 @@ impl Meter {
     fn record_at(&self, s: Sample, minute: u64) {
         let idx = shard_index(&s.cluster_id);
         let mut shard = self.shards[idx].lock().unwrap();
-        let acc = &mut shard.entry((s.cluster_id, s.op, minute)).or_default().pending;
+        let acc = &mut shard
+            .entry((s.cluster_id, s.op, minute))
+            .or_default()
+            .pending;
         acc.reqs = acc.reqs.saturating_add(s.reqs);
         acc.msgs = acc.msgs.saturating_add(s.msgs);
         acc.bytes_in = acc.bytes_in.saturating_add(s.bytes_in);
@@ -291,7 +302,12 @@ impl Meter {
     /// deliberate trade: usage we can over-count once is recoverable, usage
     /// we drop is gone.
     pub async fn drain(&self) {
-        if let Some(Sink::Kv { kv, node, keep_days }) = self.sink.get() {
+        if let Some(Sink::Kv {
+            kv,
+            node,
+            keep_days,
+        }) = self.sink.get()
+        {
             return self.drain_kv(kv.as_ref(), node, *keep_days).await;
         }
         // No store: nothing would ever replay a spool, so discard.
@@ -305,7 +321,8 @@ impl Meter {
     /// closed now), bounded by DRAIN_TIMEOUT; whatever it could not write
     /// goes to the spool as usage to add.
     async fn drain_kv(&self, kv: &dyn KvBackend, node: &str, keep_days: u64) {
-        let res = tokio::time::timeout(DRAIN_TIMEOUT, self.flush_kv(kv, node, keep_days, u64::MAX)).await;
+        let res =
+            tokio::time::timeout(DRAIN_TIMEOUT, self.flush_kv(kv, node, keep_days, u64::MAX)).await;
         let left = self.take_pending(None);
         match res {
             Ok(Ok(n)) if left.is_empty() => {
@@ -338,7 +355,8 @@ impl Meter {
                 let _ = self.sink.set(Sink::None);
                 let this = Arc::clone(self);
                 tokio::spawn(async move {
-                    let mut tick = tokio::time::interval(Duration::from_millis(this.flush_ms.max(100)));
+                    let mut tick =
+                        tokio::time::interval(Duration::from_millis(this.flush_ms.max(100)));
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         tick.tick().await;
@@ -354,7 +372,11 @@ impl Meter {
         };
         let node = usage::node_label(node);
         let keep_days = usage::keep_days_from_env();
-        let _ = self.sink.set(Sink::Kv { kv: kv.clone(), node: node.clone(), keep_days });
+        let _ = self.sink.set(Sink::Kv {
+            kv: kv.clone(),
+            node: node.clone(),
+            keep_days,
+        });
         let this = Arc::clone(self);
         tokio::spawn(async move {
             this.recover_kv(kv.clone(), node.clone(), keep_days).await;
@@ -365,7 +387,10 @@ impl Meter {
             loop {
                 tick.tick().await;
                 let now_minute = now_minute_epoch();
-                match this.flush_kv(kv.as_ref(), &node, keep_days, now_minute).await {
+                match this
+                    .flush_kv(kv.as_ref(), &node, keep_days, now_minute)
+                    .await
+                {
                     Ok(n) => {
                         if failing {
                             tracing::info!(target: "meter", rows = n, "usage flush to the kv recovered");
@@ -392,17 +417,30 @@ impl Meter {
     /// within the minute, or a late record into a minute already forgotten).
     /// A batch that fails keeps its keys pending for the next call; the first
     /// error is returned after every batch was tried.
-    async fn flush_kv(&self, kv: &dyn KvBackend, node: &str, keep_days: u64, now_minute: u64) -> Result<usize, String> {
+    async fn flush_kv(
+        &self,
+        kv: &dyn KvBackend,
+        node: &str,
+        keep_days: u64,
+        now_minute: u64,
+    ) -> Result<usize, String> {
         let _gate = self.flush_gate.lock().await;
         let mut dirty: Vec<(Key, Acc, Option<Acc>)> = Vec::new();
         for shard in &self.shards {
             let m = shard.lock().unwrap();
-            dirty.extend(m.iter().filter(|(_, e)| !e.pending.is_zero()).map(|(k, e)| (*k, e.pending, e.base)));
+            dirty.extend(
+                m.iter()
+                    .filter(|(_, e)| !e.pending.is_zero())
+                    .map(|(k, e)| (*k, e.pending, e.base)),
+            );
         }
         let mut first_err: Option<String> = None;
 
-        let unseeded: Vec<(Uuid, u64, String)> =
-            dirty.iter().filter(|d| d.2.is_none()).map(|(k, _, _)| (k.0, k.2, k.1.as_str().to_string())).collect();
+        let unseeded: Vec<(Uuid, u64, String)> = dirty
+            .iter()
+            .filter(|d| d.2.is_none())
+            .map(|(k, _, _)| (k.0, k.2, k.1.as_str().to_string()))
+            .collect();
         if !unseeded.is_empty() {
             match usage::kv_read_own(kv, node, &unseeded).await {
                 Ok(docs) => {
@@ -413,7 +451,11 @@ impl Meter {
                     for d in dirty.iter_mut() {
                         if let Some(b) = seeds.get(&d.0) {
                             d.2 = Some(*b);
-                            if let Some(e) = self.shards[shard_index(&d.0 .0)].lock().unwrap().get_mut(&d.0) {
+                            if let Some(e) = self.shards[shard_index(&d.0 .0)]
+                                .lock()
+                                .unwrap()
+                                .get_mut(&d.0)
+                            {
                                 e.base.get_or_insert(*b);
                             }
                         }
@@ -453,7 +495,10 @@ impl Meter {
         }
 
         for shard in &self.shards {
-            shard.lock().unwrap().retain(|k, e| k.2 >= now_minute || !e.pending.is_zero());
+            shard
+                .lock()
+                .unwrap()
+                .retain(|k, e| k.2 >= now_minute || !e.pending.is_zero());
         }
         match first_err {
             Some(e) => Err(e),
@@ -466,11 +511,19 @@ impl Meter {
     /// instead of growing without bound. Skipped while another flush holds the
     /// gate — it may be writing those very rows.
     fn spool_kv_backlog(&self, now_minute: u64, max: usize) {
-        let Ok(_gate) = self.flush_gate.try_lock() else { return };
+        let Ok(_gate) = self.flush_gate.try_lock() else {
+            return;
+        };
         let waiting: usize = self
             .shards
             .iter()
-            .map(|s| s.lock().unwrap().iter().filter(|(k, e)| k.2 < now_minute && !e.pending.is_zero()).count())
+            .map(|s| {
+                s.lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(k, e)| k.2 < now_minute && !e.pending.is_zero())
+                    .count()
+            })
             .sum();
         if waiting <= max {
             return;
@@ -489,7 +542,14 @@ impl Meter {
                 let (this, kv, node) = (this.clone(), kv.clone(), node.clone());
                 async move {
                     let _gate = this.flush_gate.lock().await;
-                    let touched = usage::kv_add_minutes(kv.as_ref(), &node, keep_days, &rows, usage::now_us()).await?;
+                    let touched = usage::kv_add_minutes(
+                        kv.as_ref(),
+                        &node,
+                        keep_days,
+                        &rows,
+                        usage::now_us(),
+                    )
+                    .await?;
                     this.reroll.lock().unwrap().extend(touched);
                     Ok(())
                 }
@@ -597,7 +657,8 @@ pub fn spawn_rollup(st: St) {
             crate::config::env_u64("QUEEN_PROXY_ROLLUP_MS", ROLLUP_INTERVAL_MS).max(1_000),
         );
         let warn_percent =
-            crate::config::env_u64("QUEEN_PROXY_QUOTA_WARN_PERCENT", QUOTA_WARN_PERCENT as u64) as i64;
+            crate::config::env_u64("QUEEN_PROXY_QUOTA_WARN_PERCENT", QUOTA_WARN_PERCENT as u64)
+                as i64;
         // The first tick fires immediately: after a restart the push-block
         // flags are empty (they live in memory only), so a cluster that was
         // over its quota must be re-blocked now, not an hour from now.
@@ -664,7 +725,9 @@ async fn enforce_monthly_quota(
         let msgs = row.msgs;
         // Same three-way override rule as every other limit (cache.rs):
         // absent -> plan, JSON null -> explicitly unlimited, number -> that.
-        let Some(quota) = crate::cache::override_or(&row.overrides, "monthly_msgs_quota", row.plan_quota) else {
+        let Some(quota) =
+            crate::cache::override_or(&row.overrides, "monthly_msgs_quota", row.plan_quota)
+        else {
             continue; // override forced "unlimited": nothing to enforce
         };
 
@@ -673,9 +736,14 @@ async fn enforce_monthly_quota(
             now_blocked.insert(cluster_id);
         }
 
-        if let Some(announce) = quota_announcement(state.announced.get(&cluster_id).copied(), level) {
+        if let Some(announce) = quota_announcement(state.announced.get(&cluster_id).copied(), level)
+        {
             if let Some(kind) = announce.outbox_kind() {
-                let percent = if quota > 0 { (msgs as i128) * 100 / (quota as i128) } else { 100 };
+                let percent = if quota > 0 {
+                    (msgs as i128) * 100 / (quota as i128)
+                } else {
+                    100
+                };
                 let payload = serde_json::json!({
                     "cluster_id": id_str,
                     "cluster_slug": row.slug,
@@ -716,7 +784,13 @@ async fn enforce_monthly_quota(
 /// otherwise re-announce every cluster already over the line. Best-effort by
 /// design: on a read error we let the emit proceed (a duplicate CP event beats
 /// a swallowed one).
-async fn emit_quota_event(store: &Store, kind: &str, cluster_id: &str, month: &str, payload: &serde_json::Value) {
+async fn emit_quota_event(
+    store: &Store,
+    kind: &str,
+    cluster_id: &str,
+    month: &str,
+    payload: &serde_json::Value,
+) {
     match usage::quota_event_seen(store, kind, cluster_id, month).await {
         Ok(true) => return, // already announced by a previous process
         Ok(false) => {}
@@ -779,9 +853,30 @@ mod tests {
         let dir = tempdir();
         let meter = Meter::new(&cfg_with_dir(dir.path()));
         let cid = Uuid::new_v4();
-        meter.record(Sample { cluster_id: cid, op: OpClass::Push, reqs: 1, msgs: 3, bytes_in: 100, bytes_out: 0 });
-        meter.record(Sample { cluster_id: cid, op: OpClass::Push, reqs: 1, msgs: 5, bytes_in: 50, bytes_out: 10 });
-        meter.record(Sample { cluster_id: cid, op: OpClass::Read, reqs: 1, msgs: 0, bytes_in: 0, bytes_out: 200 });
+        meter.record(Sample {
+            cluster_id: cid,
+            op: OpClass::Push,
+            reqs: 1,
+            msgs: 3,
+            bytes_in: 100,
+            bytes_out: 0,
+        });
+        meter.record(Sample {
+            cluster_id: cid,
+            op: OpClass::Push,
+            reqs: 1,
+            msgs: 5,
+            bytes_in: 50,
+            bytes_out: 10,
+        });
+        meter.record(Sample {
+            cluster_id: cid,
+            op: OpClass::Read,
+            reqs: 1,
+            msgs: 0,
+            bytes_in: 0,
+            bytes_out: 200,
+        });
 
         let now_minute = now_minute_epoch();
         // Nothing closed yet — the current minute is retained.
@@ -790,9 +885,15 @@ mod tests {
         let rows = meter.drain_closed(now_minute + 1);
         assert_eq!(rows.len(), 2, "push and read are separate op_class keys");
         let push = rows.iter().find(|r| r.op == "push").expect("push row");
-        assert_eq!((push.reqs, push.msgs, push.bytes_in, push.bytes_out), (2, 8, 150, 10));
+        assert_eq!(
+            (push.reqs, push.msgs, push.bytes_in, push.bytes_out),
+            (2, 8, 150, 10)
+        );
         let read = rows.iter().find(|r| r.op == "read").expect("read row");
-        assert_eq!((read.reqs, read.msgs, read.bytes_in, read.bytes_out), (1, 0, 0, 200));
+        assert_eq!(
+            (read.reqs, read.msgs, read.bytes_in, read.bytes_out),
+            (1, 0, 0, 200)
+        );
     }
 
     #[test]
@@ -800,11 +901,24 @@ mod tests {
         let dir = tempdir();
         let meter = Meter::new(&cfg_with_dir(dir.path()));
         let cid = Uuid::new_v4();
-        meter.record(Sample { cluster_id: cid, op: OpClass::Delivery, reqs: 1, msgs: 1, bytes_in: 0, bytes_out: 1 });
+        meter.record(Sample {
+            cluster_id: cid,
+            op: OpClass::Delivery,
+            reqs: 1,
+            msgs: 1,
+            bytes_in: 0,
+            bytes_out: 1,
+        });
 
         let now_minute = now_minute_epoch();
-        assert!(meter.drain_closed(now_minute).is_empty(), "current minute must not drain");
-        assert!(meter.drain_closed(now_minute.saturating_sub(1)).is_empty(), "a minute in the past doesn't drain the future");
+        assert!(
+            meter.drain_closed(now_minute).is_empty(),
+            "current minute must not drain"
+        );
+        assert!(
+            meter.drain_closed(now_minute.saturating_sub(1)).is_empty(),
+            "a minute in the past doesn't drain the future"
+        );
         let rows = meter.drain_closed(now_minute + 1);
         assert_eq!(rows.len(), 1);
         // A second drain at the same or later point finds nothing left.
@@ -816,7 +930,14 @@ mod tests {
         let dir = tempdir();
         let meter = Meter::new(&cfg_with_dir(dir.path()));
         let cid = Uuid::new_v4();
-        meter.record(Sample { cluster_id: cid, op: OpClass::Txn, reqs: 1, msgs: 1, bytes_in: 1, bytes_out: 1 });
+        meter.record(Sample {
+            cluster_id: cid,
+            op: OpClass::Txn,
+            reqs: 1,
+            msgs: 1,
+            bytes_in: 1,
+            bytes_out: 1,
+        });
         // Force the entry into a "closed" minute by draining with a future
         // reference point directly (the no-store tick uses real now, so we
         // exercise drain_closed the way it would via a future minute).
@@ -834,8 +955,22 @@ mod tests {
         let dir = tempdir();
         let meter = Meter::new(&cfg_with_dir(dir.path()));
         let cid = Uuid::new_v4();
-        meter.record(Sample { cluster_id: cid, op: OpClass::Push, reqs: 1, msgs: 7, bytes_in: 70, bytes_out: 0 });
-        meter.record(Sample { cluster_id: cid, op: OpClass::Read, reqs: 2, msgs: 0, bytes_in: 0, bytes_out: 9 });
+        meter.record(Sample {
+            cluster_id: cid,
+            op: OpClass::Push,
+            reqs: 1,
+            msgs: 7,
+            bytes_in: 70,
+            bytes_out: 0,
+        });
+        meter.record(Sample {
+            cluster_id: cid,
+            op: OpClass::Read,
+            reqs: 2,
+            msgs: 0,
+            bytes_in: 0,
+            bytes_out: 9,
+        });
 
         // The periodic path would flush nothing at all here — this is exactly
         // the usage a restart used to drop.
@@ -844,8 +979,15 @@ mod tests {
         let rows = meter.drain_all();
         assert_eq!(rows.len(), 2, "both op classes of the still-open minute");
         let push = rows.iter().find(|r| r.op == "push").expect("push row");
-        assert_eq!((push.reqs, push.msgs, push.bytes_in, push.bytes_out), (1, 7, 70, 0));
-        assert_eq!(push.minute, now_minute_epoch(), "drained under its own minute, not a synthetic one");
+        assert_eq!(
+            (push.reqs, push.msgs, push.bytes_in, push.bytes_out),
+            (1, 7, 70, 0)
+        );
+        assert_eq!(
+            push.minute,
+            now_minute_epoch(),
+            "drained under its own minute, not a synthetic one"
+        );
 
         // Destructive: a second drain (or a racing periodic flush) finds
         // nothing, so nothing is billed twice.
@@ -868,7 +1010,10 @@ mod tests {
         // No store: discard, like the no-store tick, rather than spooling rows
         // no recovery pass would ever have a store to drain to.
         meter.drain().await;
-        assert!(meter.drain_all().is_empty(), "drain must consume the aggregates either way");
+        assert!(
+            meter.drain_all().is_empty(),
+            "drain must consume the aggregates either way"
+        );
         let spooled = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(spooled, 0, "no store means nothing to spool for");
     }
@@ -888,7 +1033,11 @@ mod tests {
         // 80% warn band on a 1000-message allowance.
         assert_eq!(quota_level(0, 1_000, 80), QuotaLevel::Under);
         assert_eq!(quota_level(799, 1_000, 80), QuotaLevel::Under);
-        assert_eq!(quota_level(800, 1_000, 80), QuotaLevel::Warn, "the threshold itself warns");
+        assert_eq!(
+            quota_level(800, 1_000, 80),
+            QuotaLevel::Warn,
+            "the threshold itself warns"
+        );
         assert_eq!(quota_level(999, 1_000, 80), QuotaLevel::Warn);
         // An allowance is spent, not exceeded: 100% blocks.
         assert_eq!(quota_level(1_000, 1_000, 80), QuotaLevel::Over);
@@ -920,27 +1069,54 @@ mod tests {
         assert_eq!(quota_announcement(None, QuotaLevel::Under), None);
 
         // First crossing announces; the next tick at the same level does not.
-        assert_eq!(quota_announcement(None, QuotaLevel::Warn), Some(QuotaLevel::Warn));
-        assert_eq!(quota_announcement(Some(QuotaLevel::Warn), QuotaLevel::Warn), None);
+        assert_eq!(
+            quota_announcement(None, QuotaLevel::Warn),
+            Some(QuotaLevel::Warn)
+        );
+        assert_eq!(
+            quota_announcement(Some(QuotaLevel::Warn), QuotaLevel::Warn),
+            None
+        );
 
         // Escalation to blocked is worth one more event.
-        assert_eq!(quota_announcement(Some(QuotaLevel::Warn), QuotaLevel::Over), Some(QuotaLevel::Over));
-        assert_eq!(quota_announcement(Some(QuotaLevel::Over), QuotaLevel::Over), None);
+        assert_eq!(
+            quota_announcement(Some(QuotaLevel::Warn), QuotaLevel::Over),
+            Some(QuotaLevel::Over)
+        );
+        assert_eq!(
+            quota_announcement(Some(QuotaLevel::Over), QuotaLevel::Over),
+            None
+        );
 
         // A cluster that jumps straight past the warn band still gets told.
-        assert_eq!(quota_announcement(None, QuotaLevel::Over), Some(QuotaLevel::Over));
+        assert_eq!(
+            quota_announcement(None, QuotaLevel::Over),
+            Some(QuotaLevel::Over)
+        );
 
         // Falling back (usage_minutes pruned behind the rollup) re-announces
         // nothing — that would be an event per wobble.
-        assert_eq!(quota_announcement(Some(QuotaLevel::Over), QuotaLevel::Warn), None);
-        assert_eq!(quota_announcement(Some(QuotaLevel::Over), QuotaLevel::Under), None);
+        assert_eq!(
+            quota_announcement(Some(QuotaLevel::Over), QuotaLevel::Warn),
+            None
+        );
+        assert_eq!(
+            quota_announcement(Some(QuotaLevel::Over), QuotaLevel::Under),
+            None
+        );
     }
 
     #[test]
     fn quota_event_kinds_are_distinct_and_silent_under_the_band() {
         assert_eq!(QuotaLevel::Under.outbox_kind(), None);
-        assert_eq!(QuotaLevel::Warn.outbox_kind(), Some("cluster_monthly_quota_warning"));
-        assert_eq!(QuotaLevel::Over.outbox_kind(), Some("cluster_monthly_quota_blocked"));
+        assert_eq!(
+            QuotaLevel::Warn.outbox_kind(),
+            Some("cluster_monthly_quota_warning")
+        );
+        assert_eq!(
+            QuotaLevel::Over.outbox_kind(),
+            Some("cluster_monthly_quota_blocked")
+        );
     }
 
     // ---- KV (the single binary): one row per node, cumulative, idempotent ----
@@ -952,12 +1128,23 @@ mod tests {
 
     fn kv_meter(dir: &std::path::Path, kv: Arc<dyn KvBackend>, node: &str) -> Meter {
         let meter = Meter::new(&cfg_with_dir(dir));
-        let _ = meter.sink.set(Sink::Kv { kv, node: node.to_string(), keep_days: 90 });
+        let _ = meter.sink.set(Sink::Kv {
+            kv,
+            node: node.to_string(),
+            keep_days: 90,
+        });
         meter
     }
 
     fn push(cluster_id: Uuid, msgs: u64) -> Sample {
-        Sample { cluster_id, op: OpClass::Push, reqs: 1, msgs, bytes_in: msgs * 10, bytes_out: 0 }
+        Sample {
+            cluster_id,
+            op: OpClass::Push,
+            reqs: 1,
+            msgs,
+            bytes_in: msgs * 10,
+            bytes_out: 0,
+        }
     }
 
     async fn minute_msgs(kv: &dyn KvBackend, cluster: Uuid, minute: u64) -> i64 {
@@ -977,7 +1164,10 @@ mod tests {
     /// Always "no leader".
     struct Down;
     impl KvBackend for Down {
-        fn kv(&self, _ops: Vec<serde_json::Value>) -> BoxFut<'_, Result<Vec<serde_json::Value>, KvError>> {
+        fn kv(
+            &self,
+            _ops: Vec<serde_json::Value>,
+        ) -> BoxFut<'_, Result<Vec<serde_json::Value>, KvError>> {
             Box::pin(async { Err(KvError::Unavailable("no leader".into())) })
         }
     }
@@ -988,7 +1178,10 @@ mod tests {
         lose: AtomicUsize,
     }
     impl KvBackend for LostAck {
-        fn kv(&self, ops: Vec<serde_json::Value>) -> BoxFut<'_, Result<Vec<serde_json::Value>, KvError>> {
+        fn kv(
+            &self,
+            ops: Vec<serde_json::Value>,
+        ) -> BoxFut<'_, Result<Vec<serde_json::Value>, KvError>> {
             Box::pin(async move {
                 let writes = ops.iter().any(|o| o["op"] == "put");
                 let out = self.inner.kv(ops).await?;
@@ -1014,7 +1207,11 @@ mod tests {
         b.record_at(push(cid, 4), now);
         a.flush_kv(kv.as_ref(), "node-a", 90, now).await.unwrap();
         b.flush_kv(kv.as_ref(), "node-b", 90, now).await.unwrap();
-        assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 7, "the open minute is written too");
+        assert_eq!(
+            minute_msgs(kv.as_ref(), cid, now).await,
+            7,
+            "the open minute is written too"
+        );
         assert_eq!(mem.keys(ns::USAGE_MIN).len(), 2, "one row per node");
 
         // More traffic on a: ITS row is overwritten with the cumulative value.
@@ -1023,29 +1220,47 @@ mod tests {
         // Nothing new: nothing written.
         assert_eq!(a.flush_kv(kv.as_ref(), "node-a", 90, now).await.unwrap(), 0);
         assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 12);
-        let own = usage::kv_read_own(kv.as_ref(), "node-a", &[(cid, now, "push".to_string())]).await.unwrap();
+        let own = usage::kv_read_own(kv.as_ref(), "node-a", &[(cid, now, "push".to_string())])
+            .await
+            .unwrap();
         assert_eq!((own[0].msgs, own[0].reqs, own[0].bytes_in), (8, 2, 80));
 
         // The open minute stays in memory; once closed and written it goes.
         assert_eq!(in_memory(&a), 1);
-        a.flush_kv(kv.as_ref(), "node-a", 90, now + 1).await.unwrap();
+        a.flush_kv(kv.as_ref(), "node-a", 90, now + 1)
+            .await
+            .unwrap();
         assert_eq!(in_memory(&a), 0);
     }
 
     #[tokio::test]
     async fn kv_a_retried_write_whose_ack_was_lost_counts_once() {
         let dir = tempdir();
-        let lost = Arc::new(LostAck { inner: MemKv::new(), lose: AtomicUsize::new(1) });
+        let lost = Arc::new(LostAck {
+            inner: MemKv::new(),
+            lose: AtomicUsize::new(1),
+        });
         let kv: Arc<dyn KvBackend> = lost.clone();
         let m = kv_meter(dir.path(), kv.clone(), "n1");
         let cid = Uuid::new_v4();
         let now = now_minute_epoch();
         m.record_at(push(cid, 5), now - 1);
-        assert!(m.flush_kv(kv.as_ref(), "n1", 90, now).await.is_err(), "the ack was lost");
-        assert_eq!(in_memory(&m), 1, "a closed minute that failed is kept to retry");
+        assert!(
+            m.flush_kv(kv.as_ref(), "n1", 90, now).await.is_err(),
+            "the ack was lost"
+        );
+        assert_eq!(
+            in_memory(&m),
+            1,
+            "a closed minute that failed is kept to retry"
+        );
         m.record_at(push(cid, 1), now - 1); // a late record meanwhile
         m.flush_kv(kv.as_ref(), "n1", 90, now).await.unwrap();
-        assert_eq!(minute_msgs(&lost.inner, cid, now - 1).await, 6, "5 + 1, not 5 + 5 + 1");
+        assert_eq!(
+            minute_msgs(&lost.inner, cid, now - 1).await,
+            6,
+            "5 + 1, not 5 + 5 + 1"
+        );
         assert_eq!(in_memory(&m), 0);
     }
 
@@ -1063,13 +1278,19 @@ mod tests {
         // Same node label, new process, same minute: seeded from its own row.
         let second = kv_meter(dir.path(), kv.clone(), "n1");
         second.record_at(push(cid, 2), now);
-        second.flush_kv(kv.as_ref(), "n1", 90, now + 1).await.unwrap();
+        second
+            .flush_kv(kv.as_ref(), "n1", 90, now + 1)
+            .await
+            .unwrap();
         assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 5);
         assert_eq!(in_memory(&second), 0, "closed and written: forgotten");
 
         // A record racing the minute boundary lands in the forgotten minute.
         second.record_at(push(cid, 4), now);
-        second.flush_kv(kv.as_ref(), "n1", 90, now + 1).await.unwrap();
+        second
+            .flush_kv(kv.as_ref(), "n1", 90, now + 1)
+            .await
+            .unwrap();
         assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 9);
     }
 
@@ -1081,7 +1302,11 @@ mod tests {
         let down = kv_meter(dir.path(), Arc::new(Down), "n1");
         down.record_at(push(cid, 4), now);
         down.drain().await;
-        assert_eq!(in_memory(&down), 0, "the drain consumes the aggregates either way");
+        assert_eq!(
+            in_memory(&down),
+            0,
+            "the drain consumes the aggregates either way"
+        );
         drop(down);
         let spooled: Vec<UsageRow> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -1102,14 +1327,32 @@ mod tests {
         // for that minute before the failed drain: the spool ADDS.
         let mem = Arc::new(MemKv::new());
         let kv: Arc<dyn KvBackend> = mem.clone();
-        let before = UsageRow { cluster_id: cid, minute: now, op: "push".into(), reqs: 1, msgs: 10, bytes_in: 0, bytes_out: 0 };
-        usage::kv_write_totals(kv.as_ref(), "n1", 90, &[before], usage::now_us()).await.unwrap();
+        let before = UsageRow {
+            cluster_id: cid,
+            minute: now,
+            op: "push".into(),
+            reqs: 1,
+            msgs: 10,
+            bytes_in: 0,
+            bytes_out: 0,
+        };
+        usage::kv_write_totals(kv.as_ref(), "n1", 90, &[before], usage::now_us())
+            .await
+            .unwrap();
         let next = Arc::new(Meter::new(&cfg_with_dir(dir.path())));
         next.recover_kv(kv.clone(), "n1".to_string(), 90).await;
         assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 14);
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "replayed files are removed");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "replayed files are removed"
+        );
         let day = usage::day_of((now as i64) * usage::MINUTE_US);
-        assert_eq!(next.take_reroll(), vec![(cid, day)], "the rollup is told which day moved");
+        assert_eq!(
+            next.take_reroll(),
+            vec![(cid, day)],
+            "the rollup is told which day moved"
+        );
     }
 
     #[tokio::test]
@@ -1125,7 +1368,11 @@ mod tests {
         m.spool_kv_backlog(now, 5);
         assert_eq!(in_memory(&m), 3, "under the cap: kept in memory");
         m.spool_kv_backlog(now, 1);
-        assert_eq!(in_memory(&m), 1, "over it: the closed minutes went to disk, the open one stays");
+        assert_eq!(
+            in_memory(&m),
+            1,
+            "over it: the closed minutes went to disk, the open one stays"
+        );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
@@ -1135,7 +1382,12 @@ mod tests {
         let mem = Arc::new(MemKv::new());
         let kv: Arc<dyn KvBackend> = mem.clone();
         let store = Store::Kv(kv.clone());
-        let plan = PlanDoc { id: Uuid::new_v4(), code: "q".into(), monthly_msgs_quota: Some(10), ..Default::default() };
+        let plan = PlanDoc {
+            id: Uuid::new_v4(),
+            code: "q".into(),
+            monthly_msgs_quota: Some(10),
+            ..Default::default()
+        };
         let cluster = ClusterDoc {
             id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
@@ -1150,25 +1402,54 @@ mod tests {
         crate::store::kv::write(
             kv.as_ref(),
             vec![
-                crate::store::kv::put_op(ns::PLANS, &schema::key(plan.id), &plan, crate::store::kv::Expect::Any, crate::store::kv::Ttl::Forever, false),
-                crate::store::kv::put_op(ns::CLUSTERS, &schema::key(cluster.id), &cluster, crate::store::kv::Expect::Any, crate::store::kv::Ttl::Forever, false),
+                crate::store::kv::put_op(
+                    ns::PLANS,
+                    &schema::key(plan.id),
+                    &plan,
+                    crate::store::kv::Expect::Any,
+                    crate::store::kv::Ttl::Forever,
+                    false,
+                ),
+                crate::store::kv::put_op(
+                    ns::CLUSTERS,
+                    &schema::key(cluster.id),
+                    &cluster,
+                    crate::store::kv::Expect::Any,
+                    crate::store::kv::Ttl::Forever,
+                    false,
+                ),
             ],
         )
         .await
         .unwrap();
-        let used = UsageRow { cluster_id: cluster.id, minute: now_minute_epoch(), op: "push".into(), reqs: 1, msgs: 12, bytes_in: 0, bytes_out: 0 };
-        usage::kv_write_totals(kv.as_ref(), "n1", 90, &[used], usage::now_us()).await.unwrap();
+        let used = UsageRow {
+            cluster_id: cluster.id,
+            minute: now_minute_epoch(),
+            op: "push".into(),
+            reqs: 1,
+            msgs: 12,
+            bytes_in: 0,
+            bytes_out: 0,
+        };
+        usage::kv_write_totals(kv.as_ref(), "n1", 90, &[used], usage::now_us())
+            .await
+            .unwrap();
 
         let limits = crate::limits::Limits::new(&cfg_with_dir(dir.path()));
         let mut state = QuotaState::default();
         enforce_monthly_quota(&store, &limits, &mut state, 80).await;
-        assert_eq!(limits.push_block_reason(cluster.id), Some(PushBlock::MonthlyQuota));
+        assert_eq!(
+            limits.push_block_reason(cluster.id),
+            Some(PushBlock::MonthlyQuota)
+        );
 
         // A restart (or the next node): fresh memory, same store — no second event.
         let mut fresh = QuotaState::default();
         enforce_monthly_quota(&store, &limits, &mut fresh, 80).await;
         let events: Vec<(String, crate::store::kv::Doc<OutboxDoc>)> =
-            crate::store::kv::scan(kv.as_ref(), ns::OUTBOX, "#").await.unwrap();
+            crate::store::kv::scan(kv.as_ref(), ns::OUTBOX, "#")
+                .await
+                .unwrap();
         assert_eq!(events.len(), 1, "announced once: {events:?}");
         let ev = &events[0].1.value;
         assert_eq!(ev.kind, "cluster_monthly_quota_blocked");
@@ -1198,31 +1479,74 @@ mod tests {
         };
         crate::store::kv::write(
             kv.as_ref(),
-            vec![crate::store::kv::put_op(ns::CLUSTERS, &schema::key(cid), &cluster, crate::store::kv::Expect::Any, crate::store::kv::Ttl::Forever, false)],
+            vec![crate::store::kv::put_op(
+                ns::CLUSTERS,
+                &schema::key(cid),
+                &cluster,
+                crate::store::kv::Expect::Any,
+                crate::store::kv::Ttl::Forever,
+                false,
+            )],
         )
         .await
         .unwrap();
         let today = usage::day_of(usage::now_us());
         // Yesterday rolled already; day -10 got a late spool replay.
-        let y = UsageRow { cluster_id: cid, minute: ((today - 1) * 1440) as u64, op: "push".into(), reqs: 1, msgs: 1, bytes_in: 0, bytes_out: 0 };
-        let old = UsageRow { minute: ((today - 10) * 1440) as u64, msgs: 5, ..y.clone() };
-        usage::kv_write_totals(kv.as_ref(), "n1", 90, &[y, old], usage::now_us()).await.unwrap();
+        let y = UsageRow {
+            cluster_id: cid,
+            minute: ((today - 1) * 1440) as u64,
+            op: "push".into(),
+            reqs: 1,
+            msgs: 1,
+            bytes_in: 0,
+            bytes_out: 0,
+        };
+        let old = UsageRow {
+            minute: ((today - 10) * 1440) as u64,
+            msgs: 5,
+            ..y.clone()
+        };
+        usage::kv_write_totals(kv.as_ref(), "n1", 90, &[y, old], usage::now_us())
+            .await
+            .unwrap();
         rollup_once(&store, &meter).await;
         let day_msgs = |d: i64| {
             let kv = kv.clone();
             async move {
-                crate::store::kv::get::<crate::store::schema::UsageDoc>(kv.as_ref(), ns::USAGE_DAY, &usage::day_key(cid, &usage::day_str(d), "push"))
-                    .await
-                    .unwrap()
-                    .map(|d| d.value.msgs)
+                crate::store::kv::get::<crate::store::schema::UsageDoc>(
+                    kv.as_ref(),
+                    ns::USAGE_DAY,
+                    &usage::day_key(cid, &usage::day_str(d), "push"),
+                )
+                .await
+                .unwrap()
+                .map(|d| d.value.msgs)
             }
         };
         assert_eq!(day_msgs(today - 1).await, Some(1));
-        assert_eq!(day_msgs(today - 10).await, Some(5), "never rolled: the whole window is");
-        let more = UsageRow { cluster_id: cid, minute: ((today - 10) * 1440 + 1) as u64, op: "push".into(), reqs: 1, msgs: 2, bytes_in: 0, bytes_out: 0 };
-        usage::kv_write_totals(kv.as_ref(), "n2", 90, &[more], usage::now_us()).await.unwrap();
+        assert_eq!(
+            day_msgs(today - 10).await,
+            Some(5),
+            "never rolled: the whole window is"
+        );
+        let more = UsageRow {
+            cluster_id: cid,
+            minute: ((today - 10) * 1440 + 1) as u64,
+            op: "push".into(),
+            reqs: 1,
+            msgs: 2,
+            bytes_in: 0,
+            bytes_out: 0,
+        };
+        usage::kv_write_totals(kv.as_ref(), "n2", 90, &[more], usage::now_us())
+            .await
+            .unwrap();
         rollup_once(&store, &meter).await;
-        assert_eq!(day_msgs(today - 10).await, Some(5), "behind the window: untouched");
+        assert_eq!(
+            day_msgs(today - 10).await,
+            Some(5),
+            "behind the window: untouched"
+        );
         meter.restore_reroll(vec![(cid, today - 10)]);
         rollup_once(&store, &meter).await;
         assert_eq!(day_msgs(today - 10).await, Some(7));

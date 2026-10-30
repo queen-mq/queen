@@ -431,13 +431,21 @@ fn transaction_kv_writes_have_their_own_rate() {
         Verdict::RateLimited(_)
     ));
     for i in 0..3 {
-        assert_eq!(q.charge_kv_txn_write(T, 1, 1), Verdict::Allow, "txn write {i}");
+        assert_eq!(
+            q.charge_kv_txn_write(T, 1, 1),
+            Verdict::Allow,
+            "txn write {i}"
+        );
     }
     assert!(matches!(
         q.charge_kv_txn_write(T, 1, 1),
         Verdict::RateLimited(_)
     ));
-    assert_eq!(q.delta_of(T), (4, 4, 0), "both lanes charge the same occupancy");
+    assert_eq!(
+        q.delta_of(T),
+        (4, 4, 0),
+        "both lanes charge the same occupancy"
+    );
 }
 
 /// `Retry-After` must be a number a client can act on: at least one second, and

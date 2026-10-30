@@ -8,7 +8,9 @@ pub fn init() {
         .or_else(|_| std::env::var("LOG_LEVEL"))
         .unwrap_or_else(|_| "info".to_string());
     let filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
-    let json = std::env::var("QUEEN_LOG_JSON").map(|v| v == "true").unwrap_or(false);
+    let json = std::env::var("QUEEN_LOG_JSON")
+        .map(|v| v == "true")
+        .unwrap_or(false);
     if json {
         fmt().with_env_filter(filter).json().init();
     } else {

@@ -26,6 +26,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (rustfmt, 645be744e): the queen-kafka files this page names were
 # reformatted, line wrapping only. Also re-read against the Kafka facade's bounds (3e6b92631) and
 # per-id coordinator (3d24969b3): the TLS line says 2.7; nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): kafka_inproc.rs
+# reformatted, line wrapping only. Nothing this page states changes.
 ---
 
 Kafka producers, consumers and admin tools can use Queen as they are: change `bootstrap.servers`, and nothing else. A topic is a Queen queue and a Kafka consumer group is a Queen consumer group, so Kafka clients and Queen clients read and write the same data.

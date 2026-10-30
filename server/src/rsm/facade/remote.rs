@@ -135,13 +135,16 @@ fn take_stored_forms(rest: &[u8]) {
         return;
     };
     for _ in 0..count {
-        let Some(key) = take(16).map(|x| u128::from_le_bytes(x.try_into().expect("16 bytes"))) else {
+        let Some(key) = take(16).map(|x| u128::from_le_bytes(x.try_into().expect("16 bytes")))
+        else {
             return;
         };
-        let Some(raw_len) = take(4).map(|x| u32::from_le_bytes(x.try_into().expect("4 bytes"))) else {
+        let Some(raw_len) = take(4).map(|x| u32::from_le_bytes(x.try_into().expect("4 bytes")))
+        else {
             return;
         };
-        let Some(z_len) = take(4).map(|x| u32::from_le_bytes(x.try_into().expect("4 bytes"))) else {
+        let Some(z_len) = take(4).map(|x| u32::from_le_bytes(x.try_into().expect("4 bytes")))
+        else {
             return;
         };
         let Some(z) = take(z_len as usize) else {
@@ -485,8 +488,12 @@ mod tests {
             }],
             engine_acks: Default::default(),
         };
-        let bytes = encode_request(&Command::Transaction(txn.clone()), Duration::from_secs(1), &[])
-            .expect("encode");
+        let bytes = encode_request(
+            &Command::Transaction(txn.clone()),
+            Duration::from_secs(1),
+            &[],
+        )
+        .expect("encode");
         let back: SubmitReq = postcard::from_bytes(&bytes).expect("decode");
         match back.command {
             Command::Transaction(t) => assert_eq!(t, txn),

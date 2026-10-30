@@ -2571,7 +2571,11 @@ async fn the_backlog_sample_is_what_the_overview_reports() {
 /// One group of a framed body, as a client writes it: the messages in the
 /// storage layout (`crate::frames`), compressed once. Returns the group's bytes
 /// and the message ids the "client" minted.
-fn frames_group_raw(queue: &str, partition: &str, msgs: &[(&str, &[u8])]) -> (Vec<u8>, Vec<String>) {
+fn frames_group_raw(
+    queue: &str,
+    partition: &str,
+    msgs: &[(&str, &[u8])],
+) -> (Vec<u8>, Vec<String>) {
     let mut raw = Vec::new();
     let mut ids = Vec::new();
     for (txn, payload) in msgs {
@@ -2657,7 +2661,10 @@ async fn a_binary_transaction_acks_and_pushes_what_the_json_one_does() {
         .expect("push");
     let pop = pop_q(&facade, "bin-in").await;
     assert_eq!(popped(&pop).len(), 2, "{pop}");
-    let pid = pop["partitionId"].as_str().expect("partitionId").to_string();
+    let pid = pop["partitionId"]
+        .as_str()
+        .expect("partitionId")
+        .to_string();
     let lease = pop["leaseId"].as_str().expect("leaseId").to_string();
 
     // The acks in the head, the pushes as two groups of client-built frames.
@@ -2690,7 +2697,11 @@ async fn a_binary_transaction_acks_and_pushes_what_the_json_one_does() {
         assert_eq!(r["index"], 2 + k, "{ok}");
         assert_eq!(r["success"], true, "{ok}");
         assert_eq!(r["transactionId"], txn, "{ok}");
-        assert_eq!(r["messageId"], ids[k].as_str(), "the id is the client's: {ok}");
+        assert_eq!(
+            r["messageId"],
+            ids[k].as_str(),
+            "the id is the client's: {ok}"
+        );
     }
 
     // The inputs are consumed and the outputs are there, payloads untouched.
@@ -2709,7 +2720,10 @@ async fn a_binary_transaction_acks_and_pushes_what_the_json_one_does() {
         got,
         vec![
             ("o1".to_string(), serde_json::json!({"sum": 3})),
-            ("o2".to_string(), serde_json::json!({"text": "a \"quoted\"\nline"})),
+            (
+                "o2".to_string(),
+                serde_json::json!({"text": "a \"quoted\"\nline"})
+            ),
             ("o3".to_string(), serde_json::json!([1, 2, 3])),
             ("o4".to_string(), serde_json::json!(4)),
         ]
@@ -2732,7 +2746,11 @@ async fn a_binary_transaction_is_all_or_nothing() {
     let (status, no) = txn_raw(&facade, txn_binary(0, &head, &[g.clone()])).await;
     assert_eq!(status, 200, "{no}");
     assert_eq!(no["success"], false, "{no}");
-    assert_eq!(popped(&pop_q(&facade, "bin-rb").await).len(), 0, "nothing was stored");
+    assert_eq!(
+        popped(&pop_q(&facade, "bin-rb").await).len(),
+        0,
+        "nothing was stored"
+    );
 
     // The same group alone commits; sent again, the transaction id is a duplicate
     // and the bundle as a whole is refused.
@@ -2796,7 +2814,10 @@ async fn a_binary_transaction_that_is_not_well_formed_is_refused_whole() {
     more.push(0);
     cases.push(("bytes after the last group", more));
     let (not_json, _) = frames_group_raw("bin-bad", "Default", &[("b2", b"not json")]);
-    cases.push(("a payload that is not JSON", txn_binary(0, &head, &[not_json])));
+    cases.push((
+        "a payload that is not JSON",
+        txn_binary(0, &head, &[not_json]),
+    ));
     // A frame whose id is not a version-7 UUID.
     let mut raw = crate::frames::pack_frames(&[crate::frames::FrameIn {
         message_id: crate::util::uuidv7_bytes(),
@@ -2830,7 +2851,11 @@ async fn a_binary_transaction_that_is_not_well_formed_is_refused_whole() {
         assert_eq!(body["success"], false, "{what}: {body}");
         assert_eq!(body["reason"], "bad_request", "{what}: {body}");
     }
-    assert_eq!(popped(&pop_q(&facade, "bin-bad").await).len(), 0, "nothing was stored");
+    assert_eq!(
+        popped(&pop_q(&facade, "bin-bad").await).len(),
+        0,
+        "nothing was stored"
+    );
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -2862,7 +2887,12 @@ async fn a_framed_push_stores_the_clients_messages() {
     assert_eq!(msgs[0]["transactionId"], "f1");
     assert_eq!(msgs[0]["data"]["n"], 1);
     assert_eq!(msgs[1]["data"]["n"], 2);
-    assert_eq!(msgs[0]["id"], ids[0].as_str(), "the id is the client's: {}", msgs[0]);
+    assert_eq!(
+        msgs[0]["id"],
+        ids[0].as_str(),
+        "the id is the client's: {}",
+        msgs[0]
+    );
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

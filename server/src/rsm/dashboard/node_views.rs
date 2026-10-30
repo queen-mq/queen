@@ -1768,8 +1768,18 @@ mod tests {
             );
             m
         };
-        let a = sys("n1", t("2026-09-24T10:05:10Z"), 60, with_traffic(100.0, 1000.0));
-        let b = sys("n1", t("2026-09-24T10:05:50Z"), 20, with_traffic(500.0, 3000.0));
+        let a = sys(
+            "n1",
+            t("2026-09-24T10:05:10Z"),
+            60,
+            with_traffic(100.0, 1000.0),
+        );
+        let b = sys(
+            "n1",
+            t("2026-09-24T10:05:50Z"),
+            20,
+            with_traffic(500.0, 3000.0),
+        );
         let v = system_metrics_json(&Map::new(), now, &[a, b]);
         let m = &v["replicas"][0]["timeSeries"][0]["metrics"];
         let read = &m["disk"]["read_bytes_per_sec"];
@@ -1779,19 +1789,30 @@ mod tests {
         assert_eq!(m["network"]["sent_bytes_per_sec"]["min"], json!(1000.0));
         let rt = &m["raft_traffic"];
         assert_eq!(rt["sent_bytes_per_sec"]["last"], json!(3000.0));
-        assert_eq!(rt["replication"]["sent_bytes_per_sec"]["max"], json!(3000.0));
+        assert_eq!(
+            rt["replication"]["sent_bytes_per_sec"]["max"],
+            json!(3000.0)
+        );
         assert_eq!(rt["snapshot"]["received_bytes_per_sec"]["last"], json!(0.0));
         // A channel the rows did not carry, and every family on a row from a
         // release before them: null leaves, never zeros.
         let null_leaf = json!({"avg": null, "min": null, "max": null, "last": null});
         assert_eq!(rt["link"]["sent_bytes_per_sec"], null_leaf);
-        let old = sys("n2", t("2026-09-24T10:05:10Z"), 60, raft_metrics(1.0, 1.0, 1.0));
+        let old = sys(
+            "n2",
+            t("2026-09-24T10:05:10Z"),
+            60,
+            raft_metrics(1.0, 1.0, 1.0),
+        );
         let v = system_metrics_json(&Map::new(), now, &[old]);
         let m = &v["replicas"][0]["timeSeries"][0]["metrics"];
         assert_eq!(m["disk"]["written_bytes_per_sec"], null_leaf);
         assert_eq!(m["network"]["received_bytes_per_sec"], null_leaf);
         assert_eq!(m["raft_traffic"]["received_bytes_per_sec"], null_leaf);
-        assert_eq!(m["raft_traffic"]["forward"]["sent_bytes_per_sec"], null_leaf);
+        assert_eq!(
+            m["raft_traffic"]["forward"]["sent_bytes_per_sec"],
+            null_leaf
+        );
     }
 
     #[test]

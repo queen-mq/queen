@@ -82,7 +82,10 @@ pub fn router() -> Router<St> {
         // JSON body rather than the path on DELETE too, so the address never
         // has to survive percent-encoding — same-origin axum, no intermediary
         // that could strip a DELETE body.
-        .route("/members", get(list_members).post(grant_member).delete(revoke_member))
+        .route(
+            "/members",
+            get(list_members).post(grant_member).delete(revoke_member),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +97,10 @@ pub fn router() -> Router<St> {
 /// `ClusterCtx`, `user_id` and cluster `Role` — a role is only ever `Some`
 /// via a real `cluster_roles` row (see module doc), so callers needing "any
 /// member" need no extra check; admin-only endpoints call `require_admin`.
-async fn console_ctx(st: &St, headers: &HeaderMap) -> Result<(Arc<ClusterCtx>, Uuid, Role), Response> {
+async fn console_ctx(
+    st: &St,
+    headers: &HeaderMap,
+) -> Result<(Arc<ClusterCtx>, Uuid, Role), Response> {
     // Through `acting`, not `cache::resolve_host` directly — one answer to
     // "which cluster is this request for", shared with the data plane. That is
     // what makes the console work on a SHARED host (decision z: session
@@ -135,7 +141,10 @@ async fn console_ctx(st: &St, headers: &HeaderMap) -> Result<(Arc<ClusterCtx>, U
     // `push_blocked` is deliberately NOT gated: that tenant needs the console
     // most, to see why its pushes are failing and to delete its way back under
     // quota.
-    if matches!(ctx.status, ClusterStatus::Suspended | ClusterStatus::Deleting) {
+    if matches!(
+        ctx.status,
+        ClusterStatus::Suspended | ClusterStatus::Deleting
+    ) {
         tracing::debug!(
             target: "console", cluster = %ctx.slug, status = ?ctx.status,
             "console refused: cluster not active"
@@ -143,9 +152,10 @@ async fn console_ctx(st: &St, headers: &HeaderMap) -> Result<(Arc<ClusterCtx>, U
         return Err(errors::err_403(errors::CODE_SUSPENDED, "cluster suspended"));
     }
     match principal {
-        Principal::ApiKey { .. } => {
-            Err(errors::err_403(errors::CODE_FORBIDDEN, "api keys cannot access the console (human session required)"))
-        }
+        Principal::ApiKey { .. } => Err(errors::err_403(
+            errors::CODE_FORBIDDEN,
+            "api keys cannot access the console (human session required)",
+        )),
         Principal::User { user_id, role, .. } => Ok((ctx, user_id, role)),
     }
 }
@@ -163,7 +173,10 @@ fn require_admin(role: Role) -> Result<(), Response> {
     if matches!(role, Role::Admin) {
         Ok(())
     } else {
-        Err(errors::err_403(errors::CODE_FORBIDDEN, "admin role required"))
+        Err(errors::err_403(
+            errors::CODE_FORBIDDEN,
+            "admin role required",
+        ))
     }
 }
 
@@ -387,7 +400,11 @@ struct CreateKeyReq {
     scopes: Vec<String>,
 }
 
-async fn create_key(State(st): State<St>, headers: HeaderMap, Json(body): Json<CreateKeyReq>) -> Response {
+async fn create_key(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Json(body): Json<CreateKeyReq>,
+) -> Response {
     let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
         Ok(v) => v,
         Err(e) => return e,
@@ -440,7 +457,11 @@ async fn create_key(State(st): State<St>, headers: HeaderMap, Json(body): Json<C
     json_ok(json!({ "id": id, "key": plaintext }))
 }
 
-async fn delete_key(State(st): State<St>, headers: HeaderMap, Path(key_id): Path<String>) -> Response {
+async fn delete_key(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Path(key_id): Path<String>,
+) -> Response {
     let (ctx, _user_id, role) = match console_ctx(&st, &headers).await {
         Ok(v) => v,
         Err(e) => return e,
@@ -553,7 +574,11 @@ struct RevokeMemberReq {
     email: String,
 }
 
-async fn grant_member(State(st): State<St>, headers: HeaderMap, Json(body): Json<GrantMemberReq>) -> Response {
+async fn grant_member(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Json(body): Json<GrantMemberReq>,
+) -> Response {
     let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
         Ok(v) => v,
         Err(e) => return e,
@@ -599,7 +624,10 @@ async fn grant_member(State(st): State<St>, headers: HeaderMap, Json(body): Json
         }
     };
     if would_orphan_admins(standing.0.as_deref(), standing.1, Some(&new_role)) {
-        return err_400("invalid_request", "cannot demote the last admin of this cluster");
+        return err_400(
+            "invalid_request",
+            "cannot demote the last admin of this cluster",
+        );
     }
 
     // p_cluster is ALWAYS this session's cluster: the same discipline
@@ -630,7 +658,11 @@ async fn grant_member(State(st): State<St>, headers: HeaderMap, Json(body): Json
     json_ok(json!({ "ok": true, "email": email, "role": new_role }))
 }
 
-async fn revoke_member(State(st): State<St>, headers: HeaderMap, Json(body): Json<RevokeMemberReq>) -> Response {
+async fn revoke_member(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Json(body): Json<RevokeMemberReq>,
+) -> Response {
     let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
         Ok(v) => v,
         Err(e) => return e,
@@ -660,7 +692,10 @@ async fn revoke_member(State(st): State<St>, headers: HeaderMap, Json(body): Jso
             }
         };
     if would_orphan_admins(Some(&current_role), admin_count, None) {
-        return err_400("invalid_request", "cannot remove the last admin of this cluster");
+        return err_400(
+            "invalid_request",
+            "cannot remove the last admin of this cluster",
+        );
     }
 
     // Bound to this session's cluster for the same reason as the grant above.
@@ -711,7 +746,11 @@ fn validate_role(raw: &str) -> Result<String, &'static str> {
 /// this is refused rather than merely warned about. It covers self-demotion
 /// and self-revocation too: the caller is an admin, so a sole admin removing
 /// themselves is exactly `admin_count == 1`.
-fn would_orphan_admins(current_role: Option<&str>, admin_count: i64, new_role: Option<&str>) -> bool {
+fn would_orphan_admins(
+    current_role: Option<&str>,
+    admin_count: i64,
+    new_role: Option<&str>,
+) -> bool {
     if current_role != Some("admin") {
         return false; // not touching an admin seat
     }
@@ -750,7 +789,9 @@ async fn record_user_op(
         Ok(()) => {}
         // The old path returned silently when the pool had no connection.
         Err(e) if e.is_unavailable() => {}
-        Err(e) => tracing::warn!(target: "console", action, err = %e, "record_operation failed (non-fatal)"),
+        Err(e) => {
+            tracing::warn!(target: "console", action, err = %e, "record_operation failed (non-fatal)")
+        }
     }
 }
 
@@ -760,7 +801,10 @@ async fn record_user_op(
 
 fn json_ok(v: Value) -> Response {
     let mut resp = (StatusCode::OK, v.to_string()).into_response();
-    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     resp
 }
 
@@ -771,8 +815,15 @@ fn err_400(code: &str, msg: &str) -> Response {
 /// Literal shape per the task brief: `{"code":"not_configured"}` — no `error`
 /// key, unlike `errors::json_error`'s envelope.
 fn err_not_configured() -> Response {
-    let mut resp = (StatusCode::SERVICE_UNAVAILABLE, "{\"code\":\"not_configured\"}").into_response();
-    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let mut resp = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{\"code\":\"not_configured\"}",
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     resp
 }
 
@@ -808,7 +859,13 @@ fn content_type(path: &str) -> &'static str {
 }
 
 fn spa_serve(path: &str) -> Option<Response> {
-    SpaAssets::get(path).map(|f| ([(header::CONTENT_TYPE, content_type(path))], f.data.into_owned()).into_response())
+    SpaAssets::get(path).map(|f| {
+        (
+            [(header::CONTENT_TYPE, content_type(path))],
+            f.data.into_owned(),
+        )
+            .into_response()
+    })
 }
 
 /// `/console` (or any sub-path with no matching built asset) relative to
@@ -836,7 +893,10 @@ pub async fn spa(uri: Uri) -> Response {
     }
     match spa_serve("index.html") {
         Some(resp) => resp,
-        None => (StatusCode::NOT_FOUND, "console not built (console/dist is empty — see console/README.md)")
+        None => (
+            StatusCode::NOT_FOUND,
+            "console not built (console/dist is empty — see console/README.md)",
+        )
             .into_response(),
     }
 }
@@ -869,7 +929,11 @@ mod tests {
 
     #[test]
     fn limits_json_some_is_number() {
-        let l = EffectiveLimits { max_queues: Some(20), max_retained_bytes: Some(1024), ..Default::default() };
+        let l = EffectiveLimits {
+            max_queues: Some(20),
+            max_retained_bytes: Some(1024),
+            ..Default::default()
+        };
         let v = limits_json(&l);
         assert_eq!(v["max_queues"], 20);
         assert_eq!(v["max_retained_bytes"], 1024);
@@ -953,7 +1017,10 @@ mod tests {
 
     #[test]
     fn validate_email_normalizes_like_the_sql_does() {
-        assert_eq!(validate_email("  Dev@Localhost \n").unwrap(), "dev@localhost");
+        assert_eq!(
+            validate_email("  Dev@Localhost \n").unwrap(),
+            "dev@localhost"
+        );
         assert!(validate_email("").is_err());
         assert!(validate_email("   ").is_err());
         assert!(validate_email("not-an-address").is_err());
@@ -969,17 +1036,38 @@ mod tests {
 
     #[test]
     fn last_admin_cannot_be_demoted_or_removed() {
-        assert!(would_orphan_admins(Some("admin"), 1, None), "sole admin revoked");
-        assert!(would_orphan_admins(Some("admin"), 1, Some("viewer")), "sole admin demoted");
+        assert!(
+            would_orphan_admins(Some("admin"), 1, None),
+            "sole admin revoked"
+        );
+        assert!(
+            would_orphan_admins(Some("admin"), 1, Some("viewer")),
+            "sole admin demoted"
+        );
     }
 
     #[test]
     fn other_admin_changes_are_allowed() {
-        assert!(!would_orphan_admins(Some("admin"), 2, None), "one of two admins revoked");
-        assert!(!would_orphan_admins(Some("admin"), 1, Some("admin")), "sole admin re-granted admin");
-        assert!(!would_orphan_admins(Some("viewer"), 1, None), "non-admin revoked");
-        assert!(!would_orphan_admins(None, 1, Some("admin")), "brand new member");
-        assert!(!would_orphan_admins(None, 0, Some("viewer")), "brand new member, no admins yet");
+        assert!(
+            !would_orphan_admins(Some("admin"), 2, None),
+            "one of two admins revoked"
+        );
+        assert!(
+            !would_orphan_admins(Some("admin"), 1, Some("admin")),
+            "sole admin re-granted admin"
+        );
+        assert!(
+            !would_orphan_admins(Some("viewer"), 1, None),
+            "non-admin revoked"
+        );
+        assert!(
+            !would_orphan_admins(None, 1, Some("admin")),
+            "brand new member"
+        );
+        assert!(
+            !would_orphan_admins(None, 0, Some("viewer")),
+            "brand new member, no admins yet"
+        );
     }
 
     // (the cookie-to-bearer lift moved to auth::read_credential, with its
@@ -991,14 +1079,20 @@ mod tests {
     fn spa_rel_path_variants() {
         assert_eq!(spa_rel_path("/console"), "index.html");
         assert_eq!(spa_rel_path("/console/"), "index.html");
-        assert_eq!(spa_rel_path("/console/assets/index-abc123.js"), "assets/index-abc123.js");
+        assert_eq!(
+            spa_rel_path("/console/assets/index-abc123.js"),
+            "assets/index-abc123.js"
+        );
         assert_eq!(spa_rel_path("/console/keys"), "keys"); // client-side route; spa() falls back to index.html
     }
 
     #[test]
     fn content_type_table() {
         assert_eq!(content_type("index.html"), "text/html; charset=utf-8");
-        assert_eq!(content_type("assets/app.js"), "application/javascript; charset=utf-8");
+        assert_eq!(
+            content_type("assets/app.js"),
+            "application/javascript; charset=utf-8"
+        );
         assert_eq!(content_type("assets/app.css"), "text/css; charset=utf-8");
         assert_eq!(content_type("weird.bin"), "application/octet-stream");
     }

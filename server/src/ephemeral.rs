@@ -199,7 +199,11 @@ fn env_i64(name: &str, default: i64) -> i64 {
 /// replies for the life of the process. 0 = off.
 pub(crate) fn implicit_ttl_ms_env() -> i64 {
     static V: OnceLock<i64> = OnceLock::new();
-    *V.get_or_init(|| env_i64("QUEEN_EPHEMERAL_IMPLICIT_TTL_S", 600).max(0).saturating_mul(1000))
+    *V.get_or_init(|| {
+        env_i64("QUEEN_EPHEMERAL_IMPLICIT_TTL_S", 600)
+            .max(0)
+            .saturating_mul(1000)
+    })
 }
 
 /// `QUEEN_EPHEMERAL_MAX_QUEUES` (100000): live ephemeral queues per broker,

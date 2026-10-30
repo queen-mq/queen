@@ -401,9 +401,13 @@ pub(crate) async fn dispatch_transaction(
     let kv_charge = match transaction_kv_ops(&body) {
         Some(ops) if !facade && kv_ops_write(&ops) => {
             let (rows, bytes) = super::kv::write_footprint(&ops);
-            if let Some(resp) =
-                super::kv::gated(st, tenant, crate::switches::Surface::KvTxnWrite, rows, bytes)
-            {
+            if let Some(resp) = super::kv::gated(
+                st,
+                tenant,
+                crate::switches::Surface::KvTxnWrite,
+                rows,
+                bytes,
+            ) {
                 return resp;
             }
             Some((rows, bytes))
@@ -2695,8 +2699,15 @@ mod tests {
                 ),
             ] {
                 let (s, v) = call(&router, method.clone(), &path, Some(reserved), body).await;
-                assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path} as {reserved}: {v}");
-                assert_eq!(v["code"], "reserved_tenant", "{method} {path} as {reserved}: {v}");
+                assert_eq!(
+                    s,
+                    StatusCode::FORBIDDEN,
+                    "{method} {path} as {reserved}: {v}"
+                );
+                assert_eq!(
+                    v["code"], "reserved_tenant",
+                    "{method} {path} as {reserved}: {v}"
+                );
             }
         }
 

@@ -282,7 +282,11 @@ pub struct Request {
     /// Read nothing: only tell this node how far the standby has got, so it
     /// keeps the entries after that. A standby reads ONE source node and
     /// tells the others this way, so any of them can take over the reads.
-    #[serde(rename = "holdOnly", default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        rename = "holdOnly",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub hold_only: bool,
 }
 

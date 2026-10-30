@@ -126,6 +126,9 @@ sourceOfTruth:
 # follower drain window; kv.rs (7fe23f4ed): KV reads put each stored value's text into the answer
 # instead of building a JSON tree; every answer is the same, byte for byte. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): auth.rs,
+# handlers/kv.rs, rsm/facade/real/phase2.rs, rsm/facade/real/phase2/reads.rs reformatted, line
+# wrapping only. Nothing this page states changes.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number

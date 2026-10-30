@@ -692,7 +692,10 @@ mod server {
         /// not this group's counterpart — another group, or a cluster that
         /// places its tenants another way.
         #[allow(clippy::result_large_err)]
-        fn admit<'a>(link: &'a Option<LinkRpc>, headers: &HeaderMap) -> Result<&'a LinkRpc, Response> {
+        fn admit<'a>(
+            link: &'a Option<LinkRpc>,
+            headers: &HeaderMap,
+        ) -> Result<&'a LinkRpc, Response> {
             use crate::rsm::link::wire::{Placement, PLACEMENT_HEADER, TOKEN_HEADER};
             let Some(link) = link else {
                 return Err((
@@ -775,10 +778,7 @@ mod server {
 
     /// Every route, refused ones and the standby link's included: the bytes
     /// it reads and writes, on its channel ([`super::super::traffic`]).
-    async fn count_traffic(
-        req: axum::extract::Request,
-        next: axum::middleware::Next,
-    ) -> Response {
+    async fn count_traffic(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
         use super::super::traffic::{channel_of, counted, Dir};
         let ch = channel_of(req.uri().path());
         let req = req.map(|b| counted(b, ch, Dir::Received));

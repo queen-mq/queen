@@ -23,6 +23,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (2.7.0): groups.rs (7fe23f4ed): KV reads put each stored value's
 # text into the answer instead of building a JSON tree; every answer is the same, byte for byte.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): rsm/batcher_link.rs,
+# rsm/facade/real/phase2/link.rs, rsm/link/driver.rs, rsm/link/mirror.rs, rsm/link/mod.rs,
+# rsm/link/seed.rs, rsm/link/wire.rs, rsm/replicator/raft/link.rs reformatted, line wrapping only.
+# Nothing this page states changes.
 ---
 
 Three nodes protect you from losing a machine, and a [backup](/manage/backups/) from a mistake. Neither helps on the day the whole cluster is gone: the zone, the Kubernetes cluster, or a majority of the disks. A standby is a second cluster, on other machines, that replays everything the first one commits, a moment behind it. When the first is lost, you promote the standby, point your clients at it, and they carry on with the messages, positions, leases and keys the first cluster had.

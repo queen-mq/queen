@@ -39,11 +39,7 @@ impl Upstream {
                 .map_err(|e| e.to_string()),
             Upstream::InProcess(router) => {
                 use tower::ServiceExt;
-                router
-                    .clone()
-                    .oneshot(req)
-                    .await
-                    .map_err(|e| match e {})
+                router.clone().oneshot(req).await.map_err(|e| match e {})
             }
         }
     }

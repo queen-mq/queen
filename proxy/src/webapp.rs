@@ -86,13 +86,11 @@ async fn serve(st: &St, headers: &HeaderMap, uri: &Uri) -> Response {
 /// is a data-plane credential: it can push and pop, and it must not be able to
 /// pull down a dashboard bundle, so it is treated exactly like no session.
 async fn has_live_session(st: &St, headers: &HeaderMap) -> bool {
-    let Credential::Session(token) =
-        auth::read_credential_for_document(
-            &st.cfg.cookie_name,
-            crate::oauth::cookie_is_secure(st, headers),
-            headers,
-        )
-    else {
+    let Credential::Session(token) = auth::read_credential_for_document(
+        &st.cfg.cookie_name,
+        crate::oauth::cookie_is_secure(st, headers),
+        headers,
+    ) else {
         return false;
     };
     // Full verification, deny-list included: `verify_session` is the same call
@@ -106,7 +104,11 @@ async fn has_live_session(st: &St, headers: &HeaderMap) -> bool {
 /// open-redirect class of bug is not.
 fn redirect_to_login(uri: &Uri) -> Response {
     let want = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-    let next = if crate::oauth::is_safe(want) { want } else { "/" };
+    let next = if crate::oauth::is_safe(want) {
+        want
+    } else {
+        "/"
+    };
     let location = format!("/auth/login?next={}", crate::oauth::pct(next));
     let mut resp = StatusCode::FOUND.into_response();
     if let Ok(v) = HeaderValue::from_str(&location) {
@@ -164,9 +166,15 @@ pub fn embedded_asset(path: &str) -> Option<Vec<u8>> {
 
 fn embedded(path: &str) -> Option<Response> {
     let file = WebappAssets::get(path)?;
-    let mut resp = ([(header::CONTENT_TYPE, content_type(path))], file.data.into_owned()).into_response();
-    resp.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control(path)));
+    let mut resp = (
+        [(header::CONTENT_TYPE, content_type(path))],
+        file.data.into_owned(),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control(path)),
+    );
     Some(resp)
 }
 
@@ -259,7 +267,10 @@ mod tests {
     fn cache_control_is_private_everywhere() {
         assert!(cache_control("index.html").starts_with("private,"));
         assert!(cache_control("assets/index-abc.js").starts_with("private,"));
-        assert_eq!(cache_control("assets/index-abc.js"), "private, max-age=31536000, immutable");
+        assert_eq!(
+            cache_control("assets/index-abc.js"),
+            "private, max-age=31536000, immutable"
+        );
         assert_eq!(cache_control("index.html"), "private, no-cache");
     }
 
@@ -268,7 +279,10 @@ mod tests {
         // Guards the cross-crate `#[folder = "../server/webapp/dist"]`: if the
         // path ever stops resolving, this fails loudly instead of the proxy
         // silently serving "webapp not built" in production.
-        assert!(WebappAssets::get("index.html").is_some(), "index.html missing from the embed");
+        assert!(
+            WebappAssets::get("index.html").is_some(),
+            "index.html missing from the embed"
+        );
         assert!(
             WebappAssets::iter().any(|f| f.starts_with("assets/")),
             "no hashed assets in the embed"

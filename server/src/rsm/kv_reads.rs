@@ -81,7 +81,13 @@ impl KvReads {
     /// Register a call's reads before it is submitted. `None` when the id is
     /// already registered (a retry racing its original): that call reads at
     /// the receiver, as before.
-    pub fn register(&self, id: RequestId, tenant: &str, ops: &[KvOp], raw: bool) -> Option<Registration> {
+    pub fn register(
+        &self,
+        id: RequestId,
+        tenant: &str,
+        ops: &[KvOp],
+        raw: bool,
+    ) -> Option<Registration> {
         let mut g = self.pending.lock().expect("kv reads");
         if g.contains_key(&id) {
             return None;

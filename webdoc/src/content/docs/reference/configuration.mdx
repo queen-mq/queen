@@ -90,6 +90,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (stream claims): consume/mod.rs declares consume/idle.rs, the
 # empty-batch lease behind POST /streams/v1/claim; it adds no setting (baa27c5c0). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): handlers/ephemeral.rs,
+# proxy app.rs, proxy config.rs, proxy harden.rs, rsm/apply.rs, rsm/facade/real.rs,
+# rsm/link/driver.rs, rsm/replicator/raft/forward.rs, rsm/replicator/raft/link.rs reformatted, line
+# wrapping only. Nothing this page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

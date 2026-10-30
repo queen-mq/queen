@@ -366,7 +366,10 @@ pub async fn client_ip_mw(
                 let h = req.headers_mut();
                 h.remove("x-forwarded-proto");
                 if verified {
-                    h.insert("x-forwarded-proto", axum::http::HeaderValue::from_static("https"));
+                    h.insert(
+                        "x-forwarded-proto",
+                        axum::http::HeaderValue::from_static("https"),
+                    );
                 }
             }
             None => {
@@ -1213,7 +1216,10 @@ impl Edge {
             .layer(from_fn_with_state(self.limits.clone(), timeout_mw))
             .layer(from_fn_with_state(self.web.clone(), csrf_cookie_mw))
             .layer(from_fn_with_state(self.limiter.clone(), rate_limit_mw))
-            .layer(from_fn_with_state(self.anon_limiter.clone(), anon_rate_limit_mw))
+            .layer(from_fn_with_state(
+                self.anon_limiter.clone(),
+                anon_rate_limit_mw,
+            ))
             .layer(from_fn_with_state(self.resolver.clone(), client_ip_mw))
             .layer(from_fn_with_state(self.limits.clone(), header_limits_mw))
             .layer(from_fn_with_state(self.web.clone(), security_headers_mw))
@@ -2252,17 +2258,29 @@ mod tests {
         let proto = |peer: &'static str, hdrs: &'static [(&'static str, &'static str)]| {
             let app = app.clone();
             async move {
-                let resp = app.oneshot(req("POST", "/p", peer, hdrs, "")).await.unwrap();
+                let resp = app
+                    .oneshot(req("POST", "/p", peer, hdrs, ""))
+                    .await
+                    .unwrap();
                 let b = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
                 String::from_utf8_lossy(&b).to_string()
             }
         };
         // A direct client cannot claim HTTPS (it would mint Secure cookies and
         // https redirect URIs over plain HTTP).
-        assert_eq!(proto("203.0.113.9", &[("x-forwarded-proto", "https")]).await, "-");
+        assert_eq!(
+            proto("203.0.113.9", &[("x-forwarded-proto", "https")]).await,
+            "-"
+        );
         // A trusted proxy can.
-        assert_eq!(proto("10.0.0.2", &[("x-forwarded-proto", "https")]).await, "https");
-        assert_eq!(proto("10.0.0.2", &[("x-forwarded-proto", "http")]).await, "-");
+        assert_eq!(
+            proto("10.0.0.2", &[("x-forwarded-proto", "https")]).await,
+            "https"
+        );
+        assert_eq!(
+            proto("10.0.0.2", &[("x-forwarded-proto", "http")]).await,
+            "-"
+        );
     }
 
     #[tokio::test]

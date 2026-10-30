@@ -2199,12 +2199,7 @@ impl RaftFacade {
                     let head: &[u8] = if head.is_empty() { b"{}" } else { head };
                     (head, short, groups, blobs)
                 }
-                Err(m) => {
-                    return Ok(refuse(
-                        "bad_request",
-                        &format!("bad transaction body: {m}"),
-                    ))
-                }
+                Err(m) => return Ok(refuse("bad_request", &format!("bad transaction body: {m}"))),
             }
         } else {
             (&req.raw[..], false, Vec::new(), Vec::new())
@@ -2213,12 +2208,7 @@ impl RaftFacade {
         for (g, blob) in bin_groups.iter().zip(&bin_blobs) {
             match client_frames(blob, g.count) {
                 Ok(frames) => bin_frames.push(frames),
-                Err(m) => {
-                    return Ok(refuse(
-                        "bad_request",
-                        &format!("bad transaction body: {m}"),
-                    ))
-                }
+                Err(m) => return Ok(refuse("bad_request", &format!("bad transaction body: {m}"))),
             }
         }
         let body: TxnBodyIn = match serde_json::from_slice(head) {
@@ -2279,7 +2269,10 @@ impl RaftFacade {
         if timer_ops.len() > 256 {
             return Ok(refuse(
                 "timers_too_many_ops",
-                &format!("{} timer ops in one transaction, at most 256", timer_ops.len()),
+                &format!(
+                    "{} timer ops in one transaction, at most 256",
+                    timer_ops.len()
+                ),
             ));
         }
         {
@@ -2305,7 +2298,12 @@ impl RaftFacade {
             for (i, op) in timer_ops.iter().enumerate() {
                 super::check_message_key_names(&ctx.tenant, op.queue(), None, Some(op.key()))?;
                 if let crate::rsm::planner::timers::TimerOp::Schedule(s) = op {
-                    super::check_message_key_names(&ctx.tenant, &s.queue, None, Some(&s.partition))?;
+                    super::check_message_key_names(
+                        &ctx.tenant,
+                        &s.queue,
+                        None,
+                        Some(&s.partition),
+                    )?;
                     if s.delay_us > horizon_us {
                         return Ok(refuse(
                             "timer_horizon_exceeded",
@@ -3469,11 +3467,10 @@ impl RaftFacade {
                     raw_len
                 };
                 if extra > 0 {
-                    inflate_admitted = Some(gate.admit(extra).await.map_err(|o| {
-                        RsmError::Overloaded {
+                    inflate_admitted =
+                        Some(gate.admit(extra).await.map_err(|o| RsmError::Overloaded {
                             retry_after_s: o.retry_after_s,
-                        }
-                    })?);
+                        })?);
                 }
             }
             inflated = zstd::bulk::decompress(&raw[p..], raw_len)
@@ -3794,8 +3791,7 @@ impl RaftFacade {
         // on a hit, so the result is the exact map's, without three owned
         // copies of the names per item.
         let hasher = std::collections::hash_map::RandomState::new();
-        let mut seen: std::collections::HashMap<u64, Vec<usize>> =
-            std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
         // (queue, partition) → the survivors' flat indices, in order.
         let mut groups: indexed_groups::Groups = indexed_groups::Groups::new();
         // One clock read for the whole push, not one per message.
@@ -5476,13 +5472,28 @@ type OptStr<'a> = Option<std::borrow::Cow<'a, str>>;
 #[derive(Deserialize)]
 struct AckBodyIn<'a> {
     // single
-    #[serde(borrow, default, deserialize_with = "opt_cow::deserialize", rename = "transactionId")]
+    #[serde(
+        borrow,
+        default,
+        deserialize_with = "opt_cow::deserialize",
+        rename = "transactionId"
+    )]
     transaction_id: OptStr<'a>,
-    #[serde(borrow, default, deserialize_with = "opt_cow::deserialize", rename = "partitionId")]
+    #[serde(
+        borrow,
+        default,
+        deserialize_with = "opt_cow::deserialize",
+        rename = "partitionId"
+    )]
     partition_id: OptStr<'a>,
     #[serde(borrow, default, deserialize_with = "opt_cow::deserialize")]
     status: OptStr<'a>,
-    #[serde(borrow, default, deserialize_with = "opt_cow::deserialize", rename = "leaseId")]
+    #[serde(
+        borrow,
+        default,
+        deserialize_with = "opt_cow::deserialize",
+        rename = "leaseId"
+    )]
     lease_id: OptStr<'a>,
     #[serde(borrow, default, deserialize_with = "opt_cow::deserialize")]
     error: OptStr<'a>,
@@ -5491,7 +5502,12 @@ struct AckBodyIn<'a> {
     acknowledgments: Vec<AckBodyItem<'a>>,
     /// The consumer group, read here when the caller did not name one: the
     /// route used to parse the whole body a first time for this key.
-    #[serde(borrow, default, deserialize_with = "opt_cow::deserialize", rename = "consumerGroup")]
+    #[serde(
+        borrow,
+        default,
+        deserialize_with = "opt_cow::deserialize",
+        rename = "consumerGroup"
+    )]
     consumer_group: OptStr<'a>,
     /// `"counts"` asks for the totals instead of one object per item.
     #[serde(borrow, default, deserialize_with = "opt_cow::deserialize")]
@@ -5500,13 +5516,28 @@ struct AckBodyIn<'a> {
 
 #[derive(Deserialize)]
 struct AckBodyItem<'a> {
-    #[serde(borrow, default, deserialize_with = "opt_cow::deserialize", rename = "transactionId")]
+    #[serde(
+        borrow,
+        default,
+        deserialize_with = "opt_cow::deserialize",
+        rename = "transactionId"
+    )]
     transaction_id: OptStr<'a>,
-    #[serde(borrow, default, deserialize_with = "opt_cow::deserialize", rename = "partitionId")]
+    #[serde(
+        borrow,
+        default,
+        deserialize_with = "opt_cow::deserialize",
+        rename = "partitionId"
+    )]
     partition_id: OptStr<'a>,
     #[serde(borrow, default, deserialize_with = "opt_cow::deserialize")]
     status: OptStr<'a>,
-    #[serde(borrow, default, deserialize_with = "opt_cow::deserialize", rename = "leaseId")]
+    #[serde(
+        borrow,
+        default,
+        deserialize_with = "opt_cow::deserialize",
+        rename = "leaseId"
+    )]
     lease_id: OptStr<'a>,
     #[serde(borrow, default, deserialize_with = "opt_cow::deserialize")]
     error: OptStr<'a>,

@@ -577,8 +577,20 @@ mod tests {
         assert_eq!(lean.pushes.len(), tree.pushes.len());
         for (l, t) in lean.pushes.iter().zip(&tree.pushes) {
             assert_eq!(
-                (l.index, &l.queue, &l.partition, &l.message_id, &l.transaction_id),
-                (t.index, &t.queue, &t.partition, &t.message_id, &t.transaction_id)
+                (
+                    l.index,
+                    &l.queue,
+                    &l.partition,
+                    &l.message_id,
+                    &l.transaction_id
+                ),
+                (
+                    t.index,
+                    &t.queue,
+                    &t.partition,
+                    &t.message_id,
+                    &t.transaction_id
+                )
             );
             assert_eq!(doc(&l.payload), doc(&t.payload));
         }
@@ -620,15 +632,26 @@ mod tests {
                          {"key":"c","type":"upsert","value":[1]}]}"#;
         assert_same(body);
         let lean = lean_cycle(body).expect("lean");
-        let payloads: Vec<(usize, &[u8])> = lean.pushes.iter().map(|p| (p.index, &*p.payload)).collect();
+        let payloads: Vec<(usize, &[u8])> =
+            lean.pushes.iter().map(|p| (p.index, &*p.payload)).collect();
         assert_eq!(
             payloads,
-            [(0, &b"null"[..]), (1, &br#"{"x":1}"#[..]), (2, &b"{}"[..]), (5, &br#"{"y":2}"#[..])]
+            [
+                (0, &b"null"[..]),
+                (1, &br#"{"x":1}"#[..]),
+                (2, &b"{}"[..]),
+                (5, &br#"{"y":2}"#[..])
+            ]
         );
         let values: Vec<(usize, &[u8])> = lean.ops.iter().map(|o| (o.index, &*o.value)).collect();
         assert_eq!(
             values,
-            [(0, &b"null"[..]), (1, &b"null"[..]), (2, &b"null"[..]), (4, &b"[1]"[..])]
+            [
+                (0, &b"null"[..]),
+                (1, &b"null"[..]),
+                (2, &b"null"[..]),
+                (4, &b"[1]"[..])
+            ]
         );
     }
 
@@ -645,12 +668,18 @@ mod tests {
             &br#"{"query_id":"q","partition_id":"1","state_ops":[{"key":"k","value":"\ud800"}]}"#[..],
             &b"not json"[..],
         ] {
-            assert!(lean_cycle(body).is_none(), "{}", String::from_utf8_lossy(body));
+            assert!(
+                lean_cycle(body).is_none(),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
         }
         let last = tree(br#"{"query_id":"a","query_id":"b","partition_id":"1"}"#);
         assert_eq!(last.query_id, Some(Value::from("b")));
         // Fields that are not arrays hold no items, in both reads.
-        assert_same(br#"{"query_id":"q","partition_id":"1","push_items":{"queue":"s"},"state_ops":"x"}"#);
+        assert_same(
+            br#"{"query_id":"q","partition_id":"1","push_items":{"queue":"s"},"state_ops":"x"}"#,
+        );
     }
 
     #[test]
@@ -665,8 +694,15 @@ mod tests {
         assert_eq!(read, Some((state.len(), state.len())));
         // The tree read took about ten times the body.
         if let Some(peak) = peak {
-            eprintln!("cycle: {peak} bytes at the peak for a {} byte body", body.len());
-            assert!(peak < 1 << 20, "{peak} bytes at the peak for a {} byte body", body.len());
+            eprintln!(
+                "cycle: {peak} bytes at the peak for a {} byte body",
+                body.len()
+            );
+            assert!(
+                peak < 1 << 20,
+                "{peak} bytes at the peak for a {} byte body",
+                body.len()
+            );
         }
     }
 }

@@ -105,6 +105,11 @@ sourceOfTruth:
 # txn.rs, proxy/src/harden.rs and handlers/connectors.rs. Values are the code's defaults.
 # sourceOfTruth re-read 2026-10-30 (rustfmt, 645be744e): the queen-kafka files this page names were
 # reformatted, line wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): ephemeral.rs,
+# frames.rs, handlers/ephemeral.rs, handlers/kv.rs, handlers/raft.rs, memguard.rs, quota.rs,
+# rsm/facade/real.rs, rsm/facade/real/phase2.rs, rsm/facade/real/phase2/admin.rs,
+# rsm/facade/real/phase2/reads.rs, rsm/facade/real/phase2/streams.rs, rsm/maintenance.rs
+# reformatted, line wrapping only. Nothing this page states changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling

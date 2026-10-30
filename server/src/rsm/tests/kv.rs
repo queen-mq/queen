@@ -2007,15 +2007,24 @@ fn raw_rendering_prints_the_same_answer_as_the_tree() {
         .store()
         .read(|r| {
             let now = now.max(r.last_now_us()?);
-            Ok((render_call(r, TENANT, &ops, &pre, now)?, render_call_raw(r, TENANT, &ops, &pre, now)?))
+            Ok((
+                render_call(r, TENANT, &ops, &pre, now)?,
+                render_call_raw(r, TENANT, &ops, &pre, now)?,
+            ))
         })
         .expect("render");
     let tree = Value::Array(tree).to_string();
     let raw_printed = to_json_spliced(&Value::Array(raw.clone()));
-    assert_eq!(raw_printed, tree, "the raw answer prints byte for byte as the tree");
+    assert_eq!(
+        raw_printed, tree,
+        "the raw answer prints byte for byte as the tree"
+    );
     // And the values really were not trees: each is one raw string.
     let first = &raw[0]["value"];
-    assert!(first.is_string(), "a raw value is carried as its text: {first}");
+    assert!(
+        first.is_string(),
+        "a raw value is carried as its text: {first}"
+    );
     // The metered answer bytes are the printed ones, not the marker string's.
     let tree_values: Vec<Value> = c
         .node
@@ -2024,12 +2033,23 @@ fn raw_rendering_prints_the_same_answer_as_the_tree() {
         .expect("render");
     for (t, r) in tree_values.iter().zip(raw.iter()) {
         if let (Some(tv), Some(rv)) = (t.get("value"), r.get("value")) {
-            assert_eq!(crate::rsm::planner::kv::spliced_len(rv), tv.to_string().len(), "{tv}");
+            assert_eq!(
+                crate::rsm::planner::kv::spliced_len(rv),
+                tv.to_string().len(),
+                "{tv}"
+            );
         }
-        let (tr, rr) = (t.get("rows").and_then(Value::as_array), r.get("rows").and_then(Value::as_array));
+        let (tr, rr) = (
+            t.get("rows").and_then(Value::as_array),
+            r.get("rows").and_then(Value::as_array),
+        );
         for (trow, rrow) in tr.into_iter().flatten().zip(rr.into_iter().flatten()) {
             let (tv, rv) = (&trow["value"], &rrow["value"]);
-            assert_eq!(crate::rsm::planner::kv::spliced_len(rv), tv.to_string().len(), "{tv}");
+            assert_eq!(
+                crate::rsm::planner::kv::spliced_len(rv),
+                tv.to_string().len(),
+                "{tv}"
+            );
         }
     }
     // The raw mode never leaks into a later plain render on this thread.
@@ -2038,5 +2058,9 @@ fn raw_rendering_prints_the_same_answer_as_the_tree() {
         .store()
         .read(|r| render_call(r, TENANT, &ops, &pre, now.max(r.last_now_us()?)))
         .expect("render");
-    assert!(again[0]["value"].is_object(), "plain render after raw: {}", again[0]["value"]);
+    assert!(
+        again[0]["value"].is_object(),
+        "plain render after raw: {}",
+        again[0]["value"]
+    );
 }

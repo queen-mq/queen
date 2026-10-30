@@ -54,6 +54,9 @@ verifiedBy:
 # KV writes spend their own rate, QUEEN_KV_TXN_WRITE_RATE (10,000/s), on the same quota; real.rs
 # (7fe23f4ed): KV reads put each stored value's text into the answer instead of building a JSON
 # tree; every answer is the same, byte for byte. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): handlers/raft.rs,
+# rsm/facade/real.rs, rsm/facade/real/phase2/admin.rs reformatted, line wrapping only. Nothing this
+# page states changes.
 ---
 
 An ack tells the broker what happened to a message. A `completed` ack moves the consumer group's cursor past it, and that is all: the message stays in its partition until retention removes it.

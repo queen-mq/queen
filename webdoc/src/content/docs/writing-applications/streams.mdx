@@ -29,6 +29,9 @@ verifiedBy:
   - examples/tutorials/py/book_client_guide.py
   - examples/tutorials/go/book-client-guide/main.go
   - examples/tutorials/rust/src/bin/book_client_guide.rs
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates):
+# rsm/facade/real/phase2/streams.rs reformatted, line wrapping only. Nothing this page states
+# changes.
 ---
 
 A stream reads a queue and writes its results to another. The partition is the key, so each customer gets its own windows. Streams are in the JavaScript, Python, Go and Rust clients; PHP and C++ have none, and a stream reads any queue, whoever pushes to it. Like a new group it starts at the tail: push a few more orders and a result arrives a minute later.

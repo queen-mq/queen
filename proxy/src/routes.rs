@@ -331,8 +331,7 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     // between the prefix and the suffix is the route; anything else is not, and
     // a longer or shorter one falls through to the method-bounded messages arm
     // in the reads section, which fails it closed for every method but GET.
-    if p
-        .strip_prefix("/api/v1/messages/")
+    if p.strip_prefix("/api/v1/messages/")
         .and_then(|rest| rest.strip_suffix("/retry"))
         .is_some_and(|mid| {
             let mut seg = mid.split('/');
@@ -360,8 +359,7 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     // like this one from ever inheriting the `Read` its sibling wore before
     // §1.4. `/api/v1/dlq` itself is untouched: the exact-path arms below still
     // own the bulk purge and its listing.
-    if p
-        .strip_prefix("/api/v1/dlq/")
+    if p.strip_prefix("/api/v1/dlq/")
         .and_then(|rest| rest.strip_suffix("/replay"))
         .is_some_and(|id| !id.is_empty() && !id.contains('/'))
     {
@@ -681,22 +679,34 @@ mod tests {
             classify(&Method::POST, "/api/v1/resources/quota"),
             RouteClass::Blocked
         );
-        assert_eq!(classify(&Method::POST, "/api/v1/unknown"), RouteClass::Blocked);
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/unknown"),
+            RouteClass::Blocked
+        );
         // system aggregates are operator-class: closed to every tenant
         // credential, openable only by a live operator principal
-        assert_eq!(classify(&Method::GET, "/api/v1/status"), RouteClass::Operator);
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/status"),
+            RouteClass::Operator
+        );
         assert_eq!(
             classify(&Method::GET, "/api/v1/analytics/system-metrics"),
             RouteClass::Operator
         );
         // tenant-scoped aggregates (Track B2) are open reads
-        assert_eq!(classify(&Method::GET, "/api/v1/analytics/queue-lag"), RouteClass::Read);
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/analytics/queue-lag"),
+            RouteClass::Read
+        );
         assert_eq!(
             classify(&Method::GET, "/api/v1/resources/namespaces"),
             RouteClass::Read
         );
         // and the scoped listings stay open
-        assert_eq!(classify(&Method::GET, "/api/v1/status/queues"), RouteClass::Read);
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/status/queues"),
+            RouteClass::Read
+        );
         assert_eq!(
             classify(&Method::GET, "/api/v1/status/queues/orders"),
             RouteClass::Read
@@ -774,7 +784,11 @@ mod tests {
         // ship through a proxy that has never heard of it.
         let replay = "/api/v1/dlq/3f8a9c1e-0000-4000-8000-000000000000/replay";
         for p in [retry, replay] {
-            assert_eq!(classify(&Method::POST, p), RouteClass::QueueAdmin, "POST {p}");
+            assert_eq!(
+                classify(&Method::POST, p),
+                RouteClass::QueueAdmin,
+                "POST {p}"
+            );
             // The regression, stated as the thing it must never be again.
             assert_ne!(classify(&Method::POST, p), RouteClass::Read, "POST {p}");
             // One method per path at the broker, so every other shape fails
@@ -791,16 +805,28 @@ mod tests {
             classify(&Method::DELETE, "/api/v1/messages/P/T"),
             RouteClass::QueueAdmin
         );
-        assert_eq!(classify(&Method::GET, "/api/v1/messages/P/T"), RouteClass::Read);
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/messages/P/T"),
+            RouteClass::Read
+        );
         assert_eq!(classify(&Method::GET, "/api/v1/messages"), RouteClass::Read);
         // ...and so does the DLQ's own pair of exact-path arms.
-        assert_eq!(classify(&Method::DELETE, "/api/v1/dlq"), RouteClass::QueueAdmin);
+        assert_eq!(
+            classify(&Method::DELETE, "/api/v1/dlq"),
+            RouteClass::QueueAdmin
+        );
         assert_eq!(classify(&Method::GET, "/api/v1/dlq"), RouteClass::Read);
         // Neither prefix swallows a neighbour that is not a replay: both arms
         // are anchored at BOTH ends, so an address under them that the broker
         // does not register stays the fail-closed `Blocked` it was.
-        assert_eq!(classify(&Method::POST, "/api/v1/dlq/3f8a/purge"), RouteClass::Blocked);
-        assert_eq!(classify(&Method::GET, "/api/v1/dlq/3f8a"), RouteClass::Blocked);
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/dlq/3f8a/purge"),
+            RouteClass::Blocked
+        );
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/dlq/3f8a"),
+            RouteClass::Blocked
+        );
     }
 
     /// The two neighbours a prefix+suffix test would have swallowed, and the
@@ -816,16 +842,25 @@ mod tests {
     #[test]
     fn the_replay_arms_match_a_shape_not_a_suffix() {
         // txid `retry`: the message read and the message delete, unchanged.
-        assert_eq!(classify(&Method::GET, "/api/v1/messages/P/retry"), RouteClass::Read);
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/messages/P/retry"),
+            RouteClass::Read
+        );
         assert_eq!(
             classify(&Method::DELETE, "/api/v1/messages/P/retry"),
             RouteClass::QueueAdmin
         );
         // ...and it is not a replay: the broker registers no POST on the
         // two-segment address, so it fails closed rather than being forwarded.
-        assert_eq!(classify(&Method::POST, "/api/v1/messages/P/retry"), RouteClass::Blocked);
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/messages/P/retry"),
+            RouteClass::Blocked
+        );
         // A dlq row id of `replay` is a row id, not a route.
-        assert_eq!(classify(&Method::POST, "/api/v1/dlq/replay"), RouteClass::Blocked);
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/dlq/replay"),
+            RouteClass::Blocked
+        );
 
         // THE OTHER HALF OF THE ROOT CAUSE (§1.4). The messages family used to
         // answer `Read` for EVERY method that reached the reads block, so every
@@ -834,8 +869,8 @@ mod tests {
         // the HEAD axum answers from it) is a read, everything else fails
         // closed, and the two writes are classified above.
         for p in [
-            "/api/v1/messages/P/T/retry/",  // one trailing slash
-            "/api/v1/messages/P/T/RETRY",   // the broker's router is case-sensitive
+            "/api/v1/messages/P/T/retry/", // one trailing slash
+            "/api/v1/messages/P/T/RETRY",  // the broker's router is case-sensitive
             "/api/v1/messages/P/T/retrying",
             "/api/v1/messages/P/T/U/retry", // one segment too many
             "/api/v1/messages/P/T",         // the read address itself, wrong method
@@ -844,7 +879,11 @@ mod tests {
             assert_eq!(classify(&Method::PUT, p), RouteClass::Blocked, "PUT {p}");
         }
         // The reads the family exists for keep every method it serves.
-        for p in ["/api/v1/messages", "/api/v1/messages/P/T", "/api/v1/messages/P/retry"] {
+        for p in [
+            "/api/v1/messages",
+            "/api/v1/messages/P/T",
+            "/api/v1/messages/P/retry",
+        ] {
             assert_eq!(classify(&Method::GET, p), RouteClass::Read, "GET {p}");
             assert_eq!(classify(&Method::HEAD, p), RouteClass::Read, "HEAD {p}");
         }
@@ -1050,9 +1089,16 @@ mod tests {
     #[test]
     fn kv_batch_path_is_post_only() {
         for m in [Method::GET, Method::PUT, Method::DELETE, Method::PATCH] {
-            assert_eq!(classify(&m, "/api/v1/kv"), RouteClass::Blocked, "{m} /api/v1/kv");
+            assert_eq!(
+                classify(&m, "/api/v1/kv"),
+                RouteClass::Blocked,
+                "{m} /api/v1/kv"
+            );
         }
-        assert_eq!(classify(&Method::PATCH, "/api/v1/kv/ns/k"), RouteClass::Blocked);
+        assert_eq!(
+            classify(&Method::PATCH, "/api/v1/kv/ns/k"),
+            RouteClass::Blocked
+        );
     }
 
     /// The locks route: KV's plan flag, never the storage block, and never
@@ -1104,20 +1150,35 @@ mod tests {
             classify(&Method::POST, "/api/v1/timers"),
             RouteClass::Gated(Feature::Timers, GatedOp::Mixed)
         );
-        assert_eq!(classify(&Method::PUT, "/api/v1/timers"), RouteClass::Blocked);
+        assert_eq!(
+            classify(&Method::PUT, "/api/v1/timers"),
+            RouteClass::Blocked
+        );
     }
 
     /// The neighbours must not be dragged into the new families by a prefix
     /// that is one character too short.
     #[test]
     fn kv_and_timer_prefixes_do_not_swallow_neighbours() {
-        assert_eq!(classify(&Method::POST, "/api/v1/kvstore"), RouteClass::Blocked);
-        assert_eq!(classify(&Method::POST, "/api/v1/timersets"), RouteClass::Blocked);
-        assert_eq!(classify(&Method::POST, "/api/v1/ephemerals"), RouteClass::Blocked);
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/kvstore"),
+            RouteClass::Blocked
+        );
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/timersets"),
+            RouteClass::Blocked
+        );
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/ephemerals"),
+            RouteClass::Blocked
+        );
         // and the families themselves never fall through to the open Read set
         assert_ne!(classify(&Method::GET, "/api/v1/kv/ns/k"), RouteClass::Read);
         assert_ne!(classify(&Method::GET, "/api/v1/timers/q"), RouteClass::Read);
-        assert_ne!(classify(&Method::GET, "/api/v1/ephemeral/queues"), RouteClass::Read);
+        assert_ne!(
+            classify(&Method::GET, "/api/v1/ephemeral/queues"),
+            RouteClass::Read
+        );
     }
 
     // ---- EPHEMERAL_QUEUES.md §5.1: the RAM family ----
@@ -1136,7 +1197,11 @@ mod tests {
             (Method::GET, "/api/v1/ephemeral/queues", Read),
             (Method::GET, "/api/v1/ephemeral/queues/orders/depth", Read),
         ] {
-            assert_eq!(classify(&m, p), RouteClass::Gated(Feature::Ephemeral, op), "{m} {p}");
+            assert_eq!(
+                classify(&m, p),
+                RouteClass::Gated(Feature::Ephemeral, op),
+                "{m} {p}"
+            );
         }
     }
 
@@ -1164,7 +1229,10 @@ mod tests {
             // storage blocks wholesale, which have no referent in RAM.
             assert_ne!(classify(&m, p), RouteClass::Produce, "{m} {p}");
         }
-        assert_ne!(classify(&Method::POST, "/api/v1/ephemeral/push"), RouteClass::Produce);
+        assert_ne!(
+            classify(&Method::POST, "/api/v1/ephemeral/push"),
+            RouteClass::Produce
+        );
     }
 
     /// One method per path at the broker, so every other shape fails closed
@@ -1234,8 +1302,16 @@ mod tests {
         // The rest of `/api/v1/system/*` and `/api/v1/raft/*` stays blocked,
         // for every method.
         for m in [Method::GET, Method::POST] {
-            assert_eq!(classify(&m, "/api/v1/system/shared-state"), RouteClass::Blocked, "{m}");
-            assert_eq!(classify(&m, "/api/v1/raft/liveness"), RouteClass::Blocked, "{m}");
+            assert_eq!(
+                classify(&m, "/api/v1/system/shared-state"),
+                RouteClass::Blocked,
+                "{m}"
+            );
+            assert_eq!(
+                classify(&m, "/api/v1/raft/liveness"),
+                RouteClass::Blocked,
+                "{m}"
+            );
         }
     }
 
@@ -1260,7 +1336,10 @@ mod tests {
 
     #[test]
     fn wait_pop() {
-        assert!(is_wait_pop("/api/v1/pop/queue/q", Some("wait=true&timeout=5000")));
+        assert!(is_wait_pop(
+            "/api/v1/pop/queue/q",
+            Some("wait=true&timeout=5000")
+        ));
         assert!(!is_wait_pop("/api/v1/pop/queue/q", Some("timeout=5000")));
         assert!(!is_wait_pop("/api/v1/push", Some("wait=true")));
         assert_eq!(poll_timeout_ms(Some("wait=true&timeout=5000")), Some(5000));
@@ -1271,12 +1350,21 @@ mod tests {
     /// gateway.rs decides from this one predicate.
     #[test]
     fn ephemeral_wait_pop_parks_too() {
-        assert!(is_wait_pop("/api/v1/ephemeral/pop", Some("queue=inbox&wait=true&timeout=20000")));
-        assert!(!is_wait_pop("/api/v1/ephemeral/pop", Some("queue=inbox&batch=10")));
+        assert!(is_wait_pop(
+            "/api/v1/ephemeral/pop",
+            Some("queue=inbox&wait=true&timeout=20000")
+        ));
+        assert!(!is_wait_pop(
+            "/api/v1/ephemeral/pop",
+            Some("queue=inbox&batch=10")
+        ));
         assert!(!is_wait_pop("/api/v1/ephemeral/pop", None));
         // a push carrying the parameter is still not a parked consumer
         assert!(!is_wait_pop("/api/v1/ephemeral/push", Some("wait=true")));
         // same query vocabulary as the durable wire, so one parser serves both
-        assert_eq!(poll_timeout_ms(Some("queue=inbox&wait=true&timeout=20000")), Some(20_000));
+        assert_eq!(
+            poll_timeout_ms(Some("queue=inbox&wait=true&timeout=20000")),
+            Some(20_000)
+        );
     }
 }

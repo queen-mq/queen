@@ -680,7 +680,9 @@ impl Quotas {
                 let (rate, burst) = write_rate(&self.k, &snap);
                 e.write.take(rate, burst)
             }
-            Lane::Txn => e.txn_write.take(self.k.txn_write_rate, self.k.txn_write_burst),
+            Lane::Txn => e
+                .txn_write
+                .take(self.k.txn_write_rate, self.k.txn_write_burst),
         };
         if v != Verdict::Allow {
             return v;

@@ -179,7 +179,10 @@ impl RaftFacade {
                 ));
             }
             out.push_str("# HELP queen_link_holding Whether this node keeps its log for its standbys: 0 while its data volume is too full (QUEEN_LINK_HOLD_DISK_PCT)\n# TYPE queen_link_holding gauge\n");
-            out.push_str(&format!("queen_link_holding {}\n", u8::from(source.holding())));
+            out.push_str(&format!(
+                "queen_link_holding {}\n",
+                u8::from(source.holding())
+            ));
         }
         out
     }
@@ -219,7 +222,10 @@ impl RaftFacade {
                 // follower that forwarded the request has applied the entry
                 // by now, and this read makes sure.
                 loop {
-                    let role = self.store.read(|r| link::read_role(r)).map_err(read_error)?;
+                    let role = self
+                        .store
+                        .read(|r| link::read_role(r))
+                        .map_err(read_error)?;
                     if !role.is_standby() || ctx.deadline.remaining().is_zero() {
                         break;
                     }

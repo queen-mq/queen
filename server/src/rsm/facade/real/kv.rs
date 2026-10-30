@@ -92,7 +92,12 @@ impl RaftFacade {
     /// `POST /api/v1/kv` and the path routes (024 `kv_apply_v1`, HTTP surface).
     /// `raw`: the answer goes to an HTTP client (`Rsm::kv_raw`), so stored
     /// values are rendered as their own text (`kvp::render_call_raw`).
-    pub(super) async fn kv_impl(&self, ctx: ReqCtx, req: KvReq, raw: bool) -> Result<KvOut, KvFailure> {
+    pub(super) async fn kv_impl(
+        &self,
+        ctx: ReqCtx,
+        req: KvReq,
+        raw: bool,
+    ) -> Result<KvOut, KvFailure> {
         let max_key = self.store.max_key_len();
         let ops = kvp::parse_ops(
             &req.ops,
@@ -113,7 +118,9 @@ impl RaftFacade {
             let registered = ops
                 .iter()
                 .any(KvOp::is_read)
-                .then(|| crate::rsm::kv_reads::global().register(ctx.request_id, &ctx.tenant, &ops, raw))
+                .then(|| {
+                    crate::rsm::kv_reads::global().register(ctx.request_id, &ctx.tenant, &ops, raw)
+                })
                 .flatten();
             let cmd = Command::Kv(KvCommand {
                 request_id: ctx.request_id,

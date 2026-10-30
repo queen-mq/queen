@@ -29,6 +29,8 @@ verifiedBy:
 # hardening merged: /depth and lagging lists capped at 1,000 (totals still count every partition,
 # lagging sorted most lagging first), dedup window clamped to 7 days, admin effects chunked, the
 # memory guard's metrics, the follower drain window. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): ephemeral.rs,
+# handlers/ephemeral.rs, main.rs reformatted, line wrapping only. Nothing this page states changes.
 ---
 
 Ephemeral queues live in memory, outside the log, for request/reply. The worker answers on whatever inbox a request names; the caller makes a private inbox and waits on it. There is no transaction or replay here, and a crash loses what is in flight.

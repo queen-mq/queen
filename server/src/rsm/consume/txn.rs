@@ -246,7 +246,11 @@ impl Engine {
                 // group's total and the queue's ack rate count what it moved
                 // past (a Kafka commit is exactly this). A first position
                 // counts nothing: where the group started is not known.
-                let moved = if s.1 { (row.committed - before).max(0) as u64 } else { 0 };
+                let moved = if s.1 {
+                    (row.committed - before).max(0) as u64
+                } else {
+                    0
+                };
                 row.total_consumed = row.total_consumed.saturating_add(moved);
                 // Position metadata is a catalogue version 2 shape (D20): a
                 // cluster below it keeps none, here as in the logged row.

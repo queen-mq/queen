@@ -37,7 +37,11 @@ pub trait KvBackend: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub enum KvError {
     /// A shape or size refusal (the broker's 400/413): a proxy bug.
-    Invalid { status: u16, reason: String, detail: String },
+    Invalid {
+        status: u16,
+        reason: String,
+        detail: String,
+    },
     /// A `required` op lost its precondition: nothing was written. `detail`
     /// names the op (`{index, op, ns, key, reason, version, value}`).
     Precondition { detail: Value },
@@ -48,7 +52,11 @@ pub enum KvError {
 impl std::fmt::Display for KvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            KvError::Invalid { status, reason, detail } => {
+            KvError::Invalid {
+                status,
+                reason,
+                detail,
+            } => {
                 write!(f, "kv refused ({status} {reason}): {detail}")
             }
             KvError::Precondition { detail } => write!(f, "kv precondition lost: {detail}"),
@@ -106,12 +114,22 @@ fn expiry(o: &mut serde_json::Map<String, Value>, ttl: Ttl) {
 }
 
 /// `put` of `value` at `ns/key`. `required`: a lost `expect` fails the batch.
-pub fn put_op(ns: &str, key: &str, value: &impl Serialize, expect: Expect, ttl: Ttl, required: bool) -> Value {
+pub fn put_op(
+    ns: &str,
+    key: &str,
+    value: &impl Serialize,
+    expect: Expect,
+    ttl: Ttl,
+    required: bool,
+) -> Value {
     let mut o = serde_json::Map::new();
     o.insert("op".into(), "put".into());
     o.insert("ns".into(), ns.into());
     o.insert("key".into(), key.into());
-    o.insert("value".into(), serde_json::to_value(value).unwrap_or(Value::Null));
+    o.insert(
+        "value".into(),
+        serde_json::to_value(value).unwrap_or(Value::Null),
+    );
     expiry(&mut o, ttl);
     match expect {
         Expect::Any => {}
@@ -189,9 +207,15 @@ fn decode<T: DeserializeOwned>(v: &Value) -> Option<T> {
 
 /// The document at `ns/key`, if any (a value that does not decode as `T`
 /// reads as absent and is logged).
-pub async fn get<T: DeserializeOwned>(kv: &dyn KvBackend, ns: &str, key: &str) -> Result<Option<Doc<T>>, KvError> {
+pub async fn get<T: DeserializeOwned>(
+    kv: &dyn KvBackend,
+    ns: &str,
+    key: &str,
+) -> Result<Option<Doc<T>>, KvError> {
     let out = kv.kv(vec![json!({"op":"get","ns":ns,"key":key})]).await?;
-    let Some(r) = out.into_iter().next() else { return Ok(None) };
+    let Some(r) = out.into_iter().next() else {
+        return Ok(None);
+    };
     if r.get("found").and_then(Value::as_bool) != Some(true) {
         return Ok(None);
     }
@@ -206,21 +230,37 @@ pub async fn get<T: DeserializeOwned>(kv: &dyn KvBackend, ns: &str, key: &str) -
 }
 
 /// Several documents of one namespace at once, in `keys` order.
-pub async fn get_many<T: DeserializeOwned>(kv: &dyn KvBackend, ns: &str, keys: &[String]) -> Result<Vec<Option<Doc<T>>>, KvError> {
+pub async fn get_many<T: DeserializeOwned>(
+    kv: &dyn KvBackend,
+    ns: &str,
+    keys: &[String],
+) -> Result<Vec<Option<Doc<T>>>, KvError> {
     if keys.is_empty() {
         return Ok(Vec::new());
     }
     let mut found: std::collections::HashMap<String, Doc<T>> = std::collections::HashMap::new();
     for chunk in keys.chunks(500) {
-        let out = kv.kv(vec![json!({"op":"getMany","ns":ns,"keys":chunk})]).await?;
-        if let Some(rows) = out.first().and_then(|r| r.get("rows")).and_then(Value::as_array) {
+        let out = kv
+            .kv(vec![json!({"op":"getMany","ns":ns,"keys":chunk})])
+            .await?;
+        if let Some(rows) = out
+            .first()
+            .and_then(|r| r.get("rows"))
+            .and_then(Value::as_array)
+        {
             for row in rows {
-                let (Some(k), Some(v)) = (row.get("key").and_then(Value::as_str), row.get("value").and_then(decode::<T>)) else {
+                let (Some(k), Some(v)) = (
+                    row.get("key").and_then(Value::as_str),
+                    row.get("value").and_then(decode::<T>),
+                ) else {
                     continue;
                 };
                 found.insert(
                     k.to_string(),
-                    Doc { value: v, version: row.get("version").and_then(Value::as_u64).unwrap_or(0) },
+                    Doc {
+                        value: v,
+                        version: row.get("version").and_then(Value::as_u64).unwrap_or(0),
+                    },
                 );
             }
         }
@@ -230,7 +270,11 @@ pub async fn get_many<T: DeserializeOwned>(kv: &dyn KvBackend, ns: &str, keys: &
 
 /// Every document of `ns` whose key starts with `prefix`, in key order
 /// (pages through `getPrefix` until it is not truncated).
-pub async fn scan<T: DeserializeOwned>(kv: &dyn KvBackend, ns: &str, prefix: &str) -> Result<Vec<(String, Doc<T>)>, KvError> {
+pub async fn scan<T: DeserializeOwned>(
+    kv: &dyn KvBackend,
+    ns: &str,
+    prefix: &str,
+) -> Result<Vec<(String, Doc<T>)>, KvError> {
     let mut out = Vec::new();
     let mut after: Option<String> = None;
     loop {
@@ -239,18 +283,36 @@ pub async fn scan<T: DeserializeOwned>(kv: &dyn KvBackend, ns: &str, prefix: &st
             m.insert("after".into(), Value::String(a.clone()));
         }
         let res = kv.kv(vec![op]).await?;
-        let Some(r) = res.into_iter().next() else { break };
-        let rows = r.get("rows").and_then(Value::as_array).cloned().unwrap_or_default();
+        let Some(r) = res.into_iter().next() else {
+            break;
+        };
+        let rows = r
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let mut last = None;
         for row in &rows {
-            let Some(k) = row.get("key").and_then(Value::as_str) else { continue };
+            let Some(k) = row.get("key").and_then(Value::as_str) else {
+                continue;
+            };
             last = Some(k.to_string());
             if let Some(v) = row.get("value").and_then(decode::<T>) {
-                out.push((k.to_string(), Doc { value: v, version: row.get("version").and_then(Value::as_u64).unwrap_or(0) }));
+                out.push((
+                    k.to_string(),
+                    Doc {
+                        value: v,
+                        version: row.get("version").and_then(Value::as_u64).unwrap_or(0),
+                    },
+                ));
             }
         }
         let truncated = r.get("truncated").and_then(Value::as_bool).unwrap_or(false);
-        let next = r.get("nextAfter").and_then(Value::as_str).map(str::to_string).or(last);
+        let next = r
+            .get("nextAfter")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or(last);
         if !truncated || rows.is_empty() || next.is_none() {
             break;
         }
@@ -269,15 +331,25 @@ pub async fn scan_keys(kv: &dyn KvBackend, ns: &str, prefix: &str) -> Result<Vec
             m.insert("after".into(), Value::String(a.clone()));
         }
         let res = kv.kv(vec![op]).await?;
-        let Some(r) = res.into_iter().next() else { break };
-        let rows = r.get("rows").and_then(Value::as_array).cloned().unwrap_or_default();
+        let Some(r) = res.into_iter().next() else {
+            break;
+        };
+        let rows = r
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         for row in &rows {
             if let Some(k) = row.get("key").and_then(Value::as_str) {
                 out.push(k.to_string());
             }
         }
         let truncated = r.get("truncated").and_then(Value::as_bool).unwrap_or(false);
-        let next = r.get("nextAfter").and_then(Value::as_str).map(str::to_string).or_else(|| out.last().cloned());
+        let next = r
+            .get("nextAfter")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| out.last().cloned());
         if !truncated || rows.is_empty() || next.is_none() {
             break;
         }

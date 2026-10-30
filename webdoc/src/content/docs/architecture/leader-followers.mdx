@@ -32,6 +32,9 @@ sourceOfTruth:
 # stored value's text into the answer instead of building a JSON tree; every answer is the same,
 # byte for byte; hooks.rs (04d2effca): the pinned long-poll wake (e82652798) merged with the
 # hardening's batched partition drops. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): rsm/apply.rs,
+# rsm/facade/remote.rs, rsm/mod.rs reformatted, line wrapping only. Nothing this page states
+# changes.
 ---
 
 A raft group has one leader. The other nodes are followers, and every node has a full copy of the data.

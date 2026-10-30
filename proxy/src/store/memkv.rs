@@ -104,11 +104,18 @@ impl KvBackend for MemKv {
                         let keys: Vec<String> = o
                             .get("keys")
                             .and_then(Value::as_array)
-                            .map(|a| a.iter().filter_map(|k| k.as_str().map(str::to_string)).collect())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|k| k.as_str().map(str::to_string))
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         let rows: Vec<Value> = keys
                             .iter()
-                            .filter_map(|k| live(&work, &ns, k).map(|r| json!({"key":k,"value":r.value,"version":r.version})))
+                            .filter_map(|k| {
+                                live(&work, &ns, k)
+                                    .map(|r| json!({"key":k,"value":r.value,"version":r.version}))
+                            })
                             .collect();
                         out.push(json!({"index":i,"op":"getMany","rows":rows,"truncated":false}));
                     }
@@ -118,11 +125,17 @@ impl KvBackend for MemKv {
                             return Err(KvError::Invalid {
                                 status: 400,
                                 reason: "kv_prefix_required".into(),
-                                detail: format!("op at index {i}: getPrefix needs a non-empty prefix"),
+                                detail: format!(
+                                    "op at index {i}: getPrefix needs a non-empty prefix"
+                                ),
                             });
                         }
                         let after = o.get("after").and_then(Value::as_str).map(str::to_string);
-                        let limit = o.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 1000) as usize;
+                        let limit = o
+                            .get("limit")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(100)
+                            .clamp(1, 1000) as usize;
                         let keys_only = o.get("keysOnly").and_then(Value::as_bool).unwrap_or(false);
                         let mut page = Vec::new();
                         let mut truncated = false;
@@ -147,7 +160,9 @@ impl KvBackend for MemKv {
                             });
                         }
                         let next_after = if truncated {
-                            page.last().and_then(|r| r.get("key").cloned()).unwrap_or(Value::Null)
+                            page.last()
+                                .and_then(|r| r.get("key").cloned())
+                                .unwrap_or(Value::Null)
                         } else {
                             Value::Null
                         };
@@ -176,7 +191,14 @@ impl KvBackend for MemKv {
                         }
                         version += 1;
                         let value = o.get("value").cloned().unwrap_or(Value::Null);
-                        work.insert((ns.clone(), key.clone()), Row { value: value.clone(), version, expires_at_ms: expiry(o) });
+                        work.insert(
+                            (ns.clone(), key.clone()),
+                            Row {
+                                value: value.clone(),
+                                version,
+                                expires_at_ms: expiry(o),
+                            },
+                        );
                         out.push(json!({"index":i,"op":op,"applied":true,"key":key,"value":value,"version":version}));
                     }
                     "delete" => {
@@ -184,7 +206,9 @@ impl KvBackend for MemKv {
                         let expect = o.get("expect").and_then(Value::as_u64);
                         let refused = match (expect, &cur) {
                             (Some(0), Some(_)) => Some("exists"),
-                            (Some(v), Some(r)) if v != 0 && r.version != v => Some("version_mismatch"),
+                            (Some(v), Some(r)) if v != 0 && r.version != v => {
+                                Some("version_mismatch")
+                            }
                             (Some(v), None) if v != 0 => Some("absent"),
                             _ => None,
                         };
@@ -195,7 +219,8 @@ impl KvBackend for MemKv {
                             out.push(json!({"index":i,"op":"delete","applied":false,"reason":reason,"key":key,"value":null,"version":0}));
                             continue;
                         }
-                        let existed = work.remove(&(ns.clone(), key.clone())).is_some() && cur.is_some();
+                        let existed =
+                            work.remove(&(ns.clone(), key.clone())).is_some() && cur.is_some();
                         out.push(json!({"index":i,"op":"delete","applied":existed,"key":key,"value":null,"version":0}));
                     }
                     "incr" => {
@@ -204,7 +229,14 @@ impl KvBackend for MemKv {
                         let base = cur.as_ref().and_then(|r| r.value.as_i64()).unwrap_or(0);
                         version += 1;
                         let value = Value::from(base + delta);
-                        work.insert((ns.clone(), key.clone()), Row { value: value.clone(), version, expires_at_ms: expiry(o) });
+                        work.insert(
+                            (ns.clone(), key.clone()),
+                            Row {
+                                value: value.clone(),
+                                version,
+                                expires_at_ms: expiry(o),
+                            },
+                        );
                         out.push(json!({"index":i,"op":"incr","applied":true,"key":key,"value":value,"version":version}));
                     }
                     other => {
@@ -231,7 +263,19 @@ mod tests {
     #[tokio::test]
     async fn required_put_is_all_or_nothing() {
         let m = MemKv::new();
-        kv::write(&m, vec![kv::put_op("px.t", "#a", &1, Expect::Absent, Ttl::Forever, true)]).await.unwrap();
+        kv::write(
+            &m,
+            vec![kv::put_op(
+                "px.t",
+                "#a",
+                &1,
+                Expect::Absent,
+                Ttl::Forever,
+                true,
+            )],
+        )
+        .await
+        .unwrap();
         let err = kv::write(
             &m,
             vec![
@@ -248,7 +292,18 @@ mod tests {
     #[tokio::test]
     async fn scan_pages_through_a_prefix() {
         let m = MemKv::new();
-        let ops = (0..2500).map(|i| kv::put_op("px.t", &format!("#{i:05}"), &i, Expect::Any, Ttl::Forever, false)).collect();
+        let ops = (0..2500)
+            .map(|i| {
+                kv::put_op(
+                    "px.t",
+                    &format!("#{i:05}"),
+                    &i,
+                    Expect::Any,
+                    Ttl::Forever,
+                    false,
+                )
+            })
+            .collect();
         kv::write(&m, ops).await.unwrap();
         let all: Vec<(String, kv::Doc<i64>)> = kv::scan(&m, "px.t", "#").await.unwrap();
         assert_eq!(all.len(), 2500);

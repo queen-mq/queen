@@ -148,7 +148,8 @@ fn holds_data(dir: &Path) -> bool {
 
 /// How a source node's snapshot is read: its address, to the stream. The
 /// binary reads over HTTP ([`http_snapshot`]); a test may read in-process.
-pub type SnapshotStream = std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, String>> + Send>>;
+pub type SnapshotStream =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, String>> + Send>>;
 
 /// `POST http://<addr>/link/v1/snapshot` with the link's token, as the
 /// standby that will read under the name `reader`: the node that answers
@@ -241,10 +242,7 @@ pub async fn http_snapshot(
             }
             Ok(Some(Err(e))) => Some((Err(e.to_string()), s)),
             Ok(None) => None,
-            Err(_) => Some((
-                Err(format!("the source sent nothing for {STALL:?}")),
-                s,
-            )),
+            Err(_) => Some((Err(format!("the source sent nothing for {STALL:?}")), s)),
         }
     });
     Ok(Box::pin(paced))

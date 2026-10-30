@@ -20,7 +20,10 @@ pub fn env_bool(key: &str, default: bool) -> bool {
 }
 
 pub fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// The roles a cluster role document accepts (`store::data`'s check).
@@ -165,7 +168,9 @@ pub fn shutdown_drain_budget() -> std::time::Duration {
 /// `auth::Keys` builds cannot disagree about whether it is set — a divergence
 /// there would print one mode and run another.
 pub fn jwt_ed25519_pub_pem() -> Option<String> {
-    env::var("QUEEN_PROXY_JWT_ED25519_PUB_PEM").ok().filter(|s| !s.trim().is_empty())
+    env::var("QUEEN_PROXY_JWT_ED25519_PUB_PEM")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// The host of an absolute URL: scheme dropped, userinfo dropped, path/query/
@@ -176,7 +181,10 @@ fn host_from_url(url: &str) -> &str {
     let url = url.trim();
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
-    authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority)
+    authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority)
 }
 
 /// The audience this proxy accepts on a session token, or `None` for "accept
@@ -201,7 +209,9 @@ fn host_from_url(url: &str) -> &str {
 /// `jwt_ed25519_pub_pem` is: the boot log names the audience the verifier
 /// actually enforces.
 pub fn resolve_jwt_audience(explicit: Option<String>, public_url: Option<&str>) -> Option<String> {
-    let explicit = explicit.map(|v| v.trim().to_ascii_lowercase()).filter(|v| !v.is_empty());
+    let explicit = explicit
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty());
     if explicit.is_some() {
         return explicit;
     }
@@ -713,13 +723,29 @@ mod tests {
 
     #[test]
     fn auth_portal_url_takes_http_and_https_and_trims() {
-        assert_eq!(portal("https://auth.queenmq.cloud/login").as_deref(), Some("https://auth.queenmq.cloud/login"));
+        assert_eq!(
+            portal("https://auth.queenmq.cloud/login").as_deref(),
+            Some("https://auth.queenmq.cloud/login")
+        );
         // Plain http is a real deployment (a control plane on a private
         // network), so it is not refused here.
-        assert_eq!(portal("http://control.internal:8080/").as_deref(), Some("http://control.internal:8080/"));
-        assert_eq!(portal("  https://auth.test/login\n").as_deref(), Some("https://auth.test/login"));
-        assert_eq!(portal("HTTPS://Auth.Test/Login").as_deref(), Some("HTTPS://Auth.Test/Login"));
-        assert_eq!(resolve_auth_portal_url(None), None, "unset is the default shape");
+        assert_eq!(
+            portal("http://control.internal:8080/").as_deref(),
+            Some("http://control.internal:8080/")
+        );
+        assert_eq!(
+            portal("  https://auth.test/login\n").as_deref(),
+            Some("https://auth.test/login")
+        );
+        assert_eq!(
+            portal("HTTPS://Auth.Test/Login").as_deref(),
+            Some("HTTPS://Auth.Test/Login")
+        );
+        assert_eq!(
+            resolve_auth_portal_url(None),
+            None,
+            "unset is the default shape"
+        );
     }
 
     #[test]
@@ -729,7 +755,11 @@ mod tests {
         // every unauthenticated visitor.
         assert_eq!(portal("javascript:alert(1)"), None);
         assert_eq!(portal("data:text/html,<script>alert(1)</script>"), None);
-        assert_eq!(portal("  javascript:alert(1)"), None, "trimming does not launder a scheme");
+        assert_eq!(
+            portal("  javascript:alert(1)"),
+            None,
+            "trimming does not launder a scheme"
+        );
         // Relative and scheme-less values would resolve against this host, which
         // is exactly the host that cannot sign anyone in.
         assert_eq!(portal("/auth/login"), None);
@@ -743,7 +773,10 @@ mod tests {
     #[test]
     fn csv_lower_trims_lowercases_and_drops_empties() {
         std::env::set_var("QUEEN_TEST_CSV", " Smartpricing.IT , ,smartness.com,");
-        assert_eq!(csv_lower("QUEEN_TEST_CSV"), vec!["smartpricing.it", "smartness.com"]);
+        assert_eq!(
+            csv_lower("QUEEN_TEST_CSV"),
+            vec!["smartpricing.it", "smartness.com"]
+        );
         std::env::remove_var("QUEEN_TEST_CSV");
     }
 
@@ -756,7 +789,10 @@ mod tests {
         std::env::set_var("QUEEN_TEST_CSV_OPT", " Ops@Smartness.com ,admin@localhost");
         assert_eq!(
             csv_lower_opt("QUEEN_TEST_CSV_OPT"),
-            Some(vec!["ops@smartness.com".to_string(), "admin@localhost".to_string()])
+            Some(vec![
+                "ops@smartness.com".to_string(),
+                "admin@localhost".to_string()
+            ])
         );
         std::env::remove_var("QUEEN_TEST_CSV_OPT");
     }
@@ -775,14 +811,23 @@ mod tests {
 
     #[test]
     fn host_without_port_strips_only_a_real_port() {
-        assert_eq!(host_without_port("try.queenmq.cloud:6711"), "try.queenmq.cloud");
+        assert_eq!(
+            host_without_port("try.queenmq.cloud:6711"),
+            "try.queenmq.cloud"
+        );
         assert_eq!(host_without_port("try.queenmq.cloud"), "try.queenmq.cloud");
-        assert_eq!(host_without_port("  try.queenmq.cloud:443  "), "try.queenmq.cloud");
+        assert_eq!(
+            host_without_port("  try.queenmq.cloud:443  "),
+            "try.queenmq.cloud"
+        );
         // IPv6 literal: the last colon is inside the brackets, not a port.
         assert_eq!(host_without_port("[::1]"), "[::1]");
         assert_eq!(host_without_port("[::1]:6711"), "[::1]");
         // Not a port -> nothing is stripped, rather than a silent wrong guess.
-        assert_eq!(host_without_port("weird:notaport.example.com"), "weird:notaport.example.com");
+        assert_eq!(
+            host_without_port("weird:notaport.example.com"),
+            "weird:notaport.example.com"
+        );
     }
 
     #[test]
@@ -792,8 +837,14 @@ mod tests {
         // decision (it used to miss `is_shared_host` and land on the default
         // cluster instead).
         assert_eq!(canonical_host("try.queenmq.cloud."), "try.queenmq.cloud");
-        assert_eq!(canonical_host("try.queenmq.cloud.:443"), "try.queenmq.cloud");
-        assert_eq!(canonical_host("  try.queenmq.cloud.  "), "try.queenmq.cloud");
+        assert_eq!(
+            canonical_host("try.queenmq.cloud.:443"),
+            "try.queenmq.cloud"
+        );
+        assert_eq!(
+            canonical_host("  try.queenmq.cloud.  "),
+            "try.queenmq.cloud"
+        );
         // Degenerate shapes stay degenerate rather than becoming something
         // else: nothing here may invent a label.
         assert_eq!(canonical_host("."), "");
@@ -854,8 +905,16 @@ mod tests {
     fn an_unset_list_makes_no_host_shared() {
         let cfg = cfg_with_shared(&[]);
         assert!(cfg.shared_hosts.is_empty());
-        for h in ["try.queenmq.cloud", "acme.queenmq.cloud", "localhost:6711", ""] {
-            assert!(!cfg.is_shared_host(h), "{h} must keep today's Host-label routing");
+        for h in [
+            "try.queenmq.cloud",
+            "acme.queenmq.cloud",
+            "localhost:6711",
+            "",
+        ] {
+            assert!(
+                !cfg.is_shared_host(h),
+                "{h} must keep today's Host-label routing"
+            );
         }
     }
 
@@ -938,7 +997,11 @@ mod tests {
         // The default only works as a default because the two sides agree: the
         // audience the control plane stamps is the hostname it routes to.
         let aud = resolve_jwt_audience(None, Some("https://cell-a.queenmq.cloud")).unwrap();
-        for host in ["cell-a.queenmq.cloud", "cell-a.queenmq.cloud:443", "cell-a.queenmq.cloud."] {
+        for host in [
+            "cell-a.queenmq.cloud",
+            "cell-a.queenmq.cloud:443",
+            "cell-a.queenmq.cloud.",
+        ] {
             assert_eq!(canonical_host(host).to_ascii_lowercase(), aud, "{host}");
         }
     }
@@ -968,13 +1031,20 @@ mod tests {
 
     #[test]
     fn ed25519_private_key_is_mint_mode_and_boots() {
-        let m = JwtMaterial { ed_private: true, hs_secret: false, ..mat() };
+        let m = JwtMaterial {
+            ed_private: true,
+            hs_secret: false,
+            ..mat()
+        };
         let b = jwt_boot(m);
         assert_eq!(b.mode, JwtMode::Mint);
         assert!(b.fatal.is_none(), "{:?}", b.fatal);
         // The public key derived from the private one is the normal shape and
         // must not be called contradictory.
-        let b = jwt_boot(JwtMaterial { ed_public: true, ..m });
+        let b = jwt_boot(JwtMaterial {
+            ed_public: true,
+            ..m
+        });
         assert_eq!(b.mode, JwtMode::Mint);
         assert!(b.fatal.is_none());
         assert!(b.warn.is_none());
@@ -994,8 +1064,14 @@ mod tests {
             ..mat()
         });
         assert_eq!(b.mode, JwtMode::Mint);
-        assert!(b.fatal.is_none(), "an API-key-only proxy must keep booting: {:?}", b.fatal);
-        let msg = b.warn.expect("a console that cannot mint must say so at boot");
+        assert!(
+            b.fatal.is_none(),
+            "an API-key-only proxy must keep booting: {:?}",
+            b.fatal
+        );
+        let msg = b
+            .warn
+            .expect("a console that cannot mint must say so at boot");
         // The message has one job: name the way out. Both knobs, and the
         // verify-only escape, or the operator is back to reading source.
         for needle in [
@@ -1003,9 +1079,15 @@ mod tests {
             "QUEEN_PROXY_JWT_SECRET",
             "QUEEN_PROXY_JWT_ED25519_PUB_PEM",
         ] {
-            assert!(msg.contains(needle), "boot warning must name {needle}: {msg}");
+            assert!(
+                msg.contains(needle),
+                "boot warning must name {needle}: {msg}"
+            );
         }
-        assert!(msg.contains("503"), "boot warning must name what a login would do: {msg}");
+        assert!(
+            msg.contains("503"),
+            "boot warning must name what a login would do: {msg}"
+        );
     }
 
     #[test]
@@ -1038,7 +1120,9 @@ mod tests {
             ..mat()
         });
         assert_eq!(b.mode, JwtMode::Mint);
-        let msg = b.fatal.expect("minting tokens it rejects is not a bootable state");
+        let msg = b
+            .fatal
+            .expect("minting tokens it rejects is not a bootable state");
         assert!(msg.contains("QUEEN_PROXY_JWT_ED25519_PUB_PEM"), "{msg}");
     }
 
@@ -1051,7 +1135,11 @@ mod tests {
             ..mat()
         });
         assert_eq!(b.mode, JwtMode::VerifyOnly);
-        assert!(b.fatal.is_none(), "verify-only must keep booting: {:?}", b.fatal);
+        assert!(
+            b.fatal.is_none(),
+            "verify-only must keep booting: {:?}",
+            b.fatal
+        );
         assert!(b.warn.is_none());
     }
 
@@ -1065,7 +1153,9 @@ mod tests {
             ..mat()
         });
         assert_eq!(b.mode, JwtMode::VerifyOnly);
-        let msg = b.fatal.expect("a verify-only host that verifies nothing 401s every session");
+        let msg = b
+            .fatal
+            .expect("a verify-only host that verifies nothing 401s every session");
         assert!(msg.contains("VERIFY-ONLY"), "{msg}");
         assert!(msg.contains("QUEEN_PROXY_JWT_ED25519_PUB_PEM"), "{msg}");
     }
@@ -1076,7 +1166,10 @@ mod tests {
         // live cell's signer under it), so this is not fatal — but the ignored
         // public key is exactly the half-finished EdDSA migration worth saying
         // out loud.
-        let b = jwt_boot(JwtMaterial { ed_public: true, ..mat() });
+        let b = jwt_boot(JwtMaterial {
+            ed_public: true,
+            ..mat()
+        });
         assert_eq!(b.mode, JwtMode::Mint);
         assert!(b.fatal.is_none());
         let w = b.warn.expect("an ignored public key must be reported");

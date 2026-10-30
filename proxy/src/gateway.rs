@@ -124,7 +124,10 @@ fn plan_gates(
 ) -> Option<Response> {
     if let RouteClass::Gated(f, op) = class {
         if !feature_enabled(f, &ctx.features) {
-            return Some(errors::err_403(errors::CODE_FEATURE_GATED, "not in your plan"));
+            return Some(errors::err_403(
+                errors::CODE_FEATURE_GATED,
+                "not in your plan",
+            ));
         }
         // PLAN_KV_TIMERS.md §9.5: the growing half of a gated family answers
         // the push blocks exactly like Produce, because it is the half that
@@ -365,7 +368,10 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
     // ----- 4a. per-request bucket (every proxied request, post-authn) -----
     match st.limits.check_req(&ctx) {
         Decision::Allow => {}
-        Decision::Deny { retry_after_s, code } => {
+        Decision::Deny {
+            retry_after_s,
+            code,
+        } => {
             if st.limits.enforcing() {
                 return errors::err_429(code, retry_after_s, "request rate limit exceeded");
             }
@@ -556,7 +562,10 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         if cycle_sinks.total > 0 {
             match st.limits.check_bytes(&ctx, buffered.len() as u64) {
                 Decision::Allow => {}
-                Decision::Deny { retry_after_s, code } => {
+                Decision::Deny {
+                    retry_after_s,
+                    code,
+                } => {
                     if st.limits.enforcing() {
                         return errors::err_429(code, retry_after_s, "byte rate limit exceeded");
                     }
@@ -567,7 +576,8 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         // A sink emit grows retained bytes exactly like a push, so it feeds the
         // same in-flight storage account, at the same point in the order (after
         // every cap, before the forward).
-        st.limits.note_accepted_bytes(ctx.cluster_id, cycle_sinks.payload_bytes);
+        st.limits
+            .note_accepted_bytes(ctx.cluster_id, cycle_sinks.payload_bytes);
         Body::from(buffered)
     } else if let Some(blocked) = mixed_block {
         // 4b''. A kv/timers batch on a blocked cluster (PLAN_KV_TIMERS.md
@@ -611,7 +621,10 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         bytes_in = buffered.len() as u64;
         match st.limits.check_bytes(&ctx, buffered.len() as u64) {
             Decision::Allow => {}
-            Decision::Deny { retry_after_s, code } => {
+            Decision::Deny {
+                retry_after_s,
+                code,
+            } => {
                 if st.limits.enforcing() {
                     return errors::err_429(code, retry_after_s, "byte rate limit exceeded");
                 }
@@ -631,7 +644,10 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             // parked_slot only returns Err when enforcing: a shadow over-cap
             // returns Ok(guard) so the gauges keep tracking real parked pops
             // (see limits.rs) — dropping to None here would undercount.
-            Err(Decision::Deny { retry_after_s, code }) => {
+            Err(Decision::Deny {
+                retry_after_s,
+                code,
+            }) => {
                 return errors::err_429(code, retry_after_s, "too many parked consumers");
             }
             Err(Decision::Allow) => None,
@@ -649,8 +665,7 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
     } else {
         ctx.cell_base_url.trim_end_matches('/')
     };
-    let target: Uri = match format!("{}{}", base, path_q).parse()
-    {
+    let target: Uri = match format!("{}{}", base, path_q).parse() {
         Ok(u) => u,
         Err(_) => return errors::err_502("bad upstream uri"),
     };
@@ -853,7 +868,8 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             let delivered = count_pop_messages(&buffered).unwrap_or(0);
             // What the answer weighs uncompressed leaves the byte bucket after
             // the fact: a framed answer at what its records declare.
-            st.limits.debit_bytes(&ctx, crate::wire::pop_answer_bytes(&buffered));
+            st.limits
+                .debit_bytes(&ctx, crate::wire::pop_answer_bytes(&buffered));
             st.meter.record(Sample {
                 cluster_id: ctx.cluster_id,
                 op: OpClass::Delivery,
@@ -1055,9 +1071,16 @@ async fn enforce_produce(
     // Byte bucket — shadow-aware, same shape as check_req.
     match st.limits.check_bytes(ctx, weight) {
         Decision::Allow => {}
-        Decision::Deny { retry_after_s, code } => {
+        Decision::Deny {
+            retry_after_s,
+            code,
+        } => {
             if st.limits.enforcing() {
-                return Err(errors::err_429(code, retry_after_s, "byte rate limit exceeded"));
+                return Err(errors::err_429(
+                    code,
+                    retry_after_s,
+                    "byte rate limit exceeded",
+                ));
             }
             // shadow deny: canonical would_block log emitted inside check_bytes
         }
@@ -1069,7 +1092,8 @@ async fn enforce_produce(
     // has to see them in the meantime (limits.rs, `StorageAccount`). LAST in
     // this function on purpose: a batch refused above is never forwarded, so
     // counting it would refuse later pushes over bytes that were never stored.
-    st.limits.note_accepted_bytes(ctx.cluster_id, payload_bytes(&items));
+    st.limits
+        .note_accepted_bytes(ctx.cluster_id, payload_bytes(&items));
 
     Ok(n)
 }
@@ -1078,7 +1102,9 @@ async fn enforce_produce(
 /// `ItemInfo::payload_len`. Saturating because the sum is fed to a quota
 /// estimate, where wrapping would read as room to spare.
 fn payload_bytes(items: &[ItemInfo]) -> u64 {
-    items.iter().fold(0u64, |acc, it| acc.saturating_add(it.payload_len as u64))
+    items
+        .iter()
+        .fold(0u64, |acc, it| acc.saturating_add(it.payload_len as u64))
 }
 
 /// The two projections into `admit_pairs`' pair set, as named functions rather
@@ -1255,7 +1281,14 @@ async fn enforce_configure(
             }
         }
         Admit::OverPartitions { max } => {
-            log_configure_deny(st.limits.enforcing(), "partitions", ctx, &cfg.queue, max, rid);
+            log_configure_deny(
+                st.limits.enforcing(),
+                "partitions",
+                ctx,
+                &cfg.queue,
+                max,
+                rid,
+            );
             if st.limits.enforcing() {
                 return Err(errors::err_403(
                     errors::CODE_QUOTA_EXCEEDED,
@@ -1521,7 +1554,10 @@ struct ConfigureInfo {
 impl ConfigureInfo {
     /// The first retention option above `ceiling`, if any.
     fn retention_over(&self, ceiling: i64) -> Option<(&'static str, i64)> {
-        self.retention.iter().copied().find(|(_, secs)| *secs > ceiling)
+        self.retention
+            .iter()
+            .copied()
+            .find(|(_, secs)| *secs > ceiling)
     }
 }
 
@@ -1535,8 +1571,15 @@ impl ConfigureInfo {
 fn parse_configure(bytes: &[u8]) -> Result<ConfigureInfo, ()> {
     let root: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ())?;
     let obj = root.as_object().ok_or(())?;
-    let queue = obj.get("queue").and_then(|q| q.as_str()).ok_or(())?.to_string();
-    let opts = obj.get("options").and_then(|o| o.as_object()).unwrap_or(obj);
+    let queue = obj
+        .get("queue")
+        .and_then(|q| q.as_str())
+        .ok_or(())?
+        .to_string();
+    let opts = obj
+        .get("options")
+        .and_then(|o| o.as_object())
+        .unwrap_or(obj);
 
     let mut retention = Vec::new();
     for key in RETENTION_KEYS {
@@ -1631,7 +1674,9 @@ fn parse_produce_items(path: &str, bytes: &[u8]) -> Result<Vec<ItemInfo>, ()> {
         for it in parsed.items {
             out.push(ItemInfo {
                 queue: it.queue,
-                partition: it.partition.unwrap_or_else(|| DEFAULT_PARTITION.to_string()),
+                partition: it
+                    .partition
+                    .unwrap_or_else(|| DEFAULT_PARTITION.to_string()),
                 payload_len: it.payload.get().len(),
             });
         }
@@ -1649,7 +1694,9 @@ fn parse_produce_items(path: &str, bytes: &[u8]) -> Result<Vec<ItemInfo>, ()> {
                 for it in items {
                     out.push(ItemInfo {
                         queue: it.queue,
-                        partition: it.partition.unwrap_or_else(|| DEFAULT_PARTITION.to_string()),
+                        partition: it
+                            .partition
+                            .unwrap_or_else(|| DEFAULT_PARTITION.to_string()),
                         payload_len: it.payload.get().len(),
                     });
                 }
@@ -1657,7 +1704,9 @@ fn parse_produce_items(path: &str, bytes: &[u8]) -> Result<Vec<ItemInfo>, ()> {
                 // flat push form
                 out.push(ItemInfo {
                     queue: q,
-                    partition: op.partition.unwrap_or_else(|| DEFAULT_PARTITION.to_string()),
+                    partition: op
+                        .partition
+                        .unwrap_or_else(|| DEFAULT_PARTITION.to_string()),
                     payload_len: pl.get().len(),
                 });
             }
@@ -1792,7 +1841,10 @@ fn push_block_response(st: &St, ctx: &ClusterCtx) -> Option<Response> {
         None => {}
     }
     if ctx.status == ClusterStatus::PushBlocked {
-        return Some(errors::err_403(errors::CODE_PUSH_BLOCKED, "pushes blocked (billing hold)"));
+        return Some(errors::err_403(
+            errors::CODE_PUSH_BLOCKED,
+            "pushes blocked (billing hold)",
+        ));
     }
     None
 }
@@ -1987,18 +2039,31 @@ fn count_cycle_push_items(body: &[u8]) -> CycleSinks {
         let Some(queue) = item.queue.as_str().filter(|s| !s.is_empty()) else {
             continue;
         };
-        let partition =
-            item.partition.as_str().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_PARTITION);
+        let partition = item
+            .partition
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_PARTITION);
         out.total += 1;
         // `payload`, else the broker's `data` alias, else the `{}` it stores.
-        let payload_len = item.payload.or(item.data).map(|p| p.get().len()).unwrap_or(0);
+        let payload_len = item
+            .payload
+            .or(item.data)
+            .map(|p| p.get().len())
+            .unwrap_or(0);
         out.payload_bytes = out.payload_bytes.saturating_add(payload_len as u64);
         // Linear scan rather than a map: one cycle emits to a handful of sinks
         // (the broker builds the same groups the same way), so a HashMap would
         // cost two key clones per ITEM to save a walk over one or two entries.
-        match out.groups.iter_mut().find(|(k, _)| k.0 == queue && k.1 == partition) {
+        match out
+            .groups
+            .iter_mut()
+            .find(|(k, _)| k.0 == queue && k.1 == partition)
+        {
             Some((_, n)) => *n += 1,
-            None => out.groups.push(((queue.to_string(), partition.to_string()), 1)),
+            None => out
+                .groups
+                .push(((queue.to_string(), partition.to_string()), 1)),
         }
     }
     out
@@ -2163,7 +2228,14 @@ fn replay_samples(
     bytes_out: u64,
     stored: bool,
 ) -> Vec<Sample> {
-    let mut out = vec![Sample { cluster_id, op, reqs: 1, msgs: 0, bytes_in, bytes_out }];
+    let mut out = vec![Sample {
+        cluster_id,
+        op,
+        reqs: 1,
+        msgs: 0,
+        bytes_in,
+        bytes_out,
+    }];
     if stored {
         out.push(Sample {
             cluster_id,
@@ -2288,7 +2360,9 @@ mod tests {
                         {"op":"schedule","queue":"q","timerKey":"b","delayMs":1000},
                         {"op":"cancel","queue":"q","timerKey":"c"}]"#;
         assert!(mixed_batch_grows(body));
-        assert!(mixed_batch_grows(br#"[{"op":"reschedule","queue":"q","timerKey":"b"}]"#));
+        assert!(mixed_batch_grows(
+            br#"[{"op":"reschedule","queue":"q","timerKey":"b"}]"#
+        ));
     }
 
     #[test]
@@ -2296,8 +2370,12 @@ mod tests {
         // §9.5: reads and DELETEs are always permitted, over quota included,
         // or a full tenant can never empty itself.
         assert!(!mixed_batch_grows(br#"[{"op":"get","ns":"a","key":"k"}]"#));
-        assert!(!mixed_batch_grows(br#"[{"op":"getPrefix","ns":"a","prefix":"k"}]"#));
-        assert!(!mixed_batch_grows(br#"[{"op":"delete","ns":"a","key":"k"}]"#));
+        assert!(!mixed_batch_grows(
+            br#"[{"op":"getPrefix","ns":"a","prefix":"k"}]"#
+        ));
+        assert!(!mixed_batch_grows(
+            br#"[{"op":"delete","ns":"a","key":"k"}]"#
+        ));
         // A check writes nothing: a guarded batch of deletes still gets through.
         assert!(!mixed_batch_grows(
             br#"[{"op":"check","ns":"queen-locks","key":"job#0","expect":7,"required":true},
@@ -2308,9 +2386,15 @@ mod tests {
                  {"op":"put","ns":"a","key":"k","value":1}]"#
         ));
 
-        assert!(mixed_batch_grows(br#"[{"op":"put","ns":"a","key":"k","value":1}]"#));
-        assert!(mixed_batch_grows(br#"[{"op":"putIfAbsent","ns":"a","key":"k"}]"#));
-        assert!(mixed_batch_grows(br#"[{"op":"incr","ns":"a","key":"k","by":1}]"#));
+        assert!(mixed_batch_grows(
+            br#"[{"op":"put","ns":"a","key":"k","value":1}]"#
+        ));
+        assert!(mixed_batch_grows(
+            br#"[{"op":"putIfAbsent","ns":"a","key":"k"}]"#
+        ));
+        assert!(mixed_batch_grows(
+            br#"[{"op":"incr","ns":"a","key":"k","by":1}]"#
+        ));
     }
 
     #[test]
@@ -2318,7 +2402,10 @@ mod tests {
         // The op taxonomy is owned by the stored procedures. An op this proxy
         // has never heard of must not be the way past a quota.
         assert!(mixed_batch_grows(br#"[{"op":"somethingNew","ns":"a"}]"#));
-        assert!(mixed_batch_grows(br#"[{"ns":"a","key":"k"}]"#), "no op field");
+        assert!(
+            mixed_batch_grows(br#"[{"ns":"a","key":"k"}]"#),
+            "no op field"
+        );
         assert!(mixed_batch_grows(br#"[{"op":123}]"#), "op is not a string");
     }
 
@@ -2450,16 +2537,28 @@ mod tests {
         ]}"#;
         let sinks = count_cycle_push_items(body);
         assert_eq!(sinks.total, 1);
-        assert_eq!(sinks.groups, vec![(("kept".to_string(), "Default".to_string()), 1)]);
+        assert_eq!(
+            sinks.groups,
+            vec![(("kept".to_string(), "Default".to_string()), 1)]
+        );
 
         // an element that is not an object at all: skipped, neighbours kept —
         // a whole-body parse would have counted 0 and under-billed the rest
-        assert_eq!(count_cycle_push_items(br#"{"push_items":[7,{"queue":"kept","payload":1}]}"#).total, 1);
+        assert_eq!(
+            count_cycle_push_items(br#"{"push_items":[7,{"queue":"kept","payload":1}]}"#).total,
+            1
+        );
 
         // nothing to count: unreadable, no sink half, or an empty one
         assert_eq!(count_cycle_push_items(b"not json"), CycleSinks::default());
-        assert_eq!(count_cycle_push_items(br#"{"query_id":"q"}"#), CycleSinks::default());
-        assert_eq!(count_cycle_push_items(br#"{"push_items":[]}"#), CycleSinks::default());
+        assert_eq!(
+            count_cycle_push_items(br#"{"query_id":"q"}"#),
+            CycleSinks::default()
+        );
+        assert_eq!(
+            count_cycle_push_items(br#"{"push_items":[]}"#),
+            CycleSinks::default()
+        );
     }
 
     /// The response says WHICH groups were written; the request says how many
@@ -2519,13 +2618,22 @@ mod tests {
 
         // Never assumed successful: no `success` key, not JSON, or the wrong
         // top-level shape all come back None -> warn + msgs=0 at the call site.
-        assert_eq!(count_cycle_accepted(br#"{"push_results":[]}"#, &groups), None);
+        assert_eq!(
+            count_cycle_accepted(br#"{"push_results":[]}"#, &groups),
+            None
+        );
         assert_eq!(count_cycle_accepted(b"not json", &groups), None);
-        assert_eq!(count_cycle_accepted(br#"[{"success":true}]"#, &groups), None);
+        assert_eq!(
+            count_cycle_accepted(br#"[{"success":true}]"#, &groups),
+            None
+        );
         assert_eq!(count_cycle_accepted(b"", &groups), None);
         // a readable success with no push_results at all is a confirmed zero,
         // not a parse failure
-        assert_eq!(count_cycle_accepted(br#"{"success":true}"#, &groups), Some(0));
+        assert_eq!(
+            count_cycle_accepted(br#"{"success":true}"#, &groups),
+            Some(0)
+        );
     }
 
     // ---- the cycle's sink half answers the PRODUCE caps ----
@@ -2551,7 +2659,9 @@ mod tests {
     /// The `{error, code}` envelope of a refusal, so a test can pin the code a
     /// Track C client switches on rather than just the status line.
     async fn err_body(resp: Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.expect("body");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("body");
         serde_json::from_slice(&bytes).expect("json envelope")
     }
 
@@ -2574,7 +2684,11 @@ mod tests {
         let pairs: Vec<(&str, &str)> = sinks.groups.iter().map(sink_pair).collect();
         assert_eq!(
             pairs,
-            vec![("enriched", "Default"), ("audit", "shard-1"), ("enriched", "shard-2")],
+            vec![
+                ("enriched", "Default"),
+                ("audit", "shard-1"),
+                ("enriched", "shard-2")
+            ],
             "five items, three admissions"
         );
 
@@ -2583,9 +2697,11 @@ mod tests {
         let reg = crate::registry::Registry::new(crate::store::Store::None);
         let ctx = cycle_ctx(Some(2), Some(2));
         for _ in 0..2 {
-            assert!(admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
-                .await
-                .is_ok());
+            assert!(
+                admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
+                    .await
+                    .is_ok()
+            );
         }
     }
 
@@ -2620,9 +2736,11 @@ mod tests {
         // — the rate/quota posture the whole file shares.
         let reg = crate::registry::Registry::new(crate::store::Store::None);
         let ctx = cycle_ctx(Some(1), Some(1));
-        assert!(admit_pairs(&reg, false, &ctx, sinks.groups.iter().map(sink_pair), "rid")
-            .await
-            .is_ok());
+        assert!(
+            admit_pairs(&reg, false, &ctx, sinks.groups.iter().map(sink_pair), "rid")
+                .await
+                .is_ok()
+        );
     }
 
     /// The dedup lives in `admit_pairs` and serves BOTH callers: extracting it
@@ -2639,7 +2757,11 @@ mod tests {
         let reg = crate::registry::Registry::new(crate::store::Store::None);
         // room for exactly one queue and one partition: five copies of one pair
         let ctx = cycle_ctx(Some(1), Some(1));
-        assert!(admit_pairs(&reg, true, &ctx, items.iter().map(produce_pair), "rid").await.is_ok());
+        assert!(
+            admit_pairs(&reg, true, &ctx, items.iter().map(produce_pair), "rid")
+                .await
+                .is_ok()
+        );
     }
 
     /// What a cycle's sink items add to the in-flight storage account: the raw
@@ -2653,7 +2775,10 @@ mod tests {
         );
         // `data` is the broker's accepted alias for `payload` and measures the
         // same; an item with neither is stored as `{}` and measures nothing.
-        assert_eq!(measured(br#"{"push_items":[{"queue":"a","data":[1,2,3]}]}"#), "[1,2,3]".len() as u64);
+        assert_eq!(
+            measured(br#"{"push_items":[{"queue":"a","data":[1,2,3]}]}"#),
+            "[1,2,3]".len() as u64
+        );
         assert_eq!(measured(br#"{"push_items":[{"queue":"a"}]}"#), 0);
         // A skipped item's payload is never measured: the broker discards
         // those bytes.
@@ -2672,16 +2797,21 @@ mod tests {
             br#"{"query_id":"q","partition_id":"p","state_ops":[{"op":"delete","key":"k"}],
                 "ack":{"transactionId":"t","leaseId":"l","status":"completed","count":10}}"#,
         );
-        assert_eq!(sinks.total, 0, "nothing to weigh: `handle` asks the byte bucket only of a cycle that emits");
+        assert_eq!(
+            sinks.total, 0,
+            "nothing to weigh: `handle` asks the byte bucket only of a cycle that emits"
+        );
         assert!(sinks.groups.is_empty());
         assert_eq!(sinks.payload_bytes, 0);
 
         // caps of zero: no pair to admit, so nothing to refuse
         let reg = crate::registry::Registry::new(crate::store::Store::None);
         let ctx = cycle_ctx(Some(0), Some(0));
-        assert!(admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
-            .await
-            .is_ok());
+        assert!(
+            admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
+                .await
+                .is_ok()
+        );
     }
 
     /// The cycle bills messages WITHOUT changing its op class: the request
@@ -2692,7 +2822,10 @@ mod tests {
     fn cycle_keeps_the_gated_read_class_for_its_request() {
         use crate::routes::{Feature, GatedOp};
         assert_eq!(
-            op_for(STREAMS_CYCLE_PATH, RouteClass::Gated(Feature::Streams, GatedOp::Mixed)),
+            op_for(
+                STREAMS_CYCLE_PATH,
+                RouteClass::Gated(Feature::Streams, GatedOp::Mixed)
+            ),
             OpClass::Read
         );
         // POST-only: `classify` hands every other method on the path the
@@ -2722,13 +2855,19 @@ mod tests {
             {"index":2,"type":"ack","success":true,"transactionId":"a","error":null,"dlq":false}
         ]}"#;
         // One real push, one first-wins duplicate (M2: never charged), one ack.
-        assert_eq!(txn_outcome(committed), TxnOutcome::Committed { duplicates: 1 });
+        assert_eq!(
+            txn_outcome(committed),
+            TxnOutcome::Committed { duplicates: 1 }
+        );
 
         // Ack-only transaction: committed, nothing to subtract.
         let ack_only = br#"{"transactionId":"t","success":true,"results":[
             {"index":0,"type":"ack","success":true,"transactionId":"a","error":null,"dlq":true}
         ]}"#;
-        assert_eq!(txn_outcome(ack_only), TxnOutcome::Committed { duplicates: 0 });
+        assert_eq!(
+            txn_outcome(ack_only),
+            TxnOutcome::Committed { duplicates: 0 }
+        );
     }
 
     #[test]
@@ -2738,14 +2877,20 @@ mod tests {
         let with_nulls = br#"{"transactionId":"t","success":true,"results":[
             null,{"index":1,"type":"push","success":true,"duplicate":true}
         ]}"#;
-        assert_eq!(txn_outcome(with_nulls), TxnOutcome::Committed { duplicates: 1 });
+        assert_eq!(
+            txn_outcome(with_nulls),
+            TxnOutcome::Committed { duplicates: 1 }
+        );
     }
 
     #[test]
     fn transaction_unreadable_body_is_unknown_not_committed() {
         // No `success` key, not JSON, or the wrong top-level shape: never
         // assumed committed — Unknown charges 0 at the call site.
-        assert_eq!(txn_outcome(br#"{"transactionId":"t","results":[]}"#), TxnOutcome::Unknown);
+        assert_eq!(
+            txn_outcome(br#"{"transactionId":"t","results":[]}"#),
+            TxnOutcome::Unknown
+        );
         assert_eq!(txn_outcome(b"not json"), TxnOutcome::Unknown);
         assert_eq!(txn_outcome(br#"[{"success":true}]"#), TxnOutcome::Unknown);
         assert_eq!(txn_outcome(b""), TxnOutcome::Unknown);
@@ -2755,7 +2900,10 @@ mod tests {
     fn pop_message_counting() {
         let body = br#"{"success":true,"queue":"q","partition":"p","partitionId":"pid","leaseId":"l","consumerGroup":"g","messages":[{"a":1},{"b":2},{"c":3}]}"#;
         assert_eq!(count_pop_messages(body), Some(3));
-        assert_eq!(count_pop_messages(br#"{"success":true,"messages":[]}"#), Some(0));
+        assert_eq!(
+            count_pop_messages(br#"{"success":true,"messages":[]}"#),
+            Some(0)
+        );
         // missing messages field defaults to empty
         assert_eq!(count_pop_messages(br#"{"success":true}"#), Some(0));
     }
@@ -2847,7 +2995,10 @@ mod tests {
         // nested options bag (client shape)
         let nested = parse_configure(br#"{"queue":"q","options":{"retentionSeconds":86400}}"#)
             .expect("parse");
-        assert_eq!(nested.retention_over(3600), Some(("retentionSeconds", 86400)));
+        assert_eq!(
+            nested.retention_over(3600),
+            Some(("retentionSeconds", 86400))
+        );
         // top-level bag (raw caller shape — the broker's fallback)
         let flat = parse_configure(br#"{"queue":"q","retentionSeconds":86400}"#).expect("parse");
         assert_eq!(flat.retention_over(3600), Some(("retentionSeconds", 86400)));
@@ -2866,7 +3017,10 @@ mod tests {
         assert_eq!(cfg.retention_over(7200), None);
         // completedRetentionSeconds alone over the ceiling is still a refusal,
         // and the option name comes back for the error message
-        assert_eq!(cfg.retention_over(3600), Some(("completedRetentionSeconds", 7200)));
+        assert_eq!(
+            cfg.retention_over(3600),
+            Some(("completedRetentionSeconds", 7200))
+        );
         // both over -> reports the first one found, in RETENTION_KEYS order
         assert_eq!(cfg.retention_over(60), Some(("retentionSeconds", 3600)));
     }
@@ -2895,7 +3049,12 @@ mod tests {
             &br#"{"queue":"q","options":{}}"#[..],
         ] {
             let cfg = parse_configure(body).expect("parse");
-            assert_eq!(cfg.retention_over(1), None, "body: {}", String::from_utf8_lossy(body));
+            assert_eq!(
+                cfg.retention_over(1),
+                None,
+                "body: {}",
+                String::from_utf8_lossy(body)
+            );
         }
     }
 
@@ -2952,11 +3111,17 @@ mod tests {
     fn ephemeral_push_and_pop_meter_as_messages() {
         use crate::routes::{Feature, GatedOp};
         assert_eq!(
-            op_for(EPH_PUSH_PATH, RouteClass::Gated(Feature::Ephemeral, GatedOp::Grow)),
+            op_for(
+                EPH_PUSH_PATH,
+                RouteClass::Gated(Feature::Ephemeral, GatedOp::Grow)
+            ),
             OpClass::Push
         );
         assert_eq!(
-            op_for(EPH_POP_PATH, RouteClass::Gated(Feature::Ephemeral, GatedOp::Open)),
+            op_for(
+                EPH_POP_PATH,
+                RouteClass::Gated(Feature::Ephemeral, GatedOp::Open)
+            ),
             OpClass::Delivery
         );
         // the rest of the family carries no messages and keeps the default
@@ -2973,12 +3138,18 @@ mod tests {
             );
         }
         assert_eq!(
-            op_for("/api/v1/ephemeral/queues", RouteClass::Gated(Feature::Ephemeral, GatedOp::Read)),
+            op_for(
+                "/api/v1/ephemeral/queues",
+                RouteClass::Gated(Feature::Ephemeral, GatedOp::Read)
+            ),
             OpClass::Read
         );
         // and the neighbouring families are untouched by the new arms
         assert_eq!(
-            op_for("/api/v1/kv/ns/k", RouteClass::Gated(Feature::Kv, GatedOp::Grow)),
+            op_for(
+                "/api/v1/kv/ns/k",
+                RouteClass::Gated(Feature::Kv, GatedOp::Grow)
+            ),
             OpClass::Read
         );
     }
@@ -2994,10 +3165,15 @@ mod tests {
         assert!(!is_pop_path("/api/v1/pop"));
         // its response shape is the durable one, so one counter serves both
         assert_eq!(
-            count_pop_messages(br#"{"queue":"inbox","messages":[{"id":"e:1a:p:1"},{"id":"e:1a:p:2"}]}"#),
+            count_pop_messages(
+                br#"{"queue":"inbox","messages":[{"id":"e:1a:p:1"},{"id":"e:1a:p:2"}]}"#
+            ),
             Some(2)
         );
-        assert_eq!(count_pop_messages(br#"{"queue":"inbox","messages":[]}"#), Some(0));
+        assert_eq!(
+            count_pop_messages(br#"{"queue":"inbox","messages":[]}"#),
+            Some(0)
+        );
     }
 
     /// The 201 the family answers is one number, not a status array (§3.1).
@@ -3020,7 +3196,10 @@ mod tests {
         let none = crate::state::Features::default();
         assert!(!feature_enabled(Feature::Ephemeral, &none));
 
-        let granted = crate::state::Features { ephemeral: true, ..Default::default() };
+        let granted = crate::state::Features {
+            ephemeral: true,
+            ..Default::default()
+        };
         assert!(feature_enabled(Feature::Ephemeral, &granted));
         // one flag, one family: granting the RAM class grants nothing else
         assert!(!feature_enabled(Feature::Kv, &granted));
@@ -3028,7 +3207,10 @@ mod tests {
         assert!(!feature_enabled(Feature::Streams, &granted));
         assert!(!feature_enabled(Feature::Traces, &granted));
         // ...and no other flag turns it on
-        let kv_only = crate::state::Features { kv: true, ..Default::default() };
+        let kv_only = crate::state::Features {
+            kv: true,
+            ..Default::default()
+        };
         assert!(!feature_enabled(Feature::Ephemeral, &kv_only));
     }
 
@@ -3207,11 +3389,18 @@ mod tests {
     const REPLAY_PATH: &str = "/api/v1/dlq/3f8a9c1e-0000-4000-8000-000000000000/replay";
 
     fn user(role: crate::state::Role) -> crate::state::Principal {
-        crate::state::Principal::User { user_id: uuid::Uuid::nil(), role, operator: false }
+        crate::state::Principal::User {
+            user_id: uuid::Uuid::nil(),
+            role,
+            operator: false,
+        }
     }
 
     fn key(scopes: crate::state::Scopes) -> crate::state::Principal {
-        crate::state::Principal::ApiKey { key_id: uuid::Uuid::nil(), scopes }
+        crate::state::Principal::ApiKey {
+            key_id: uuid::Uuid::nil(),
+            scopes,
+        }
     }
 
     /// A whole `St` with no store behind it — acting.rs's `st_with` twin, copied
@@ -3279,19 +3468,28 @@ mod tests {
         for p in [RETRY_PATH, REPLAY_PATH] {
             let class = classify(&Method::POST, p);
             assert_eq!(class, RouteClass::QueueAdmin, "{p}");
-            let refused = crate::auth::authorize(&viewer, class).expect_err("a viewer may not replay");
+            let refused =
+                crate::auth::authorize(&viewer, class).expect_err("a viewer may not replay");
             assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{p}");
-            assert!(crate::auth::authorize(&read_only, class).is_err(), "read-scoped key {p}");
+            assert!(
+                crate::auth::authorize(&read_only, class).is_err(),
+                "read-scoped key {p}"
+            );
             // ...and the credentials that own the act still hold it: the fix
             // must not close the route on the role the dashboard button is for.
             assert!(crate::auth::authorize(&admin, class).is_ok(), "admin {p}");
-            assert!(crate::auth::authorize(&admin_key, class).is_ok(), "admin key {p}");
+            assert!(
+                crate::auth::authorize(&admin_key, class).is_ok(),
+                "admin key {p}"
+            );
         }
         // The reads on the same prefix are untouched — a Viewer still sees the
         // dead letters it may no longer replay, which is the whole point of the
         // class split.
         assert!(crate::auth::authorize(&viewer, classify(&Method::GET, "/api/v1/dlq")).is_ok());
-        assert!(crate::auth::authorize(&viewer, classify(&Method::GET, "/api/v1/messages/P/T")).is_ok());
+        assert!(
+            crate::auth::authorize(&viewer, classify(&Method::GET, "/api/v1/messages/P/T")).is_ok()
+        );
     }
 
     /// The second half of the finding, and the reason `is_dlq_replay` exists: a
@@ -3319,7 +3517,14 @@ mod tests {
             assert_eq!(body["code"], errors::CODE_STORAGE_QUOTA, "{p}");
         }
         assert!(
-            plan_gates(&st, &ctx, RouteClass::Produce, &Method::POST, "/api/v1/push").is_some(),
+            plan_gates(
+                &st,
+                &ctx,
+                RouteClass::Produce,
+                &Method::POST,
+                "/api/v1/push"
+            )
+            .is_some(),
             "the push the replay is being held to"
         );
 
@@ -3375,8 +3580,14 @@ mod tests {
     /// the message rides the second sample `handle` records off the verdict.
     #[test]
     fn a_replay_bills_one_message_without_changing_its_class() {
-        assert_eq!(op_for(RETRY_PATH, RouteClass::QueueAdmin), OpClass::Configure);
-        assert_eq!(op_for(REPLAY_PATH, RouteClass::QueueAdmin), OpClass::Configure);
+        assert_eq!(
+            op_for(RETRY_PATH, RouteClass::QueueAdmin),
+            OpClass::Configure
+        );
+        assert_eq!(
+            op_for(REPLAY_PATH, RouteClass::QueueAdmin),
+            OpClass::Configure
+        );
 
         // The move primitive's two verdicts (§2.3): `moved` wrote a frame,
         // `duplicate` found the destination's dedup window already holding the
@@ -3430,7 +3641,10 @@ mod tests {
         assert!(!is_dlq_replay(&Method::DELETE, "/api/v1/dlq"));
         assert!(!is_dlq_replay(&Method::POST, "/api/v1/push"));
         assert!(!is_dlq_replay(&Method::POST, "/api/v1/messages/P/retry"));
-        assert!(!is_dlq_replay(&Method::POST, "/api/v1/messages/P/T/U/retry"));
+        assert!(!is_dlq_replay(
+            &Method::POST,
+            "/api/v1/messages/P/T/U/retry"
+        ));
         assert!(!is_dlq_replay(&Method::POST, "/api/v1/messages/P/T/retry/"));
         assert!(!is_dlq_replay(&Method::POST, "/api/v1/dlq/replay"));
         // `is_dlq_replay` and `classify` answer the same set, which is the
@@ -3516,7 +3730,9 @@ mod tests {
     /// `move_response`-shaped verdict chosen by the dead-letter row id in the
     /// path — which is the only thing the two requests below differ by.
     async fn stub_broker() -> (String, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         let app = axum::Router::new().fallback(|req: Request| async move {
             let verdict =
@@ -3635,7 +3851,9 @@ mod tests {
             // The body is returned to the caller as well as read for the
             // verdict: the arm BUFFERS the response, and a buffer that forgets
             // to hand the bytes back would be a broken replay button.
-            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.expect("body");
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .expect("body");
             let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
             assert_eq!(body["success"], true, "{id}");
         }
@@ -3643,7 +3861,10 @@ mod tests {
         st.meter.drain().await;
         let rows = spooled_rows(&dir);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(!rows.is_empty(), "the drain spooled nothing: the readout itself is broken");
+        assert!(
+            !rows.is_empty(),
+            "the drain spooled nothing: the readout itself is broken"
+        );
         let totals = |op: &str| -> (u64, u64) {
             rows.iter()
                 .filter(|r| r.op == op)
@@ -3702,11 +3923,17 @@ mod tests {
         }
         assert_eq!(answers[0]["code"], errors::CODE_QUOTA_EXCEEDED);
         assert_eq!(answers[0]["error"], "queue limit reached (1)");
-        assert_eq!(answers[0], answers[1], "same cap, same error on both routes");
+        assert_eq!(
+            answers[0], answers[1],
+            "same cap, same error on both routes"
+        );
 
         // A half-named destination is refused on the retry route too — also
         // when the other half is not a string, which the broker ignores.
-        for body in [r#"{"queue":"orders-3"}"#, r#"{"queue":"orders-3","partition":7}"#] {
+        for body in [
+            r#"{"queue":"orders-3"}"#,
+            r#"{"queue":"orders-3","partition":7}"#,
+        ] {
             let refused = send(RETRY_PATH, body).await;
             assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{body}");
             let answer = err_body(refused).await;
@@ -3729,9 +3956,14 @@ mod tests {
         let ctx = cycle_ctx(Some(1), Some(1));
 
         // The first destination fits and is remembered.
-        assert!(admit_replay_dest(&st, &ctx, &Bytes::from_static(br#"{"queue":"orders","partition":"p"}"#), "rid")
-            .await
-            .is_ok());
+        assert!(admit_replay_dest(
+            &st,
+            &ctx,
+            &Bytes::from_static(br#"{"queue":"orders","partition":"p"}"#),
+            "rid"
+        )
+        .await
+        .is_ok());
         // A second partition in it does not.
         let refused = admit_replay_dest(
             &st,
@@ -3780,7 +4012,9 @@ mod tests {
             b"not json".as_slice(),
         ] {
             assert!(
-                admit_replay_dest(&st, &ctx, &Bytes::copy_from_slice(body), "rid").await.is_ok(),
+                admit_replay_dest(&st, &ctx, &Bytes::copy_from_slice(body), "rid")
+                    .await
+                    .is_ok(),
                 "{}",
                 String::from_utf8_lossy(body)
             );
@@ -3823,7 +4057,11 @@ mod tests {
         let ctx = cycle_ctx(Some(1), Some(1));
 
         let padded = br#"{"queue":"  orders  ","partition":"  p  "}"#;
-        assert!(admit_replay_dest(&st, &ctx, &Bytes::copy_from_slice(padded), "rid").await.is_ok());
+        assert!(
+            admit_replay_dest(&st, &ctx, &Bytes::copy_from_slice(padded), "rid")
+                .await
+                .is_ok()
+        );
         // The same pair, spelled the way the broker will store it. It is
         // already known, so it takes neither a second queue slot nor a second
         // partition slot — which is only true if the padded body registered the
@@ -3880,7 +4118,11 @@ mod tests {
 
         for (body, missing, other) in [
             (br#"{"partition":"p-new"}"#.as_slice(), "queue", "partition"),
-            (br#"{"queue":"orders.retry"}"#.as_slice(), "partition", "queue"),
+            (
+                br#"{"queue":"orders.retry"}"#.as_slice(),
+                "partition",
+                "queue",
+            ),
         ] {
             let refused = admit_replay_dest(&st, &ctx, &Bytes::copy_from_slice(body), "rid")
                 .await
@@ -3894,7 +4136,10 @@ mod tests {
             // (app/src/composables/useDlqReplay.js reads "<half> override" out
             // of this text), so naming both halves would file it under the
             // wrong one.
-            assert!(text.starts_with(&format!("{missing} override missing")), "{text}");
+            assert!(
+                text.starts_with(&format!("{missing} override missing")),
+                "{text}"
+            );
             assert!(!text.contains(&format!("{other} override")), "{text}");
         }
 
@@ -3903,11 +4148,14 @@ mod tests {
         // either (`Registry::admit*` REMEMBERS what it allows).
         let tight = gate_st_enforcing();
         let one = cycle_ctx(Some(1), Some(1));
-        assert!(
-            admit_replay_dest(&tight, &one, &Bytes::from_static(br#"{"queue":"ghost"}"#), "rid")
-                .await
-                .is_err()
-        );
+        assert!(admit_replay_dest(
+            &tight,
+            &one,
+            &Bytes::from_static(br#"{"queue":"ghost"}"#),
+            "rid"
+        )
+        .await
+        .is_err());
         assert!(
             admit_replay_dest(
                 &tight,
@@ -3952,7 +4200,10 @@ mod tests {
             dest(br#"{"queue":"orders.retry"}"#),
             Ok((Some("orders.retry".to_string()), None))
         );
-        assert_eq!(dest(br#"{"partition":"eu-2"}"#), Ok((None, Some("eu-2".to_string()))));
+        assert_eq!(
+            dest(br#"{"partition":"eu-2"}"#),
+            Ok((None, Some("eu-2".to_string())))
+        );
         assert_eq!(
             dest(br#"{"queue":"orders.retry","partition":"eu-2"}"#),
             Ok((Some("orders.retry".to_string()), Some("eu-2".to_string())))
@@ -3971,7 +4222,10 @@ mod tests {
         // ...and a padded half is still a HALF: the trim must not turn
         // `{"queue":" orders "}` into a body that names both, nor into one that
         // names neither. `admit_replay_dest` still sees one name and refuses.
-        assert_eq!(dest(br#"{"queue":" orders "}"#), Ok((Some("orders".to_string()), None)));
+        assert_eq!(
+            dest(br#"{"queue":" orders "}"#),
+            Ok((Some("orders".to_string()), None))
+        );
         // Fields this proxy does not know are the broker's business.
         assert_eq!(
             dest(br#"{"queue":"orders","reason":"manual"}"#),
@@ -4225,8 +4479,16 @@ mod tests {
     fn pop_answers() -> Vec<(&'static str, &'static str, Vec<u8>)> {
         vec![
             ("", "application/json", json_pop_answer().into_bytes()),
-            ("?frames=true", "application/x-queen-pop", framed_pop_answer(false)),
-            ("?frames=true&stored=zstd", "application/x-queen-pop", framed_pop_answer(true)),
+            (
+                "?frames=true",
+                "application/x-queen-pop",
+                framed_pop_answer(false),
+            ),
+            (
+                "?frames=true&stored=zstd",
+                "application/x-queen-pop",
+                framed_pop_answer(true),
+            ),
         ]
     }
 
@@ -4240,12 +4502,20 @@ mod tests {
             let seen = seen.clone();
             async move {
                 let path = req.uri().path().to_string();
-                let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
-                let body = axum::body::to_bytes(req.into_body(), 64 * 1024).await.expect("body");
+                let query = req
+                    .uri()
+                    .query()
+                    .map(|q| format!("?{q}"))
+                    .unwrap_or_default();
+                let body = axum::body::to_bytes(req.into_body(), 64 * 1024)
+                    .await
+                    .expect("body");
                 seen.lock().unwrap().push((path.clone(), body.clone()));
                 let counts = body.starts_with(b"QPB1") && body.get(4).is_some_and(|f| f & 2 != 0);
                 let json = "application/json";
-                let (status, content_type, answer): (StatusCode, &str, Vec<u8>) = match path.as_str() {
+                let (status, content_type, answer): (StatusCode, &str, Vec<u8>) = match path
+                    .as_str()
+                {
                     "/api/v1/push" if counts => (StatusCode::CREATED, json, THREE_COUNTED.into()),
                     "/api/v1/push" => (StatusCode::CREATED, json, THREE_STATUSES.into()),
                     "/api/v1/transaction" => (StatusCode::OK, json, THREE_COMMITTED.into()),
@@ -4268,7 +4538,11 @@ mod tests {
 
     /// `replay_st_capped` relaying to `broker` in-process, the way the single
     /// binary reaches its own broker: `relay_st` with the plan narrowed.
-    async fn binary_st(spool_dir: &str, caps: Option<serde_json::Value>, broker: axum::Router) -> St {
+    async fn binary_st(
+        spool_dir: &str,
+        caps: Option<serde_json::Value>,
+        broker: axum::Router,
+    ) -> St {
         let st = replay_st_capped("inprocess://self", spool_dir, caps).await;
         let Ok(mut state) = std::sync::Arc::try_unwrap(st) else {
             panic!("a freshly built St has exactly one owner");
@@ -4298,8 +4572,11 @@ mod tests {
     /// was handed it once, on the same route, byte for byte.
     async fn produce(st: &St, seen: &Bodies, path: &str, body: Vec<u8>) -> Met {
         seen.lock().unwrap().clear();
-        let content_type =
-            if body.starts_with(b"Q") { "application/x-queen-push" } else { "application/json" };
+        let content_type = if body.starts_with(b"Q") {
+            "application/x-queen-push"
+        } else {
+            "application/json"
+        };
         let req = Request::builder()
             .method(Method::POST)
             .uri(path)
@@ -4311,10 +4588,17 @@ mod tests {
         let handed = seen.lock().unwrap().clone();
         if handed.is_empty() {
             let status = resp.status().as_u16();
-            let code = err_body(resp).await["code"].as_str().unwrap_or_default().to_string();
+            let code = err_body(resp).await["code"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             return Met::Refused(status, code);
         }
-        assert_eq!(handed, vec![(path.to_string(), Bytes::from(body))], "{path}");
+        assert_eq!(
+            handed,
+            vec![(path.to_string(), Bytes::from(body))],
+            "{path}"
+        );
         assert!(resp.status().is_success(), "{path}: {}", resp.status());
         Met::Forwarded
     }
@@ -4343,7 +4627,11 @@ mod tests {
             let seen = Bodies::default();
 
             let (st, dir) = st_with_bytes("bytes-short", weight - 1, &seen).await;
-            assert_eq!(produce(&st, &seen, path, body.clone()).await, over_the_rate(), "{name}");
+            assert_eq!(
+                produce(&st, &seen, path, body.clone()).await,
+                over_the_rate(),
+                "{name}"
+            );
             let _ = std::fs::remove_dir_all(&dir);
 
             let (st, dir) = st_with_bytes("bytes-exact", weight, &seen).await;
@@ -4356,8 +4644,10 @@ mod tests {
         }
         // (name, on the wire, weighed): the two compressed pushes and the
         // binary transaction weigh more than they measure.
-        let wire_and_weight: Vec<(&str, bool)> =
-            weighed.iter().map(|(name, wire, weight)| (*name, weight > wire)).collect();
+        let wire_and_weight: Vec<(&str, bool)> = weighed
+            .iter()
+            .map(|(name, wire, weight)| (*name, weight > wire))
+            .collect();
         assert_eq!(
             wire_and_weight,
             vec![
@@ -4386,7 +4676,11 @@ mod tests {
                 met.push(produce(&st, &seen, path, body.clone()).await);
             }
             let _ = std::fs::remove_dir_all(&dir);
-            assert_eq!(met, vec![Met::Forwarded, Met::Forwarded, over_the_rate()], "{name}");
+            assert_eq!(
+                met,
+                vec![Met::Forwarded, Met::Forwarded, over_the_rate()],
+                "{name}"
+            );
         }
     }
 
@@ -4440,7 +4734,10 @@ mod tests {
         let seen = Bodies::default();
         let st = binary_st(&dir, None, binary_broker(seen.clone())).await;
         assert!(!st.limits.enforcing(), "a cell that only logs its limits");
-        assert_eq!(produce(&st, &seen, "/api/v1/push", good).await, Met::Forwarded);
+        assert_eq!(
+            produce(&st, &seen, "/api/v1/push", good).await,
+            Met::Forwarded
+        );
         for (name, path, body, error) in bodies {
             seen.lock().unwrap().clear();
             let req = Request::builder()
@@ -4454,7 +4751,10 @@ mod tests {
             let answer = err_body(resp).await;
             assert_eq!(answer["code"], "invalid_request", "{name}");
             assert_eq!(answer["error"], error, "{name}");
-            assert!(seen.lock().unwrap().is_empty(), "{name}: the broker was handed it");
+            assert!(
+                seen.lock().unwrap().is_empty(),
+                "{name}: the broker was handed it"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4513,15 +4813,27 @@ mod tests {
 
         let mut booked = Vec::new();
         for (name, path, body) in produce_bodies() {
-            let op = if path == "/api/v1/push" { "push" } else { "txn" };
+            let op = if path == "/api/v1/push" {
+                "push"
+            } else {
+                "txn"
+            };
             let sent = body.len() as u64;
             // The spool only grows: what this request booked is what one more
             // drain added to it.
             let before = totals(op);
-            assert_eq!(produce(&st, &seen, path, body).await, Met::Forwarded, "{name}");
+            assert_eq!(
+                produce(&st, &seen, path, body).await,
+                Met::Forwarded,
+                "{name}"
+            );
             st.meter.drain().await;
             let after = totals(op);
-            assert_eq!(after.2 - before.2, sent, "{name}: the bytes of the request, as sent");
+            assert_eq!(
+                after.2 - before.2,
+                sent,
+                "{name}: the bytes of the request, as sent"
+            );
             booked.push((name, op, after.0 - before.0, after.1 - before.1));
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -4556,7 +4868,10 @@ mod tests {
         for (query, content_type, answer) in pop_answers() {
             let weight = crate::wire::pop_answer_bytes(&answer);
             seen_weights.push((query, answer.len() as u64, weight));
-            let rooms = [(weight + p, Met::Forwarded), (weight + p - 1, over_the_rate())];
+            let rooms = [
+                (weight + p, Met::Forwarded),
+                (weight + p - 1, over_the_rate()),
+            ];
             for (room, push_after) in rooms {
                 let seen = Bodies::default();
                 let (st, dir) = st_with_bytes("bytes-pop", room, &seen).await;
@@ -4572,22 +4887,35 @@ mod tests {
                 let resp = handle(State(st.clone()), req).await;
                 assert_eq!(resp.status(), StatusCode::OK, "pop{query}");
                 assert_eq!(
-                    resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+                    resp.headers()
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok()),
                     Some(content_type),
                     "pop{query}"
                 );
-                let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.expect("body");
-                assert_eq!(&bytes[..], &answer[..], "pop{query}: the answer as the broker wrote it");
+                let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                    .await
+                    .expect("body");
+                assert_eq!(
+                    &bytes[..],
+                    &answer[..],
+                    "pop{query}: the answer as the broker wrote it"
+                );
 
                 let pushed = produce(&st, &seen, "/api/v1/push", push.clone()).await;
-                assert_eq!(pushed, push_after, "a push of {p} bytes after pop{query}, from {room}");
+                assert_eq!(
+                    pushed, push_after,
+                    "a push of {p} bytes after pop{query}, from {room}"
+                );
 
                 st.meter.drain().await;
                 let rows = spooled_rows(&dir);
                 let _ = std::fs::remove_dir_all(&dir);
                 let booked = rows.iter().filter(|r| r.op == "delivery").fold(
                     (0, 0, 0),
-                    |(reqs, msgs, bytes_out), r| (reqs + r.reqs, msgs + r.msgs, bytes_out + r.bytes_out),
+                    |(reqs, msgs, bytes_out), r| {
+                        (reqs + r.reqs, msgs + r.msgs, bytes_out + r.bytes_out)
+                    },
                 );
                 let messages = if query.is_empty() { 4 } else { 0 };
                 assert_eq!(booked, (1, messages, answer.len() as u64), "pop{query}");

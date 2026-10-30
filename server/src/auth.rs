@@ -1270,12 +1270,9 @@ mod tests {
             )
             .expect("sign")
         };
-        let router = axum::Router::new()
-            .fallback(|| async { "reached" })
-            .layer(axum::middleware::from_fn_with_state(
-                auth.clone(),
-                auth_middleware,
-            ));
+        let router = axum::Router::new().fallback(|| async { "reached" }).layer(
+            axum::middleware::from_fn_with_state(auth.clone(), auth_middleware),
+        );
         let status = |method: Method, uri: &'static str, bearer: Option<String>| {
             let router = router.clone();
             async move {
