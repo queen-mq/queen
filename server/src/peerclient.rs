@@ -225,14 +225,30 @@ impl PeerClient {
             .map_err(|e| e.to_string())?;
         let status = resp.status();
         let retry_after = resp.headers().get(axum::http::header::RETRY_AFTER).cloned();
-        let collected = tokio::time::timeout(deadline, resp.into_body().collect())
-            .await
-            .map_err(|_| "peer response body stalled".to_string())?
-            .map_err(|e| e.to_string())?;
-        let bytes = collected.to_bytes();
-        if bytes.len() > MAX_RESPONSE_BYTES {
+        // The cap is enforced WHILE reading, not after collecting: checked
+        // after, a peer answering more than the cap had already put all of it
+        // in this process's RAM. A declared length over the cap is refused
+        // before a byte is read.
+        let declared = resp
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        if declared.is_some_and(|n| n > MAX_RESPONSE_BYTES as u64) {
             return Err("peer response exceeds the relay cap".to_string());
         }
+        let limited = http_body_util::Limited::new(resp.into_body(), MAX_RESPONSE_BYTES);
+        let collected = tokio::time::timeout(deadline, limited.collect())
+            .await
+            .map_err(|_| "peer response body stalled".to_string())?
+            .map_err(|e| {
+                if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() {
+                    "peer response exceeds the relay cap".to_string()
+                } else {
+                    e.to_string()
+                }
+            })?;
+        let bytes = collected.to_bytes();
         Ok(PeerResponse {
             status,
             body: bytes,
