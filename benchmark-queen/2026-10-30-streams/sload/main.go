@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -238,7 +239,7 @@ func run(c config) error {
 	}
 
 	// The producers: open loop, one request = -batch events of one partition.
-	var pushed, pushErr int64
+	var pushed, pushErr, lost int64
 	var lastErr atomic.Value
 	client := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{MaxIdleConnsPerHost: 512}}
 	reqPerSec := float64(c.rate) / float64(c.batch)
@@ -265,6 +266,10 @@ func run(c config) error {
 					sec := int(time.Since(start).Seconds())
 					part = (sec*c.active + int(n%int64(c.active))) % c.partitions
 				}
+				// Every event has a transactionId of its own, so a push retried
+				// after an answer that never came is deduplicated by the broker:
+				// "pushed" counts each event once, and the windows must count
+				// exactly that many.
 				var b bytes.Buffer
 				b.WriteString(`{"items":[`)
 				now := time.Now().UnixMilli()
@@ -272,20 +277,31 @@ func run(c config) error {
 					if i > 0 {
 						b.WriteByte(',')
 					}
-					fmt.Fprintf(&b, `{"queue":%q,"partition":"p%d","payload":{"amount":1,"ts":%d}}`, src, part, now)
+					fmt.Fprintf(&b, `{"queue":%q,"partition":"p%d","transactionId":"%s-%d-%d","payload":{"amount":1,"ts":%d}}`,
+						src, part, c.tag, n, i, now)
 				}
 				b.WriteString(`]}`)
-				resp, err := client.Post(c.url+"/api/v1/push", "application/json", &b)
-				if err != nil {
+				body := b.Bytes()
+				for attempt := 0; ; attempt++ {
+					resp, err := client.Post(c.url+"/api/v1/push", "application/json", bytes.NewReader(body))
+					if err == nil {
+						// Read to the end: only a drained body returns its
+						// connection to the pool (else one TCP connection per push).
+						_, _ = io.Copy(io.Discard, resp.Body)
+						_ = resp.Body.Close()
+						if resp.StatusCode/100 == 2 {
+							break
+						}
+						err = fmt.Errorf("%s", resp.Status)
+					}
 					atomic.AddInt64(&pushErr, int64(c.batch))
 					lastErr.Store(err.Error())
-					continue
-				}
-				_ = resp.Body.Close()
-				if resp.StatusCode/100 != 2 {
-					atomic.AddInt64(&pushErr, int64(c.batch))
-					lastErr.Store(resp.Status)
-					continue
+					if attempt >= 20 {
+						// Given up: these events may or may not be stored.
+						atomic.AddInt64(&lost, int64(c.batch))
+						break
+					}
+					time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
 				}
 				atomic.AddInt64(&pushed, int64(c.batch))
 			}
@@ -323,8 +339,8 @@ func run(c config) error {
 				verdict = fmt.Sprintf("MISSING (%d not counted)", p-k)
 			}
 			elapsed := time.Since(start).Seconds()
-			fmt.Printf("[final] window=%s rate=%d partitions=%d active=%d runners=%d | pushed=%d (%.0f/s) pushErr=%d | windows=%d counted=%d -> %s | emit delay p50=%.0f p90=%.0f p99=%.0f max=%.0f ms | runner errors=%d\n",
-				c.window, c.rate, c.partitions, c.active, c.runners, p, float64(p)/c.duration.Seconds(), atomic.LoadInt64(&pushErr),
+			fmt.Printf("[final] window=%s rate=%d partitions=%d active=%d runners=%d | pushed=%d (%.0f/s) push retries=%d given-up=%d | windows=%d counted=%d -> %s | emit delay p50=%.0f p90=%.0f p99=%.0f max=%.0f ms | runner errors=%d\n",
+				c.window, c.rate, c.partitions, c.active, c.runners, p, float64(p)/c.duration.Seconds(), atomic.LoadInt64(&pushErr), atomic.LoadInt64(&lost),
 				atomic.LoadInt64(&windows), k, verdict, pct(all, 50), pct(all, 90), pct(all, 99), pct(all, 100), errs)
 			_ = elapsed
 		}
@@ -366,5 +382,8 @@ drainLoop:
 	verStop()
 	verWG.Wait()
 	report(true)
+	// Exit here: a runner's Stop can wait on a close in flight for as long as
+	// the broker takes, and the run's numbers are already printed.
+	os.Exit(0)
 	return nil
 }
