@@ -131,6 +131,75 @@ fn collapses_to(list: &[Header], record: &Record) -> bool {
         )
 }
 
+/// The least one record takes on the wire: its length, attributes, timestamp
+/// delta, offset delta, key length, value length and header count, a byte
+/// each.
+pub const MIN_RECORD_BYTES: usize = 7;
+
+/// The least one header takes: its name length and its value length.
+const MIN_HEADER_BYTES: usize = 2;
+
+/// Where a RecordBatch v2 header keeps its record count: after the base
+/// offset (8), the length (4), the leader epoch (4), the magic (1), the CRC
+/// (4), the attributes (2), the last offset delta (4), two timestamps (16),
+/// the producer id (8) and epoch (2) and the base sequence (4).
+const RECORD_COUNT_AT: usize = 57;
+
+/// The record count the batch at the start of `raw` declares, read from its
+/// header without decoding anything; `None` when the header is cut short (the
+/// decoder then refuses the batch by itself).
+pub fn declared_records(raw: &[u8]) -> Option<i32> {
+    let b = raw.get(RECORD_COUNT_AT..RECORD_COUNT_AT + 4)?;
+    Some(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Check the counts a batch DECLARES against the bytes it has, before
+/// `kafka-protocol` decodes it: its decoder reserves memory from them before
+/// it reads a record (`records.reserve(record_count)`, and
+/// `IndexMap::with_capacity(header_count)` per record), so a batch of a few
+/// bytes declaring two billion records asks for hundreds of gigabytes, and a
+/// failed allocation aborts the broker. `section` is the decompressed records
+/// section; `declared` is the record count of its batch header.
+///
+/// Every record must fit in what is left of the section, and every record's
+/// header count in what is left of the record. Answers the headers the
+/// records declare in all, which the caller charges to its budget.
+pub fn prescan(section: &[u8], declared: i32) -> Result<usize, String> {
+    let Ok(count) = usize::try_from(declared) else {
+        return Err(format!("the batch declares {declared} records"));
+    };
+    if count > section.len() / MIN_RECORD_BYTES {
+        return Err(format!(
+            "the batch declares {count} records in {} bytes of records",
+            section.len()
+        ));
+    }
+    let mut cursor = Cursor::new(section);
+    let mut headers = 0usize;
+    for i in 0..count {
+        let cut = || format!("record {i} of {count} is cut short");
+        let size = cursor.varint().ok_or_else(cut)?;
+        let size = usize::try_from(size).map_err(|_| format!("record {i} has length {size}"))?;
+        let mut body = Cursor::new(cursor.take(size).ok_or_else(cut)?);
+        body.u8().ok_or_else(cut)?;
+        body.varlong().ok_or_else(cut)?;
+        body.varint().ok_or_else(cut)?;
+        body.nullable_bytes().ok_or_else(cut)?;
+        body.nullable_bytes().ok_or_else(cut)?;
+        let n = body.varint().ok_or_else(cut)?;
+        match usize::try_from(n) {
+            Ok(n) if n <= body.remaining() / MIN_HEADER_BYTES => headers += n,
+            _ => {
+                return Err(format!(
+                    "record {i} declares {n} headers in {} bytes",
+                    body.remaining()
+                ))
+            }
+        }
+    }
+    Ok(headers)
+}
+
 /// A byte-by-byte reader over one records section. Every method answers `None`
 /// rather than panicking: the bytes came off a client's connection.
 struct Cursor<'a> {
@@ -141,6 +210,10 @@ struct Cursor<'a> {
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Cursor<'a> {
         Cursor { bytes, at: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.at)
     }
 
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {

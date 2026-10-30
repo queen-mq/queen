@@ -27,7 +27,7 @@ use crate::wire;
 
 /// What one request may decompress to, and how many records it may carry.
 const MAX_DECOMPRESSED_BYTES: usize = 256 << 20;
-const MAX_RECORDS: usize = 2_000_000;
+const MAX_RECORDS: usize = 500_000;
 
 struct Slot {
     index: i32,
@@ -42,10 +42,31 @@ pub async fn produce(
     req: ProduceRequest,
     version: i16,
     correlation: i32,
+    frame_len: usize,
 ) -> Step {
+    // Admission before a single record is decoded, sized by the frame, as the
+    // HTTP edge sizes a push by its Content-Length before reading the body:
+    // a producer that must wait holds its compressed frame, never what it
+    // decodes to. Held until the push answers. Only the leader decodes.
+    let admitted = if ctx.broker.cluster().leads() {
+        match ctx.broker.admit(frame_len).await {
+            Ok(permit) => permit,
+            Err(retry_after_s) => {
+                tracing::debug!(target: "kafka", frame_len, retry_after_s, "produce refused: the broker is saturated");
+                if req.acks == 0 {
+                    return Step::Close;
+                }
+                let out = refuse_all(&req, REQUEST_TIMED_OUT, retry_after_s);
+                return crate::conn::ready(encode(ApiKey::Produce, version, correlation, &out));
+            }
+        }
+    } else {
+        None
+    };
     if let Some(tid) = req.transactional_id.as_ref().filter(|t| !t.0.is_empty()) {
         let tid = tid.0.to_string();
         let out = produce_txn(ctx, conn, &tid, req).await;
+        drop(admitted);
         return crate::conn::ready(encode(ApiKey::Produce, version, correlation, &out));
     }
     let acks = req.acks;
@@ -169,7 +190,7 @@ pub async fn produce(
         ));
     }
 
-    let ordered = ctx.broker.push(bearer, items);
+    let ordered = ctx.broker.push(bearer, items, admitted);
     let in_log = ordered.in_log.await;
     let done = ordered.done;
     let finish = async move {
@@ -206,6 +227,35 @@ pub async fn produce(
         // Not in the log: the next request waits for this one's outcome.
         crate::conn::ready(finish.await)
     }
+}
+
+/// Every partition of the request answered `code`, with the client told to
+/// wait `retry_after_s` before it sends again (`throttle_time_ms`).
+fn refuse_all(req: &ProduceRequest, code: i16, retry_after_s: u64) -> ProduceResponse {
+    let responses = req
+        .topic_data
+        .iter()
+        .map(|t| {
+            TopicProduceResponse::default()
+                .with_name(t.name.clone())
+                .with_partition_responses(
+                    t.partition_data
+                        .iter()
+                        .map(|p| {
+                            PartitionProduceResponse::default()
+                                .with_index(p.index)
+                                .with_error_code(code)
+                                .with_base_offset(-1)
+                                .with_log_append_time_ms(-1)
+                                .with_log_start_offset(-1)
+                        })
+                        .collect(),
+                )
+        })
+        .collect();
+    ProduceResponse::default()
+        .with_responses(responses)
+        .with_throttle_time_ms(retry_after_s.saturating_mul(1000).min(i32::MAX as u64) as i32)
 }
 
 /// One partition's record set as Queen pushes, and the producer id and epoch

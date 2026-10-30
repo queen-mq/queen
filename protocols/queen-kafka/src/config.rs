@@ -107,6 +107,100 @@ impl Config {
     }
 }
 
+// ------------------------------------------------------------------ limits
+//
+// The ceilings that keep one client from spending the broker's memory. Read
+// once from the environment, on first use: the facade runs inside the broker,
+// so an allocation it cannot make aborts the whole process, and Produce,
+// Fetch and the coordinators run on the raft leader only, so a request that
+// kills one leader kills each new leader in turn.
+
+use std::sync::OnceLock;
+
+/// `name` from the environment, or `default` when it is unset or not an
+/// integer in `min..=max` (said once in the log: a limit must not stop a boot).
+fn limit(cell: &'static OnceLock<i64>, name: &str, default: i64, min: i64, max: i64) -> i64 {
+    *cell.get_or_init(|| {
+        match std::env::var(name).ok().filter(|v| !v.trim().is_empty()) {
+            None => default,
+            Some(v) => match v.trim().parse::<i64>() {
+                Ok(n) if (min..=max).contains(&n) => n,
+                _ => {
+                    tracing::warn!(target: "kafka", %name, value = %v, default, "not an integer in {min}..={max}; the default applies");
+                    default
+                }
+            },
+        }
+    })
+}
+
+/// The largest frame a connection may send before SASL completes: Kafka's
+/// `sasl.server.max.receive.size`. A login is a few hundred bytes, and a
+/// client nobody knows yet must not make the broker allocate 100 MiB.
+pub const PRE_AUTH_MAX_FRAME_BYTES: usize = 512 << 10;
+
+/// `QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS`, default 30000: how long the rest of a
+/// frame may take once its first byte arrived.
+pub fn frame_read_timeout() -> Duration {
+    static V: OnceLock<i64> = OnceLock::new();
+    Duration::from_millis(limit(
+        &V,
+        "QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS",
+        30_000,
+        100,
+        3_600_000,
+    ) as u64)
+}
+
+/// `QUEEN_KAFKA_IDLE_TIMEOUT_MS`, default 600000: a connection that sends no
+/// request for this long is closed (Kafka's `connections.max.idle.ms`).
+pub fn idle_timeout() -> Duration {
+    static V: OnceLock<i64> = OnceLock::new();
+    Duration::from_millis(limit(
+        &V,
+        "QUEEN_KAFKA_IDLE_TIMEOUT_MS",
+        600_000,
+        1_000,
+        86_400_000,
+    ) as u64)
+}
+
+/// `QUEEN_KAFKA_INFLIGHT_BYTES`, default 256 MiB: the request frames every
+/// connection together may hold at once. A frame waits for room before its
+/// buffer is allocated; its bytes stay in the socket meanwhile.
+pub fn inflight_bytes() -> usize {
+    static V: OnceLock<i64> = OnceLock::new();
+    limit(&V, "QUEEN_KAFKA_INFLIGHT_BYTES", 256 << 20, 1 << 20, 64 << 30) as usize
+}
+
+/// `QUEEN_KAFKA_FETCH_MAX_BYTES`, default 50 MiB (Kafka's `fetch.max.bytes`):
+/// the most one Fetch answer carries, whatever the request asks. A request
+/// asking for 0 or less gets this, not an unlimited answer.
+pub fn fetch_max_bytes() -> i64 {
+    static V: OnceLock<i64> = OnceLock::new();
+    limit(&V, "QUEEN_KAFKA_FETCH_MAX_BYTES", 50 << 20, 1 << 10, 1 << 30)
+}
+
+/// `QUEEN_KAFKA_METADATA_MAX_PARTITIONS`, default 100000: the partitions one
+/// Metadata answer lists; the topics past it are answered with an error.
+pub fn metadata_max_partitions() -> usize {
+    static V: OnceLock<i64> = OnceLock::new();
+    limit(
+        &V,
+        "QUEEN_KAFKA_METADATA_MAX_PARTITIONS",
+        100_000,
+        1,
+        10_000_000,
+    ) as usize
+}
+
+/// `QUEEN_KAFKA_GROUP_MAX_MEMBERS`, default 1000 (Kafka's
+/// `group.max.size`): members one consumer group may have.
+pub fn group_max_members() -> usize {
+    static V: OnceLock<i64> = OnceLock::new();
+    limit(&V, "QUEEN_KAFKA_GROUP_MAX_MEMBERS", 1000, 1, 1_000_000) as usize
+}
+
 /// `host:port`, `[v6]:port`. The host is kept as written.
 pub fn split_host_port(s: &str) -> Option<(String, i32)> {
     let (host, port) = s.rsplit_once(':')?;

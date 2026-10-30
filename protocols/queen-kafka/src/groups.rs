@@ -51,7 +51,12 @@ pub struct JoinArgs {
     pub session_timeout_ms: i32,
     pub rebalance_timeout_ms: i32,
     pub protocol_type: String,
+    /// Each protocol's metadata, copied out of the request frame: a slice of
+    /// it would keep the whole frame alive as long as the member.
     pub protocols: Vec<(String, Bytes)>,
+    /// JoinGroup v4+ (KIP-394): a member with no id is handed one with
+    /// MEMBER_ID_REQUIRED and joins with it, instead of joining at once.
+    pub require_known_member: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -151,6 +156,12 @@ struct Group {
     last_presence: Option<Instant>,
     /// Since when it has had no members ([`EMPTY_GROUP_TTL`]).
     empty_since: Option<Instant>,
+    /// Member ids handed out with MEMBER_ID_REQUIRED and not joined yet, with
+    /// the time they are forgotten.
+    pending: HashMap<String, Instant>,
+    /// No member's session ends before this (a lower bound: heartbeats only
+    /// move deadlines later), so the sweep skips the group until then.
+    next_expiry: Option<Instant>,
 }
 
 impl Group {
@@ -168,6 +179,8 @@ impl Group {
             dirty: true,
             last_presence: None,
             empty_since: None,
+            pending: HashMap::new(),
+            next_expiry: None,
         }
     }
 }
@@ -175,6 +188,9 @@ impl Group {
 pub struct Coordinator {
     inner: Mutex<Inner>,
     join_delay: Duration,
+    /// `QUEEN_KAFKA_GROUP_MAX_MEMBERS`: members (and ids handed out to join)
+    /// one group may have.
+    max_members: usize,
 }
 
 struct Inner {
@@ -231,6 +247,7 @@ impl Coordinator {
                 gone: HashMap::new(),
             }),
             join_delay,
+            max_members: crate::config::group_max_members(),
         }
     }
 
@@ -263,15 +280,32 @@ impl Coordinator {
                 return Joined::Now(JoinOut::error(INCONSISTENT_GROUP_PROTOCOL, &a.member_id));
             }
         }
+        let session = Duration::from_millis(a.session_timeout_ms as u64);
+        let full = g.members.len() + g.pending.len() >= self.max_members;
         let member_id = if a.member_id.is_empty() {
-            new_member_id(&a.client_id)
+            if full {
+                return Joined::Now(JoinOut::error(GROUP_MAX_SIZE_REACHED, &a.member_id));
+            }
+            let id = new_member_id(&a.client_id);
+            if a.require_known_member {
+                // KIP-394: the id first, the membership when the client comes
+                // back with it. A client that never does is forgotten after
+                // its session timeout.
+                g.pending.insert(id.clone(), now + session);
+                return Joined::Now(JoinOut::error(MEMBER_ID_REQUIRED, &id));
+            }
+            id
         } else if g.members.contains_key(&a.member_id) {
+            a.member_id.clone()
+        } else if g.pending.remove(&a.member_id).is_some() {
             a.member_id.clone()
         } else {
             return Joined::Now(JoinOut::error(UNKNOWN_MEMBER_ID, &a.member_id));
         };
+        if !g.members.contains_key(&member_id) && g.members.len() >= self.max_members {
+            return Joined::Now(JoinOut::error(GROUP_MAX_SIZE_REACHED, &member_id));
+        }
         let (tx, rx) = oneshot::channel();
-        let session = Duration::from_millis(a.session_timeout_ms as u64);
         let rebalance =
             Duration::from_millis(a.rebalance_timeout_ms.max(a.session_timeout_ms) as u64);
         let is_new = !g.members.contains_key(&member_id);
@@ -291,6 +325,7 @@ impl Coordinator {
                 sync: None,
             },
         );
+        g.next_expiry = Some(g.next_expiry.map_or(now + session, |e| e.min(now + session)));
         if let Some(mut p) = previous {
             // A repeat join of a member still waiting: the newer request wins.
             if let Some(old) = p.join.take() {
@@ -529,6 +564,22 @@ impl Coordinator {
     /// The groups whose console row is due: changed since the last one (at
     /// most once a second), or `every` old.
     pub fn presence_due(&self, now: Instant, every: Duration) -> Vec<PresenceRow> {
+        // The subscriptions are decoded after the lock is let go: under it,
+        // only the metadata handles are cloned (a reference count each).
+        let mut subscriptions: Vec<(usize, Vec<Bytes>)> = Vec::new();
+        let mut out = self.presence_rows(now, every, &mut subscriptions);
+        for (i, metadata) in subscriptions {
+            out[i].topics = subscribed_topics(metadata.into_iter());
+        }
+        out
+    }
+
+    fn presence_rows(
+        &self,
+        now: Instant,
+        every: Duration,
+        subscriptions: &mut Vec<(usize, Vec<Bytes>)>,
+    ) -> Vec<PresenceRow> {
         let mut inner = self.lock();
         let mut out = Vec::new();
         for (name, g) in inner.groups.iter_mut() {
@@ -543,16 +594,17 @@ impl Coordinator {
             g.dirty = false;
             g.last_presence = Some(now);
             let protocol = g.protocol.clone().unwrap_or_default();
-            let topics = if g.protocol_type.as_deref() == Some("consumer") {
-                subscribed_topics(g.members.values().map(|m| m.metadata_for(&protocol)))
-            } else {
-                None
-            };
+            if g.protocol_type.as_deref() == Some("consumer") {
+                subscriptions.push((
+                    out.len(),
+                    g.members.values().map(|m| m.metadata_for(&protocol)).collect(),
+                ));
+            }
             out.push(PresenceRow {
                 group: name.clone(),
                 bearer: g.bearer.clone(),
                 members: g.members.len() as u64,
-                topics,
+                topics: None,
                 committing: false,
                 state: g.state.name(),
                 generation: g.generation,
@@ -616,21 +668,29 @@ impl Coordinator {
     pub fn tick(&self, now: Instant) {
         let mut inner = self.lock();
         for g in inner.groups.values_mut() {
-            let expired: Vec<String> = g
-                .members
-                .iter()
-                .filter(|(_, m)| m.join.is_none() && m.sync.is_none() && now >= m.deadline)
-                .map(|(id, _)| id.clone())
-                .collect();
-            if !expired.is_empty() {
-                for id in &expired {
-                    g.members.remove(id);
+            // Every member's session, only once the earliest may have ended:
+            // this runs ten times a second under the coordinator's lock.
+            if g.next_expiry.is_some_and(|e| now >= e) {
+                let expired: Vec<String> = g
+                    .members
+                    .iter()
+                    .filter(|(_, m)| m.join.is_none() && m.sync.is_none() && now >= m.deadline)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                if !expired.is_empty() {
+                    for id in &expired {
+                        g.members.remove(id);
+                    }
+                    tracing::info!(target: "kafka", members = ?expired, "group members expired");
+                    members_changed(g, now, self.join_delay);
                 }
-                tracing::info!(target: "kafka", members = ?expired, "group members expired");
-                members_changed(g, now, self.join_delay);
+                g.next_expiry = g.members.values().map(|m| m.deadline).min();
+            }
+            if !g.pending.is_empty() {
+                g.pending.retain(|_, until| now < *until);
             }
             try_complete(g, now);
-            if g.state == State::Empty && g.members.is_empty() {
+            if g.state == State::Empty && g.members.is_empty() && g.pending.is_empty() {
                 g.empty_since.get_or_insert(now);
             } else {
                 g.empty_since = None;
@@ -861,6 +921,7 @@ mod tests {
             rebalance_timeout_ms: 30_000,
             protocol_type: "consumer".into(),
             protocols: vec![("range".into(), Bytes::from_static(b"md"))],
+            require_known_member: false,
         }
     }
 

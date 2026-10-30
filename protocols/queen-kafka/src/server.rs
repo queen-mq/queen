@@ -25,6 +25,11 @@ pub struct Ctx {
     pub txns: Txns,
     pub producer_ids: AtomicU64,
     pub indexed: crate::presence::Indexed,
+    /// Request frames in flight, in bytes (`QUEEN_KAFKA_INFLIGHT_BYTES`):
+    /// taken before a frame's buffer is allocated ([`crate::conn`]).
+    pub frame_bytes: Semaphore,
+    /// SASL logins checked recently ([`crate::handlers::sasl`]).
+    pub logins: crate::handlers::sasl::Logins,
 }
 
 /// Serve Kafka clients until `stop` resolves.
@@ -47,6 +52,8 @@ pub async fn serve(
         txns: Txns::new(queen.clone()),
         producer_ids: AtomicU64::new(0),
         indexed: crate::presence::Indexed::default(),
+        frame_bytes: Semaphore::new(crate::config::inflight_bytes()),
+        logins: crate::handlers::sasl::Logins::default(),
         queen,
         broker,
         cfg,

@@ -21,16 +21,22 @@ use kafka_protocol::messages::{
 
 use super::s;
 use crate::conn::Conn;
-use crate::core::PositionOp;
+use crate::core::{PositionOp, MAX_POSITION_READS, MAX_POSITION_WRITES};
 use crate::errors::*;
 use crate::server::Ctx;
 
 pub async fn commit(ctx: &Arc<Ctx>, conn: &Conn, req: OffsetCommitRequest) -> OffsetCommitResponse {
     let group = req.group_id.0.to_string();
+    // Counted before anything is built: one commit is one Queen transaction,
+    // and the broker takes MAX_POSITION_WRITES positions in one.
+    let count: usize = req.topics.iter().map(|t| t.partitions.len()).sum();
     let mut error = if !ctx.broker.cluster().leads() {
         NOT_COORDINATOR
     } else if !super::group::valid_group(&group) {
         INVALID_GROUP_ID
+    } else if count > MAX_POSITION_WRITES {
+        tracing::debug!(target: "kafka", %group, count, "offset commit over its ceiling");
+        INVALID_COMMIT_OFFSET_SIZE
     } else {
         ctx.groups.may_commit(
             &group,
@@ -106,10 +112,18 @@ pub async fn fetch(
             .map(|t| (t.name, t.partition_indexes))
             .collect()
     });
+    // Counted before anything is built: the broker reads MAX_POSITION_READS
+    // positions in one call.
+    let count: usize = asked
+        .as_ref()
+        .map_or(0, |ts| ts.iter().map(|(_, ps)| ps.len()).sum());
     let error = if !ctx.broker.cluster().leads() {
         NOT_COORDINATOR
     } else if !super::group::valid_group(&group) {
         INVALID_GROUP_ID
+    } else if count > MAX_POSITION_READS {
+        tracing::debug!(target: "kafka", %group, count, "offset fetch over its ceiling");
+        INVALID_REQUEST
     } else {
         NONE
     };
