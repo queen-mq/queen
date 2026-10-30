@@ -16,11 +16,13 @@
 //                        cursors cannot say whether it reads — Kafka clients
 //                        commit offsets and take no lease — so the broker's
 //                        Dead says nothing about it.
-//   a queue              the worst of its live groups; and warn when it holds
-//                        messages that nothing is set up to read: no live
-//                        group, no named group at all, not a topic the Kafka
-//                        facade created, and Settings does not say no reader
-//                        is expected there.
+//   a queue              the worst of its live groups and of its acks over the
+//                        last hour (ackFailureSeverity with the queue's lines:
+//                        a share of the acks failing, past a floor of failures);
+//                        and warn when it holds messages that nothing is set up
+//                        to read: no live group, no named group at all, not a
+//                        topic the Kafka facade created, and Settings does not
+//                        say no reader is expected there.
 //
 // Why a named group, in any state, takes the "no reader" alarm away: it is a
 // subscription somebody made, and its own row tells its story — behind, never
@@ -37,12 +39,14 @@
 // for that queue (and its flags). Without one every queue is judged by the
 // tenant's lines.
 //
-// The Overview adds one rule of its own, ack failures across the tenant: that
-// one needs the hour's ack counts, which only the Overview fetches.
+// `ops` is queueOpsStore's Map, queue name → the hour's totals (composables/
+// queueOps). Without it (not read yet, or a broker without the route) a queue
+// is judged without its acks. The Overview keeps the tenant's ack failures as
+// an issue of their own only when no queue's own acks explain them.
 //
 // Pure: no Vue, no '@/' imports, so test/attention.test.js pins it directly.
 import { formatSpan } from './settingsDoc.js'
-import { consumerGroupSeverity, groupActivity } from './useSeverity.js'
+import { ackFailureSeverity, consumerGroupSeverity, groupActivity } from './useSeverity.js'
 
 const RANK = { bad: 2, warn: 1 }
 
@@ -100,12 +104,26 @@ export function groupPresence(g, linesFor) {
 }
 
 /**
- * The queues that need you, in the order they were given, each as
- *   { name, sev: 'bad'|'warn', reason: 'lag'|'noReader', lag, pending, deadOnly }
- * `lag` is the worst live group's age in seconds; `deadOnly` says the queue has
- * a queue-mode cursor, but it has never consumed.
+ * A queue's acks over the last hour: `{ sev: ''|'warn'|'bad', hour }`, `hour`
+ * being its totals in `ops` (queueOpsStore's Map), or null when `ops` has none.
  */
-export function queueAttention(queues = [], groups = [], linesFor) {
+export function ackAttention(name, linesFor, ops = null) {
+  const hour = typeof ops?.get === 'function' ? ops.get(name) || null : null
+  const sev = hour
+    ? ackFailureSeverity({ failed: hour.ackFailed, succeeded: hour.ackSuccess }, linesOf(linesFor, name))
+    : ''
+  return { sev, hour }
+}
+
+/**
+ * The queues that need you, in the order they were given, each as
+ *   { name, sev: 'bad'|'warn', reason: 'lag'|'acks'|'noReader', lag, pending, deadOnly, ops }
+ * `lag` is the worst live group's age in seconds; `deadOnly` says the queue has
+ * a queue-mode cursor, but it has never consumed; `ops` is the queue's hour
+ * (queueOps) when `ops` has it. A queue behind AND failing acks takes the
+ * worse of the two, and 'lag' on a tie.
+ */
+export function queueAttention(queues = [], groups = [], linesFor, ops = null) {
   const byQueue = new Map()
   for (const g of groups || []) {
     const q = g?.queueName
@@ -127,11 +145,14 @@ export function queueAttention(queues = [], groups = [], linesFor) {
       if ((RANK[s] || 0) > (RANK[sev] || 0)) sev = s
     }
     const named = all.some((g) => g.name !== QUEUE_MODE)
-    if (sev === 'bad' || sev === 'warn') {
-      out.push({ name: q.name, sev, reason: 'lag', lag, pending, deadOnly: false })
+    const { sev: ackSev, hour } = ackAttention(q.name, linesFor, ops)
+    let reason = sev === 'bad' || sev === 'warn' ? 'lag' : null
+    if ((RANK[ackSev] || 0) > (RANK[sev] || 0)) { sev = ackSev; reason = 'acks' }
+    if (reason) {
+      out.push({ name: q.name, sev, reason, lag, pending, deadOnly: false, ops: hour })
     } else if (pending > 0 && live.length === 0 && !named && q.kafkaTopic !== true
       && !linesOf(linesFor, q.name)?.noReaderOk) {
-      out.push({ name: q.name, sev: 'warn', reason: 'noReader', lag, pending, deadOnly: all.length > 0 })
+      out.push({ name: q.name, sev: 'warn', reason: 'noReader', lag, pending, deadOnly: all.length > 0, ops: hour })
     }
   }
   return out

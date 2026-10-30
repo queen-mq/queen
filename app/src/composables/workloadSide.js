@@ -45,13 +45,13 @@ export const GROUP_BY = [
  * queues); `groups` and `queues` count them all, whatever the search.
  */
 export function workloadList({
-  queues = [], groups = null, groupBy = 'namespace', focus = null, keys = [], search = '', linesFor,
+  queues = [], groups = null, groupBy = 'namespace', focus = null, keys = [], search = '', linesFor, ops = null,
 } = {}) {
   const term = String(search || '').trim().toLowerCase()
   const byTask = groupBy === 'task'
   const keyOf = (q) => (byTask ? q.task : q.namespace) ?? ''
   const attention = groups
-    ? new Map(queueAttention(queues, groups, linesFor).map((a) => [a.name, a]))
+    ? new Map(queueAttention(queues, groups, linesFor, ops).map((a) => [a.name, a]))
     : new Map()
 
   const nodes = new Map()

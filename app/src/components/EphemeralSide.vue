@@ -33,7 +33,7 @@
     >
       <span class="ss-mark" aria-hidden="true" />
       <span class="ss-text"><span class="ss-name">{{ q.name }}</span></span>
-      <span class="ss-num">{{ q.depth === null ? '—' : formatNumber(q.depth) }}</span>
+      <span class="ss-num">{{ q.depth === null ? '—' : q.depth ? formatNumber(q.depth) : '' }}</span>
     </router-link>
     <div v-if="rows.length > LIMIT" class="ss-empty">{{ formatNumber(rows.length - LIMIT) }} more · search to narrow</div>
   </nav>

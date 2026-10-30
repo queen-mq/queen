@@ -9,6 +9,10 @@ test('the view: the Overview by default, every view by its key, the old Resource
   for (const v of SYSTEM_VIEWS) assert.equal(systemView(v.key), v.key)
   assert.equal(systemView('resources'), 'compute')
   assert.equal(systemViewAlias('resources'), 'compute')
+  assert.equal(systemView('nodes'), 'overview', 'the Nodes view is the Overview\'s table now')
+  assert.equal(systemViewAlias('nodes'), 'overview')
+  assert.equal(systemViewOf('overview').charts, true, 'the Overview draws charts, so it reads the metrics')
+  assert.equal(systemViewOf('storage').charts, true)
   assert.equal(systemViewAlias('raft'), null)
   assert.equal(systemViewQuery('overview'), undefined)
   assert.equal(systemViewQuery('disk'), 'disk')
@@ -17,11 +21,12 @@ test('the view: the Overview by default, every view by its key, the old Resource
 })
 
 test('the list: three groups in a fixed order, the number coloured only on trouble', () => {
-  const groups = systemSideGroups({ disk: { num: '85%', tone: 'warn' }, nodes: { num: '3/3', tone: 'ok' } })
+  const groups = systemSideGroups({ disk: { num: '85%', tone: 'warn' }, overview: { num: 'Healthy', tone: 'ok' } })
   assert.deepEqual(groups.map((g) => g.label), ['', 'Replication', 'Resources'])
   const rows = Object.fromEntries(groups.flatMap((g) => g.rows).map((r) => [r.key, r]))
   assert.equal(rows.disk.tone, 'warn')
-  assert.equal(rows.nodes.tone, '')
+  assert.equal(rows.overview.tone, '', 'ok is not a tone')
+  assert.equal(rows.nodes, undefined, 'no Nodes row')
   assert.equal(rows.raft.num, '—')
 })
 

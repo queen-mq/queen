@@ -488,7 +488,9 @@ test('rollupFromQueueOps: groupBy=queue carries namespace/task, filters narrow t
 })
 
 import { comparisonRange, totalSeries, windowDeltas } from '../src/composables/useWorkload.js'
-import { CATEGORY_SLOTS, categorySlot, resetCategorySlots } from '../src/composables/useCategoryColors.js'
+import {
+  CATEGORY_SLOTS, categorySlot, entitySlots, heldSlot, resetCategorySlots, splitBySlot,
+} from '../src/composables/useCategoryColors.js'
 
 test('comparisonRange: previous = same length before; yesterday / lastWeek = same clock window', () => {
   const from = new Date('2026-09-09T09:00:00Z')
@@ -535,6 +537,45 @@ test('categorySlot: first sight assigns in order, per kind, grey past the palett
   assert.equal(categorySlot('u', 'sixth'), 0, 'another kind starts over')
   resetCategorySlots('t')
   assert.equal(categorySlot('t', 'channel'), 0)
+})
+
+test('entitySlots: the busy ones take the hues in rank order, an idle one takes none, a filter repaints nobody', () => {
+  resetCategorySlots('ns')
+  const ranked = (keys, idle = []) => keys.map((key) => ({ key, active: !idle.includes(key) }))
+  // First sight: busiest first; the idle one is grey and holds no slot.
+  const first = entitySlots('ns', ranked(['traceflow', 'channel', 'smartchat', 'quiet'], ['quiet']))
+  assert.deepEqual([...first.values()], [0, 1, 2, null])
+  assert.equal(heldSlot('ns', 'quiet'), null, 'an idle entity does not burn a slot')
+  // Another window drops two and reorders: the survivors keep their hues.
+  const narrow = entitySlots('ns', ranked(['smartchat', 'traceflow']))
+  assert.equal(narrow.get('smartchat'), 2)
+  assert.equal(narrow.get('traceflow'), 0)
+  // Idle now, still its hue: a held slot is read, never given away.
+  assert.equal(entitySlots('ns', ranked(['channel'], ['channel'])).get('channel'), 1)
+  // The quiet one wakes up and takes the next free hue; past five, grey.
+  const wide = entitySlots('ns', ranked(['quiet', 'a', 'b', 'c', 'traceflow']))
+  assert.equal(wide.get('quiet'), 3)
+  assert.equal(wide.get('a'), 4)
+  assert.equal(wide.get('b'), null)
+  assert.equal(wide.get('traceflow'), 0)
+  resetCategorySlots('ns')
+})
+
+test('splitBySlot: hued in slot order whatever the row order, the rest apart', () => {
+  const slot = new Map([['c', 2], ['a', 0], ['x', null], ['b', 1]])
+  const { hued, rest } = splitBySlot(['x', 'c', 'y', 'b', 'a'], (k) => slot.get(k))
+  assert.deepEqual(hued, ['a', 'b', 'c'])
+  assert.deepEqual(rest, ['x', 'y'], 'null and unknown both fold into Other, in their order')
+})
+
+test('resetCategorySlots without a kind forgets every kind (another cluster)', () => {
+  categorySlot('k1', 'a')
+  categorySlot('k2', 'b')
+  resetCategorySlots()
+  assert.equal(heldSlot('k1', 'a'), null)
+  assert.equal(heldSlot('k2', 'b'), null)
+  assert.equal(categorySlot('k2', 'c'), 0)
+  resetCategorySlots()
 })
 
 import { trimOpenBucket } from '../src/composables/useWorkload.js'

@@ -21,7 +21,7 @@
           <router-link
             v-for="r in g.rows"
             :key="r.key"
-            :to="r.href || viewTo(r.key)"
+            :to="viewTo(r.key)"
             class="ss-row"
             :class="{ on: view === r.key }"
             :aria-current="view === r.key ? 'page' : undefined"
@@ -69,148 +69,59 @@
       </header>
 
       <!-- =====================================================================
-           SUMMARY — the answer: the sentence behind the verdict, the first
-           issues (Issues holds them all), the partitions, the counts, and four
-           trend tiles that open their view.
+           SUMMARY — the answer, said once: the verdict, the five numbers it
+           stands on and, in the same card, what needs you, each row naming
+           its queue. Under it the hour in four charts, each opening its view.
+           No number here is repeated in another block.
            ===================================================================== -->
       <template v-if="view === 'summary'">
-        <!-- The answer: the verdict, and the five numbers it stands on. -->
-        <section class="card ov-status" aria-label="Status">
-          <div class="ov-verdict">
-            <span class="ov-verdict-word" :class="verdictTone"><span class="g" :class="verdictGlyph" aria-hidden="true" />{{ verdict.word }}</span>
-            <h2 class="ov-verdict-title" :title="verdict.headline">{{ verdict.headline }}</h2>
-            <p v-if="verdictLine" class="ov-verdict-line">{{ verdictLine }}</p>
-          </div>
-          <div v-for="c in statusCells" :key="c.k" class="ov-kpi" :title="c.title">
-            <span class="ov-kpi-k">{{ c.k }}</span>
-            <span class="ov-kpi-v" :class="c.tone">{{ c.v }}</span>
-          </div>
-        </section>
-
-        <section class="hero" aria-label="What needs you">
-          <div class="hero-left">
-            <QueueTriage
-              :key="epoch" :queues="queues" :groups="consumers"
-              :sample-at="queuesQ.lastUpdated.value" :groups-at="consumersQ.lastUpdated.value"
-              :queues-error="queuesFailed ? queuesErrorText : ''"
-              :groups-error="consumersFailed ? consumersErrorText : ''"
-              :tenant-issues="issues.filter(i => i.tenant)"
-              :cell-issues="cellIssueList"
-              :tenant-error="opsError ? describeApiError(opsError) : ''"
-              :limit="5"
-              :more-to="viewTo('issues')"
-            />
-          </div>
-
-          <section class="card flower-card" aria-labelledby="ov-flower-title">
-            <div class="card-header">
-              <h3 id="ov-flower-title">Partitions</h3>
-              <span class="card-sub">{{ queuesFailed || !queuesRead ? '—' : `${formatNumber(totalPartitions)} across ${formatNumber(queues.length)} ${queues.length === 1 ? 'queue' : 'queues'}` }}</span>
+        <section class="card ov-summary" aria-label="Status">
+          <div class="ov-status">
+            <div class="ov-verdict">
+              <span class="ov-verdict-word" :class="verdictTone"><span class="g" :class="verdictGlyph" aria-hidden="true" />{{ verdict.word }}</span>
+              <h2 class="ov-verdict-title" :title="verdict.headline">{{ verdict.headline }}</h2>
             </div>
-            <PartitionSunflower :queues="sunflowerQueues" :partitions="sunflowerPartitions" :loading="loadingQueues" :error="queuesQ.error.value" />
-          </section>
+            <div v-for="c in statusCells" :key="c.k" class="ov-kpi" :title="c.title">
+              <span class="ov-kpi-k">{{ c.k }}</span>
+              <span class="ov-kpi-v" :class="c.tone">{{ c.v }}</span>
+            </div>
+          </div>
+          <QueueTriage
+            bare
+            :key="epoch" :queues="queues" :groups="consumers" :ops="queueOps"
+            :sample-at="queuesQ.lastUpdated.value" :groups-at="consumersQ.lastUpdated.value"
+            :queues-error="queuesFailed ? queuesErrorText : ''"
+            :groups-error="consumersFailed ? consumersErrorText : ''"
+            :tenant-issues="issues.filter(i => i.tenant)"
+            :cell-issues="cellIssueList"
+            :tenant-error="opsError ? describeApiError(opsError) : ''"
+            :limit="5"
+            :more-to="viewTo('issues')"
+          />
         </section>
 
-        <div class="counts-tiles" role="group" aria-label="Right now">
-          <div class="count-tile" title="Messages stored for this tenant now; retention has swept the rest">
-            <span class="k">Stored</span>
-            <span class="v">{{ overviewFailed || !overview ? '—' : formatNumber(overview.messages?.total ?? 0) }}</span>
-          </div>
-          <router-link class="count-tile" :to="queueTabLocation('overview', null, route)" title="Open the queues">
-            <span class="k">Queues</span>
-            <span class="v">{{ overviewFailed || !overview ? '—' : formatNumber(overview.queues ?? 0) }}</span>
+        <nav class="ov-inventory" aria-label="What this tenant holds">
+          <router-link v-for="t in inventory" :key="t.k" class="ov-inv" :to="t.to" :title="t.title">
+            <span class="ov-inv-k">{{ t.k }}</span>
+            <span class="ov-inv-v">{{ t.v }}</span>
+            <span v-if="t.sub" class="ov-inv-sub" :class="t.tone">{{ t.sub }}</span>
           </router-link>
-          <div class="count-tile">
-            <span class="k">Partitions</span>
-            <span class="v">{{ queuesFailed || !queuesRead ? '—' : formatNumber(totalPartitions) }}</span>
-          </div>
-          <router-link class="count-tile" :to="queueTabLocation('consumers', null, route)" title="Open the consumer groups">
-            <span class="k">Consumer groups</span>
-            <span class="v">{{ consumersFailed || !groupsRead ? '—' : formatNumber(consumers.length) }}</span>
-          </router-link>
-          <div class="count-tile" title="Waiting to be read now. The tone is how long the work takes at this window's ack rate">
-            <span class="k">Pending</span>
-            <span class="v num" :class="pendingNumClass(overview?.messages?.pending)">{{ overviewFailed || !overview ? '—' : formatNumber(overview.messages?.pending ?? 0) }}</span>
-          </div>
-          <div class="count-tile">
-            <span class="k">Completed</span>
-            <span class="v">{{ overviewFailed || !overview ? '—' : formatNumber(overview.messages?.completed ?? 0) }}</span>
-          </div>
-        </div>
+        </nav>
 
-        <!-- The trends; each opens its view. -->
-        <div class="tile-grid tile-grid-4">
-          <MetricTile
-            label="Throughput"
-            :value="throughput.current"
-            :unit="throughput.current === '—' ? '' : '/s push'"
-            :context="throughputContext"
-            :series="throughputSeries"
-            :labels="chartLabels"
-            :value-format="fmtRate"
-            :loading="loadingOps"
-            :error="opsError"
-            tooltip="Push, pop and ack per second for this tenant, summed across its queues (queue-ops). Kafka clients count as Queen consumers: a record they fetch is a pop, a commit that moves their group past N records is N acks. Fetch (Kafka) is their share of the pops; two groups reading one topic count its records twice, as two Queen groups do."
-            :selected="false"
-            @select="go('throughput')"
-          />
-          <MetricTile
-            label="Pending Δ · history"
-            :value="pendingDeltaDisplay"
-            :unit="pendingDeltaDisplay === '—' ? '' : 'msgs'"
-            :context="pendingDeltaContext"
-            :sparkline="pendingDeltaSeries"
-            :labels="backlogLabels"
-            :value-format="fmtCount"
-            :severity="pendingDeltaSeverity"
-            :loading="loadingOps"
-            :error="opsError"
-            tooltip="Change between the first and last backlog readings of the window. The latest reading can differ from the overview's count; its bucket time is shown below."
-            :selected="false"
-            @select="go('backlog')"
-          />
-          <MetricTile
-            label="Time lag"
-            :context="lagContext"
-            :series="lagSeriesData"
-            :labels="chartLabels"
-            :value-format="fmtLagMs"
-            :severity="lagSeverity"
-            :loading="loadingOverview"
-            :error="overviewError"
-            tooltip="The tenant's oldest-message age now, average / oldest. The chart is sampled at pop, so it has gaps where nothing was consumed: it cannot show the lag of a stalled queue."
-            :selected="false"
-            @select="go('backlog')"
-          >
-            <template #value>
-              <!-- `0` and "no sample" are different answers. -->
-              <template v-if="lagAvgSeconds === null && lagMaxSeconds === null">
-                <span class="num">—</span>
-              </template>
-              <template v-else>
-                <span class="num" :class="lagNumClass(lagAvgSeconds)">{{ lagText(lagAvgSeconds) }}</span>
-                <span class="mr-sep">/</span>
-                <span class="num" :class="lagNumClass(lagMaxSeconds)">{{ lagText(lagMaxSeconds) }}</span>
-              </template>
-            </template>
-          </MetricTile>
-          <MetricTile
-            label="Errors"
-            :value="formatNumber(ackFailedTotal)"
-            unit="ack failures"
-            :context="errorContext"
-            :sparkline="errorSeriesData"
-            :labels="chartLabels"
-            :value-format="fmtCount"
-            :severity="errorSeverity"
-            :loading="loadingOps"
-            :error="opsError"
-            tooltip="Ack failures for this tenant across the window. The dead letter count is a snapshot, not a window count, so it is in the line below."
-            :selected="false"
-            @select="go('dead-letters')"
-          />
+        <div class="ov-trends">
+          <section v-for="t in summaryTrends" :key="t.key" class="card ov-trend" :aria-labelledby="`ov-tr-${t.key}`">
+            <div class="card-header">
+              <router-link :id="`ov-tr-${t.key}`" class="ov-trend-title" :to="viewTo(t.view)">{{ t.title }}<Icon name="chevron-right" :size="14" /></router-link>
+              <span class="card-sub">{{ t.sub }}</span>
+            </div>
+            <div class="card-body">
+              <div v-if="t.error" class="panel-err">{{ describeApiError(t.error) }}</div>
+              <div v-else-if="t.loading" class="skeleton ov-chart-skeleton" />
+              <RowChart v-else-if="t.data" :data="t.data" :labels="t.labels" :tone="t.tone" :value-format="t.valueFormat" :unit="t.unit" variant="full" />
+              <RowChart v-else :series="t.series || null" :labels="t.labels" :value-format="t.valueFormat" :unit="t.unit" variant="full" />
+            </div>
+          </section>
         </div>
-
       </template>
 
       <!-- =====================================================================
@@ -219,7 +130,7 @@
            ===================================================================== -->
       <template v-else-if="view === 'issues'">
         <QueueTriage
-          :key="epoch" :queues="queues" :groups="consumers"
+          :key="epoch" :queues="queues" :groups="consumers" :ops="queueOps"
           :sample-at="queuesQ.lastUpdated.value" :groups-at="consumersQ.lastUpdated.value"
           :queues-error="queuesFailed ? queuesErrorText : ''"
           :groups-error="consumersFailed ? consumersErrorText : ''"
@@ -240,9 +151,12 @@
                 and no queue-mode consumer that has ever consumed; a queue Kafka
                 clients created is exempt. A Kafka group with no live member for
                 {{ formatSpan(lines.inactiveAfterSeconds) }} is inactive, not an
-                issue. Ack failures count when their
-                share of the window's acks crosses
-                {{ formatLine(LINE_META.ackWarnRate, lines.ackWarnRate) }}. The
+                issue. A queue also needs you when its acks fail: their share of
+                its last hour's acks crosses
+                {{ formatLine(LINE_META.ackWarnRate, lines.ackWarnRate) }}
+                (<code>analytics/workload</code>, by queue). The tenant's ack
+                failures are an issue of their own only when no queue's acks
+                explain them. The
                 sidebar, Queues and Consumer groups use the same rule, and the lines
                 are the ones in <router-link to="/settings">Settings</router-link>,
                 where a queue may have lag lines of its own.
@@ -250,6 +164,23 @@
             </details>
           </template>
         </QueueTriage>
+      </template>
+
+      <!-- =====================================================================
+           CELL — the cell under the queues, compact: its verdict and five
+           numbers, what needs you in it, and each node now. System has its
+           charts, its log and its traffic.
+           ===================================================================== -->
+      <template v-else-if="view === 'cell'">
+        <CellStatus
+          :cell="cellStatus"
+          :issues="cellIssueLinks"
+          :note="nodesNote"
+          :node-to="systemNodeTo"
+          :more-to="{ path: '/system' }"
+          :stamp-text="stamp(membersQ)"
+          :version="cellVersion"
+        />
       </template>
 
       <!-- =====================================================================
@@ -354,6 +285,39 @@
               <RowChart v-else :series="nsBacklog.series" :labels="nsBacklog.labels" :value-format="fmtCount" unit="msgs" variant="full" />
             </div>
           </section>
+          <div class="ov-pair">
+          <!-- Where the backlog is: the deepest queues, each with its oldest
+               wait and its mark. -->
+          <section class="card" aria-labelledby="ov-deep-title">
+            <div class="card-header">
+              <h3 id="ov-deep-title">Deepest queues</h3>
+              <span class="card-sub">the most messages waiting</span>
+            </div>
+            <div v-if="cards.attention.state === 'loading'" class="ov-list" aria-hidden="true">
+              <div v-for="i in 3" :key="i" class="ov-lrow ov-skel"><span /><span class="skeleton" /><span /></div>
+            </div>
+            <div v-else-if="queuesFailed" class="card-body"><div class="panel-err">{{ queuesErrorText }}</div></div>
+            <div v-else-if="!nsDeepest.length" class="ov-quiet">Nothing is waiting</div>
+            <div v-else class="ov-list ov-cols-att">
+              <div class="ov-lhead" aria-hidden="true"><span /><span>Queue</span><span class="ov-r" title="The oldest message a live consumer group of the queue has not read">Oldest</span><span class="ov-r">Pending</span></div>
+              <router-link
+                v-for="d in nsDeepest"
+                :key="d.name"
+                class="ov-lrow"
+                :to="queueTabLocation('overview', d.name, route, carry)"
+                :title="`${d.name} · ${formatNumber(d.pending)} waiting`"
+              >
+                <span class="ss-mark" aria-hidden="true"><span v-if="d.sev" class="g" :class="d.sev" /></span>
+                <span class="ov-cell">
+                  <span class="ov-name">{{ d.name }}</span>
+                  <span v-if="d.namespace && namespace === null" class="ov-sub">{{ d.namespace }}</span>
+                </span>
+                <span class="ov-n" :class="d.lag === null ? '' : lagNumClass(d.lag, d.name)">{{ lagText(d.lag) }}</span>
+                <span class="ov-n">{{ formatNumber(d.pending) }}</span>
+              </router-link>
+            </div>
+          </section>
+
           <section class="card" aria-labelledby="ov-att-title">
             <div class="card-header">
               <h3 id="ov-att-title">Needs attention</h3>
@@ -384,6 +348,7 @@
               </router-link>
             </div>
           </section>
+          </div>
 
         <section class="card" aria-labelledby="ov-lag-title">
           <div class="card-header">
@@ -428,6 +393,13 @@
             </template>
           </MetricTile>
         </div>
+        <section class="card flower-card ov-flower" aria-labelledby="ov-flower-title">
+          <div class="card-header">
+            <h3 id="ov-flower-title">Partitions</h3>
+            <span class="card-sub">{{ queuesFailed || !queuesRead ? '—' : `${formatNumber(nsPartitions)} across ${formatNumber(nsQueues.length)} ${nsQueues.length === 1 ? 'queue' : 'queues'}` }}</span>
+          </div>
+          <PartitionSunflower :queues="nsSunflowerQueues" :partitions="namespace === null ? sunflowerPartitions : null" :loading="loadingQueues" :error="queuesQ.error.value" />
+        </section>
       </template>
 
       <!-- =====================================================================
@@ -530,7 +502,7 @@ import {
   resources,
   system as systemApi,
 } from '@/api'
-import BaseChart from '@/components/BaseChart.vue'
+import CellStatus from '@/components/CellStatus.vue'
 import Icon from '@/components/Icon.vue'
 import MetricTile from '@/components/MetricTile.vue'
 import NamespacePicker from '@/components/NamespacePicker.vue'
@@ -540,9 +512,9 @@ import RowChart from '@/components/RowChart.vue'
 import SubSidebar from '@/components/SubSidebar.vue'
 import { namespaceCounts, queueTabLocation } from '@/composables/navigation'
 import {
-  attentionList, attentionWhy, busiestQueues, groupsSummary, inRateUnit, lagText, nodeLines,
-  nodeRows, overviewVerdict, overviewView, perSecond, queuesIn, queueTotals, rollupQueueOps,
-  NAMESPACED_VIEWS, OVERVIEW_VIEWS, sideGroups, systemRedirect, trafficWindow, viewAlias, viewQuery, windowSeconds, worstMark,
+  attentionList, attentionWhy, deepestQueues, busiestQueues, groupsSummary, lagText,
+  overviewVerdict, overviewView, perSecond, queuesIn, queueTotals, rollupQueueOps,
+  NAMESPACED_VIEWS, OVERVIEW_VIEWS, sideGroups, systemRedirect, viewAlias, viewQuery, windowSeconds, worstMark,
 } from '@/composables/overviewViews'
 import { LINE_META, formatLine, formatSpan } from '@/composables/settingsDoc'
 import { groupAttention, groupPresence, queueAttention } from '@/composables/useAttention'
@@ -550,18 +522,20 @@ import {
   formatBytes, formatNumber, latestFinite, toNum, trimIncompleteBuckets, useApi,
 } from '@/composables/useApi'
 import { brokerStatus, cellIssues } from '@/composables/useBrokerStatus'
-import { chartColor, semanticColors } from '@/composables/useChartTheme'
+import { clusterView } from '@/composables/useRaftCluster'
+import { cellIssueView } from '@/composables/systemViews'
 import { formatChartLabel, isMultiDay } from '@/composables/useFormat'
 import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useRouteState } from '@/composables/useRouteState'
 import {
-  ackFailureSeverity, backlogSeverity, eventLoopSeverity, numTone,
-  pendingDriftSeverity, timeLagSeverity,
+  ackFailureSeverity, backlogSeverity, numTone,
+  timeLagSeverity,
 } from '@/composables/useSeverity'
 import { stamp } from '@/composables/useStamp'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useIdentity } from '@/stores/identity'
 import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -592,12 +566,10 @@ watch(() => route.query.view, (v) => {
   if (to) router.replace({ query: { ...route.query, view: to } })
 }, { immediate: true })
 const viewTo = (key) => ({ path: '/', query: { ...route.query, view: viewQuery(key) } })
-const go = (key) => router.push(viewTo(key))
 const currentName = computed(() => OVERVIEW_VIEWS.find((v) => v.key === view.value)?.name || 'Summary')
 // The views drawn over a window take the range; the views a namespace
 // narrows take the namespace picker.
-const RANGED = new Set(['summary', 'throughput', 'backlog', 'dead-letters', 'resources'])
-const CELL_VIEWS = new Set(['nodes', 'resources', 'replication'])
+const RANGED = new Set(['summary', 'throughput', 'backlog', 'dead-letters'])
 const ranged = computed(() => RANGED.has(view.value))
 const namespaced = computed(() => NAMESPACED_VIEWS.includes(view.value))
 
@@ -622,14 +594,16 @@ const getTimeRangeParams = () => {
 // view: the sub sidebar's marks need them whichever view is open.
 // ---------------------------------------------------------------------------
 const groupsStore = useGroupsStore()
+// Each queue's last hour (its acks), for the one rule: a queue whose acks
+// fail needs you, and the tenant's failure rate is then that queue's.
+const queueOpsStore = useQueueOpsStore()
+const queueOps = queueOpsStore.ops
 const overviewQ = useApi((config) => resources.getOverview(config), { immediate: false })
 const queuesQ = useApi((config) => queuesApi.list(undefined, config), { immediate: false })
 // Handed to the shared store, so the sidebar and Queues reuse this read.
 const consumersQ = useApi((config) => consumersApi.list(config), { immediate: false, onSuccess: (d) => groupsStore.publish(d) })
 const opsQ = useApi((config) => systemApi.getQueueOps(getTimeRangeParams(), config), { immediate: false })
 const retentionQ = useApi((config) => systemApi.getRetention(getTimeRangeParams(), config), { immediate: false })
-const statusQ = useApi((config) => operatorApi.getStatus(getTimeRangeParams(), config), { immediate: false })
-const sysQ = useApi((config) => operatorApi.getSystemMetrics(getTimeRangeParams(), config), { immediate: false })
 // The cell's nodes: the read the top bar makes, guarded the same way, so a
 // broker without the route is asked once and stays quiet.
 const membersQ = useApi(
@@ -654,13 +628,10 @@ const loadingOverview = firstLoad(overviewQ)
 const loadingQueues = firstLoad(queuesQ)
 const loadingConsumers = firstLoad(consumersQ)
 const loadingOps = firstLoad(opsQ)
-const loadingStatus = firstLoad(statusQ)
-const sysFirstLoad = firstLoad(sysQ)
 
 const overviewError = computed(() => overviewQ.error.value)
 const opsError = computed(() => opsQ.error.value)
 const retentionError = computed(() => retentionQ.error.value)
-const statusError = computed(() => statusQ.error.value)
 
 const overviewFailed = computed(() => overviewQ.error.value !== null)
 const queuesFailed = computed(() => queuesQ.error.value !== null)
@@ -671,11 +642,9 @@ const groupsRead = computed(() => consumersQ.data.value !== null)
 const queuesErrorText = computed(() => describeApiError(queuesQ.error.value))
 const consumersErrorText = computed(() => describeApiError(consumersQ.error.value))
 
-// A node that did not answer the broker's gather (usePartial): queue-ops feeds
-// the Overview and Queues, status and system-metrics the Server.
-const opsPartial = computed(() => partialText(missingNodes(opsQ.data.value)))
-const cellPartial = computed(() => partialText(missingNodes(statusQ.data.value, sysQ.data.value)))
-const partial = computed(() => (CELL_VIEWS.has(view.value) ? cellPartial.value : opsPartial.value))
+// A node that did not answer the broker's gather (usePartial): queue-ops
+// feeds every view of the Overview.
+const partial = computed(() => partialText(missingNodes(opsQ.data.value)))
 
 // ---------------------------------------------------------------------------
 // Charts' clock.
@@ -710,35 +679,18 @@ const throughputOf = (h) => {
   return [
     { label: 'Push', data: h.map((x) => toNum(x.pushPerSecond)) },
     { label: 'Pop', data: h.map((x) => toNum(x.popPerSecond)) },
-    { label: 'Ack', data: h.map((x) => toNum(x.ackPerSecond)), color: semanticColors.ok.line },
+    { label: 'Ack', data: h.map((x) => toNum(x.ackPerSecond)) },
     // Only once a fetch is counted: a tenant without Kafka keeps three lines.
     ...(h.some((x) => x.fetchMessages > 0) ? [{ label: 'Fetch (Kafka)', data: h.map((x) => toNum(x.fetchPerSecond)) }] : []),
   ]
 }
-const throughput = computed(() => {
-  const v = latestFinite(history.value.map((x) => x.pushPerSecond))
-  return { current: v === null ? '—' : v.toFixed(1) }
-})
 const throughputSeries = computed(() => throughputOf(history.value))
-const throughputPeak = computed(() => {
-  const finite = history.value.map((x) => toNum(x.pushPerSecond)).filter((v) => v !== null)
-  return finite.length ? Math.max(0, ...finite) : 0
-})
-const throughputContext = computed(() => {
-  if (!history.value.length) return 'no queue-ops buckets in window'
-  const peak = throughputPeak.value
-  const cur = Number(throughput.value.current) || 0
-  if (peak === 0 && cur === 0) return 'idle · no traffic in window'
-  if (peak === 0) return `current ${cur.toFixed(1)} /s`
-  return `peak ${formatNumber(Math.round(peak))} /s push`
-})
 
-// Pending Δ — the backlog itself, as the broker reads it once a minute
+// Pending — the backlog itself, as the broker reads it once a minute
 // (queue-ops `backlog`: per bucket its last reading of what waits and what is
-// in flight). The value is how much Pending changed across the window; the
-// chart is Pending itself. It is NOT push − ack: a message also leaves by a
-// transaction, a stream cycle, retention or the DLQ, and every group acks it
-// once, so that difference drifts for ever.
+// in flight). It is NOT push − ack: a message also leaves by a transaction, a
+// stream cycle, retention or the DLQ, and every group acks it once, so that
+// difference drifts for ever.
 const backlogRowsOf = (rows) => (Array.isArray(rows) ? rows.filter((x) => toNum(x?.pending) !== null) : [])
 const backlogChartOf = (rows) => ({
   labels: labelsFor(rows.map((b) => b.bucket)),
@@ -750,46 +702,8 @@ const backlogChartOf = (rows) => ({
     : null,
 })
 const backlog = computed(() => backlogRowsOf(opsQ.data.value?.backlog))
-const backlogMultiDay = computed(() => isMultiDay(backlog.value.map((b) => b.bucket)))
 const backlogLabels = computed(() => labelsFor(backlog.value.map((b) => b.bucket)))
-const pendingDeltaSeries = computed(() => backlog.value.map((b) => toNum(b.pending)))
 const backlogSeries = computed(() => backlogChartOf(backlog.value).series)
-const backlogLast = computed(() => latestFinite(pendingDeltaSeries.value))
-// A change needs two readings; a broker that has just started reading has one.
-const pendingDeltaLatest = computed(() => {
-  const s = pendingDeltaSeries.value
-  return s.length > 1 ? s[s.length - 1] - s[0] : null
-})
-const pendingDeltaDisplay = computed(() => {
-  const v = pendingDeltaLatest.value
-  if (v === null) return '—'
-  if (v === 0) return '0'
-  return (v > 0 ? '+' : '−') + formatNumber(Math.abs(v))
-})
-// Readings that begin inside the window (a broker that started reading
-// recently) make the change "since" the first reading, not "over" the range.
-const pendingDeltaSpan = computed(() => {
-  const b = backlog.value
-  const from = Date.parse(opsQ.data.value?.timeRange?.from || '')
-  if (!b.length || Number.isNaN(from)) return `over ${selectedRange.value}`
-  const first = Date.parse(b[0].bucket)
-  const step = (opsQ.data.value?.bucketMinutes || 1) * 60_000
-  return first - from > 2 * step
-    ? `since ${formatChartLabel(new Date(first), backlogMultiDay.value)}`
-    : `over ${selectedRange.value}`
-})
-// Judged against the work that arrived: +1 000 is noise on a window that
-// pushed half a million and a stall on one that pushed two thousand.
-const pushedTotal = computed(() => history.value.reduce((s, x) => s + (toNum(x.pushMessages) || 0), 0))
-const pendingDeltaSeverity = computed(() => pendingDriftSeverity({ delta: pendingDeltaLatest.value, pushed: pushedTotal.value }))
-const pendingDeltaContext = computed(() => {
-  const now = backlogLast.value
-  if (now === null) return 'no backlog readings in window'
-  const lastBucket = backlog.value.at(-1)?.bucket
-  const when = lastBucket ? formatChartLabel(new Date(lastBucket), backlogMultiDay.value) : 'unknown time'
-  const waiting = `${formatNumber(now)} pending · bucket ${when}`
-  return pendingDeltaLatest.value === null ? `${waiting} · first reading` : `${waiting} · ${pendingDeltaSpan.value}`
-})
 
 // Time lag. The value is the tenant overview's: the age of each queue's oldest
 // unconsumed message, right with consumers stopped; null is "no measurement"
@@ -809,9 +723,6 @@ const lagSeriesData = computed(() => {
 // lines only: the queue's own when a row names its queue, else the tenant's.
 const lagNumClass = (s, queue) => numTone(timeLagSeverity(s, queue === undefined ? undefined : linesFor(queue)))
 const lagSeverity = computed(() => lagNumClass(lagMaxSeconds.value || 0))
-const lagContext = computed(() => (history.value.some((x) => x.avgLagMs !== null)
-  ? 'oldest-message age now · chart is pop-sampled'
-  : 'oldest-message age now · no pops in window, chart empty'))
 
 // Errors — ack failures across the window, read as a share of the acks
 // attempted (success + failed); the dead letter depth is a snapshot, context
@@ -979,6 +890,19 @@ const metricChart = (metric) => {
   }
 }
 
+// The Summary's hour in four charts, each opening its view. The numbers they
+// would repeat are in the status card above them, so they carry none.
+const summaryTrends = computed(() => {
+  const loading = loadingOps.value
+  const acks = metricChart('errors')
+  return [
+    { key: 'tp', view: 'throughput', ...metricChart('throughput'), loading },
+    { key: 'wait', view: 'backlog', ...metricChart('pendingDelta'), loading },
+    { key: 'lag', view: 'backlog', ...metricChart('timeLag'), loading },
+    { key: 'acks', view: 'dead-letters', ...acks, data: acks.sparkline || [], loading },
+  ]
+})
+
 // ---------------------------------------------------------------------------
 // What needs you, worked out from data already on the page (composables/
 // useAttention: the sidebar, Queues and Consumer groups read the same rule),
@@ -995,10 +919,13 @@ const queuesByDepth = computed(() => queues.value
 const statusKnown = computed(() => queuesRead.value && groupsRead.value && !queuesFailed.value && !consumersFailed.value)
 const issues = computed(() => {
   if (queuesFailed.value || consumersFailed.value) return []
-  const out = queueAttention(queuesByDepth.value, consumers.value, linesFor)
-    .map((a) => ({ key: `q:${a.name}`, sev: a.sev, name: a.name, why: attentionWhy(a) }))
+  const out = queueAttention(queuesByDepth.value, consumers.value, linesFor, queueOps.value)
+    .map((a) => ({ key: `q:${a.name}`, sev: a.sev, name: a.name, reason: a.reason, why: attentionWhy(a) }))
+  // The tenant's ack failures are an issue of their own only when no queue's
+  // own acks explain them: failures spread thin over many queues.
   const es = errorSeverity.value
-  if (es === 'warn' || es === 'bad') out.push({ key: 'acks', sev: es, name: 'Ack failures', why: errorContext.value, to: '/dlq', tenant: true })
+  const explained = out.some((i) => i.reason === 'acks')
+  if ((es === 'warn' || es === 'bad') && !explained) out.push({ key: 'acks', sev: es, name: 'Ack failures', why: errorContext.value, to: '/dlq', tenant: true })
   const rank = { bad: 2, warn: 1 }
   return out.sort((a, b) => rank[b.sev] - rank[a.sev])
 })
@@ -1007,7 +934,19 @@ const issueSevByQueue = computed(() => new Map(issues.value.filter((i) => !i.ten
 // The cell's own problems, an operator's only (useBrokerStatus cellIssues, the
 // lines the top bar colours by). A failed read adds nothing here.
 const cellStatus = computed(() => (canOperate.value ? brokerStatus(membersQ.data.value) : null))
-const cellIssueList = computed(() => cellIssues(cellStatus.value))
+const cellIssueList = computed(() => cellIssues(cellStatus.value).map((i) => ({ ...i, to: viewTo('cell'), go: 'Cell' })))
+const cellIssueLinks = computed(() => cellIssues(cellStatus.value).map((i) => {
+  const v = cellIssueView(i)
+  return { ...i, to: { path: '/system', query: v ? { view: v } : {} } }
+}))
+// A node opens System's CPU and memory view with that node picked.
+const systemNodeTo = (name) => ({ path: '/system', query: { view: 'compute', node: name } })
+// The version every node reports (several during a roll, each once).
+const cellVersion = computed(() => {
+  const rows = clusterView(membersQ.data.value)?.rows || []
+  const versions = [...new Set(rows.map((r) => r.version).filter(Boolean))].sort()
+  return versions.join(' · ')
+})
 
 const verdict = computed(() => overviewVerdict({
   loading: loadingQueues.value || loadingConsumers.value,
@@ -1078,7 +1017,7 @@ const side = computed(() => {
           : resourceStatus.value.mark ? resourceStatus.value.num
             : cellIssueList.value.length ? `${formatNumber(cellIssueList.value.length)} issues`
               : `${reachable}/${s.nodes.length}`
-      return { mark, num, title: cellIssueList.value[0]?.title || 'The cell is healthy · opens System' }
+      return { mark, num, title: cellIssueList.value[0]?.title || 'The cell is healthy' }
     })() : {},
   }, canOperate.value)
 })
@@ -1109,6 +1048,11 @@ const refreshPartitions = () => {
   if (view.value !== 'summary' || queuesFailed.value || totalPartitions.value > MAX_SEEDS) return undefined
   return partitionsQ.refresh()
 }
+// The Backlog view's sunflower: the namespace shown, its queues' partitions.
+const nsSunflowerQueues = computed(() => (namespace.value === null
+  ? sunflowerQueues.value
+  : sunflowerQueues.value.filter((q) => nsNames.value.has(q.name))))
+const nsPartitions = computed(() => nsSunflowerQueues.value.reduce((n, q) => n + (toNum(q.partitions) || 0), 0))
 const sunflowerPartitions = computed(() => {
   const d = partitionsQ.data.value
   if (!d || d.truncated || totalPartitions.value > MAX_SEEDS) return null
@@ -1187,7 +1131,9 @@ const cards = computed(() => {
   }
 })
 
-const nsAttention = computed(() => (statusKnown.value ? attentionList(nsQueues.value, consumers.value, linesFor) : []))
+const nsAttention = computed(() => (statusKnown.value ? attentionList(nsQueues.value, consumers.value, linesFor, queueOps.value) : []))
+// The Backlog's deepest queues, of the namespace shown.
+const nsDeepest = computed(() => deepestQueues(nsQueues.value, consumers.value, issueSevByQueue.value, LIST, linesFor))
 const busiest = computed(() => busiestQueues(opsQ.data.value?.series, nsNames.value, {
   seconds: windowSeconds(opsQ.data.value?.timeRange),
   limit: LIST,
@@ -1216,144 +1162,12 @@ const dlqRows = computed(() => nsQueues.value
   .filter((d) => d.count > 0)
   .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)))
 
-// ---------------------------------------------------------------------------
-// SERVER — the cell: the members read (brokerStatus) for the issues and the
-// nodes now; system-metrics for each node over time, drawn as the System
-// page's "Per server" view; /api/v1/status for the workers' event loop.
-// ---------------------------------------------------------------------------
-const cellNodes = computed(() => nodeRows(cellStatus.value))
-const cellWindow = computed(() => trafficWindow(cellStatus.value))
+// The Cell view's note while there is no cell to show.
 const nodesNote = computed(() => {
   if (isMissingRoute(membersQ.error.value)) return 'This broker does not list its nodes'
   if (membersQ.error.value) return `Cannot read the nodes · ${describeApiError(membersQ.error.value)}`
   return 'Reading the nodes…'
 })
-
-// The workers' event loop, now (the last two minutes) and over the window.
-const statusHistory = computed(() => {
-  const s = statusQ.data.value
-  if (!s?.throughput?.length) return []
-  // status_v3 answers newest first; charts read left to right.
-  return trimIncompleteBuckets([...s.throughput].reverse(), { bucketKey: 'timestamp', bucketMinutes: s.bucketMinutes || 1 })
-})
-const statusChartLabels = computed(() => labelsFor(statusHistory.value.map((h) => h.timestamp)))
-const elSeriesData = computed(() => {
-  const h = statusHistory.value
-  if (!h.length) return null
-  return [
-    { label: 'Avg', data: h.map((x) => toNum(x.avgEventLoopLagMs)) },
-    { label: 'Max', data: h.map((x) => toNum(x.maxEventLoopLagMs)) },
-  ]
-})
-const workerReadings = (key) => (statusQ.data.value?.workers || []).map((w) => toNum(w[key])).filter((v) => v !== null)
-// Averaged over the workers that reported: one without the field must not
-// pull the cell towards zero.
-const avgEventLoopLag = computed(() => {
-  const v = workerReadings('avgEventLoopLagMs')
-  return v.length ? Math.round(v.reduce((s, x) => s + x, 0) / v.length) : null
-})
-const maxEventLoopLag = computed(() => {
-  const v = workerReadings('maxEventLoopLagMs')
-  return v.length ? Math.max(...v) : null
-})
-// Rows per request, lifetime, every tenant on the cell. Fewer means more
-// overhead per commit; no line is drawn on it.
-const batchText = computed(() => {
-  const b = statusQ.data.value?.messages?.batchEfficiency
-  if (!b) return null
-  const one = (v) => {
-    const n = toNum(v)
-    return n === null ? '—' : n >= 10 || n === 0 ? String(Math.round(n)) : n.toFixed(1)
-  }
-  return `${one(b.push)} · ${one(b.pop)} · ${one(b.ack)}`
-})
-
-// Per node over time: System's "Per server" lines, one colour per node; the
-// second measure of a node (out, write) dashed.
-const replicas = computed(() => sysQ.data.value?.replicas || [])
-const chartOf = (lines) => ({
-  labels: labelsFor(lines.timeline),
-  hasData: lines.hasData,
-  unit: lines.unit || null,
-  datasets: lines.datasets.map((d) => ({
-    label: d.label,
-    data: d.data,
-    borderColor: chartColor(d.node).line,
-    borderDash: d.dashed ? [5, 4] : [],
-    fill: false,
-    tension: 0,
-  })),
-})
-const cpuChart = computed(() => chartOf(nodeLines(replicas.value, [{ path: ['cpu', 'user_us'] }], { scale: (v) => v / 100, suffix: ' · user' })))
-const memoryChart = computed(() => chartOf(nodeLines(replicas.value, [{ path: ['memory', 'rss_bytes'] }], { scale: (v) => Math.round(v / 1024 / 1024) })))
-const networkChart = computed(() => chartOf(inRateUnit(nodeLines(replicas.value, [
-  { path: ['network', 'received_bytes_per_sec'], short: 'in' },
-  { path: ['network', 'sent_bytes_per_sec'], short: 'out' },
-]))))
-const diskChart = computed(() => chartOf(inRateUnit(nodeLines(replicas.value, [
-  { path: ['disk', 'read_bytes_per_sec'], short: 'read' },
-  { path: ['disk', 'written_bytes_per_sec'], short: 'write' },
-]))))
-
-// A new options object only when a chart's unit changes: BaseChart rebuilds
-// the whole chart for new options and only re-plots for new data.
-const legendTop = { display: true, position: 'top' }
-const cpuOptions = {
-  plugins: { legend: legendTop },
-  scales: { y: { title: { display: true, text: 'CPU %', font: { size: 11 } }, ticks: { callback: (value) => `${Number(value).toFixed(1)}%` } } },
-}
-const memoryOptions = {
-  plugins: { legend: legendTop },
-  scales: { y: { title: { display: true, text: 'Memory (MB)', font: { size: 11 } } } },
-}
-const rateOptions = (unitLabel) => ({
-  plugins: { legend: legendTop },
-  scales: { y: { title: { display: true, text: unitLabel, font: { size: 11 } } } },
-})
-const networkUnit = computed(() => networkChart.value.unit?.label || 'B/s')
-const diskUnit = computed(() => diskChart.value.unit?.label || 'B/s')
-const networkOptions = computed(() => rateOptions(networkUnit.value))
-const diskOptions = computed(() => rateOptions(diskUnit.value))
-
-const noSamples = computed(() => ({ text: `No samples in the last ${selectedRange.value}`, title: '' }))
-const serverCharts = computed(() => [
-  {
-    key: 'cpu',
-    title: 'CPU',
-    sub: 'user time, per node',
-    help: 'User CPU time of each node\'s broker process, in percent of one core: four busy cores read 400%.',
-    chart: cpuChart.value,
-    options: cpuOptions,
-    none: noSamples.value,
-  },
-  {
-    key: 'memory',
-    title: 'Memory',
-    sub: 'resident, per node',
-    help: 'Resident memory of each node\'s broker process.',
-    chart: memoryChart.value,
-    options: memoryOptions,
-    none: noSamples.value,
-  },
-  {
-    key: 'network',
-    title: 'Network',
-    sub: 'solid in · dashed out',
-    help: 'What each node\'s network interfaces received and sent: every client, the Raft port and anything else on them. In a container, its own interfaces; loopback and bridges are left out.',
-    chart: networkChart.value,
-    options: networkOptions.value,
-    none: { text: 'Not reported', title: 'A broker records the network on Linux only, and older releases not at all.' },
-  },
-  {
-    key: 'disk',
-    title: 'Disk',
-    sub: 'solid read · dashed write',
-    help: 'What each node\'s broker process read from and wrote to storage. A read the page cache serves is not a disk read.',
-    chart: diskChart.value,
-    options: diskOptions.value,
-    none: { text: 'Not reported', title: 'Older releases do not record disk reads and writes.' },
-  },
-])
 
 // ---------------------------------------------------------------------------
 // The head: the title and the facts of the view.
@@ -1361,11 +1175,49 @@ const serverCharts = computed(() => [
 // The Summary's status card: the verdict's word and tone, the scope it was
 // worked out over, and the five numbers the paragraph used to carry.
 const verdictTone = computed(() => (verdict.value.sev === 'bad' || verdict.value.sev === 'warn' ? verdict.value.sev : ''))
-const verdictLine = computed(() => {
-  const parts = []
-  if (queuesRead.value && !queuesFailed.value) parts.push(`${formatNumber(queues.value.length)} ${queues.value.length === 1 ? 'queue' : 'queues'}`)
-  if (groupsRead.value && !consumersFailed.value) parts.push(`${formatNumber(consumers.value.length)} consumer ${consumers.value.length === 1 ? 'group' : 'groups'}`)
-  return parts.join(' · ')
+// What the tenant holds, under the status card: each count with what it
+// means now, and the way to where it is listed.
+const inventory = computed(() => {
+  const queuesKnown = queuesRead.value && !queuesFailed.value
+  const groupsKnown = groupsRead.value && !consumersFailed.value
+  const needs = queueIssues.value.length
+  const behind = groupsBehind.value.length
+  const stored = overviewFailed.value ? null : toNum(overview.value?.messages?.total)
+  const bytes = queues.value.reduce((s, q) => s + (toNum(q.retainedBytes) || 0), 0)
+  const made = partitionCreatedTotal.value
+  const gone = partitionDeletedTotal.value
+  return [
+    {
+      k: 'Queues',
+      v: queuesKnown ? formatNumber(queues.value.length) : '—',
+      sub: !queuesKnown || !groupsKnown ? '' : needs ? `${formatNumber(needs)} ${needs === 1 ? 'needs' : 'need'} you` : 'none needs you',
+      tone: worstMark(queueIssues.value.map((i) => i.sev)) || '',
+      to: queueTabLocation('overview', null, route),
+      title: 'Open the queues',
+    },
+    {
+      k: 'Partitions',
+      v: queuesKnown ? formatNumber(totalPartitions.value) : '—',
+      sub: made || gone ? `+${formatNumber(made)} / −${formatNumber(gone)} in ${selectedRange.value}` : `none made or removed in ${selectedRange.value}`,
+      to: viewTo('backlog'),
+      title: 'Partitions made and removed in the window; Backlog draws them',
+    },
+    {
+      k: 'Consumer groups',
+      v: groupsKnown ? formatNumber(consumers.value.length) : '—',
+      sub: !groupsKnown ? '' : behind ? `${formatNumber(behind)} behind` : 'none behind',
+      tone: worstMark(groupsBehind.value) || '',
+      to: viewTo('groups'),
+      title: 'Open the consumer groups, the worst first',
+    },
+    {
+      k: 'Messages stored',
+      v: stored === null ? '—' : formatNumber(stored),
+      sub: bytes ? formatBytes(bytes) : '',
+      to: viewTo('backlog'),
+      title: 'Every message the queues keep now; Backlog shows what retention removes',
+    },
+  ]
 })
 const statusCells = computed(() => [
   {
@@ -1463,6 +1315,7 @@ const fetchAll = async () => {
     consumersQ.refresh(),
     opsQ.refresh(),
     overviewQ.refresh(),
+    queueOpsStore.fetchOps(),
     ...viewJobs(view.value),
   ]
   // The members are an operator route: for anyone else the proxy answers 404
@@ -1516,11 +1369,50 @@ onMounted(fetchAll)
 .ov-word { flex: none; font-size: 12px; color: var(--text-low); }
 
 /* The Summary's status card: the verdict on the left, five number cells
-   beside it, hairlines between; colour only on a number that is trouble. */
+   beside it, hairlines between; colour only on a number that is trouble.
+   What needs you follows in the same card, under a hairline. */
+.ov-summary { overflow: hidden; }
 .ov-status {
   display: grid; grid-template-columns: minmax(260px, 1.5fr) repeat(5, minmax(0, 1fr));
-  overflow: hidden;
 }
+
+/* What the tenant holds: four counts in one card, hairlines between, each a
+   link to where it is listed; the line under a count says what it means now. */
+.ov-inventory {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--bd); border-radius: var(--r-card); background: var(--ink-2); overflow: hidden;
+}
+.ov-inv {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  padding: 13px 16px; border-right: 1px solid var(--bd);
+  color: inherit; text-decoration: none; transition: background-color .12s;
+}
+.ov-inv:last-child { border-right: 0; }
+.ov-inv:hover { background: var(--ink-3); }
+.ov-inv:focus-visible { outline-offset: -2px; }
+.ov-inv-k { font-size: 11.5px; color: var(--text-low); }
+.ov-inv-v { font-size: 20px; font-weight: 600; letter-spacing: -0.015em; color: var(--text-hi); font-variant-numeric: tabular-nums; }
+.ov-inv-sub { font-size: 12px; color: var(--text-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.ov-inv-sub.bad { color: var(--ember-400); }
+.ov-inv-sub.warn { color: var(--warn-400); }
+@media (max-width: 760px) {
+  .ov-inventory { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ov-inv:nth-child(2) { border-right: 0; }
+  .ov-inv:nth-child(-n+2) { border-bottom: 1px solid var(--bd); }
+}
+
+/* The hour in four charts, two a row (one on a narrow screen). The title is
+   the way to the view. */
+.ov-trends { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 900px) { .ov-trends { grid-template-columns: minmax(0, 1fr); } }
+.ov-trend { min-width: 0; }
+.ov-trend-title {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 13px; font-weight: 600; color: var(--text-hi); text-decoration: none;
+}
+.ov-trend-title :deep(svg) { color: var(--text-low); transition: transform .12s, color .12s; }
+.ov-trend-title:hover :deep(svg) { color: var(--text-hi); transform: translateX(2px); }
+.ov-flower { align-self: stretch; }
 .ov-verdict { min-width: 0; padding: 15px 18px; border-right: 1px solid var(--bd); }
 .ov-verdict-word {
   display: inline-flex; align-items: center; gap: 7px; margin-bottom: 6px;
@@ -1558,12 +1450,10 @@ onMounted(fetchAll)
   .ov-kpi { padding: 12px; }
   .ov-kpi-v { font-size: 16px; }
 }
-.ov-facts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.ov-facts { display: flex; align-items: baseline; gap: 4px 16px; flex-wrap: wrap; min-width: 0; }
 .ov-fact {
   display: inline-flex; align-items: baseline; gap: 5px;
-  padding: 2px 8px; border-radius: var(--r-chip);
-  background: var(--ink-3); border: 1px solid var(--bd);
-  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
+  font-size: 12.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .ov-k { color: var(--text-low); }
 .ov-fact .warn { color: var(--warn-400); }
@@ -1614,6 +1504,9 @@ a.count-tile:focus-visible, a.ov-lrow:focus-visible { outline-offset: -2px; }
    hairline, numbers right-aligned on a common baseline.
    --------------------------------------------------------------------------- */
 .ov-list { display: flex; flex-direction: column; }
+/* Two list cards side by side (one on a narrow screen). */
+.ov-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .ov-pair { grid-template-columns: minmax(0, 1fr); } }
 .ov-lhead, .ov-lrow {
   display: grid; align-items: center; gap: 12px;
   padding: 0 14px;

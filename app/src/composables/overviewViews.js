@@ -2,7 +2,9 @@
 // sub sidebar and kept in the address as ?view= (OVERVIEW_VIEWS):
 //
 //   Summary (no ?view=), Issues        the answer, and everything that needs you
-//   Cell                               a link to System, an operator's only
+//   Cell                               the cell compact: its verdict, its issues
+//                                      and each node now (System has the rest);
+//                                      a live operator's only
 //   Throughput, Backlog, Consumer      the tenant's queues, one namespace or
 //   groups, Dead letters               all of them
 //
@@ -10,6 +12,7 @@
 // reads. No Vue, no '@/': test/overview-views.test.js pins it.
 
 import { inNamespace } from './navigation.js'
+import { acksText } from './queueOps.js'
 import { byLagInactiveLast, groupAttention, queueAttention } from './useAttention.js'
 import { formatRate, inUnit, rateUnit } from './useTraffic.js'
 
@@ -42,9 +45,9 @@ export function worstMark(sevs) {
 export const OVERVIEW_VIEWS = Object.freeze([
   { key: 'summary', name: 'Summary', group: '', icon: 'gauge' },
   { key: 'issues', name: 'Issues', group: '', icon: 'inbox' },
-  // Not a view: the cell's detail is System's. The row says how the cell is
-  // and opens System (a live operator's only).
-  { key: 'cell', name: 'Cell', group: '', operator: true, href: '/system', icon: 'server' },
+  // The cell under the queues, compact (System holds its charts and its log):
+  // a live operator's only.
+  { key: 'cell', name: 'Cell', group: '', operator: true, icon: 'server' },
   { key: 'throughput', name: 'Throughput', group: 'Queues', icon: 'activity' },
   { key: 'backlog', name: 'Backlog', group: 'Queues', icon: 'hourglass' },
   { key: 'groups', name: 'Consumer groups', group: 'Queues', icon: 'users-round' },
@@ -61,7 +64,7 @@ const ALIASES = { overview: 'summary', queues: 'throughput', consumers: 'groups'
 
 // The cell views the Overview had for a day, and the sections before them:
 // their content is System's now, and an old address goes there.
-const TO_SYSTEM = { server: 'overview', cell: 'overview', nodes: 'nodes', resources: 'compute', replication: 'raft' }
+const TO_SYSTEM = { server: 'overview', nodes: 'overview', resources: 'compute', replication: 'raft' }
 
 /** The System view an old Overview address goes to, or null. */
 export function systemRedirect(value) {
@@ -70,13 +73,13 @@ export function systemRedirect(value) {
 
 /**
  * ?view= → the view shown. An old name lands on the view that holds its
- * content now. Anything else is the Summary (the Cell row is a link, not a
- * view).
+ * content now. An operator's view asked by anyone else, and anything
+ * unknown, is the Summary.
  */
-export function overviewView(value) {
+export function overviewView(value, canOperate = false) {
   const v = typeof value === 'string' ? (ALIASES[value] || value) : ''
   const known = BY_KEY.get(v)
-  return known && !known.href ? v : 'summary'
+  return known && (!known.operator || canOperate) ? v : 'summary'
 }
 
 /** The ?view= an old address is rewritten to, or null when it is current. */
@@ -123,8 +126,9 @@ export function overviewVerdict({ loading = false, known = false, issues = [], c
   if (cellBad.length) headline = cellHeadline(cellBad)
   else if (loading) headline = 'Checking your queues…'
   else if (!known) headline = 'Status unknown'
-  else if (bad.length === 1) headline = `${bad[0].name} is falling behind`
-  else if (bad.length > 1) headline = `${bad.length} queues are falling behind`
+  else if (bad.length === 1) headline = `${bad[0].name} ${bad[0].reason === 'acks' ? 'is failing its acks' : 'is falling behind'}`
+  else if (bad.length > 1) headline = bad.every((i) => i.reason === 'acks') ? `${bad.length} queues are failing their acks`
+    : bad.every((i) => i.reason !== 'acks') ? `${bad.length} queues are falling behind` : `${bad.length} queues are failing`
   else if (queueIssues.length) headline = `${queueIssues.length} ${queueIssues.length === 1 ? 'queue needs' : 'queues need'} attention`
   else if (issues.length) headline = 'Ack failures need attention'
   else if (cellIssues.length) headline = cellHeadline(cellIssues)
@@ -156,7 +160,6 @@ export function sideGroups(status = {}, canOperate = false) {
     g.rows.push({
       key: v.key,
       name: v.name,
-      href: v.href || null,
       icon: v.icon || null,
       mark: worstMark([st.mark]),
       num: st.num === undefined || st.num === null || st.num === '' ? '—' : String(st.num),
@@ -208,6 +211,7 @@ export function perSecond(v) {
 export function attentionWhy(a) {
   if (!a) return ''
   if (a.reason === 'lag') return 'A consumer group is behind'
+  if (a.reason === 'acks') return a.ops ? `${acksText(a.ops)} in the last hour` : 'Its acks are failing'
   return a.deadOnly ? 'Queue mode has never consumed from it' : 'No consumer group reads it'
 }
 
@@ -335,11 +339,40 @@ export function busiestQueues(series, names = null, { seconds = null, limit = 8 
 }
 
 /**
+ * Where the backlog is: the queues with the most messages waiting, deepest
+ * first, at most `limit`, as `[{ name, namespace, pending, lag, sev }]`.
+ * `lag` is the oldest wait among the queue's live groups in seconds (an
+ * inactive Kafka group's lag only grows, so it is left out; null when no
+ * group reports one); `sev` is the queue's mark by the one rule, from
+ * `sevByQueue`, or null. A queue with nothing waiting is not listed.
+ */
+export function deepestQueues(queues, groups, sevByQueue = new Map(), limit = 8, linesFor) {
+  const lagOf = new Map()
+  for (const g of groups || []) {
+    const lag = num(g?.maxTimeLag)
+    if (!g?.queueName || lag === null || groupAttention(g, linesFor) === 'mute') continue
+    lagOf.set(g.queueName, Math.max(lagOf.get(g.queueName) ?? 0, lag))
+  }
+  return (queues || [])
+    .filter((q) => q?.name)
+    .map((q) => ({
+      name: q.name,
+      namespace: q.namespace || '',
+      pending: num(q.messages?.pending) || 0,
+      lag: lagOf.has(q.name) ? lagOf.get(q.name) : null,
+      sev: sevByQueue?.get?.(q.name) || null,
+    }))
+    .filter((q) => q.pending > 0)
+    .sort((a, b) => b.pending - a.pending || a.name.localeCompare(b.name))
+    .slice(0, limit)
+}
+
+/**
  * The queues that need you (queueAttention, the app's one rule): failing
  * first, then the longest lag, then the most pending.
  */
-export function attentionList(queues, groups, linesFor) {
-  return queueAttention(queues, groups, linesFor)
+export function attentionList(queues, groups, linesFor, ops = null) {
+  return queueAttention(queues, groups, linesFor, ops)
     .sort((a, b) => (RANK[b.sev] || 0) - (RANK[a.sev] || 0)
       || (b.lag || 0) - (a.lag || 0)
       || (b.pending || 0) - (a.pending || 0)

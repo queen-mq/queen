@@ -22,8 +22,8 @@ export function observePending(previous, queues, at) {
   return { current, delta, elapsed: comparable ? elapsed : null }
 }
 
-export function buildQueueTriage(queues = [], groups = [], deltas = new Map(), linesFor) {
-  const issues = new Map(queueAttention(queues, groups, linesFor).map(i => [i.name, i]))
+export function buildQueueTriage(queues = [], groups = [], deltas = new Map(), linesFor, ops = null) {
+  const issues = new Map(queueAttention(queues, groups, linesFor, ops).map(i => [i.name, i]))
   const byQueue = new Map()
   for (const g of groups) {
     if (!byQueue.has(g.queueName)) byQueue.set(g.queueName, [])
@@ -40,6 +40,7 @@ export function buildQueueTriage(queues = [], groups = [], deltas = new Map(), l
       name: q.name, namespace: q.namespace || '', pending: count(q.messages?.pending),
       processing: count(q.messages?.processing),
       sev: issue?.sev || null, reason: issue?.reason || null, deadOnly: issue?.deadOnly || false,
+      ops: issue?.ops || null,
       lag: lags.length ? lags.reduce((a, b) => Math.max(a, b)) : null,
       delta: deltas.has(q.name) ? deltas.get(q.name) : null,
       affected, groupCount: all.length, readerCount: live.length,
@@ -59,6 +60,7 @@ export function filterQueueTriage(rows, search = '', filter = 'attention') {
     if (term && !`${row.name} ${row.namespace}`.toLocaleLowerCase().includes(term)) return false
     if (filter === 'attention') return row.sev !== null
     if (filter === 'bad') return row.sev === 'bad'
+    if (filter === 'acks') return row.reason === 'acks'
     if (filter === 'noReader') return row.reason === 'noReader'
     if (filter === 'growing') return row.delta !== null && row.delta > 0
     return true

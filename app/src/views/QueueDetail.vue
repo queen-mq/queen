@@ -391,12 +391,12 @@ import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/useParti
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { queueAlerts } from '@/composables/queueAlerts'
 import { formatSpan } from '@/composables/settingsDoc'
 import { queueAttention } from '@/composables/useAttention'
-import { semanticColors } from '@/composables/useChartTheme'
 import {
   ackFailureSeverity, backlogSeverity, numTone, pendingDriftSeverity, timeLagSeverity,
 } from '@/composables/useSeverity'
@@ -564,7 +564,7 @@ const throughputSeries = computed(() => {
     { label: 'Pop',  data: h.map(x => toNum(x.popPerSecond)) },
     // Ack is the only semantically-coloured line here (it means "work landed");
     // the colour is resolved from --ok-500, never re-typed.
-    { label: 'Ack',  data: h.map(x => toNum(x.ackPerSecond)), color: semanticColors.ok.line },
+    { label: 'Ack',  data: h.map(x => toNum(x.ackPerSecond)) },
   ]
 })
 const throughputPeak = computed(() => {
@@ -690,6 +690,7 @@ const kafkaTopic = computed(() => queueData.value?.kafkaTopic === true
 // The tenant's consumer groups: the shared listing the sidebar keeps (this page
 // never pays for a scan of its own), read here and by the queue's verdict.
 const groupsStore = useGroupsStore()
+const queueOpsStore = useQueueOpsStore()
 const lagNumClass = (ms) => (
   ms === null || ms === undefined ? '' : numTone(timeLagSeverity(ms / 1000, queueLines.value))
 )
@@ -770,6 +771,9 @@ const errorsContext = computed(() => {
   if (!t) return 'none in the window'
   const delivered = deliveredTotal.value
   if (!delivered) return `${formatNumber(t)} ack failure${t === 1 ? '' : 's'}`
+  // A redelivery fails again: past the window's deliveries, a share would
+  // read over 100%. Every delivery failed is the fact.
+  if (t >= delivered) return `${formatNumber(t)} failures, every delivery`
   return `${formatNumber(t)} of ${formatNumber(delivered)} delivered (${((t / delivered) * 100).toFixed(2)}%)`
 })
 const errorsSeverity = computed(() =>
@@ -882,7 +886,7 @@ const probeGroupsIfDeep = () => {
 //   dead letter  a standing to-do list, not an event: never toned
 // ---------------------------------------------------------------------------
 const listRow = computed(() => (queuesStore.queues.value || []).find(q => q?.name === queueName.value) || null)
-const alerts = computed(() => queueAlerts(listRow.value, groupsStore.groups.value || [], settingsStore.linesFor))
+const alerts = computed(() => queueAlerts(listRow.value, groupsStore.groups.value || [], settingsStore.linesFor, queueOpsStore.ops.value))
 const tabAt = (view) => queueTabLocation(view, queueName.value, route, listCarry(route))
 const plural = (n, one, many = `${one}s`) => `${formatNumber(n)} ${n === 1 ? one : many}`
 const NOTE_RANK = { bad: 0, warn: 1 }
@@ -894,15 +898,18 @@ const notes = computed(() => {
     out.push({
       key: 'alerts',
       sev: a[0].sev,
-      text: a.length === 1 ? a[0].title : `${a[0].title} · ${a.length - 1} more`,
+      text: `${a[0].title}${a[0].brief ? ` · ${a[0].brief}` : ''}${a.length > 1 ? ` · ${a.length - 1} more` : ''}`,
       title: a[0].detail,
       to: tabAt('alerts'),
       go: 'Alerts',
     })
   }
-  if (errorsSeverity.value) {
+  // The Alerts line already says the acks fail (the same rule over the last
+  // hour): a second line would repeat it.
+  if (errorsSeverity.value && !a.some((x) => x.key === 'acks')) {
     const t = errorsTotal.value
-    const share = deliveredTotal.value ? ` · ${((t / deliveredTotal.value) * 100).toFixed(2)}% of deliveries` : ''
+    const d = deliveredTotal.value
+    const share = !d ? '' : t >= d ? ' · every delivery' : ` · ${((t / d) * 100).toFixed(2)}% of deliveries`
     out.push({ key: 'acks', sev: errorsSeverity.value, text: `${plural(t, 'ack failure')} ${linkedWindow.value ? 'in' : 'in the'} ${rangeLabel.value}${share}` })
   }
   // Four outcomes, not two: 'none' below the floor, 'hold' while the
@@ -1021,7 +1028,7 @@ const queueSev = computed(() => {
   const groups = groupsStore.groups.value
   if (groups === null || groupsStore.error.value !== null) return 'ok'
   const here = { name: queueName.value, messages: { pending: totalMessages.value.pending }, kafkaTopic: kafkaTopic.value }
-  return queueAttention([here], groups, settingsStore.linesFor)[0]?.sev || 'ok'
+  return queueAttention([here], groups, settingsStore.linesFor, queueOpsStore.ops.value)[0]?.sev || 'ok'
 })
 // Match the overview: only scan individual partitions while each fits a seed.
 const getPartitions = routeSupport.guard('resources-partitions', (params) =>

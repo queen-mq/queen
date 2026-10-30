@@ -1,7 +1,9 @@
 // The System page's views (views/System.vue), picked in its sub sidebar and
 // kept in the address as ?view=:
 //
-//   Overview (no ?view=), Nodes        the cell at a glance; each node now
+//   Overview (no ?view=)               the cell at a glance: its verdict, each
+//                                      node now (who it is and how loaded),
+//                                      and four charts over the range
 //   Replication: Raft, Storage         the replicated log: members, traffic,
 //                                      the log and the store on each node
 //   Resources: CPU and memory, Disk,   each node over time
@@ -11,18 +13,18 @@
 // Pure: no Vue, no '@/' (test/system-views.test.js).
 
 export const SYSTEM_VIEWS = Object.freeze([
-  { key: 'overview', name: 'Overview', group: '', icon: 'gauge' },
-  { key: 'nodes', name: 'Nodes', group: '', icon: 'boxes' },
+  { key: 'overview', name: 'Overview', group: '', charts: true, icon: 'gauge' },
   { key: 'raft', name: 'Raft', group: 'Replication', charts: true, picker: true, icon: 'network' },
-  { key: 'storage', name: 'Storage', group: 'Replication', icon: 'database' },
+  { key: 'storage', name: 'Storage', group: 'Replication', charts: true, icon: 'database' },
   { key: 'compute', name: 'CPU and memory', group: 'Resources', charts: true, picker: true, icon: 'cpu' },
   { key: 'disk', name: 'Disk', group: 'Resources', charts: true, picker: true, icon: 'hard-drive' },
   { key: 'network', name: 'Network', group: 'Resources', charts: true, picker: true, icon: 'arrow-up-down' },
 ])
 const BY_KEY = new Map(SYSTEM_VIEWS.map((v) => [v.key, v]))
 
-// The page's two tabs before 2026-10-30 night.
-const ALIASES = { resources: 'compute' }
+// The page's two tabs before 2026-10-30 night, and the Nodes view, folded
+// into the Overview the day after.
+const ALIASES = { resources: 'compute', nodes: 'overview' }
 
 /** ?view= → the view shown; anything unknown is the Overview. */
 export function systemView(value) {
@@ -63,6 +65,19 @@ export function systemSideGroups(status = {}) {
     })
   }
   return groups
+}
+
+// Each cell issue (useBrokerStatus cellIssues) is worked on in one view.
+const ISSUE_VIEW = { quorum: 'raft', heartbeat: 'raft', lag: 'raft', snapshot: 'storage', disk: 'disk', memory: 'compute', cpu: 'compute' }
+
+/** The System view a cell issue is worked on in, or null (the Overview). */
+export function cellIssueView(issue) {
+  let kind = issue?.kind
+  if (!kind) {
+    const parts = String(issue?.key || '').replace(/^cell:/, '').split(':')
+    kind = parts.length === 1 ? parts[0] : parts[1]
+  }
+  return ISSUE_VIEW[kind] || null
 }
 
 /** The cell's verdict: its word, its tone and its headline, from brokerStatus and cellIssues. */

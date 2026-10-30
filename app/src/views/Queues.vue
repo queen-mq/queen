@@ -99,6 +99,7 @@ import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
 import { useToast } from '@/composables/useToast'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -284,13 +285,14 @@ const fetchQueueOps = async () => {
 // listing (a full scan on the broker — stores/groupsStore), kept fresher here
 // because this is the page that shows the verdicts.
 const groupsStore = useGroupsStore()
+const queueOpsStore = useQueueOpsStore()
 const { linesFor } = useSettingsStore()
 const groupsFailed = computed(() => groupsStore.error.value !== null)
 const fetchGroups = () => groupsStore.fetchGroups({ ttlMs: 25_000 })
 const attention = computed(() => {
   const groups = groupsStore.groups.value
   if (groups === null) return null
-  return new Map(queueAttention(queuesStore.queues.value, groups, linesFor).map((a) => [a.name, a]))
+  return new Map(queueAttention(queuesStore.queues.value, groups, linesFor, queueOpsStore.ops.value).map((a) => [a.name, a]))
 })
 
 // Auto-refresh forces fresh queues; mount-time call reuses cache.

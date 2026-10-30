@@ -1,43 +1,45 @@
 <template>
-  <section class="card triage" aria-labelledby="triage-title">
-    <div class="card-header">
+  <!-- `bare`: rows only, inside a card of the page's (the Summary's status
+       card), and nothing at all when nothing needs you. -->
+  <section v-if="!bare || bareHasRows" class="triage" :class="bare ? 'triage-bare' : 'card'" :aria-labelledby="bare ? undefined : 'triage-title'" :aria-label="bare ? 'What needs you' : undefined">
+    <div v-if="!bare" class="card-header">
       <h3 id="triage-title">{{ filter === 'all' || filter === 'growing' ? 'Queues' : 'Open issues' }}</h3>
       <span class="card-sub">{{ known ? `${formatNumber(attentionCount)} of ${formatNumber(rows.length)} ${rows.length === 1 ? 'queue needs' : 'queues need'} attention` : 'Status unconfirmed' }}</span>
     </div>
 
     <!-- The cell under every queue, an operator's only: what the top bar
-         colours, said as issues. Each opens System, where the node is. -->
+         colours, said as issues. Each opens where it is worked on (`to`). -->
     <ul v-if="cellIssues.length" class="triage-list triage-cell" aria-label="Cell issues">
       <li v-for="issue in cellIssues" :key="issue.key">
         <RouterLink class="triage-row" :to="issue.to">
           <span class="g" :class="issue.sev" aria-hidden="true" />
           <span class="triage-name">{{ issue.name }}<i class="cell-chip" title="The cell: shared by every tenant on it">cell</i></span>
           <span class="triage-finding" :class="issue.sev">{{ issue.why }}</span>
-          <span class="triage-open" aria-hidden="true">System<Icon name="chevron-right" :size="14" /></span>
+          <span class="triage-open" aria-hidden="true">{{ issue.go || 'System' }}<Icon name="chevron-right" :size="14" /></span>
         </RouterLink>
       </li>
     </ul>
 
-    <div v-if="!known" class="triage-empty" role="status" :title="errorText ? 'Queue health needs both the queues and the consumer groups' : undefined">
+    <div v-if="!known && !bare" class="triage-empty" role="status" :title="errorText ? 'Queue health needs both the queues and the consumer groups' : undefined">
       {{ errorText || 'Reading queues and consumer groups…' }}
     </div>
-    <template v-else>
+    <template v-else-if="known">
       <!-- A short list (limit) is the Summary's: the first rows that need you,
            no tools, and the way to the full list. -->
       <div v-if="!limit" class="triage-tools">
         <input v-model="search" type="search" placeholder="Search queues or namespaces" class="input triage-search" aria-label="Search queues or namespaces" />
         <UiSelect v-model="filter" label="Show" aria-label="Which queues to show" :options="FILTERS" />
       </div>
-      <div v-if="!filtered.length" class="triage-empty">
+      <div v-if="!filtered.length && !bare" class="triage-empty">
         {{ rows.length === 0 ? 'No queues yet' : attentionCount === 0 && filter === 'attention' && !search ? 'Nothing needs attention' : 'No queue matches' }}
         <button v-if="search || filter !== 'all'" class="btn btn-ghost" @click="search = ''; filter = 'all'">Show all queues</button>
       </div>
-      <ul v-else class="triage-list" aria-label="Queues, worst first, then the longest group lag" title="Worst first, then the longest group lag">
+      <ul v-else-if="filtered.length" class="triage-list" aria-label="Queues, worst first, then the longest group lag" title="Worst first, then the longest group lag">
         <li v-for="row in shownRows" :key="row.name" data-triage-row>
           <button class="triage-row" aria-haspopup="dialog" aria-controls="queue-issue-drawer" :aria-expanded="selection?.kind === 'queue' && selection.name === row.name" @click="openQueue(row)">
             <span class="g" :class="row.sev || 'idle'" aria-hidden="true" />
             <span class="triage-name">{{ row.name }}<span class="triage-meta">{{ row.namespace || 'No namespace' }}</span></span>
-            <span class="triage-finding" :class="row.sev">{{ finding(row) }}<template v-if="row.reason === 'lag'"> · {{ duration(row.lag) }}</template><template v-else-if="row.reason === 'noReader'"> · {{ number(row.pending) }} pending</template></span>
+            <span class="triage-finding" :class="row.sev">{{ finding(row) }}<template v-if="row.reason === 'lag'"> · {{ duration(row.lag) }}</template><template v-else-if="row.reason === 'acks'"> · {{ acksText(row.ops) }}</template><template v-else-if="row.reason === 'noReader'"> · {{ number(row.pending) }} pending</template></span>
             <span class="triage-open" aria-hidden="true">Details<Icon name="chevron-right" :size="14" /></span>
           </button>
         </li>
@@ -71,7 +73,13 @@
         <div v-if="detailUnavailable" class="panel-err" role="status">{{ (selection?.kind === 'tenant' && tenantError) || errorText || 'Refreshing queue and consumer readings…' }} Current health cannot be confirmed.</div>
         <template v-else-if="selected">
           <div class="triage-status"><span class="g" :class="selected.sev || 'idle'" aria-hidden="true" /><strong :class="selected.sev">{{ finding(selected) }}</strong><span>{{ selected.namespace || 'No namespace' }}</span></div>
-          <dl class="triage-evidence">
+          <dl v-if="selected.reason === 'acks'" class="triage-evidence">
+            <div><dt>Acks failed</dt><dd :class="selected.sev">{{ number(selected.ops?.ackFailed ?? null) }}</dd><small>In the last hour</small></div>
+            <div><dt>Acks done</dt><dd>{{ number(selected.ops?.ackSuccess ?? null) }}</dd><small>In the last hour</small></div>
+            <div><dt>Dead letter</dt><dd>{{ number(selected.ops?.deadLetter ?? null) }}</dd><small>Messages there now</small></div>
+            <div><dt>Pending</dt><dd>{{ number(selected.pending) }}</dd><small>Excludes in-flight work</small></div>
+          </dl>
+          <dl v-else class="triage-evidence">
             <div><dt>Pending</dt><dd>{{ number(selected.pending) }}</dd><small>Excludes in-flight work</small></div>
             <div><dt>In flight</dt><dd>{{ number(selected.processing) }}</dd><small>Currently being processed</small></div>
             <div><dt>Pending change</dt><dd>{{ change(selected.delta) }}</dd><small>{{ elapsed ? `Between reads · ${Math.round(elapsed / 1000)}s apart` : 'Waiting for a second reading' }}</small></div>
@@ -100,7 +108,8 @@
       <div v-if="!detailUnavailable && (selected || selectedTenant)" class="modal-foot triage-drawer-footer">
         <template v-if="selected">
           <RouterLink class="btn" :to="queueLocation(selected.name, route)">Inspect queue →</RouterLink>
-          <RouterLink class="btn btn-ghost" :to="queueLocation(selected.name, route, 'consumers')">Inspect consumer groups →</RouterLink>
+          <RouterLink v-if="selected.reason === 'acks'" class="btn btn-ghost" :to="queueTabLocation('failed', selected.name, route)">Open its dead letters →</RouterLink>
+          <RouterLink v-else class="btn btn-ghost" :to="queueLocation(selected.name, route, 'consumers')">Inspect consumer groups →</RouterLink>
         </template>
         <RouterLink v-else class="btn" :to="selectedTenant.to">Inspect failures →</RouterLink>
       </div>
@@ -109,7 +118,8 @@
 </template>
 
 <script setup>
-import { queueLocation } from '@/composables/navigation'
+import { queueLocation, queueTabLocation } from '@/composables/navigation'
+import { acksText } from '@/composables/queueOps'
 const route = useRoute()
 import { useRoute } from 'vue-router'
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
@@ -123,6 +133,7 @@ import UiSelect from '@/components/UiSelect.vue'
 const FILTERS = [
   { value: 'attention', label: 'Needs attention' },
   { value: 'bad', label: 'Falling behind' },
+  { value: 'acks', label: 'Acks failing' },
   { value: 'noReader', label: 'No reader' },
   { value: 'growing', label: 'Pending increased' },
   { value: 'all', label: 'All queues' },
@@ -133,6 +144,8 @@ const props = defineProps({
   sampleAt: { default: null }, groupsAt: { default: null },
   queuesError: { type: String, default: '' }, groupsError: { type: String, default: '' },
   tenantIssues: { type: Array, default: () => [] },
+  /** queueOpsStore's Map: each queue's last hour, so failing acks count (useAttention). */
+  ops: { type: Object, default: null },
   /** The cell's problems (useBrokerStatus cellIssues): rows that open System. */
   cellIssues: { type: Array, default: () => [] },
   tenantError: { type: String, default: '' },
@@ -140,6 +153,8 @@ const props = defineProps({
   limit: { type: Number, default: 0 },
   /** Where "All N issues" goes when the list is cut. */
   moreTo: { type: [Object, String], default: null },
+  /** Rows only, no card or header, and nothing when nothing needs you. */
+  bare: { type: Boolean, default: false },
 })
 const observation = shallowRef(null)
 const queueUnavailable = ref(true), groupsUnavailable = ref(true)
@@ -163,7 +178,7 @@ const known = computed(() => !queueUnavailable.value && !groupsUnavailable.value
 const errorText = computed(() => props.queuesError || props.groupsError)
 const readTime = at => new Date(at).toLocaleTimeString()
 const { lines, linesFor } = useSettingsStore()
-const rows = computed(() => known.value ? buildQueueTriage(props.queues, props.groups, observation.value?.delta, linesFor) : [])
+const rows = computed(() => known.value ? buildQueueTriage(props.queues, props.groups, observation.value?.delta, linesFor, props.ops) : [])
 const elapsed = computed(() => observation.value?.elapsed)
 const attentionCount = computed(() => rows.value.filter(r => r.sev).length)
 const search = ref(''), filter = ref('attention'), page = ref(1)
@@ -174,6 +189,7 @@ watch([search, filter], () => { page.value = 1 })
 watch(pages, n => { page.value = Math.min(page.value, n) })
 const pageRows = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize))
 const shownRows = computed(() => (props.limit ? filtered.value.slice(0, props.limit) : pageRows.value))
+const bareHasRows = computed(() => props.cellIssues.length > 0 || props.tenantIssues.length > 0 || (known.value && filtered.value.length > 0))
 
 // Selection belongs to an identity, not a list position. A heartbeat can move
 // or resolve the row; it must never switch the open drawer to another queue.
@@ -223,9 +239,10 @@ const groupName = g => (g.name || g.consumerGroup) === '__QUEUE_MODE__' ? 'Queue
 const number = n => n === null ? '—' : formatNumber(n)
 const change = n => n === null ? '—' : `${n > 0 ? '+' : ''}${formatNumber(n)}`
 const duration = n => n === null || n === undefined ? '—' : n < 60 ? `${Math.round(n)}s` : n < 3600 ? `${Math.floor(n / 60)}m ${Math.round(n % 60)}s` : `${Math.floor(n / 3600)}h ${Math.floor((n % 3600) / 60)}m`
-const finding = row => row.reason === 'lag' ? 'Consumer lag' : row.reason === 'noReader' ? 'No reader' : row.pending === null ? 'Pending unknown' : 'No alert'
+const finding = row => row.reason === 'lag' ? 'Consumer lag' : row.reason === 'acks' ? 'Acks failing' : row.reason === 'noReader' ? 'No reader' : row.pending === null ? 'Pending unknown' : 'No alert'
 function nextCheck(row) {
   if (row.reason === 'noReader') return { title: 'Check the consumer subscription', body: row.deadOnly ? 'Queue mode has a cursor on this queue, but it has never consumed. Check that a consumer is running on this queue.' : 'No consumer group is registered for this queue. Check the intended subscription and consumer deployment.' }
+  if (row.reason === 'acks') return { title: 'Read why its messages fail', body: 'Its consumers take messages and fail them; past the retry limit they go to dead letter. The errors there say why. Fix the cause before replaying them.' }
   if (row.reason === 'lag') return { title: row.pending === 0 ? 'Check unconfirmed work in the lagging groups' : 'Inspect the groups falling behind', body: 'Check their assigned partitions, consumer processes and job failures. Compare queue history before deciding whether more capacity is needed.' }
   if (row.pending === null) return { title: 'Confirm the pending count', body: 'The current reading does not report pending messages. Inspect the queue before drawing a backlog conclusion.' }
   if (row.delta > 0) return { title: 'Check whether the increase persists', body: 'More messages are pending than at the previous read. Open queue history to distinguish a short burst from sustained growth.' }
@@ -235,6 +252,9 @@ function nextCheck(row) {
 
 <style scoped>
 .triage { overflow: hidden; }
+/* Inside the status card: a hairline above, rows on the verdict's 18px edge. */
+.triage-bare { border-top: 1px solid var(--bd); }
+.triage-bare .triage-row, .triage-bare .triage-more { padding-left: 18px; padding-right: 18px; }
 /* The card header's 14px edge, all the way down. */
 .triage-tools { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--bd-soft); }
 .triage-search { flex: 1 1 auto; max-width: 320px; height: 32px; }

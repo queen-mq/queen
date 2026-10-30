@@ -625,7 +625,10 @@ import Icon from '@/components/Icon.vue'
 import UiSelect from '@/components/UiSelect.vue'
 import { analytics, consumers, describeApiError, system } from '@/api'
 import { useApi } from '@/composables/useApi'
-import { alpha, chartPalette, chartTheme, legendLabels, semanticColors, themeVersion } from '@/composables/useChartTheme'
+import { entitySlots, resetCategorySlots, splitBySlot } from '@/composables/useCategoryColors'
+import {
+  alpha, categoryPalette, chartPalette, chartTheme, legendLabels, linePalette, semanticColors, themeVersion,
+} from '@/composables/useChartTheme'
 import { ackFailureSeverity, backlogSeverity, groupActivity } from '@/composables/useSeverity'
 import { byLagInactiveLast } from '@/composables/useAttention'
 import {
@@ -641,8 +644,8 @@ import WorkloadSide from '@/components/WorkloadSide.vue'
 import { groupName, rootName } from '@/composables/workloadSide'
 import { stamp } from '@/composables/useStamp'
 import {
-  comparisonRange, deeperFindings, efficiency, enrichRows, findings, flowSeries, formatters as fmt,
-  heatCells, readsOf, rollupFromQueueOps, sameHourBaseline, tenantTotals, totalSeries, trimOpenBucket,
+  comparisonRange, deeperFindings, efficiency, enrichRows, findings, formatters as fmt,
+  heatCells, rollupFromQueueOps, sameHourBaseline, tenantTotals, totalSeries, trimOpenBucket,
   weeklyProfile, windowDeltas,
 } from '@/composables/useWorkload'
 import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
@@ -938,9 +941,15 @@ async function rollupWorkload(params, config) {
   }
 }
 
+// The scope the rows on screen were read at, taken when the answer lands.
+// Every change of Group by or of the pick starts a read that aborts the one
+// in flight, so the answer that lands is the scope on screen. What is keyed by
+// the rows (their colours) reads it here, not from `focus`: between a click
+// and its answer the old rows are still the ones on screen.
+const rowsScope = ref({ groupBy: groupBy.value, focus: focus.value })
 const workload = useApi((params, config) => (
   fallbackMode.value ? rollupWorkload(params, config) : getWorkload(params, config)
-), { immediate: false })
+), { immediate: false, onSuccess: () => { rowsScope.value = { groupBy: groupBy.value, focus: focus.value } } })
 const consumerGroups = useApi((config) => consumers.list(config), { immediate: false })
 
 const level = computed(() => (focus.value === null ? groupBy.value : 'queue'))
@@ -1047,6 +1056,8 @@ const refreshAgo = useRefreshAgo(workload.lastUpdated)
 // the verdict resets with it — exactly as the tenant-keyed stores do.
 const stopClusterWatch = onClusterChange(() => {
   fallbackMode.value = routeSupport.missing('workload') !== null
+  // Another cluster's namespaces are not this one's: their hues start over.
+  resetCategorySlots()
   fetchDeeper()
 })
 
@@ -1123,25 +1134,34 @@ const prevRows = computed(() => enrichRows(prevPayload.value, groupsByQueue.valu
 const prevByKey = computed(() => new Map(prevRows.value.map((r) => [r.key, r])))
 const deltas = computed(() => windowDeltas(tenant.value?.window, prevPayload.value?.tenant?.window))
 
-// Entity → ink. Nothing on this page is coloured by identity: a hue is a
-// verdict everywhere else in the console, and five of them on a healthy tenant
-// read as five things to look at. The flow chart tells its series apart by
-// the grey ramp (and names each one at its right edge); the activity map's
-// swatch is that same grey, so a row can be found in the chart above it. The
-// four biggest by reads get a step each, in flowSeries' own order; the
-// rest share the fifth, as they share "Other". Every bar chart is one ink.
-const entityInk = computed(() => {
-  const m = new Map()
-  ;[...rows.value]
-    .sort((a, b) => readsOf(b.window) - readsOf(a.window))
-    .slice(0, 4)
-    .forEach((r, i) => { m.set(r.key, chartPalette[i].line) })
-  return m
+// Entity → hue (useCategoryColors). A namespace, task or queue is given one
+// of the five categorical hues the first time it has traffic, busiest first,
+// and keeps it for the session: a refresh, another window or another measure
+// that reorders the rows or drops some repaints none of the others. Past the
+// fifth an entity is grey and folds into "Other" on the flow chart; the
+// activity map's swatch is the same colour, so a row can be found in the
+// chart above it. Bars are not coloured by entity: a hue on this page says
+// "this entity" (these two cards) or "another measure" (linePalette below).
+const entityKind = computed(() => {
+  const s = rowsScope.value
+  return s.focus === null ? s.groupBy : `queue:${s.groupBy}=${s.focus}`
 })
-const colorOf = (key) => entityInk.value.get(key) || chartPalette[4].line
-// One measure per row, and two when a row carries a pair.
+const slotOf = computed(() => entitySlots(entityKind.value, [...rows.value]
+  .sort((a, b) => (b.reads - a.reads) || ((b.window.pushMessages || 0) - (a.window.pushMessages || 0)))
+  .map((r) => ({ key: r.key, active: r.reads > 0 || (r.window.pushMessages || 0) > 0 }))))
+// "Other" takes the grey that stays apart from all five hues for colour-blind
+// readers as well (ΔE >= 14.9): the bars' mid grey collapses beside aqua and
+// magenta for deuteranopes, and "Other" can sit beside either.
+const otherInk = () => chartPalette[3].line
+const colorOf = (key) => {
+  const slot = slotOf.value.get(key)
+  return slot === null || slot === undefined ? otherInk() : categoryPalette[slot].line
+}
+// Bars: one measure is grey. Several in one chart take linePalette by the
+// measure's place, whichever of them are drawn: the first ink, the second
+// blue, the third aqua.
 const barInk = () => alpha(chartPalette[1].line, 0.85)
-const barInkLead = () => alpha(chartPalette[0].line, 0.85)
+const measureInk = (i, a = 0.85) => alpha(linePalette[i].line, a)
 const findingGlyph = (sev) => (sev === 'bad' || sev === 'warn' ? sev : 'ok')
 
 const tenantFill = computed(() => {
@@ -1389,19 +1409,32 @@ const drillOn = (sorted) => (evt, els) => {
 }
 
 function renderFlow() {
-  const series = flowSeries(rows.value, buckets.value, metric.value)
+  // A band per entity with a hue, in slot order, then "Other" for the rest on
+  // top: the stack's neighbours are then the palette's neighbours, the pairs
+  // it was checked for. A band with nothing in it is left out, legend and all:
+  // drawn, its edge would trace the top of the band under it in its own hue.
+  const { hued, rest } = splitBySlot(rows.value, (r) => slotOf.value.get(r.key))
+  const series = hued
+    .map((r) => ({ label: r.name, data: (r.series[metric.value] || []).map((v) => v), color: colorOf(r.key) }))
+    .concat(rest.length ? [{
+      // One entity left over is named, in the grey of "Other".
+      label: rest.length === 1 ? rest[0].name : `Other (${rest.length})`,
+      data: totalSeries(rest, buckets.value, metric.value),
+      color: otherInk(),
+    }] : [])
+    .filter((s) => s.data.some((v) => v > 0))
   const labels = buckets.value.map((b) => fmt.bucket(b, multiDay.value))
   mount('flow', {
     type: 'line',
     data: {
       labels,
-      datasets: series.map((s) => {
-        const color = chartPalette[s.index].line
-        return {
-          label: s.label, data: s.data, borderColor: color, backgroundColor: alpha(color, 0.38),
-          fill: true, borderWidth: 1.5, pointRadius: 0, pointHitRadius: 6, tension: 0, spanGaps: false,
-        }
-      }).concat(prevPayload.value ? [{
+      // Each band fills down to the band under it ('stack'), not to zero:
+      // filled to zero, every fill lies over the bands below and the bottom
+      // one reads as a blend of all six, not as its own hue.
+      datasets: series.map((s) => ({
+        label: s.label, data: s.data, borderColor: s.color, backgroundColor: alpha(s.color, 0.38),
+        fill: 'stack', borderWidth: 1.5, pointRadius: 0, pointHitRadius: 6, tension: 0, spanGaps: false,
+      })).concat(prevPayload.value ? [{
         // The comparison window's total, its own stack so it overlays instead
         // of piling onto the areas.
         label: `total, ${compareLabel.value}`, data: totalSeries(prevRows.value, prevPayload.value.buckets, metric.value),
@@ -1442,7 +1475,7 @@ function renderShare() {
   const options = barBase(labels, drillOn(sorted))
   options.scales.x.ticks.callback = (v) => fmt.k(v)
   options.plugins = {
-    legend: { display: false },
+    legend: { display: true, position: 'top', align: 'end' },
     tooltip: {
       callbacks: {
         label: (c) => ` ${c.dataset.label}: ${fmt.n(c.parsed.x)}`
@@ -1458,13 +1491,14 @@ function renderShare() {
     data: {
       labels,
       datasets: [
-        { label: 'delivered', data: sorted.map((r) => r.window.popMessages), backgroundColor: barInkLead(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'delivered', data: sorted.map((r) => r.window.popMessages), backgroundColor: measureInk(0), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
         // Only where the broker counts fetches and a row has some: a tenant
-        // without Kafka keeps its two bars.
+        // without Kafka keeps its two bars. Third by place, so pushed is blue
+        // with or without it; a hue at the old 0.45 fell under 3:1 on the card.
         ...(sorted.some((r) => r.fetched > 0) ? [{
-          label: 'fetched (Kafka)', fetch: true, data: sorted.map((r) => r.fetched), backgroundColor: alpha(chartPalette[0].line, 0.45), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8,
+          label: 'fetched (Kafka)', fetch: true, data: sorted.map((r) => r.fetched), backgroundColor: measureInk(2), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8,
         }] : []),
-        { label: 'pushed', data: sorted.map((r) => r.window.pushMessages), backgroundColor: barInk(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'pushed', data: sorted.map((r) => r.window.pushMessages), backgroundColor: measureInk(1), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
         ...(prevPayload.value ? [{
           label: `delivered + fetched, ${compareLabel.value}`, data: sorted.map((r) => prevByKey.value.get(r.key)?.reads ?? null),
           backgroundColor: 'transparent', borderColor: chartTheme.tick, borderWidth: 1, borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8,
@@ -1475,7 +1509,7 @@ function renderShare() {
   })
 }
 
-// --- footprint: point-in-time structure, coloured by entity ---------------
+// --- footprint: point-in-time structure, one measure or a pair per row ------
 function renderPartsBy() {
   const sorted = [...rows.value].sort((a, b) => b.now.partitions - a.now.partitions)
   const labels = sorted.map((r) => r.name)
@@ -1518,7 +1552,7 @@ function renderStructure() {
   const options = barBase(labels, drillOn(sorted))
   options.layout.padding.right = 150 // room for "21 queues · 30 groups"
   options.plugins = {
-    legend: { display: false },
+    legend: { display: true, position: 'top', align: 'end' },
     tooltip: {
       callbacks: {
         label: (c) => ` ${c.dataset.label}: ${fmt.n(c.parsed.x)}`,
@@ -1535,8 +1569,8 @@ function renderStructure() {
     data: {
       labels,
       datasets: [
-        { label: 'queues', data: sorted.map((r) => r.queues || 0), backgroundColor: barInkLead(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
-        { label: 'consumer groups', data: sorted.map((r) => r.now.groups), backgroundColor: barInk(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'queues', data: sorted.map((r) => r.queues || 0), backgroundColor: measureInk(0), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'consumer groups', data: sorted.map((r) => r.now.groups), backgroundColor: measureInk(1), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
       ],
     },
     options,
@@ -1573,7 +1607,7 @@ function renderChurn() {
   const options = barBase(labels, drillOn(sorted))
   options.scales.x.ticks.callback = (v) => fmt.k(v)
   options.plugins = {
-    legend: { display: false },
+    legend: { display: true, position: 'top', align: 'end' },
     tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${fmt.n(c.parsed.x)}` } },
     endLabels: {
       format: (i) => {
@@ -1588,8 +1622,8 @@ function renderChurn() {
     data: {
       labels,
       datasets: [
-        { label: 'created', data: sorted.map((r) => r.window.partitionsCreated || 0), backgroundColor: barInkLead(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
-        { label: 'deleted', data: sorted.map((r) => r.window.partitionsDeleted || 0), backgroundColor: alpha(chartPalette[2].line, 0.7), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'created', data: sorted.map((r) => r.window.partitionsCreated || 0), backgroundColor: measureInk(0), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'deleted', data: sorted.map((r) => r.window.partitionsDeleted || 0), backgroundColor: measureInk(1, 0.7), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
       ],
     },
     options,
@@ -2261,7 +2295,7 @@ function renderBatch() {
   const options = narrow(barBase(labels, null), labels)
   options.scales.x.title = { display: true, text: 'messages per request', font: { size: 10 } }
   options.plugins = {
-    legend: { display: false },
+    legend: { display: true, position: 'top', align: 'end' },
     tooltip: {
       callbacks: {
         label: (c) => {
@@ -2284,8 +2318,8 @@ function renderBatch() {
     data: {
       labels,
       datasets: [
-        { label: 'push', data: rows.map((r) => r.pushBatch), backgroundColor: alpha(chartPalette[0].line, 0.85), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
-        { label: 'ack', data: rows.map((r) => r.ackBatch), backgroundColor: alpha(chartPalette[1].line, 0.85), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'push', data: rows.map((r) => r.pushBatch), backgroundColor: measureInk(0), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'ack', data: rows.map((r) => r.ackBatch), backgroundColor: measureInk(1), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
       ],
     },
     options,
@@ -2358,8 +2392,8 @@ function renderRet() {
     data: {
       labels,
       datasets: [
-        { label: 'age retention', data: rows.map((r) => r.retention), backgroundColor: alpha(chartPalette[1].line, 0.85), borderRadius: 2 },
-        { label: 'completed', data: rows.map((r) => r.completed), backgroundColor: alpha(chartPalette[2].line, 0.85), borderRadius: 2 },
+        { label: 'age retention', data: rows.map((r) => r.retention), backgroundColor: measureInk(0), borderRadius: 2 },
+        { label: 'completed', data: rows.map((r) => r.completed), backgroundColor: measureInk(1), borderRadius: 2 },
         // Evicted is loss by policy, so it is the only ember on the card.
         { label: 'evicted', data: rows.map((r) => r.eviction), backgroundColor: alpha(semanticColors.bad.line, 0.9), borderRadius: 2 },
       ],
@@ -2437,8 +2471,8 @@ function renderParts() {
     data: {
       labels,
       datasets: [
-        { label: 'total', data: rows.map((r) => r.partitions), backgroundColor: alpha(chartPalette[2].line, 0.6), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
-        { label: 'live 24h', data: rows.map((r) => r.live24h), backgroundColor: alpha(chartPalette[0].line, 0.85), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'total', data: rows.map((r) => r.partitions), backgroundColor: measureInk(0, 0.6), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'live 24h', data: rows.map((r) => r.live24h), backgroundColor: measureInk(1), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
       ],
     },
     options,

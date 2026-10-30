@@ -89,22 +89,22 @@ watch(pickKey, () => { sheetOpen.value = false })
 .ss-tools .input { width: 100%; height: 32px; font-size: 12.5px; }
 .ss-pair { display: flex; gap: 6px; }
 .ss-pair .input { min-width: 0; }
-.ss-group { display: flex; flex-direction: column; gap: 5px; padding: 0 10px 8px; }
+.ss-group { display: flex; flex-direction: column; gap: 1px; padding: 0 8px 8px; }
 .ss-label { padding: 10px 10px 4px; font-size: 11px; font-weight: 500; color: var(--text-low); }
+/* A plain row: no frame. Hovered, a grey fill; picked, the rail's yellow
+   tint with its name and icon yellow. A frame on every row turns a long list
+   into a wall. */
 .ss-row {
   display: flex; align-items: center; gap: 10px;
-  min-height: 34px; padding: 0 10px; border-radius: 8px;
-  border: 1px solid var(--bd); background: transparent; width: 100%; text-align: left; font: inherit; cursor: pointer;
+  min-height: 32px; padding: 0 10px; border-radius: 7px;
+  border: 1px solid transparent; background: transparent; width: 100%; text-align: left; font: inherit; cursor: pointer;
   color: var(--text-mid); text-decoration: none; font-size: 13px;
-  transition: border-color .12s, box-shadow .12s;
+  transition: background-color .12s, border-color .12s;
 }
-.ss-row:hover { border-color: var(--bd-hi); }
+.ss-row:hover { background: var(--ink-3); }
 .ss-row:hover .ss-name { color: var(--text-hi); }
-.ss-row.on, .ss-row.on:hover {
-  background: transparent;
-  border-color: var(--accent-text); box-shadow: inset 0 0 0 0.5px var(--accent-text);
-}
-.ss-row.on .ss-name { color: var(--text-hi); font-weight: 500; }
+.ss-row.on, .ss-row.on:hover { background: var(--selected); }
+.ss-row.on .ss-name { color: var(--accent-text); font-weight: 500; }
 .ss-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ss-mark { flex: none; width: 8px; display: inline-flex; justify-content: center; }
 /* A row's icon: the text's quiet grey, the name's ink on hover and when picked.

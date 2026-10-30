@@ -1,11 +1,13 @@
 // Chart theme — single source of truth for all Chart.js colors.
 //
-// Philosophy: monochrome by default. Red / green / yellow are reserved for
-// status: failing → red, healthy / success / completed → green, degrading →
-// yellow. They are NEVER assigned by series index, and never by what a series
-// is CALLED — a series named "DLQ", "errors" or "evicted" is not red for being
-// named that. Charts that just need to tell N series apart use the grey ramp
-// below; the legend / tooltip carries the rest of the meaning.
+// Philosophy: monochrome by default. Amber and coral are reserved for status:
+// degrading → amber, failing → coral; healthy is grey. They are NEVER
+// assigned by series index, and never by what a series is CALLED — a series
+// named "DLQ", "errors" or "evicted" is not coral for being named that. One
+// series is grey. Several in one chart take linePalette (ink, then hues), and
+// entities compared across charts take categoryPalette: a hue says "another
+// series" or "this entity", never a verdict. The legend / tooltip carries the
+// rest of the meaning.
 //
 // A chart's tone comes from the same place a number's does: the rules in
 // composables/useSeverity, which judge a rate against the work in the window
@@ -47,11 +49,11 @@ const FALLBACK = {
   '--series-3': '#6b6661',
   '--series-4': '#c4beb6',
   '--series-5': '#4f4b47',
-  '--cat-1': '#7f9fd0',
-  '--cat-2': '#6fb3a3',
-  '--cat-3': '#b092d0',
-  '--cat-4': '#a3b56f',
-  '--cat-5': '#d08fae',
+  '--cat-1': '#3987e5',
+  '--cat-2': '#199e70',
+  '--cat-3': '#9085e9',
+  '--cat-4': '#d55181',
+  '--cat-5': '#008300',
 }
 
 // Resolved from the live document, then cached. Chart.js option objects are
@@ -93,26 +95,42 @@ export const alpha = (color, a) => {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`
 }
 
-// Cycling series palette — all greys, no semantic colors. Use chartColor(i)
-// or chartColors[i] for generic N-series charts where index has no health
-// meaning (per-replica, per-queue, push/pop/ack split, etc). The order
-// alternates light/dark on purpose so ADJACENT indices stay apart: sorted by
-// luminance the ramp steps 1.65×–2.10× between neighbours. In light mode the
-// ramp inverts (dark greys on a white card) and keeps the same separation.
+// Cycling series palette — all greys, no semantic colors. A single series
+// takes one of these; so does "Other", the tail past the categorical hues.
+// Several series in one chart take linePalette below instead: on this ramp
+// alone three lines read as one. The order alternates light/dark on purpose
+// so ADJACENT indices stay apart: sorted by luminance the ramp steps
+// 1.65×–2.10× between neighbours. In light mode the ramp inverts (dark greys
+// on a white card) and keeps the same separation.
 const SERIES = ['--series-1', '--series-2', '--series-3', '--series-4', '--series-5']
 
 export const chartPalette = reactive(SERIES.map(() => ({ line: '', fill: '' })))
 
-// Categorical hues — the one place a colour is assigned by IDENTITY rather
-// than by status: charts that compare entities (the namespaces of a tenant,
-// the tasks of a namespace) across a stacked area, a bar chart and a heat map,
-// where a grey ramp cannot keep five series apart. Fixed order, never cycled:
-// a sixth entity is grey, and the caller owns the entity → slot map
-// (composables/useCategoryColors) so a colour follows its namespace, not its
-// rank. Both token sets pass the six data-viz checks on their card surface.
+// Categorical hues — blue, aqua, violet, magenta, green — the one place a
+// colour is assigned by IDENTITY rather than by status: charts that compare
+// entities (the namespaces of a tenant, the queues of a namespace) across a
+// stacked area and a heat map, where a grey ramp cannot keep five series
+// apart. Fixed order, never cycled: a sixth entity is grey ("Other"), and the
+// caller owns the entity → slot map (composables/useCategoryColors) so a
+// colour follows its namespace, not its rank. Both token sets pass the
+// dataviz validator on their card surface (#1c1b19 dark, #ffffff light) for
+// NEIGHBOURING slots only — aqua beside magenta collapses for deuteranopes,
+// blue beside violet is too close for anyone — so draw a stack in slot order.
 const CATEGORY = ['--cat-1', '--cat-2', '--cat-3', '--cat-4', '--cat-5']
 
 export const categoryPalette = reactive(CATEGORY.map(() => ({ line: '', fill: '' })))
+
+// Measures told apart in one chart — push / pop / ack, average / peak, each
+// node of a cell, the two bars of a row — take the ink first, then the
+// categorical hues in their order: ink, blue, aqua, violet, magenta. On the
+// grey ramp alone three lines read as one (2026-10-30). Every neighbour here
+// is a pair the validator passed (the ink is apart from every hue), so take
+// them in order, by the measure's place rather than by which ones are drawn.
+// A single series keeps its grey or its status tone, so a hue only ever says
+// "another series" or "this entity".
+const LINES = ['--series-1', '--cat-1', '--cat-2', '--cat-3', '--cat-4']
+
+export const linePalette = reactive(LINES.map(() => ({ line: '', fill: '' })))
 
 // Semantic colors — call by name when the data itself carries a VERDICT.
 // Do not cycle through these, and do not reach for one because a series sounds
@@ -179,6 +197,11 @@ export const refreshChartTheme = () => {
     categoryPalette[i].fill = alpha(t(name), 0.35)
   })
 
+  LINES.forEach((name, i) => {
+    linePalette[i].line = t(name)
+    linePalette[i].fill = alpha(t(name), 0.1)
+  })
+
   semanticColors.ok.line = t('--ok-500')
   semanticColors.ok.fill = alpha(t('--ok-500'), 0.12)
   semanticColors.warn.line = t('--warn-400')
@@ -234,6 +257,8 @@ export const stateColor = (label) => {
 
 // Convenience accessors used throughout views / Chart.js configs.
 export const chartColor = (i) => chartPalette[i % chartPalette.length]
+/** The colour of measure `i` of several in one chart, line or bar (linePalette). */
+export const lineColor = (i) => linePalette[i % linePalette.length]
 
 // Helper: build a backgroundColor array for bar/doughnut series by label.
 export const seriesBackgrounds = (labels, variant = 'fill') =>

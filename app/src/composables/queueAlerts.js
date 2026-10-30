@@ -4,12 +4,14 @@
 //
 //   no reader      the queue holds messages nothing is set up to read
 //   behind         a live consumer group of this queue past its lag lines
+//   acks failing   its acks over the last hour, past the queue's ack lines
 //
 // Each alert names the tab where it is worked on. Worst first, then by name.
 //
 // Pure: no Vue, no '@/' imports, so test/queue-alerts.test.js pins it directly.
 import { formatSpan } from './settingsDoc.js'
-import { groupAttention, queueAttention } from './useAttention.js'
+import { acksText } from './queueOps.js'
+import { ackAttention, groupAttention, queueAttention } from './useAttention.js'
 
 const QUEUE_MODE = '__QUEUE_MODE__'
 const RANK = { bad: 0, warn: 1 }
@@ -22,13 +24,29 @@ const num = (v) => {
 /** A consumer group as a person names it: queue mode has no name of its own. */
 export const groupLabel = (g) => (g?.name === QUEUE_MODE ? 'Queue mode' : String(g?.name ?? ''))
 
-/** `[{ key, sev, title, detail, tab }]` for one queue row of the queues listing. */
-export function queueAlerts(queue, groups = [], linesFor) {
+/**
+ * `[{ key, sev, title, detail, tab }]` for one queue row of the queues listing.
+ * `ops` is queueOpsStore's Map (the hour per queue); without it acks are not judged.
+ */
+export function queueAlerts(queue, groups = [], linesFor, ops = null) {
   if (!queue?.name) return []
   const mine = (groups || []).filter((g) => g?.queueName === queue.name)
   const out = []
 
-  const [verdict] = queueAttention([queue], mine, linesFor)
+  const [verdict] = queueAttention([queue], mine, linesFor, ops)
+  const acks = ackAttention(queue.name, linesFor, ops)
+  if (acks.sev) {
+    const dead = acks.hour?.deadLetter
+    out.push({
+      key: 'acks',
+      sev: acks.sev,
+      title: 'Its acks are failing',
+      detail: `${acksText(acks.hour)} in the last hour${dead ? `; ${dead.toLocaleString('en-US')} in dead letter` : ''}.`,
+      // The numbers alone, for a one-line note (the queue's Overview tab).
+      brief: `${acksText(acks.hour)} in the last hour`,
+      tab: 'failed',
+    })
+  }
   if (verdict?.reason === 'noReader') {
     const pending = num(queue.messages?.pending) || 0
     out.push({

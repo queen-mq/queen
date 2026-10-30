@@ -6,11 +6,11 @@
          "by criteria" across the whole dead letter is not offered. -->
     <template v-if="canAdmin && filterQueue.trim()" #actions>
       <button
-        class="btn btn-danger"
+        class="btn btn-ghost"
         :disabled="bulkPurging"
         :title="bulkPurgeButtonTitle"
         @click="openBulkPurge"
-      >Purge by criteria</button>
+      >Purge by criteria…</button>
     </template>
   <div class="view-container dlq">
 
@@ -42,54 +42,40 @@
       </template>
     </PageTools>
 
-    <!-- What an operator opens this page for is WHICH failure is dominating,
-         so that is the only summary: the broker reports no dead-letter total,
-         and a tally of the page would dress a page-sized fact as a
-         queue-sized one. Drawn only with rows to describe. -->
-    <div v-if="pageMessages.length" class="card">
+    <!-- What an operator opens this page for is WHY the messages failed: one
+         row per kind of error, worst first, the text in full. With a queue
+         picked the kinds are the broker's, over the queue's newest dead
+         letters (composables/dlqWhy); without one, the page's. A row narrows
+         the table below to its messages on this page. -->
+    <div v-if="why.length" class="card">
       <div class="card-header">
-        <h3>Failure breakdown</h3>
-        <span class="card-sub tabular-nums">{{ errorGroups.length }} {{ errorGroups.length === 1 ? 'error' : 'errors' }} · {{ formatNumber(pageMessages.length) }} {{ pageMessages.length === 1 ? 'message' : 'messages' }} on this page</span>
+        <h3>Why they failed</h3>
+        <span class="card-sub tabular-nums">{{ whyScopeText }}</span>
       </div>
-      <div class="card-body dlq-breakdown">
-        <!-- The shape of the failure in one strip: one recurring fault, or a
-             long tail of unrelated ones. Each bar filters the table. -->
-        <div class="dlq-dist">
+      <ul class="dlq-why" :aria-label="`${why.length} ${why.length === 1 ? 'kind of error' : 'kinds of error'}`">
+        <li v-for="r in visibleWhy" :key="r.key">
           <button
-            v-for="seg in distribution"
-            :key="seg.error"
             type="button"
-            class="dlq-dist-seg"
-            :class="{ 'dlq-dist-seg-on': errorFilter === seg.error }"
-            :style="{ width: seg.share * 100 + '%', opacity: segmentOpacity(seg) }"
-            :title="`${seg.count} · ${seg.error === TAIL_SEGMENT ? 'the other errors' : seg.error}`"
-            :aria-label="`${seg.count} messages: ${seg.error === TAIL_SEGMENT ? 'the other errors' : seg.error}`"
-            @click="toggleErrorFilter(seg.error)"
-          />
-        </div>
-
-        <!-- Two columns, each row a filter for the table below. -->
-        <div class="dlq-err-grid">
-          <button
-            v-for="entry in visibleErrorGroups"
-            :key="entry.error"
-            type="button"
-            class="dlq-err"
-            :class="{ 'dlq-err-on': errorFilter === entry.error }"
-            :title="entry.error"
-            :aria-pressed="errorFilter === entry.error"
-            @click="toggleErrorFilter(entry.error)"
+            class="dlq-why-row"
+            :class="{ on: errorFilter !== null && errorFilter === r.filter }"
+            :disabled="r.filter === null"
+            :aria-pressed="errorFilter !== null && errorFilter === r.filter"
+            :title="r.filter === null ? 'No message on this page has this error' : (errorFilter === r.filter ? 'Show every message' : 'Show only these messages on this page')"
+            @click="toggleErrorFilter(r.filter)"
           >
-            <span class="dlq-err-count tabular-nums">{{ entry.count }}</span>
-            <span class="dlq-err-text">{{ entry.error }}</span>
+            <span class="dlq-why-share tabular-nums">{{ sharePct(r.share) }}</span>
+            <span class="dlq-why-body">
+              <span class="dlq-why-text">{{ r.text }}{{ r.cut ? '…' : '' }}</span>
+              <span v-if="why.length > 1" class="dlq-why-bar" aria-hidden="true"><span :style="{ width: Math.max(2, r.share * 100) + '%' }" /></span>
+            </span>
+            <span class="dlq-why-n tabular-nums">{{ formatNumber(r.n) }}</span>
           </button>
-        </div>
-
-        <div v-if="errorGroups.length > COLLAPSED_ERRORS" class="dlq-err-more">
-          <button type="button" class="dlq-link" @click="showAllErrors = !showAllErrors">
-            {{ showAllErrors ? `Show the top ${COLLAPSED_ERRORS}` : `Show all ${errorGroups.length}` }}
-          </button>
-        </div>
+        </li>
+      </ul>
+      <div v-if="why.length > COLLAPSED_ERRORS" class="dlq-why-more">
+        <button type="button" class="dlq-link" @click="showAllErrors = !showAllErrors">
+          {{ showAllErrors ? `Show the top ${COLLAPSED_ERRORS}` : `Show all ${why.length}` }}
+        </button>
       </div>
     </div>
 
@@ -113,7 +99,7 @@
               <th>Transaction ID</th>
               <th v-if="!filterQueue">Queue</th>
               <th>Consumer group</th>
-              <th>Error</th>
+              <th v-if="showErrorColumn">Error</th>
               <th class="r">Retries</th>
               <th class="r">Failed</th>
               <th v-if="canAdmin" class="r"><span class="sr-only">Actions</span></th>
@@ -127,7 +113,7 @@
                 <td><div class="skeleton" style="height:14px; width:112px;" /></td>
                 <td v-if="!filterQueue"><div class="skeleton" style="height:14px; width:88px;" /></td>
                 <td><div class="skeleton" style="height:14px; width:104px;" /></td>
-                <td><div class="skeleton" style="height:14px; width:168px;" /></td>
+                <td v-if="showErrorColumn"><div class="skeleton" style="height:14px; width:168px;" /></td>
                 <td><div class="skeleton" style="height:14px; width:24px; margin-left:auto;" /></td>
                 <td><div class="skeleton" style="height:14px; width:56px; margin-left:auto;" /></td>
                 <td v-if="canAdmin"><div class="skeleton" style="height:14px; width:96px; margin-left:auto;" /></td>
@@ -147,10 +133,10 @@
                 @click="selectMessage(msg)"
                 @keydown.enter.prevent="selectMessage(msg)"
               >
-                <td><span class="dlq-cut dlq-txn" :title="msg.transactionId || msg.id">{{ msg.transactionId || msg.id || '—' }}</span></td>
+                <td><span class="dlq-txn" :title="msg.transactionId || msg.id">{{ midCut(msg.transactionId || msg.id || '—') }}</span></td>
                 <td v-if="!filterQueue"><span class="dlq-cut dlq-queue" :title="msg.queue">{{ msg.queue || '—' }}</span></td>
                 <td><span class="dlq-cut dlq-group-name" :title="msg.consumerGroup">{{ msg.consumerGroup || '—' }}</span></td>
-                <td><span class="dlq-cut dlq-err-cell" :title="msg.errorMessage">{{ msg.errorMessage || '—' }}</span></td>
+                <td v-if="showErrorColumn"><span class="dlq-cut dlq-err-cell" :title="msg.errorMessage">{{ msg.errorMessage || '—' }}</span></td>
                 <td class="r dlq-num">{{ msg.retryCount ?? '—' }}</td>
                 <td class="r dlq-when" :title="formatTimestampUtc(msg.failedAt)">{{ formatRelativeTime(msg.failedAt) }}</td>
                 <td v-if="canAdmin" class="r dlq-actions" @click.stop @keydown.enter.stop>
@@ -478,7 +464,8 @@ import { useRoute } from 'vue-router'
 import { useRouteState } from '@/composables/useRouteState'
 import { queueLocation } from '@/composables/navigation'
 const route = useRoute()
-import { dlq, queues as queuesApi, describeApiError } from '@/api'
+import { dlq, queues as queuesApi, system, describeApiError } from '@/api'
+import { midCut, whyRows, whyScope } from '@/composables/dlqWhy'
 import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
 import { formatDlqMarkdown } from '@/composables/useDlqMarkdown'
 import { dlqRowKey, replayRequest, replayVerdict } from '@/composables/useDlqReplay'
@@ -502,12 +489,8 @@ import { useGroupsStore } from '@/stores/groupsStore'
 const { can, epoch, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 const { notifySuccess, notifyInfo, notifyWarn, notifyError } = useToast()
 
-/** Error groups shown before the breakdown has to be expanded. Two columns, so
-    an even number keeps the grid square. */
+/** Kinds of error shown before "Why they failed" has to be expanded. */
 const COLLAPSED_ERRORS = 6
-/** Bars in the distribution strip; everything past this merges into one tail. */
-const DIST_SEGMENTS = 8
-const TAIL_SEGMENT = '__tail__'
 /** Errors the broker sent with no text: still a group, and still says so. */
 const NO_ERROR_TEXT = '(no error text recorded)'
 
@@ -698,7 +681,7 @@ const bulkPurgeButtonTitle = computed(() => (
 ))
 
 // ---------------------------------------------------------------------------
-// Failure breakdown — the page's only summary, and the table's filter
+// Why they failed — the page's kinds of error, and the table's filter
 // ---------------------------------------------------------------------------
 
 /** Every group is computed over the PAGE, never over the filtered view: a
@@ -715,44 +698,44 @@ const errorGroups = computed(() => {
     .sort((a, b) => b.count - a.count || a.error.localeCompare(b.error))
 })
 
-const visibleErrorGroups = computed(
-  () => (showAllErrors.value ? errorGroups.value : errorGroups.value.slice(0, COLLAPSED_ERRORS))
-)
-
-/** Segments of the distribution strip: the top groups, then one bar for the
-    tail, so the widths always add up to the page. */
-const distribution = computed(() => {
-  const head = errorGroups.value.slice(0, DIST_SEGMENTS)
-  const segments = head.map((entry, i) => ({
-    ...entry,
-    // The palette carries one "bad" hue, so rank is stepped in opacity.
-    opacity: Math.max(0.32, 1 - i * 0.11),
-  }))
-  const tail = errorGroups.value.slice(DIST_SEGMENTS)
-  if (tail.length) {
-    const count = tail.reduce((sum, e) => sum + e.count, 0)
-    segments.push({
-      error: TAIL_SEGMENT,
-      count,
-      share: count / (pageMessages.value.length || 1),
-      opacity: 0.22,
-    })
-  }
-  return segments
+// Why the picked queue's messages failed: the broker folds the errors of its
+// newest dead letters into signatures (one request, refreshed with the page).
+// Quiet: a broker without the route keeps the page's own breakdown.
+const whyPanel = useApi((params, config) => system.getDlqSignatures(params, { ...config, probe: true, quiet: true }), { immediate: false })
+const whyAnswer = computed(() => {
+  const d = whyPanel.data.value
+  return d && filterQueue.value && d.queue === filterQueue.value ? d : null
 })
-
-/** A selection mutes every other bar, so the strip reads as "this slice of the
-    page" instead of staying a full-width chart of something else. */
-const segmentOpacity = (seg) => {
-  if (!errorFilter.value) return seg.opacity
-  return errorFilter.value === seg.error ? 1 : 0.14
+const fetchWhy = () => (filterQueue.value
+  ? whyPanel.execute({ queue: filterQueue.value }).catch(() => {})
+  : Promise.resolve())
+const why = computed(() => (pageMessages.value.length || whyAnswer.value
+  ? whyRows(whyAnswer.value, errorGroups.value, pageMessages.value)
+  : []))
+const visibleWhy = computed(() => (showAllErrors.value ? why.value : why.value.slice(0, COLLAPSED_ERRORS)))
+const clock = (iso) => {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const sameDay = d.toDateString() === new Date().toDateString()
+  return sameDay
+    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+const whyScopeText = computed(() => whyScope(whyAnswer.value, pageMessages.value.length, clock))
+const sharePct = (share) => {
+  const p = (Number(share) || 0) * 100
+  return p >= 99.5 ? '100%' : p < 1 ? '<1%' : `${Math.round(p)}%`
 }
 
 /** Toggle, not set: a second click on the active error clears the filter. */
 const toggleErrorFilter = (error) => {
-  if (error === TAIL_SEGMENT) return
+  if (error === null || error === undefined) return
   errorFilter.value = errorFilter.value === error ? null : error
 }
+
+// The Error column says something only when the rows on screen differ in it:
+// one kind of error is said once, in "Why they failed".
+const showErrorColumn = computed(() => !errorFilter.value && errorGroups.value.length > 1)
 
 // The groups to offer: the picked queue's from the app's one group listing
 // (every queue's when none is picked), and any this page shows.
@@ -767,7 +750,7 @@ const groupSuggestions = computed(() => {
 
 const hasFilters = computed(() => Boolean(filterQueue.value || filterGroup.value || errorFilter.value))
 // The Queue column names what the list beside has not picked.
-const columns = computed(() => 5 + (filterQueue.value ? 0 : 1) + (canAdmin.value ? 1 : 0))
+const columns = computed(() => 4 + (showErrorColumn.value ? 1 : 0) + (filterQueue.value ? 0 : 1) + (canAdmin.value ? 1 : 0))
 // Against the page, not the filtered view: an error filter narrows what is on
 // screen, it does not tell us the broker has no further page.
 const canPageForward = computed(
@@ -1052,7 +1035,7 @@ const submitReplay = async () => {
 
 // One shared ticker for the whole app (paused while the tab is hidden) instead
 // of a private setInterval: under the proxy every poll is metered.
-useRefresh(fetchMessages, { auto: true })
+useRefresh(() => Promise.all([fetchMessages(), fetchWhy()]), { auto: true })
 
 watch([filterQueue, pageSize, filterGroup, page], (values, previous) => {
   if (restoringRoute.value) fetchMessages()
@@ -1062,12 +1045,14 @@ watch([filterQueue, pageSize, filterGroup, page], (values, previous) => {
     page.value = 1
     fetchMessages()
   }
+  if (values[0] !== previous[0]) fetchWhy()
 })
 
 // In setup, not onMounted: the first paint must be the loading state, not the
 // "dead letter queue is empty" state we have not asked about yet.
 refreshQueues()
 fetchMessages()
+fetchWhy()
 </script>
 
 <style scoped>
@@ -1079,35 +1064,29 @@ fetchMessages()
    chevron and clear button, and the whole width. */
 .dlq-group :deep(.ac-input) { width: 100%; padding-right: 28px; }
 
-/* --- Failure breakdown: a strip, then two columns of filters ---------------- */
-.dlq-breakdown { display: flex; flex-direction: column; gap: 12px; }
-.dlq-dist { display: flex; align-items: stretch; gap: 2px; height: 6px; }
-/* Every segment is a failure, so the bar is ink; the SELECTED one stands out. */
-.dlq-dist-seg {
-  height: 100%; min-width: 3px; padding: 0; border: none; cursor: pointer;
-  border-radius: 2px; background: var(--text-low);
-  transition: background .12s var(--ease), transform .12s var(--ease);
+/* --- Why they failed: one row per kind of error, the text in full ---------- */
+.dlq-why { list-style: none; margin: 0; padding: 4px 0; }
+.dlq-why li + li { border-top: 1px solid var(--bd-soft); }
+.dlq-why-row {
+  display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: start; gap: 14px;
+  width: 100%; padding: 10px 16px; border: 0; background: none; text-align: left; font: inherit; cursor: pointer;
+  transition: background-color .12s var(--ease);
 }
-.dlq-dist-seg:hover { background: var(--text-mid); transform: scaleY(1.5); }
-.dlq-dist-seg-on { background: var(--text-hi); transform: scaleY(1.5); }
-
-.dlq-err-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 16px; }
-@media (max-width: 900px) { .dlq-err-grid { grid-template-columns: minmax(0, 1fr); } }
-.dlq-err {
-  display: flex; align-items: baseline; gap: 8px; width: 100%; min-height: 28px;
-  padding: 4px 8px; border-radius: var(--r-control);
-  border: 1px solid transparent; background: none; cursor: pointer; text-align: left;
-  transition: background .12s var(--ease);
+.dlq-why-row:hover:not(:disabled) { background: var(--ink-3); }
+.dlq-why-row.on, .dlq-why-row.on:hover { background: var(--selected); }
+.dlq-why-row:disabled { cursor: default; }
+.dlq-why-row:focus-visible { outline-offset: -2px; }
+.dlq-why-share { font-size: 13px; font-weight: 600; color: var(--text-hi); text-align: right; line-height: 20px; }
+.dlq-why-body { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.dlq-why-text {
+  font-family: var(--font-mono); font-size: 12px; line-height: 20px; color: var(--text-hi);
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.dlq-err:hover { background: var(--ink-3); }
-.dlq-err-on, .dlq-err-on:hover { background: var(--selected); }
-.dlq-err-count { min-width: 32px; text-align: right; flex-shrink: 0; font-size: 13px; color: var(--text-hi); }
-.dlq-err-text {
-  flex: 1; min-width: 0;
-  font-family: var(--font-mono); font-size: 12px; color: var(--text-hi);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.dlq-err-more { display: flex; }
+.dlq-why-bar { display: block; height: 3px; border-radius: 2px; background: var(--ink-4); overflow: hidden; }
+.dlq-why-bar > span { display: block; height: 100%; background: var(--text-low); border-radius: 2px; }
+.dlq-why-row.on .dlq-why-bar > span { background: var(--text-hi); }
+.dlq-why-n { font-size: 12px; color: var(--text-low); line-height: 20px; white-space: nowrap; }
+.dlq-why-more { display: flex; padding: 4px 16px 12px 74px; }
 .dlq-link {
   padding: 0; border: none; background: none; cursor: pointer;
   font-size: 12px; color: var(--text-low); transition: color .12s var(--ease);
@@ -1134,7 +1113,7 @@ fetchMessages()
 .dlq-row.dlq-row-on td { background: var(--selected); }
 /* Long ids, names and errors end in an ellipsis; the whole is the tooltip. */
 .dlq-cut { display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-.dlq-txn { max-width: 160px; font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); }
+.dlq-txn { font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); white-space: nowrap; }
 .dlq-queue { max-width: 200px; font-weight: 500; color: var(--text-hi); }
 .dlq-group-name { max-width: 180px; color: var(--text-mid); }
 /* The error is the column the page exists for: strongest ink, no hue. */
@@ -1144,6 +1123,12 @@ fetchMessages()
 .dlq-actions { width: 1%; }
 .dlq-row-btn { padding: 3px 8px; font-size: 12px; }
 .dlq-row-btn + .dlq-row-btn { margin-left: 4px; }
+/* A row's Replay and Purge appear on the row under the pointer (or with
+   focus inside it), not on every row at once. Touch screens keep them. */
+@media (hover: hover) {
+  .dlq-row .dlq-row-btn { opacity: 0; transition: opacity .12s var(--ease); }
+  .dlq-row:hover .dlq-row-btn, .dlq-row:focus-within .dlq-row-btn, .dlq-row.dlq-row-on .dlq-row-btn { opacity: 1; }
+}
 .dlq-row-err { margin-top: 4px; max-width: 260px; margin-left: auto; white-space: normal; text-align: right; font-size: 12px; color: var(--ember-400); }
 
 /* --- Drawer and modals ------------------------------------------------------ */

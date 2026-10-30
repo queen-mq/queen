@@ -45,138 +45,35 @@
 
       <!-- =================== OVERVIEW: the cell at a glance =================== -->
       <div v-else-if="view === 'overview'" class="sys-stack">
-        <section class="card sys-status" aria-label="Status of the cell">
-          <div class="sys-verdict">
-            <span class="sys-verdict-word" :class="verdict.tone"><span v-if="verdict.tone" class="g" :class="verdict.tone" aria-hidden="true" />{{ verdict.word }}</span>
-            <h2 class="sys-verdict-title" :title="verdict.headline">{{ verdict.headline }}</h2>
-            <p v-if="verdictLine" class="sys-verdict-line">{{ verdictLine }}</p>
-          </div>
-          <div v-for="c in statusCells" :key="c.k" class="sys-kpi" :title="c.title">
-            <span class="sys-kpi-k">{{ c.k }}</span>
-            <span class="sys-kpi-v" :class="c.tone">{{ c.v }}</span>
-          </div>
-        </section>
+        <CellStatus
+          :cell="cell"
+          :issues="issueLinks"
+          :note="nodesNote"
+          full
+          :members="memberRows"
+          :node-to="nodeTo"
+          :stamp-text="stamp(raftMembers)"
+        />
 
-        <section class="card" aria-labelledby="sys-att-title">
-          <div class="card-header"><h3 id="sys-att-title">Needs attention</h3></div>
-          <div v-if="!cell" class="sys-quiet">{{ nodesNote }}</div>
-          <div v-else-if="!issueList.length" class="sys-quiet">Nothing needs you</div>
-          <ul v-else class="sys-issues">
-            <li v-for="i in issueList" :key="i.key">
-              <router-link class="sys-issue" :to="i.view ? viewTo(i.view) : i.to">
-                <span class="g" :class="i.sev" aria-hidden="true" />
-                <span class="sys-issue-text"><span class="sys-issue-title">{{ i.title }}</span><span class="sys-issue-why">{{ i.why }}</span></span>
-                <Icon name="chevron-right" :size="14" class="sys-issue-go" />
-              </router-link>
-            </li>
-          </ul>
-        </section>
-
-        <section v-if="cell" class="card" aria-labelledby="sys-now-title">
-          <div class="card-header">
-            <h3 id="sys-now-title">Each node now</h3>
-            <span class="muted">{{ stamp(raftMembers) }}</span>
-          </div>
-          <div class="table-container">
-            <table class="t sys-table">
-              <thead>
-                <tr>
-                  <th>Node</th>
-                  <th>Raft</th>
-                  <th class="num" title="Of the cores the node may use">CPU</th>
-                  <th class="num" title="Of the node's memory limit">Memory</th>
-                  <th class="num" title="Of the data disk">Disk</th>
-                  <th class="num">Network in / out</th>
-                  <th class="num" title="Bytes over the Raft port">Raft out / in</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="n in nowRows" :key="n.name">
-                  <td><router-link class="sys-node-link" :to="nodeTo(n.name)">{{ n.name }}</router-link></td>
-                  <td :class="n.roleTone">{{ n.role }}</td>
-                  <td class="num" :class="n.cpu.tone">{{ n.cpu.text }}</td>
-                  <td class="num" :class="n.mem.tone">{{ n.mem.text }}</td>
-                  <td class="num" :class="n.disk.tone">{{ n.disk.text }}</td>
-                  <td class="num">{{ n.net }}</td>
-                  <td class="num">{{ n.raft }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </div>
-
-      <!-- =================== NODES: who they are, and their last sample =================== -->
-      <div v-else-if="view === 'nodes'" class="sys-stack">
-        <div v-if="raftMembers.failed.value && !raftMembersAbsent" class="status-banner banner-bad view-banner">
-          <span :title="formatTimestampUtc(raftMembers.lastUpdated.value)"><strong>Could not load the Raft cluster</strong> · {{ describeRaftFailure(raftMembers.error.value) }}<template v-if="raftMembers.data.value"> · showing the last members{{ raftMembers.lastUpdated.value ? ` (${formatTimestamp(raftMembers.lastUpdated.value)})` : '' }}</template></span>
+        <!-- Each node over the range: four charts, each opening its view. -->
+        <div class="sys-ov-head">
+          <span class="sys-ov-label">Each node over time</span>
+          <UiSelect v-model="rangeChoice" label="Range" :options="shortRangeOptions" aria-label="Time range" size="sm" />
         </div>
-
-        <section class="card" aria-labelledby="sys-nodes-title">
-          <div class="card-header">
-            <h3 id="sys-nodes-title">Members</h3>
-            <span class="muted">{{ stamp(raftMembers) }}</span>
-          </div>
-          <div v-if="!memberRows.length" class="sys-quiet">{{ nodesNote }}</div>
-          <div v-else class="table-container">
-            <table class="t sys-table">
-              <thead>
-                <tr>
-                  <th>Node</th>
-                  <th>Role</th>
-                  <th>Version</th>
-                  <th class="num">Up</th>
-                  <th>HTTP</th>
-                  <th>Raft address</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="m in memberRows" :key="m.name">
-                  <td><span class="sys-host">{{ m.name }}</span></td>
-                  <td :class="m.roleTone">{{ m.role }}</td>
-                  <td>{{ m.version }}</td>
-                  <td class="num">{{ m.up }}</td>
-                  <td class="sys-mono">{{ m.http }}</td>
-                  <td class="sys-mono">{{ m.raftAddr }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        <div v-if="replicas.length" class="card">
-          <div class="card-header">
-            <h3>Servers</h3>
-            <span class="card-sub">last sample</span>
-            <span class="muted">{{ stamp(metrics) }}</span>
-          </div>
-          <div class="table-container">
-            <table class="t sys-table">
-              <thead>
-                <tr>
-                  <th>Server</th>
-                  <th class="num">CPU user</th>
-                  <th class="num">CPU sys</th>
-                  <th class="num">Memory</th>
-                  <th class="num">Network in / out</th>
-                  <th class="num">Disk read / write</th>
-                  <th class="num">Raft out / in</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="replica in replicas" :key="`${replica.hostname}:${replica.port}`">
-                  <td><span class="sys-host">{{ replica.hostname }}</span><span class="sys-port">:{{ replica.port }}</span></td>
-                  <td class="num">{{ pct(cpuOf(replica, 'user_us')) }}</td>
-                  <td class="num">{{ pct(cpuOf(replica, 'system_us')) }}</td>
-                  <td class="num">{{ mb(lastOf(replica, ['memory', 'rss_bytes'])) }}</td>
-                  <td class="num">{{ formatRate(lastOf(replica, ['network', 'received_bytes_per_sec'])) }}<span class="sys-sep"> / </span>{{ formatRate(lastOf(replica, ['network', 'sent_bytes_per_sec'])) }}</td>
-                  <td class="num">{{ formatRate(lastOf(replica, ['disk', 'read_bytes_per_sec'])) }}<span class="sys-sep"> / </span>{{ formatRate(lastOf(replica, ['disk', 'written_bytes_per_sec'])) }}</td>
-                  <td class="num">{{ formatRate(lastOf(replica, ['raft_traffic', 'sent_bytes_per_sec'])) }}<span class="sys-sep"> / </span>{{ formatRate(lastOf(replica, ['raft_traffic', 'received_bytes_per_sec'])) }}</td>
-                </tr>
-              </tbody>
-            </table>
+        <div v-if="metrics.failed.value && !systemData" class="card"><div class="card-body"><div class="panel-err">{{ describeApiError(metrics.error.value) }}</div></div></div>
+        <div v-else class="sys-grid-2">
+          <div v-for="c in overviewCharts" :key="c.key" class="card">
+            <div class="card-header">
+              <router-link class="sys-chart-title" :to="viewTo(c.view)">{{ c.title }}<Icon name="chevron-right" :size="14" /></router-link>
+              <span class="card-sub">{{ c.sub }}</span>
+            </div>
+            <div class="card-body">
+              <div v-if="metricsFirstLoad" class="skeleton" style="height:200px;" />
+              <BaseChart v-else-if="c.chart.labels.length" type="line" :data="c.chart" :options="c.options" height="200px" />
+              <div v-else class="panel-msg">{{ c.none }}</div>
+            </div>
           </div>
         </div>
-
       </div>
 
       <!-- =================== RAFT: the members, and what crosses the Raft port =================== -->
@@ -256,6 +153,26 @@
       <div v-else-if="view === 'storage'" class="sys-stack">
         <div v-if="raftMembers.failed.value && !raftMembersAbsent" class="status-banner banner-bad view-banner">
           <span :title="formatTimestampUtc(raftMembers.lastUpdated.value)"><strong>Could not load the Raft cluster</strong> · {{ describeRaftFailure(raftMembers.error.value) }}<template v-if="raftMembers.data.value"> · showing the last members{{ raftMembers.lastUpdated.value ? ` (${formatTimestamp(raftMembers.lastUpdated.value)})` : '' }}</template></span>
+        </div>
+
+        <!-- What grows on each node's disk, over the range: the log, and how
+             full the store's map is. -->
+        <div class="sys-ov-head">
+          <span class="sys-ov-label">Each node over time</span>
+          <UiSelect v-model="rangeChoice" label="Range" :options="shortRangeOptions" aria-label="Time range" size="sm" />
+        </div>
+        <div class="sys-grid-2">
+          <div v-for="c in storageCharts" :key="c.key" class="card">
+            <div class="card-header">
+              <h3>{{ c.title }}</h3>
+              <span class="card-sub">{{ c.sub }}</span>
+            </div>
+            <div class="card-body">
+              <div v-if="metricsFirstLoad" class="skeleton" style="height:220px;" />
+              <BaseChart v-else-if="c.chart.labels.length" type="line" :data="c.chart" :options="c.options" height="220px" />
+              <div v-else class="panel-msg">{{ c.none }}</div>
+            </div>
+          </div>
         </div>
 
         <section class="card" aria-labelledby="sys-store-title">
@@ -413,9 +330,30 @@
             </div>
           <div class="card">
             <div class="card-header">
+              <h3>Event loop</h3>
+              <span class="card-sub">every worker on the cell, average and peak, per minute</span>
+              <span class="muted">{{ stamp(status) }}</span>
+            </div>
+            <div class="card-body">
+              <div v-if="status.failed.value && !status.data.value" class="panel-err">{{ describeApiError(status.error.value) }}</div>
+              <RowChart v-else :series="eventLoopSeries" :labels="eventLoopLabels" :value-format="fmtMs" unit="ms" variant="full" />
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
               <h3>Workers</h3>
               <span class="card-sub" title="Cell-wide, since each broker started">{{ metric(lifetimeAckFailed) }} ack failures since start</span>
               <span class="muted">{{ stamp(status) }}</span>
+            </div>
+            <div
+              v-if="batchEfficiency"
+              class="sys-batch"
+              title="Rows per batch across every tenant on the cell, over the range: the more rows a batch carries, the less each pays for its commit"
+            >
+              <span class="sys-batch-k">Rows per batch</span>
+              <span>push <b>{{ batchEfficiency.push }}</b></span>
+              <span>pop <b>{{ batchEfficiency.pop }}</b></span>
+              <span>ack <b>{{ batchEfficiency.ack }}</b></span>
             </div>
             <div v-if="status.failed.value" class="card-body"><div class="panel-err">{{ describeApiError(status.error.value) }}</div></div>
             <div v-else-if="!workers.length" class="sys-quiet">{{ focusNode ? `No worker of ${focusNode} reported in the last two minutes` : 'No worker reported in the last two minutes' }}</div>
@@ -461,6 +399,17 @@
               </div>
             </section>
             <div class="card">
+              <div class="card-header" title="How full each node's data disk was, every minute: the same measure as the write gate, which stops writes at 99.5%">
+                <h3>Used over time</h3>
+                <span class="card-sub">of the data disk, per node</span>
+                <span class="muted">{{ stamp(metrics) }}</span>
+              </div>
+              <div class="card-body">
+                <BaseChart v-if="diskUsedChart.labels.length" type="line" :data="diskUsedChart" :options="pctOptions" height="240px" />
+                <div v-else class="panel-msg" title="Each node records its disk use every minute from 2.7.0-beta.2; a broker before it does not">Not recorded by this broker yet</div>
+              </div>
+            </div>
+            <div class="card">
               <div class="card-header" title="What the broker process read from and wrote to storage. A read the page cache serves is not a disk read.">
                 <h3>Disk</h3>
                 <span class="card-sub">{{ viewMode === 'individual' ? 'solid read · dashed write' : replicaCountLabel }}</span>
@@ -497,6 +446,8 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import BaseChart from '@/components/BaseChart.vue'
+import RowChart from '@/components/RowChart.vue'
+import CellStatus from '@/components/CellStatus.vue'
 import Icon from '@/components/Icon.vue'
 import PageTools from '@/components/PageTools.vue'
 import PaneHead from '@/components/PaneHead.vue'
@@ -504,9 +455,9 @@ import RaftCluster from '@/components/RaftCluster.vue'
 import SubSidebar from '@/components/SubSidebar.vue'
 import UiSelect from '@/components/UiSelect.vue'
 import { describeApiError, operator } from '@/api'
-import { formatBytes, formatDuration, formatNumber, toNum, useApi } from '@/composables/useApi'
+import { formatBytes, formatDuration, formatNumber, toNum, trimIncompleteBuckets, useApi } from '@/composables/useApi'
 import { brokerStatus, cellIssues } from '@/composables/useBrokerStatus'
-import { chartColor } from '@/composables/useChartTheme'
+import { lineColor } from '@/composables/useChartTheme'
 import {
   formatChartLabel, formatDateTimeLocal, formatTimestamp, formatTimestampUtc,
   isMultiDay, validateRange,
@@ -519,9 +470,8 @@ import { useRouteRange } from '@/composables/useRouteRange'
 import { useRouteState } from '@/composables/useRouteState'
 import { numTone } from '@/composables/useSeverity'
 import { nodeEntries, nodeReplicas } from '@/composables/systemSide'
-import { nodeRows } from '@/composables/overviewViews'
 import {
-  cellVerdict, systemSideGroups, systemView, systemViewAlias, systemViewOf, systemViewQuery,
+  cellIssueView, cellVerdict, systemSideGroups, systemView, systemViewAlias, systemViewOf, systemViewQuery,
 } from '@/composables/systemViews'
 import { RAFT_CHANNELS, formatRate, inUnit, rateUnit } from '@/composables/useTraffic'
 import { stamp } from '@/composables/useStamp'
@@ -601,7 +551,7 @@ const rangeChoice = computed({
     customMode.value = false
     appliedCustom.value = null
     timeRange.value = value
-    metrics.refresh()
+    refreshResources()
   },
 })
 
@@ -613,7 +563,7 @@ const applyCustomRange = () => {
   const parsed = validateRange(customFrom.value, customTo.value)
   if (parsed.error) return
   appliedCustom.value = { from: parsed.from, to: parsed.to }
-  metrics.refresh()
+  refreshResources()
 }
 
 // ---------------------------------------------------------------------------
@@ -625,7 +575,12 @@ const metrics = useApi((config) => {
   return operator.getSystemMetrics({ from: from.toISOString(), to: to.toISOString() }, config)
 }, { immediate: false })
 
-const status = useApi((config) => operator.getStatus(undefined, config), { immediate: false })
+// The workers now, and per bucket over the page's range their event loop
+// (`throughput`) and the cell's rows per batch (`messages.batchEfficiency`).
+const status = useApi((config) => {
+  const { from, to } = currentRange()
+  return operator.getStatus({ from: from.toISOString(), to: to.toISOString() }, config)
+}, { immediate: false })
 
 // The raft routes. A broker without them answers 404 and a proxy that does
 // not classify them 404 route_blocked — a state to render, not a failure to
@@ -768,22 +723,10 @@ const nodeOptions = computed(() => [
 ])
 
 // Each cell issue opens the view where it is worked on.
-const ISSUE_VIEW = { quorum: 'raft', heartbeat: 'raft', lag: 'raft', snapshot: 'storage', disk: 'disk', memory: 'compute', cpu: 'compute' }
-const issueKind = (i) => {
-  if (i.kind) return i.kind
-  const parts = String(i.key || '').replace(/^cell:/, '').split(':')
-  return parts.length === 1 ? parts[0] : parts[1]
-}
-const issueList = computed(() => cellIssues(cell.value).map((i) => ({ ...i, view: ISSUE_VIEW[issueKind(i)] || null })))
+const issueList = computed(() => cellIssues(cell.value).map((i) => ({ ...i, view: cellIssueView(i) })))
+// Each opens the view it is worked on in (CellStatus draws them in the status card).
+const issueLinks = computed(() => issueList.value.map((i) => ({ ...i, to: i.view ? viewTo(i.view) : i.to })))
 const verdict = computed(() => cellVerdict(cell.value, issueList.value))
-const verdictLine = computed(() => {
-  const c = cell.value
-  if (!c) return ''
-  const parts = [`${c.nodes.length} ${c.nodes.length === 1 ? 'node' : 'nodes'}`]
-  if (!c.raft.single) parts.push(`leader ${c.raft.leader || 'none'}`)
-  if (c.raft.term !== null && c.raft.term !== undefined) parts.push(`term ${formatNumber(c.raft.term)}`)
-  return parts.join(' · ')
-})
 const toneOf = (sev) => (sev === 'warn' || sev === 'bad' ? sev : '')
 // A share as a person reads it: a sliver that is not zero says so ("<1%").
 const shareText = (top) => {
@@ -802,17 +745,6 @@ const networkNow = computed(() => {
   }
   return sum
 })
-const statusCells = computed(() => {
-  const c = cell.value
-  return [
-    { k: 'CPU', v: shareText(c?.cpu.top), tone: toneOf(c?.cpu.sev), title: c?.cpu.top ? `The busiest node: ${c.cpu.top.name}` : '' },
-    { k: 'Memory', v: shareText(c?.mem.top), tone: toneOf(c?.mem.sev), title: c?.mem.top ? `The fullest node: ${c.mem.top.name}` : '' },
-    { k: 'Disk', v: shareText(c?.disk.top), tone: toneOf(c?.disk.sev), title: c?.disk.top ? `The fullest disk: ${c.disk.top.name}; from 99.5% writes stop` : '' },
-    { k: 'Network', v: networkNow.value === null ? '—' : formatRate(networkNow.value), title: 'In and out of every node, summed' },
-    { k: 'Raft port', v: c?.raft.wire === null || c?.raft.wire === undefined ? '—' : formatRate(c.raft.wire), title: 'Bytes per second on the Raft port, every node' },
-  ]
-})
-const nowRows = computed(() => nodeRows(cell.value))
 const nodesNote = computed(() => {
   if (raftMembersAbsent.value) return 'This broker does not report its members'
   if (raftMembers.failed.value) return `Cannot read the members · ${nodesError.value}`
@@ -853,12 +785,10 @@ const diskRows = computed(() => (cell.value?.nodes || [])
 // The list: every view's one number, coloured only where it is the trouble.
 const side = computed(() => {
   const c = cell.value
-  const reachable = c ? c.nodes.filter((n) => !n.unreachable).length : 0
   const resourceTone = toneOf(c?.cpu.sev) === 'bad' || toneOf(c?.mem.sev) === 'bad' ? 'bad'
     : toneOf(c?.cpu.sev) || toneOf(c?.mem.sev)
   return systemSideGroups({
     overview: c ? { num: verdict.value.word, tone: verdict.value.tone, title: verdict.value.headline } : {},
-    nodes: c ? { num: `${reachable}/${c.nodes.length}`, tone: reachable < c.nodes.length ? 'bad' : '', title: c.raft.leader ? `Leader ${c.raft.leader}` : '' } : {},
     raft: c ? {
       num: c.raft.alert ? c.raft.alert.title : c.raft.lagMax ? `${formatNumber(c.raft.lagMax)} behind` : 'In sync',
       tone: toneOf(c.raft.sev),
@@ -891,6 +821,41 @@ const workers = computed(() => {
   return focusNode.value ? all.filter((w) => w.hostname === focusNode.value) : all
 })
 const lifetimeAckFailed = computed(() => toNum(status.data.value?.errors?.ackFailed))
+
+// The workers' event loop over the range: the same read's `throughput`, one
+// row a bucket, newest first. Every worker on the cell, whatever node is
+// picked: the broker keeps it for the cell, not per node.
+const statusHistory = computed(() => {
+  const s = status.data.value
+  if (!s?.throughput?.length) return []
+  return trimIncompleteBuckets([...s.throughput].reverse(), { bucketKey: 'timestamp', bucketMinutes: s.bucketMinutes || 1 })
+})
+const eventLoopLabels = computed(() => {
+  const ts = statusHistory.value.map((x) => x.timestamp)
+  const multi = isMultiDay(ts)
+  return ts.map((t) => formatChartLabel(new Date(t), multi))
+})
+const eventLoopSeries = computed(() => {
+  const h = statusHistory.value
+  if (!h.length) return null
+  return [
+    { label: 'Average', data: h.map((x) => toNum(x.avgEventLoopLagMs)) },
+    { label: 'Peak', data: h.map((x) => toNum(x.maxEventLoopLagMs)) },
+  ]
+})
+const fmtMs = (v) => `${Math.round(v)} ms`
+
+// Rows per batch across every tenant on the cell: the more rows a batch
+// carries, the less each pays for its commit.
+const batchEfficiency = computed(() => {
+  const b = status.data.value?.messages?.batchEfficiency
+  if (!b) return null
+  const one = (v) => {
+    const n = toNum(v)
+    return n === null ? '—' : n.toFixed(n < 10 ? 2 : 1)
+  }
+  return { push: one(b.push), pop: one(b.pop), ack: one(b.ack) }
+})
 
 // The state says what the payload says, not what we hope. Only the event-loop
 // gauges are actually written by this broker (min_free_slots / db_connections
@@ -992,7 +957,7 @@ const buildChart = (specs, { perReplicaPath = null, perReplicaScale = (v) => v, 
       datasets: replicas.value.map((replica, i) => ({
         label: `${replica.hostname}${perReplicaSuffix}`,
         data: replicaSeries(replica, perReplicaPath, perReplicaScale),
-        borderColor: chartColor(i).line,
+        borderColor: lineColor(i).line,
         fill: false,
         tension: 0,
       })),
@@ -1003,8 +968,8 @@ const buildChart = (specs, { perReplicaPath = null, perReplicaScale = (v) => v, 
     datasets: specs.map((spec, i) => ({
       label: spec.label,
       data: summedSeries(spec.path, spec.scale),
-      borderColor: chartColor(i).line,
-      backgroundColor: chartColor(i).fill,
+      borderColor: lineColor(i).line,
+      backgroundColor: lineColor(i).fill,
       fill: true,
       tension: 0,
     })),
@@ -1045,15 +1010,15 @@ const buildRateChart = (specs) => {
     ? replicas.value.flatMap((replica, i) => specs.map((spec, j) => ({
       label: `${replica.hostname} · ${spec.short}`,
       data: replicaSeries(replica, spec.path),
-      borderColor: chartColor(i).line,
+      borderColor: lineColor(i).line,
       borderDash: j === 0 ? [] : [5, 4],
       fill: false,
     })))
     : specs.map((spec, i) => ({
       label: spec.label,
       data: summedSeries(spec.path),
-      borderColor: chartColor(spec.color ?? i).line,
-      backgroundColor: chartColor(spec.color ?? i).fill,
+      borderColor: lineColor(spec.color ?? i).line,
+      backgroundColor: lineColor(spec.color ?? i).fill,
       fill: true,
     }))
   if (!raw.some((d) => d.data.some((v) => v !== null))) return empty
@@ -1171,6 +1136,104 @@ const tiles = computed(() => {
   ]
 })
 
+// ---------------------------------------------------------------------------
+// One line per node, over the range: the Overview's four charts, Storage's two
+// and the Disk view's use. The Overview is not narrowed by a node picked on
+// another view (it has no picker): its lines are every node's.
+// ---------------------------------------------------------------------------
+const allReplicas = computed(() => nodeReplicas(systemData.value?.replicas, null))
+const axisOf = (list) => {
+  const seen = new Set()
+  for (const r of list) for (const p of r.timeSeries || []) if (p?.timestamp) seen.add(p.timestamp)
+  return [...seen].sort()
+}
+const valuesOn = (replica, axis, value) => {
+  const byTs = pointsByTimestamp(replica)
+  return axis.map((ts) => value(byTs.get(ts)?.metrics))
+}
+const at = (metricsObj, path) => toNum(leaf(metricsObj, path)?.[aggregationType.value])
+/** `value(metrics)` → a number or null, one line per node of `list`; no labels when nothing was recorded. */
+const perNodeChart = (list, value) => {
+  const axis = axisOf(list)
+  if (!list.length || !axis.length) return { labels: [], datasets: [] }
+  const datasets = list.map((r, i) => ({
+    label: r.hostname,
+    data: valuesOn(r, axis, value),
+    borderColor: lineColor(i).line,
+    fill: false,
+    tension: 0,
+  }))
+  if (!datasets.some((d) => d.data.some((v) => v !== null))) return { labels: [], datasets: [] }
+  const multiDay = isMultiDay(axis)
+  return { labels: axis.map((ts) => formatChartLabel(new Date(ts), multiDay)), datasets }
+}
+// Bytes in the unit the largest value reads best in: MB under a gigabyte.
+const bytesChart = (chart) => {
+  const max = largest(chart.datasets)
+  const unit = max >= 1e9 ? { div: 1e9, label: 'GB' } : { div: 1e6, label: 'MB' }
+  return {
+    unit,
+    labels: chart.labels,
+    datasets: chart.datasets.map((d) => ({ ...d, data: d.data.map((v) => (v === null ? null : Math.round((v / unit.div) * 100) / 100)) })),
+  }
+}
+const lineOptions = (title, tick = (v) => v) => ({
+  plugins: { legend: { display: true, position: 'top' } },
+  scales: { y: { title: { display: true, text: title, font: { size: 11 } }, ticks: { callback: tick } } },
+})
+const pctOptions = lineOptions('% used', (v) => `${Number(v) < 10 ? Number(v).toFixed(1) : Number(v).toFixed(0)}%`)
+const usedPct = (m) => {
+  const used = toNum(leaf(m, ['disk', 'used_bytes'])?.last)
+  const total = toNum(leaf(m, ['disk', 'total_bytes'])?.last)
+  return used === null || !total ? null : Math.round((used / total) * 1000) / 10
+}
+const diskUsedChart = computed(() => perNodeChart(replicas.value, usedPct))
+const logChart = computed(() => bytesChart(perNodeChart(allReplicas.value, (m) => at(m, ['raft', 'log_bytes']))))
+// `map_used_pct` is a percentage already (0.99 = 0.99 %), as the table shows it.
+const mapChart = computed(() => perNodeChart(allReplicas.value, (m) => {
+  const v = at(m, ['raft', 'map_used_pct'])
+  return v === null ? null : Math.round(v * 100) / 100
+}))
+
+const overviewCharts = computed(() => {
+  const all = allReplicas.value
+  const diskUsed = perNodeChart(all, usedPct)
+  const log = logChart.value
+  // The disk's use when the broker records it; before 2.7.0-beta.2, the log,
+  // which is most of what fills it.
+  const disk = diskUsed.labels.length
+    ? { key: 'disk', view: 'disk', title: 'Disk used', sub: 'of the data disk, per node', chart: diskUsed, options: pctOptions, none: 'No disk samples in this range' }
+    : { key: 'log', view: 'storage', title: 'Raft log', sub: 'size on disk, per node', chart: log, options: lineOptions(log.unit?.label || 'MB'), none: 'No log samples in this range' }
+  return [
+    { key: 'cpu', view: 'compute', title: 'CPU', sub: 'user time per node, % of one core', chart: perNodeChart(all, (m) => { const v = at(m, ['cpu', 'user_us']); return v === null ? null : CPU_SCALE(v) }), options: cpuOptions, none: 'No CPU samples in this range' },
+    { key: 'memory', view: 'compute', title: 'Memory', sub: 'resident, per node', chart: perNodeChart(all, (m) => { const v = at(m, ['memory', 'rss_bytes']); return v === null ? null : MB_SCALE(v) }), options: memoryOptions, none: 'No memory samples in this range' },
+    disk,
+    { key: 'network', view: 'network', title: 'Network', sub: 'received and sent, per node', chart: bytesPerSecChart(all), options: networkPerNodeOptions.value, none: 'Not reported: a broker records the network on Linux only' },
+  ]
+})
+// The network per node: what it received and sent, summed, in the unit the
+// largest value reads best in.
+const networkPerNode = computed(() => {
+  const chart = perNodeChart(allReplicas.value, (m) => {
+    const rx = at(m, ['network', 'received_bytes_per_sec'])
+    const tx = at(m, ['network', 'sent_bytes_per_sec'])
+    return rx === null && tx === null ? null : (rx || 0) + (tx || 0)
+  })
+  const unit = rateUnit(largest(chart.datasets))
+  return { unit, labels: chart.labels, datasets: chart.datasets.map((d) => ({ ...d, data: d.data.map((v) => inUnit(v, unit)) })) }
+})
+const bytesPerSecChart = () => networkPerNode.value
+const networkPerNodeOptions = computed(() => lineOptions(networkPerNode.value.unit?.label || 'B/s'))
+
+const storageCharts = computed(() => [
+  { key: 'log', title: 'Raft log', sub: 'size on disk, per node', chart: logChart.value, options: lineOptions(logChart.value.unit?.label || 'MB'), none: 'No log samples in this range' },
+  { key: 'map', title: 'Store', sub: 'how full its map is, per node', chart: mapChart.value, options: pctOptions, none: 'No store samples in this range' },
+])
+
+// The range choices a view without its own tools offers: the presets, not a
+// custom window (its form lives on the chart views).
+const shortRangeOptions = computed(() => rangeOptions.filter((o) => o.value !== 'custom'))
+
 // Chart options
 const cpuOptions = {
   plugins: { legend: { display: true, position: 'top' } },
@@ -1197,41 +1260,22 @@ const capital = (label) => (label ? label.charAt(0).toUpperCase() + label.slice(
 .sys-side .ss-num.warn { color: var(--warn-400); }
 .ss-num.sys-side-word { font-family: inherit; font-size: 12px; }
 
-/* The Overview's status card (the Overview page's Summary card, for the
-   cell): the verdict, five number cells beside it, hairlines between. */
-.sys-status { display: grid; grid-template-columns: minmax(260px, 1.5fr) repeat(5, minmax(0, 1fr)); overflow: hidden; }
-.sys-verdict { min-width: 0; padding: 15px 18px; border-right: 1px solid var(--bd); }
-.sys-verdict-word { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--text-mid); }
-.sys-verdict-word.bad { color: var(--ember-400); }
-.sys-verdict-word.warn { color: var(--warn-400); }
-.sys-verdict-title { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; color: var(--text-hi); text-wrap: balance; }
-.sys-verdict-line { margin: 5px 0 0; font-size: 12px; color: var(--text-low); }
-.sys-kpi { min-width: 0; padding: 15px 16px; border-right: 1px solid var(--bd); display: flex; flex-direction: column; justify-content: center; gap: 5px; }
-.sys-kpi:last-child { border-right: 0; }
-.sys-kpi-k { font-size: 11.5px; color: var(--text-low); white-space: nowrap; }
-.sys-kpi-v { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sys-kpi-v.bad { color: var(--ember-400); }
-.sys-kpi-v.warn { color: var(--warn-400); }
-@media (max-width: 1100px) {
-  .sys-status { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .sys-verdict { grid-column: 1 / -1; border-right: 0; border-bottom: 1px solid var(--bd); }
-  .sys-kpi { border-bottom: 1px solid var(--bd); }
-  .sys-kpi:nth-child(4) { border-right: 0; }
-  .sys-kpi:nth-child(n+5) { border-bottom: 0; }
-}
-
-/* What needs you in the cell: each row opens the view it is worked on in. */
-.sys-issues { list-style: none; margin: 0; padding: 0; }
-.sys-issues li + li { border-top: 1px solid var(--bd-soft); }
-.sys-issue { display: flex; align-items: center; gap: 12px; padding: 11px 16px; color: inherit; text-decoration: none; }
-.sys-issue:hover { background: var(--ink-3); }
-.sys-issue-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.sys-issue-title { font-size: 13px; font-weight: 500; color: var(--text-hi); }
-.sys-issue-why { font-size: 12px; color: var(--text-mid); }
-.sys-issue-go { color: var(--text-low); flex: none; }
-.sys-node-link { color: var(--text-hi); text-decoration: none; }
-.sys-node-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 .sys-mono { font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); }
+/* Over the charts of the Overview and Storage: what they show, and the range. */
+.sys-ov-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; }
+.sys-ov-label { font-size: 12px; font-weight: 600; color: var(--text-mid); }
+/* A chart's title is the way to its view. */
+.sys-chart-title { display: inline-flex; align-items: center; gap: 2px; font-size: 13px; font-weight: 600; color: var(--text-hi); text-decoration: none; }
+.sys-chart-title :deep(svg) { color: var(--text-low); transition: transform .12s, color .12s; }
+.sys-chart-title:hover :deep(svg) { color: var(--text-hi); transform: translateX(2px); }
+/* The cell's rows per batch, a line under the workers' header. */
+.sys-batch {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 18px;
+  padding: 10px 16px; border-bottom: 1px solid var(--bd-soft);
+  font-size: 12.5px; color: var(--text-mid);
+}
+.sys-batch b { color: var(--text-hi); font-weight: 600; font-variant-numeric: tabular-nums; }
+.sys-batch-k { color: var(--text-low); }
 
 /* How full each data disk is: one bar per node, the number after it. */
 .sys-bars { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px 16px; }

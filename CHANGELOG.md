@@ -148,11 +148,38 @@ Overview, Messages, Consumer groups, Supervisors, Dead letter, Timers and Alerts
 what needs you on that queue now and the lines it is judged by. The Messages, Dead letter and
 Timers pages are now those tabs, and the queue list filters by namespace. The Overview lists a
 summary card, open issues, the cell, throughput, backlog, consumer groups and dead letters. System
-lists Overview, Nodes, Raft, Storage, CPU and memory, Disk and Network, picks a node on the views
-that chart one, and shows the broker version. Selects and checkboxes are the dashboard's own in
-both themes, the side column is a sheet on a phone, and the rail and top bar are soft greys in dark
-and near the page's white in light. Why: a list that stays put is faster to scan, and everything
-about a queue was spread over five pages.
+lists Overview, Raft, Storage, CPU and memory, Disk and Network, picks a node on the views that
+chart one, and shows the broker version. Selects and checkboxes are the dashboard's own in both
+themes, the side column is a sheet on a phone, and the rail and top bar are soft greys in dark and
+near the page's white in light. Why: a list that stays put is faster to scan, and everything about
+a queue was spread over five pages.
+
+**Dashboard: one rule for what needs you, and each number said once.** A queue whose acks fail
+over the last hour needs you, by its own ack lines: the verdict, the issues, the rail's mark, the
+queue list and the queue's Alerts tab all read the same rule, from one read of
+`/api/v1/analytics/workload` by queue every 30 seconds. The tenant's ack failures are an issue of
+their own only when no queue's acks explain them. The Summary is one status card (the verdict, five
+numbers and what needs you, each naming its queue), the counts (queues, partitions, consumer groups,
+messages stored, each with what it means now), and four charts of the range. Cell is a view of the
+Overview, and Backlog lists the deepest queues. A queue's Dead letter tab says why its messages
+failed: the broker's error signatures over its newest 200 rows, each with its share and its full
+text. List rows are plain, the picked one on the yellow tint, and zero counts are left out. Why: a
+queue failing every ack read "Nothing needs attention" under a Failing verdict, and one number was
+on the page up to four times.
+
+**Dashboard: charts in colour, and System's nodes in one place.** A chart with several lines draws
+the first in ink and the others in blue, aqua, violet and magenta, a set checked for colour-blind
+separation and contrast in both themes; Workload colours each namespace by name, the rest grey.
+System's Overview holds every node (role, version, uptime and load, its addresses on hover) and
+four charts per node; Storage draws each node's log and store over time, Disk the data disk's use,
+and CPU and memory the workers' event loop and the cell's rows per batch. Why: three grey lines
+read as one, and a disk filling up showed only as a number.
+
+**Broker: each node records its disk use.** Every minute's sample of a node now carries its data
+disk's used and total bytes, as the write gate measures them, served by
+`/api/v1/analytics/system-metrics` as `disk.used_bytes` and `disk.total_bytes`. The history starts
+at the upgrade; older rows read as missing, and a node rolled back keeps them. Why: the dashboard
+can draw a disk filling up only from a history.
 
 **Broker: large stream states and fetches no longer use many times their size in memory.**
 `POST /streams/v1/state/get` and `POST /api/v1/fetch` parsed every stored state and payload into a

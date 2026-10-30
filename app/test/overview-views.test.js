@@ -27,15 +27,18 @@ test('the view: the Summary by default; every view by its key', () => {
   for (const key of ['issues', 'throughput', 'backlog', 'groups', 'dead-letters']) assert.equal(overviewView(key), key)
 })
 
-test('the Cell row is a link to System, and the old cell addresses go there', () => {
+test('Cell is a view of the Overview, an operator\'s only; a click in the list never leaves the page', () => {
+  assert.equal(overviewView('cell', true), 'cell')
+  assert.equal(overviewView('cell', false), 'summary', 'anyone else lands on the Summary')
   assert.equal(overviewView('cell'), 'summary')
-  for (const [from, to] of [['server', 'overview'], ['cell', 'overview'], ['nodes', 'nodes'], ['resources', 'compute'], ['replication', 'raft']]) {
+  for (const [from, to] of [['server', 'overview'], ['nodes', 'overview'], ['resources', 'compute'], ['replication', 'raft']]) {
     assert.equal(systemRedirect(from), to)
   }
+  assert.equal(systemRedirect('cell'), null, 'cell is a view here now')
   assert.equal(systemRedirect('backlog'), null)
   const op = sideGroups({}, true)
-  const cell = op[0].rows.find((r) => r.key === 'cell')
-  assert.equal(cell.href, '/system')
+  assert.ok(op[0].rows.some((r) => r.key === 'cell'))
+  assert.equal(op.flatMap((g) => g.rows).some((r) => r.href), false, 'no row is a link out')
   assert.equal(sideGroups({}, false)[0].rows.some((r) => r.key === 'cell'), false)
 })
 
@@ -325,4 +328,22 @@ test('inRateUnit: the unit the largest value reads best in, named in every label
   assert.equal(disk.datasets[3].label, 'queen-2 · write (MB/s)')
   assert.deepEqual(disk.datasets[3].data, [null, 4])
   assert.deepEqual(disk.datasets[1].data, [0, 0])
+})
+
+test('deepestQueues: the most waiting first, with the oldest live wait and the queue\'s mark', async () => {
+  const { deepestQueues } = await import('../src/composables/overviewViews.js')
+  const queues = [
+    q('a', 'ns', { pending: 5 }), q('b', 'ns', { pending: 900 }), q('c', '', { pending: 0 }), q('d', 'x', { pending: 40 }),
+  ]
+  const groups = [
+    g('b', 30), { ...g('b', 120), name: 'b-other' },
+    // An inactive Kafka group: its lag only grows, so it is not the queue's wait.
+    { name: 'gone', queueName: 'd', kind: 'kafka', state: 'Empty', maxTimeLag: 90_000, liveMembers: 0, inactiveSeconds: 86_400 },
+  ]
+  const out = deepestQueues(queues, groups, new Map([['b', 'warn']]), 2)
+  assert.deepEqual(out, [
+    { name: 'b', namespace: 'ns', pending: 900, lag: 120, sev: 'warn' },
+    { name: 'd', namespace: 'x', pending: 40, lag: null, sev: null },
+  ])
+  assert.deepEqual(deepestQueues([q('c', '', { pending: 0 })], []), [], 'nothing waiting, nothing listed')
 })

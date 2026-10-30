@@ -25,7 +25,7 @@
     >
       <span class="ss-mark" aria-hidden="true"><span v-if="q.sev" class="g" :class="q.sev" /></span>
       <span class="ss-text"><span class="ss-name">{{ q.name }}</span></span>
-      <span class="ss-num">{{ q.pending === null ? '—' : formatNumber(q.pending) }}</span>
+      <span class="ss-num">{{ q.pending === null ? '—' : q.pending ? formatNumber(q.pending) : '' }}</span>
     </router-link>
     <div v-if="rows.length > LIMIT" class="ss-empty">{{ formatNumber(rows.length - LIMIT) }} more · search to narrow</div>
   </nav>
@@ -42,6 +42,7 @@ import { queueAttention } from '@/composables/useAttention'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRouteState } from '@/composables/useRouteState'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 
@@ -51,6 +52,7 @@ const LIMIT = 300
 const route = useRoute()
 const queuesStore = useQueuesStore()
 const groupsStore = useGroupsStore()
+const queueOpsStore = useQueueOpsStore()
 const { linesFor } = useSettingsStore()
 
 // In the address (?find=, ?namespace=), which the Queues table reads too, so
@@ -71,7 +73,7 @@ const loaded = computed(() => queuesStore.lastFetched.value > 0 || queuesStore.q
 // The attention verdict of every queue, by name: the list's marks and the
 // namespace picker's (a namespace carries its worst queue's).
 const attention = computed(() => new Map(
-  queueAttention(queuesStore.queues.value || [], groupsStore.groups.value || [], linesFor).map((a) => [a.name, a]),
+  queueAttention(queuesStore.queues.value || [], groupsStore.groups.value || [], linesFor, queueOpsStore.ops.value).map((a) => [a.name, a]),
 ))
 
 // Each namespace with its count and mark; one picked in the address that no

@@ -45,6 +45,7 @@ import { QUEUE_TABS, listCarry, queueOf, queueTabLocation, queueTabOf } from '@/
 import { queueAlerts } from '@/composables/queueAlerts'
 import { formatBytes, formatNumber, toNum } from '@/composables/useApi'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 
@@ -57,6 +58,7 @@ defineProps({
 const route = useRoute()
 const queuesStore = useQueuesStore()
 const groupsStore = useGroupsStore()
+const queueOpsStore = useQueueOpsStore()
 const { linesFor } = useSettingsStore()
 
 const queue = computed(() => queueOf(route))
@@ -96,7 +98,7 @@ const carry = computed(() => listCarry(route))
 const tabs = computed(() => {
   const q = row.value
   const groups = (groupsStore.groups.value || []).filter((g) => !queue.value || g?.queueName === queue.value)
-  const alerts = q ? queueAlerts(q, groupsStore.groups.value || [], linesFor) : []
+  const alerts = q ? queueAlerts(q, groupsStore.groups.value || [], linesFor, queueOpsStore.ops.value) : []
   const dead = queue.value ? toNum(q?.messages?.deadLetter) || 0 : sum((x) => x.messages?.deadLetter)
   const counts = {
     consumers: { count: groups.filter((g) => g.name !== '__QUEUE_MODE__').length },
@@ -130,12 +132,11 @@ const tabs = computed(() => {
   font-size: 18px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-hi);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.qs-facts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+/* Facts are words beside the title, not boxes: the page has enough frames. */
+.qs-facts { display: flex; align-items: baseline; gap: 4px 16px; flex-wrap: wrap; min-width: 0; }
 .qs-fact {
   display: inline-flex; align-items: baseline; gap: 5px;
-  padding: 2px 8px; border-radius: var(--r-chip);
-  background: var(--ink-3); border: 1px solid var(--bd);
-  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
+  font-size: 12.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .qs-k { color: var(--text-low); }
 .qs-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

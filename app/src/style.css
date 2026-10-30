@@ -37,10 +37,10 @@
 
     --recessed: var(--ink-1);
     --card:     var(--ink-2);
-    /* Neutral, as in light: a picked row, tab or segment is one step
-       lighter, never yellow. Yellow marks the rail's page and the primary
-       button only (2026-10-30). */
-    --selected: var(--ink-5);
+    /* What is picked — the rail's page, a list row, a segment — sits on a
+       yellow tint, its text and icon yellow: the look before the redesign,
+       which she asked back (2026-10-30). */
+    --selected: color-mix(in srgb, var(--accent) 14%, var(--ink-2));
 
     /* ---- Text: warm white down to warm grey. Every tier that carries words
        holds 4.5:1 on every surface it sits on (--text-low: 4.8:1 on the
@@ -97,11 +97,19 @@
     --series-3: #6b6661;
     --series-4: #c4beb6;
     --series-5: #4f4b47;
-    --cat-1: #7f9fd0;
-    --cat-2: #6fb3a3;
-    --cat-3: #b092d0;
-    --cat-4: #a3b56f;
-    --cat-5: #d08fae;
+    /* Categorical hues: what tells entities (namespaces, tasks, queues) and
+       several measures in one chart apart — never a status, so no orange,
+       yellow or red (amber and coral mean degrading and failing here).
+       Checked with the dataviz validator on the dark card #1c1b19: lightness
+       band, chroma floor, contrast >= 3:1, and every NEIGHBOUR pair under
+       normal and colour-blind vision. Only neighbours pass, so the order is
+       part of the palette: aqua beside magenta is ΔE 1.6 for deuteranopes,
+       blue beside violet ΔE 9.8 for everyone (floor 15). Take them in order. */
+    --cat-1: #3987e5; /* blue */
+    --cat-2: #199e70; /* aqua */
+    --cat-3: #9085e9; /* violet */
+    --cat-4: #d55181; /* magenta */
+    --cat-5: #008300; /* green */
 
     /* ---- Lines ----------------------------------------------------------- */
     --bd:      #2c2a27;  /* a card's edge: 1.20:1 on the card */
@@ -153,7 +161,8 @@
 
     --recessed: var(--ink-0);
     --card:     var(--ink-2);
-    --selected: var(--ink-5);
+    /* Picked: a pale yellow under the dark-yellow text, as in dark. */
+    --selected: color-mix(in srgb, var(--accent) 20%, #ffffff);
 
     --text-hi:    #1a1918;
     --text-mid:   #45423e;
@@ -206,11 +215,13 @@
     --series-3: #b5b1ab;
     --series-4: #45423e;
     --series-5: #d3d0cb;
-    --cat-1: #44689e;
-    --cat-2: #2c7a6a;
-    --cat-3: #6f4fa0;
-    --cat-4: #5b7a26;
-    --cat-5: #9a4d73;
+    /* The same hues in the same order (see :root), re-stepped for the white
+       card and checked on #ffffff: blue and violet are darker here. */
+    --cat-1: #2a78d6; /* blue */
+    --cat-2: #199e70; /* aqua */
+    --cat-3: #6250d6; /* violet */
+    --cat-4: #d55181; /* magenta */
+    --cat-5: #008300; /* green */
 
     --bd:      #e2e2df;
     --bd-hi:   #cfcfcb;
@@ -501,7 +512,7 @@
   .seg button { padding: 3px 10px; border-radius: var(--r-chip); font-size: 11.5px; color: var(--text-mid); font-weight: 500; cursor: pointer; border: none; background: transparent; transition: .12s; }
   .seg button:hover { color: var(--text-hi); }
   .seg button.on { color: var(--text-hi); }
-  .seg button.on { color: var(--text-hi); background: var(--selected); }
+  .seg button.on { color: var(--accent-text); background: var(--selected); }
 
   /* --- Bars --- */
   .bar { display: inline-block; height: 4px; border-radius: var(--r-pill); background: var(--ink-4); overflow: hidden; vertical-align: middle; }
@@ -904,7 +915,7 @@
     background: transparent; transition: .15s var(--ease);
   }
   .pill:hover { color: var(--text-hi); }
-  .pill.on { color: var(--text-hi); background: var(--selected); border-color: var(--bd-hi); }
+  .pill.on { color: var(--accent-text); background: var(--selected); border-color: var(--bd-hi); }
 
   /* --- Counts strip (Dashboard + QueueDetail) ----------------------------
      Hoisted verbatim from the two identical scoped copies. */
@@ -1014,14 +1025,11 @@
 /* At that size, hung 3px from the top of the 52px row (shell.css) it has no
    room above it: centre it in the row, as the rail does. */
 .sidebar .brand-mark { align-self: center; margin-top: 0; }
-/* Light: on the navigation zone's warm grey the neutral selected step
-   (#e7e7e4) disappears; a white pill is the selected row there. */
-html.light .sidebar, html.light .ss-side { --selected: #ffffff; }
 
 /* Queen's frame (2026-10-30, after Iggy's): with a sub sidebar on the pages
    the rail is the default. 80px of the darkest tone, its icons alone (the
    name is the hover tip), 18px each in a 40px square; the page you are on is a
-   yellow outline round a yellow icon, no fill. The top bar takes the
+   yellow icon on the yellow tint (--selected). The top bar takes the
    frame's tone with the sub sidebar. The shell's 52px rail stays as it is
    for Gate and Traceflow; these rules come after it and win. */
 .app-shell.nav-rail { grid-template-columns: 80px minmax(0, 1fr); }
@@ -1035,7 +1043,7 @@ html.light .sidebar, html.light .ss-side { --selected: #ffffff; }
 .sidebar.rail .nav-item:hover { background: transparent; }
 .sidebar.rail .nav-item:hover .nav-icon { color: var(--text-hi); }
 .sidebar.rail .nav-item-active,
-.sidebar.rail .nav-item-active:hover { background: transparent; border-color: var(--accent-text); }
+.sidebar.rail .nav-item-active:hover { background: var(--selected); border-color: transparent; }
 .sidebar.rail .nav-icon { width: 18px; height: 18px; flex: none; }
 .sidebar.rail .nav-rule { width: 28px; margin: 8px auto 10px; }
 .sidebar.rail .nav-corner { top: 3px; right: 3px; }
@@ -1524,12 +1532,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--text-hi); }
    every page (QueuesLayout keeps its own scoped copy of the same look). */
 .fact {
   display: inline-flex; align-items: baseline; gap: 5px;
-  padding: 2px 8px; border-radius: var(--r-chip);
-  background: var(--ink-3); border: 1px solid var(--bd);
-  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
+  font-size: 12.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .fact-k { color: var(--text-low); }
-.facts { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.facts { display: inline-flex; align-items: baseline; gap: 4px 16px; flex-wrap: wrap; min-width: 0; }
 
 /* Section titles: one size, one weight. */
 .card-header h3 { font-size: 13px; font-weight: 600; letter-spacing: -0.005em; }

@@ -73,12 +73,11 @@ defineProps({
   font-size: 18px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-hi);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.ph-facts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+/* Facts are words beside the title, not boxes (as the Queues header's). */
+.ph-facts { display: flex; align-items: baseline; gap: 4px 16px; flex-wrap: wrap; min-width: 0; }
 .ph-fact {
   display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%;
-  padding: 2px 8px; border-radius: var(--r-chip);
-  background: var(--ink-3); border: 1px solid var(--bd);
-  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums;
+  font-size: 12.5px; color: var(--text-hi); font-variant-numeric: tabular-nums;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .ph-k { color: var(--text-low); }

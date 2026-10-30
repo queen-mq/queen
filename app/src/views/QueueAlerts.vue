@@ -65,6 +65,7 @@ import { queueAlerts } from '@/composables/queueAlerts'
 import { queueLinesInForce } from '@/composables/settingsSide'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -72,13 +73,14 @@ import { useSettingsStore } from '@/stores/settingsStore'
 const route = useRoute()
 const queuesStore = useQueuesStore()
 const groupsStore = useGroupsStore()
+const queueOpsStore = useQueueOpsStore()
 const { settings, lines, linesFor, state: settingsState, fetchSettings } = useSettingsStore()
 const { can } = useIdentity()
 
 const queue = computed(() => queueOf(route))
 const loaded = computed(() => queuesStore.lastFetched.value > 0)
 const row = computed(() => (queuesStore.queues.value || []).find((q) => q?.name === queue.value) || null)
-const alerts = computed(() => queueAlerts(row.value, groupsStore.groups.value || [], linesFor))
+const alerts = computed(() => queueAlerts(row.value, groupsStore.groups.value || [], linesFor, queueOpsStore.ops.value))
 const view = computed(() => queueLinesInForce(settings.value.queues.get(queue.value), lines.value))
 const tabLabel = (view) => QUEUE_TABS.find((t) => t.view === view)?.label || 'Open'
 
@@ -90,6 +92,7 @@ const editing = ref(false)
 const refresh = () => Promise.all([
   queuesStore.fetchQueues(),
   groupsStore.fetchGroups({ ttlMs: 25_000 }),
+  queueOpsStore.fetchOps(),
   fetchSettings(),
 ])
 onMounted(refresh)

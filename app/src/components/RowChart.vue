@@ -63,7 +63,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { chartTheme, semanticColors, chartPalette, chartColor, alpha, themeVersion } from '@/composables/useChartTheme'
+import { chartTheme, semanticColors, linePalette, chartColor, alpha, themeVersion } from '@/composables/useChartTheme'
 import {
   Chart, LineController, CategoryScale, LinearScale,
   PointElement, LineElement, Filler, Tooltip,
@@ -205,7 +205,7 @@ function buildChartData() {
   return {
     labels,
     datasets: ss.map((s, i) => {
-      const palette = chartPalette[i % chartPalette.length]
+      const palette = linePalette[i % linePalette.length]
       const line = s.color || palette.line
       // alpha() hands back non-hex input untouched, which is what the old
       // `line + '20'` string concat was hand-rolling (0x20/255 ≈ .125).
@@ -366,7 +366,7 @@ const legendItems = computed(() => {
   const ss = flatSeries.value
   if (ss.length <= 1) return []  // single-series → no legend needed
   return ss.map((s, i) => {
-    const palette = chartPalette[i % chartPalette.length]
+    const palette = linePalette[i % linePalette.length]
     return {
       label: s.label || `Series ${i + 1}`,
       color: s.color || palette.line,

@@ -67,6 +67,7 @@ import Icon from '@/components/Icon.vue'
 import UiSelect from '@/components/UiSelect.vue'
 import { formatNumber } from '@/composables/useApi'
 import { GROUP_BY, workloadList } from '@/composables/workloadSide'
+import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 
@@ -85,6 +86,7 @@ const emit = defineEmits(['group-by', 'root', 'focus'])
 const LIMIT = 300
 
 const queuesStore = useQueuesStore()
+const queueOpsStore = useQueueOpsStore()
 const { linesFor } = useSettingsStore()
 // Not in the address: the page keeps what it shows (?focus=, ?groupBy=).
 const search = ref('')
@@ -99,9 +101,10 @@ const list = computed(() => workloadList({
   keys: props.keys,
   search: search.value,
   linesFor,
+  ops: queueOpsStore.ops.value,
 }))
 
-const pending = (n) => (n === null ? '—' : formatNumber(n))
+const pending = (n) => (n === null ? '—' : n ? formatNumber(n) : '')
 const rowTitle = (n) => [
   n.label,
   `${formatNumber(n.count)} ${n.count === 1 ? 'queue' : 'queues'}`,

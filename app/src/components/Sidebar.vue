@@ -122,6 +122,7 @@ import { useAutoRefresh } from '@/composables/useRefresh'
 import { raftLagSeverity } from '@/composables/useSeverity'
 import { useEphemeralStore } from '@/stores/ephemeralStore'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -244,6 +245,7 @@ watch(epoch, () => { health.value = null; healthFailed.value = false })
 const queuesStore = useQueuesStore()
 const ephemeralStore = useEphemeralStore()
 const groupsStore = useGroupsStore()
+const queueOpsStore = useQueueOpsStore()
 const settingsStore = useSettingsStore()
 const groups = groupsStore.groups // null = not read yet
 const groupsFailed = computed(() => groupsStore.error.value !== null)
@@ -252,6 +254,8 @@ const refreshAttention = () => Promise.allSettled([
   // A tick every 30 s; a list another page read in the last 25 s is reused.
   queuesStore.fetchQueues({ ttlMs: 25_000 }),
   groupsStore.fetchGroups(),
+  // The hour of acks per queue, for the same rule (30 s between reads).
+  queueOpsStore.fetchOps(),
   // Quiet about a broker without the class: it is a figure, not a check.
   ephemeralStore.fetchQueues(),
   settingsStore.fetchSettings(),
@@ -304,15 +308,17 @@ const marks = computed(() => {
   }
   if (groups.value === null || !queuesStore.lastFetched.value) return out
 
-  const qa = queueAttention(queuesStore.queues.value, groups.value, settingsStore.linesFor)
+  const qa = queueAttention(queuesStore.queues.value, groups.value, settingsStore.linesFor, queueOpsStore.ops.value)
   const q = summarize(qa.map((i) => i.sev))
   if (q.sev) {
     const bad = qa.filter((i) => i.sev === 'bad').length
     const behind = qa.filter((i) => i.sev === 'warn' && i.reason === 'lag').length
     const unread = qa.filter((i) => i.reason === 'noReader').length
+    const acks = qa.filter((i) => i.sev === 'warn' && i.reason === 'acks').length
     const why = [
-      bad && `${bad} falling behind`,
+      bad && `${bad} failing`,
       behind && `${behind} behind`,
+      acks && `${acks} with acks failing`,
       unread && `${unread} with no reader`,
     ].filter(Boolean).join(', ')
     out['/queues'] = { parts: parts(bad, qa.length - bad), title: `${plural(q.count, 'queue needs', 'queues need')} you: ${why}` }
