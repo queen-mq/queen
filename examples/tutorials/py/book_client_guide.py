@@ -7,7 +7,7 @@
 # says it does.
 #
 # Run it against the node that the book's first section starts:
-#   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+#   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 #   PYTHONPATH=clients/client-py python3 examples/tutorials/py/book_client_guide.py
 # The wire-forms example needs zstd: Python 3.14, or pip install "queen-mq[zstd]".
 # run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.

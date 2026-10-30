@@ -18,7 +18,7 @@ QUEEN\_RAFT\_DIR & /var/lib/\allowbreak queen/raft & The data directory, one per
 \multicolumn{3}{@{}l}{\itshape How fast old data leaves} \\
 PARTITION\_CLEANUP\_SECONDS & 30 days & An empty partition is deleted after this long without a write. At least 60. \\
 QUEEN\_RAFT\_TXN\_WINDOW\_MIN\_S & 900 & The least time a message's dedup record is kept. Nothing is deleted sooner, partitions included. \\
-QUEEN\_RAFT\_RETENTION\_SCAN\_PER\_S & 50000 & Partitions the retention scan visits a second. On 2.6.0, set \texttt{40000} when partitions come and go fast (see Many short-lived partitions). \\
+QUEEN\_RAFT\_RETENTION\_SCAN\_PER\_S & 50000 & Partitions the retention scan visits a second. On 2.6.0, set \texttt{40000} when partitions come and go fast; 2.7.0 keeps up without it (see Many short-lived partitions). \\
 QUEEN\_RAFT\_TRACE\_RETENTION\_S & 7 days & How long message traces are kept. \\
 \multicolumn{3}{@{}l}{\itshape Limits} \\
 QUEEN\_RAFT\_DISK\_HIGH\_PCT & 85 & Above this share of the disk, writes that would grow it answer 507. \\

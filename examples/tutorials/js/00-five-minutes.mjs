@@ -5,7 +5,7 @@
 // that each step did what the page says it does.
 //
 // Run it against the node that step 1 of the guide starts:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 //   node 00-five-minutes.mjs
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 

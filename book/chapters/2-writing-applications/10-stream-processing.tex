@@ -58,6 +58,18 @@ after its end, and \texttt{idleFlushMs} (5 seconds) closes the windows of partit
 \why{events arrive late and out of order: a phone that was offline, a batch upload, a retry. An
 hourly report should count a sale in the hour it happened, not in the hour its message got through.}
 
+A window on a partition that goes quiet still closes on time. The client keeps the time each open
+window ends, and at that time leases the quiet partition from the broker
+(\texttt{POST /streams/v1/claim}, from broker 2.7.0) and closes the window under that lease, on the
+broker's clock. A partition someone else holds, or one with messages still waiting, is not leased:
+the window then closes in that cycle. So a window closes once, even with several processes on one
+\texttt{queryId}, and a process that starts asks the broker which partitions hold state, so the
+windows a restart or a scale-down left open close too. On an older broker a client closes only the
+windows of partitions its own process read in the last five minutes.
+
+\why{a session per visit or per trace ends with silence, so closing it cannot wait for the next
+message, and a process that restarts must not forget the windows it had open.}
+
 \subsection{Shaping the data}
 
 \begin{itemize}

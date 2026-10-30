@@ -71,13 +71,13 @@ A dead letter keeps the payload, the error the worker sent, the number of retrie
 
 <Why>a failure you cannot see is a failure you cannot fix. The dead-letter queue is where they wait for a person, or for a fix in the code.</Why>
 
-Some SDKs lose the error text on the way in 2.6.0: a Go or C++ transaction ack with `dlq`, and the automatic nack of PHP's consume loop, file the message as "Retries exhausted". Ack with `failed` or `dlq` and an `error` outside a transaction when the reason matters.
+Some SDKs lose the error text on the way in 2.7.0: a Go or C++ transaction ack with `dlq`, and the automatic nack of PHP's consume loop, file the message as "Retries exhausted". Ack with `failed` or `dlq` and an `error` outside a transaction when the reason matters.
 
 ## Read it
 
 <SdkCode id="dlq-read" />
 
-`limit()` and `offset()` page through it, newest first. The JavaScript client also has `from()` and `to()`, but the 2.6.0 broker ignores them.
+`limit()` and `offset()` page through it, newest first. The JavaScript client also has `from()` and `to()`, but the 2.7.0 broker ignores them.
 
 ## Replay it
 

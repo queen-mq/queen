@@ -8,7 +8,7 @@
 //
 // Run it against a node:
 //
-//	docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+//	docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 //	GOWORK=off go run ./book-use-cases
 //
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.

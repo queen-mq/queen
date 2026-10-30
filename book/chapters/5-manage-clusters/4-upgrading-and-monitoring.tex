@@ -63,8 +63,8 @@ that data.
 
 To keep the way back open while a new release proves itself, set
 \texttt{QUEEN\_RAFT\_CLUSTER\_VERSION\_MS=0} on every node: the version then never moves. Remove the
-setting when you decide to stay, and the version moves within a second. 2.5.0 and 2.6.0 write the
-same format (version 7).
+setting when you decide to stay, and the version moves within a second. 2.5.0, 2.6.0 and 2.7.0 write
+the same format (version 7).
 
 \why{a rolling upgrade means old and new nodes run side by side for a while. If a new node wrote
 something an old node cannot read, the old node would stop. Waiting for the last node is what makes
@@ -88,7 +88,7 @@ answers 503 \texttt{settling}.
 
 \begin{shell}
 curl -s http://10.0.0.13:6632/health
-{"status":"healthy","engine":"raft","version":"2.6.0",
+{"status":"healthy","engine":"raft","version":"2.7.0",
  "raft":{"role":"leader","leader":true,"term":1,"applied":5,"commit":5,"lag":0,
   "quorumAckMs":8,"storageReady":true,"clusterVersion":7,"kinds":7,
   "apply":{"failure":null,"skipped":[]}}}

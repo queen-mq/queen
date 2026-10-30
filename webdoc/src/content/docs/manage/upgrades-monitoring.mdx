@@ -83,7 +83,7 @@ kubectl -n queen patch queencluster queen --type merge \
 
 A release can change how data is written. It does so only when every node runs it: until the last node is upgraded, the cluster keeps writing the old format, and the new feature stays off. The format is the `clusterVersion` in `/health`. While it has not moved, you can go back by starting the old release on the same data. Once it moves, an older release refuses to start on that data.
 
-To keep the way back open while a new release proves itself, set `QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node: the version then never moves. Remove the setting when you decide to stay, and the version moves within a second. 2.5.0 and 2.6.0 write the same format (version 7).
+To keep the way back open while a new release proves itself, set `QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node: the version then never moves. Remove the setting when you decide to stay, and the version moves within a second. 2.5.0, 2.6.0 and 2.7.0 write the same format (version 7).
 
 <Why>a rolling upgrade means old and new nodes run side by side for a while. If a new node wrote something an old node cannot read, the old node would stop. Waiting for the last node is what makes the roll safe in both directions, up to the moment you choose.</Why>
 

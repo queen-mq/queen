@@ -12,7 +12,7 @@
 // ext-pcntl. PHP has no streams client, so uc-trace and uc-rate are not here.
 //
 // Run it against a node:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 //   php book-use-cases.php
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 

@@ -5,7 +5,7 @@
 // the program a clean start and checks that each step did what the page says.
 //
 // Run it against the node that step 1 of the guide starts:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 //   cargo run --bin 00_five_minutes
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 

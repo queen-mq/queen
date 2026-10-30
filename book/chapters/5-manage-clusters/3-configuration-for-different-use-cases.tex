@@ -33,7 +33,7 @@ To survive the loss of a whole site & A standby cluster \\
 One command, no settings:
 
 \begin{shell}
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 \end{shell}
 
 Without a volume, the data lives inside the container and is gone when the container is removed.
@@ -46,7 +46,7 @@ One node with its data on a volume:
 \begin{shell}
 docker run -d --name queen --restart unless-stopped --stop-timeout 60 \
   -p 6632:6632 -v /var/lib/queen:/var/lib/queen/raft \
-  ghcr.io/queen-mq/queen:2.6.0
+  ghcr.io/queen-mq/queen:2.7.0
 \end{shell}
 
 A single node writes every message to disk (fsync) before it answers. A crash, a kill -9 or a
@@ -116,7 +116,7 @@ docker run -d --name queen -p 6711:6711 -p 127.0.0.1:6632:6632 \
   -e QUEEN_PROXY_BOOTSTRAP_TENANT=acme \
   -e QUEEN_PROXY_BOOTSTRAP_API_KEY="$QUEEN_KEY" \
   -e QUEEN_PROXY_DEFAULT_CLUSTER=acme \
-  ghcr.io/queen-mq/queen:2.6.0
+  ghcr.io/queen-mq/queen:2.7.0
 \end{shell}
 
 The first start creates the tenant \texttt{acme} and its key. Clients now use port 6711, with the
@@ -202,7 +202,7 @@ docker run -d --name queen -p 6632:6632 -v /var/lib/queen:/var/lib/queen/raft \
   -e PARTITION_CLEANUP_SECONDS=60 \
   -e QUEEN_RAFT_TXN_WINDOW_MIN_S=60 \
   -e QUEEN_RAFT_RETENTION_SCAN_PER_S=40000 \
-  ghcr.io/queen-mq/queen:2.6.0
+  ghcr.io/queen-mq/queen:2.7.0
 \end{shell}
 
 and give the queue retention and a short dedup window:
@@ -225,11 +225,17 @@ window, nor before \texttt{QUEEN\_RAFT\_TXN\_WINDOW\_MIN\_S} (15 minutes by defa
 needs both to be short too.}
 
 On 2.6.0 the third setting matters when partitions come and go fast: we saw the problem from 200
-new partitions a second. By default the retention scan paces each round from the size of the previous one. When new
-partitions arrive faster than that, a round never ends, and nothing is deleted: in a test with
-1,000 new partitions a second, 594,000 of 595,000 partitions were still there after ten minutes.
-\texttt{40000} turns that pacing off. With it, 1,000 and 2,000 new partitions a second stayed flat,
-at about 70,000 and 150,000 partitions.
+new partitions a second. The retention scan paces each round from the size of the previous one, so
+when new partitions arrive faster than that, a round never ends, and nothing is deleted: in a test
+with 1,000 new partitions a second, 594,000 of 595,000 partitions were still there after ten
+minutes. \texttt{40000} turns that pacing off. With it, 1,000 and 2,000 new partitions a second
+stayed flat, at about 70,000 and 150,000 partitions.
+
+2.7.0 does not need the setting: a round is paced from the larger of the previous round and what it
+has visited so far, so it ends while partitions grow. On one node (an Apple laptop) with the three
+settings at 60 s and one message to each new partition, 1,000 new partitions a second for ten
+minutes stayed between 63,000 and 69,000 partitions, and every one was deleted within 60 seconds of
+the end. Memory went from about 550 MB under the load back to 105 MB.
 
 \subsection{Kafka clients}
 

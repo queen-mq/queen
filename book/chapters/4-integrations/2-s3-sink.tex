@@ -32,7 +32,7 @@ docker run -d --name queen --network lake -p 6632:6632 \
   -e QUEEN_S3_SECRET_KEY=queen-secret-key \
   -e QUEEN_S3_START=earliest \
   -e QUEEN_S3_MAX_WINDOW_MS=10000 \
-  ghcr.io/queen-mq/queen:2.6.0
+  ghcr.io/queen-mq/queen:2.7.0
 \end{shell}
 
 The last two lines are for the demo: \texttt{earliest} copies the queue from its first record, and

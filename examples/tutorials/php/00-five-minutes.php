@@ -7,7 +7,7 @@
 // PHP has no streams client, so this program skips step 6.
 //
 // Run it against the node that step 1 of the guide starts:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 //   php 00-five-minutes.php
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 

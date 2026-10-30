@@ -13,7 +13,7 @@
 // with a note. consume-run needs ext-pcntl and ext-posix, to stop on SIGTERM.
 //
 // Run it against the node that the book's first section starts:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
 //   php book-client-guide.php
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 
