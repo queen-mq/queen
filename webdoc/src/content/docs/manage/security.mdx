@@ -30,6 +30,8 @@ sourceOfTruth:
 # empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
 # lease names a partition its group has no row on, or one that is gone (bad_lease); auth.rs makes
 # POST /streams/v1/state/partitions read-only (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt, 645be744e): the queen-kafka files this page names were
+# reformatted, line wrapping only. Nothing this page states changes.
 ---
 
 Out of the box a node authenticates nobody: its port is plain HTTP, and every route answers any caller that can reach it. That keeps the first run to one command, and it is the first thing to change. Put one of two front doors on it (the broker's own JWT for services, or the built-in proxy for API keys and people), keep the raft port private, and encrypt the queues whose payloads must not sit on disk in clear.

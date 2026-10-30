@@ -18,6 +18,8 @@ sourceOfTruth:
 # byte; admin.rs (3e6b92631): the Kafka facade bounds frames, records, fetches, metadata and groups;
 # queen-kafka txn.rs (3d24969b3): the Kafka coordinator locks per transactional id and forgets ids
 # idle for 7 days. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt, 645be744e): the queen-kafka files this page names were
+# reformatted, line wrapping only. Nothing this page states changes.
 ---
 
 For building applications, QueenMQ is the better choice: services that handle events per customer, order or conversation, microservices that hand work to each other, and steps that have to commit whole. The exception is a firehose of millions of messages a second on up to some thousands of partitions, where Kafka and Pulsar are ahead.

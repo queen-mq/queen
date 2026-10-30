@@ -16,6 +16,8 @@ sourceOfTruth:
 # frames, records, fetches, metadata and groups; queen-kafka txn.rs (3d24969b3): the Kafka
 # coordinator locks per transactional id and forgets ids idle for 7 days. The Transactions row says
 # a transactional id idle for 7 days is forgotten.
+# sourceOfTruth re-read 2026-10-30 (rustfmt, 645be744e): the queen-kafka files this page names were
+# reformatted, line wrapping only. Nothing this page states changes.
 ---
 
 Kafka Streams, Kafka Connect and Flink ask more of a broker than produce and consume: they create topics with configs, keep state in compacted topics, start reading from a point in time, and commit transactions that outlive a process. This page says what the 2.6 Kafka port does with each of those requests, and what has run against QueenMQ.

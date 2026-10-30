@@ -31,6 +31,12 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21 (empty groups leave memory): groups.rs drops a group with no
 # members ten minutes after its last member left, and presence.rs deletes its console row; "Where it
 # differs" says so.
+# sourceOfTruth re-read 2026-10-30 (rustfmt, 645be744e): the queen-kafka files this page names were
+# reformatted, line wrapping only. Also re-read against the Kafka facade's bounds (3e6b92631) and
+# per-id coordinator (3d24969b3): the settings table gains QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS,
+# QUEEN_KAFKA_IDLE_TIMEOUT_MS, QUEEN_KAFKA_INFLIGHT_BYTES, QUEEN_KAFKA_FETCH_MAX_BYTES,
+# QUEEN_KAFKA_METADATA_MAX_PARTITIONS and QUEEN_KAFKA_GROUP_MAX_MEMBERS with config.rs's ranges, the
+# 512 KiB frame before a SASL login, and a transactional id idle for 7 days being forgotten.
 ---
 
 This is the contract a Kafka client gets from Queen, in the form you check things against: the
@@ -62,7 +68,13 @@ is out of range stops the node with the variable's name, except for `QUEEN_KAFKA
 | `QUEEN_KAFKA_GROUP_JOIN_DELAY_MS` | `3000` | How long the first join of an empty group waits for more members (Kafka's `group.initial.rebalance.delay.ms`), 0 to 300,000. |
 | `QUEEN_KAFKA_SASL` | unset | `plain` (or `required`) makes every connection log in with SASL/PLAIN before it may send anything but ApiVersions and the SASL handshake ([security](#security)). `off`, or unset: no login. Any other value stops the node. |
 | `QUEEN_KAFKA_MAX_CONNECTIONS` | `10000` | Connections served at once, 1 to 1,000,000. Past it a new connection is closed, with a line in the node's log, and the client tries again. |
-| `QUEEN_KAFKA_MAX_REQUEST_BYTES` | `104857600` (100 MiB) | The largest request frame, 1 MiB to 1 GiB (Kafka's `socket.request.max.bytes`). A larger one closes the connection. |
+| `QUEEN_KAFKA_MAX_REQUEST_BYTES` | `104857600` (100 MiB) | The largest request frame, 1 MiB to 1 GiB (Kafka's `socket.request.max.bytes`). A larger one closes the connection. Before a client logs in with SASL a frame is at most 512 KiB. |
+| `QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS` | `30000` | How long the rest of a frame may take once its first byte arrived, 100 to 3,600,000. A slower one closes the connection. |
+| `QUEEN_KAFKA_IDLE_TIMEOUT_MS` | `600000` | A connection that sends no request for this long is closed (Kafka's `connections.max.idle.ms`), 1,000 to 86,400,000. |
+| `QUEEN_KAFKA_INFLIGHT_BYTES` | `268435456` (256 MiB) | The request frames every connection together may hold at once, 1 MiB to 64 GiB. A frame waits in its socket until there is room. |
+| `QUEEN_KAFKA_FETCH_MAX_BYTES` | `52428800` (50 MiB) | The most one Fetch answer carries, whatever the request asks (Kafka's `fetch.max.bytes`), 1 KiB to 1 GiB. |
+| `QUEEN_KAFKA_METADATA_MAX_PARTITIONS` | `100000` | The partitions one Metadata answer lists, 1 to 10,000,000; the topics past it are answered with an error. One request creates at most 16 topics by itself. |
+| `QUEEN_KAFKA_GROUP_MAX_MEMBERS` | `1000` | The members one consumer group may have (Kafka's `group.max.size`), 1 to 1,000,000. |
 | `QUEEN_FETCH_TOPIC_WAKE_MS` | `5` | How long a parked fetch that has read nothing waits at least before it answers, empty, because another partition of its topic was written on the node, 0 to 30,000. `0` parks it on its own partitions only. Read by the broker, so `POST /api/v1/fetch` behaves the same. |
 | `QUEEN_KAFKA_SHUTDOWN_GRACE_MS` | `5000` | How long a stopping node waits for the facade to close. |
 
@@ -96,6 +108,9 @@ speaks only those. This is that answer, with the reason each window stops where 
   every partition, and the raft leader leads every partition and coordinates every group and every
   transactional id. Produce, Fetch, ListOffsets and the group and transaction APIs reach the leader;
   another node answers `NOT_LEADER_OR_FOLLOWER` or `NOT_COORDINATOR` and the client asks again.
+- A transactional id nobody used for 7 days is forgotten, as Kafka's
+  `transactional.id.expiration.ms` does by default: its next InitProducerId starts it again with a
+  new producer id. Each id is coordinated on its own, so a slow commit holds back only its producer.
 - Inside a transaction, a produce answers offset `-1`, because no offset exists until the commit.
   The transaction's records wait in the leader's memory and its commit writes them, with its
   offsets, as one raft entry. There are no commit markers, so a committed transaction of N records

@@ -38,6 +38,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (2.7.0): real.rs (7fe23f4ed): KV reads put each stored value's
 # text into the answer instead of building a JSON tree; every answer is the same, byte for byte.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (rustfmt, 645be744e): the queen-kafka files this page names were
+# reformatted, line wrapping only. Nothing this page states changes.
 ---
 
 A broker that promises "all or nothing" has to keep the promise exactly when something breaks. We test QueenMQ with Jepsen on five nodes, under kill -9, network partitions, paused processes, clock jumps, power loss and corrupted files. This page says what each API guarantees, what an answered write means, and where the guarantees stop.

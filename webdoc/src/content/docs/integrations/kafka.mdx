@@ -23,6 +23,9 @@ sourceOfTruth:
   - protocols/queen-kafka/src/handlers/offsets.rs
   - protocols/queen-kafka/src/handlers/admin.rs
   - examples/cross-protocol/bridge.mjs
+# sourceOfTruth re-read 2026-10-30 (rustfmt, 645be744e): the queen-kafka files this page names were
+# reformatted, line wrapping only. Also re-read against the Kafka facade's bounds (3e6b92631) and
+# per-id coordinator (3d24969b3): the TLS line says 2.7; nothing else this page states changes.
 ---
 
 Kafka producers, consumers and admin tools can use Queen as they are: change `bootstrap.servers`, and nothing else. A topic is a Queen queue and a Kafka consumer group is a Queen consumer group, so Kafka clients and Queen clients read and write the same data.
@@ -111,7 +114,7 @@ On a cluster every node runs the Kafka port, and together they are one Kafka clu
 - **Kafka consumers take no lease.** Queen's retries and dead-letter queue do not apply to them: a Kafka consumer handles its own failures, as on Kafka. Kafka and Queen consumers share a group's position, not its work, so hand a group from one kind to the other, and do not run both at once.
 - **Committed offsets never expire.** Kafka forgets an empty group after seven days; here a group keeps its position until you delete it.
 - **Transactions live in the leader's memory**, up to 8 MiB, 50,000 records and 1,000 partitions each. A leader change aborts the transactions that were open.
-- **The Kafka port has no TLS in 2.6**, and SASL passwords travel in clear: keep it on a private network.
+- **The Kafka port has no TLS in 2.7**, and SASL passwords travel in clear: keep it on a private network.
 - **Advertise an address the client can reach, as it will try it.** On macOS, `localhost` is tried as `::1` first, so a port published on `127.0.0.1` only fails with `localhost`: use `127.0.0.1`.
 
 ## See also
