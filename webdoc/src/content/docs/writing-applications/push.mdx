@@ -35,6 +35,8 @@ verifiedBy:
   - examples/tutorials/rust/src/bin/book_client_guide.rs
   - examples/tutorials/php/book-client-guide.php
   - examples/tutorials/cpp/book-client-guide.cpp
+# sourceOfTruth re-read 2026-10-30 (stream claims): phase2.rs adds POST /streams/v1/claim and
+# /streams/v1/state/partitions (baa27c5c0). Nothing this page states changes.
 ---
 
 In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up every customer that shares its partition. Here a partition is one entity: a customer, an order, a conversation. The push that names it creates it, order holds inside it, and one queue has held ten million.

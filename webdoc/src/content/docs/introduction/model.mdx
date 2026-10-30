@@ -27,6 +27,9 @@ digest: >-
   entry of the log, and either all parts apply or none does. Delivery is at-least-once; effects
   inside Queen are exactly-once through transactions and transactionId deduplication, and stop at
   calls a worker makes to other systems.
+# sourceOfTruth re-read 2026-10-30 (stream claims): txn.rs refuses a streams cycle whose lease names
+# a partition that is gone; phase2.rs adds POST /streams/v1/claim and /streams/v1/state/partitions
+# (baa27c5c0). Nothing this page states changes.
 ---
 
 The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases, transactions and a simple interface.

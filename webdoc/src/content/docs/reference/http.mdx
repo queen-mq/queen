@@ -59,6 +59,9 @@ sourceOfTruth:
 # Kafka-facade consumer group from the presence row the facade writes (kind kafka, liveMembers,
 # lastSeenAt, inactiveSeconds; state Stable, Lagging or Empty), two KV point reads per group of the
 # listing. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): auth.rs makes POST /streams/v1/state/partitions
+# read-only; the generated route table lists it and POST /streams/v1/claim (baa27c5c0). Nothing else
+# this page states changes.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no

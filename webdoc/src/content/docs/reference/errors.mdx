@@ -82,6 +82,10 @@ sourceOfTruth:
 # the queue detail read takes includePartitions=false and then returns queue-wide totals without
 # per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): a streams cycle whose lease names a partition
+# its group never read, or one that is gone, now answers bad_lease (ack.rs, txn.rs); auth.rs makes
+# POST /streams/v1/state/partitions read-only; phase2.rs adds it and POST /streams/v1/claim with the
+# usual 400 and 404 answers (baa27c5c0). Nothing this page states changes.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code

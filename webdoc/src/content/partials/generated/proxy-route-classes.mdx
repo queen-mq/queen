@@ -111,9 +111,11 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 
 | Method | Path |
 | --- | --- |
+| `POST` | `/streams/v1/claim` |
 | `POST` | `/streams/v1/cycle` |
 | `POST` | `/streams/v1/queries` |
 | `POST` | `/streams/v1/state/get` |
+| `POST` | `/streams/v1/state/partitions` |
 
 ### gated (traces)
 
@@ -194,4 +196,4 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-82 of the broker's 112 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+84 of the broker's 114 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

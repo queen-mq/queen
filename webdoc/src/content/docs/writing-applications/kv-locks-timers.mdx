@@ -34,6 +34,8 @@ verifiedBy:
   - examples/tutorials/rust/src/bin/00_five_minutes.rs
   - examples/tutorials/php/00-five-minutes.php
   - examples/tutorials/cpp/00-five-minutes.cpp
+# sourceOfTruth re-read 2026-10-30 (stream claims): auth.rs makes POST /streams/v1/state/partitions
+# read-only (baa27c5c0). Nothing this page states changes.
 ---
 
 The transaction above already used two of the three: `kv.put` stored the order's state, and `timer()` scheduled tomorrow's reminder, which arrives as a message.

@@ -129,6 +129,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21: real.rs gives a Kafka record's push its transaction id (facade
 # 2's idempotent producer) and consume/txn.rs counts a moved position as consumption on the
 # dashboard (cd737c40a). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): ack.rs refuses a positional ack (Streams only)
+# whose lease names a partition its group has no row on (baa27c5c0). Nothing this page states
+# changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue`, keep their middleware, `tries`, `backoff` and failure events, and `queue:work` still runs them. What changes is where a job waits and what holds it while it runs. This page follows one job through QueenMQ, one idea at a time, with what Horizon does at the same point. The settings of each idea close its section ([configuration reference](/integrations/laravel/configuration/)).

@@ -57,6 +57,9 @@ sourceOfTruth:
 # 2's idempotent producer) and consume/txn.rs counts a moved position as consumption on the
 # dashboard (cd737c40a); the transaction route, its fields and its answers are unchanged. Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): ack.rs and txn.rs refuse a positional ack
+# (Streams cycles only) whose lease names a partition its group has no row on, or one that is gone
+# (baa27c5c0). Nothing this page states changes.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step

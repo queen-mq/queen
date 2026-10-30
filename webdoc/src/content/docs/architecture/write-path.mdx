@@ -20,6 +20,10 @@ sourceOfTruth:
   - server/src/rsm/consume/txn.rs
   - server/src/rsm/consume/ack.rs
   - server/src/rsm/qlog/mod.rs
+# sourceOfTruth re-read 2026-10-30 (stream claims): consume/mod.rs declares consume/idle.rs, the
+# empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
+# lease names a partition its group has no row on, or one that is gone (bad_lease), instead of
+# skipping it (baa27c5c0). Nothing this page states changes.
 ---
 
 A write goes through four steps.

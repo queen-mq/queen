@@ -31,6 +31,10 @@ sourceOfTruth:
   - protocols/queen-kafka/src/handlers/produce.rs
   - clients/client-js/client-v2/builders/TransactionBuilder.js
   - clients/client-js/client-v2/kv/Kv.js
+# sourceOfTruth re-read 2026-10-30 (stream claims): ack.rs refuses a positional ack whose lease
+# names a partition its group has no row on, so a streams cycle is fenced by its lease there too;
+# consume/mod.rs declares consume/idle.rs, the empty-batch lease of POST /streams/v1/claim
+# (baa27c5c0). Nothing this page states changes.
 ---
 
 A broker that promises "all or nothing" has to keep the promise exactly when something breaks. We test QueenMQ with Jepsen on five nodes, under kill -9, network partitions, paused processes, clock jumps, power loss and corrupted files. This page says what each API guarantees, what an answered write means, and where the guarantees stop.

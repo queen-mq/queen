@@ -90,6 +90,8 @@ sourceOfTruth:
 # the queue detail read takes includePartitions=false and then returns queue-wide totals without
 # per-partition rows or the DLQ scan; the default response is unchanged. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): phase2.rs adds POST /streams/v1/claim and
+# /streams/v1/state/partitions (baa27c5c0). Nothing this page states changes.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel
