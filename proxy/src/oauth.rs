@@ -1915,16 +1915,16 @@ var error=document.querySelector('[role=alert]');if(error)error.focus();
 /// with its line, centred over the card, at about the smallest height that
 /// still lets the line be read.
 const SIGN_IN_CSS: &str = "\
-:root{--ink-0:#0b0a0a;--ink-2:#111010;--ink-3:#171615;\
---text-hi:#eeebe6;--text-mid:#aaa59e;--text-low:#8f8a83;--text-faint:#57534e;\
+:root{--ink-0:#1a1917;--ink-2:#1c1b19;--ink-3:#22211f;\
+--text-hi:#f3f0eb;--text-mid:#b8b3ab;--text-low:#9a958e;--text-faint:#706b65;\
 --brand:#fcc620;--accent:var(--brand);--accent-dim:#e6ae05;--accent-text:var(--brand);--on-accent:#000000;\
 --ember-400:#f07a5f;--ember-glow:rgba(240,122,95,0.12);--ember-bd:rgba(240,122,95,0.30);\
---bd:#1f1d1b;--bd-hi:#34312e;--ring:var(--accent-text);color-scheme:dark}\
-html.light{--ink-0:#f2f0ec;--ink-2:#f9f7f4;--ink-3:#f1eee9;\
---text-hi:#1f1d1a;--text-mid:#4f4b45;--text-low:#6c675f;--text-faint:#b0aaa2;\
+--bd:#2c2a27;--bd-hi:#403d39;--ring:var(--accent-text);color-scheme:dark}\
+html.light{--ink-0:#f7f7f6;--ink-2:#ffffff;--ink-3:#fcfcfb;\
+--text-hi:#1a1918;--text-mid:#45423e;--text-low:#67625c;--text-faint:#8c8782;\
 --brand:#fcc620;--accent:var(--brand);--accent-dim:#e6ae05;--accent-text:#806000;--on-accent:#000000;\
---ember-400:#c6452e;--ember-glow:rgba(198,69,46,0.09);--ember-bd:rgba(198,69,46,0.30);\
---bd:#e0dcd6;--bd-hi:#cfc9c1;--ring:var(--accent-text);color-scheme:light}\
+--ember-400:#c0262d;--ember-glow:rgba(192,38,45,0.07);--ember-bd:rgba(192,38,45,0.32);\
+--bd:#e2e2df;--bd-hi:#cfcfcb;--ring:var(--accent-text);color-scheme:light}\
 *{box-sizing:border-box}\
 body{margin:0;min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;\
 padding:24px;font:13px/1.5 'Inter',ui-sans-serif,system-ui,sans-serif;\

@@ -1,61 +1,64 @@
 <template>
+  <!--
+    The all-queues table: one row per queue, its verdict (useAttention's, the
+    rule the list beside and the Overview use) as a mark and a word, then plain
+    right-aligned numbers; colour only where a verdict says so. A row opens the
+    queue; Delete shows on hover.
+  -->
   <div class="qhg" :class="{ 'qhg-no-hot': !showHot }">
-    <!-- header row (column labels) -->
     <div class="qhead">
-      <div class="qstatus-compact"></div>
-      <div class="h-name">Queue</div>
-      <div class="h-status">Status</div>
-      <div class="h-c h-density">Density</div>
-      <div v-if="showHot" class="h-c h-hot">Hot</div>
-      <div class="h-c">Pop rate</div>
-      <div class="h-c">Lag p99</div>
-      <div class="h-c h-parts">Partitions</div>
-      <div class="h-c h-store">Stored</div>
-      <div></div>
+      <span class="qstatus-compact" aria-hidden="true" />
+      <span class="h-name">Queue</span>
+      <span class="h-status">Status</span>
+      <span class="h-c h-density" title="Messages per partition, since the queue was created">Per partition</span>
+      <span v-if="showHot" class="h-c h-hot">Hot</span>
+      <span class="h-c" title="Pops per second, last 15 minutes">Pop rate</span>
+      <span class="h-c" title="Longest wait before a pop, last 15 minutes">Max lag</span>
+      <span class="h-c h-parts">Partitions</span>
+      <span class="h-c h-store" title="Bytes the queue holds on disk">Stored</span>
+      <span aria-hidden="true" />
     </div>
 
-    <!-- skeleton -->
     <template v-if="loading && !queues.length">
-      <div v-for="i in 8" :key="`s-${i}`" class="qrow qrow-skeleton">
-        <span class="qstatus-compact"></span>
-        <span class="skeleton" style="height: 12px; width: 60%;"></span>
-        <span class="skeleton qstatus" style="height: 12px; width: 70px;"></span>
-        <span class="skeleton h-density" style="height: 12px; width: 50px; margin-left: auto;"></span>
-        <span v-if="showHot" class="skeleton cc-hot" style="height: 12px; width: 50px; margin-left: auto;"></span>
-        <span class="skeleton" style="height: 12px; width: 60px; margin-left: auto;"></span>
-        <span class="skeleton" style="height: 12px; width: 50px; margin-left: auto;"></span>
-        <span class="skeleton cc-parts" style="height: 12px; width: 40px; margin-left: auto;"></span>
-        <span class="skeleton cc-store" style="height: 12px; width: 50px; margin-left: auto;"></span>
-        <span></span>
+      <div v-for="i in 8" :key="`s-${i}`" class="qrow qrow-skeleton" aria-hidden="true">
+        <span class="qstatus-compact" />
+        <span class="skeleton" style="height: 12px; width: 60%;" />
+        <span class="skeleton qstatus" style="height: 12px; width: 70px;" />
+        <span class="skeleton h-density" style="height: 12px; width: 50px; margin-left: auto;" />
+        <span v-if="showHot" class="skeleton cc-hot" style="height: 12px; width: 50px; margin-left: auto;" />
+        <span class="skeleton" style="height: 12px; width: 50px; margin-left: auto;" />
+        <span class="skeleton" style="height: 12px; width: 40px; margin-left: auto;" />
+        <span class="skeleton cc-parts" style="height: 12px; width: 32px; margin-left: auto;" />
+        <span class="skeleton cc-store" style="height: 12px; width: 50px; margin-left: auto;" />
+        <span />
       </div>
     </template>
 
-    <!-- empty state -->
     <div v-else-if="!queues.length">
       <!-- The slot owns the whole block, `.empty-state` padding included. -->
       <slot name="empty">
-        <div class="empty-state">
-          <h3>No queues match your filters</h3>
-        </div>
+        <div class="empty-state"><h3>No queue matches</h3></div>
       </slot>
     </div>
 
-    <!-- rows: plain numbers; colour only where a verdict says so -->
     <template v-else>
       <div
         v-for="q in displayed"
         :key="q.name"
         class="qrow"
-        :class="`sev-${cardSev(q)}`"
+        role="link"
+        tabindex="0"
+        :aria-label="`${q.name}: ${verdict(q).word}`"
         @click="$emit('select', q)"
+        @keydown.enter.prevent="$emit('select', q)"
       >
-        <span class="g qstatus-compact" :class="glyph(cardSev(q))" aria-hidden="true"></span>
-        <span class="qname">
+        <span class="g qstatus-compact" :class="glyph(cardSev(q))" aria-hidden="true" />
+        <span class="qname" :title="q.name">
           <span class="ns">{{ q._nsPrefix }}</span><span class="nm">{{ q._namePart }}</span>
         </span>
         <QueueStatus class="qstatus" :severity="cardSev(q)" :label="verdict(q).word" />
         <span class="cell-c h-density">
-          <span class="cc">{{ densityVal(q.density) }}<i>msg/p</i></span>
+          <span class="cc">{{ densityVal(q.density) }}</span>
         </span>
         <span v-if="showHot" class="cell-c cc-hot">
           <span class="cc" :class="`sev-${hotSev(q.hotCount, q.partitions)}`">
@@ -64,7 +67,7 @@
         </span>
         <span class="cell-c">
           <span class="cc" :title="`push ${fmtRate(q.pushPerSec)}/s · pop ${fmtRate(q.popPerSec)}/s`">
-            <span class="arrow" :class="arrowClass(q)">{{ arrow(q) }}</span>{{ fmtRate(q.popPerSec) }}<i>/s</i>
+            <span class="arrow" :class="arrowClass(q)" aria-hidden="true">{{ arrow(q) }}</span>{{ fmtRate(q.popPerSec) }}<i>/s</i>
           </span>
         </span>
         <span class="cell-c">
@@ -74,22 +77,18 @@
           <span class="cc">{{ fmt(q.partitions) }}</span>
         </span>
         <span class="cell-c cc-store">
-          <span class="cc" :title="q.retainedBytes == null ? 'Storage not reported for this queue' : undefined">
-            {{ fmtBytes(q.retainedBytes) }}
-          </span>
+          <span class="cc" :title="q.retainedBytes == null ? 'Storage not reported for this queue' : undefined">{{ fmtBytes(q.retainedBytes) }}</span>
         </span>
         <span class="cell-c qactions">
           <button
             v-if="canDelete"
+            type="button"
             class="qaction"
             title="Delete queue"
             :aria-label="`Delete ${q.name}`"
             @click.stop="$emit('delete', q)"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-            </svg>
-          </button>
+            @keydown.enter.stop
+          ><Icon name="trash" :size="14" /></button>
         </span>
       </div>
     </template>
@@ -101,6 +100,7 @@ import { computed } from 'vue'
 
 import { formatBytes } from '@/composables/useApi'
 import { laggingPartitionsSeverity } from '@/composables/useSeverity'
+import Icon from '@/components/Icon.vue'
 import QueueStatus from '@/components/QueueStatus.vue'
 
 const props = defineProps({
@@ -260,9 +260,8 @@ const displayed = computed(() => {
 </script>
 
 <style scoped>
-/* One card, rows on hairlines, plain right-aligned numbers. The status badge
-   keeps its glyph beside the verdict; narrow rows retain the leading glyph
-   when the status column is hidden. */
+/* One card, rows on hairlines, plain right-aligned numbers. Narrow rows keep
+   the leading mark when the status column steps out. */
 .qhg {
   background: var(--ink-2);
   border: 1px solid var(--bd);
@@ -272,48 +271,39 @@ const displayed = computed(() => {
 
 .qhead, .qrow {
   display: grid;
-  grid-template-columns: minmax(200px, 1fr) 118px 92px 82px 104px 84px 86px 88px 32px;
+  grid-template-columns: minmax(200px, 1fr) 128px 96px 82px 96px 80px 86px 88px 28px;
   gap: 12px;
   align-items: center;
   padding: 0 12px 0 16px;
 }
 .qhg-no-hot .qhead,
 .qhg-no-hot .qrow {
-  grid-template-columns: minmax(200px, 1fr) 118px 92px 104px 84px 86px 88px 32px;
+  grid-template-columns: minmax(200px, 1fr) 128px 96px 96px 80px 86px 88px 28px;
 }
 
 .qhead {
   height: 36px;
   border-bottom: 1px solid var(--bd);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-low);
+  font-size: 12px; font-weight: 500; color: var(--text-low);
 }
-.qhead .h-c { text-align: right; }
+.qhead .h-c { text-align: right; white-space: nowrap; }
 
 .qrow {
-  position: relative;
   height: var(--row-h, 40px);
   border-bottom: 1px solid var(--bd-soft);
+  font-size: 13px;
   cursor: pointer;
   transition: background .12s ease;
-  font-size: 13px;
 }
-.qrow:last-child { border-bottom: none; }
+.qrow:last-child { border-bottom: 0; }
 .qrow:hover { background: var(--ink-3); }
+.qrow:focus-visible { outline-offset: -2px; }
 .qrow .g { justify-self: center; }
-
 .qrow-skeleton { cursor: default; }
 .qrow-skeleton:hover { background: transparent; }
 
 /* Queue names are names, not code: sans, with the namespace prefix dimmed. */
-.qname {
-  font-weight: 500;
-  color: var(--text-hi);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.qname { font-weight: 500; color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qname .ns { color: var(--text-low); font-weight: 400; }
 .qname .nm { color: var(--text-hi); }
 
@@ -321,51 +311,38 @@ const displayed = computed(() => {
 .qstatus-compact { display: none; }
 
 .cell-c { text-align: right; }
-.cc {
-  font-variant-numeric: tabular-nums;
-  font-size: 13px;
-  color: var(--text-hi);
-  white-space: nowrap;
-}
-.cc i {
-  font-style: normal;
-  font-size: 11px;
-  color: var(--text-low);
-  margin-left: 3px;
-}
+/* Figures as in the list beside: mono, tabular, a step smaller than words. */
+.cc { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text-hi); white-space: nowrap; }
+.cc i { font-family: var(--font-sans); font-style: normal; font-size: 11px; color: var(--text-low); margin-left: 3px; }
 .cc.sev-warn { color: var(--warn-400); }
 .cc.sev-bad { color: var(--ember-400); }
-.arrow { margin-right: 3px; color: var(--text-low); }
+.arrow { margin-right: 4px; font-family: var(--font-sans); color: var(--text-low); }
 .arrow.arrow-bad { color: var(--text-mid); }
 
-/* row action button (hover-only) */
-.qactions { opacity: 0; transition: opacity .12s ease; }
-.qrow:hover .qactions, .qaction:focus-visible { opacity: 1; }
+/* The row action shows on hover and on keyboard focus. */
+.qactions { display: flex; justify-content: flex-end; }
 .qaction {
-  width: 24px; height: 24px;
-  display: grid;
-  place-items: center;
-  background: transparent;
-  border: 0;
-  border-radius: var(--r-control);
-  color: var(--text-low);
-  cursor: pointer;
-  margin-left: auto;
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border: 0; border-radius: var(--r-control); background: transparent;
+  color: var(--text-low); cursor: pointer; opacity: 0; transition: opacity .12s ease;
 }
+.qrow:hover .qaction, .qrow:focus-within .qaction, .qaction:focus-visible { opacity: 1; }
 .qaction:hover { color: var(--ember-400); background: var(--ink-4); }
-.qaction svg { width: 13px; height: 13px; }
+@media (hover: none) { .qaction { opacity: 1; } }
 
-/* narrower: drop the columns a triage does not need first */
+/* Narrower: drop the columns a triage does not need first. */
 @media (max-width: 1180px) {
   .qhead, .qrow, .qhg-no-hot .qhead, .qhg-no-hot .qrow {
-    grid-template-columns: minmax(180px, 1fr) 118px 104px 84px 86px 32px;
+    grid-template-columns: minmax(180px, 1fr) 128px 96px 80px 86px 28px;
   }
-  .h-density, .qrow .h-density, .qrow .cc-hot, .qhead .h-hot, .qrow .cc-store, .qhead .h-store { display: none; }
+  .h-density, .qrow .cc-hot, .qhead .h-hot, .qrow .cc-store, .qhead .h-store { display: none; }
 }
+/* Phone: the mark says the verdict; name, pop rate and lag keep the room. */
 @media (max-width: 760px) {
   .qhead, .qrow, .qhg-no-hot .qhead, .qhg-no-hot .qrow {
-    grid-template-columns: 14px minmax(120px, 1fr) 90px 72px 28px;
-    gap: 10px;
+    grid-template-columns: 14px minmax(0, 1fr) 76px 64px 28px;
+    gap: 8px;
+    padding: 0 8px 0 12px;
   }
   .qstatus, .qhead .h-status, .qrow .cc-parts, .qhead .h-parts { display: none; }
   .qstatus-compact { display: inline-block; }

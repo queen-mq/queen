@@ -51,7 +51,7 @@
             @focus="showTip($event, item.name, railNote(item))"
             @blur="hideTip"
           >
-            <component :is="icons[item.icon]" v-if="icons[item.icon]" class="nav-icon" aria-hidden="true" />
+            <Icon v-if="RAIL_ICONS[item.icon]" :name="RAIL_ICONS[item.icon]" class="nav-icon" :size="18" :stroke="1.6" />
             <span class="nav-name" :class="{ 'sr-only': rail }">{{ item.name }}</span>
             <span v-if="rail && marks[item.path]" class="g nav-corner" :class="marks[item.path].parts[0].glyph" aria-hidden="true" />
             <span v-else-if="marks[item.path]" class="nav-mark" :title="marks[item.path].title">
@@ -68,7 +68,9 @@
       <!-- Where you are: whose numbers these are, the cell they live on, and
            how that cell is. A control only when there is something to switch
            to; otherwise words, which must not look like a button. -->
-      <div class="sidebar-foot">
+      <!-- The rail has no foot: the cell's health is System's (its icon is
+           in the rail) and the top bar's; the drawer keeps who and where. -->
+      <div v-if="!rail" class="sidebar-foot">
         <template v-if="!rail">
         <ClusterSelector v-if="switchable" />
         <div v-else class="whoami" :title="whoamiTitle">
@@ -105,14 +107,16 @@
 </template>
 
 <script setup>
-import { h, ref, computed, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import mark from '@/assets/q.svg?raw'
 import wordmark from '@/assets/queen.svg?raw'
 import ClusterSelector from '@/components/ClusterSelector.vue'
+import Icon from '@/components/Icon.vue'
 import { system } from '@/api'
 import { formatNumber } from '@/composables/useApi'
+import { queueTabOf } from '@/composables/navigation'
 import { groupAttention, queueAttention, summarize } from '@/composables/useAttention'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { raftLagSeverity } from '@/composables/useSeverity'
@@ -342,8 +346,10 @@ watch(() => route.path, hideTip)
 const railNote = (item) => marks.value[item.path]?.title || figures.value[item.path]?.title || ''
 
 // A page with no row of its own lights the row that stands for it (Users,
-// under Members).
+// under Members). Every tab of a queue lights Queues: Consumer groups and
+// Supervisors only while they show one queue.
 const isActive = (path) => {
+  if (queueTabOf(route)) return path === '/queues'
   if (route.meta?.navParent === path) return true
   return path === '/' ? route.path === '/' : route.path.startsWith(path)
 }
@@ -381,58 +387,24 @@ const navGroups = computed(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Row icons: one line weight, one ink, drawn for what each page holds. They
-// sit a step quieter than the words and take the page's ink on the row you
-// are on.
+// Row icons: Lucide's (components/Icon.vue), one line weight, one ink, chosen
+// for what each page holds: a bolt for the class that lives in RAM, a key for
+// KV, a padlock for locks, a route for traces, the sliders for the lines.
 // ---------------------------------------------------------------------------
-const icons = {
-  dashboard: DashboardIcon,
-  queues: QueuesIcon,
-  ephemeral: EphemeralIcon,
-  consumers: ConsumersIcon,
-  messages: MessagesIcon,
-  kv: KvIcon,
-  timers: TimersIcon,
-  locks: LocksIcon,
-  traces: TracesIcon,
-  workload: WorkloadIcon,
-  dlq: DlqIcon,
-  members: MembersIcon,
-  keys: ApiKeysIcon,
-  settings: SettingsIcon,
-  system: SystemIcon,
+const RAIL_ICONS = {
+  dashboard: 'layout-dashboard',
+  queues: 'layers',
+  ephemeral: 'zap',
+  kv: 'key-round',
+  locks: 'lock',
+  supervisors: 'server-cog',
+  workload: 'chart-column',
+  traces: 'route',
+  settings: 'sliders-horizontal',
+  system: 'server',
+  members: 'users',
+  keys: 'id-card',
 }
-
-function DashboardIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('rect',{x:'3',y:'3',width:'7',height:'9',rx:'1.5'}),h('rect',{x:'14',y:'3',width:'7',height:'5',rx:'1.5'}),h('rect',{x:'14',y:'12',width:'7',height:'9',rx:'1.5'}),h('rect',{x:'3',y:'16',width:'7',height:'5',rx:'1.5'})]) }
-function QueuesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M3 7h18M3 12h18M3 17h18'}),h('circle',{cx:'6',cy:'7',r:'1.2',fill:'currentColor'}),h('circle',{cx:'10',cy:'12',r:'1.2',fill:'currentColor'}),h('circle',{cx:'8',cy:'17',r:'1.2',fill:'currentColor'})]) }
-/* Ephemeral: the queue glyph with a bolt through it — same stacked rows, and
-   the bolt is the one thing this class is: it lives in RAM and it goes. */
-function EphemeralIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('path',{d:'M3 7h9M3 12h6M3 17h8'}),h('path',{d:'M18 3l-4 8h4l-2 10'})]) }
-function ConsumersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('circle',{cx:'9',cy:'8',r:'3'}),h('circle',{cx:'17',cy:'10',r:'2.2'}),h('path',{d:'M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M15 20c.2-2 1.6-3.5 3.3-3.9'})]) }
-function MessagesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M4 6h16v10a2 2 0 01-2 2H9l-5 4V6Z'}),h('path',{d:'M8 11h8M8 14h5'})]) }
-/* KV: a key. The store is addressed BY the key — namespace plus a byte-ordered
-   string — and every other glyph for a key/value store is a table, which this
-   sidebar already spends on queues. */
-function KvIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'7.5',cy:'12',r:'3.5'}),h('path',{d:'M11 12h9M17 12v3.5M20 12v2.5'})]) }
-/* Timers: a clock, and nothing else. A timer is a message with an instant on
-   it, and the instant is the only thing the glyph has to carry. */
-function TimersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'12',cy:'13',r:'8'}),h('path',{d:'M12 9v4l3 2'}),h('path',{d:'M9 2h6'})]) }
-/* Locks: a padlock, closed. A lock here is something a holder HAS, for a
-   while; the page lists the ones that are held. */
-function LocksIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('rect',{x:'5',y:'11',width:'14',height:'9',rx:'2'}),h('path',{d:'M8 11V8a4 4 0 018 0v3'})]) }
-function TracesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M3 6h6M11 10h8M7 14h10M3 18h6'}),h('circle',{cx:'9',cy:'6',r:'1.6',fill:'currentColor'}),h('circle',{cx:'19',cy:'10',r:'1.6',fill:'currentColor'}),h('circle',{cx:'17',cy:'14',r:'1.6',fill:'currentColor'}),h('circle',{cx:'9',cy:'18',r:'1.6',fill:'currentColor'})]) }
-function WorkloadIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round' }, [h('rect',{x:'3',y:'4',width:'8',height:'6',rx:'1.5'}),h('rect',{x:'13',y:'4',width:'8',height:'11',rx:'1.5'}),h('rect',{x:'3',y:'14',width:'8',height:'6',rx:'1.5'}),h('path',{d:'M17 18v2'})]) }
-function SystemIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('rect',{x:'3',y:'4',width:'18',height:'6',rx:'1.6'}),h('rect',{x:'3',y:'14',width:'18',height:'6',rx:'1.6'}),h('circle',{cx:'7',cy:'7',r:'.9',fill:'currentColor'}),h('circle',{cx:'7',cy:'17',r:'.9',fill:'currentColor'})]) }
-/* Members: a person and the roster lines beside them; Consumers is two
-   people. */
-function MembersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'9',cy:'8',r:'3'}),h('path',{d:'M3.5 20c0-3.3 2.5-6 5.5-6s5.5 2.7 5.5 6'}),h('path',{d:'M16 8h5M16 12h5M17.5 16H21'})]) }
-/* API keys: a credential card, not a key. The key glyph is KV's, and a key
-   here is what a service shows the proxy, i.e. a card with a name on it. */
-function ApiKeysIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('rect',{x:'3',y:'6',width:'18',height:'12',rx:'1.6'}),h('circle',{cx:'8.5',cy:'12',r:'2'}),h('path',{d:'M13 10.5h5M13 13.5h3.5'})]) }
-/* Settings: three lines, each with the stop you move along it. Hollow stops,
-   so it does not read as Queues, whose dots are messages on a line. */
-function SettingsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round' }, [h('path',{d:'M3 7h10.5M18.5 7H21M3 12h4.5M12.5 12H21M3 17h8.5M16.5 17H21'}),h('circle',{cx:'16',cy:'7',r:'2.2'}),h('circle',{cx:'10',cy:'12',r:'2.2'}),h('circle',{cx:'14',cy:'17',r:'2.2'})]) }
-function DlqIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M5 7h14l-1.2 11.2a2 2 0 01-2 1.8H8.2a2 2 0 01-2-1.8L5 7Z'}),h('path',{d:'M9 4h6v3H9z'})]) }
 </script>
 
 <style>

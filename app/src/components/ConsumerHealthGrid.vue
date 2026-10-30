@@ -1,141 +1,73 @@
 <template>
+  <!--
+    The Consumer groups tab's list: one row per group, in the order the page
+    gives (composables/consumerGroups sortGroups). A mark and a word for the
+    verdict (useAttention's, as everywhere), then plain right-aligned numbers;
+    colour only where a line says so. A click opens the group's detail; the
+    one row action, Delete, shows on hover and is also in the detail.
+  -->
   <div class="chg">
-    <!-- header row (column labels) -->
     <div class="chead">
-      <div></div>
-      <div class="h-name">Consumer group</div>
-      <div class="h-status">Status</div>
-      <div class="h-c">Partitions</div>
-      <div class="h-c">Lagging</div>
-      <div class="h-c">Time lag</div>
-      <div></div>
+      <span aria-hidden="true" />
+      <span>Group</span>
+      <span class="c-status">Status</span>
+      <span class="c-num c-parts" title="Partitions this group reads">Partitions</span>
+      <span class="c-num" title="Partitions with messages this group has not read yet">Behind</span>
+      <span class="c-num" title="Age of the oldest message this group has not read">Time lag</span>
+      <span class="c-act" aria-hidden="true" />
     </div>
 
-    <!-- skeleton -->
     <template v-if="loading && !consumers.length">
-      <div v-for="i in 8" :key="`s-${i}`" class="crow crow-skeleton">
-        <span></span>
-        <span class="skeleton" style="height: 12px; width: 60%;"></span>
-        <span class="skeleton" style="height: 12px; width: 60px;"></span>
-        <span class="skeleton" style="height: 18px; width: 40px; margin: 0 auto;"></span>
-        <span class="skeleton" style="height: 18px; width: 50px; margin: 0 auto;"></span>
-        <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
-        <span></span>
+      <div v-for="i in 6" :key="`s-${i}`" class="crow crow-skeleton" aria-hidden="true">
+        <span />
+        <span class="skeleton" style="height: 12px; width: 55%;" />
+        <span class="skeleton c-status" style="height: 12px; width: 64px;" />
+        <span class="skeleton c-parts" style="height: 12px; width: 32px; justify-self: end;" />
+        <span class="skeleton" style="height: 12px; width: 32px; justify-self: end;" />
+        <span class="skeleton" style="height: 12px; width: 48px; justify-self: end;" />
+        <span class="c-act" />
       </div>
     </template>
 
-    <!-- empty state -->
     <div v-else-if="!consumers.length">
-      <!-- The slot owns the whole block, `.empty-state` padding included: a
-           wrapper that padded too meant the host view's empty state sat in
-           96px of air while every other empty state in the app sat in 48. -->
-      <slot name="empty">
-        <div class="empty-state">
-          <h3>No consumer groups match your filters</h3>
-        </div>
-      </slot>
+      <!-- The slot owns the whole block, `.empty-state` padding included. -->
+      <slot name="empty" />
     </div>
 
-    <!-- rows -->
     <template v-else>
       <div
-        v-for="g in displayed"
-        :key="`${g.name}@${g.queueName}`"
+        v-for="g in consumers"
+        :key="keyOf(g)"
         class="crow"
-        :class="`sev-${cardSev(g)}`"
+        :class="{ on: keyOf(g) === selectedKey }"
+        tabindex="0"
+        :aria-label="`${groupLabel(g)} on ${g.queueName}: ${verdictOf(g, linesFor).word}`"
         @click="$emit('select', g)"
+        @keydown.enter.prevent="$emit('select', g)"
       >
-        <span class="g" :class="glyph(rowState(g))" aria-hidden="true"></span>
-
-        <span class="cname">
-          <!-- Queue mode: queue name leads (the meaningful identifier);
-               named groups: group name leads with queue as subtitle. -->
-          <span class="cname-tag" v-if="g.name === '__QUEUE_MODE__'">qmode</span>
-          <!-- Conflation is a delivery POLICY of the group, so it rides the
-               name, not a metric column: the Lagging column beside it counts
-               partitions to visit either way, but for a conflating group that
-               is the whole of the work and its message backlog is not. -->
-          <span class="cname-tag cname-tag-cfl" v-if="isConflating(g)">conflation</span>
-          <!-- Read through the Kafka facade: its presence, not its cursors,
-               says whether anyone is there (the status beside it). -->
-          <span class="cname-tag" v-if="g.kind === 'kafka'">kafka</span>
-          <span class="nm">{{ primaryName(g) }}</span>
-          <span class="ns" v-if="g.name !== '__QUEUE_MODE__'"> · {{ g.queueName }}</span>
+        <span class="g" :class="verdictOf(g, linesFor).glyph" aria-hidden="true" />
+        <span class="cname" :title="showQueue ? `${groupLabel(g)} on ${g.queueName}` : groupLabel(g)">
+          <span class="nm">{{ groupLabel(g) }}</span>
+          <span v-if="showQueue && g.queueName" class="ns">{{ g.queueName }}</span>
+          <!-- A delivery policy and a client kind ride the name: they say how
+               to read the numbers beside it, they are not numbers. -->
+          <span v-if="isConflating(g)" class="ctag" title="Delivered one message per partition, the newest: what it is behind is partitions to visit, not messages">conflation</span>
+          <span v-if="g.kind === 'kafka'" class="ctag" title="Read through the Kafka facade">Kafka</span>
         </span>
-
-        <span class="cstatus" :class="`sev-${cardSev(g)}`" :title="presence(g) || null">{{ statusWord(rowState(g)) }}</span>
-
-        <span class="cell-c">
-          <!-- "members" in the API = partitions assigned to this consumer group;
-               the column reflects the real meaning, not the API field name. -->
-          <span class="cc sev-mute">
-            {{ fmt(g.members || 0) }}<i>parts</i>
-          </span>
-        </span>
-
-        <span class="cell-c">
-          <span
-            v-if="(g.partitionsWithLag || 0) > 0"
-            class="cc"
-            :class="`sev-${lagPartsSev(g)}`"
-          >
-            {{ fmt(g.partitionsWithLag) }}<i>behind</i>
-          </span>
-          <span v-else class="cc-empty">—</span>
-        </span>
-
-        <span class="cell-c">
-          <span
-            v-if="(g.maxTimeLag || 0) > 0"
-            class="cc"
-            :class="`sev-${timeLagSev(g)}`"
-          >
-            {{ fmtLag(g.maxTimeLag) }}
-          </span>
-          <span v-else class="cc-empty">—</span>
-        </span>
-
-        <span class="cell-c cactions">
+        <span class="cstatus c-status" :class="verdictOf(g, linesFor).tone" :title="presence(g) || undefined">{{ verdictOf(g, linesFor).word }}</span>
+        <span class="cnum c-parts">{{ count(g.members) }}</span>
+        <span class="cnum" :class="lagPartsSev(g)">{{ toNum(g.partitionsWithLag) > 0 ? count(g.partitionsWithLag) : '—' }}</span>
+        <span class="cnum" :class="timeLagSev(g)">{{ toNum(g.maxTimeLag) > 0 ? fmtLag(g.maxTimeLag) : '—' }}</span>
+        <span class="c-act">
           <button
+            v-if="canAdmin"
+            type="button"
             class="caction"
-            title="View details"
-            @click.stop="$emit('view', g)"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"/>
-              <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-            </svg>
-          </button>
-          <button
-            v-if="g.queueName && props.canAdmin"
-            class="caction"
-            title="Move cursor to now (skip pending)"
-            @click.stop="$emit('move-now', g)"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 8.688c0-.864.933-1.405 1.683-.977l7.108 4.062a1.125 1.125 0 010 1.953l-7.108 4.062A1.125 1.125 0 013 16.81V8.688zM12.75 8.688c0-.864.933-1.405 1.683-.977l7.108 4.062a1.125 1.125 0 010 1.953l-7.108 4.062a1.125 1.125 0 01-1.683-.977V8.688z"/>
-            </svg>
-          </button>
-          <button
-            v-if="g.queueName && props.canAdmin"
-            class="caction"
-            title="Seek to timestamp"
-            @click.stop="$emit('seek', g)"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-          </button>
-          <button
-            v-if="props.canAdmin"
-            class="caction caction-danger"
             title="Delete consumer group"
+            :aria-label="`Delete ${groupLabel(g)} on ${g.queueName}`"
             @click.stop="$emit('delete', g)"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"/>
-            </svg>
-          </button>
+            @keydown.enter.stop
+          ><Icon name="trash" :size="14" /></button>
         </span>
       </div>
     </template>
@@ -143,145 +75,61 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
-
-import { groupAttention, groupPresence, groupState } from '@/composables/useAttention'
+import Icon from '@/components/Icon.vue'
+import { groupLabel, verdictOf } from '@/composables/consumerGroups'
+import { formatSpan } from '@/composables/settingsDoc'
+import { toNum } from '@/composables/useApi'
+import { groupPresence } from '@/composables/useAttention'
 import { isConflating } from '@/composables/useConflation'
 import { groupActivity, laggingPartitionsSeverity, timeLagSeverity } from '@/composables/useSeverity'
 import { useSettingsStore } from '@/stores/settingsStore'
 
-const props = defineProps({
+defineProps({
   /**
-   * Consumer-group rows. Each entry should expose:
+   * Consumer-group rows, already in the page's order:
    *   { name, queueName, members, maxTimeLag, partitionsWithLag, state,
    *     conflation, kind, liveMembers, lastSeenAt, inactiveSeconds }
-   * `name === '__QUEUE_MODE__'` indicates the synthetic queue-mode group;
-   * the grid surfaces the queue name as the lead in that case.
-   * `conflation` is the group's last-value delivery policy (absent = off).
-   * `kind === 'kafka'` is a group read through the Kafka facade, and the last
-   * three are its presence (null when the facade reports none).
+   * `members` is the partitions the group reads; `kind === 'kafka'` is a
+   * group read through the Kafka facade.
    */
   consumers: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
-  /** Sort key. One of: 'health' | 'name' | 'lag' | 'members' */
-  sortBy: { type: String, default: 'health' },
-  /** Optional cap on rendered rows. */
-  limit: { type: Number, default: null },
-  /**
-   * Whether the caller's role may mutate cursors on this cluster
-   * (identity `can('queueAdmin')`). False hides move-now / seek / delete —
-   * the proxy classifies all three as QueueAdmin and would 403 them.
-   */
-  canAdmin: { type: Boolean, default: true },
+  /** The proxy classifies delete as QueueAdmin: anyone else sees no button. */
+  canAdmin: { type: Boolean, default: false },
+  /** Name each row's queue: off on a queue's own tab, where the header does. */
+  showQueue: { type: Boolean, default: true },
+  /** The row whose detail is open (keyOf), drawn selected. */
+  selectedKey: { type: String, default: '' },
 })
 
-defineEmits(['select', 'view', 'move-now', 'seek', 'delete'])
+defineEmits(['select', 'delete'])
 
-/* ---------------- severity rules ----------------
- * A consumer group that is behind is a real state and keeps its colours — the
- * thresholds are in @/composables/useSeverity with the rest of the policy, and
- * this file only maps this grid's columns onto them.
- *
- * One rule did change. `partitionsWithLag > 0` used to be enough to paint a
- * whole row amber, and on a busy queue some partition is a second behind at
- * every sample: that is not a group falling behind, it is a group working.
- * Lag is now judged by its AGE, and the partition count by its SHARE of the
- * group's partitions. Dead groups stay mute — informational, not an alert —
- * and so do inactive Kafka groups, whose figures are then plain ink too: the
- * lag of a consumer nobody runs any more grows forever, and painting it would
- * be the alarm the verdict has just declined to raise. */
-const SEV_RANK = { ok: 0, ice: 0, mute: 1, warn: 2, bad: 3 }
-
-// A group's age is judged by the lines of its queue (Settings).
+// A group's lines are its queue's (Settings).
 const { linesFor } = useSettingsStore()
 
-// The verdict, useAttention's, as every other surface gives it.
-function cardSev(g) {
-  return groupAttention(g, linesFor)
-}
-
-// What the row names: the verdict, or where a Kafka group's members are.
-function rowState(g) {
-  return groupState(g, linesFor)
-}
+const keyOf = (g) => `${g?.queueName ?? ''}\u0000${g?.name ?? ''}`
 
 function presence(g) {
   const said = groupPresence(g, linesFor)
   return said && said.charAt(0).toUpperCase() + said.slice(1)
 }
 
+// An inactive Kafka group is not judged by its figures: its lag grows for as
+// long as nobody runs it, and painting it would be the alarm its verdict has
+// just declined to raise.
 const inactive = (g) => groupActivity(g, linesFor(g.queueName)) === 'inactive'
+const timeLagSev = (g) => (inactive(g) ? '' : timeLagSeverity(g.maxTimeLag, linesFor(g.queueName)))
+const lagPartsSev = (g) => (inactive(g) ? '' : laggingPartitionsSeverity({ behind: g.partitionsWithLag, total: g.members }))
 
-function timeLagSev(g) {
-  return inactive(g) ? 'mute' : timeLagSeverity(g.maxTimeLag, linesFor(g.queueName))
-}
-
-function lagPartsSev(g) {
-  return inactive(g) ? 'mute' : laggingPartitionsSeverity({ behind: g.partitionsWithLag, total: g.members })
-}
-
-/* ---------------- naming -----------------
- * Queue-mode groups have a synthetic `__QUEUE_MODE__` name that's pure
- * noise to the operator — the meaningful identifier is the queue. Named
- * groups put the group name first with the queue as muted subtitle. */
-// The row state (groupState) as a shape and a word, in the page legend's
-// vocabulary. A Kafka group with no member right now that is not behind keeps
-// the healthy shape and says so; past the grace it is inactive.
-const GLYPH = { bad: 'bad', warn: 'warn', mute: 'idle', inactive: 'idle' }
-const WORD = { bad: 'Stuck', warn: 'Lagging', mute: 'Never consumed', inactive: 'Inactive', empty: 'No members' }
-function glyph(state) {
-  return GLYPH[state] || 'ok'
-}
-function statusWord(state) {
-  return WORD[state] || 'Stable'
-}
-
-const primaryName = (g) => g.name === '__QUEUE_MODE__' ? g.queueName : g.name
-
-/* ---------------- formatters ---------------- */
-function fmt(n) {
-  if (n === null || n === undefined) return '—'
+/** A count we hold, or a dash: a missing value is not a zero. */
+function count(v) {
+  const n = toNum(v)
+  if (n === null) return '—'
   if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k'
-  return String(n)
+  if (n >= 1e4) return (n / 1e3).toFixed(0) + 'k'
+  return n.toLocaleString('en-US')
 }
-function fmtLag(seconds) {
-  if (!seconds || seconds < 1) return '0s'
-  if (seconds < 60)    return Math.round(seconds) + 's'
-  if (seconds < 3600)  {
-    const m = Math.floor(seconds / 60)
-    const s = Math.round(seconds % 60)
-    return s ? `${m}m ${s}s` : `${m}m`
-  }
-  if (seconds < 86400) {
-    const h = Math.floor(seconds / 3600)
-    const m = Math.floor((seconds % 3600) / 60)
-    return m ? `${h}h ${m}m` : `${h}h`
-  }
-  const d = Math.floor(seconds / 86400)
-  const h = Math.floor((seconds % 86400) / 3600)
-  return h ? `${d}d ${h}h` : `${d}d`
-}
-
-/* ---------------- sort / limit ---------------- */
-const displayed = computed(() => {
-  const sorted = [...props.consumers]
-
-  if (props.sortBy === 'health') {
-    sorted.sort((a, b) =>
-      SEV_RANK[cardSev(b)] - SEV_RANK[cardSev(a)] ||
-      (b.maxTimeLag || 0) - (a.maxTimeLag || 0)
-    )
-  } else if (props.sortBy === 'name') {
-    sorted.sort((a, b) => primaryName(a).localeCompare(primaryName(b)))
-  } else if (props.sortBy === 'lag') {
-    sorted.sort((a, b) => (b.maxTimeLag || 0) - (a.maxTimeLag || 0))
-  } else if (props.sortBy === 'members') {
-    sorted.sort((a, b) => (b.members || 0) - (a.members || 0))
-  }
-
-  return props.limit ? sorted.slice(0, props.limit) : sorted
-})
+const fmtLag = (seconds) => formatSpan(Math.round(toNum(seconds) || 0))
 </script>
 
 <style scoped>
@@ -292,252 +140,73 @@ const displayed = computed(() => {
   overflow: hidden;
 }
 
-/* column header */
-.chead {
-  display: grid;
-  grid-template-columns: 14px minmax(180px, 1fr) 80px 80px 86px 100px;
-  gap: 10px;
-  align-items: center;
-  padding: 0 12px 0 0;
-  height: 28px;
-  background: color-mix(in srgb, var(--text-hi) 1.2%, transparent);
-  border-bottom: 1px solid var(--bd);
-  font-size: 9.5px;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-  color: var(--text-low);
-  font-weight: 500;
-}
-.chead .h-name { padding-left: 28px; }
-.chead .h-c { text-align: center; }
-
-/* row */
-.crow {
-  position: relative;
-  display: grid;
-  grid-template-columns: 14px minmax(180px, 1fr) 80px 80px 86px 100px;
-  gap: 10px;
-  align-items: center;
-  padding: 0 12px 0 0;
-  height: 26px;
-  border-bottom: 1px solid var(--bd);
-  cursor: pointer;
-  transition: background .12s ease;
-  font-size: 11.5px;
-}
-.crow:last-child { border-bottom: none; }
-.crow:hover { background: color-mix(in srgb, var(--text-hi) 2.5%, transparent); }
-
-/* left status stripe — same idiom as QueueHealthGrid so the two pages
-   read as siblings in the same visual system. */
-.crow::before {
-  content: '';
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: 3px;
-  background: var(--bd-hi);
-}
-.crow.sev-ok::before { background: var(--ok-500); }
-.crow.sev-mute::before { background: var(--bd-hi); }
-.crow.sev-warn::before { background: var(--warn-400); }
-.crow.sev-bad::before {
-  background: var(--ember-400);
-  box-shadow: 1px 0 12px color-mix(in srgb, var(--ember-500) 55%, transparent);
-}
-.crow.sev-bad { background: color-mix(in srgb, var(--ember-500) 3%, transparent); }
-.crow.sev-warn { background: color-mix(in srgb, var(--warn-400) 2%, transparent); }
-.crow.sev-mute { opacity: 0.78; }
-
-.crow-skeleton { cursor: default; }
-.crow-skeleton::before { background: var(--bd-hi) !important; box-shadow: none !important; }
-.crow-skeleton:hover { background: transparent; }
-
-/* status dot */
-.cdot {
-  width: 6px; height: 6px;
-  border-radius: var(--r-pill);
-  background: var(--bd-hi);
-  margin-left: 10px;
-  position: relative;
-  flex-shrink: 0;
-}
-.crow.sev-ok .cdot { background: var(--ok-500); }
-.crow.sev-warn .cdot { background: var(--warn-400); }
-.crow.sev-bad .cdot { background: var(--ember-400); }
-.crow.sev-bad .cdot::after {
-  content: '';
-  position: absolute; inset: -2px;
-  border-radius: var(--r-pill);
-  background: var(--ember-400);
-  opacity: .25;
-  animation: chg-pulse 2.4s ease-out infinite;
-}
-@keyframes chg-pulse {
-  0% { transform: scale(.6); opacity: .35; }
-  100% { transform: scale(2.0); opacity: 0; }
-}
-
-/* name cell */
-.cname {
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-hi);
-  letter-spacing: -0.005em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-}
-.cname .nm { color: var(--text-hi); }
-.cname .ns { color: var(--text-low); font-weight: 400; }
-.cname-tag {
-  display: inline-block;
-  padding: 1px 5px;
-  border-radius: var(--r-chip);
-  border: 1px solid var(--bd);
-  background: var(--ink-3);
-  color: var(--text-low);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  flex-shrink: 0;
-}
-/* Conflation is a declared policy, not a severity: ice, the app's "idle,
-   proven" tone (same token as .chip-ice), never warn or ember. */
-.cname-tag-cfl {
-  color: var(--ice-400);
-  background: var(--ice-glow);
-  border-color: var(--ice-bd);
-}
-
-/* cell wrapper to align chip in column center */
-.cell-c { text-align: center; }
-
-/* compact chip — borrowed verbatim from QueueHealthGrid so the two
-   pages share one visual vocabulary for severity-toned numbers. */
-.cc {
-  display: inline-flex;
-  align-items: baseline;
-  justify-content: center;
-  padding: 2px 7px;
-  border-radius: var(--r-control);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.4;
-  border: 1px solid transparent;
-  white-space: nowrap;
-  min-width: 52px;
-  letter-spacing: 0;
-}
-.cc i {
-  font-style: normal;
-  opacity: .55;
-  font-weight: 500;
-  margin-left: 4px;
-  font-size: 9.5px;
-}
-/* Fill + border are the status tokens, same as QueueHealthGrid — the two
-   grids must never drift apart on a palette change. */
-.cc.sev-mute { background: var(--ink-3); color: var(--text-mid); border-color: var(--bd); }
-.cc.sev-ok   { background: var(--ok-glow); color: var(--ok-500); border-color: var(--ok-bd); }
-.cc.sev-warn { background: var(--warn-glow); color: var(--warn-400); border-color: var(--warn-bd); }
-.cc.sev-bad  { background: var(--ember-glow); color: var(--ember-400); border-color: var(--ember-bd); }
-.cc-empty {
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11px;
-  color: var(--text-low);
-}
-
-/* row actions — hover-only, like QueueHealthGrid. Four buttons (view,
-   move-to-now, seek, delete) instead of one, but same overall shape:
-   small square buttons with subtle hover states; only the trash icon
-   uses the danger tone. */
-.cactions {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity .12s ease;
-}
-.crow:hover .cactions,
-.crow:focus-within .cactions { opacity: 1; }
-.caction {
-  width: 22px; height: 22px;
-  display: grid;
-  place-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--r-control);
-  color: var(--text-low);
-  cursor: pointer;
-}
-.caction:hover {
-  color: var(--text-hi);
-  border-color: var(--bd-hi);
-  background: var(--ink-3);
-}
-.caction-danger:hover {
-  color: var(--ember-400);
-  border-color: var(--ember-bd);
-  background: color-mix(in srgb, var(--ember-500) 6%, transparent);
-}
-.caction svg { width: 12px; height: 12px; }
-
-/* Empty state: shared `.empty-state` block from style.css, supplied by the
-   host view through the #empty slot. Nothing local — the wrapper must not
-   pad, or the block pads twice. */
-
-/* Responsive: drop the Partitions column first at narrow widths since
-   total partition count is the least operationally urgent of the three
-   metrics — the operator cares about lag count + lag duration first. */
-@media (max-width: 720px) {
-  .chead, .crow {
-    grid-template-columns: 14px minmax(150px, 1fr) 80px 86px 96px;
-  }
-  .chead > :nth-child(3),
-  .crow > :nth-child(3) { display: none; }
-}
-
-/* ---- v3: one card, rows on hairlines, plain numbers, a word per row ------- */
 .chead, .crow {
-  grid-template-columns: 14px minmax(180px, 1fr) 100px 96px 110px 96px 110px;
+  display: grid;
+  grid-template-columns: 14px minmax(180px, 1fr) 120px 88px 80px 96px 28px;
   gap: 12px;
+  align-items: center;
   padding: 0 12px 0 16px;
 }
 .chead {
-  height: 36px; background: transparent; font-size: 12px; letter-spacing: 0;
-  text-transform: none; font-weight: 500;
+  height: 36px;
+  border-bottom: 1px solid var(--bd);
+  font-size: 12px; font-weight: 500; color: var(--text-low);
 }
-.chead .h-name { padding-left: 0; }
-.chead .h-c { text-align: right; }
-.crow { height: var(--row-h, 40px); font-size: 13px; border-bottom-color: var(--bd-soft); }
+.c-num { text-align: right; }
+
+.crow {
+  height: var(--row-h, 40px);
+  border-bottom: 1px solid var(--bd-soft);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .12s ease;
+}
+.crow:last-child { border-bottom: 0; }
 .crow:hover { background: var(--ink-3); }
-.crow::before { display: none; }
-.crow.sev-bad, .crow.sev-warn { background: transparent; }
-.crow.sev-mute { opacity: 1; }
+.crow.on, .crow.on:hover { background: var(--selected); }
+.crow:focus-visible { outline-offset: -2px; }
 .crow .g { justify-self: center; }
-.cname { font-family: inherit; font-size: 13px; }
-.cname-tag { font-family: inherit; font-size: 11px; letter-spacing: 0; text-transform: none; font-weight: 500; }
-.cstatus { font-size: 12px; color: var(--text-low); white-space: nowrap; }
-.cstatus.sev-warn { color: var(--warn-400); }
-.cstatus.sev-bad { color: var(--ember-400); }
-.cell-c { text-align: right; }
-.cc { background: transparent !important; border: 0 !important; padding: 0 !important; min-width: 0 !important;
-  font-family: inherit !important; font-size: 13px !important; font-weight: 400 !important; color: var(--text-hi); }
-.cc i { font-size: 11px; color: var(--text-low); opacity: 1; margin-left: 3px; font-style: normal; }
-.cc.sev-warn { color: var(--warn-400); }
-.cc.sev-bad { color: var(--ember-400); }
-.cc.sev-ok, .cc.sev-mute, .cc.sev-ice { color: var(--text-hi); }
+.crow-skeleton { cursor: default; }
+.crow-skeleton:hover { background: transparent; }
+
+.cname { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.nm { font-weight: 500; color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
+.ns { font-size: 12px; color: var(--text-low); overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
+.ns::before { content: '· '; color: var(--text-faint); }
+.ctag {
+  flex: none; padding: 0 6px; border: 1px solid var(--bd); border-radius: var(--r-chip);
+  font-size: 11px; line-height: 17px; color: var(--text-low);
+}
+
+.cstatus { font-size: 12px; color: var(--text-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cstatus.warn { color: var(--warn-400); }
+.cstatus.bad { color: var(--ember-400); }
+
+/* Figures as in the queue list: mono, tabular, a step smaller than words. */
+.cnum { text-align: right; font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-hi); white-space: nowrap; }
+.cnum.warn { color: var(--warn-400); }
+.cnum.bad { color: var(--ember-400); }
+
+/* The row action shows on hover and on keyboard focus. */
+.c-act { display: flex; justify-content: flex-end; }
+.caction {
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border: 0; border-radius: var(--r-control); background: transparent;
+  color: var(--text-low); cursor: pointer; opacity: 0; transition: opacity .12s ease;
+}
+.crow:hover .caction, .crow:focus-within .caction, .caction:focus-visible { opacity: 1; }
+.caction:hover { color: var(--ember-400); background: var(--ink-4); }
+@media (hover: none) { .caction { opacity: 1; } }
+
+/* Narrower: the partition count goes first. */
+@media (max-width: 1180px) {
+  .chead, .crow { grid-template-columns: 14px minmax(160px, 1fr) 112px 72px 88px 28px; }
+  .c-parts { display: none; }
+}
+/* Phone: the mark says the verdict; the status word and the row action
+   (also in the detail) step out so the name keeps its room. */
 @media (max-width: 760px) {
-  .chead, .crow { grid-template-columns: 14px minmax(120px, 1fr) 80px 80px; }
-  .chead > :nth-child(3), .crow > :nth-child(3), .chead > :nth-child(4), .crow > :nth-child(4), .chead > :last-child, .crow > :last-child { display: none; }
+  .chead, .crow { grid-template-columns: 14px minmax(0, 1fr) 60px 72px; gap: 8px; padding: 0 12px; }
+  .c-status, .c-act { display: none; }
 }
 </style>

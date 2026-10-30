@@ -1,305 +1,232 @@
 <template>
-  <div class="view-container">
+  <!-- Every ephemeral queue is the list (EphemeralSide): picked on the left
+       (?name=), shown on the right; nothing picked, the table of all of them.
+       The list's search narrows the table too. -->
+  <SubSidebar label="Ephemeral queues" :current="picked || 'All ephemeral queues'">
+  <template #side><EphemeralSide v-model:find="find" /></template>
+  <div class="view-container eph">
 
-    <!-- The class is not decoration: everything below is RAM, and the page has
-         to say so before it says anything else — so it is the head's fact. -->
     <PageHead
-      title="Ephemeral queues"
+      :title="picked || 'All ephemeral queues'"
       :live="support === 'live' ? refreshAgo : ''"
       :live-title="POLL_NOTE"
     >
-      <template #sub>
-        <span title="Contents live in broker RAM and survive nothing — not a restart, not a crash, not a deploy, not an ownership move">in broker RAM — contents survive nothing</span>
+      <!-- The way back to every queue is the top bar's "Ephemeral queues"
+           crumb (route meta pick: 'name'), as on every page with a pick. -->
+      <template v-if="facts.length" #sub>
+        <span class="facts">
+          <span v-for="f in facts" :key="f.k" class="fact" :title="f.title"><span class="fact-k">{{ f.k }}</span>{{ f.v }}</span>
+        </span>
+      </template>
+      <!-- §5.1: reset and delete are writes on this family (produce or
+           consume keys, any user but a Viewer). -->
+      <template v-if="pickedRow && canMutate" #actions>
+        <button class="btn" :title="RESET_TITLE" @click="ask('reset', pickedRow)"><Icon name="rotate-ccw" :size="14" />Reset</button>
+        <button class="btn" :title="DELETE_TITLE" @click="ask('delete', pickedRow)"><Icon name="trash" :size="14" />Delete</button>
       </template>
     </PageHead>
 
-    <!-- ===================== Not exposed here =====================
-         404 (broker older than 1.1), 404 route_blocked (proxy does not
-         classify the family), or the SPA fallback answering an API path. All
-         three are facts about this cell, not failures of it: one quiet state,
-         and the store stops asking so the poll cannot become a toast loop. -->
-    <div v-if="support === 'absent'" class="card">
+    <!-- Not exposed here (404, a proxy that does not classify the family, or
+         the SPA answering an API path) or not granted (403 feature_gated):
+         facts about this cell, not failures of it. One quiet card, and the
+         store stops asking so the poll cannot become a toast loop. -->
+    <div v-if="support === 'absent' || support === 'gated'" class="card">
       <div class="empty-state">
-        <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h16M4 17h16" />
-          <path stroke-linecap="round" stroke-linejoin="round" d="M3 3l18 18" />
-        </svg>
-        <h3>This broker does not expose ephemeral queues</h3>
-        <p>
-          <code>/api/v1/ephemeral/*</code> arrived in 1.1. The broker on this
-          cell — or the proxy in front of it — does not serve the family, so
-          there is nothing to list. Durable queues are unaffected.
-        </p>
-        <button class="btn btn-ghost" @click="probeAgain">Check again</button>
-      </div>
-    </div>
-
-    <!-- ===================== Exposed, not granted =====================
-         403 feature_gated: the routes exist, this cluster's plan does not
-         include the class (§5.1). Also a stable answer — also asked once. -->
-    <div v-else-if="support === 'gated'" class="card">
-      <div class="empty-state">
-        <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <rect x="5" y="11" width="14" height="9" rx="2" />
-          <path stroke-linecap="round" d="M8 11V8a4 4 0 018 0v3" />
-        </svg>
-        <h3>Ephemeral queues are not enabled for this cluster</h3>
-        <p>
-          The broker serves the family but the plan on this cluster does not
-          grant it. An administrator has to enable ephemeral queues before
-          anything can be pushed to or listed from them.
-        </p>
+        <Icon :name="support === 'gated' ? 'lock' : 'zap'" class="empty-state-icon" :size="28" :stroke="1.5" />
+        <h3 :title="support === 'gated' ? GATED_TITLE : ABSENT_TITLE">
+          {{ support === 'gated' ? 'Ephemeral queues are not enabled for this cluster' : 'This broker does not serve ephemeral queues' }}
+        </h3>
         <button class="btn btn-ghost" @click="probeAgain">Check again</button>
       </div>
     </div>
 
     <template v-else>
-      <!-- Stale data presented as live is the failure mode: the store keeps the
-           last rows that loaded, so say how old they are and why. -->
+      <!-- The store keeps the last rows that loaded: say how old they are. -->
       <div v-if="isStale" class="status-banner banner-bad view-banner">
         <span :title="formatTimestampUtc(lastFetched)">
-          <strong>Could not refresh the ephemeral queues</strong> ·
-          {{ describeApiError(error) }} · showing the last rows that loaded
-          ({{ lastFetchedText }}), which on a RAM class may already be gone.
+          <strong>Could not refresh the ephemeral queues</strong> · {{ describeApiError(error) }} ·
+          showing the rows that loaded at {{ lastFetchedText }}, which on a RAM class may already be gone.
         </span>
       </div>
 
-      <!-- Totals for what is on screen. Every figure here is a live gauge; a
-           null anywhere renders '—' rather than collapsing into a zero. -->
-      <div class="counts-strip">
-        <!-- Class-wide, never filtered: this strip is the tenant's ephemeral
-             footprint on the cell, and the table below says separately how many
-             of those rows it is currently showing. -->
-        <div class="counts-group">
-          <span class="count-item count-static" title="Every ephemeral queue this tenant holds on the cell, whatever the filters below say">
-            <span class="count-item-label">queues</span>
-            <strong>{{ formatNumber(rows.length) }}</strong>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static" title="Ring length across every ephemeral queue">
-            <span class="count-item-label">in ram</span>
-            <strong>{{ num(totals.depth) }}</strong>
-            <span class="count-suffix">msgs</span>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static">
-            <span class="count-item-label">bytes</span>
-            <strong>{{ bytes(totals.bytes) }}</strong>
-          </span>
-          <span class="count-sep">·</span>
-          <span
-            class="count-item count-static count-muted"
-            title="Messages that left without being consumed — bounds, ttl and retry exhaustion together"
-          >
-            <span class="count-item-label">dropped</span>
-            <strong>{{ num(totals.drops) }}</strong>
-          </span>
-        </div>
-      </div>
-
-      <!-- High queue cardinality is the point of this class (thousands of
-           req/reply inboxes), so search and an explicit order are not a
-           convenience here — they are how the page stays readable. -->
-      <PageTools>
-        <div class="filter-search">
-          <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-          </svg>
-          <input v-model="searchQuery" type="text" placeholder="Search ephemeral queues…" class="input" />
-        </div>
-        <label class="tool-check">
-          <input v-model="declaredOnly" type="checkbox" />
-          <span>Declared only</span>
-        </label>
-        <template #view>
-          <div class="tool-seg">
-            <span class="tool-label">Sort</span>
-            <div class="seg">
-              <button
-                v-for="opt in sortOptions"
-                :key="opt.value"
-                :class="{ on: sortBy === opt.value }"
-                @click="sortBy = opt.value"
-              >{{ opt.label }}</button>
-            </div>
+      <!-- ===================== One queue ===================== -->
+      <template v-if="picked">
+        <div v-if="!loaded && error" class="card">
+          <div class="empty-state empty-state-failed">
+            <h3>Cannot list ephemeral queues</h3>
+            <p>{{ describeApiError(error) }}</p>
+            <button class="btn btn-ghost" @click="refreshAll">Retry</button>
           </div>
-        </template>
-      </PageTools>
-
-      <!-- ===================== The table ===================== -->
-      <div class="card">
-        <div class="card-header">
-          <h3>Ephemeral queues</h3>
-          <span class="card-sub">depth is the ring — no pending, no retained, no dead letters on this class</span>
-          <span class="muted">{{ visible.length }} of {{ formatNumber(rows.length) }}</span>
         </div>
+        <div v-else-if="!loaded" class="card">
+          <div class="eph-reading"><div v-for="i in 3" :key="i" class="skeleton eph-skeleton" /></div>
+        </div>
+        <div v-else-if="!pickedRow" class="card">
+          <div class="empty-state">
+            <Icon name="zap" class="empty-state-icon" :size="28" :stroke="1.5" />
+            <p :title="GONE_TITLE">No ephemeral queue named {{ picked }} right now</p>
+          </div>
+        </div>
+        <template v-else>
+          <!-- One cursor per group over the ONE ring (§1.5): lag is head −
+               cursor, the only lag this class has. -->
+          <section class="card">
+            <div class="card-header"><h3>Groups</h3></div>
+            <div v-if="pickedGroups && pickedGroups.length" class="eph-scroll">
+              <table class="t eph-table">
+                <thead>
+                  <tr>
+                    <th>Group</th>
+                    <th class="num" :title="CURSOR_TITLE">Cursor</th>
+                    <th class="num" :title="LAG_TITLE">Lag</th>
+                    <th class="num" :title="SKIPPED_TITLE">Skipped</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="g in pickedGroups" :key="g.name">
+                    <td><span class="eph-name">{{ g.name }}</span></td>
+                    <td class="num">{{ num(g.cursor) }}</td>
+                    <td class="num">{{ num(g.lag) }}</td>
+                    <td class="num" :class="skippedClass(g)" :title="g.skipped ? SKIPPED_TITLE : ''">{{ num(g.skipped) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else-if="pickedGroups" class="empty-state eph-empty">
+              <Icon name="users" class="empty-state-icon" :size="28" :stroke="1.5" />
+              <p>No group has read this queue yet</p>
+            </div>
+            <div v-else-if="detailState === 'reading'" class="eph-reading"><div v-for="i in 2" :key="i" class="skeleton eph-skeleton" /></div>
+            <div v-else class="empty-state eph-empty">
+              <Icon name="users" class="empty-state-icon" :size="28" :stroke="1.5" />
+              <p :title="detailState === 'failed' ? detailErrorText : ''">
+                {{ detailState === 'failed' ? 'Cannot read this queue’s groups' : 'This broker does not report group cursors' }}
+              </p>
+            </div>
+          </section>
 
-        <div style="overflow-x:auto;">
-          <table class="t">
-            <thead>
-              <tr>
-                <th>Queue</th>
-                <th>Tier</th>
-                <th class="num">Depth</th>
-                <th class="num">Bytes</th>
-                <th class="num">Groups</th>
-                <th>Drops</th>
-                <th v-if="showOwner">Owner</th>
-                <th v-if="canMutate" style="text-align:right;">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              <!-- First paint only: a 2s poll must never blank the rows the
-                   operator is reading. -->
-              <template v-if="firstLoad">
-                <tr v-for="i in 6" :key="`sk-${i}`">
-                  <td :colspan="colCount"><div class="skeleton" style="height:16px;" /></td>
+          <!-- Only where there is more than one: a single partition is the
+               queue itself, already in the head. -->
+          <section v-if="pickedPartitions && pickedPartitions.length > 1" class="card">
+            <div class="card-header"><h3>Partitions</h3></div>
+            <div class="eph-scroll">
+              <table class="t eph-table">
+                <thead>
+                  <tr>
+                    <th>Partition</th>
+                    <th class="num">Messages</th>
+                    <th class="num">Size</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="p in pickedPartitions" :key="p.name">
+                    <td><span class="eph-name">{{ p.name }}</span></td>
+                    <td class="num">{{ num(p.depth) }}</td>
+                    <td class="num">{{ bytes(p.bytes) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </template>
+      </template>
+
+      <!-- ===================== Every queue ===================== -->
+      <template v-else>
+        <!-- Thousands of request/reply inboxes are the point of this class,
+             so the order is explicit. The search is the list's, beside it. -->
+        <PageTools>
+          <UiCheck v-model="declaredOnly">Declared only</UiCheck>
+          <template #view>
+            <div class="tool-seg">
+              <span class="tool-label">Sort</span>
+              <div class="seg" role="group" aria-label="Sort">
+                <button
+                  v-for="opt in sortOptions"
+                  :key="opt.value"
+                  :class="{ on: sortBy === opt.value }"
+                  :aria-pressed="sortBy === opt.value ? 'true' : 'false'"
+                  @click="sortBy = opt.value"
+                >{{ opt.label }}</button>
+              </div>
+            </div>
+          </template>
+        </PageTools>
+
+        <div class="card">
+          <div v-if="firstLoad || visible.length" class="eph-scroll">
+            <table class="t eph-table">
+              <thead>
+                <tr>
+                  <th>Queue</th>
+                  <th :title="TIER_TITLE">Tier</th>
+                  <th class="num" :title="MESSAGES_TITLE">Messages</th>
+                  <th class="num">Size</th>
+                  <th class="num">Groups</th>
+                  <th class="num" :title="DROPPED_TITLE">Dropped</th>
+                  <th v-if="showOwner">Owner</th>
+                  <th v-if="canMutate" class="num"><span class="eph-sr">Actions</span></th>
                 </tr>
-              </template>
-
-              <template v-else-if="visible.length">
-                <template v-for="row in visible" :key="row.name">
-                  <tr class="eph-row" @click="toggleRow(row.name)">
-                    <td>
-                      <div style="display:flex; align-items:center; gap:7px;">
-                        <svg
-                          class="eph-caret" :class="{ open: isExpanded(row.name) }"
-                          width="10" height="10" viewBox="0 0 24 24" fill="none"
-                          stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
-                        ><polyline points="9 6 15 12 9 18" /></svg>
-                        <span class="font-mono" style="font-size:12px;">{{ row.name }}</span>
-                      </div>
-                    </td>
-                    <td>
-                      <!-- Explicit true / explicit false only. A payload that
-                           carries neither tells us nothing, and a badge that
-                           guesses is worse than no badge. -->
-                      <span v-if="row.declared === true" class="chip chip-ice" title="Declared with configure — the configuration is durable, the contents are not">declared</span>
-                      <span v-else-if="row.declared === false" class="chip chip-mute" title="Created by the first push or pop that named it; collected once empty and idle">implicit</span>
-                      <span v-else class="num mute">—</span>
-                    </td>
+              </thead>
+              <tbody>
+                <!-- First paint only: a 2 s poll never blanks the rows being read. -->
+                <template v-if="firstLoad">
+                  <tr v-for="i in 6" :key="`sk-${i}`"><td :colspan="colCount"><div class="skeleton eph-skeleton" /></td></tr>
+                </template>
+                <template v-else>
+                  <tr
+                    v-for="row in visible"
+                    :key="row.name"
+                    class="eph-row"
+                    tabindex="0"
+                    @click="pick(row.name)"
+                    @keydown.enter.self="pick(row.name)"
+                  >
+                    <td><span class="eph-name" :title="row.name">{{ row.name }}</span></td>
+                    <td class="eph-tier" :title="tierTitle(row.declared)">{{ tierWord(row.declared) }}</td>
                     <td class="num">{{ num(row.depth) }}</td>
                     <td class="num">{{ bytes(row.bytes) }}</td>
                     <td class="num">{{ num(row.groupCount) }}</td>
-                    <td>
-                      <span class="eph-drops">
-                        <span :class="dropClass(row.drops.bounds)">{{ num(row.drops.bounds) }}<i>bounds</i></span>
-                        <span :class="dropClass(row.drops.ttl)">{{ num(row.drops.ttl) }}<i>ttl</i></span>
-                        <span :class="dropClass(row.drops.retry)">{{ num(row.drops.retry) }}<i>retry</i></span>
-                      </span>
-                    </td>
-                    <td v-if="showOwner" class="font-mono" style="font-size:11.5px; color:var(--text-mid);">
-                      {{ row.owner || '—' }}
-                    </td>
-                    <td v-if="canMutate" style="text-align:right; white-space:nowrap;" @click.stop>
-                      <button class="btn btn-ghost" style="padding:4px 10px; font-size:11px;" @click="ask('reset', row)">Reset</button>
-                      <button class="btn btn-danger" style="padding:4px 10px; font-size:11px; margin-left:6px;" @click="ask('delete', row)">Delete</button>
-                    </td>
-                  </tr>
-
-                  <!-- Expanded: one cursor per group over the ONE ring (§1.5).
-                       lag is head − cursor, and it is the only lag this class
-                       has — nothing here is read from the durable store. -->
-                  <tr v-if="isExpanded(row.name)">
-                    <td :colspan="colCount" style="background:var(--recessed); padding:12px 16px;">
-                      <div class="eph-detail-meta">
-                        <span v-if="row.partitions !== null"><b>{{ num(row.partitions) }}</b> partition{{ row.partitions === 1 ? '' : 's' }}</span>
-                        <span v-if="row.head !== null">ring head <b class="tabular-nums">{{ num(row.head) }}</b></span>
-                        <span v-if="row.owner">owner <b class="font-mono">{{ row.owner }}</b></span>
-                        <span class="eph-detail-note">contents survive nothing — this is a snapshot of RAM</span>
-                      </div>
-
-                      <table v-if="groupsFor(row) && groupsFor(row).length" class="t eph-groups">
-                        <thead>
-                          <tr>
-                            <th>Group</th>
-                            <th class="num">Cursor</th>
-                            <th class="num">Lag</th>
-                            <th class="num">Skipped</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr v-for="g in groupsFor(row)" :key="g.name">
-                            <td class="font-mono" style="font-size:12px;">{{ g.name }}</td>
-                            <td class="num">{{ num(g.cursor) }}</td>
-                            <td class="num">{{ num(g.lag) }}</td>
-                            <td class="num" :class="skippedClass(g)" :title="g.skipped ? 'Messages evicted by ttl or bounds before this group reached them' : ''">
-                              {{ num(g.skipped) }}
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-
-                      <div v-else-if="groupsFor(row)" class="empty-tile">
-                        No group has read this queue yet — the ring has no cursors on it.
-                      </div>
-
-                      <div v-else class="panel-na">
-                        This broker does not report per-group cursors for ephemeral queues.
-                      </div>
+                    <td class="num" :class="{ mute: !dropTotal(row.drops) }" :title="describeDrops(row.drops)">{{ num(dropTotal(row.drops)) }}</td>
+                    <td v-if="showOwner"><span class="eph-owner">{{ row.owner || '—' }}</span></td>
+                    <td v-if="canMutate" class="num eph-acts" @click.stop>
+                      <button class="btn btn-ghost btn-icon" :title="`Reset ${row.name}`" :aria-label="`Reset ${row.name}`" @click="ask('reset', row)"><Icon name="rotate-ccw" :size="14" /></button>
+                      <button class="btn btn-ghost btn-icon" :title="`Delete ${row.name}`" :aria-label="`Delete ${row.name}`" @click="ask('delete', row)"><Icon name="trash" :size="14" /></button>
                     </td>
                   </tr>
                 </template>
-              </template>
+              </tbody>
+            </table>
+          </div>
 
-              <!-- A failure with nothing loaded is not an empty class. -->
-              <tr v-else-if="error">
-                <td :colspan="colCount">
-                  <div class="empty-state empty-state-failed">
-                    <h3>Cannot list ephemeral queues</h3>
-                    <p>{{ describeApiError(error) }} — nothing loaded, which is not the same as nothing existing.</p>
-                    <button class="btn btn-ghost" @click="refreshAll">Retry</button>
-                  </div>
-                </td>
-              </tr>
+          <!-- A failure with nothing loaded is not an empty class. -->
+          <div v-else-if="error" class="empty-state empty-state-failed">
+            <h3>Cannot list ephemeral queues</h3>
+            <p>{{ describeApiError(error) }}</p>
+            <button class="btn btn-ghost" @click="refreshAll">Retry</button>
+          </div>
+          <div v-else-if="rows.length" class="empty-state">
+            <Icon name="search" class="empty-state-icon" :size="28" :stroke="1.5" />
+            <p>No queue matches</p>
+          </div>
+          <div v-else class="empty-state">
+            <Icon name="zap" class="empty-state-icon" :size="28" :stroke="1.5" />
+            <p :title="EMPTY_TITLE">No ephemeral queues yet</p>
+          </div>
 
-              <tr v-else-if="rows.length">
-                <td :colspan="colCount">
-                  <div class="empty-state">
-                    <h3>No queue matches these filters</h3>
-                    <p>{{ formatNumber(rows.length) }} ephemeral queue{{ rows.length === 1 ? '' : 's' }} are live on this cell.</p>
-                  </div>
-                </td>
-              </tr>
-
-              <!-- Empty, and it loaded: say what this class IS, because an
-                   empty table teaches nobody what would fill it. -->
-              <tr v-else>
-                <td :colspan="colCount">
-                  <div class="empty-state">
-                    <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h16M4 17h10" />
-                      <circle cx="18" cy="17" r="2.5" />
-                    </svg>
-                    <h3>No ephemeral queues on this cell</h3>
-                    <p>
-                      Ephemeral queues keep their messages in broker RAM and
-                      survive nothing — not a restart, not a crash, not a deploy,
-                      not an ownership move. One appears here the moment a push
-                      or a pop names it, or when a client declares it with
-                      <code>configure</code>.
-                    </p>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <!-- The cap is stated, never silent: a cut list that does not say so
+               reads as the whole answer. -->
+          <div v-if="sortedRows.length > visible.length" class="pager eph-pager">
+            <span class="pager-count">Showing the first {{ formatNumber(visible.length) }} of {{ formatNumber(sortedRows.length) }} · search to narrow</span>
+          </div>
         </div>
-
-        <!-- The cap is stated, never silent: a truncated list that does not
-             say it is truncated reads as the whole answer. -->
-        <div v-if="sortedRows.length > visible.length" class="pager">
-          <span class="pager-count">
-            Showing the first {{ visible.length }} of {{ formatNumber(sortedRows.length) }} matching queues — narrow with search to see the rest.
-          </span>
-        </div>
-      </div>
+      </template>
     </template>
 
     <!-- ===================== Confirm =====================
-         One dialog for both verbs, and it restates the loss contract with the
-         actual count in it. There is no undo and no DLQ behind this class, so
-         the sentence has to be read before the button is reachable. -->
+         One dialog for both verbs, restating the loss with the actual count.
+         There is no undo and no dead letter behind this class, so the
+         sentence is read before the button is reachable. -->
     <Teleport to="body">
       <div v-if="pending" class="modal-backdrop" @click.self="closeModal">
         <div class="card modal-card">
@@ -310,12 +237,9 @@
             <!-- The modal stays open on failure and says what happened: a closed
                  modal plus an unchanged list is indistinguishable from success. -->
             <div v-if="actionError" class="panel-err">{{ actionError }}</div>
-
-            <p style="color:var(--text-mid); margin-bottom:10px;">
-              <strong class="font-mono">{{ pending.row.name }}</strong>
-            </p>
-            <p style="color:var(--text-hi); margin-bottom:8px;">{{ lossSentence }}</p>
-            <p v-if="consequence" style="font-size:13px; color:var(--text-low);">{{ consequence }}</p>
+            <p class="eph-modal-name">{{ pending.row.name }}</p>
+            <p class="eph-modal-loss">{{ lossSentence }}</p>
+            <p v-if="consequence" class="eph-modal-note">{{ consequence }}</p>
           </div>
           <div class="modal-foot">
             <button class="btn btn-ghost" @click="closeModal">Cancel</button>
@@ -327,6 +251,7 @@
       </div>
     </Teleport>
   </div>
+  </SubSidebar>
 </template>
 
 <script setup>
@@ -341,6 +266,14 @@
 // survive nothing (§1.2), and borrowing a durable column would be inventing a
 // number.
 //
+// THE PICKED QUEUE IS READ BY THIS PAGE, NOT BY THE STORE. Its groups and
+// partitions come from the per-queue route, which answers 404
+// `ephemeral_queue_not_found` for a queue that was deleted or collected —
+// and the store's fetchDepth reads every 404 as "this broker has no ephemeral
+// queues at all", which would put the whole page in its quiet state over one
+// vanished inbox. So the page asks the route itself and reads that answer as
+// what it is: the queue is gone.
+//
 // POLLING. Both status routes read in-process gauges and touch no storage
 // (§6), which is why this view carries its own 2s ticker instead of the shell's
 // 30s one — the house rule against private intervals exists because a poll
@@ -349,26 +282,37 @@
 // cleared on unmount, and stops entirely once the family answers a stable
 // verdict (see stores/ephemeralStore.js).
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
-import { ephemeral as ephemeralApi, describeApiError } from '@/api'
-import { formatBytes, formatNumber, toNum } from '@/composables/useApi'
-import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
-import { useRefresh } from '@/composables/useRefresh'
-import { useRefreshAgo } from '@/composables/useRefreshAgo'
-import { useToast } from '@/composables/useToast'
-import { useEphemeralStore } from '@/stores/ephemeralStore'
-import { useIdentity } from '@/stores/identity'
+import EphemeralSide from '@/components/EphemeralSide.vue'
+import Icon from '@/components/Icon.vue'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
+import SubSidebar from '@/components/SubSidebar.vue'
+import UiCheck from '@/components/UiCheck.vue'
+import { ephemeral as ephemeralApi, describeApiError } from '@/api'
+import { formatBytes, formatNumber, toNum } from '@/composables/useApi'
+import {
+  describeDrops, dropTotal, isQueueGone, matchesSearch, partitionRows, tierWord,
+} from '@/composables/useEphemeralSide'
+import { formatTimestampTime, formatTimestampUtc } from '@/composables/useFormat'
+import { useRefresh } from '@/composables/useRefresh'
+import { useRefreshAgo } from '@/composables/useRefreshAgo'
+import { useRouteState } from '@/composables/useRouteState'
 import { lossSeverity } from '@/composables/useSeverity'
+import { useToast } from '@/composables/useToast'
+import { normalizeEphemeralQueue, useEphemeralStore } from '@/stores/ephemeralStore'
+import { useIdentity } from '@/stores/identity'
 
-const { can } = useIdentity()
+const route = useRoute()
+const router = useRouter()
+const { can, epoch } = useIdentity()
 const { notifySuccess } = useToast()
 
 const store = useEphemeralStore()
 const {
   queues: rows, loading, error, lastFetched, support, isStale, totals,
-  fetchQueues, fetchDepth, invalidate,
+  fetchQueues, invalidate,
 } = store
 
 const POLL_MS = 2000
@@ -378,20 +322,42 @@ const POLL_NOTE =
 // slice and say so, rather than paint 5 000 rows every two seconds.
 const MAX_ROWS = 200
 
-const searchQuery = ref('')
+const STORAGE_TITLE =
+  'Contents live in broker RAM and survive nothing: not a restart, not a crash, not a deploy, not an ownership move'
+const MESSAGES_TITLE = 'Messages in broker RAM right now: the ring length'
+const DROPPED_TITLE = 'Messages that left without being consumed: bounds, ttl and retry exhaustion together'
+const TIER_TITLE =
+  'Declared: configured with configure, the configuration is durable, the contents are not. ' +
+  'Implicit: created by the first push or pop that named it, collected once empty and idle'
+const CURSOR_TITLE = 'Where this group has read up to in the ring'
+const LAG_TITLE = 'Head − cursor: the messages this group has not read yet'
+const SKIPPED_TITLE = 'Messages evicted by ttl or bounds before this group reached them'
+const RESET_TITLE = 'Drop every message, void the leases and rewind every group; the queue stays'
+const DELETE_TITLE = 'Drop every message and remove the queue'
+const GONE_TITLE = 'It was deleted, or collected once empty and idle.'
+const EMPTY_TITLE =
+  'Ephemeral queues keep their messages in broker RAM and survive nothing. One appears here the moment a ' +
+  'push or a pop names it, or when a client declares it with configure.'
+const ABSENT_TITLE =
+  '/api/v1/ephemeral/* arrived in 1.1. The broker on this cell, or the proxy in front of it, does not serve ' +
+  'the family, so there is nothing to list. Durable queues are unaffected.'
+const GATED_TITLE =
+  'The broker serves the family but this cluster\'s plan does not grant it. An administrator has to enable ' +
+  'ephemeral queues before anything can be pushed to or listed from them.'
+
+// The list's search, shared with the table below: local, so typing in the
+// list's sheet on a phone does not navigate (which would close the sheet).
+const find = ref('')
+// The queue picked in the list, in the address.
+const picked = ref(null)
+useRouteState({ name: picked })
 const sortBy = ref('depth')
 const declaredOnly = ref(false)
 const sortOptions = [
-  { value: 'depth', label: 'Depth' },
-  { value: 'bytes', label: 'Bytes' },
+  { value: 'depth', label: 'Messages' },
+  { value: 'bytes', label: 'Size' },
   { value: 'name', label: 'Name' },
 ]
-
-// Per-row expand state — the Set-based pattern Dashboard and QueueDetail use.
-const expanded = ref(new Set())
-// name → normalized row from the per-queue depth route, or null when that call
-// failed. The list is the table; this is the authority for the open row.
-const depthByQueue = ref(new Map())
 
 const pending = ref(null)
 const actionError = ref(null)
@@ -404,22 +370,24 @@ const acting = ref(false)
 // ---------------------------------------------------------------------------
 const num = (v) => (v === null || v === undefined ? '—' : formatNumber(v))
 const bytes = (v) => (v === null || v === undefined ? '—' : formatBytes(v))
+const tierTitle = (declared) => (declared === true
+  ? 'Declared with configure: the configuration is durable, the contents are not'
+  : declared === false ? 'Created by the first push or pop that named it; collected once empty and idle' : '')
+
 // A ring that drops is a ring doing what it was configured to do: bounds and
 // ttl are the POLICY of an ephemeral queue, and a count of drops carries no
 // verdict without knowing what the queue was asked to hold. So a non-zero
-// count is raised in INK — it is worth finding on the row — and never in
-// amber, which would mark every long-running ephemeral queue as degraded.
-const dropClass = (v) => (v ? 'eph-drop on' : 'eph-drop')
-
+// count is shown in ink, and never in amber, which would mark every
+// long-running ephemeral queue as degraded.
+//
 // The per-group column is different: `skipped` is what THIS reader missed,
 // and it has a denominator — `cursor`, the number of messages it did read.
 // Loss becomes attention once it is a real share of that.
 const skippedClass = (g) => lossSeverity({ dropped: g.skipped, delivered: g.cursor })
 
+const loaded = computed(() => lastFetched.value > 0 || rows.value.length > 0)
 const firstLoad = computed(() => loading.value && lastFetched.value === 0)
-const lastFetchedText = computed(() =>
-  lastFetched.value ? formatTimestamp(lastFetched.value) : 'an earlier load'
-)
+const lastFetchedText = computed(() => (lastFetched.value ? formatTimestampTime(lastFetched.value) : 'an earlier load'))
 // Fed by the LAST GOOD load, not by the last attempt: a tick that resets on a
 // failed poll claims freshness it does not have.
 const refreshAgo = useRefreshAgo(lastFetched)
@@ -436,8 +404,7 @@ const colCount = computed(() => 6 + (showOwner.value ? 1 : 0) + (canMutate.value
 const sortedRows = computed(() => {
   const list = rows.value.filter((q) => {
     if (declaredOnly.value && q.declared !== true) return false
-    if (!searchQuery.value) return true
-    return q.name.toLowerCase().includes(searchQuery.value.toLowerCase())
+    return matchesSearch(q.name, find.value)
   })
   const desc = (a, b) => (b ?? -1) - (a ?? -1)
   return [...list].sort((a, b) => {
@@ -448,53 +415,93 @@ const sortedRows = computed(() => {
 })
 const visible = computed(() => sortedRows.value.slice(0, MAX_ROWS))
 
+// A pick is a step the Back button undoes, as a pick in the list is.
+const allLocation = computed(() => ({ path: route.path, query: { ...route.query, name: undefined } }))
+const pick = (name) => { router.push({ path: route.path, query: { ...route.query, name } }) }
+
 // ---------------------------------------------------------------------------
-// Expand — per-group cursors for one queue
+// The picked queue: its row in the list, and its groups and partitions from
+// its own route, re-read on every tick while it is picked.
 // ---------------------------------------------------------------------------
-const isExpanded = (name) => expanded.value.has(name)
+const pickedRow = computed(() => (picked.value ? rows.value.find((q) => q.name === picked.value) || null : null))
 
-/** The open row's groups: the per-queue route when it carries them, else what
- *  the listing carried, else null — which renders "not reported", not "none". */
-const groupsFor = (row) => {
-  const detail = depthByQueue.value.get(row.name)
-  if (detail && detail.groups) return detail.groups
-  return row.groups
-}
+const detail = ref(null)            // { name, queue (normalized), partitions } of the picked queue
+const detailError = ref(null)
+const detailState = computed(() => {
+  if (detail.value && detail.value.name === picked.value) return 'ready'
+  if (detailError.value) return 'failed'
+  return 'reading'
+})
+const detailErrorText = computed(() => (detailError.value ? describeApiError(detailError.value) : ''))
 
-const loadDepth = async (name) => {
-  const detail = await fetchDepth(name)
-  const next = new Map(depthByQueue.value)
-  next.set(name, detail)
-  depthByQueue.value = next
-}
+/** The groups: the per-queue route's when it carries them, else the list's,
+ *  else null, which renders "not reported", never "none". */
+const pickedGroups = computed(() => {
+  const d = detail.value && detail.value.name === picked.value ? detail.value.queue : null
+  if (d && d.groups) return d.groups
+  return pickedRow.value ? pickedRow.value.groups : null
+})
+const pickedPartitions = computed(() => (detail.value && detail.value.name === picked.value ? detail.value.partitions : null))
 
-const toggleRow = (name) => {
-  const next = new Set(expanded.value)
-  if (next.has(name)) {
-    next.delete(name)
-    const map = new Map(depthByQueue.value)
-    map.delete(name)
-    depthByQueue.value = map
-  } else {
-    next.add(name)
-    loadDepth(name)
+const loadDetail = async (name) => {
+  const at = epoch.value
+  try {
+    const r = await ephemeralApi.depth(name, { probe: true })
+    if (epoch.value !== at || picked.value !== name) return
+    detail.value = { name, queue: normalizeEphemeralQueue(r.data, name), partitions: partitionRows(r.data) }
+    detailError.value = null
+  } catch (err) {
+    if (epoch.value !== at || picked.value !== name) return
+    // Gone between the list and this call: the next list read drops the row
+    // and the page says so. Anything else stays an inline failure here.
+    if (isQueueGone(err)) { detail.value = null; detailError.value = null; return }
+    detailError.value = err
   }
-  expanded.value = next
 }
 
-/** Only the open rows are re-read; a collapsed row costs nothing. */
-const refreshExpanded = async () => {
-  const names = [...expanded.value].filter((n) => rows.value.some((q) => q.name === n))
-  if (!names.length) return
-  await Promise.all(names.map(loadDepth))
-}
+watch(picked, (name) => {
+  detail.value = null
+  detailError.value = null
+  if (name && pickedRow.value) loadDetail(name)
+})
+watch(epoch, () => { detail.value = null; detailError.value = null })
+
+// The head's facts: the class's totals with nothing picked, the queue's own
+// figures with one — the figures the list and the table show, no read of
+// their own.
+const facts = computed(() => {
+  if (support.value === 'absent' || support.value === 'gated' || !loaded.value) return []
+  if (picked.value) {
+    const q = pickedRow.value
+    if (!q) return []
+    const dropped = dropTotal(q.drops)
+    return [
+      { k: 'Tier', v: tierWord(q.declared), title: tierTitle(q.declared) || STORAGE_TITLE },
+      { k: 'Messages', v: num(q.depth), title: `${MESSAGES_TITLE}. ${STORAGE_TITLE}` },
+      { k: 'Size', v: bytes(q.bytes), title: 'Bytes the ring holds' },
+      q.partitions !== null ? { k: 'Partitions', v: num(q.partitions) } : null,
+      { k: 'Dropped', v: num(dropped), title: `${DROPPED_TITLE}: ${describeDrops(q.drops)}` },
+      // Only where the broker reports them.
+      q.head !== null ? { k: 'Head', v: num(q.head), title: 'The ring head: a group\'s lag is head − cursor' } : null,
+      q.owner ? { k: 'Owner', v: String(q.owner), title: 'The broker that holds this queue\'s ring' } : null,
+    ].filter(Boolean)
+  }
+  const t = totals.value
+  return [
+    { k: 'Storage', v: 'RAM', title: STORAGE_TITLE },
+    { k: 'Queues', v: formatNumber(rows.value.length), title: 'Every ephemeral queue on this cell, whatever the filters say' },
+    { k: 'Messages', v: num(t.depth), title: MESSAGES_TITLE },
+    { k: 'Size', v: bytes(t.bytes), title: 'Bytes every ring holds' },
+    { k: 'Dropped', v: num(t.drops), title: DROPPED_TITLE },
+  ]
+})
 
 // ---------------------------------------------------------------------------
 // Loading + the private 2s ticker
 // ---------------------------------------------------------------------------
 const refreshAll = async () => {
   await fetchQueues({ force: true })
-  await refreshExpanded()
+  if (picked.value && pickedRow.value) await loadDetail(picked.value)
 }
 
 let ticker = null
@@ -562,7 +569,7 @@ const consequence = computed(() => {
     return 'Leases are voided and every group cursor rewinds. The queue itself, and its declared configuration, stay.'
   }
   return p.row.declared === true
-    ? 'The declared configuration is deleted too — a later push recreates the queue implicitly, with tenant defaults.'
+    ? 'The declared configuration is deleted too: a later push recreates the queue implicitly, with tenant defaults.'
     : 'A later push or pop with the same name creates the queue again, empty.'
 })
 
@@ -579,20 +586,19 @@ const runPending = async () => {
       notifySuccess(
         dropped === null
           ? `Reset ${name}`
-          : `Reset ${name} — dropped ${formatNumber(dropped)} message${dropped === 1 ? '' : 's'}`
+          : `Reset ${name}: dropped ${formatNumber(dropped)} message${dropped === 1 ? '' : 's'}`
       )
     } else {
       const res = await ephemeralApi.delete(name)
       // An explicit `existed:false` means the name matched nothing. Reporting
       // that as a deletion is how a typo reads as success.
       if (res.data && res.data.existed === false) {
-        actionError.value = `No ephemeral queue named "${name}" on this cluster — nothing was deleted.`
+        actionError.value = `No ephemeral queue named "${name}" on this cluster: nothing was deleted.`
         return
       }
-      const next = new Set(expanded.value)
-      next.delete(name)
-      expanded.value = next
       notifySuccess(`Deleted ${name}`)
+      // The queue on the right is gone: back to every queue.
+      if (picked.value === name) picked.value = null
     }
     closeModal()
     invalidate()
@@ -607,43 +613,62 @@ const runPending = async () => {
 </script>
 
 <style scoped>
-/* The caret in the queue cell — the row is the toggle, so the glyph only has
-   to say which way it is. */
-.eph-caret {
-  color: var(--text-faint);
-  flex-shrink: 0;
-  transition: transform .12s var(--ease), color .12s;
+/* The head's facts: small chips beside the title, as in the Queues section
+   (the same 16px after the title). On a narrow screen they wrap under the
+   title rather than being cut. */
+.eph :deep(.page-id) { flex-wrap: wrap; gap: 6px 16px; }
+.eph :deep(.page-sub) { overflow: visible; white-space: normal; }
+.facts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.fact {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 2px 8px; border-radius: var(--r-chip);
+  background: var(--ink-3); border: 1px solid var(--bd);
+  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-.eph-caret.open { transform: rotate(90deg); color: var(--text-mid); }
+.fact-k { color: var(--text-low); }
+
+/* Back to every queue, before the picked queue's name: 8px from it, the
+   head's 16px being the title's distance from its facts. */
+.eph-back {
+  flex: none; width: 28px; height: 28px; margin-right: -8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-control); color: var(--text-mid);
+}
+.eph-back:hover { background: var(--ink-3); color: var(--text-hi); }
+.eph-back:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+
+.view-container.eph > .card + .card,
+.view-container.eph > section + section { margin-top: 16px; }
+
+/* Tables scroll inside their card on a narrow screen; one line per row. */
+.eph-scroll { overflow-x: auto; }
+.eph-table th, .eph-table td { white-space: nowrap; }
+.eph-table td { height: 36px; }
 .eph-row { cursor: pointer; }
-.eph-row:hover .eph-caret { color: var(--text-mid); }
-
-/* Three drop counters in one cell: the label rides under the figure so the
-   column stays one line wide and no reader has to remember a column order. */
-.eph-drops { display: inline-flex; gap: 12px; }
-.eph-drop {
-  display: inline-flex; flex-direction: column; line-height: 1.15;
-  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
-  font-size: 12px; color: var(--text-low);
+.eph-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.eph-name {
+  display: block; max-width: 480px;
+  overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-hi);
 }
-.eph-drop i {
-  font-style: normal; font-size: 11px; letter-spacing: .06em;
-  text-transform: uppercase; color: var(--text-low);
+.eph-tier { color: var(--text-mid); }
+.eph-owner { font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); }
+.eph-table td.num.mute { color: var(--text-low); }
+.eph-acts { width: 1%; padding-top: 0; padding-bottom: 0; }
+.eph-acts .btn { color: var(--text-low); }
+.eph-acts .btn:hover { color: var(--text-hi); }
+.eph-acts .btn + .btn { margin-left: 2px; }
+.eph-sr {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
 }
-/* Raised ink once something has actually been dropped — see dropClass(). */
-.eph-drop.on { color: var(--text-hi); }
 
-.eph-detail-meta {
-  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px;
-  font-size: 11.5px; color: var(--text-low); margin-bottom: 10px;
-}
-.eph-detail-meta b { color: var(--text-hi); font-weight: 600; }
-.eph-detail-note { color: var(--text-low); font-style: italic; }
+.eph-reading { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; }
+.eph-skeleton { height: 16px; }
+.eph-empty { padding: 28px 16px; }
+.eph-pager .pager-count { font-size: 12px; }
 
-/* The group table is a table inside a row: no card, no outer border, and a
-   head that reads as a sub-head rather than a second page header. */
-.eph-groups { background: transparent; }
-.eph-groups th { background: transparent; padding: 4px 10px; }
-.eph-groups td { padding: 5px 10px; border-bottom: 1px solid var(--bd-soft, var(--bd)); }
-.eph-groups tr:hover td { background: transparent; }
+.eph-modal-name { margin-bottom: 10px; font-family: var(--font-mono); font-size: 12.5px; color: var(--text-hi); overflow-wrap: anywhere; }
+.eph-modal-loss { margin-bottom: 8px; font-size: 13px; color: var(--text-hi); }
+.eph-modal-note { font-size: 12.5px; color: var(--text-mid); }
 </style>

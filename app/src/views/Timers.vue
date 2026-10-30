@@ -1,156 +1,86 @@
 <template>
-  <div class="view-container">
+  <!-- A tab of the Queues section, for the queue picked in the list beside
+       (?queue=): timers are listed one queue at a time. -->
+  <QueuesLayout>
+  <div class="view-container tm">
 
-    <!-- The timer count beside the title is the TENANT's, from the queue
-         listing's root, and it is a sweeper snapshot — hence `≈`, everywhere
-         it appears; it is shown only when it is a measurement. -->
-    <PageHead title="Timers">
-      <template #sub>
-        <template v-if="tenantTotalMeasured">
-          <span :title="TENANT_TOTAL_TITLE">≈ {{ formatNumber(timerRows) }} pending</span><template v-if="timerBytes !== null"> · <span :title="TENANT_TOTAL_TITLE">≈ {{ formatBytes(timerBytes) }}</span></template>
-        </template>
-        <template v-if="stamp(listPanel)"><template v-if="tenantTotalMeasured"> · </template>{{ stamp(listPanel) }}</template>
-      </template>
-    </PageHead>
-
-    <!-- ===================== The three quiet states =====================
-         Not here / not in the plan / not being served right now. One card, no
-         poll, no retry: composables/useGatedVerdict.js owns the rule and the
-         wording, and stores/routeSupport.js remembers the first of them for
-         the whole cluster epoch so a second page cannot re-ask. -->
+    <!-- Not here / not in the plan / not served right now: one quiet card, no
+         poll, no retry. composables/useGatedVerdict.js owns the rule and the
+         words; stores/routeSupport.js remembers it for the cluster epoch. -->
     <div v-if="quiet" class="card">
       <div class="empty-state">
-        <svg v-if="verdict === 'absent'" class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <circle cx="12" cy="13" r="8" />
-          <path stroke-linecap="round" d="M12 9v4l3 2M3 3l18 18" />
-        </svg>
-        <svg v-else-if="verdict === 'gated'" class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <rect x="5" y="11" width="14" height="9" rx="2" />
-          <path stroke-linecap="round" d="M8 11V8a4 4 0 018 0v3" />
-        </svg>
-        <svg v-else class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <circle cx="12" cy="12" r="9" />
-          <path stroke-linecap="round" d="M10 9v6M14 9v6" />
-        </svg>
-        <h3>{{ quiet.title }}</h3>
-        <p>{{ quiet.detail }}</p>
-        <p v-if="verdict === 'absent'" style="font-size:13px;">
-          <code>/api/v1/timers/*</code> arrived in 1.2.
-        </p>
-        <!-- The shared copy says a 503 is "an operator's switch, or a cluster
-             that cannot answer right now". Half of that is unreachable HERE,
-             and saying it would send an operator to a switch that was never on
-             this path: switches.rs pins rung 1 to `true` for
-             Surface::TimerRead / TimerCancel and quota.rs allows both (§9.6 —
-             a read that answered 503 would stop a caller finding out whether a
-             timer it can no longer cancel is still pending, and the stop button
-             must not switch itself off). So `timers_disabled` is reachable only
-             on POST /api/v1/timers, which this page never calls, and the 503 it
-             does meet is handlers/timers.rs `unavailable()`: no leader, a
-             retry, a deadline that passed. The KV page keeps the shared
-             wording, where the switch is real. -->
-        <p v-else-if="verdict === 'paused'" style="font-size:13px;">
-          No operator switch pauses timer reads or cancels — the cell answers
-          this when the cluster cannot answer (no leader, or a timeout).
-        </p>
+        <Icon :name="verdict === 'absent' ? 'timer' : verdict === 'gated' ? 'lock' : 'pause'" class="empty-state-icon" :size="28" />
+        <h3 :title="quietTitle">{{ quiet.title }}</h3>
         <button class="btn btn-ghost" @click="probeAgain">Check again</button>
       </div>
     </div>
 
     <template v-else>
-      <!-- Stale rows presented as live is the failure mode this banner exists
-           to prevent: the panel keeps the last page that loaded. -->
+      <!-- The panel keeps the last page that loaded: stale rows must not pass
+           for live ones. -->
       <div v-if="isStale" class="status-banner banner-bad view-banner">
         <span>
-          <strong>Could not refresh this page of timers</strong> ·
-          {{ describeApiError(listError) }} · showing the last page that loaded
-          ({{ stamp(listPanel) }}).
+          <strong>Could not refresh these timers</strong> · {{ describeApiError(listError) }} · showing the page from {{ stamp(listPanel) }}
         </span>
       </div>
 
-      <!-- The queue is not a filter, it is the ADDRESS: the route is queue-scoped
-           because a tenant-wide timer list would be a scan whose call rate is
-           decided by somebody else's web traffic (§4.1). -->
+      <!-- The queue is the ADDRESS, not a filter: the route is queue-scoped
+           because a tenant-wide timer list would be a scan (§4.1). -->
       <PageTools>
-        <label class="tool-field" for="timers-queue">
-          <span class="tool-label">Queue</span>
-          <Autocomplete
-            id="timers-queue"
-            v-model="queue"
-            :options="queueOptions"
-            :loading="queuesLoading"
-            label="Queue"
-            placeholder="Pick a queue"
-            allow-custom
-          />
-        </label>
         <!-- The exact count. A whole-queue count is REFUSED by the stored
-             procedure, not by this form: an exact aggregate cannot have the
-             list's LIMIT, so it is prefix-scoped to stay an index range
-             (handlers/timers.rs timer_read_query). -->
-        <label class="tool-field" for="timers-prefix" title="An exact count is prefix-scoped; a whole-queue count would be a scan">
-          <span class="tool-label">Count under</span>
+             procedure: an exact aggregate cannot have the list's LIMIT, so it is
+             prefix-scoped to stay an index range (handlers/timers.rs). -->
+        <label class="tool-field" for="timers-prefix" title="An exact count of the pending timers whose key starts with this. A whole-queue count would be a scan, so the broker asks for a prefix.">
+          <span class="tool-label">Key prefix</span>
           <input
             id="timers-prefix"
             v-model="countPrefix"
-            class="input"
-            placeholder="a prefix, e.g. retry:"
+            class="input tm-prefix"
+            placeholder="e.g. retry:"
             @keyup.enter="runCount"
           />
         </label>
         <button
           class="btn btn-ghost"
           :disabled="!queue || !countPrefix || counting"
-          :title="countPrefix ? 'Count every pending timer whose key starts with this' : 'The broker refuses a whole-queue count — give a non-empty prefix'"
+          :title="countPrefix ? 'Count every pending timer whose key starts with this' : 'The broker refuses a whole-queue count: give a prefix'"
           @click="runCount"
         >{{ counting ? 'Counting…' : 'Count' }}</button>
         <span v-if="countError" class="tool-note is-bad">{{ countError }}</span>
-        <span v-else-if="countResult && countResult.count !== null" class="tool-note">
-          {{ formatNumber(countResult.count) }} pending under <code>{{ countResult.prefix }}</code>
-        </span>
-        <span v-else-if="countResult" class="tool-note">The broker answered no count for <code>{{ countResult.prefix }}</code></span>
-        <span v-if="queuesUnavailable" class="tool-note">Queue list unavailable — type a queue name</span>
-        <span v-else-if="unlistedQueue" class="tool-note">Not in this cluster's queue list — asking the broker anyway</span>
+        <span v-else-if="countResult && countResult.count !== null" class="tool-note tabular-nums">{{ formatNumber(countResult.count) }} pending under <code>{{ countResult.prefix }}</code></span>
+        <span v-else-if="countResult" class="tool-note">No count for <code>{{ countResult.prefix }}</code></span>
         <template #view>
-          <label class="tool-field" for="timers-limit">
-            <span class="tool-label">Show</span>
-            <select id="timers-limit" v-model.number="limit" class="input">
-              <option :value="25">25</option>
-              <option :value="50">50</option>
-              <option :value="100">100</option>
-              <option :value="250">250</option>
-            </select>
-          </label>
+          <!-- The TENANT's timer count, from the queue listing's root: a sweeper
+               snapshot, hence `≈`; shown only when it is a measurement. -->
+          <span v-if="tenantTotalMeasured" class="tool-note tabular-nums" :title="TENANT_TOTAL_TITLE">≈ {{ formatNumber(timerRows) }} in all queues</span>
+          <UiSelect v-model="limit" label="Show" :options="LIMITS" />
         </template>
       </PageTools>
 
-      <!-- ===================== The page ===================== -->
       <div class="card">
         <div class="card-header">
           <h3>Pending timers</h3>
-          <span class="card-sub">
-            scheduled, not yet delivered — a fired timer leaves no row behind
-          </span>
+          <span class="card-sub" title="A timer that has fired leaves no row behind: its message is in the log">not yet delivered</span>
           <span class="muted">{{ stamp(listPanel) }}</span>
         </div>
 
-        <div style="overflow-x:auto;">
-          <table class="t">
+        <div class="tm-scroll">
+          <table class="t tm-table">
             <thead>
               <tr>
                 <th>Timer key</th>
                 <th>Partition</th>
                 <th>Delivers</th>
-                <th class="num">Attempts</th>
+                <th class="r">Attempts</th>
                 <th>Last error</th>
                 <th>State</th>
-                <th style="text-align:right;">Created</th>
+                <th class="r">Created</th>
               </tr>
             </thead>
             <tbody>
               <template v-if="firstLoad">
-                <tr v-for="i in 6" :key="`sk-${i}`">
-                  <td colspan="7"><div class="skeleton" style="height:16px;" /></td>
+                <tr v-for="i in 6" :key="`sk-${i}`" aria-hidden="true">
+                  <td colspan="7"><div class="skeleton" style="height:14px;" /></td>
                 </tr>
               </template>
 
@@ -158,44 +88,35 @@
                 <tr
                   v-for="row in rows"
                   :key="row.timerKey"
-                  class="timers-row"
+                  class="tm-row"
+                  tabindex="0"
                   @click="openTimer(row)"
+                  @keydown.enter.prevent="openTimer(row)"
                 >
                   <td>
-                    <div class="timers-key">
-                      <span class="font-mono" style="font-size:12px;">{{ row.timerKey }}</span>
-                      <span v-if="row.encrypted" class="chip chip-mute" title="Stored as an encrypted envelope — the payload is not readable from this console">encrypted</span>
-                    </div>
+                    <span class="tm-key">
+                      <span class="tm-cut tm-mono" :title="row.timerKey">{{ row.timerKey }}</span>
+                      <span v-if="row.encrypted" class="tm-tag" title="Stored as an encrypted envelope: the payload is not readable from this console">encrypted</span>
+                    </span>
                   </td>
-                  <td><span style="font-size:12px; color:var(--text-mid);">{{ row.partition || '—' }}</span></td>
+                  <td><span class="tm-cut tm-mid" :title="row.partition || undefined">{{ row.partition || '—' }}</span></td>
                   <td :title="utcTitle(row.deliverAt)">
-                    <div :class="dueClass(row)" style="font-size:12px;">{{ formatDeliverIn(row.deliverAt, asOf) }}</div>
-                    <div class="tabular-nums" style="font-size:12px; color:var(--text-low);">
-                      {{ localStamp(row.deliverAt) }}
-                    </div>
+                    <span class="tm-due">{{ formatDeliverIn(row.deliverAt, asOf) }}</span>
+                    <span class="tm-at">{{ compactStamp(row.deliverAt) }}</span>
                   </td>
-                  <td class="num" :class="{ warn: (row.attempts || 0) > 0 }">{{ row.attempts ?? '—' }}</td>
+                  <td class="r tm-num">{{ row.attempts ?? '—' }}</td>
                   <td>
-                    <span
-                      v-if="row.lastError"
-                      class="timers-error"
-                      :title="row.lastError"
-                    >{{ row.lastError }}</span>
-                    <span v-else class="num mute">—</span>
+                    <span v-if="row.lastError" class="tm-cut tm-error" :title="row.lastError">{{ row.lastError }}</span>
+                    <span v-else class="tm-low">—</span>
                   </td>
                   <td>
                     <!-- `claimed` is the SP's one definition of "out of your
                          hands": a claim token that has not expired. A row in
-                         BACKOFF reads claimed:false and is still cancellable,
-                         deliberately — so this column says nothing more. -->
-                    <span v-if="row.claimed" class="chip chip-warn" :title="CLAIMED_TITLE">claimed</span>
-                    <span v-else class="chip chip-mute">pending</span>
+                         BACKOFF reads claimed:false and is still cancellable. -->
+                    <span v-if="row.claimed" class="tm-state" :title="CLAIMED_TITLE">Claimed</span>
+                    <span v-else class="tm-state tm-low" title="No live claim: a cancel can still take it">Pending</span>
                   </td>
-                  <td
-                    :title="utcTitle(row.createdAt)"
-                    class="tabular-nums"
-                    style="text-align:right; font-size:12px; color:var(--text-mid); white-space:nowrap;"
-                  >{{ localStamp(row.createdAt) }}</td>
+                  <td class="r tm-when" :title="utcTitle(row.createdAt)">{{ compactStamp(row.createdAt) }}</td>
                 </tr>
               </template>
 
@@ -204,25 +125,19 @@
               <tr v-else-if="!queue">
                 <td colspan="7">
                   <div class="empty-state">
-                    <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                      <circle cx="12" cy="13" r="8" />
-                      <path stroke-linecap="round" d="M12 9v4l3 2M9 2h6" />
-                    </svg>
-                    <h3>Pick a queue</h3>
-                    <p>
-                      Timers are listed per queue, never tenant-wide: the key is
-                      unique inside one queue, and a whole-tenant listing would be
-                      a scan driven by somebody else's traffic.
-                    </p>
+                    <Icon name="timer" class="empty-state-icon" :size="28" />
+                    <h3>Pick a queue in the list</h3>
                   </div>
                 </td>
               </tr>
 
               <tr v-else-if="listError">
                 <td colspan="7">
+                  <!-- The banner above speaks only over rows; here the reason
+                       has nowhere else to be. -->
                   <div class="empty-state empty-state-failed">
-                    <h3>{{ describeApiError(listError) }}</h3>
-                    <p>Nothing loaded — this is a failure, not an empty queue.</p>
+                    <h3>Cannot load timers</h3>
+                    <p>{{ describeApiError(listError) }}</p>
                     <button class="btn btn-ghost" @click="reload">Retry</button>
                   </div>
                 </td>
@@ -231,16 +146,8 @@
               <tr v-else>
                 <td colspan="7">
                   <div class="empty-state">
-                    <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                      <circle cx="12" cy="13" r="8" />
-                      <path stroke-linecap="round" d="M12 9v4l3 2M9 2h6" />
-                    </svg>
-                    <h3>No pending timers{{ pageNumber > 1 ? ' on this page' : '' }}</h3>
-                    <p>
-                      Nothing is scheduled on <strong class="font-mono">{{ queue }}</strong> right now.
-                      A timer that has fired leaves no row behind — the log is where
-                      its message is.
-                    </p>
+                    <Icon name="timer" class="empty-state-icon" :size="28" />
+                    <h3 title="A timer that has fired leaves no row behind: its message is in the log">No pending timers{{ pageNumber > 1 ? ' on this page' : '' }}</h3>
                   </div>
                 </td>
               </tr>
@@ -251,10 +158,8 @@
         <!-- Keyset pager: no page count, because there is no total without a
              count and this is an index range, not an offset. -->
         <div v-if="queue && (rows.length || canPrev)" class="pager">
-          <span class="pager-count">
-            Page <span class="tabular-nums">{{ pageNumber }}</span>
-            · {{ rows.length }} row{{ rows.length === 1 ? '' : 's' }}
-            <template v-if="!canNext && !listError"> · end of the queue</template>
+          <span class="pager-count tabular-nums">
+            Page {{ pageNumber }} · {{ rows.length }} {{ rows.length === 1 ? 'row' : 'rows' }}<template v-if="!canNext && !listError"> · the end</template>
           </span>
           <div class="pager-nav">
             <button class="btn btn-ghost" :disabled="!canPrev || loading" @click="goPrev">Previous</button>
@@ -273,24 +178,23 @@
       :split="Boolean(peeked && peeked.found !== false)"
       @close="closeDrawer"
     >
-      <div v-if="peekLoading" style="text-align:center; padding:48px 0;">
-        <div class="spinner" style="margin:0 auto 12px;"></div>
-        <p style="color:var(--text-low);">Loading the timer…</p>
+      <div v-if="peekLoading" class="tm-loading">
+        <div class="spinner" />
+        <p>Loading the timer…</p>
       </div>
 
-      <div v-else-if="peekError" class="panel-err">
-        {{ describeApiError(peekError) }}
-      </div>
+      <div v-else-if="peekError" class="panel-err">{{ describeApiError(peekError) }}</div>
 
       <!-- found:false is HTTP 200 and a VERDICT, not an error: the timer is no
            longer pending, which may mean it has already been delivered. -->
-      <div v-else-if="peeked && peeked.found === false" class="empty-tile">
-        No longer pending. There is no tombstone, so this may mean it has already
-        been delivered — the log on <strong class="font-mono">{{ queue }}</strong> is the authority.
-      </div>
+      <p
+        v-else-if="peeked && peeked.found === false"
+        class="tm-quiet"
+        :title="`There is no tombstone: the log on ${queue} is the authority.`"
+      >No longer pending: it may have been delivered.</p>
 
       <template v-else-if="peeked">
-        <div class="timers-fields">
+        <div class="tm-fields">
           <DetailField label="Queue" :value="peeked.queue" mono />
           <DetailField label="Timer key" :value="peeked.timerKey" mono copyable />
           <DetailField label="Partition" :value="peeked.partition || 'Default'" mono />
@@ -300,8 +204,8 @@
             :title="utcTitle(peeked.deliverAt)"
           />
           <DetailField label="Transaction id" :value="peeked.txn" mono copyable />
-          <!-- Promised at SCHEDULE, which is what makes the delivered frame
-               correlatable without a second API call. -->
+          <!-- Promised at SCHEDULE, which makes the delivered frame
+               correlatable without a second call. -->
           <DetailField label="Message id" :value="peeked.messageId" mono copyable />
           <DetailField label="Attempts" :value="peeked.attempts ?? '—'" />
           <DetailField label="Last error" :value="peeked.lastError || '—'" :tone="peeked.lastError ? 'danger' : 'mid'" boxed />
@@ -310,55 +214,36 @@
           <DetailField label="Updated" :value="localStamp(peeked.updatedAt)" :title="utcTitle(peeked.updatedAt)" />
           <DetailField
             label="State"
-            :value="peeked.claimed ? 'claimed' : 'pending'"
-            :tone="peeked.claimed ? 'accent' : 'mid'"
-            :title="peeked.claimed ? CLAIMED_TITLE : 'No live claim — a cancel can still take it'"
+            :value="peeked.claimed ? 'Claimed' : 'Pending'"
+            :tone="peeked.claimed ? 'high' : 'mid'"
+            :title="peeked.claimed ? CLAIMED_TITLE : 'No live claim: a cancel can still take it'"
           />
         </div>
       </template>
 
       <template #secondary>
-        <div v-if="peeked && peeked.found !== false" class="timers-payload">
-          <div class="label-xs timers-payload-head">
+        <div v-if="peeked && peeked.found !== false" class="tm-payload">
+          <div class="label-xs tm-payload-head">
             <span>Payload</span>
-            <span v-if="payload.state === 'text' || payload.state === 'binary'" class="muted">
-              {{ formatBytes(payload.bytes) }}
-              <template v-if="peeked.payloadZstd"> · {{ formatBytes(payload.storedBytes) }} stored (zstd)</template>
+            <span v-if="payload.state === 'text' || payload.state === 'binary'" class="tm-low">
+              {{ formatBytes(payload.bytes) }}<template v-if="peeked.payloadZstd"> · {{ formatBytes(payload.storedBytes) }} stored (zstd)</template>
             </span>
           </div>
 
           <!-- Peek promises the bytes AS STORED, and encryption happens at
-               schedule and is outermost: there is nothing this browser could
-               decrypt, and pretending otherwise would be a lie about what the
-               consumer will receive. -->
-          <div v-if="payload.state === 'encrypted'" class="empty-tile">
-            <strong>Encrypted envelope.</strong>
-            The broker encrypted this payload when it was scheduled, so the console
-            cannot show its contents. The consumer receives the decrypted frame.
-          </div>
-          <!-- Not a failure: the stored bytes are capped at 1 MiB and a zstd
-               frame can expand four orders of magnitude past that — or ask the
-               decoder to hold a 1.9 GB window for 4 MB of output — so a preview
-               that decompressed whatever it was handed would hang the tab on a
-               payload a producer chose. "Asking for more than", not "expanding
-               past": the size is only named when the frame declared one, and a
-               frame refused on its window declared nothing. -->
-          <div v-else-if="payload.state === 'too_large'" class="empty-tile">
-            <strong>Too large to preview.</strong>
-            {{ formatBytes(payload.storedBytes) }} stored, asking for more than this
-            console's {{ formatBytes(TIMER_PAYLOAD_BUDGET_BYTES) }} decode budget{{
-              payload.bytes === null ? '' : ` — it declares ${formatBytes(payload.bytes)}` }}.
-            The consumer still receives it whole.
-          </div>
-          <div v-else-if="payload.state === 'error'" class="panel-err">
-            The payload did not decode — {{ payload.error }}.
-          </div>
-          <div v-else-if="payload.state === 'binary'" class="empty-tile">
-            {{ formatBytes(payload.bytes) }} of binary, not UTF-8 text.
-          </div>
-          <div v-else-if="payload.state === 'empty'" class="empty-tile">
-            Empty payload — zero bytes, which is a legal thing to schedule.
-          </div>
+               schedule and is outermost: nothing here could decrypt it. -->
+          <p v-if="payload.state === 'encrypted'" class="tm-quiet" title="The broker encrypted this payload when it was scheduled. The consumer receives the decrypted frame.">Encrypted when scheduled: not readable here.</p>
+          <!-- Not a failure: a zstd frame can expand four orders of magnitude
+               past its stored size, so a preview that decompressed whatever it
+               was handed would hang the tab on a payload a producer chose. -->
+          <p
+            v-else-if="payload.state === 'too_large'"
+            class="tm-quiet"
+            :title="`Asking for more than this console's ${formatBytes(TIMER_PAYLOAD_BUDGET_BYTES)} decode budget${payload.bytes === null ? '' : `: it declares ${formatBytes(payload.bytes)}`}. The consumer still receives it whole.`"
+          >Too large to preview: {{ formatBytes(payload.storedBytes) }} stored.</p>
+          <div v-else-if="payload.state === 'error'" class="panel-err">The payload did not decode: {{ payload.error }}.</div>
+          <p v-else-if="payload.state === 'binary'" class="tm-quiet">{{ formatBytes(payload.bytes) }} of binary, not UTF-8 text.</p>
+          <p v-else-if="payload.state === 'empty'" class="tm-quiet" title="Zero bytes is a legal thing to schedule">Empty payload.</p>
           <JsonViewer v-else-if="payload.state === 'text'" :value="payload.text" />
         </div>
       </template>
@@ -366,9 +251,8 @@
       <template #footer>
         <button class="btn btn-ghost" @click="closeDrawer">Close</button>
         <!-- The proxy's rule for a gated write, not the durable queueAdmin:
-             Gated(Timers, Open) is allowed to every role except Viewer, which
-             `can('produce') || can('consume')` mirrors exactly
-             (views/Ephemeral.vue does the same for its family). -->
+             every role but Viewer, which `can('produce') || can('consume')`
+             mirrors exactly (as views/Ephemeral.vue does). -->
         <button
           v-if="canCancel && peeked && peeked.found !== false"
           class="btn btn-danger"
@@ -381,36 +265,21 @@
     <Teleport to="body">
       <div v-if="pending" class="modal-backdrop timers-cancel-over" @click.self="closeCancel">
         <div class="card modal-card">
-          <div class="card-header">
-            <h3>Cancel timer</h3>
-          </div>
-          <div class="card-body">
+          <div class="card-header"><h3>Cancel timer</h3></div>
+          <div class="card-body tm-form">
             <div v-if="cancelError" class="panel-err">{{ cancelError }}</div>
 
             <!-- The verdict, as the stored procedure issued it. `cancelled` is
                  the only one of the three that means the timer will not fire. -->
-            <div v-if="cancelVerdict" class="timers-verdict">
-              <span class="detail-status" :class="{ 'is-warn': cancelVerdict.tone !== 'ok' }">
-                {{ cancelVerdict.status || 'no status' }}
-              </span>
-              <p style="color:var(--text-hi); margin-top:8px;">{{ cancelVerdict.sentence }}</p>
-            </div>
+            <template v-if="cancelVerdict">
+              <span class="detail-status" :class="{ 'is-warn': cancelVerdict.tone !== 'ok' }">{{ cancelVerdict.status || 'no status' }}</span>
+              <p class="tm-lead">{{ cancelVerdict.sentence }}</p>
+            </template>
 
             <template v-else>
-              <p style="color:var(--text-mid); margin-bottom:10px;">
-                <strong class="font-mono">{{ pending.timerKey }}</strong>
-                on
-                <strong class="font-mono">{{ pending.queue }}</strong>
-              </p>
-              <p style="color:var(--text-hi); margin-bottom:8px;">
-                This deletes the scheduled message. It will never be delivered, and
-                there is nothing to undo it with — a cancelled timer leaves no row
-                and no tombstone.
-              </p>
-              <p style="font-size:13px; color:var(--text-low);">
-                A timer a broker has already claimed cannot be cancelled: that answers
-                <code>too_late</code>, and the delivery goes out.
-              </p>
+              <p class="tm-lead"><strong class="font-mono">{{ pending.timerKey }}</strong> on <strong class="font-mono">{{ pending.queue }}</strong></p>
+              <p class="tm-help" title="A cancelled timer leaves no row and no tombstone.">It will never be delivered, and a cancel cannot be undone.</p>
+              <p class="tm-help" title="A broker that has claimed it is delivering it: the cancel answers too_late.">A claimed timer cannot be cancelled.</p>
             </template>
           </div>
           <div class="modal-foot">
@@ -426,6 +295,7 @@
       </div>
     </Teleport>
   </div>
+  </QueuesLayout>
 </template>
 
 <script setup>
@@ -455,15 +325,16 @@ import { useRouteState } from '@/composables/useRouteState'
 //                           total, by construction
 import { computed, ref, watch } from 'vue'
 
-import Autocomplete from '@/components/Autocomplete.vue'
-import PageHead from '@/components/PageHead.vue'
+import QueuesLayout from '@/components/QueuesLayout.vue'
 import PageTools from '@/components/PageTools.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
+import Icon from '@/components/Icon.vue'
+import UiSelect from '@/components/UiSelect.vue'
 import { timers as timersApi, describeApiError } from '@/api'
 import { formatBytes, formatNumber, toNum, useApi } from '@/composables/useApi'
-import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { formatTimestamp, formatTimestampCompact, formatTimestampUtc } from '@/composables/useFormat'
 import { describeVerdict, gatedVerdict } from '@/composables/useGatedVerdict'
 import { useKeysetPager } from '@/composables/useKeysetPager'
 import { useRefresh } from '@/composables/useRefresh'
@@ -485,28 +356,19 @@ const TENANT_TOTAL_TITLE =
   'Every pending timer this tenant holds on the cell, from the sweeper\'s cached measurement on the queue listing — minutes old, never a live count'
 const CLAIMED_TITLE =
   'A broker holds the lease and is about to deliver this timer. A cancel now answers too_late; the window is bounded by the lease.'
+const LIMITS = [25, 50, 100, 250]
 
 // ---------------------------------------------------------------------------
-// Queue picker. The queue is the ADDRESS, and it lives in the URL so a page of
-// timers is something an operator can paste into a ticket.
+// The queue. It is the ADDRESS, picked in the Queues section's list and kept
+// in the URL, so a page of timers is something an operator can paste into a
+// ticket.
 // ---------------------------------------------------------------------------
 const queuesStore = useQueuesStore()
-const {
-  queues: allQueues, loading: queuesLoading, error: queuesError,
-  timerRows, timerBytes, fetchQueues,
-} = queuesStore
+const { timerRows, fetchQueues } = queuesStore
 
 const queue = ref('')
 const limit = ref(25)
 useRouteState({ queue, limit })
-
-const queueOptions = computed(() => allQueues.value.map((q) => q.name).filter(Boolean).sort())
-const queuesUnavailable = computed(() => Boolean(queuesError.value) && queueOptions.value.length === 0)
-// The picker suggests from /resources/queues; the timers live in their own
-// table. A queue that only has timers on it must still be addressable.
-const unlistedQueue = computed(
-  () => Boolean(queue.value) && queueOptions.value.length > 0 && !queueOptions.value.includes(queue.value)
-)
 
 // ---------------------------------------------------------------------------
 // The page itself.
@@ -553,6 +415,17 @@ const asOf = computed(() => listPanel.lastUpdated.value?.getTime() ?? Date.now()
 const quiet = computed(() =>
   verdict.value && verdict.value !== 'transient' ? describeVerdict(verdict.value, 'timers') : null
 )
+// The why, on the quiet card's line. A 503 here is never an operator's switch:
+// switches.rs pins rung 1 to `true` for TimerRead / TimerCancel and quota.rs
+// allows both (§9.6), so `timers_disabled` is reachable only on POST
+// /api/v1/timers, which this page never calls. What it meets is
+// handlers/timers.rs `unavailable()`: no leader, a retry, a deadline passed.
+const quietTitle = computed(() => {
+  if (!quiet.value) return ''
+  if (verdict.value === 'absent') return `${quiet.value.detail} The timer routes arrived in 1.2.`
+  if (verdict.value === 'paused') return 'No operator switch pauses timer reads or cancels: the cell answers this when the cluster cannot answer (no leader, or a timeout). A retry is the only cure.'
+  return quiet.value.detail
+})
 
 // A sweeper figure the page on screen contradicts is not a measurement: a cell
 // that has not written this tenant's usage row answers `timerRows: 0`, so `≈ 0
@@ -817,18 +690,12 @@ const runCancel = async () => {
 // string. The local-time value with UTC in the hover title is the app's idiom
 // everywhere else and is kept here.
 const localStamp = (value) => formatTimestamp(parseBrokerInstant(value))
-const utcTitle = (value) => formatTimestampUtc(parseBrokerInstant(value))
-
-/**
- * Overdue is not an error — the sweeper runs on a cycle and a claimed row is
- * mid-delivery — but a timer that is a minute late is worth seeing, because
- * that is the shape the 1.5.1 announce defect had.
- */
-const dueClass = (row) => {
-  const at = parseBrokerInstant(row?.deliverAt)
-  if (!at) return 'timers-due'
-  return at.getTime() < asOf.value - 60_000 ? 'timers-due warn' : 'timers-due'
+// The table's short form, the Messages tab's: DD/MM HH:mm:ss.
+const compactStamp = (value) => {
+  const at = parseBrokerInstant(value)
+  return at ? formatTimestampCompact(at) : '—'
 }
+const utcTitle = (value) => formatTimestampUtc(parseBrokerInstant(value))
 
 // First load. Last, so nothing above can be reached before it is defined.
 fetchQueues()
@@ -836,40 +703,52 @@ reload()
 </script>
 
 <style scoped>
-/* The queue names and the timer prefixes are long and dotted; the page-size
-   select next to them is three digits wide and must not take the same room. */
+.tm { display: flex; flex-direction: column; gap: 16px; }
+.tm > .page-tools, .tm > .view-banner { margin-bottom: 0; }
+.tm-prefix { width: 150px; }
 
+.tm-scroll { overflow-x: auto; }
+.tm-table { min-width: 760px; }
+.tm-table th, .tm-table td { white-space: nowrap; }
+.tm-table td { height: 40px; font-size: 13px; }
+.tm-table .r { text-align: right; }
+.tm-row { cursor: pointer; }
+.tm-row:focus-visible { outline-offset: -2px; }
+/* Long keys, partitions and errors end in an ellipsis; the whole is the tooltip. */
+.tm-cut { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.tm-key { display: inline-flex; align-items: center; gap: 8px; }
+.tm-mono { font-family: var(--font-mono); font-size: 12px; color: var(--text-hi); }
+.tm-mid { color: var(--text-mid); }
+.tm-low { color: var(--text-low); }
+.tm-tag { padding: 0 6px; border: 1px solid var(--bd); border-radius: var(--r-chip); font-size: 11px; line-height: 17px; color: var(--text-low); }
+.tm-due { font-weight: 500; color: var(--text-hi); }
+.tm-at { margin-left: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--text-low); font-variant-numeric: tabular-nums; }
+.tm-num { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.tm-error { max-width: 280px; font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); }
+.tm-state { font-size: 12px; color: var(--text-hi); }
+.tm-state.tm-low { color: var(--text-low); }
+.tm-when { font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); font-variant-numeric: tabular-nums; }
 
-.timers-row { cursor: pointer; }
-.timers-key { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.timers-due { color: var(--text-hi); font-weight: 500; }
-.timers-due.warn { color: var(--warn-400); }
+/* --- The drawer ------------------------------------------------------------ */
+.tm-loading { padding: 48px 0; text-align: center; font-size: 13px; color: var(--text-low); }
+.tm-loading .spinner { margin: 0 auto 12px; }
+.tm-quiet { margin: 0; padding: 12px 0; font-size: 13px; color: var(--text-mid); }
+.tm-fields { display: flex; flex-direction: column; gap: 16px; }
+.tm-payload-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 
-/* One line of the failure, the rest on hover: a stack trace in a table cell
-   pushes every other column off the screen. */
-.timers-error {
-  display: block; max-width: 320px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 11.5px; color: var(--ember-400);
-}
+/* --- The cancel confirm ------------------------------------------------------ */
+.tm-form { display: flex; flex-direction: column; gap: 8px; }
+.tm-form .panel-err { margin: 0 0 4px; }
+.tm-lead { margin: 0; font-size: 13px; color: var(--text-hi); overflow-wrap: anywhere; }
+.tm-lead strong { font-weight: 600; }
+.tm-help { margin: 0; font-size: 12px; color: var(--text-low); }
 
-
-
-.timers-fields { display: flex; flex-direction: column; gap: 14px; }
-
-.timers-payload-head {
-  display: flex; align-items: baseline; justify-content: space-between;
-  gap: 8px; margin-bottom: 6px;
-}
-.timers-payload-head .muted { color: var(--text-low); font-size: 11px; }
-
-.timers-verdict { margin-bottom: 4px; }
-
-/* The ONLY way to this confirm is the drawer's footer, and askCancel leaves the
-   drawer open behind it: `.drawer-panel` is z-index 51 while the shared
-   `.modal-backdrop` is 50, so without this the dialog opens BEHIND the panel
-   that raised it — invisible, unclickable, and the timer cannot be cancelled at
-   all. 55 clears the drawer and still passes under the Autocomplete's teleported
-   menu (60), exactly as .dlq-replay-over / .push-over / .qc-over do. */
+/* The only way to this confirm is the drawer's footer, which stays open
+   behind it: `.drawer-panel` is z-index 51 and the shared scrim 50, so this
+   sits above both and under the Autocomplete's menu (60). */
 .timers-cancel-over { z-index: 55; }
+
+@media (max-width: 640px) {
+  .tm-prefix { width: auto; flex: 1; min-width: 0; }
+}
 </style>

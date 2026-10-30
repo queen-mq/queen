@@ -56,14 +56,11 @@
                    that exists is an EDIT of that queue, merged. Saying so is
                    what stops "Create" from reading as "reset". -->
               <span v-else-if="existingWarn" class="qc-warn">{{ existingWarn }}</span>
-              <span v-else-if="nameExists" class="qc-warn">
-                A queue named <span class="font-mono">{{ queueName.trim() }}</span> already exists on this
-                cluster, so this is an edit of it and the fields below now show its configuration.
-                Saving sends only what you change.
+              <span v-else-if="nameExists" class="qc-warn" title="The fields below now show its configuration. Saving sends only what you change.">
+                <span class="font-mono">{{ queueName.trim() }}</span> already exists: this edits it.
               </span>
-              <span v-else class="qc-help">
-                The name consumers and producers address. A queue also appears the first time
-                something pushes to it; configuring it up front is how you move off the defaults.
+              <span v-else class="qc-help" title="A queue also appears the first time something pushes to it; configuring it up front is how you move off the defaults.">
+                The name producers and consumers use.
               </span>
             </label>
 
@@ -104,10 +101,8 @@
                 />
               </div>
             </div>
-            <p class="qc-help qc-pair-help">
-              The two discovery labels, matched for exact equality by
-              <span class="font-mono">/pop?namespace=…&amp;task=…</span>. Changing them moves no
-              messages; the queue starts matching a different discovery pop from the next call.
+            <p class="qc-help qc-pair-help" title="Matched for exact equality by /pop?namespace=…&amp;task=…. Changing them moves no messages: the queue starts matching a different discovery pop from the next call.">
+              Discovery labels, matched exactly by a pop that names them.
             </p>
 
             <!-- ----------------------------------------------- common options -->
@@ -155,9 +150,7 @@
             <div class="qc-section">
               <button type="button" class="qc-toggle" :aria-expanded="showAdvanced ? 'true' : 'false'" @click="showAdvanced = !showAdvanced">
                 <span class="qc-toggle-chev" :class="{ 'qc-toggle-open': showAdvanced }" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
-                  </svg>
+                  <Icon name="chevron-right" :size="14" />
                 </span>
                 Advanced options
                 <!-- Retention and encryption live under this fold. If any of
@@ -183,12 +176,11 @@
                        direction, and an operator who reads this switch as "make
                        this queue's data encrypted" would be wrong about
                        everything already stored. -->
-                  <span v-if="meta.key === 'encryptionEnabled' && isEditing" class="qc-caution">
-                    Not retroactive: frames already in the queue stay exactly as they are, and only
-                    pushes after this save are encrypted. The broker that serves this call drops its
-                    cached flag at once and tells its peers to do the same; a peer that misses that
-                    frame picks it up on the next cache refresh (60 s by default).
-                  </span>
+                  <span
+                    v-if="meta.key === 'encryptionEnabled' && isEditing"
+                    class="qc-caution"
+                    title="Frames already in the queue stay exactly as they are. The broker that serves this call drops its cached flag at once and tells its peers; a peer that misses that frame picks it up on the next cache refresh (60 s by default)."
+                  >Not retroactive: only pushes after this save are encrypted.</span>
                 </span>
                 <span class="qc-row-control">
                   <span v-if="meta.type === 'bool'" class="seg" role="group" :aria-label="meta.label">
@@ -216,18 +208,10 @@
             </div>
 
             <!-- --------------------------------------------------- the rule -->
-            <p class="qc-note">
-              <template v-if="isEditing">
-                This sends only the options you changed
-                <template v-if="changedKeys.length">
-                  (<span class="font-mono">{{ changedKeys.join(', ') }}</span>)</template>, as a
-                merge: everything else keeps the value the queue has now, and a field you clear
-                goes back to its default.
-              </template>
-              <template v-else>
-                A blank field is not sent: the queue is created with that option's default.
-              </template>
+            <p v-if="isEditing" class="qc-note" title="A merge: everything else keeps the value the queue has now, and a field you clear goes back to its default.">
+              Only the options you change are sent<template v-if="changedKeys.length"> (<span class="font-mono">{{ changedKeys.join(', ') }}</span>)</template>.
             </p>
+            <p v-else class="qc-note">A blank field takes the option’s default.</p>
           </template>
         </div>
 
@@ -276,6 +260,7 @@
 import { computed, ref, watch } from 'vue'
 
 import Autocomplete from '@/components/Autocomplete.vue'
+import Icon from '@/components/Icon.vue'
 import { queues as queuesApi, resources as resourcesApi } from '@/api'
 import {
   OPTION_META, buildBody, configDiff, describeConfigureRefusal, existingQueueName, formatOptionValue,
@@ -611,7 +596,7 @@ const submit = async () => {
 .qc-field > .label-xs { font-size: 13px; font-weight: 500; color: var(--text-hi); }
 .qc-help { color: var(--text-low); font-size: 12px; line-height: 1.5; }
 .qc-invalid { color: var(--ember-400); font-size: 12px; line-height: 1.5; }
-.qc-warn { color: var(--warn-400); font-size: 12px; line-height: 1.5; }
+.qc-warn { color: var(--text-mid); font-size: 12px; line-height: 1.5; }
 /* Namespace and task are one decision in two fields, so they share a row and
    one helper sentence below them. */
 .qc-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -645,7 +630,7 @@ const submit = async () => {
 .qc-unit { margin-left: 6px; font-size: 12px; color: var(--text-low); }
 .qc-default { font-size: 11px; color: var(--text-low); white-space: nowrap; }
 /* Not retroactive, and said where the switch is. */
-.qc-caution { color: var(--warn-400); }
+.qc-caution { color: var(--text-mid); }
 
 .qc-toggle {
   display: flex; align-items: center; gap: 8px; padding: 10px 0;
@@ -653,8 +638,7 @@ const submit = async () => {
   font-size: 13px; font-weight: 600; color: var(--text-hi); text-align: left;
 }
 .qc-toggle:hover { color: var(--text-hi); }
-.qc-toggle-chev { display: inline-flex; width: 12px; height: 12px; color: var(--text-low); transition: transform 0.15s ease; }
-.qc-toggle-chev svg { width: 12px; height: 12px; }
+.qc-toggle-chev { display: inline-flex; color: var(--text-low); transition: transform 0.15s ease; }
 .qc-toggle-open { transform: rotate(90deg); }
 .qc-toggle-note { font-weight: 400; font-size: 12px; color: var(--text-low); }
 

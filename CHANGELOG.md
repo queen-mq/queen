@@ -122,6 +122,19 @@ which now also shows the bytes on the Raft port's wire beside Raft, and per node
 brighter text and 11px floor, but the dark theme's cards, inputs and borders are back to their
 earlier values; the Queen wordmark is 34px, centred in its row.
 
+**Dashboard: a list beside every page, and one place for each queue.** The rail is a fixed column
+of icons, without Consumer groups. Each page lists what it holds in a second column, searched from
+its top, and picking a row opens that row without changing the list. A queue's page has tabs:
+Overview, Messages, Consumer groups, Supervisors, Dead letter, Timers and Alerts, the last showing
+what needs you on that queue now and the lines it is judged by. The Messages, Dead letter and
+Timers pages are now those tabs, and the queue list filters by namespace. The Overview lists a
+summary card, open issues, the cell, throughput, backlog, consumer groups and dead letters. System
+lists Overview, Nodes, Raft, Storage, CPU and memory, Disk and Network, picks a node on the views
+that chart one, and shows the broker version. Selects and checkboxes are the dashboard's own in
+both themes, the side column is a sheet on a phone, and the rail and top bar are soft greys in dark
+and near the page's white in light. Why: a list that stays put is faster to scan, and everything
+about a queue was spread over five pages.
+
 **Broker: large stream states and fetches no longer use many times their size in memory.**
 `POST /streams/v1/state/get` and `POST /api/v1/fetch` parsed every stored state and payload into a
 JSON tree and copied the tree two more times before printing it: a read held 19 to 25 times what it

@@ -17,22 +17,30 @@
 
 @layer base {
   :root {
-    /* ---- Surfaces: sidebar < page < card ---------------------------------- */
-    --rail:  #000000;  /* the sidebar column: one visible step below the page;
-                          #070606 was 1.3 L* away and read as the same black */
-    /* One dark sheet: a card sits barely above the page (1.04:1) and is told
-       apart by its content, not by a lighter box. Brighter surfaces (#154,
-       card 1.11:1) were tried and turned back on 2026-10-30. */
-    --ink-0: #0b0a0a;  /* page                                               */
-    --ink-1: #070606;  /* deepest well inside the page                       */
-    --ink-2: #111010;  /* card                                               */
-    --ink-3: #171615;  /* input, recessed                                    */
-    --ink-4: #1c1b19;  /* hover                                              */
-    --ink-5: #242220;  /* active / selected                                  */
+    /* ---- Surfaces: rail < frame < page ≈ card (2026-10-30, Iggy's frame) --
+       Three warm greys, the icon rail darkest, then the FRAME (a page's sub
+       sidebar and the top bar, one tone), then the page, about 2 L* apart,
+       and the shell's hairlines mark where each zone ends. None is black:
+       under L* ~5 a screen shows plain black, and a black frame reads as a
+       hole around the page, the loudest edge on the screen, and cold beside
+       these warm greys. A card stays near the page (1.02:1) and is drawn by
+       its edge, not by a lighter box. */
+    --rail:  #121110;  /* the icon rail, L* 5.1                               */
+    --frame: #161514;  /* sub sidebar and top bar, L* 6.8                     */
+    --sub-rail: var(--frame);
+    --ink-0: #1a1917;  /* page                                               */
+    --ink-1: #141312;  /* deepest well inside the page                       */
+    --ink-2: #1c1b19;  /* card                                               */
+    --ink-3: #22211f;  /* input, recessed                                    */
+    --ink-4: #272523;  /* hover                                              */
+    --ink-5: #2e2c29;  /* active / selected                                  */
 
     --recessed: var(--ink-1);
     --card:     var(--ink-2);
-    --selected: color-mix(in srgb, var(--accent) 14%, var(--ink-2));
+    /* Neutral, as in light: a picked row, tab or segment is one step
+       lighter, never yellow. Yellow marks the rail's page and the primary
+       button only (2026-10-30). */
+    --selected: var(--ink-5);
 
     /* ---- Text: warm white down to warm grey. Every tier that carries words
        holds 4.5:1 on every surface it sits on (--text-low: 4.8:1 on the
@@ -96,9 +104,9 @@
     --cat-5: #d08fae;
 
     /* ---- Lines ----------------------------------------------------------- */
-    --bd:      #1f1d1b;
-    --bd-hi:   #34312e;
-    --bd-soft: #181716;
+    --bd:      #2c2a27;  /* a card's edge: 1.20:1 on the card */
+    --bd-hi:   #403d39;
+    --bd-soft: #232120;
 
     --ring: var(--accent-text);
 
@@ -111,7 +119,7 @@
     --shadow-sm: none;
     --shadow:    none;
     --shadow-lg: none;
-    --shadow-pop: 0 14px 34px -14px rgba(0, 0, 0, 0.7), 0 0 0 1px #34312e;
+    --shadow-pop: 0 14px 34px -14px rgba(0, 0, 0, 0.7), 0 0 0 1px #403d39;
     --scrim: rgba(7, 6, 6, 0.62);
 
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
@@ -127,11 +135,17 @@
      every generated dashboard, and its 1.06:1 card step hid the panels.
      ======================================================================== */
   html.light {
-    --rail:  #f5f5f4;  /* the sidebar column: the page's own ground, so the
-                          selected pill shows on it (1.14:1); a darker rail
-                          swallowed the pill */
-    --ink-0: #f5f5f4;  /* page                  */
-    --ink-1: #ededeb;  /* deepest well          */
+    /* The same three tones as dark, lightest last: rail, frame (sub sidebar
+       and top bar), page; each about 1.09:1 apart. A selected row in the sub
+       sidebar is a white pill (rule by the brand height). */
+    /* Light (2026-10-30, her "too much difference between cards and the
+       sidebars"): the chrome a step from the page, not three; the white cards
+       stay the brightest thing, the rail L* 94, the frame L* 96, page 97. */
+    --rail:  #efeeeb;  /* the icon rail         */
+    --frame: #f4f3f1;  /* sub sidebar, top bar  */
+    --sub-rail: var(--frame);
+    --ink-0: #f7f7f6;  /* page                  */
+    --ink-1: #efefed;  /* deepest well          */
     --ink-2: #ffffff;  /* card: 1.09:1 on the page, with a 1.3:1 edge */
     --ink-3: #fcfcfb;  /* input: white, its border does the work */
     --ink-4: #f0f0ee;  /* hover                 */
@@ -487,7 +501,7 @@
   .seg button { padding: 3px 10px; border-radius: var(--r-chip); font-size: 11.5px; color: var(--text-mid); font-weight: 500; cursor: pointer; border: none; background: transparent; transition: .12s; }
   .seg button:hover { color: var(--text-hi); }
   .seg button.on { color: var(--text-hi); }
-  .seg button.on { color: var(--accent-text); background: var(--selected); }
+  .seg button.on { color: var(--text-hi); background: var(--selected); }
 
   /* --- Bars --- */
   .bar { display: inline-block; height: 4px; border-radius: var(--r-pill); background: var(--ink-4); overflow: hidden; vertical-align: middle; }
@@ -890,7 +904,7 @@
     background: transparent; transition: .15s var(--ease);
   }
   .pill:hover { color: var(--text-hi); }
-  .pill.on { color: var(--accent-text); background: var(--selected); border-color: var(--bd-hi); }
+  .pill.on { color: var(--text-hi); background: var(--selected); border-color: var(--bd-hi); }
 
   /* --- Counts strip (Dashboard + QueueDetail) ----------------------------
      Hoisted verbatim from the two identical scoped copies. */
@@ -1000,6 +1014,31 @@
 /* At that size, hung 3px from the top of the 52px row (shell.css) it has no
    room above it: centre it in the row, as the rail does. */
 .sidebar .brand-mark { align-self: center; margin-top: 0; }
+/* Light: on the navigation zone's warm grey the neutral selected step
+   (#e7e7e4) disappears; a white pill is the selected row there. */
+html.light .sidebar, html.light .ss-side { --selected: #ffffff; }
+
+/* Queen's frame (2026-10-30, after Iggy's): with a sub sidebar on the pages
+   the rail is the default. 80px of the darkest tone, its icons alone (the
+   name is the hover tip), 18px each in a 40px square; the page you are on is a
+   yellow outline round a yellow icon, no fill. The top bar takes the
+   frame's tone with the sub sidebar. The shell's 52px rail stays as it is
+   for Gate and Traceflow; these rules come after it and win. */
+.app-shell.nav-rail { grid-template-columns: 80px minmax(0, 1fr); }
+.topbar { background: var(--frame, var(--ink-0)); }
+.sidebar.rail .nav-group { gap: 6px; align-items: center; }
+.sidebar.rail .nav-item {
+  width: 40px; height: 40px; padding: 0; margin: 0;
+  border: 1.5px solid transparent; border-radius: 9px;
+  background: transparent;
+}
+.sidebar.rail .nav-item:hover { background: transparent; }
+.sidebar.rail .nav-item:hover .nav-icon { color: var(--text-hi); }
+.sidebar.rail .nav-item-active,
+.sidebar.rail .nav-item-active:hover { background: transparent; border-color: var(--accent-text); }
+.sidebar.rail .nav-icon { width: 18px; height: 18px; flex: none; }
+.sidebar.rail .nav-rule { width: 28px; margin: 8px auto 10px; }
+.sidebar.rail .nav-corner { top: 3px; right: 3px; }
 
 /* The cluster picker in the sidebar's footer opens upward. */
 .sidebar-foot .cluster-menu { top: auto; bottom: calc(100% + 6px); }
@@ -1198,7 +1237,9 @@
 .issues-rules summary:hover { color: var(--text-hi); }
 .issues-rules p { margin: 8px 0 2px; line-height: 1.55; max-width: 76ch; }
 
-.flower-card { display: flex; flex-direction: column; min-width: 0; }
+/* As tall as the flower, not as the issues beside it: a long issue list
+   used to stretch it into a mostly empty card. */
+.flower-card { display: flex; flex-direction: column; min-width: 0; align-self: start; }
 
 .counts-tiles {
   display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px;
@@ -1386,7 +1427,7 @@ button.count-tile:hover { background: var(--ink-3); }
   width: auto; min-width: 0; height: 30px; padding-left: 0;
   border: 0; box-shadow: none; background-color: transparent;
 }
-.tool-field input.input { padding-right: 10px; }
+.tool-field input.input:not(.ac-input) { padding-right: 10px; }
 .tool-field .input:focus { box-shadow: none; }
 /* A switch with its name beside it: "Sort  [Worst first|Lag|…]". */
 .tool-seg { display: inline-flex; align-items: center; }
@@ -1466,3 +1507,60 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--text-hi); }
 @keyframes drawer-slide-out { from { transform: var(--drawer-leave-from, translateX(0)); } to { transform: translateX(100%); } }
 @keyframes drawer-scrim-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes drawer-scrim-out { from { opacity: var(--drawer-scrim-from, 1); } to { opacity: 0; } }
+
+/* =========================================================================
+   2026-10-30 — the redesign pass (the Queues pilot's rules, everywhere).
+   Later than everything above on purpose: these win.
+   ========================================================================= */
+
+/* One title size across the app: the Queues section's header line. */
+.page-id h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+.view-container > .page-head:first-child { margin-top: 4px; }
+/* The title's facts wrap under it on a narrow column instead of clipping. */
+.page-id { flex-wrap: wrap; row-gap: 6px; }
+.page-sub { font-size: 12px; white-space: normal; overflow: visible; text-overflow: clip; }
+
+/* A fact beside a title: "Pending 186,800". The Queues header's chip, for
+   every page (QueuesLayout keeps its own scoped copy of the same look). */
+.fact {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 2px 8px; border-radius: var(--r-chip);
+  background: var(--ink-3); border: 1px solid var(--bd);
+  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.fact-k { color: var(--text-low); }
+.facts { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+
+/* Section titles: one size, one weight. */
+.card-header h3 { font-size: 13px; font-weight: 600; letter-spacing: -0.005em; }
+
+/* A banner inside a page is a calm line: the tint of its tone, a hairline in
+   that tone, the TITLE in the tone and the sentence in the page's ink. A
+   whole sentence in amber or coral shouts; the word that names the problem
+   is enough. */
+.status-banner.view-banner {
+  color: var(--text-mid); border: 1px solid var(--bd); border-radius: var(--r-card);
+  padding: 9px 14px; font-size: 12.5px; line-height: 1.45;
+}
+.status-banner.view-banner.banner-warn { background: var(--warn-glow); border-color: var(--warn-bd); }
+.status-banner.view-banner.banner-warn strong { color: var(--warn-400); }
+.status-banner.view-banner.banner-bad { background: var(--ember-glow); border-color: var(--ember-bd); }
+.status-banner.view-banner.banner-bad strong { color: var(--ember-400); }
+.status-banner.view-banner.banner-info { background: var(--ink-2); }
+.status-banner.view-banner strong { color: var(--text-hi); font-weight: 600; }
+
+/* Tables: the header a quiet label row, numbers on a common baseline. */
+.t th { font-size: 11.5px; font-weight: 500; color: var(--text-low); white-space: nowrap; }
+.t td { font-size: 12.5px; }
+.t td.num, .t th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Inputs: one height with the custom select and picker beside them. */
+.page-tools .input:not(textarea), .ss-tools .input { height: 32px; }
+
+/* Phones: the top bar keeps the page's name and its buttons; the cell's
+   numbers fold into the bar's own compact form (BrokerBar). */
+@media (max-width: 700px) {
+  .view-container { padding: 12px 12px 32px; }
+  .page-id h1 { font-size: 17px; }
+}
+

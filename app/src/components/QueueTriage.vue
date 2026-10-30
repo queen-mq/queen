@@ -1,9 +1,8 @@
 <template>
   <section class="card triage" aria-labelledby="triage-title">
-    <div class="triage-heading">
+    <div class="card-header">
       <h3 id="triage-title">{{ filter === 'all' || filter === 'growing' ? 'Queues' : 'Open issues' }}</h3>
-      <span v-if="known" class="triage-count">{{ formatNumber(attentionCount) }} of {{ formatNumber(rows.length) }} queues need attention</span>
-      <span v-else class="triage-count">Status unconfirmed</span>
+      <span class="card-sub">{{ known ? `${formatNumber(attentionCount)} of ${formatNumber(rows.length)} ${rows.length === 1 ? 'queue needs' : 'queues need'} attention` : 'Status unconfirmed' }}</span>
     </div>
 
     <!-- The cell under every queue, an operator's only: what the top bar
@@ -14,38 +13,39 @@
           <span class="g" :class="issue.sev" aria-hidden="true" />
           <span class="triage-name">{{ issue.name }}<i class="cell-chip" title="The cell: shared by every tenant on it">cell</i></span>
           <span class="triage-finding" :class="issue.sev">{{ issue.why }}</span>
-          <span class="triage-open" aria-hidden="true">System ›</span>
+          <span class="triage-open" aria-hidden="true">System<Icon name="chevron-right" :size="14" /></span>
         </RouterLink>
       </li>
     </ul>
 
-    <div v-if="!known" class="triage-empty" role="status">
+    <div v-if="!known" class="triage-empty" role="status" :title="errorText ? 'Queue health needs both the queues and the consumer groups' : undefined">
       {{ errorText || 'Reading queues and consumer groups…' }}
-      <p v-if="errorText">Queue health cannot be assessed until both sources are available.</p>
     </div>
     <template v-else>
-      <div class="triage-tools">
-        <label class="triage-search"><span class="sr-only">Search queues or namespaces</span><input v-model="search" type="search" placeholder="Search queue or namespace…" class="input" /></label>
-        <label><span class="sr-only">Queue triage filter</span><select v-model="filter" class="input" aria-label="Queue triage filter">
-          <option value="attention">Needs attention</option><option value="bad">Falling behind</option><option value="noReader">No reader</option><option value="growing">Pending increased</option><option value="all">All queues</option>
-        </select></label>
-        <span class="triage-order">Priority, then group lag</span>
+      <!-- A short list (limit) is the Summary's: the first rows that need you,
+           no tools, and the way to the full list. -->
+      <div v-if="!limit" class="triage-tools">
+        <input v-model="search" type="search" placeholder="Search queues or namespaces" class="input triage-search" aria-label="Search queues or namespaces" />
+        <UiSelect v-model="filter" label="Show" aria-label="Which queues to show" :options="FILTERS" />
       </div>
       <div v-if="!filtered.length" class="triage-empty">
-        {{ rows.length === 0 ? 'No queues in this scope.' : attentionCount === 0 && filter === 'attention' && !search ? 'No queue matches the attention rules.' : 'No queues match these filters.' }}
+        {{ rows.length === 0 ? 'No queues yet' : attentionCount === 0 && filter === 'attention' && !search ? 'Nothing needs attention' : 'No queue matches' }}
         <button v-if="search || filter !== 'all'" class="btn btn-ghost" @click="search = ''; filter = 'all'">Show all queues</button>
       </div>
-      <ul v-else class="triage-list" aria-label="Queue issues">
-        <li v-for="row in pageRows" :key="row.name" data-triage-row>
+      <ul v-else class="triage-list" aria-label="Queues, worst first, then the longest group lag" title="Worst first, then the longest group lag">
+        <li v-for="row in shownRows" :key="row.name" data-triage-row>
           <button class="triage-row" aria-haspopup="dialog" aria-controls="queue-issue-drawer" :aria-expanded="selection?.kind === 'queue' && selection.name === row.name" @click="openQueue(row)">
             <span class="g" :class="row.sev || 'idle'" aria-hidden="true" />
             <span class="triage-name">{{ row.name }}<span class="triage-meta">{{ row.namespace || 'No namespace' }}</span></span>
             <span class="triage-finding" :class="row.sev">{{ finding(row) }}<template v-if="row.reason === 'lag'"> · {{ duration(row.lag) }}</template><template v-else-if="row.reason === 'noReader'"> · {{ number(row.pending) }} pending</template></span>
-            <span class="triage-open" aria-hidden="true">Details ›</span>
+            <span class="triage-open" aria-hidden="true">Details<Icon name="chevron-right" :size="14" /></span>
           </button>
         </li>
       </ul>
-      <div v-if="pages > 1" class="triage-pagination">
+      <RouterLink v-if="limit && moreTo && filtered.length > limit" class="triage-more" :to="moreTo">
+        All {{ formatNumber(filtered.length) }} issues<Icon name="chevron-right" :size="14" />
+      </RouterLink>
+      <div v-if="!limit && pages > 1" class="triage-pagination">
         <span role="status">{{ formatNumber((page - 1) * pageSize + 1) }}–{{ formatNumber(Math.min(page * pageSize, filtered.length)) }} of {{ formatNumber(filtered.length) }} queues</span>
         <div><button class="btn btn-ghost" :disabled="page === 1" @click="page--">Previous</button><button class="btn btn-ghost" :disabled="page >= pages" @click="page++">Next</button></div>
       </div>
@@ -53,7 +53,7 @@
     <ul v-if="tenantIssues.length" class="triage-list triage-tenant" aria-label="Tenant issues">
       <li v-for="issue in tenantIssues" :key="issue.key">
         <button class="triage-row" aria-haspopup="dialog" aria-controls="queue-issue-drawer" :aria-expanded="selection?.key === issue.key" @click="selection = { kind: 'tenant', key: issue.key, name: issue.name }">
-          <span class="g" :class="issue.sev" aria-hidden="true" /><span class="triage-name">{{ issue.name }}</span><span class="triage-finding">{{ issue.why }}</span><span class="triage-open" aria-hidden="true">Details ›</span>
+          <span class="g" :class="issue.sev" aria-hidden="true" /><span class="triage-name">{{ issue.name }}</span><span class="triage-finding">{{ issue.why }}</span><span class="triage-open" aria-hidden="true">Details<Icon name="chevron-right" :size="14" /></span>
         </button>
       </li>
     </ul>
@@ -64,7 +64,7 @@
     <dialog ref="drawer" id="queue-issue-drawer" class="drawer-panel triage-drawer" aria-labelledby="issue-drawer-title" @cancel.prevent="closeDrawer" @close="onDialogClose" @pointerdown="backdropDown = isOutside($event)" @click="onDrawerClick">
       <div class="card-header triage-drawer-header">
         <h3 id="issue-drawer-title">{{ selection?.kind === 'tenant' ? 'Issue details' : 'Queue details' }}</h3>
-        <button class="btn btn-ghost btn-icon modal-close" aria-label="Close issue details" autofocus @click="closeDrawer"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg></button>
+        <button class="btn btn-ghost btn-icon modal-close" aria-label="Close issue details" autofocus @click="closeDrawer"><Icon name="x" :size="18" /></button>
       </div>
       <div class="triage-drawer-body">
         <h2 class="triage-drawer-name">{{ selection?.name }}</h2>
@@ -117,6 +117,16 @@ import { formatNumber } from '@/composables/useApi'
 import { buildQueueTriage, filterQueueTriage, observePending } from '@/composables/queueTriage'
 import { formatSpan } from '@/composables/settingsDoc'
 import { useSettingsStore } from '@/stores/settingsStore'
+import Icon from '@/components/Icon.vue'
+import UiSelect from '@/components/UiSelect.vue'
+
+const FILTERS = [
+  { value: 'attention', label: 'Needs attention' },
+  { value: 'bad', label: 'Falling behind' },
+  { value: 'noReader', label: 'No reader' },
+  { value: 'growing', label: 'Pending increased' },
+  { value: 'all', label: 'All queues' },
+]
 
 const props = defineProps({
   queues: { type: Array, default: () => [] }, groups: { type: Array, default: () => [] },
@@ -126,6 +136,10 @@ const props = defineProps({
   /** The cell's problems (useBrokerStatus cellIssues): rows that open System. */
   cellIssues: { type: Array, default: () => [] },
   tenantError: { type: String, default: '' },
+  /** Show only the first rows that need you, without the tools (the Summary). */
+  limit: { type: Number, default: 0 },
+  /** Where "All N issues" goes when the list is cut. */
+  moreTo: { type: [Object, String], default: null },
 })
 const observation = shallowRef(null)
 const queueUnavailable = ref(true), groupsUnavailable = ref(true)
@@ -159,6 +173,7 @@ const pages = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageS
 watch([search, filter], () => { page.value = 1 })
 watch(pages, n => { page.value = Math.min(page.value, n) })
 const pageRows = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize))
+const shownRows = computed(() => (props.limit ? filtered.value.slice(0, props.limit) : pageRows.value))
 
 // Selection belongs to an identity, not a list position. A heartbeat can move
 // or resolve the row; it must never switch the open drawer to another queue.
@@ -220,81 +235,82 @@ function nextCheck(row) {
 
 <style scoped>
 .triage { overflow: hidden; }
-.triage-heading { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--bd-soft); }
-.triage-heading h3 { margin: 0; font-size: 13px; }
-.triage-count { margin-left: auto; color: var(--text-low); font-size: 12px; }
-.triage-tools { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--bd-soft); }
-.triage-search { flex: 1; max-width: 330px; }
-.triage-tools .input { width: 100%; font-size: 12px; }
-.triage-order { margin-left: auto; color: var(--text-low); font-size: 11px; }
+/* The card header's 14px edge, all the way down. */
+.triage-tools { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--bd-soft); }
+.triage-search { flex: 1 1 auto; max-width: 320px; height: 32px; }
 .triage-list { list-style: none; margin: 0; padding: 0; }
 .triage-list li + li { border-top: 1px solid var(--bd-soft); }
-.triage-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto 65px; align-items: center; gap: 12px; width: 100%; border: 0; background: none; padding: 12px 16px; text-align: left; color: var(--text-hi); font: inherit; cursor: pointer; }
+.triage-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto 64px; align-items: center; gap: 12px; width: 100%; border: 0; background: none; padding: 12px 14px; text-align: left; color: var(--text-hi); font: inherit; cursor: pointer; transition: background .12s var(--ease); }
 .triage-row:hover, .triage-row[aria-expanded="true"] { background: var(--ink-3); }
+/* Inside the card's clipping edge the focus ring sits within the row. */
+.triage-row:focus-visible { outline-offset: -2px; }
 .triage-name { min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
-.triage-meta { display: block; color: var(--text-low); font-size: 11px; margin-top: 3px; }
+.triage-meta { display: block; color: var(--text-low); font-size: 12px; margin-top: 2px; }
 .triage-finding { color: var(--text-mid); font-size: 12px; font-variant-numeric: tabular-nums; }
-.triage-open { text-align: right; color: var(--text-low); font-size: 12px; }
-.triage-pagination { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; border-top: 1px solid var(--bd-soft); color: var(--text-low); font-size: 11px; }
+.triage-open { display: inline-flex; align-items: center; justify-content: flex-end; gap: 2px; color: var(--text-low); font-size: 12px; white-space: nowrap; }
+.triage-row:hover .triage-open { color: var(--text-hi); }
+.triage-more {
+  display: flex; align-items: center; justify-content: flex-end; gap: 4px;
+  padding: 9px 14px; border-top: 1px solid var(--bd-soft); font-size: 12.5px; color: var(--text-mid);
+}
+.triage-more:hover { color: var(--text-hi); }
+.triage-pagination { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--bd-soft); color: var(--text-low); font-size: 12px; }
 .triage-pagination > div { display: flex; gap: 8px; }
-.triage .btn { font-size: 11px; }
 .triage-pagination button:disabled { opacity: .4; cursor: default; }
 .triage-tenant { border-top: 1px solid var(--bd); }
 .triage-cell { border-bottom: 1px solid var(--bd); }
 /* A cell finding is a sentence, not a count: the name keeps its width and
    the sentence wraps beside it. */
-.triage-cell .triage-row { grid-template-columns: 12px max-content minmax(0, 1fr) 65px; }
+.triage-cell .triage-row { grid-template-columns: 12px max-content minmax(0, 1fr) 64px; }
 .triage-cell .triage-finding { text-align: right; }
 @media (max-width: 760px) {
   .triage-cell .triage-row { grid-template-columns: 12px minmax(0, 1fr) auto; }
   .triage-cell .triage-finding { text-align: left; grid-column: 2 / -1; }
 }
 a.triage-row { text-decoration: none; }
-.triage-empty { padding: 16px; color: var(--text-mid); font-size: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.triage-empty p { margin: 0; }
+.triage-empty { padding: 12px 14px; min-height: 48px; color: var(--text-mid); font-size: 13px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .triage-drawer { inset: 0 0 0 auto; margin: 0 0 0 auto; padding: 0; width: min(540px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; border: 0; border-left: 1px solid var(--bd); color: var(--text-hi); background: var(--ink-2); overscroll-behavior: contain; }
 .triage-drawer[open] { display: flex; flex-direction: column; }
 .triage-drawer::backdrop { background: rgb(0 0 0 / .18); }
 .triage-drawer-header { flex-shrink: 0; }
 .triage-drawer-body { flex: 1; min-height: 0; overflow-y: auto; padding: 24px; overscroll-behavior: contain; }
-.triage-drawer-name { margin: 0 0 12px; font-size: 20px; font-weight: 550; line-height: 1.4; overflow-wrap: anywhere; }
+.triage-drawer-name { margin: 0 0 12px; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.4; overflow-wrap: anywhere; }
 .triage-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--text-mid); font-size: 12px; }
 .triage-status > span:last-child { margin-left: auto; color: var(--text-low); }
-.triage-evidence { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--bd); border: 1px solid var(--bd); border-radius: var(--r-card); overflow: hidden; margin: 24px 0 10px; }
+.triage-evidence { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--bd); border: 1px solid var(--bd); border-radius: var(--r-card); overflow: hidden; margin: 24px 0 12px; }
 .triage-evidence > div { background: var(--ink-2); padding: 16px; min-width: 0; }
 .triage-evidence dt { font-size: 12px; color: var(--text-mid); }
-.triage-evidence dd { margin: 6px 0; font-size: 25px; font-variant-numeric: tabular-nums; }
-.triage-evidence small, .triage-stamp { color: var(--text-low); font-size: 11px; line-height: 1.5; }
+.triage-evidence dd { margin: 4px 0; font-size: 20px; font-weight: 600; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; }
+.triage-evidence small, .triage-stamp { color: var(--text-low); font-size: 12px; line-height: 1.5; }
 .triage-stamp { margin: 0; }
 .triage-check { margin-top: 24px; }
-.triage-kicker { color: var(--text-low); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
-.triage-check h4 { margin: 7px 0; font-size: 14px; }
+.triage-kicker { color: var(--text-low); font-size: 12px; }
+.triage-check h4 { margin: 4px 0 8px; font-size: 13px; font-weight: 600; }
 .triage-check p, .triage-explanation { color: var(--text-mid); font-size: 12px; line-height: 1.7; }
 .triage-check p { margin: 0; }
 .triage-groups { margin-top: 24px; }
-.triage-groups h4 { margin: 0 0 10px; font-size: 12px; }
+.triage-groups h4 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
 .triage-groups h4 span { float: right; color: var(--text-low); font-weight: 400; }
 .triage-groups ul { margin: 0; padding: 0; list-style: none; }
-.triage-groups li { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--bd-soft); font-size: 12px; }
+.triage-groups li { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--bd-soft); font-size: 12px; }
 .triage-groups li > span { overflow-wrap: anywhere; min-width: 0; }
 .triage-groups li > b { flex-shrink: 0; font-weight: 500; font-variant-numeric: tabular-nums; }
-.triage-groups p { font-size: 11px; color: var(--text-low); }
+.triage-groups p { font-size: 12px; color: var(--text-low); }
 .triage-explanation { padding: 12px; margin: 20px 0; background: var(--ink-3); border-radius: var(--r-card); }
-.triage-rules { margin-top: 20px; color: var(--text-low); font-size: 11px; line-height: 1.6; }
+.triage-rules { margin-top: 20px; color: var(--text-low); font-size: 12px; line-height: 1.6; }
 .triage-rules summary { cursor: pointer; color: var(--text-mid); }
 .triage-drawer-footer { flex-shrink: 0; flex-wrap: wrap; justify-content: flex-start; padding: 16px 24px; }
-.triage-drawer-footer .btn { font-size: 12px; }
 .bad { color: var(--ember-400); }
 .warn { color: var(--warn-400); }
+@media (max-width: 640px) {
+  .triage-tools, .triage-row, .triage-pagination, .triage-empty { padding-left: 12px; padding-right: 12px; }
+}
 @media (max-width: 760px) {
-  .triage-heading { align-items: start; flex-wrap: wrap; gap: 6px; }
   .triage-tools { flex-wrap: wrap; }
   .triage-search { flex: 1 1 100%; max-width: none; }
-  .triage-order { margin-left: 0; }
-  .triage-row { grid-template-columns: 12px minmax(0, 1fr) auto; gap: 4px 10px; }
-  .triage-row > .g { align-self: start; margin-top: 5px; }
+  .triage-row { grid-template-columns: 12px minmax(0, 1fr) auto; gap: 4px 12px; }
+  .triage-row > .g { align-self: start; margin-top: 4px; }
   .triage-finding { grid-column: 2; }
   .triage-open { grid-column: 3; grid-row: 1 / span 2; }
-  .triage-count { margin-left: 0; }
 }
 </style>

@@ -25,9 +25,7 @@
             :aria-label="`Close ${title}`"
             @click="emit('close')"
           >
-            <svg style="width:18px; height:18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <Icon name="x" :size="18" />
           </button>
         </div>
 
@@ -48,6 +46,8 @@
 </template>
 
 <script setup>
+import Icon from '@/components/Icon.vue'
+
 defineProps({
   open: { type: Boolean, required: true },
   title: { type: String, required: true },

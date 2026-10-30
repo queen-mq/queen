@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { consumerLocation, contextQuery, queueLocation, readRouteValue, safeReturnTo, validWindow } from '../src/composables/navigation.js'
+import { QUEUE_TABS, consumerLocation, contextQuery, inNamespace, listCarry, namespaceCounts, queueLocation, queueMatches, queueOf, queueTabLocation, queueTabOf, readRouteValue, safeReturnTo, validWindow } from '../src/composables/navigation.js'
 
 const source = { name: 'Queues', fullPath: '/queues?search=orders&namespace=', query: { search: 'orders', namespace: '' } }
 
@@ -40,4 +40,64 @@ test('query decoding distinguishes the default namespace and rejects malformed p
   assert.equal(readRouteValue('2', 1), 2)
   assert.equal(validWindow('bad', '2026-10-09'), null)
   assert.equal(validWindow('2026-10-10', '2026-10-09'), null)
+})
+
+test('the Queues section: which page is which tab, with or without a picked queue', () => {
+  const r = (name, meta, extra = {}) => ({ name, meta, params: {}, query: {}, ...extra })
+  assert.equal(queueTabOf(r('Queues', { queueTab: 'overview' })), 'overview')
+  assert.equal(queueTabOf(r('Messages', { queueTab: 'messages' })), 'messages')
+  // Consumer groups is a tab only while a queue is picked.
+  const groups = { queueTab: 'consumers', queueTabNeedsQueue: true }
+  assert.equal(queueTabOf(r('Consumers', groups)), '')
+  assert.equal(queueTabOf(r('Consumers', groups, { query: { queue: 'orders' } })), 'consumers')
+  assert.equal(queueTabOf(r('Kv', {})), '')
+  // The queue is in the path on its own pages, in ?queue= on its tabs.
+  assert.equal(queueOf(r('QueueAlerts', {}, { params: { queueName: 'orders' } })), 'orders')
+  assert.equal(queueOf(r('DeadLetter', {}, { query: { queue: 'billing' } })), 'billing')
+})
+
+test('a tab keeps the investigation window and drops the queue when none is picked', () => {
+  const route = { name: 'Messages', meta: {}, params: {}, query: { queue: 'orders', range: '6h', status: 'failed' }, fullPath: '/messages?queue=orders' }
+  assert.deepEqual(queueTabLocation('failed', '', route), { path: '/dlq', query: { range: '6h' } })
+  // A tab that needs a queue falls back to the queue list's own page.
+  assert.equal(queueTabLocation('scheduled', '', route).path, '/queues')
+  assert.equal(queueTabLocation('alerts', 'a/b', route).path, '/queues/a%2Fb/alerts')
+  assert.deepEqual(queueTabLocation('failed', 'orders', route), { path: '/dlq', query: { range: '6h', queue: 'orders' } })
+  assert.deepEqual(QUEUE_TABS.map((t) => t.view), ['overview', 'messages', 'consumers', 'supervisors', 'failed', 'scheduled', 'alerts'])
+})
+
+test('the queue list and the Queues table match a term the same way', () => {
+  const q = { name: 'orders', namespace: 'shop', task: 'billing' }
+  for (const term of ['', '  ', 'ORD', 'sho', 'bill']) assert.equal(queueMatches(q, term), true)
+  assert.equal(queueMatches(q, 'zzz'), false)
+  assert.equal(queueMatches({ name: 'x' }, 'shop'), false)
+})
+
+test('the namespace picked in the queue list: every one, a named one, or the default one', () => {
+  const shop = { name: 'orders', namespace: 'shop' }
+  const plain = { name: 'jobs', namespace: '' }
+  const bare = { name: 'legacy' }
+  assert.equal(inNamespace(shop, null), true)
+  assert.equal(inNamespace(shop, undefined), true)
+  assert.equal(inNamespace(shop, 'shop'), true)
+  assert.equal(inNamespace(shop, ''), false)
+  // '' is the default namespace, and a queue that reports none is in it.
+  assert.equal(inNamespace(plain, ''), true)
+  assert.equal(inNamespace(bare, ''), true)
+  assert.deepEqual(namespaceCounts([shop, plain, bare, { name: 'carts', namespace: 'shop' }, null]), [
+    { name: '', count: 2, sev: null },
+    { name: 'shop', count: 2, sev: null },
+  ])
+  // A namespace carries the worst mark of its queues.
+  const sev = { orders: 'warn', carts: 'bad', jobs: null }
+  assert.deepEqual(
+    namespaceCounts([shop, plain, { name: 'carts', namespace: 'shop' }], (q) => sev[q.name]).map((n) => [n.name, n.sev]),
+    [['', null], ['shop', 'bad']],
+  )
+})
+
+test('the list filters ride along, and an empty namespace is kept as the default one', () => {
+  assert.deepEqual(listCarry({ query: { find: 'ord', namespace: 'shop', status: 'x' } }), { find: 'ord', namespace: 'shop' })
+  assert.deepEqual(listCarry({ query: { namespace: '' } }), { namespace: '' })
+  assert.deepEqual(listCarry({ query: {} }), {})
 })

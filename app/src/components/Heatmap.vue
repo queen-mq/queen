@@ -68,18 +68,23 @@ const tip = (row, ci, cell) => {
 
 <style scoped>
 .hm { display: flex; flex-direction: column; gap: 2px; }
-.hm-row { display: grid; grid-template-columns: 150px 1fr 72px; align-items: center; gap: 8px; }
+.hm-row, .hm-axis { display: grid; grid-template-columns: 150px minmax(0, 1fr) 64px; align-items: center; gap: 8px; }
 .hm-name {
-  font-size: 11px; color: var(--text-mid); text-align: left; background: none; border: none;
+  font: inherit; font-size: 12px; color: var(--text-mid); text-align: left; background: none; border: none;
   padding: 0; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .hm-name:hover { color: var(--text-hi); }
+.hm-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 2px; }
 .hm-swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; vertical-align: 1px; }
 .hm-cells { display: grid; gap: 1px; height: 14px; }
 .hm-cell { display: block; height: 100%; border-radius: 1px; background: var(--ink-3); }
 .hm-cell.na { background: transparent; box-shadow: inset 0 0 0 1px var(--bd); }
-.hm-total { font-size: 11px; color: var(--text-mid); text-align: right; }
-.hm-axis { display: grid; grid-template-columns: 150px 1fr 72px; gap: 8px; margin-top: 4px; }
-.hm-axis .ax { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-low); }
+.hm-total { font-size: 12px; color: var(--text-mid); text-align: right; font-variant-numeric: tabular-nums; }
+.hm-axis { margin-top: 4px; align-items: start; }
+.hm-axis .ax { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-low); font-variant-numeric: tabular-nums; }
 .hm-axis-end { justify-content: flex-end; }
+/* A phone: the names give the cells room. */
+@media (max-width: 640px) {
+  .hm-row, .hm-axis { grid-template-columns: 88px minmax(0, 1fr) 48px; gap: 6px; }
+}
 </style>

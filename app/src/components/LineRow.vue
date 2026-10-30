@@ -1,24 +1,24 @@
 <template>
-  <!-- A line you may move: what it is on the left, its value on the right, and
-       under the value the line it falls back to when the field is blank. -->
-  <label class="line-row">
-    <span class="line-row-label">{{ meta.label }}</span>
-    <span class="line-row-help">
+  <!-- A line you may move, on one row as the pilot's lines read (QueueAlerts):
+       what it is on the left, then the line it falls back to while the field
+       is blank, then the field. What the line means is its tooltip; a value
+       that cannot be saved says why under the name. -->
+  <label class="line-row" :title="meta.help">
+    <span class="line-row-text">
+      <span class="line-row-label">{{ meta.label }}</span>
       <span v-if="error" class="line-row-invalid">{{ error }}</span>
-      <template v-else>{{ meta.help }}</template>
     </span>
-    <span class="line-row-control">
-      <LineInput
-        :model-value="modelValue"
-        :unit="meta.unit"
-        :placeholder="toInput(meta, fallback)"
-        :label="meta.label"
-        :invalid="!!error"
-        :disabled="disabled"
-        @update:model-value="emit('update:modelValue', $event)"
-      />
-      <span class="line-row-note">{{ note }}</span>
-    </span>
+    <span class="line-row-note">{{ note }}</span>
+    <LineInput
+      class="line-row-input"
+      :model-value="modelValue"
+      :unit="meta.unit"
+      :placeholder="toInput(meta, fallback)"
+      :label="meta.label"
+      :invalid="!!error"
+      :disabled="disabled"
+      @update:model-value="emit('update:modelValue', $event)"
+    />
   </label>
 </template>
 
@@ -53,20 +53,18 @@ const note = computed(() => {
 
 <style scoped>
 .line-row {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto;
-  column-gap: 28px; row-gap: 4px; align-items: start;
-  padding: 14px 0; border-top: 1px solid var(--bd-soft);
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  column-gap: 16px; align-items: center;
+  padding: 8px 0; border-top: 1px solid var(--bd-soft);
 }
-.line-row-label { grid-column: 1; font-size: 13px; font-weight: 500; color: var(--text-hi); }
-.line-row-help { grid-column: 1; font-size: 12px; line-height: 1.5; color: var(--text-low); }
-.line-row-invalid { color: var(--ember-400); }
-.line-row-control {
-  grid-column: 2; grid-row: 1 / span 2;
-  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
-}
-.line-row-note { font-size: 11px; color: var(--text-low); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.line-row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.line-row-label { font-size: 13px; color: var(--text-hi); }
+.line-row-invalid { font-size: 12px; line-height: 1.45; color: var(--ember-400); }
+.line-row-note { font-size: 12px; color: var(--text-low); white-space: nowrap; font-variant-numeric: tabular-nums; text-align: right; }
+/* Phone: the name on its line, the note and the field under it. */
 @media (max-width: 560px) {
-  .line-row { grid-template-columns: minmax(0, 1fr); }
-  .line-row-control { grid-column: 1; grid-row: auto; align-items: flex-start; }
+  .line-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; }
+  .line-row-text { grid-column: 1 / -1; }
+  .line-row-note { text-align: left; }
 }
 </style>

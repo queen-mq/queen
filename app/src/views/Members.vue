@@ -1,107 +1,93 @@
 <template>
-  <div class="view-container">
+  <SubSidebar label="Members" :current="title">
+    <template #side><MembersSide :members="members" :loaded="loaded" :error="error" /></template>
 
-    <PageHead title="Members">
-      <template #sub>
-        <span>cluster <b>{{ actingClusterSlug || '—' }}</b> · tenant <b>{{ actingTenantSlug || '—' }}</b></span>
-      </template>
-      <template #switch><AccessScope /></template>
+    <PaneHead :title="title" :facts="facts">
       <template #actions>
+        <AccessScope />
         <button class="btn btn-primary" @click="openGrant">Add member</button>
       </template>
-    </PageHead>
+    </PaneHead>
 
-    <div v-if="error" class="status-banner banner-bad view-banner">
-      <span>
-        <strong>Could not load members</strong> · {{ describeApiError(error) }}
-        <template v-if="loaded"> · showing the last list that loaded</template>
-      </span>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <h3>Who has access</h3>
-        <span class="card-sub">
-          {{ members.length }} {{ members.length === 1 ? 'member' : 'members' }} ·
-          {{ adminCount }} {{ adminCount === 1 ? 'admin' : 'admins' }}
+    <div class="view-container">
+      <div v-if="error" class="status-banner banner-bad view-banner">
+        <span>
+          <strong>Could not load members</strong> · {{ describeApiError(error) }}<template v-if="loaded"> · showing the last list</template>
         </span>
-        <span v-if="loading" class="muted">refreshing…</span>
       </div>
-      <div class="table-container">
-        <table v-if="members.length" class="t members-table">
-          <thead>
-            <tr>
-              <th>Member</th>
-              <th>Role</th>
-              <th>Since</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="member in members" :key="member.email">
-              <td class="members-who">
-                <span class="members-email">{{ member.email }}</span>
-                <span v-if="isMe(member)" class="members-you">you</span>
-              </td>
-              <td>
-                <select
-                  class="input members-role"
-                  :value="member.role"
-                  :disabled="busy === member.email"
-                  :aria-label="`Role of ${member.email}`"
-                  @change="changeRole(member, $event)"
-                >
-                  <option v-for="role in ROLES" :key="role.name" :value="role.name">{{ role.name }}</option>
-                </select>
-              </td>
-              <td class="members-since" :title="formatTimestampUtc(member.granted_at)">
-                {{ formatTimestamp(member.granted_at) }}
-              </td>
-              <td class="right members-act">
-                <template v-if="confirming === member.email">
-                  <span class="members-confirm">{{ isMe(member) ? 'Remove your own access?' : 'Remove access?' }}</span>
-                  <button class="btn btn-danger" :disabled="busy === member.email" @click="revoke(member)">
-                    {{ busy === member.email ? 'Removing…' : 'Remove' }}
-                  </button>
-                  <button class="btn btn-ghost" @click="confirming = null">Keep</button>
-                </template>
-                <button v-else class="btn btn-ghost" @click="confirming = member.email">Remove</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
 
-        <div v-else-if="loading && !loaded" class="members-loading">
+      <div class="card">
+        <div v-if="shown.length" class="table-container">
+          <table class="t mem-table">
+            <thead>
+              <tr>
+                <th>Member</th>
+                <th title="A cluster keeps at least one admin: the proxy refuses a change that would leave none">Role</th>
+                <th>Since</th>
+                <th><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="member in shown" :key="member.email">
+                <td class="mem-who">
+                  <span class="mem-email">{{ member.email }}</span>
+                  <span v-if="isMe(member)" class="mem-you">you</span>
+                </td>
+                <td class="mem-role">
+                  <UiSelect
+                    :model-value="member.role"
+                    :options="roleOptions"
+                    size="sm"
+                    :disabled="busy === member.email"
+                    :aria-label="`Role of ${member.email}`"
+                    @update:model-value="changeRole(member, $event)"
+                  />
+                </td>
+                <td class="mem-since" :title="formatTimestampUtc(member.granted_at)">{{ day(member.granted_at) }}</td>
+                <td class="mem-act">
+                  <template v-if="confirming === member.email">
+                    <span class="mem-confirm">{{ isMe(member) ? 'Remove your own access?' : 'Remove access?' }}</span>
+                    <button class="btn btn-danger" :disabled="busy === member.email" @click="revoke(member)">
+                      {{ busy === member.email ? 'Removing…' : 'Remove' }}
+                    </button>
+                    <button class="btn btn-ghost" @click="confirming = null">Keep</button>
+                  </template>
+                  <button v-else class="btn btn-ghost" @click="confirming = member.email">Remove</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-else-if="loading && !loaded" class="acc-loading">
           <div v-for="i in 4" :key="i" class="skeleton" />
         </div>
+        <div v-else-if="members.length" class="empty-state">
+          <Icon name="users" :size="28" class="empty-state-icon" />
+          <p>No member has this role</p>
+          <button class="btn btn-ghost" @click="role = ''">Show all members</button>
+        </div>
         <div v-else-if="loaded" class="empty-state">
-          <h3>No members on this cluster</h3>
-          <p>Grant a role to someone who has signed in once.</p>
+          <Icon name="users" :size="28" class="empty-state-icon" />
+          <p>No members on this cluster</p>
+          <button class="btn" @click="openGrant">Add member</button>
+        </div>
+        <div v-else-if="error" class="empty-state">
+          <Icon name="users" :size="28" class="empty-state-icon" />
+          <p>Cannot read the members</p>
+          <button class="btn btn-ghost" @click="load">Retry</button>
         </div>
       </div>
-    </div>
-
-    <div class="card members-roles">
-      <div class="card-header"><h3>What each role may do</h3></div>
-      <dl class="members-role-list">
-        <template v-for="role in ROLES" :key="role.name">
-          <dt class="font-mono">{{ role.name }}</dt>
-          <dd>{{ role.can }}</dd>
-        </template>
-      </dl>
-      <p class="members-help">
-        A cluster keeps at least one admin: the proxy refuses a change that would leave none, including your own.
-      </p>
     </div>
 
     <Teleport to="body">
       <div v-if="showGrant" class="modal-backdrop" @click.self="closeGrant">
         <form class="card modal-card" @submit.prevent="grant">
           <div class="card-header"><h3>Add member</h3></div>
-          <div class="card-body members-form">
+          <div class="card-body acc-form">
             <div v-if="grantError" class="panel-err">{{ grantError }}</div>
-            <label class="members-field">
-              <span class="label-xs">Email</span>
+            <label class="acc-field">
+              <span class="acc-label">Email</span>
               <input
                 ref="emailInput"
                 v-model.trim="grantForm.email"
@@ -112,16 +98,15 @@
                 placeholder="teammate@example.com"
               />
             </label>
-            <label class="members-field">
-              <span class="label-xs">Role</span>
-              <select v-model="grantForm.role" class="input">
-                <option v-for="role in ROLES" :key="role.name" :value="role.name">{{ role.name }} — {{ role.can }}</option>
-              </select>
-            </label>
-            <p class="members-help">
-              The address must already be a user of tenant <b>{{ actingTenantSlug || '—' }}</b>. Signing in once
-              creates it. Granting to an existing member changes their role.
-            </p>
+            <div class="acc-field">
+              <span class="acc-label">Role</span>
+              <UiSelect v-model="grantForm.role" :options="roleOptions" block aria-label="Role" />
+              <span class="acc-help">{{ roleCan(grantForm.role) }}</span>
+            </div>
+            <p
+              class="acc-help"
+              :title="`The address must already be a user of tenant ${actingTenantSlug || 'this tenant'}: signing in once creates it. Granting to someone who is already a member changes their role.`"
+            >They must have signed in once.</p>
           </div>
           <div class="modal-foot">
             <button type="button" class="btn btn-ghost" @click="closeGrant">Cancel</button>
@@ -132,31 +117,31 @@
         </form>
       </div>
     </Teleport>
-  </div>
+  </SubSidebar>
 </template>
 
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import { access, describeApiError } from '@/api'
+import { ROLES, filterMembers, memberPickTitle, roleCan } from '@/composables/accessGroups'
 import { useRefresh } from '@/composables/useRefresh'
+import { useRouteState } from '@/composables/useRouteState'
 import { useToast } from '@/composables/useToast'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useIdentity } from '@/stores/identity'
 import AccessScope from '@/components/AccessScope.vue'
-import PageHead from '@/components/PageHead.vue'
-
-// proxy/src/console.rs VALID_ROLES, most privileged first; what each allows is
-// the proxy's RouteClass table, mirrored by stores/identity.js CAPABILITIES.
-const ROLES = [
-  { name: 'admin', can: 'everything, including members and API keys' },
-  { name: 'producer', can: 'push messages, and read' },
-  { name: 'consumer', can: 'pop and acknowledge messages, and read' },
-  { name: 'viewer', can: 'read only' },
-]
+import Icon from '@/components/Icon.vue'
+import MembersSide from '@/components/MembersSide.vue'
+import PaneHead from '@/components/PaneHead.vue'
+import SubSidebar from '@/components/SubSidebar.vue'
+import UiSelect from '@/components/UiSelect.vue'
 
 const { email, epoch, actingClusterSlug, actingTenantSlug } = useIdentity()
 const { notifySuccess } = useToast()
+
+// The roles as a picker names them; the values are the proxy's.
+const roleOptions = ROLES.map(r => ({ value: r.name, label: r.name[0].toUpperCase() + r.name.slice(1) }))
 
 const members = ref([])
 const loading = ref(false)
@@ -165,8 +150,27 @@ const error = ref(null)
 const busy = ref(null) // email of the row with a call in flight
 const confirming = ref(null) // email of the row asking "remove?"
 
-const adminCount = computed(() => members.value.filter(m => m.role === 'admin').length)
+// The role picked in the list (MembersSide): the same address field, so the
+// list and the table show the same members.
+const role = ref('')
+useRouteState({ role })
+const shown = computed(() => filterMembers(members.value, role.value))
 const isMe = member => !!email.value && member.email.toLowerCase() === email.value.toLowerCase()
+// A grant is a day; the tooltip keeps the instant.
+const day = v => formatTimestamp(v, 'en-US', { hour: undefined, minute: undefined, second: undefined })
+
+const title = computed(() => memberPickTitle(role.value))
+const adminCount = computed(() => members.value.filter(m => m.role === 'admin').length)
+const facts = computed(() => [
+  {
+    k: 'Cluster',
+    v: actingClusterSlug.value || '—',
+    title: `Who may use cluster ${actingClusterSlug.value || '—'} of tenant ${actingTenantSlug.value || '—'}, and with which role`,
+  },
+  role.value
+    ? (roleCan(role.value) ? { v: roleCan(role.value), title: `What the ${role.value} role may do` } : null)
+    : (loaded.value ? { k: 'Admins', v: String(adminCount.value), title: 'A cluster keeps at least one admin: the proxy refuses a change that would leave none' } : null),
+].filter(Boolean))
 
 async function load() {
   if (loading.value) return
@@ -193,16 +197,15 @@ watch(epoch, () => {
   load()
 })
 
-async function changeRole(member, event) {
-  const role = event.target.value
-  if (role === member.role) return
+async function changeRole(member, next) {
+  if (!next || next === member.role) return
   busy.value = member.email
   try {
-    await access.grantMember(member.email, role)
-    notifySuccess(`${member.email} is now ${role}`)
+    await access.grantMember(member.email, next)
+    notifySuccess(`${member.email} is now ${next}`)
   } catch {
     // The shell's failure toast carries the proxy's reason (a cluster keeps
-    // one admin); the reload below puts the refused role back in the select.
+    // one admin); the reload below puts the refused role back in the picker.
   } finally {
     busy.value = null
     await load()
@@ -258,50 +261,38 @@ async function grant() {
 </script>
 
 <style scoped>
-.members-email { font-weight: 550; }
-.members-you {
-  margin-left: 7px;
-  color: var(--text-low);
-  font-size: 11px;
-}
-.members-role { width: 132px; }
-.members-since { color: var(--text-mid); white-space: nowrap; }
-.members-confirm { margin-right: 8px; color: var(--text-mid); font-size: 12px; }
-.members-loading { display: grid; gap: 8px; padding: 16px; }
-.members-loading .skeleton { height: 34px; }
-.members-roles { margin-top: 12px; }
-.members-role-list {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 6px 18px;
-  margin: 0;
-  padding: 4px 16px 0;
-  font-size: 12.5px;
-}
-.members-role-list dt { color: var(--text-hi); }
-.members-role-list dd { margin: 0; color: var(--text-mid); }
-.members-form { display: grid; gap: 14px; }
-.members-field { display: grid; gap: 6px; }
-.members-help { margin: 0; padding: 12px 16px 14px; color: var(--text-low); font-size: 11.5px; line-height: 1.45; }
-.members-form .members-help { padding: 0; }
-.right { text-align: right; white-space: nowrap; }
+.mem-who { overflow-wrap: anywhere; }
+.mem-email { font-weight: 500; color: var(--text-hi); }
+.mem-you { margin-left: 8px; font-size: 12px; color: var(--text-low); }
+.mem-role { width: 160px; }
+.mem-role :deep(.uis) { width: 132px; }
+.mem-since { color: var(--text-mid); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mem-act { text-align: right; white-space: nowrap; }
+.mem-confirm { margin-right: 8px; font-size: 12px; color: var(--text-mid); }
+
+.acc-loading { display: grid; gap: 8px; padding: 16px; }
+.acc-loading .skeleton { height: 34px; }
+
+/* The form: a label over each field, one short line under it at most. */
+.acc-form { display: grid; gap: 16px; }
+.acc-field { display: grid; gap: 4px; }
+.acc-label { font-size: 12px; font-weight: 500; color: var(--text-mid); }
+.acc-help { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-low); }
+
 /* Phone: a row is a small block — who, then role and remove on one line —
    instead of a table wider than the screen. The date is the one to drop. */
 @media (max-width: 720px) {
-  .members-table thead { display: none; }
-  .members-table tr {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    align-items: center;
-    gap: 8px 10px;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--bd-soft);
+  .mem-table thead { display: none; }
+  .mem-table tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+    gap: 8px 12px; padding: 12px 16px; border-bottom: 1px solid var(--bd-soft);
   }
-  .members-table tr:last-child { border-bottom: 0; }
-  .members-table td { display: block; padding: 0; border: 0; }
-  .members-table .members-who { grid-column: 1 / -1; overflow-wrap: anywhere; }
-  .members-table .members-since { display: none; }
-  .members-act { white-space: normal; }
-  .members-confirm { display: block; margin: 0 0 6px; }
+  .mem-table tr:last-child { border-bottom: 0; }
+  .mem-table td { display: block; padding: 0; border: 0; }
+  .mem-table .mem-who { grid-column: 1 / -1; }
+  .mem-table .mem-role { width: auto; }
+  .mem-table .mem-since { display: none; }
+  .mem-act { white-space: normal; }
+  .mem-confirm { display: block; margin: 0 0 6px; }
 }
 </style>

@@ -8,12 +8,9 @@
         </div>
         <div class="card-body ql-body">
           <div v-if="conflict" class="panel-err">
-            Somebody saved the settings while this was open. The fields now show what is stored;
-            make your change again.
+            Somebody saved first. The fields show what is stored now: make your change again.
           </div>
-          <p class="ql-lead">
-            The lines the console judges this queue by. A blank field keeps the tenant's line.
-          </p>
+          <p class="ql-lead">A blank field keeps the tenant’s line.</p>
           <section v-for="group in groups" :key="group.name" class="ql-group">
             <h4 class="ql-group-title">{{ group.name }}</h4>
             <LineRow
@@ -30,9 +27,8 @@
             <h4 class="ql-group-title">Readers</h4>
             <!-- Not a <label>: the switch is two buttons, and a label around
                  them would forward every click to the first. -->
-            <div v-for="flag in QUEUE_FLAGS" :key="flag.key" class="ql-flag">
+            <div v-for="flag in QUEUE_FLAGS" :key="flag.key" class="ql-flag" :title="flag.help">
               <span class="ql-flag-label">{{ flag.label }}</span>
-              <span class="ql-flag-help">{{ flag.help }}</span>
               <span class="seg ql-flag-control" role="group" :aria-label="flag.label">
                 <button type="button" :class="{ on: form[flag.key] === true }" :aria-pressed="form[flag.key] === true ? 'true' : 'false'" @click="form[flag.key] = true">Yes</button>
                 <button type="button" :class="{ on: form[flag.key] !== true }" :aria-pressed="form[flag.key] !== true ? 'true' : 'false'" @click="form[flag.key] = false">No</button>
@@ -133,23 +129,19 @@ async function submit() {
 .ql-card { max-width: 600px; }
 .ql-body { display: grid; }
 .ql-body .panel-err { margin-bottom: 12px; }
-.ql-lead { margin: 0 0 4px; font-size: 12px; line-height: 1.5; color: var(--text-low); }
-.ql-group-title { margin: 14px 0 8px; font-size: 13px; font-weight: 600; color: var(--text-hi); }
-/* The same row as a line: what it is on the left, its control on the right. */
+.ql-lead { margin: 0; font-size: 12px; color: var(--text-low); }
+/* A group's name over its rows, as on the Settings page. */
+.ql-group-title { margin: 16px 0 4px; font-size: 12px; font-weight: 600; color: var(--text-low); }
+/* The same row as a line (LineRow): what it is on the left, its control on
+   the right, what it means in its tooltip. */
 .ql-flag {
   display: grid; grid-template-columns: minmax(0, 1fr) auto;
-  column-gap: 28px; row-gap: 4px; align-items: start;
-  padding: 14px 0; border-top: 1px solid var(--bd-soft);
+  column-gap: 16px; align-items: center;
+  padding: 8px 0; border-top: 1px solid var(--bd-soft);
 }
-.ql-flag-label { grid-column: 1; font-size: 13px; font-weight: 500; color: var(--text-hi); }
-.ql-flag-help { grid-column: 1; font-size: 12px; line-height: 1.5; color: var(--text-low); }
-.ql-flag-control { grid-column: 2; grid-row: 1 / span 2; }
+.ql-flag-label { font-size: 13px; color: var(--text-hi); }
 .ql-clear { margin-right: auto; }
 /* The form is taller than a small window: Save stays in reach while it scrolls. */
 .ql-card .modal-foot { position: sticky; bottom: 0; background: var(--ink-2); }
 .btn:disabled { opacity: .45; cursor: default; }
-@media (max-width: 560px) {
-  .ql-flag { grid-template-columns: minmax(0, 1fr); }
-  .ql-flag-control { grid-column: 1; grid-row: auto; justify-self: start; }
-}
 </style>

@@ -138,7 +138,8 @@ export const traces = {
     client.get(`/api/v1/traces/by-name/${encodeURIComponent(traceName)}`, { params, ...config }),
   /** Trace names that actually exist for this tenant — the only honest source of suggestions. */
   getAvailableNames: (params, config) =>
-    client.get('/api/v1/traces/names', { params, ...config }),
+    // Quiet: the Traces list says when the names cannot be read.
+    client.get('/api/v1/traces/names', { params, quiet: true, ...config }),
 }
 
 // ============================================

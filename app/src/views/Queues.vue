@@ -1,78 +1,34 @@
 <template>
-  <div class="view-container">
+  <QueuesLayout :live="refreshAgo">
+    <template #actions>
+      <!-- The throughput and lag columns are queue-ops': a node that did not
+           answer the broker's gather took its share out of them (usePartial). -->
+      <span v-if="opsPartial" class="chip chip-warn" role="status" :title="`Throughput and lag columns. ${PARTIAL_TITLE}`"><span class="dot" />{{ opsPartial }}</span>
+      <button v-if="can('queueAdmin')" class="btn btn-primary" @click="showCreate = true">Create queue</button>
+    </template>
+  <div class="view-container qs">
 
-    <PageHead title="Queues" :sub="headSub" :live="refreshAgo">
-      <template #actions>
-        <!-- The throughput and lag columns are queue-ops': a node that did not
-             answer the broker's gather took its share out of them (usePartial). -->
-        <span v-if="opsPartial" class="chip chip-warn" role="status" :title="`Throughput and lag columns. ${PARTIAL_TITLE}`"><span class="dot" />{{ opsPartial }}</span>
-        <button v-if="can('queueAdmin')" class="btn btn-primary" @click="showCreate = true">Create queue</button>
-      </template>
-    </PageHead>
-
-    <!-- Stale data presented as live is the failure mode: the store keeps the
-         last-good rows on a failed refresh, so say how old they are. -->
+    <!-- The store keeps the last good rows on a failed refresh: say how old. -->
     <div v-if="queuesStale" class="status-banner banner-bad view-banner">
       <span :title="formatTimestampUtc(lastFetched)">
-        <strong>Could not load the queue list</strong> ·
-        {{ describeApiError(queuesError) }} · showing the last rows that
-        loaded ({{ lastFetchedText }}), which may no longer be true.
-      </span>
-    </div>
-    <!-- Throughput and lag come from a second call. When it fails those columns
-         render '—', and this says why — an unreachable metric must never look
-         like a quiet queue. -->
-    <div v-if="opsError" class="status-banner banner-warn view-banner">
-      <span>
-        <strong>Throughput and lag unavailable</strong> ·
-        {{ describeApiError(opsError) }} — the throughput and lag columns below
-        read '—' rather than zero.
+        <strong>Could not load the queue list</strong> · {{ describeApiError(queuesError) }} · showing the list from {{ lastFetchedText }}
       </span>
     </div>
 
-    <!-- No range picker here on purpose: the Throughput and Lag p99 columns
-         average over a 15-minute window hard-coded in `fetchQueueOps`, so a
-         picker would not drive the fetch. -->
+    <!-- The search and the namespace are the list's beside (?find=,
+         ?namespace=): the list and this table always show the same queues.
+         Only the order is the table's. The throughput and lag columns cover
+         the last 15 minutes, a window fixed in fetchQueueOps. -->
     <PageTools>
-      <div class="filter-search">
-        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-        </svg>
-        <input v-model="searchQuery" type="text" placeholder="Search queues…" class="input" />
-      </div>
-      <!-- ALL is `null`, never '': '' is the DEFAULT namespace server-side
-           (phase2.rs configured_defaults), so a '' sentinel makes the bucket
-           most queues land in the one bucket you cannot select. -->
-      <label class="tool-field">
-        <span class="tool-label">Namespace</span>
-        <select v-model="filterNamespace" class="input">
-          <option :value="ALL">All</option>
-          <option v-for="ns in namespaces" :key="ns" :value="ns">{{ ns || '(default)' }}</option>
-        </select>
-      </label>
-      <label class="tool-field">
-        <span class="tool-label">Task</span>
-        <select v-model="filterTask" class="input">
-          <option :value="ALL">All</option>
-          <option v-for="task in tasks" :key="task" :value="task">{{ task || '(default)' }}</option>
-        </select>
-      </label>
+      <span v-if="hasActiveFilter && lastFetched" class="tool-note">{{ headSub }}</span>
+      <!-- Those columns come from a second call: when it fails they read '—',
+           and this says why — an unreachable metric is not a quiet queue. -->
+      <span v-if="opsError" class="tool-note is-bad" :title="describeApiError(opsError)">Throughput and lag unavailable</span>
       <template #view>
-        <div class="tool-seg">
-          <span class="tool-label">Sort</span>
-          <div class="seg">
-            <button
-              v-for="opt in sortOptions"
-              :key="opt.value"
-              :class="{ on: sortBy === opt.value }"
-              @click="sortBy = opt.value"
-            >{{ opt.label }}</button>
-          </div>
-        </div>
+        <UiSelect v-model="sortBy" label="Sort" :options="sortOptions" aria-label="Sort the queues" />
       </template>
     </PageTools>
 
-    <!-- Health grid -->
     <QueueHealthGrid
       :queues="filteredQueues"
       :loading="loading"
@@ -85,69 +41,40 @@
       @delete="confirmDelete"
     >
       <template #empty>
-        <!-- "No queues" is a claim. Only make it when the list actually
-             loaded — a failed fetch has to say so instead, in ember, with a
-             Retry: `cannot list` must never read as `nothing here`. -->
+        <!-- "No queues" is a claim: a failed read says so instead, with a Retry. -->
         <div v-if="queuesError" class="empty-state empty-state-failed">
           <h3>Cannot list queues</h3>
           <p>{{ describeApiError(queuesError) }}</p>
           <button class="btn btn-ghost" @click="refreshAll">Retry</button>
         </div>
         <div v-else class="empty-state">
-          <!-- Same block, same 40px glyph, as every other empty state in the
-               app (Messages · DeadLetter · Traces): stacked rows for a list
-               of queues. -->
-          <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
-          </svg>
-          <h3>No queues found</h3>
-          <p>{{ hasActiveFilter ? 'Try adjusting your filters' : 'Create a queue to get started' }}</p>
-          <!-- The same control as the header's, offered where the sentence
-               above asks for it. Not under a filter, though: the queues that
-               exist are simply not in this slice, and creating one more would
-               not answer that. -->
-          <button v-if="!hasActiveFilter && can('queueAdmin')" class="btn" @click="showCreate = true">
-            Create queue
-          </button>
+          <Icon name="layers" class="empty-state-icon" :size="28" />
+          <h3>{{ hasActiveFilter ? 'No queue matches' : 'No queues yet' }}</h3>
         </div>
       </template>
     </QueueHealthGrid>
 
-    <!-- The glyphs the rows use: shape first, colour only for the two states
-         that need you. -->
-    <div v-if="filteredQueues.length" class="list-legend">
-      <span><i class="g ok" aria-hidden="true" />healthy</span>
-      <span><i class="g idle" aria-hidden="true" />idle</span>
-      <span><i class="g warn" aria-hidden="true" />behind or no reader</span>
-      <span><i class="g bad" aria-hidden="true" />falling behind</span>
-    </div>
-
-    <!-- Delete confirmation modal -->
+    <!-- Delete confirmation. It stays open on failure and says what happened:
+         a closed modal over an unchanged list reads as success. -->
     <Teleport to="body">
       <div v-if="showDeleteModal" class="modal-backdrop" @click.self="closeDeleteModal">
         <div class="card modal-card">
           <div class="card-header"><h3>Delete queue</h3></div>
-          <div class="card-body">
-            <!-- The modal stays open on failure and says what happened. A closed
-                 modal plus an unchanged list is indistinguishable from success. -->
+          <div class="card-body qs-form">
             <div v-if="deleteError" class="panel-err">{{ deleteError }}</div>
-            <p>
-              Are you sure you want to delete <strong>{{ queueToDelete?.name }}</strong>? This will permanently remove the queue and all its messages. This action cannot be undone.
-            </p>
+            <p class="qs-lead">Delete <strong>{{ queueToDelete?.name }}</strong>?</p>
+            <p class="qs-help">The queue and all its messages are removed. This cannot be undone.</p>
           </div>
           <div class="modal-foot">
             <button class="btn btn-ghost" @click="closeDeleteModal">Cancel</button>
-            <button class="btn btn-danger" :disabled="deleting" @click="deleteQueue">
-              {{ deleting ? 'Deleting…' : 'Delete queue' }}
-            </button>
+            <button class="btn btn-danger" :disabled="deleting" @click="deleteQueue">{{ deleting ? 'Deleting…' : 'Delete queue' }}</button>
           </div>
         </div>
       </div>
     </Teleport>
 
-    <!-- Create. The modal owns the option set and the merge rule; this page
-         only says when it is open and refetches once it saved, because the row
-         it added belongs to the broker's list and guessing it would drift. -->
+    <!-- Create. The modal owns the options and the merge rule; this page only
+         refetches once it saved: the new row is the broker's to list. -->
     <QueueConfigModal
       :open="showCreate"
       mode="create"
@@ -155,13 +82,14 @@
       @saved="refreshAll"
     />
   </div>
+  </QueuesLayout>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRouteState } from '@/composables/useRouteState'
-import { queueLocation } from '@/composables/navigation'
+import { inNamespace, listCarry, queueMatches, queueTabLocation } from '@/composables/navigation'
 import { queues as queuesApi, system as systemApi, describeApiError } from '@/api'
 import { formatNumber, toNum } from '@/composables/useApi'
 import { queueAttention } from '@/composables/useAttention'
@@ -176,17 +104,15 @@ import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import QueueConfigModal from '@/components/QueueConfigModal.vue'
 import QueueHealthGrid from '@/components/QueueHealthGrid.vue'
-import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
+import QueuesLayout from '@/components/QueuesLayout.vue'
+import Icon from '@/components/Icon.vue'
+import UiSelect from '@/components/UiSelect.vue'
 
 const router = useRouter()
 const route = useRoute()
 const { can } = useIdentity()
 const { notifySuccess } = useToast()
-
-// "All" sentinel. It must not be '' — '' is a real, selectable namespace/task
-// (the server default), and collapsing the two makes it unfilterable.
-const ALL = null
 
 // Shared store — same singleton the Consumers page reads. Calling
 // fetchQueues({ force: true }) on auto-refresh keeps it fresh; navigating
@@ -194,7 +120,6 @@ const ALL = null
 const queuesStore = useQueuesStore()
 const {
   queues, loading, error: queuesError, isStale: queuesStale, lastFetched,
-  namespaces: storeNamespaces, tasks: storeTasks,
   fetchQueues: fetchQueuesShared, invalidate,
 } = queuesStore
 
@@ -213,11 +138,13 @@ const opsError = ref(null)
 // The nodes the last good queue-ops read lacked (usePartial).
 const opsMissing = ref([])
 const opsPartial = computed(() => (opsError.value ? '' : partialText(opsMissing.value)))
+// The queue list's filters (QueueList), on the same address fields: the list
+// and this table always show the same queues. null = every namespace; '' is
+// the default namespace, a real one.
 const searchQuery = ref('')
-const filterNamespace = ref(ALL)
-const filterTask = ref(ALL)
+const filterNamespace = ref(null)
 const sortBy = ref('health')
-useRouteState({ search: searchQuery, namespace: filterNamespace, task: filterTask, sort: sortBy })
+useRouteState({ find: searchQuery, namespace: filterNamespace, sort: sortBy })
 
 // Modal state
 // The create form. It is not prefilled from anything on this page: a create
@@ -228,18 +155,15 @@ const queueToDelete = ref(null)
 const deleteError = ref(null)
 const deleting = ref(false)
 
+// The column names, so a sort says which column it orders by.
 const sortOptions = [
   { value: 'health', label: 'Worst first' },
-  { value: 'avgLagMs', label: 'Lag' },
-  { value: 'density', label: 'Density' },
+  { value: 'avgLagMs', label: 'Max lag' },
+  { value: 'density', label: 'Per partition' },
   { value: 'partitions', label: 'Partitions' },
   { value: 'name', label: 'Name' },
 ]
 
-// Re-export the store-derived lists with the names this template already
-// uses, so the template doesn't need to change.
-const namespaces = storeNamespaces
-const tasks = storeTasks
 
 /**
  * Merge each queue with its latest queue-ops aggregate and derive the
@@ -283,34 +207,20 @@ const enrichedQueues = computed(() => {
   })
 })
 
-const hasActiveFilter = computed(() =>
-  !!searchQuery.value || filterNamespace.value !== ALL || filterTask.value !== ALL
-)
+const hasActiveFilter = computed(() => !!searchQuery.value.trim() || filterNamespace.value !== null)
 
 // Filter (sort happens inside QueueHealthGrid)
 const filteredQueues = computed(() => {
   let result = enrichedQueues.value
 
-  if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase()
-    result = result.filter(q => q.name.toLowerCase().includes(query))
-  }
-  if (filterNamespace.value !== ALL) {
-    result = result.filter(q => (q.namespace || '') === filterNamespace.value)
-  }
-  if (filterTask.value !== ALL) {
-    result = result.filter(q => (q.task || '') === filterTask.value)
-  }
-  return result
+  return result.filter(q => inNamespace(q, filterNamespace.value) && queueMatches(q, searchQuery.value))
 })
 
+// Only while the list's search or namespace narrows the table: the header
+// already counts every queue.
 const headSub = computed(() => {
-  if (!lastFetched.value) return ''
   const total = queues.value.length
-  const count = `${formatNumber(total)} ${total === 1 ? 'queue' : 'queues'}`
-  return hasActiveFilter.value
-    ? `Showing ${formatNumber(filteredQueues.value.length)} of ${count}`
-    : count
+  return `${formatNumber(filteredQueues.value.length)} of ${formatNumber(total)} ${total === 1 ? 'queue' : 'queues'}`
 })
 
 // Methods — fetchQueues is now thin shim around the shared store.
@@ -393,7 +303,8 @@ const refreshAll = async () => {
 }
 
 const viewQueue = (queue) => {
-  router.push(queueLocation(queue.name, route))
+  // The list's search rides along, so the list beside stays as it was.
+  router.push(queueTabLocation('overview', queue.name, route, listCarry(route)))
 }
 
 const confirmDelete = (queue) => {
@@ -445,7 +356,12 @@ onMounted(() => {
 </script>
 
 <style scoped>
-/* The head and the tools row are components/PageHead and PageTools, the same
-   on every page; the list is QueueHealthGrid. Nothing page-specific is left
-   to lay out here. */
+.qs { display: flex; flex-direction: column; gap: 16px; }
+.qs > .page-tools, .qs > .view-banner { margin-bottom: 0; }
+
+.qs-form { display: flex; flex-direction: column; gap: 8px; }
+.qs-form .panel-err { margin: 0 0 4px; }
+.qs-lead { margin: 0; font-size: 13px; color: var(--text-hi); overflow-wrap: anywhere; }
+.qs-lead strong { font-weight: 600; }
+.qs-help { margin: 0; font-size: 12px; color: var(--text-low); }
 </style>

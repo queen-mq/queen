@@ -1,102 +1,59 @@
 <template>
-  <div class="view-container">
+  <!-- A tab of the Queues section: the queue is picked in the list beside
+       (?queue=), every queue's dead letters when none is. -->
+  <QueuesLayout :live="refreshAgo">
+    <!-- The page's one bulk write, offered once a queue is picked: purging
+         "by criteria" across the whole dead letter is not offered. -->
+    <template v-if="canAdmin && filterQueue.trim()" #actions>
+      <button
+        class="btn btn-danger"
+        :disabled="bulkPurging"
+        :title="bulkPurgeButtonTitle"
+        @click="openBulkPurge"
+      >Purge by criteria</button>
+    </template>
+  <div class="view-container dlq">
 
-    <PageHead title="Dead letter" :live="refreshAgo">
-      <!-- The page's one bulk write. It needs a queue: purging "by criteria"
-           across the whole DLQ is not offered. -->
-      <template v-if="canAdmin" #actions>
-        <button
-          class="btn btn-danger"
-          :disabled="!filterQueue.trim() || bulkPurging"
-          :title="filterQueue.trim() ? bulkPurgeButtonTitle : 'Choose a queue before bulk purging'"
-          @click="openBulkPurge"
-        >Purge by criteria</button>
-      </template>
-    </PageHead>
-
-    <!-- The list failed: say so instead of drawing an empty, healthy-looking page. -->
+    <!-- The list failed: say so instead of drawing an empty, healthy page. -->
     <div v-if="error" class="status-banner banner-bad view-banner">
       <span>
-        <strong>Could not load the dead-letter queue</strong> · {{ describeApiError(error) }}<template v-if="messages.length">
-          · showing the last rows that loaded{{ lastUpdatedText ? ` (${lastUpdatedText})` : '' }}</template>
+        <strong>Could not load the dead letter</strong> · {{ describeApiError(error) }}<template v-if="messages.length"> · showing the last rows{{ lastUpdatedText ? ` (${lastUpdatedText})` : '' }}</template>
       </span>
     </div>
 
-    <!-- A broker capability, not a data fact — and it belongs above the table,
-         not inside the pager it disables. -->
-    <!-- Informational: it describes what this broker CAN do, which is not a
-         condition of the system and never becomes untrue by itself. -->
-    <div v-if="!serverPaginates" class="status-banner banner-info view-banner">
-      <span>This broker returns the whole dead-letter queue at once — paging is disabled</span>
-    </div>
-
-    <!-- Applied server-side (the endpoint takes queue + consumerGroup), so they
-         select from the whole DLQ, not from the loaded page. -->
+    <!-- Applied server-side (the endpoint takes queue + consumerGroup), so it
+         selects from the whole dead letter, not from the loaded page. -->
     <PageTools>
-      <!-- Autocomplete, not a select: a cell carries hundreds of queues and the
-           names are long and dotted. Free entry stays open because the queue
-           list and the DLQ come from two different endpoints — a queue that
-           only exists in the DLQ must still be filterable. -->
-      <label class="tool-field" for="dlq-queue-filter">
-        <span class="tool-label">Queue</span>
+      <div class="tool-field dlq-group">
+        <label class="tool-label" for="dlq-group">Consumer group</label>
         <Autocomplete
-          id="dlq-queue-filter"
-          v-model="filterQueue"
-          :options="queueOptions"
-          :loading="queuesLoading"
-          label="Queue"
+          id="dlq-group"
+          v-model="filterGroup"
+          :options="groupSuggestions"
+          label="Consumer group"
           placeholder="All"
           allow-custom
         />
-      </label>
-      <label class="tool-field">
-        <span class="tool-label">Consumer group</span>
-        <input
-          v-model="filterGroup"
-          class="input"
-          list="dlq-group-options"
-          placeholder="All"
-          @change="reload"
-          @keyup.enter="reload"
-        />
-        <datalist id="dlq-group-options">
-          <option v-for="g in groupSuggestions" :key="g" :value="g" />
-        </datalist>
-      </label>
-      <span v-if="queuesUnavailable" class="tool-note">Queue list unavailable — type a name to filter</span>
-      <span v-else-if="unlistedQueue" class="tool-note">Not in this cluster's queue list — filtering by name anyway</span>
+      </div>
       <template #view>
-        <label class="tool-field">
-          <span class="tool-label">Show</span>
-          <select v-model.number="pageSize" class="input">
-            <option :value="25">25</option>
-            <option :value="50">50</option>
-            <option :value="100">100</option>
-            <option :value="200">200</option>
-          </select>
-        </label>
+        <!-- A broker capability, not a data fact. -->
+        <span v-if="!serverPaginates" class="tool-note" title="This broker returns the whole dead letter at once">No paging on this broker</span>
+        <UiSelect v-model="pageSize" label="Show" :options="PAGE_SIZES" />
       </template>
     </PageTools>
 
-    <!-- Summary. What an operator opens this page for is WHICH failure is
-         dominating, so that is the only summary kept: a count of rows on the
-         page and a partition tally over the same rows both dressed a page-sized
-         fact as a queue-sized one (the broker reports no DLQ total, and the
-         proxy blocks /api/v1/status for tenants).
-         Rendered only with rows to describe — a breakdown of nothing is noise,
-         and the table below owns the loading and failure states. -->
-    <div v-if="pageMessages.length" class="card" style="margin-bottom:16px;">
+    <!-- What an operator opens this page for is WHICH failure is dominating,
+         so that is the only summary: the broker reports no dead-letter total,
+         and a tally of the page would dress a page-sized fact as a
+         queue-sized one. Drawn only with rows to describe. -->
+    <div v-if="pageMessages.length" class="card">
       <div class="card-header">
         <h3>Failure breakdown</h3>
-        <span class="card-sub">
-          {{ errorGroups.length }} distinct {{ errorGroups.length === 1 ? 'error' : 'errors' }}
-          across the {{ formatNumber(pageMessages.length) }} messages on this page
-        </span>
-        <span class="muted">{{ stamp(listPanel) }}</span>
+        <span class="card-sub tabular-nums">{{ errorGroups.length }} {{ errorGroups.length === 1 ? 'error' : 'errors' }} · {{ formatNumber(pageMessages.length) }} {{ pageMessages.length === 1 ? 'message' : 'messages' }} on this page</span>
       </div>
       <div class="card-body dlq-breakdown">
-        <!-- The shape of the failure in one 6px strip: whether this page is one
-             recurring fault or a long tail of unrelated ones. -->
+        <!-- The shape of the failure in one strip: one recurring fault, or a
+             long tail of unrelated ones. Each bar filters the table. -->
         <div class="dlq-dist">
           <button
             v-for="seg in distribution"
@@ -105,15 +62,13 @@
             class="dlq-dist-seg"
             :class="{ 'dlq-dist-seg-on': errorFilter === seg.error }"
             :style="{ width: seg.share * 100 + '%', opacity: segmentOpacity(seg) }"
-            :title="`${seg.count} · ${seg.error}`"
-            :aria-label="`${seg.count} messages: ${seg.error}`"
+            :title="`${seg.count} · ${seg.error === TAIL_SEGMENT ? 'the other errors' : seg.error}`"
+            :aria-label="`${seg.count} messages: ${seg.error === TAIL_SEGMENT ? 'the other errors' : seg.error}`"
             @click="toggleErrorFilter(seg.error)"
           />
         </div>
 
-        <!-- Two columns, so six errors cost three rows of height. Each row is a
-             filter for the table below, not a label. The strip above carries
-             the proportion; each error below carries its row count. -->
+        <!-- Two columns, each row a filter for the table below. -->
         <div class="dlq-err-grid">
           <button
             v-for="entry in visibleErrorGroups"
@@ -132,135 +87,108 @@
 
         <div v-if="errorGroups.length > COLLAPSED_ERRORS" class="dlq-err-more">
           <button type="button" class="dlq-link" @click="showAllErrors = !showAllErrors">
-            {{ showAllErrors ? `Show top ${COLLAPSED_ERRORS}` : `Show all ${errorGroups.length}` }}
+            {{ showAllErrors ? `Show the top ${COLLAPSED_ERRORS}` : `Show all ${errorGroups.length}` }}
           </button>
         </div>
       </div>
     </div>
 
-    <!-- Messages table -->
-    <div class="card" style="margin-bottom:16px;">
+    <div class="card">
       <div class="card-header">
         <h3>Dead-lettered messages</h3>
-        <span class="card-sub">{{ formatNumber(pageMessages.length) }} loaded · page {{ page }}</span>
-        <!-- A narrowed table must say so where the row count is read, not only
-             up in the breakdown that narrowed it. -->
-        <button v-if="errorFilter" type="button" class="chip chip-mute dlq-filter-chip" @click="errorFilter = null">
+        <span class="card-sub tabular-nums">{{ formatNumber(pageMessages.length) }} on page {{ page }}</span>
+        <!-- A narrowed table says so where its rows are counted. -->
+        <button v-if="errorFilter" type="button" class="dlq-filter-chip" :title="`Showing ${messages.length}: ${errorFilter}. Click to show every row.`" @click="errorFilter = null">
           <span class="dlq-filter-chip-text">{{ formatNumber(messages.length) }} shown · {{ errorFilter }}</span>
-          <span aria-hidden="true">×</span>
+          <Icon name="x" :size="12" />
           <span class="sr-only">Clear the error filter</span>
         </button>
         <span class="muted">{{ stamp(listPanel) }}</span>
       </div>
 
-      <div style="overflow-x:auto;">
-        <table class="t">
+      <div class="dlq-scroll">
+        <table class="t dlq-table">
           <thead>
             <tr>
-              <th>Message</th>
-              <th>Queue</th>
-              <th>Consumer</th>
+              <th>Transaction ID</th>
+              <th v-if="!filterQueue">Queue</th>
+              <th>Consumer group</th>
               <th>Error</th>
-              <th>Retries</th>
-              <th>Failed</th>
-              <th v-if="canAdmin" style="text-align:right;">Actions</th>
+              <th class="r">Retries</th>
+              <th class="r">Failed</th>
+              <th v-if="canAdmin" class="r"><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>
             <!-- First paint only: a refresh or a page turn leaves the rows that
                  already loaded on screen. -->
             <template v-if="firstLoad">
-              <tr v-for="i in 8" :key="i">
-                <td><div class="skeleton" style="height:16px; width:112px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:88px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:104px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:168px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:32px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:72px;" /></td>
-                <td v-if="canAdmin"><div class="skeleton" style="height:16px; width:56px; margin-left:auto;" /></td>
+              <tr v-for="i in 8" :key="i" aria-hidden="true">
+                <td><div class="skeleton" style="height:14px; width:112px;" /></td>
+                <td v-if="!filterQueue"><div class="skeleton" style="height:14px; width:88px;" /></td>
+                <td><div class="skeleton" style="height:14px; width:104px;" /></td>
+                <td><div class="skeleton" style="height:14px; width:168px;" /></td>
+                <td><div class="skeleton" style="height:14px; width:24px; margin-left:auto;" /></td>
+                <td><div class="skeleton" style="height:14px; width:56px; margin-left:auto;" /></td>
+                <td v-if="canAdmin"><div class="skeleton" style="height:14px; width:96px; margin-left:auto;" /></td>
               </tr>
             </template>
 
             <template v-else-if="messages.length">
-              <!--
-                EVERY row here is a failure — that is what the page is — so
-                nothing in a row is painted as one. A red dot, red error text
-                and an amber selection wash on all of them carried no
-                information beyond the table's own title, and left the page
-                with no way to say that something is failing RIGHT NOW. The
-                error text instead gets the page's strongest ink, because it
-                is the column the reader came for.
-              -->
+              <!-- Every row here is a failure — that is what the page is — so
+                   nothing in a row is painted as one. The error text gets the
+                   strongest ink: it is the column the reader came for. -->
               <tr
                 v-for="msg in messages"
                 :key="rowKey(msg)"
                 class="dlq-row"
                 :class="{ 'dlq-row-on': selectedKey && rowKey(msg) === selectedKey }"
+                tabindex="0"
                 @click="selectMessage(msg)"
+                @keydown.enter.prevent="selectMessage(msg)"
               >
-                <td>
-                  <div style="display:flex; align-items:center; gap:6px;">
-                    <span class="dlq-row-dot" />
-                    <span class="font-mono" style="font-size:12px;">{{ (msg.transactionId || msg.id || '-').slice(0, 14) }}…</span>
-                  </div>
-                </td>
-                <td style="font-weight:500;">{{ msg.queue || '-' }}</td>
-                <td class="font-mono" style="font-size:12px; color:var(--text-mid);">{{ msg.consumerGroup || '-' }}</td>
-                <td>
-                  <span class="font-mono dlq-err-cell">{{ truncateError(msg.errorMessage) }}</span>
-                </td>
-                <td class="tabular-nums" style="font-size:12px;">{{ msg.retryCount ?? '—' }}</td>
-                <td style="font-size:12px; color:var(--text-mid);">{{ formatRelativeTime(msg.failedAt) }}</td>
-                <td v-if="canAdmin" style="text-align:right; white-space:nowrap;" @click.stop>
-                  <!-- Replay before Purge: the recoverable action reads first,
-                       and the destructive one keeps the far-right position it
-                       has always had. A row whose listing carries no id cannot
-                       be addressed by the move route at all, so the button says
-                       why instead of disappearing. -->
+                <td><span class="dlq-cut dlq-txn" :title="msg.transactionId || msg.id">{{ msg.transactionId || msg.id || '—' }}</span></td>
+                <td v-if="!filterQueue"><span class="dlq-cut dlq-queue" :title="msg.queue">{{ msg.queue || '—' }}</span></td>
+                <td><span class="dlq-cut dlq-group-name" :title="msg.consumerGroup">{{ msg.consumerGroup || '—' }}</span></td>
+                <td><span class="dlq-cut dlq-err-cell" :title="msg.errorMessage">{{ msg.errorMessage || '—' }}</span></td>
+                <td class="r dlq-num">{{ msg.retryCount ?? '—' }}</td>
+                <td class="r dlq-when" :title="formatTimestampUtc(msg.failedAt)">{{ formatRelativeTime(msg.failedAt) }}</td>
+                <td v-if="canAdmin" class="r dlq-actions" @click.stop @keydown.enter.stop>
+                  <!-- Replay before Purge: the recoverable action reads first.
+                       A row whose listing carries no id cannot be addressed by
+                       the move route, so its button says why. -->
                   <button
                     class="btn btn-ghost dlq-row-btn"
                     :disabled="!msg.id || isReplaying(msg) || replayUnavailable"
                     :title="replayUnavailable
-                      ? 'This cell does not serve the replay route — the broker predates it, or the proxy in front does not classify it'
+                      ? 'This cell does not serve the replay route: the broker predates it, or the proxy in front does not classify it'
                       : (msg.id
                         ? `Replay this message onto ${msg.queue || 'its queue'}`
                         : 'This broker’s dead-letter list carries no row id, so a replay cannot address this row')"
                     @click="openReplay(msg)"
-                  >
-                    {{ isReplaying(msg) ? '…' : 'Replay' }}
-                  </button>
-                  <button class="btn btn-danger" style="padding:4px 10px; font-size:11px;" @click="purge(msg)" :disabled="isDeleting(msg)">
-                    {{ isDeleting(msg) ? '…' : 'Purge' }}
-                  </button>
-                  <!-- A purge the broker refused must stay on screen: the row is
-                       still here, and so is the reason. -->
-                  <div v-if="rowError(msg)" style="font-size:11px; color:var(--ember-400); margin-top:4px; max-width:260px; white-space:normal;">
-                    {{ rowError(msg) }}
-                  </div>
+                  >{{ isReplaying(msg) ? '…' : 'Replay' }}</button>
+                  <button class="btn btn-ghost dlq-row-btn dlq-row-purge" :disabled="isDeleting(msg)" @click="askPurge(msg)">{{ isDeleting(msg) ? '…' : 'Purge' }}</button>
+                  <!-- A purge the broker refused stays on screen with its reason. -->
+                  <div v-if="rowError(msg)" class="dlq-row-err">{{ rowError(msg) }}</div>
                 </td>
               </tr>
             </template>
 
-            <!-- Never an idle empty state on a failure: that is a load error
-                 wearing "no dead letters" as a disguise. -->
+            <!-- Never an idle empty state on a failure. -->
             <tr v-else-if="error">
-              <td :colspan="canAdmin ? 7 : 6">
+              <td :colspan="columns">
                 <div class="empty-state empty-state-failed">
-                  <h3>{{ describeApiError(error) }}</h3>
-                  <p>Nothing loaded — this is a failure, not an empty dead-letter queue.</p>
+                  <h3>Cannot load the dead letter</h3>
+                  <button class="btn btn-ghost" @click="fetchMessages">Retry</button>
                 </div>
               </td>
             </tr>
 
             <tr v-else>
-              <td :colspan="canAdmin ? 7 : 6">
+              <td :colspan="columns">
                 <div class="empty-state">
-                  <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 7h14l-1.2 11.2a2 2 0 01-2 1.8H8.2a2 2 0 01-2-1.8L5 7Z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 4h6v3H9z" />
-                  </svg>
-                  <h3>{{ page > 1 ? 'No more dead-lettered messages' : 'Dead letter queue is empty' }}</h3>
-                  <p>{{ hasFilters ? 'No failed messages match these filters.' : 'No failed messages to review.' }}</p>
+                  <Icon name="archive-x" class="empty-state-icon" :size="28" />
+                  <h3>{{ page > 1 ? 'No more dead letters' : hasFilters ? 'No dead letter matches' : 'No dead letters' }}</h3>
                 </div>
               </td>
             </tr>
@@ -268,9 +196,8 @@
         </table>
       </div>
 
-      <!-- Not drawn under an empty first page, under a failure, or on a broker
-           that ignores the limit: Previous/Next there offer travel that goes
-           nowhere. -->
+      <!-- Not drawn under an empty first page, a failure, or a broker that
+           ignores the limit: Previous and Next there go nowhere. -->
       <div v-if="serverPaginates && (pageMessages.length || page > 1)" class="pager">
         <span class="pager-count">Page <span class="tabular-nums">{{ page }}</span></span>
         <div class="pager-nav">
@@ -280,53 +207,62 @@
       </div>
     </div>
 
-    <!-- Detail drawer (teleported to body to avoid transform issues).
-         Backdrop before the panel, so DOM order matches paint order. -->
     <Teleport to="body">
       <div v-if="bulkTarget" class="modal-backdrop" @click.self="closeBulkPurge">
         <div class="card modal-card">
-          <div class="card-header"><h3>Purge matching DLQ records</h3></div>
-          <div class="card-body">
+          <div class="card-header"><h3>Purge by criteria</h3></div>
+          <div class="card-body dlq-form">
             <div v-if="bulkPurgeError" class="panel-err">{{ bulkPurgeError }}</div>
-            <p>
-              This will permanently purge every dead-letter record for queue
-              <strong class="font-mono">{{ bulkTarget.queue }}</strong><template v-if="bulkTarget.consumerGroup">
-                and consumer group <strong class="font-mono">{{ bulkTarget.consumerGroup }}</strong></template>.
+            <p class="dlq-lead">
+              Purge every dead-letter record of <strong>{{ bulkTarget.queue }}</strong><template v-if="bulkTarget.consumerGroup"> for <strong>{{ bulkTarget.consumerGroup }}</strong></template>?
             </p>
-            <p class="dlq-bulk-note">
-              The error breakdown filter is page-only and is not part of this cleanup.
-              This action cannot be undone.
-            </p>
+            <p class="dlq-help" title="The error filter narrows only the loaded page and is not part of this purge.">Every record, not only this page’s. This cannot be undone.</p>
           </div>
           <div class="modal-foot">
             <button class="btn btn-ghost" :disabled="bulkPurging" @click="closeBulkPurge">Cancel</button>
-            <button class="btn btn-danger" :disabled="bulkPurging" @click="purgeByCriteria">
-              {{ bulkPurging ? 'Purging…' : 'Purge all matching records' }}
-            </button>
+            <button class="btn btn-danger" :disabled="bulkPurging" @click="purgeByCriteria">{{ bulkPurging ? 'Purging…' : 'Purge all' }}</button>
           </div>
         </div>
       </div>
     </Teleport>
 
-    <!-- Replay. A confirm rather than a one-click action because a replay is a
-         WRITE: it appends a copy to a partition, it removes the dead-letter
-         record, and both are irreversible. So the modal names the target AND
-         the irreversible part before the click. -->
+    <!-- One message's purge: from a row or from the drawer, so it sits above
+         the drawer. The call takes every consumer group's record of the
+         message (delete_message_v1), and the modal says so. -->
+    <Teleport to="body">
+      <div v-if="purgeTarget" class="modal-backdrop dlq-replay-over" @click.self="purgeTarget = null">
+        <div class="card modal-card">
+          <div class="card-header">
+            <h3>Purge</h3>
+            <span class="card-sub font-mono dlq-cut dlq-purge-id">{{ purgeTarget.transactionId || purgeTarget.id }}</span>
+          </div>
+          <div class="card-body dlq-form">
+            <p class="dlq-lead">Purge this dead letter<template v-if="purgeTarget.queue"> of <strong>{{ purgeTarget.queue }}</strong></template>?</p>
+            <p class="dlq-help">Every consumer group’s record of the message goes. This cannot be undone.</p>
+          </div>
+          <div class="modal-foot">
+            <button class="btn btn-ghost" @click="purgeTarget = null">Cancel</button>
+            <button class="btn btn-danger" @click="confirmPurge">Purge</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Replay. A confirm, because a replay is a WRITE: it appends a copy to a
+         partition and removes the dead-letter record, both irreversible. The
+         modal names the target before the click. -->
     <Teleport to="body">
       <div v-if="replayRow" class="modal-backdrop dlq-replay-over" @click.self="closeReplay">
         <form class="card modal-card dlq-replay-card" @submit.prevent="submitReplay">
           <div class="card-header">
-            <h3>{{ replayTarget.moved ? 'Move and replay' : 'Replay dead-letter message' }}</h3>
+            <h3>{{ replayTarget.moved ? 'Move and replay' : 'Replay' }}</h3>
             <span class="card-sub font-mono">{{ replayRow.consumerGroup || 'no consumer group' }}</span>
           </div>
 
           <div class="card-body dlq-replay-body">
-            <!-- The verdict, and the only thing on screen allowed to call a
-                 replay a success. It does not replace the form: a refusal or a
-                 broker fault leaves the destination fields exactly as they were
-                 so they can be corrected and sent again. A verdict that names a
-                 FIELD is not drawn here at all — it belongs under that field,
-                 which is where the correction is made. -->
+            <!-- The verdict, and the only thing allowed to call a replay a
+                 success. A refusal leaves the fields as they were, to correct
+                 and send again; a verdict about a FIELD is drawn under it. -->
             <div
               v-if="replayResult && !replayResult.field"
               class="dlq-verdict"
@@ -334,81 +270,48 @@
             >
               <strong>{{ replayResult.title }}</strong>
               <p>{{ replayResult.detail }}</p>
-              <!-- Only ever offered for the two answers that name a destination
-                   the message is actually in. -->
               <router-link
                 v-if="replayResult.target"
                 class="btn btn-ghost dlq-verdict-link"
                 :to="queueLocation(replayResult.target.queue, route, 'messages', { partition: replayResult.target.partition, from: undefined, to: undefined, range: '1h' })"
-              >
-                Open {{ replayResult.target.queue }} in Messages
-              </router-link>
+              >Open {{ replayResult.target.queue }} in Messages</router-link>
             </div>
 
-            <!-- Gone once the dead-letter row is verified gone: there is nothing
-                 left to replay, and a live form under a finished verdict invites
-                 a second attempt at a row that no longer exists. -->
+            <!-- Gone once the row is verified gone: a live form under a
+                 finished verdict invites a second attempt at nothing. -->
             <template v-if="!replayDone">
               <p class="dlq-replay-lead">
-                This appends a new copy at the tail of
+                Appends a copy to
                 <strong class="font-mono">{{ replayTarget.queue }}</strong><span class="dlq-replay-sep">/</span><strong class="font-mono">{{ replayTarget.partition }}</strong>
-                with transaction id <strong class="font-mono">{{ replayTarget.transactionId }}</strong>.
-                <!-- Which of the two the request actually carries is not a
-                     detail here: a destination is admitted as one pair, so the
-                     button either names both halves or names neither, and the
-                     sentence says which of the two it is about to do. -->
-                <template v-if="replayTarget.namesDestination">
-                  The request carries that destination explicitly, queue and partition together:
-                  broker-direct, an omitted half falls back to this row's own value without
-                  saying so, and a cloud proxy refuses a half-named destination outright, so the
-                  whole pair is the one form that means the same thing in both.
-                </template>
-                <template v-else>
-                  No destination is sent: the broker replays onto the queue and partition the
-                  message failed on, which are the two named above.
-                </template>
+                as <strong class="font-mono">{{ replayTarget.transactionId }}</strong><template v-if="!replayTarget.namesDestination">, where it failed</template>.
               </p>
 
               <ul class="dlq-replay-facts">
-                <li>
-                  The dead-letter record is removed in the same transaction as the copy — one move,
-                  not a push followed by a cleanup that can fail on its own. If nothing is written
-                  (the destination already carries this transaction id), nothing is removed either.
-                </li>
-                <li>
-                  Records of other consumer groups for the same message are untouched: this replays
-                  <strong class="font-mono">{{ replayRow.consumerGroup || 'this group' }}</strong>’s row and only that one.
-                </li>
-                <li>
-                  Replay appends — it does not restore the message’s position in the partition, and its
-                  age clock restarts at the destination.
-                </li>
+                <li title="One move, not a push followed by a cleanup that can fail on its own. If nothing is written (the destination already holds this transaction id), nothing is removed either.">The dead-letter record is removed in the same step.</li>
+                <li>Other consumer groups’ records of this message stay.</li>
+                <li>The copy goes to the tail; its age restarts there.</li>
                 <li v-if="replayTarget.moved">
-                  This is a move, not a replay in place: the message failed on
-                  <strong class="font-mono">{{ replayRow.queue }}/{{ replayRow.partition }}</strong> and a destination this
-                  cluster does not carry yet is created by the replay, with the default options.
+                  A move: it failed on <strong class="font-mono">{{ replayRow.queue }}/{{ replayRow.partition }}</strong>. A destination that does not exist yet is created with default options.
                 </li>
+                <li
+                  v-if="replayTarget.namesDestination"
+                  title="Broker-direct, an omitted half falls back to this row's own value without saying so; a cloud proxy refuses a half-named destination. The whole pair means the same in both."
+                >The request names queue and partition together.</li>
               </ul>
 
-              <!-- The destination override the route has carried from day one.
-                   Behind a fold because replaying where the message failed is
-                   the answer nearly every time, and a target queue left over
-                   from a previous row is how a message lands in the wrong
-                   place. -->
-              <button type="button" class="dlq-toggle" @click="showReplayAdvanced = !showReplayAdvanced">
-                <span class="dlq-toggle-chev" :class="{ 'dlq-toggle-open': showReplayAdvanced }" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
-                  </svg>
-                </span>
-                Advanced — replay somewhere else
+              <!-- The destination override, behind a fold: replaying where it
+                   failed is the answer nearly every time. -->
+              <button type="button" class="dlq-toggle" :aria-expanded="showReplayAdvanced ? 'true' : 'false'" @click="showReplayAdvanced = !showReplayAdvanced">
+                <Icon name="chevron-right" class="dlq-toggle-chev" :class="{ 'dlq-toggle-open': showReplayAdvanced }" :size="14" />
+                Replay somewhere else
                 <span v-if="replayTarget.moved" class="detail-note dlq-toggle-badge">· destination changed</span>
               </button>
 
               <div v-if="showReplayAdvanced" class="dlq-replay-advanced">
-                <label class="dlq-replay-field">
-                  <span class="label-xs">Target queue</span>
+                <div class="dlq-replay-field">
+                  <label class="dlq-field-label" for="dlq-target-queue">Queue</label>
                   <Autocomplete
+                    id="dlq-target-queue"
                     v-model="replayForm.queue"
                     :options="queueOptions"
                     :loading="queuesLoading"
@@ -417,16 +320,15 @@
                     allow-custom
                   />
                   <span v-if="replayResult?.field === 'queue'" class="dlq-invalid">{{ replayResult.detail }}</span>
-                  <span v-else class="dlq-help">
-                    Blank replays onto <span class="font-mono">{{ replayRow.queue || 'the queue it failed on' }}</span>.
-                    Pick a name, or press Enter to accept one this cluster does not carry yet — the picker
-                    drops text it was never told to apply, and the sentence above always names the
-                    destination this button will write to.
-                  </span>
-                </label>
+                  <span
+                    v-else
+                    class="dlq-help"
+                    title="Pick a name, or press Enter to accept one this cluster does not carry yet. The sentence above always names the destination this button writes to."
+                  >Blank keeps <span class="font-mono">{{ replayRow.queue || 'the queue it failed on' }}</span>.</span>
+                </div>
 
                 <label class="dlq-replay-field">
-                  <span class="label-xs">Target partition</span>
+                  <span class="dlq-field-label">Partition</span>
                   <input
                     v-model="replayForm.partition"
                     class="input font-mono"
@@ -435,12 +337,11 @@
                     :placeholder="replayRow.partition || 'Where it failed'"
                   />
                   <span v-if="replayResult?.field === 'partition'" class="dlq-invalid">{{ replayResult.detail }}</span>
-                  <span v-else class="dlq-help">
-                    Blank keeps <span class="font-mono">{{ replayRow.partition || 'the partition it failed on' }}</span>.
-                    Fill either field and the request names the whole pair. Broker-direct, a missing half
-                    would quietly fall back to this row's own value; a cloud proxy refuses a half-named
-                    destination instead, since it cannot see the half it was not given.
-                  </span>
+                  <span
+                    v-else
+                    class="dlq-help"
+                    title="Fill either field and the request names the whole pair."
+                  >Blank keeps <span class="font-mono">{{ replayRow.partition || 'the partition it failed on' }}</span>.</span>
                 </label>
               </div>
             </template>
@@ -452,11 +353,10 @@
             </template>
             <template v-else>
               <button type="button" class="btn btn-ghost" :disabled="replaying" @click="closeReplay">Cancel</button>
-              <!-- Disabled in flight, and the row stays in the table behind it
-                   until the verdict arrives: the broker's answer is what removes
-                   a row here, never the click that asked for it. -->
+              <!-- Disabled in flight; the broker's answer is what removes a
+                   row here, never the click that asked for it. -->
               <button type="submit" class="btn btn-primary" :disabled="replaying || !replayTarget.id">
-                {{ replaying ? 'Replaying…' : (replayTarget.moved ? 'Move and replay' : 'Replay message') }}
+                {{ replaying ? 'Replaying…' : (replayTarget.moved ? 'Move and replay' : 'Replay') }}
               </button>
             </template>
           </div>
@@ -475,17 +375,14 @@
       <template #actions>
         <button
           class="btn btn-ghost"
-          title="Copy the failure, routing details, timestamps, and payload as Markdown"
+          title="Copy the failure, routing, times and payload as Markdown"
           @click="copyMarkdown"
-        >
-          {{ markdownCopied ? 'Markdown copied!' : 'Copy as Markdown' }}
-        </button>
+        >{{ markdownCopied ? 'Copied' : 'Copy as Markdown' }}</button>
       </template>
 
       <template v-if="selectedMsg">
-        <!-- What it is, in words — and never red: a dead letter is a message
-             the broker has already given up on and parked, history rather
-             than something failing now. The retry count is how hard it tried. -->
+        <!-- In words, never red: a dead letter is a message the broker has
+             already given up on and parked, history rather than a failure now. -->
         <div class="detail-status-row">
           <span class="detail-status">Dead-lettered</span>
           <span v-if="selectedMsg.retryCount" class="detail-note">· after {{ selectedMsg.retryCount }} {{ selectedMsg.retryCount === 1 ? 'retry' : 'retries' }}</span>
@@ -499,8 +396,8 @@
           <DetailField label="Consumer group" :value="selectedMsg.consumerGroup" mono tone="accent" />
 
           <!-- The broker does not return a dead letter's enqueue time: it
-               echoes failed_at as createdAt. Showing the same instant twice
-               under two labels invents a fact. -->
+               echoes failed_at as createdAt, and the same instant twice under
+               two labels would invent a fact. -->
           <DetailField
             v-if="hasDistinctCreatedAt(selectedMsg)"
             label="Created"
@@ -512,9 +409,7 @@
             :value="formatTimestamp(selectedMsg.failedAt)"
             :title="formatTimestampUtc(selectedMsg.failedAt)"
           >
-            <span v-if="!hasDistinctCreatedAt(selectedMsg)" class="detail-note">
-              Enqueue time is not recorded for this entry.
-            </span>
+            <span v-if="!hasDistinctCreatedAt(selectedMsg)" class="detail-note">Enqueue time not recorded.</span>
           </DetailField>
         </div>
 
@@ -529,39 +424,29 @@
           tone="high"
         />
 
-        <!-- Actions. Replay re-pushes this snapshot on the broker's move
-             primitive — lock, push, delete, one transaction — so the button can
-             state what happened to the row instead of guessing; purge is the
-             end of the line for a message nobody will process. -->
+        <!-- Replay moves this snapshot on the broker's move primitive (lock,
+             push, delete, one transaction); purge is the end of the line. -->
         <div v-if="canAdmin" class="detail-actions">
           <div class="detail-buttons">
-          <button
-            class="btn"
-            :disabled="!selectedMsg.id || isReplaying(selectedMsg) || replayUnavailable"
-            :title="replayUnavailable
-              ? 'This cell does not serve the replay route — the broker predates it, or the proxy in front does not classify it'
-              : (selectedMsg.id
-                ? null
-                : 'This broker’s dead-letter list carries no row id, so a replay cannot address this row')"
-            @click="openReplay(selectedMsg)"
-          >
-            {{ isReplaying(selectedMsg) ? 'Replaying…' : 'Replay message' }}
-          </button>
-          <button
-            class="btn btn-danger"
-            :disabled="isDeleting(selectedMsg)"
-            @click="purge(selectedMsg)"
-          >
-            {{ isDeleting(selectedMsg) ? 'Purging…' : 'Purge message' }}
-          </button>
+            <button
+              class="btn"
+              :disabled="!selectedMsg.id || isReplaying(selectedMsg) || replayUnavailable"
+              :title="replayUnavailable
+                ? 'This cell does not serve the replay route: the broker predates it, or the proxy in front does not classify it'
+                : (selectedMsg.id
+                  ? null
+                  : 'This broker’s dead-letter list carries no row id, so a replay cannot address this row')"
+              @click="openReplay(selectedMsg)"
+            >{{ isReplaying(selectedMsg) ? 'Replaying…' : 'Replay' }}</button>
+            <button
+              class="btn btn-danger"
+              :disabled="isDeleting(selectedMsg)"
+              @click="askPurge(selectedMsg)"
+            >{{ isDeleting(selectedMsg) ? 'Purging…' : 'Purge' }}</button>
           </div>
-          <p v-if="rowError(selectedMsg)" class="detail-note is-bad">
-            {{ rowError(selectedMsg) }}
-          </p>
+          <p v-if="rowError(selectedMsg)" class="detail-note is-bad">{{ rowError(selectedMsg) }}</p>
         </div>
-        <p v-else class="detail-actions detail-note">
-          Replaying and purging need the admin role on this cluster.
-        </p>
+        <p v-else class="detail-actions detail-note">Replaying and purging need the admin role on this cluster.</p>
       </template>
 
       <template #secondary>
@@ -569,24 +454,22 @@
           <div class="detail-section-header">
             <label class="label-xs">Payload</label>
             <button class="btn btn-ghost detail-copy-button" @click="copyPayload">
-              {{ copied ? 'Copied!' : (encryptedPayload ? 'Copy envelope' : 'Copy') }}
+              {{ copied ? 'Copied' : (encryptedPayload ? 'Copy envelope' : 'Copy') }}
             </button>
           </div>
-          <!-- The DLQ read path does no decryption: what follows is the stored
-               envelope, not the message. Saying "payload" over ciphertext is
-               how a debugger loses an hour. -->
-          <!-- A fact about the payload, not a fault: information. -->
-          <div v-if="encryptedPayload" class="status-banner banner-info view-banner">
-            <span>
-              <strong>Encrypted envelope</strong> · this queue encrypts payloads and the DLQ endpoint
-              returns them as stored. This is ciphertext, not the message body.
-            </span>
-          </div>
+          <!-- The dead-letter read path does no decryption: what follows is the
+               stored envelope, not the message. -->
+          <p
+            v-if="encryptedPayload"
+            class="dlq-quiet"
+            title="This queue encrypts payloads, and the dead-letter endpoint returns them as stored. This is ciphertext, not the message body."
+          >Encrypted: this is the stored envelope, not the message.</p>
           <JsonViewer :value="selectedMsg.data" />
         </div>
       </template>
     </DetailDrawer>
   </div>
+  </QueuesLayout>
 </template>
 
 <script setup>
@@ -606,12 +489,15 @@ import { useToast } from '@/composables/useToast'
 import { currentEpoch, useIdentity } from '@/stores/identity'
 import { routeSupport } from '@/stores/routeSupport'
 import Autocomplete from '@/components/Autocomplete.vue'
-import PageHead from '@/components/PageHead.vue'
+import QueuesLayout from '@/components/QueuesLayout.vue'
 import PageTools from '@/components/PageTools.vue'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
+import Icon from '@/components/Icon.vue'
+import UiSelect from '@/components/UiSelect.vue'
+import { useGroupsStore } from '@/stores/groupsStore'
 
 const { can, epoch, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 const { notifySuccess, notifyInfo, notifyWarn, notifyError } = useToast()
@@ -626,6 +512,7 @@ const TAIL_SEGMENT = '__tail__'
 const NO_ERROR_TEXT = '(no error text recorded)'
 
 const errorKey = (msg) => msg.errorMessage || NO_ERROR_TEXT
+const PAGE_SIZES = [25, 50, 100, 200]
 
 const selectedKey = ref(null)
 const copied = ref(false)
@@ -750,7 +637,6 @@ const {
 const {
   data: queuesData,
   loading: queuesLoading,
-  error: queuesError,
   refresh: refreshQueues,
 } = useApi((config) => queuesApi.list(undefined, config), { immediate: false })
 
@@ -771,13 +657,6 @@ const messages = computed(() => (
 ))
 const queueOptions = computed(
   () => (queuesData.value?.queues || []).map(q => q.name).filter(Boolean).sort()
-)
-// The picker suggests from /resources/queues, but the filter is applied by the
-// DLQ endpoint. When the two disagree, say which one is being trusted instead
-// of leaving a name in the box that looks unrecognised.
-const queuesUnavailable = computed(() => Boolean(queuesError.value) && queueOptions.value.length === 0)
-const unlistedQueue = computed(
-  () => Boolean(filterQueue.value) && queueOptions.value.length > 0 && !queueOptions.value.includes(filterQueue.value)
 )
 // Resolved against the whole page, not the filtered view: narrowing the table
 // must not empty a drawer the user already has open. By row identity, never by
@@ -875,11 +754,20 @@ const toggleErrorFilter = (error) => {
   errorFilter.value = errorFilter.value === error ? null : error
 }
 
-const groupSuggestions = computed(
-  () => [...new Set(pageMessages.value.map(m => m.consumerGroup).filter(Boolean))].sort()
-)
+// The groups to offer: the picked queue's from the app's one group listing
+// (every queue's when none is picked), and any this page shows.
+const groupsStore = useGroupsStore()
+const groupSuggestions = computed(() => {
+  const queue = filterQueue.value.trim()
+  const known = (groupsStore.groups.value || [])
+    .filter(g => g?.name && (!queue || g.queueName === queue))
+    .map(g => g.name)
+  return [...new Set([...known, ...pageMessages.value.map(m => m.consumerGroup)].filter(Boolean))].sort()
+})
 
 const hasFilters = computed(() => Boolean(filterQueue.value || filterGroup.value || errorFilter.value))
+// The Queue column names what the list beside has not picked.
+const columns = computed(() => 5 + (filterQueue.value ? 0 : 1) + (canAdmin.value ? 1 : 0))
 // Against the page, not the filtered view: an error filter narrows what is on
 // screen, it does not tell us the broker has no further page.
 const canPageForward = computed(
@@ -900,11 +788,6 @@ const isEncryptedEnvelope = (data) =>
 
 const hasDistinctCreatedAt = (msg) =>
   Boolean(msg.createdAt) && msg.createdAt !== msg.failedAt
-
-const truncateError = (err) => {
-  if (!err || err === '-') return '-'
-  return err.length > 50 ? err.slice(0, 50) + '…' : err
-}
 
 const selectMessage = (msg) => {
   const key = rowKey(msg)
@@ -978,10 +861,19 @@ const nextPage = () => {
   fetchMessages()
 }
 
+// The confirm is the page's own modal, not the browser's: the row (or the
+// drawer) asks, the modal's button purges.
+const purgeTarget = ref(null)
+const askPurge = (msg) => { if (canAdmin.value && msg) purgeTarget.value = msg }
+const confirmPurge = () => {
+  const msg = purgeTarget.value
+  purgeTarget.value = null
+  if (msg) purge(msg)
+}
+
 const purge = async (msg) => {
   if (!canAdmin.value) return
   const key = msgKey(msg)
-  if (!confirm(`Purge message ${String(key).slice(0, 16)}…?\n\nThis cannot be undone.`)) return
   deleting.value.add(key)
   rowErrors.value.delete(key)
   try {
@@ -1164,6 +1056,8 @@ useRefresh(fetchMessages, { auto: true })
 
 watch([filterQueue, pageSize, filterGroup, page], (values, previous) => {
   if (restoringRoute.value) fetchMessages()
+  // A new group is an operator asking again: reload re-probes the replay route.
+  else if (values[2] !== previous[2]) reload()
   else if (values[0] !== previous[0] || values[1] !== previous[1]) {
     page.value = 1
     fetchMessages()
@@ -1177,144 +1071,134 @@ fetchMessages()
 </script>
 
 <style scoped>
-/* Queue names here are dotted and long (`connect.newsletter.sendgrid`), so the
-   picker gets more room than the 220px the shared filter column allows. */
+.dlq { display: flex; flex-direction: column; gap: 16px; }
+.dlq > .page-tools, .dlq > .view-banner { margin-bottom: 0; }
+/* Group names are long and dotted: the picker gets room. */
+.dlq-group :deep(.ac) { width: 200px; }
+/* The tools row's field drops the input's box; the picker keeps room for its
+   chevron and clear button, and the whole width. */
+.dlq-group :deep(.ac-input) { width: 100%; padding-right: 28px; }
 
-.dlq-bulk-note { margin-top: 12px; color: var(--text-low); font-size: 12px; }
-
-/* --- Failure breakdown -----------------------------------------------------
-   The page's summary, so it is sized like a strip and not like a panel: a 6px
-   distribution bar over two columns of rows, roughly a third of the height the
-   three stat tiles and the bottom histogram used to cost between them. */
+/* --- Failure breakdown: a strip, then two columns of filters ---------------- */
 .dlq-breakdown { display: flex; flex-direction: column; gap: 12px; }
-
 .dlq-dist { display: flex; align-items: stretch; gap: 2px; height: 6px; }
-/* The distribution of a failure list across its signatures: every segment is
-   a failure, so the bar is drawn in ink and the SELECTED segment is the only
-   one that stands out. Painting all of them red made the widest segment and
-   the narrowest one equally urgent. */
+/* Every segment is a failure, so the bar is ink; the SELECTED one stands out. */
 .dlq-dist-seg {
   height: 100%; min-width: 3px; padding: 0; border: none; cursor: pointer;
   border-radius: 2px; background: var(--text-low);
   transition: background .12s var(--ease), transform .12s var(--ease);
 }
 .dlq-dist-seg:hover { background: var(--text-mid); transform: scaleY(1.5); }
-.dlq-dist-seg-on { background: var(--text-hi); transform: scaleY(1.5); box-shadow: 0 0 0 1px var(--bd-hi); }
+.dlq-dist-seg-on { background: var(--text-hi); transform: scaleY(1.5); }
 
-.dlq-err-grid {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 18px;
-}
+.dlq-err-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 16px; }
 @media (max-width: 900px) { .dlq-err-grid { grid-template-columns: minmax(0, 1fr); } }
-
 .dlq-err {
-  display: flex; align-items: baseline; gap: 8px; width: 100%;
-  padding: 3px 7px; border-radius: var(--r-chip);
-  border: 1px solid transparent; background: none; cursor: pointer;
-  text-align: left; transition: background .12s var(--ease), border-color .12s var(--ease);
+  display: flex; align-items: baseline; gap: 8px; width: 100%; min-height: 28px;
+  padding: 4px 8px; border-radius: var(--r-control);
+  border: 1px solid transparent; background: none; cursor: pointer; text-align: left;
+  transition: background .12s var(--ease);
 }
 .dlq-err:hover { background: var(--ink-3); }
-/* Selected = selected, the app's own selected surface. It used to be a red
-   wash, which read as "this signature is the dangerous one". */
-.dlq-err-on { background: var(--ink-4); border-color: var(--bd-hi); }
-.dlq-err-count {
-  min-width: 34px; text-align: right; flex-shrink: 0;
-  font-size: 13px; color: var(--text-hi);
-}
+.dlq-err-on, .dlq-err-on:hover { background: var(--selected); }
+.dlq-err-count { min-width: 32px; text-align: right; flex-shrink: 0; font-size: 13px; color: var(--text-hi); }
 .dlq-err-text {
   flex: 1; min-width: 0;
-  font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-hi);
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-hi);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-
-/* Row chrome. `cursor` and the selection wash used to be inline styles on the
-   <tr>; the wash is now the neutral selected surface, and the leading dot is
-   ink instead of a pulsing red one. */
-.dlq-row { cursor: pointer; }
-.dlq-row-on { background: var(--ink-4); }
-.dlq-row-dot {
-  width: 5px; height: 5px; border-radius: var(--r-pill);
-  background: var(--text-faint); flex-shrink: 0;
-}
-/* The error is the column the page exists for: strongest ink, no hue. */
-.dlq-err-cell { font-size: 12px; color: var(--text-hi); }
-
 .dlq-err-more { display: flex; }
 .dlq-link {
   padding: 0; border: none; background: none; cursor: pointer;
-  font-size: 11px; color: var(--text-low); transition: color .12s var(--ease);
+  font-size: 12px; color: var(--text-low); transition: color .12s var(--ease);
 }
 .dlq-link:hover { color: var(--text-hi); }
 
-/* The active error can be a whole sentence: it truncates rather than pushing
-   the freshness stamp off the header. */
-.dlq-filter-chip { cursor: pointer; max-width: 340px; }
+/* A narrowed table says so in its header; the error can be a sentence. */
+.dlq-filter-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: min(340px, 100%); min-width: 0;
+  padding: 1px 6px 1px 8px; border: 1px solid var(--bd-hi); border-radius: var(--r-chip);
+  background: transparent; color: var(--text-mid); font-size: 12px; cursor: pointer;
+}
+.dlq-filter-chip:hover { color: var(--text-hi); }
 .dlq-filter-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* --- Replay ----------------------------------------------------------------
-   Matched to the Purge button beside it — same padding, same type size — so the
-   pair reads as one control group and not as a primary next to an afterthought.
-   Ghost, because the destructive one is the only red on the row. */
-.dlq-row-btn { padding: 4px 10px; font-size: 11px; margin-right: 6px; }
+/* --- The table ------------------------------------------------------------- */
+.dlq-scroll { overflow-x: auto; }
+.dlq-table { min-width: 760px; }
+.dlq-table th, .dlq-table td { white-space: nowrap; }
+.dlq-table td { height: 40px; font-size: 13px; }
+.dlq-table .r { text-align: right; }
+.dlq-row { cursor: pointer; }
+.dlq-row:focus-visible { outline-offset: -2px; }
+.dlq-row.dlq-row-on td { background: var(--selected); }
+/* Long ids, names and errors end in an ellipsis; the whole is the tooltip. */
+.dlq-cut { display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.dlq-txn { max-width: 160px; font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); }
+.dlq-queue { max-width: 200px; font-weight: 500; color: var(--text-hi); }
+.dlq-group-name { max-width: 180px; color: var(--text-mid); }
+/* The error is the column the page exists for: strongest ink, no hue. */
+.dlq-err-cell { max-width: 340px; font-family: var(--font-mono); font-size: 12px; color: var(--text-hi); }
+.dlq-num { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.dlq-when { font-size: 12px; color: var(--text-mid); font-variant-numeric: tabular-nums; }
+.dlq-actions { width: 1%; }
+.dlq-row-btn { padding: 3px 8px; font-size: 12px; }
+.dlq-row-btn + .dlq-row-btn { margin-left: 4px; }
+.dlq-row-err { margin-top: 4px; max-width: 260px; margin-left: auto; white-space: normal; text-align: right; font-size: 12px; color: var(--ember-400); }
 
-/* One of the two entry points is a button INSIDE the DLQ drawer, and the drawer
-   is `z-index: 51` while the shared `.modal-backdrop` is 50 — the confirm would
-   open behind the panel that raised it. 55 clears the drawer and still passes
-   under the Autocomplete's teleported menu (60), which has to open inside this
-   form. */
+/* --- Drawer and modals ------------------------------------------------------ */
+.dlq-quiet { margin: 0 0 8px; font-size: 12px; color: var(--text-low); }
+.dlq-form { display: flex; flex-direction: column; gap: 8px; }
+.dlq-form .panel-err { margin: 0 0 4px; }
+.dlq-lead { margin: 0; font-size: 13px; color: var(--text-hi); overflow-wrap: anywhere; }
+.dlq-lead strong { font-weight: 600; }
+.dlq-help { margin: 0; font-size: 12px; color: var(--text-low); }
+.dlq-purge-id { max-width: 240px; }
+
+/* The replay confirm opens from the drawer (z 51) as well as from a row, so it
+   sits above the drawer and under the Autocomplete's menu (60). */
 .dlq-replay-over { z-index: 55; }
-/* Wider than the 480px shell: the destination is a dotted queue name plus a
-   partition plus a `dlq:<uuid>` transaction id, and all three are read here. */
+/* Wider than the 480px shell: a dotted queue, a partition and a dlq:<uuid>
+   transaction id are all read here. */
 .dlq-replay-card { max-width: 560px; }
-
-.dlq-replay-body { display: grid; gap: 14px; }
-.dlq-replay-lead { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-mid); }
+.dlq-replay-body { display: grid; gap: 16px; }
+.dlq-replay-lead { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-mid); }
 .dlq-replay-lead strong { color: var(--text-hi); font-weight: 600; overflow-wrap: anywhere; }
 .dlq-replay-sep { padding: 0 2px; color: var(--text-low); }
-
-/* The three (sometimes four) facts a replay cannot be undone without. A list,
-   not a paragraph: each one is a separate consequence and they are checked
-   individually before the button is pressed. */
 .dlq-replay-facts {
-  margin: 0; padding: 10px 12px 10px 26px;
-  display: grid; gap: 6px;
-  font-size: 11.5px; line-height: 1.45; color: var(--text-mid);
-  border: 1px solid var(--bd); border-radius: var(--r-control);
-  background: var(--ink-3);
+  margin: 0; padding: 8px 12px 8px 28px; display: grid; gap: 4px;
+  font-size: 12px; line-height: 1.5; color: var(--text-mid);
+  border: 1px solid var(--bd); border-radius: var(--r-control); background: var(--ink-3);
 }
 .dlq-replay-facts strong { color: var(--text-hi); font-weight: 500; overflow-wrap: anywhere; }
-
 .dlq-toggle {
   display: flex; align-items: center; gap: 8px;
   padding: 0; border: none; background: none; cursor: pointer;
-  font-size: 12px; font-weight: 600; color: var(--text-mid);
+  font-size: 12px; font-weight: 500; color: var(--text-mid);
 }
 .dlq-toggle:hover { color: var(--text-hi); }
-.dlq-toggle-chev { display: inline-flex; width: 12px; height: 12px; transition: transform .15s var(--ease); }
-.dlq-toggle-chev svg { width: 12px; height: 12px; }
+.dlq-toggle-chev { transition: transform .15s var(--ease); }
 .dlq-toggle-open { transform: rotate(90deg); }
-.dlq-toggle-badge { font-weight: 500; }
-
-.dlq-replay-advanced { display: grid; gap: 14px; }
+.dlq-toggle-badge { font-weight: 400; }
+.dlq-replay-advanced { display: grid; gap: 16px; }
 .dlq-replay-field { display: grid; gap: 6px; }
-.dlq-help { color: var(--text-low); font-size: 11.5px; line-height: 1.45; }
+.dlq-field-label { font-size: 12px; color: var(--text-mid); }
+.dlq-invalid { color: var(--ember-400); font-size: 12px; line-height: 1.45; }
 .dlq-help .font-mono { color: var(--text-mid); overflow-wrap: anywhere; }
-.dlq-invalid { color: var(--ember-400); font-size: 11.5px; line-height: 1.45; }
 
-/* The verdict block. `.panel-err` is single-toned and `.status-banner` has no
-   success variant, so the four outcomes of a replay get one block with four
-   tones, built from the same tokens so both schemes follow. Info is the ice
-   hue: a duplicate wrote nothing, which is neither a success nor a warning. */
-.dlq-verdict {
-  padding: 10px 12px;
-  border: 1px solid; border-radius: var(--r-card);
-  font-size: 12.5px; line-height: 1.45;
-}
+/* The four outcomes of a replay: neutral when it worked or wrote nothing,
+   attention when it is half-known, failure when it did not happen. */
+.dlq-verdict { padding: 12px; border: 1px solid var(--bd); border-radius: var(--r-card); font-size: 13px; line-height: 1.45; color: var(--text-hi); }
 .dlq-verdict strong { display: block; font-weight: 600; margin-bottom: 4px; }
-.dlq-verdict p { margin: 0; color: var(--text-mid); }
-.dlq-verdict-success { border-color: var(--ok-bd); background: var(--ok-glow); color: var(--ok-500); }
-.dlq-verdict-info { border-color: var(--ice-bd); background: var(--ice-glow); color: var(--ice-400); }
+.dlq-verdict p { margin: 0; font-size: 12px; color: var(--text-mid); }
 .dlq-verdict-warning { border-color: var(--warn-bd); background: var(--warn-glow); color: var(--warn-400); }
 .dlq-verdict-error { border-color: var(--ember-bd); background: var(--ember-glow); color: var(--ember-400); }
-.dlq-verdict-link { margin-top: 10px; max-width: 100%; overflow-wrap: anywhere; }
+.dlq-verdict-link { margin-top: 12px; max-width: 100%; overflow-wrap: anywhere; }
 
+@media (max-width: 640px) {
+  .dlq-group { flex: 1 1 100%; }
+  .dlq-group :deep(.ac) { flex: 1; width: auto; }
+}
+.dlq-row-purge { color: var(--text-mid); }
+.dlq-row-purge:hover:not(:disabled) { color: var(--ember-400); background: var(--ember-glow); }
 </style>

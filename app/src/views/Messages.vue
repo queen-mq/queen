@@ -1,8 +1,45 @@
 <template>
-  <div class="view-container">
+  <!-- A tab of the Queues section: the queue is picked in the list beside
+       (?queue=), every queue when none is. -->
+  <QueuesLayout>
+    <!-- `can('produce')` mirrors the proxy's RouteClass::Produce for
+         /api/v1/push, so the button is absent rather than enabled-and-403. -->
+    <template v-if="canProduce" #actions>
+      <button class="btn btn-primary" @click="openPush">Push message</button>
+    </template>
+  <div class="view-container msg">
 
-    <PageHead title="Messages">
-      <template #range>
+    <!-- The list failed: the table below is stale (or empty), and says so. -->
+    <div v-if="listError" class="status-banner banner-bad view-banner">
+      <span>
+        <strong>Could not load messages</strong> · {{ describeApiError(listError) }}<template v-if="messages.length"> · showing the last rows{{ lastUpdatedText ? ` (${lastUpdatedText})` : '' }}</template>
+      </span>
+    </div>
+
+    <!-- The broker answered page N with page N-1's rows: paging further would
+         renumber the same messages. -->
+    <div v-if="paginationStalled" class="status-banner banner-warn view-banner">
+      <span><strong>Paging is not advancing</strong> · this broker returned the same rows for page {{ currentPage }}. Narrow the window or the filters.</span>
+    </div>
+
+    <PageTools>
+      <!-- Client-side: it narrows the rows already on this page; it is not a
+           server-side transaction lookup. -->
+      <input
+        v-model="searchQuery"
+        type="search"
+        class="input msg-search"
+        placeholder="Search this page"
+        aria-label="Search the loaded rows by transaction or partition id"
+        title="Narrows the rows already loaded on this page. It is not a server-side lookup."
+      />
+      <label class="tool-field">
+        <span class="tool-label">Partition</span>
+        <input v-model="filterPartition" type="text" placeholder="All" class="input msg-partition-input" />
+      </label>
+      <UiSelect v-model="filterStatus" label="Status" :options="STATUS_OPTIONS" />
+      <button v-if="hasActiveFilters" class="btn btn-ghost" @click="clearFilters">Clear</button>
+      <template #view>
         <div class="seg" role="group" aria-label="Created in">
           <button
             v-for="r in RANGE_PRESETS"
@@ -11,90 +48,15 @@
             :aria-pressed="rangePreset === r.value ? 'true' : 'false'"
             @click="pickRange(r)"
           >{{ r.value }}</button>
-          <button :class="{ on: rangePreset === 'custom' }" @click="rangePreset = 'custom'">Custom</button>
+          <button :class="{ on: rangePreset === 'custom' }" :aria-pressed="rangePreset === 'custom' ? 'true' : 'false'" @click="rangePreset = 'custom'">Custom</button>
         </div>
-      </template>
-      <!-- `can('produce')` mirrors the proxy's RouteClass::Produce for
-           /api/v1/push, so the button is absent rather than enabled-and-403. -->
-      <template v-if="canProduce" #actions>
-        <button class="btn" @click="openPush">Push message</button>
-      </template>
-    </PageHead>
-
-    <!-- The list failed. Whatever is in the table below is stale, and saying so
-         is the whole point — an empty table would read as "no messages". -->
-    <div v-if="listError" class="status-banner banner-bad view-banner">
-      <span>
-        <strong>Could not load messages</strong> · {{ describeApiError(listError) }}<template v-if="messages.length">
-          · showing the last rows that loaded{{ lastUpdatedText ? ` (${lastUpdatedText})` : '' }}</template>
-      </span>
-    </div>
-
-    <!-- The broker answered page N with page N-1's rows: paging further would
-         renumber the same messages. -->
-    <div v-if="paginationStalled" class="status-banner banner-warn view-banner">
-      <span>
-        <strong>Pagination is not advancing</strong> ·
-        this broker returned the same rows for page {{ currentPage }}. Narrow the time range or the filters instead.
-      </span>
-    </div>
-
-    <PageTools>
-      <!-- Client-side only: this narrows the rows already on the page, it is
-           not a server-side transaction lookup, and the placeholder says so. -->
-      <div class="filter-search" title="Filters the rows already on this page. It is not a server-side transaction lookup.">
-        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-        </svg>
-        <input v-model="searchQuery" type="text" placeholder="Search loaded rows" class="input" />
-      </div>
-      <!-- Free entry allowed: `queue` is a server-side parameter here, and a
-           deep link can arrive with a queue this cluster's list does not
-           carry. -->
-      <label class="tool-field" for="msg-queue-filter">
-        <span class="tool-label">Queue</span>
-        <Autocomplete
-          id="msg-queue-filter"
-          v-model="filterQueue"
-          :options="queueNames"
-          :loading="queuesLoading"
-          label="Queue"
-          placeholder="All"
-          allow-custom
-        />
-      </label>
-      <label class="tool-field">
-        <span class="tool-label">Partition</span>
-        <input v-model="filterPartition" type="text" placeholder="All" class="input" />
-      </label>
-      <label class="tool-field">
-        <span class="tool-label">Status</span>
-        <select v-model="filterStatus" class="input">
-          <option value="">All</option>
-          <option value="pending">Pending</option>
-          <option value="processing">Processing</option>
-          <option value="completed">Completed</option>
-          <option value="dead_letter">Dead letter</option>
-        </select>
-      </label>
-      <button v-if="hasActiveFilters" class="btn btn-ghost" @click="clearFilters">Clear</button>
-      <template #view>
-        <label class="tool-field">
-          <span class="tool-label">Show</span>
-          <select v-model="limit" class="input" @change="applyFilters">
-            <option :value="25">25</option>
-            <option :value="50">50</option>
-            <option :value="100">100</option>
-            <option :value="200">200</option>
-            <option :value="500">500</option>
-          </select>
-        </label>
+        <UiSelect v-model="limit" label="Show" :options="LIMITS" @change="applyFilters" />
       </template>
     </PageTools>
 
-    <!-- A window of your own: the one filter that waits for Apply, because
-         a half-typed date must not re-scope the list. -->
-    <div v-if="rangePreset === 'custom'" class="page-tools">
+    <!-- A window of your own: the one filter that waits for Apply, because a
+         half-typed date must not re-scope the list. -->
+    <div v-if="rangePreset === 'custom'" class="page-tools msg-custom">
       <label class="tool-field">
         <span class="tool-label">From</span>
         <input v-model="filterFrom" type="datetime-local" step="any" class="input" :title="formatTimestampUtc(filterFrom)" />
@@ -103,116 +65,82 @@
         <span class="tool-label">To</span>
         <input v-model="filterTo" type="datetime-local" step="any" class="input" :title="formatTimestampUtc(filterTo)" />
       </label>
-      <button class="btn btn-primary" @click="applyFilters">Apply</button>
+      <button class="btn" @click="applyFilters">Apply</button>
     </div>
 
-    <!-- Bus mode. Driven by what the rows actually report as well as by the
-         top-level mode: a log-engine queue reports its groups per message. -->
-    <!-- Messages list -->
     <div class="card">
       <div class="card-header">
         <h3>Messages</h3>
-        <span class="card-sub">{{ formatNumber(messages.length) }} loaded · page {{ currentPage }}<template v-if="busGroups > 0"> · bus mode, {{ busGroups }} consumer {{ busGroups === 1 ? 'group' : 'groups' }}</template></span>
+        <span class="card-sub tabular-nums">{{ formatNumber(messages.length) }} on page {{ currentPage }}<template v-if="busGroups > 0"> · read by {{ busGroups }} consumer {{ busGroups === 1 ? 'group' : 'groups' }}</template></span>
         <span class="muted">{{ stamp(listPanel) }}</span>
       </div>
 
-      <div style="overflow-x:auto;">
-        <table class="t">
+      <div class="msg-scroll">
+        <table class="t msg-table">
           <thead>
             <tr>
-              <th>Queue</th>
+              <th v-if="!filterQueue">Queue</th>
               <th>Partition</th>
               <th>Transaction ID</th>
-              <!-- GET /api/v1/messages always returns createdAt descending;
-                   it does not accept a sort field or direction. -->
-              <th aria-sort="descending" class="msg-created-heading">
-                <span>Created <span aria-hidden="true">↓</span></span>
-                <span class="msg-sort-hint">Newest first</span>
-              </th>
-              <th style="text-align:right;">Status</th>
+              <!-- GET /api/v1/messages always answers newest first; it takes
+                   no sort field or direction. -->
+              <th class="r" aria-sort="descending" title="Newest first">Created</th>
+              <th class="r">Status</th>
             </tr>
           </thead>
           <tbody>
             <template v-if="loading && !messages.length">
-              <tr v-for="i in 10" :key="i">
-                <td><div class="skeleton" style="height:16px; width:96px;" /></td>
-                <td>
-                  <div class="skeleton" style="height:16px; width:96px;" />
-                  <div class="skeleton" style="height:12px; width:192px; margin-top:4px;" />
-                </td>
-                <td><div class="skeleton" style="height:16px; width:160px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:112px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:80px;" /></td>
+              <tr v-for="i in 8" :key="i" aria-hidden="true">
+                <td v-if="!filterQueue"><div class="skeleton" style="height:14px; width:96px;" /></td>
+                <td><div class="skeleton" style="height:14px; width:96px;" /></td>
+                <td><div class="skeleton" style="height:14px; width:200px;" /></td>
+                <td><div class="skeleton" style="height:14px; width:112px; margin-left:auto;" /></td>
+                <td><div class="skeleton" style="height:14px; width:80px; margin-left:auto;" /></td>
               </tr>
             </template>
             <template v-else-if="filteredMessages.length > 0">
               <tr
                 v-for="(message, idx) in filteredMessages"
                 :key="rowKey(message, idx)"
-                :style="isAddressable(message) ? 'cursor:pointer;' : 'cursor:default;'"
+                :class="isAddressable(message) ? 'msg-row' : 'msg-row-dead'"
+                :tabindex="isAddressable(message) ? 0 : undefined"
                 @click="isAddressable(message) && selectMessage(message)"
+                @keydown.enter.prevent="isAddressable(message) && selectMessage(message)"
               >
+                <td v-if="!filterQueue"><span class="msg-cut msg-queue" :title="message.queue">{{ message.queue }}</span></td>
+                <td><span class="msg-cut msg-partition" :title="message.partitionId ? `${message.partition} · partition ID ${message.partitionId}` : message.partition">{{ message.partition }}</span></td>
                 <td>
-                  <div style="font-size:13px; font-weight:500; color:var(--text-hi);">{{ message.queue }}</div>
-                </td>
-                <td class="msg-partition">
-                  <div class="msg-partition-name">{{ message.partition }}</div>
-                  <div class="msg-partition-id font-mono">{{ message.partitionId }}</div>
-                </td>
-                <td>
-                  <!-- The txn id lives inside the segment blob. Once retention
-                       drops the segment the broker cannot resolve it: say so
-                       instead of rendering an empty, clickable cell. -->
-                  <div
-                    v-if="isAddressable(message)"
-                    class="font-mono"
-                    style="font-size:11px; color:var(--text-hi); word-break:break-all; user-select:all;"
-                  >
-                    {{ message.transactionId }}
-                  </div>
+                  <!-- The txn id lives inside the segment blob: once retention
+                       drops the segment the broker cannot resolve it. -->
+                  <span v-if="isAddressable(message)" class="msg-cut msg-txn" :title="message.transactionId">{{ message.transactionId }}</span>
                   <span
                     v-else
-                    class="chip chip-mute"
-                    title="The covering log segment was removed by retention, so the broker can no longer resolve this message's transaction id or payload."
-                  >
-                    payload expired
-                  </span>
+                    class="msg-expired"
+                    title="Retention removed the covering log segment, so the broker can no longer resolve this message's transaction id or payload."
+                  >payload expired</span>
                 </td>
-                <td :title="formatTimestampUtc(message.createdAt)" class="tabular-nums" style="text-align:right; font-size:12px; color:var(--text-mid); white-space:nowrap;">
-                  {{ formatTimestampCompact(message.createdAt) }}
-                </td>
-                <td style="text-align:right; white-space:nowrap;">
+                <td class="r msg-when" :title="formatTimestampUtc(message.createdAt)">{{ formatTimestampCompact(message.createdAt) }}</td>
+                <td class="r msg-state">
                   <MessageStatus :status="message.status" />
-                  <span v-if="message.busStatus && message.busStatus.totalGroups > 0" class="msg-groups">
-                    · {{ message.busStatus.consumedBy }}/{{ message.busStatus.totalGroups }} groups
-                  </span>
+                  <span v-if="message.busStatus && message.busStatus.totalGroups > 0" class="msg-groups" title="Consumer groups that have consumed it">· {{ message.busStatus.consumedBy }}/{{ message.busStatus.totalGroups }}</span>
                 </td>
               </tr>
             </template>
-            <!-- Never an idle empty state on a failure: that is a load error
-                 wearing "no messages" as a disguise. -->
+            <!-- Never an idle empty state on a failure. -->
             <tr v-else-if="listError">
-              <td colspan="5">
+              <td :colspan="columns">
                 <div class="empty-state empty-state-failed">
-                  <h3>{{ describeApiError(listError) }}</h3>
-                  <p>Nothing loaded — this is a failure, not an empty queue.</p>
+                  <h3>Cannot load messages</h3>
+                  <button class="btn btn-ghost" @click="fetchMessages">Retry</button>
                 </div>
               </td>
             </tr>
             <tr v-else>
-              <td colspan="5">
+              <td :colspan="columns">
                 <div class="empty-state">
-                  <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
-                  </svg>
-                  <template v-if="searchQuery && messages.length">
-                    <h3>No row matches this filter</h3>
-                    <p>No loaded row matches “{{ searchQuery }}” — the filter only searches this page.</p>
-                  </template>
-                  <template v-else>
-                    <h3>No messages found</h3>
-                    <p>Try a wider time range, or fewer filters.</p>
-                  </template>
+                  <Icon name="message-square-text" class="empty-state-icon" :size="28" />
+                  <h3 v-if="searchQuery && messages.length">No row on this page matches</h3>
+                  <h3 v-else>{{ hasActiveFilters ? 'No message matches' : 'No messages in this window' }}</h3>
                 </div>
               </td>
             </tr>
@@ -220,8 +148,8 @@
         </table>
       </div>
 
-      <!-- Pagination. Not drawn under an empty first page or under a failure:
-           Previous/Next below "no messages" offer travel that goes nowhere. -->
+      <!-- Not drawn under an empty first page or a failure: Previous and Next
+           there offer travel that goes nowhere. -->
       <div v-if="messages.length || currentPage > 1" class="pager">
         <span class="pager-count">Page <span class="tabular-nums">{{ currentPage }}</span></span>
         <div class="pager-nav">
@@ -239,145 +167,110 @@
       :split="Boolean(messageDetail)"
       @close="closePanel"
     >
-      <div v-if="detailLoading" style="text-align:center; padding:48px 0;">
-        <div class="spinner" style="margin:0 auto 12px;"></div>
-        <p style="color:var(--text-low);">Loading details...</p>
+      <div v-if="detailLoading" class="msg-loading">
+        <div class="spinner" />
+        <p>Loading the message…</p>
       </div>
 
-      <div v-else-if="detailError" class="panel-err">
-        {{ detailError }}
-      </div>
+      <div v-else-if="detailError" class="panel-err">{{ detailError }}</div>
 
       <template v-else-if="messageDetail">
-          <!-- Status and routing match the DLQ drawer: the same facts occupy
-               the same positions and identifiers are directly copyable. -->
-          <div class="detail-status-row">
-            <MessageStatus :status="messageDetail.status" class="detail-status" />
-            <span v-if="messageDetail.retryCount" class="detail-note">· {{ messageDetail.retryCount }} {{ messageDetail.retryCount === 1 ? 'retry' : 'retries' }}</span>
-          </div>
+        <!-- Status and routing match the dead-letter drawer: the same facts in
+             the same places, identifiers copyable. -->
+        <div class="detail-status-row">
+          <MessageStatus :status="messageDetail.status" class="detail-status" />
+          <span v-if="messageDetail.retryCount" class="detail-note">· {{ messageDetail.retryCount }} {{ messageDetail.retryCount === 1 ? 'retry' : 'retries' }}</span>
+        </div>
 
-          <div class="detail-fields">
-            <RouterLink v-if="messageDetail.queue" class="btn btn-ghost" :to="queueLocation(messageDetail.queue, route)">Open queue →</RouterLink>
-            <RouterLink class="btn btn-ghost" :to="{ path: '/traces', query: { ...contextQuery(route), queue: messageDetail.queue, partitionId: selectedMessage.partitionId, transactionId: selectedMessage.transactionId } }">Message traces →</RouterLink>
-            <DetailField label="Queue" :value="messageDetail.queue" tone="high" />
-            <DetailField label="Partition" :value="messageDetail.partition" mono copyable />
-            <DetailField label="Partition ID" :value="messageDetail.partitionId" mono copyable />
-            <DetailField label="Transaction ID" :value="messageDetail.transactionId" mono copyable />
-            <DetailField
-              label="Created"
-              :value="formatTimestamp(messageDetail.createdAt)"
-              :title="formatTimestampUtc(messageDetail.createdAt)"
-            />
-            <DetailField v-if="messageDetail.traceId" label="Trace ID" :value="messageDetail.traceId" mono copyable />
+        <div class="detail-fields">
+          <div class="msg-links">
+            <RouterLink v-if="messageDetail.queue" class="btn btn-ghost" :to="queueLocation(messageDetail.queue, route)">Open queue</RouterLink>
+            <RouterLink class="btn btn-ghost" :to="{ path: '/traces', query: { ...contextQuery(route), queue: messageDetail.queue, partitionId: selectedMessage.partitionId, transactionId: selectedMessage.transactionId } }">Traces</RouterLink>
           </div>
-
+          <DetailField label="Queue" :value="messageDetail.queue" tone="high" />
+          <DetailField label="Partition" :value="messageDetail.partition" mono copyable />
+          <DetailField label="Partition ID" :value="messageDetail.partitionId" mono copyable />
+          <DetailField label="Transaction ID" :value="messageDetail.transactionId" mono copyable />
           <DetailField
-            v-if="messageDetail.errorMessage"
-            class="detail-section"
-            label="Error"
-            :value="messageDetail.errorMessage"
-            mono
-            copyable
-            boxed
-            tone="high"
+            label="Created"
+            :value="formatTimestamp(messageDetail.createdAt)"
+            :title="formatTimestampUtc(messageDetail.createdAt)"
           />
+          <DetailField v-if="messageDetail.traceId" label="Trace ID" :value="messageDetail.traceId" mono copyable />
+        </div>
 
-          <div v-if="messageDetail.queueConfig" class="detail-section">
-            <h4 class="detail-section-title">Queue configuration</h4>
-            <div class="card detail-config-grid">
-              <div><span>Lease time</span><strong>{{ messageDetail.queueConfig.leaseTime }}s</strong></div>
-              <div><span>TTL</span><strong>{{ messageDetail.queueConfig.ttl }}s</strong></div>
-              <div><span>Retry limit</span><strong>{{ messageDetail.queueConfig.retryLimit }}</strong></div>
-              <div><span>Retry delay</span><strong>{{ messageDetail.queueConfig.retryDelay }}ms</strong></div>
-            </div>
+        <DetailField
+          v-if="messageDetail.errorMessage"
+          class="detail-section"
+          label="Error"
+          :value="messageDetail.errorMessage"
+          mono
+          copyable
+          boxed
+          tone="high"
+        />
+
+        <div v-if="messageDetail.queueConfig" class="detail-section">
+          <h4 class="detail-section-title">Queue configuration</h4>
+          <div class="card detail-config-grid">
+            <div><span>Lease time</span><strong>{{ messageDetail.queueConfig.leaseTime }}s</strong></div>
+            <div><span>TTL</span><strong>{{ messageDetail.queueConfig.ttl }}s</strong></div>
+            <div><span>Retry limit</span><strong>{{ messageDetail.queueConfig.retryLimit }}</strong></div>
+            <div><span>Retry delay</span><strong>{{ messageDetail.queueConfig.retryDelay }}ms</strong></div>
           </div>
+        </div>
 
-          <!-- Consumer Groups -->
-          <div v-if="messageDetail.consumerGroups && messageDetail.consumerGroups.length > 0" class="detail-section">
-            <h4 class="detail-section-title">Consumer groups</h4>
-            <ul class="detail-list">
-              <li v-for="group in messageDetail.consumerGroups" :key="group.name">
-                <span>{{ group.name === '__QUEUE_MODE__' ? 'Queue mode' : group.name }}</span>
-                <span :class="group.consumed ? 'detail-note' : 'msg-status is-live'">{{ group.consumed ? 'Consumed' : 'Pending' }}</span>
-              </li>
-            </ul>
-          </div>
+        <div v-if="messageDetail.consumerGroups && messageDetail.consumerGroups.length > 0" class="detail-section">
+          <h4 class="detail-section-title">Consumer groups</h4>
+          <ul class="detail-list">
+            <li v-for="group in messageDetail.consumerGroups" :key="group.name">
+              <span>{{ group.name === '__QUEUE_MODE__' ? 'Queue mode' : group.name }}</span>
+              <span :class="group.consumed ? 'detail-note' : 'msg-pending'">{{ group.consumed ? 'Consumed' : 'Pending' }}</span>
+            </li>
+          </ul>
+        </div>
 
-          <!-- Actions -->
-          <div class="detail-actions">
-            <!-- Sits with the button that produced it: this drawer scrolls, and
-                 a delete failure hoisted to the top would land off screen. -->
-            <div v-if="actionError" class="panel-err">{{ actionError }}</div>
+        <div class="detail-actions">
+          <!-- With the button that produced it: this drawer scrolls, and a
+               failure hoisted to the top would land off screen. -->
+          <div v-if="actionError" class="panel-err">{{ actionError }}</div>
 
-            <p v-if="messageDetail.status === 'completed'" class="detail-note">
-              Consumed and acknowledged.
-            </p>
+          <p v-if="messageDetail.status === 'completed'" class="detail-note">Consumed and acknowledged.</p>
 
-            <!-- Only dead-lettered messages are deletable: a live payload lives
-                 in an immutable log segment, and the broker answers a delete on
-                 one with success:false. Retry / move-to-DLQ are not offered at
-                 all — the broker has no route for either. -->
-            <button
-              v-if="isDeletable && canAdmin"
-              @click="deleteMessage"
-              :disabled="actionLoading"
-              class="btn btn-danger"
-            >
-              {{ actionLoading ? 'Purging…' : 'Purge dead-letter entry' }}
-            </button>
+          <!-- Only dead-lettered messages are deletable: a live payload lives in
+               an immutable log segment, and the broker answers a delete on one
+               with success:false. Retry and move-to-DLQ have no route at all. -->
+          <button
+            v-if="isDeletable && canAdmin"
+            class="btn btn-danger"
+            :disabled="actionLoading"
+            @click="purgeAsk = true"
+          >{{ actionLoading ? 'Purging…' : 'Purge dead-letter entry' }}</button>
+          <p v-else-if="isDeletable" class="detail-note">Purging needs the admin role on this cluster.</p>
+          <p
+            v-else
+            class="detail-note"
+            title="Live messages are stored in immutable log segments. A copy pushed to this queue or another is a new message and leaves this one where it is. Only dead-lettered entries can be purged."
+          >A live message cannot be deleted or retried from here.</p>
 
-            <p v-else-if="isDeletable" style="font-size:12px; color:var(--text-low);">
-              Purging a dead-letter entry needs the admin role on this cluster.
-            </p>
-
-            <!-- What this drawer CANNOT do, and it has to stay true with "Push
-                 a copy" right underneath it: that button opens a form whose
-                 queue field is editable, so "re-routed from here" read as a
-                 flat contradiction of the control below it. A copy is not a
-                 re-route — the original is not moved, not re-delivered and not
-                 removed, wherever the copy is pushed — and saying so is what
-                 keeps the paragraph honest in both directions. -->
-            <p v-else style="font-size:12px; color:var(--text-low);">
-              Live messages are stored in immutable log segments: this one cannot be deleted or
-              retried from here, and nothing here moves it — a copy pushed to this queue or another
-              is a NEW message and leaves this one exactly where it is. Only dead-lettered entries
-              can be purged.
-            </p>
-
-            <!-- A COPY, and the word retry is never used for it. The broker has
-                 no retry for a live message and the one it has for a dead
-                 letter is a different route with different hazards; this button
-                 opens the push form on this message's queue, partition and
-                 payload with an EMPTY transaction id, which is a new message at
-                 the tail of the partition. Needs the payload: a message whose
-                 covering segment retention removed has nothing to copy. -->
-            <template v-if="payloadAvailable && canProduce">
-              <p v-if="payloadIsEnvelope" style="font-size:12px; color:var(--text-low);">
-                This broker cannot decrypt this message — what it returned is the stored
-                <span class="font-mono">{encrypted, iv, authTag}</span> envelope, not the payload.
-                A copy would push the envelope itself, so it is not offered here. Push it from a
-                broker that carries the encryption key.
-              </p>
-              <template v-else>
-                <button class="btn" @click="openPushCopy">
-                  Push a copy
-                </button>
-                <p style="font-size:12px; color:var(--text-low);">
-                  Push a copy: a new transaction id, appended at the tail, not deduplicated against
-                  the original.
-                </p>
-                <!-- On a dead letter the word "replay" is the one an operator
-                     expects, and this button is not it: the DLQ row stays, and
-                     a second click pushes a second copy. The Dead Letter page
-                     has the move primitive that does this exactly once. -->
-                <p v-if="isDeletable" style="font-size:12px; color:var(--text-low);">
-                  This is a copy, not a replay: the dead-letter entry stays where it is, and a
-                  second click pushes a second copy. Use Replay on the Dead Letter page to move
-                  the row instead.
-                </p>
-              </template>
+          <!-- A COPY, never called a retry: the push form opens on this
+               message's queue, partition and payload with an EMPTY transaction
+               id, which is a new message at the tail of the partition. -->
+          <template v-if="payloadAvailable && canProduce">
+            <p
+              v-if="payloadIsEnvelope"
+              class="detail-note"
+              title="This broker returned the stored {encrypted, iv, authTag} envelope, not the payload: a copy would push the envelope itself. Push it from a broker that carries the encryption key."
+            >Encrypted, and this broker cannot decrypt it: no copy.</p>
+            <template v-else>
+              <button class="btn" @click="openPushCopy">Push a copy</button>
+              <p
+                class="detail-note"
+                :title="isDeletable ? 'The dead-letter entry stays where it is, and a second click pushes a second copy. Replay on the Dead letter tab moves the row instead.' : 'A new transaction id, appended at the tail, not deduplicated against the original.'"
+              >{{ isDeletable ? 'A copy, not a replay: the dead-letter entry stays.' : 'A new message, appended at the tail.' }}</p>
             </template>
-          </div>
+          </template>
+        </div>
       </template>
 
       <template #secondary>
@@ -403,28 +296,41 @@
                 v-if="payloadAvailable"
                 class="btn btn-ghost detail-copy-button"
                 @click="copyPayload"
-              >
-                {{ payloadCopied ? 'Copied!' : 'Copy' }}
-              </button>
+              >{{ payloadCopied ? 'Copied' : 'Copy' }}</button>
             </div>
           </div>
-          <!-- payloadAvailable:false means the segment is gone. An empty
-               payload box would read as "this message carried nothing". -->
-          <div v-if="!payloadAvailable" class="card" style="padding:12px 14px;">
-            <p style="font-size:13px; color:var(--text-mid);">
-              Payload unavailable — the covering log segment was removed by retention.
-            </p>
-          </div>
+          <!-- payloadAvailable:false means the segment is gone: an empty box
+               would read as "this message carried nothing". -->
+          <p v-if="!payloadAvailable" class="msg-quiet">Payload unavailable: retention removed its log segment.</p>
           <KafkaRecordView v-else-if="showDecoded" :record="kafkaRecord" />
           <JsonViewer v-else :value="messageDetail.payload" />
         </div>
       </template>
     </DetailDrawer>
 
+    <!-- The purge's confirm, over the drawer that asks for it. -->
+    <Teleport to="body">
+      <div v-if="purgeAsk && messageDetail" class="modal-backdrop msg-over" @click.self="purgeAsk = false">
+        <div class="card modal-card">
+          <div class="card-header">
+            <h3>Purge dead-letter entry</h3>
+            <span class="card-sub font-mono msg-cut msg-purge-id">{{ messageDetail.transactionId }}</span>
+          </div>
+          <div class="card-body msg-form">
+            <p class="msg-lead">Purge this dead letter of <strong>{{ messageDetail.queue }}</strong>?</p>
+            <p class="msg-help">This cannot be undone.</p>
+          </div>
+          <div class="modal-foot">
+            <button class="btn btn-ghost" @click="purgeAsk = false">Cancel</button>
+            <button class="btn btn-danger" @click="purgeAsk = false; deleteMessage()">Purge</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- One component behind both entry points. `messages-link` is off here:
          this IS the Messages list, and `pushed` puts the queue in the filter
-         and refetches, which is the same jump without a navigation that would
-         not re-read its own query. -->
+         and refetches. -->
     <PushMessageModal
       :open="pushOpen"
       :queue="pushSeed.queue"
@@ -437,6 +343,7 @@
       @pushed="onPushed"
     />
   </div>
+  </QueuesLayout>
 </template>
 
 <script setup>
@@ -445,7 +352,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useRouteState, replaceQueryFields } from '@/composables/useRouteState'
 import { contextQuery, queueLocation } from '@/composables/navigation'
 import { DEFAULT_TIME_RANGE, EXTENDED_TIME_RANGES as RANGE_PRESETS, relativeTimeRange } from '../../../shared/timeRanges.mjs'
-import { messages as messagesApi, queues as queuesApi, describeApiError } from '@/api'
+import { messages as messagesApi, describeApiError } from '@/api'
 import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
 import { filtersForPushedMessage, isEncryptedEnvelope } from '@/composables/usePushVerdict'
 import { formatDateTimeLocal, formatTimestamp, formatTimestampCompact, formatTimestampUtc } from '@/composables/useFormat'
@@ -453,21 +360,31 @@ import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
-import Autocomplete from '@/components/Autocomplete.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
 import KafkaRecordView from '@/components/KafkaRecordView.vue'
 import { kafkaRecordOf, kafkaRecordPlain } from '@/composables/kafkaRecord'
 import PushMessageModal from '@/components/PushMessageModal.vue'
-import PageHead from '@/components/PageHead.vue'
+import QueuesLayout from '@/components/QueuesLayout.vue'
 import PageTools from '@/components/PageTools.vue'
 import MessageStatus from '@/components/MessageStatus.vue'
+import Icon from '@/components/Icon.vue'
+import UiSelect from '@/components/UiSelect.vue'
 
 const route = useRoute()
 const router = useRouter()
 const { can } = useIdentity()
 const { notifySuccess, notifyError } = useToast()
+
+const STATUS_OPTIONS = [
+  { value: '', label: 'All' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'processing', label: 'Processing' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'dead_letter', label: 'Dead letter' },
+]
+const LIMITS = [25, 50, 100, 200, 500]
 
 // State
 const paginationStalled = ref(false)
@@ -525,15 +442,8 @@ const {
   execute: executeList,
 } = listPanel
 
-const {
-  data: queuesData,
-  loading: queuesLoading,
-  refresh: refreshQueues,
-} = useApi((config) => queuesApi.list(undefined, config), { immediate: false })
 
 const messages = computed(() => listData.value?.messages || [])
-const queues = computed(() => queuesData.value?.queues || [])
-const queueNames = computed(() => queues.value.map(q => q.name).filter(Boolean).sort())
 const queueMode = computed(() => listData.value?.mode || null)
 
 // Permissions come from the identity store only — never from whether a call 403'd.
@@ -556,8 +466,12 @@ const filteredMessages = computed(() => {
   return result
 })
 
+// The Queue column names what the list beside has not picked.
+const columns = computed(() => (filterQueue.value ? 4 : 5))
+
 const hasActiveFilters = computed(() => {
-  return searchQuery.value || filterQueue.value || filterPartition.value || filterStatus.value
+  // The queue is the section's pick (the list beside), not a filter to clear.
+  return searchQuery.value || filterPartition.value || filterStatus.value
 })
 
 // A log queue reports its groups per message even when the queue-level mode
@@ -637,7 +551,6 @@ const setTimeRange = (value) => {
 // Clear all filters
 const clearFilters = () => {
   searchQuery.value = ''
-  filterQueue.value = ''
   filterPartition.value = ''
   filterStatus.value = ''
 
@@ -693,6 +606,7 @@ const closePanel = () => {
   replaceQueryFields(router, route, { partitionId: null, transactionId: null })
   selectedMessage.value = null
   actionError.value = null
+  purgeAsk.value = false
 }
 
 const openMessage = async (partitionId, transactionId) => {
@@ -716,10 +630,12 @@ const openMessage = async (partitionId, transactionId) => {
 
 const selectMessage = (message) => openMessage(message.partitionId, message.transactionId)
 
+// Asked in the page's own modal, not the browser's.
+const purgeAsk = ref(false)
+
 const deleteMessage = async () => {
   const detail = messageDetail.value
   if (!detail || !canAdmin.value) return
-  if (!confirm('Purge this dead-letter entry? This action cannot be undone.')) return
 
   actionLoading.value = true
   actionError.value = null
@@ -886,20 +802,55 @@ watch(() => [route.query.partitionId, route.query.transactionId], ([partitionId,
     if (selectedMessage.value?.partitionId !== partitionId || selectedMessage.value?.transactionId !== transactionId) openMessage(partitionId, transactionId)
   } else selectedMessage.value = null
 }, { immediate: true })
-refreshQueues()
 fetchMessages()
 
 </script>
 
 <style scoped>
-.msg-partition { max-width: 300px; overflow-wrap: anywhere; }
-.msg-partition-name { font-size: 12px; color: var(--text-mid); }
-.msg-partition-id { margin-top: 3px; font-size: 11px; color: var(--text-low); user-select: all; }
-.t th.msg-created-heading { text-align: right; white-space: nowrap; color: var(--text-hi); }
-.msg-sort-hint { display: block; margin-top: 2px; font-size: 11px; font-weight: 400; color: var(--text-low); }
-.msg-status { font-size: 12px; color: var(--text-low); }
-.msg-status.is-live { color: var(--text-hi); }
-.msg-groups { font-size: 12px; color: var(--text-low); }
+.msg { display: flex; flex-direction: column; gap: 16px; }
+.msg > .page-tools, .msg > .view-banner { margin-bottom: 0; }
+.msg-search { flex: 0 1 220px; min-width: 160px; height: 32px; }
+.msg-partition-input { width: 120px; }
+.msg-custom { margin-top: -8px; }
+
+.msg-scroll { overflow-x: auto; }
+.msg-table { min-width: 640px; }
+.msg-table th, .msg-table td { white-space: nowrap; }
+.msg-table td { height: 40px; font-size: 13px; }
+.msg-table .r { text-align: right; }
+.msg-row { cursor: pointer; }
+.msg-row:focus-visible { outline-offset: -2px; }
+.msg-row-dead { cursor: default; }
+/* Long names and ids end in an ellipsis; the whole of each is its tooltip. */
+.msg-cut { display: inline-block; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.msg-queue { font-weight: 500; color: var(--text-hi); }
+.msg-partition { color: var(--text-mid); }
+.msg-txn { max-width: 340px; font-family: var(--font-mono); font-size: 12px; color: var(--text-hi); }
+.msg-expired { font-size: 12px; color: var(--text-low); }
+.msg-when { font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); font-variant-numeric: tabular-nums; }
+.msg-state { font-size: 12px; }
+.msg-groups { margin-left: 4px; font-size: 12px; color: var(--text-low); font-variant-numeric: tabular-nums; }
+
+/* --- The drawer ------------------------------------------------------------ */
+.msg-loading { padding: 48px 0; text-align: center; font-size: 13px; color: var(--text-low); }
+.msg-loading .spinner { margin: 0 auto 12px; }
+.msg-links { display: flex; flex-wrap: wrap; gap: 4px; margin: -4px 0 0 -10px; }
+.msg-pending { font-size: 12px; color: var(--text-hi); }
+.msg-quiet { margin: 0; padding: 12px 0; font-size: 13px; color: var(--text-mid); }
 .payload-tools { display: flex; align-items: center; gap: 8px; }
+
+/* The purge confirm opens from the drawer (z 51, scrim 50). */
+.msg-over { z-index: 55; }
+.msg-purge-id { max-width: 240px; }
+.msg-form { display: flex; flex-direction: column; gap: 8px; }
+.msg-lead { margin: 0; font-size: 13px; color: var(--text-hi); overflow-wrap: anywhere; }
+.msg-lead strong { font-weight: 600; }
+.msg-help { margin: 0; font-size: 12px; color: var(--text-low); }
 .payload-view button { padding: 2px 8px; font-size: 11px; }
+
+@media (max-width: 640px) {
+  .msg-search { flex: 1 1 100%; }
+  .msg-custom .tool-field { flex: 1 1 100%; }
+  .msg-custom .tool-field .input { flex: 1; }
+}
 </style>

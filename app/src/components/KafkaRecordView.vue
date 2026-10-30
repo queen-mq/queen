@@ -1,9 +1,6 @@
 <template>
   <div class="kafka-record">
-    <p class="kr-note">
-      Written through the Kafka facade, which stores the key, value and headers base64-encoded.
-      Shown decoded; Raw is the stored form.
-    </p>
+    <p class="kr-note" title="The Kafka facade stores the key, value and headers base64-encoded. Raw is the stored form.">A Kafka record, decoded.</p>
 
     <div class="kr-grid">
       <label class="label-xs">Key</label>
@@ -80,7 +77,7 @@ const valueMeta = computed(() => {
 
 <style scoped>
 .kafka-record { display: flex; flex-direction: column; gap: 12px; }
-.kr-note { font-size: 11px; color: var(--text-low); }
+.kr-note { margin: 0; font-size: 12px; color: var(--text-low); }
 
 .kr-grid {
   display: grid; grid-template-columns: 64px minmax(0, 1fr);
@@ -91,7 +88,7 @@ const valueMeta = computed(() => {
   gap: 4px 12px; align-items: baseline;
 }
 .kr-line { font-size: 12px; color: var(--text-hi); word-break: break-all; }
-.kr-header-name { font-size: 12px; color: var(--ice-400); }
+.kr-header-name { font-size: 12px; color: var(--text-mid); }
 .kr-muted { color: var(--text-low); }
 
 .kr-value-head { display: flex; align-items: baseline; gap: 10px; margin-top: 4px; }
@@ -99,7 +96,7 @@ const valueMeta = computed(() => {
 
 .kr-box {
   margin: 0;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 12px; line-height: 1.6;
   padding: 14px 16px; border-radius: var(--r-card);
   border: 1px solid var(--bd);

@@ -6,22 +6,6 @@
          the rest equally, so the middle is the bar's centre whatever the page
          is called. -->
     <div class="topbar-side">
-    <!-- The sidebar's width: the full column or its rail of icons. A wide
-         screen only; below that the sidebar is a drawer with its own button
-         in this same corner. -->
-    <button
-      class="top-btn nav-toggle"
-      @click="toggleSidebar()"
-      :title="collapsed ? 'Expand sidebar (⌘\\)' : 'Collapse sidebar (⌘\\)'"
-      :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
-      :aria-expanded="!collapsed"
-    >
-      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-        <rect x="3" y="4.5" width="18" height="15" rx="2" />
-        <path d="M9 4.5v15" />
-      </svg>
-    </button>
-
     <div class="crumbs">
       <template v-if="parentCrumb">
         <router-link class="crumb-link" :to="parentCrumb.to">{{ parentCrumb.label }}</router-link>
@@ -79,8 +63,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { queues as queuesApi, consumers as consumersApi } from '@/api'
-import { collapsed, toggleSidebar, wide } from '@/composables/useSidebar'
-import { queueOf, queueLocation, consumerLocation } from '@/composables/navigation'
+import { listCarry, queueOf, queueLocation, queueTabLocation, queueTabOf, consumerLocation } from '@/composables/navigation'
 import { useIdentity } from '@/stores/identity'
 import BrokerBar from '@/components/BrokerBar.vue'
 import ThemeMenu from '@/components/ThemeMenu.vue'
@@ -90,15 +73,31 @@ const route = useRoute()
 const router = useRouter()
 const emit = defineEmits(['refresh'])
 
-// A detail page names its entity; its parent list is one click back.
+// A detail page names its entity; its parent list is one click back. In the
+// Queues section every tab reads "Queues / <queue>", and "Queues" drops the
+// pick but keeps the tab (the queue list's own page for a tab that needs one).
+const queueTab = computed(() => queueTabOf(route))
+// A page whose list has picked something (route meta `pick`) reads the same
+// way: "KV / shop", and "KV" drops the pick.
+const picked = computed(() => {
+  const key = route.meta?.pick
+  const value = key && typeof route.query[key] === 'string' ? route.query[key] : ''
+  return value ? { key, value } : null
+})
 const pageTitle = computed(() => {
-  if (route.name === 'QueueDetail' && route.params.queueName) return String(route.params.queueName)
+  if (queueTab.value) return queueOf(route) || 'Queues'
+  if (picked.value) return picked.value.value
   return route.meta.title || 'Overview'
 })
-const parentCrumb = computed(() =>
-  route.name === 'QueueDetail' ? { label: 'Queues', to: '/queues' }
-    : queueOf(route) ? { label: queueOf(route), to: queueLocation(queueOf(route), route) } : null
-)
+const parentCrumb = computed(() => {
+  if (queueTab.value) return queueOf(route) ? { label: 'Queues', to: queueTabLocation(queueTab.value, '', route, listCarry(route)) } : null
+  if (picked.value) {
+    const query = { ...route.query }
+    delete query[picked.value.key]
+    return { label: route.meta.title, to: { path: route.path, query } }
+  }
+  return queueOf(route) ? { label: queueOf(route), to: queueLocation(queueOf(route), route) } : null
+})
 
 const searchQuery = ref('')
 const showResults = ref(false)
@@ -171,7 +170,6 @@ watch(epoch, () => {
 const handleKeydown = (e) => {
   if (!(e.metaKey || e.ctrlKey)) return
   if (e.key.toLowerCase() === 'k') { e.preventDefault(); focusSearch() }
-  else if (e.key === '\\' && wide.value) { e.preventDefault(); toggleSidebar() }
 }
 
 const isRefreshing = ref(false)

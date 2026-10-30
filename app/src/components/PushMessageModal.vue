@@ -12,10 +12,7 @@
                it carries a fresh transaction id, it lands at the tail of the
                partition rather than in the original's position, and it is not
                deduplicated against the message it was copied from. -->
-          <p v-if="copy" class="push-note">
-            Push a copy: a new transaction id, appended at the tail, not deduplicated
-            against the original.
-          </p>
+          <p v-if="copy" class="push-note" title="It lands at the tail of the partition, not in the original's place, and is not deduplicated against it.">A copy is a new message, with a new transaction id.</p>
 
           <!-- The outcome, and the only thing on screen that may call a push a
                success. The form stays under it so a duplicate or an error
@@ -83,20 +80,20 @@
               custom-hint="press Enter to push to this queue name"
               :reset-label="null"
             />
-            <span v-if="!queueFixed" class="push-help">
-              A name this cluster does not carry yet is created by the push, with the default
-              options — including the 60-second lease a queue gets when nothing configured it.
-            </span>
+            <span
+              v-if="!queueFixed"
+              class="push-help"
+              title="Including the 60-second lease a queue gets when nothing configured it."
+            >A new name creates the queue, with default options.</span>
           </label>
 
           <label class="push-field">
             <span class="label-xs">Partition</span>
             <input v-model="form.partition" class="input font-mono" autocomplete="off" placeholder="Default" />
-            <span class="push-help">
-              Blank pushes to <span class="font-mono">Default</span>. A partition is an ordering
-              lane: everything in one is delivered in order, and a name that does not exist yet is
-              created by this push.
-            </span>
+            <span
+              class="push-help"
+              title="A partition is an ordering lane: everything in one is delivered in order. A name that does not exist yet is created by this push."
+            >Blank pushes to <span class="font-mono">Default</span>.</span>
           </label>
 
           <label class="push-field">
@@ -109,27 +106,24 @@
               placeholder='{"id": 1}'
             ></textarea>
             <span v-if="payloadError" class="push-invalid">{{ payloadError }}</span>
-            <span v-else class="push-help">
-              Any JSON value: an object, an array, a quoted "string", a number, true / false
-              or null. It is stored verbatim.
-            </span>
+            <span
+              v-else
+              class="push-help"
+              title='An object, an array, a quoted "string", a number, true / false or null.'
+            >Any JSON value, stored as written.</span>
           </label>
 
           <label class="push-field">
             <span class="label-xs">Transaction ID</span>
             <input v-model="form.transactionId" class="input font-mono" autocomplete="off" placeholder="a fresh id" />
-            <span class="push-help">
-              Blank mints a fresh id, which makes the push non-idempotent — send it twice and the
-              queue holds two messages. Set one to make the push idempotent inside the queue's
-              dedup window: a second push of the same id answers
-              <span class="font-mono">duplicate</span> and writes nothing.
-            </span>
+            <span
+              class="push-help"
+              title="Blank mints a fresh id, so the same push sent twice is two messages. With an id, a second push of it inside the queue's dedup window answers duplicate and writes nothing."
+            >Set one to make the push safe to repeat.</span>
           </label>
 
-          <p class="push-help push-meter">
-            Metered as a producer push for
-            <strong>{{ actingClusterSlug || 'the acting cluster' }}</strong>, exactly like one
-            from an SDK.
+          <p class="push-help push-meter" title="Exactly like a push from an SDK.">
+            Metered as a producer push for <strong>{{ actingClusterSlug || 'the acting cluster' }}</strong>.
           </p>
         </div>
 
@@ -384,7 +378,7 @@ const pushAnother = () => {
 /* The queue of a page that is one queue: stated, not editable. Same box as the
    inputs beside it so the row still reads as a field. */
 .push-fixed {
-  padding: 5px 9px; font-size: 12.5px; color: var(--text-hi);
+  padding: 6px 9px; font-size: 12.5px; color: var(--text-hi);
   border: 1px solid var(--bd); border-radius: var(--r-control);
   background: var(--ink-3);
   overflow-wrap: anywhere;
@@ -392,11 +386,7 @@ const pushAnother = () => {
 
 .push-payload { min-height: 120px; resize: vertical; line-height: 1.5; }
 
-.push-note {
-  padding: 9px 10px; font-size: 11.5px; line-height: 1.45; color: var(--text-mid);
-  border: 1px solid var(--bd); border-radius: var(--r-control);
-  background: var(--ink-3);
-}
+.push-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-mid); }
 
 /* The verdict block. `.panel-err` is the shell for "we could not ask" and is
    single-toned on purpose, and `.status-banner` has no success variant, so the
@@ -415,7 +405,7 @@ const pushAnother = () => {
 
 .push-ids {
   display: grid; gap: 4px; margin: 8px 0 0;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .push-ids > div { display: flex; gap: 8px; align-items: baseline; }
 .push-ids dt { flex: 0 0 96px; color: var(--text-low); }

@@ -1,139 +1,82 @@
 <template>
+  <SubSidebar label="Trace names" :current="currentLabel">
+  <!-- The tenant's trace names and the search box; a click loads one here. -->
+  <template #side>
+    <TracesSide
+      :rows="traceNames.rows"
+      :total="traceNames.total"
+      :loaded="traceNames.loaded"
+      :failed="traceNames.failed"
+      :current="currentTraceName"
+      :message="messageTarget"
+    />
+  </template>
   <div class="view-container">
 
     <!-- This page does not poll, so it carries no live tick. -->
-    <PageHead title="Traces" :sub="messageTarget ? `message ${messageTarget.transactionId}` : currentTraceName ? `events named ${currentTraceName}` : ''" />
+    <PageHead :title="headTitle">
+      <template #title><span :title="headFull || undefined">{{ headTitle }}</span></template>
+      <template v-if="facts.length" #sub>
+        <span class="tr-facts">
+          <span v-for="f in facts" :key="f.k" class="tr-fact" :title="f.title || undefined"><span class="tr-fact-k">{{ f.k }}</span>{{ f.v }}</span>
+        </span>
+      </template>
+      <template v-if="hasTraceTarget" #actions>
+        <span v-if="traceData" class="tr-stamp">{{ stamp(tracePanel) }}</span>
+        <button type="button" class="btn btn-ghost" @click="clearSearch">Clear</button>
+      </template>
+    </PageHead>
 
-    <!-- Page banners: the failure first, then the broker-capability caveat. -->
-    <div v-if="error" class="status-banner banner-bad view-banner">
+    <!-- A refresh that failed over rows still on screen says how old they
+         are; with nothing on screen the table itself says it. -->
+    <div v-if="error && traces.length" class="status-banner banner-bad view-banner tr-banner" role="status">
       <span :title="formatTimestampUtc(tracePanel.lastUpdated.value)">
-        <strong>Could not load traces</strong> · {{ error }}<template v-if="traces.length"> · showing the last rows that loaded{{ lastGoodText ? ` (${lastGoodText})` : '' }}</template>
+        <strong>Could not load traces</strong> · {{ error }} · showing the last rows that loaded{{ lastGoodText ? ` (${lastGoodText})` : '' }}
       </span>
     </div>
-    <!-- A broker capability, like the same note on the dead-letter page:
-         information, not a condition — so it is not amber. -->
-    <div
-      v-if="hasTraceTarget && traces.length > 0 && !serverPaginates"
-      class="status-banner banner-info view-banner"
-    >
-      <span>This broker returned every trace in one response — the page controls would page nothing, so they are hidden.</span>
-    </div>
 
-    <PageTools>
-      <div class="filter-search">
-        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-        </svg>
-        <input v-model="searchTraceName" type="text" placeholder="A trace name" class="input" @keyup.enter="searchTraces" />
-      </div>
-      <button class="btn btn-primary" :disabled="!searchTraceName || loading" @click="searchTraces">Search</button>
-      <button v-if="hasTraceTarget" class="btn btn-ghost" @click="clearSearch">Clear</button>
-      <!-- Quick examples: real trace names for this tenant, or nothing. -->
-      <template v-if="!hasTraceTarget && exampleTraceNames.length > 0">
-        <span class="tool-label">Recent</span>
-        <div class="pill-row">
-          <button
-            v-for="example in exampleTraceNames"
-            :key="example"
-            class="pill"
-            @click="searchTraceName = example; searchTraces()"
-          >{{ example }}</button>
-        </div>
-      </template>
-    </PageTools>
-
-    <p v-if="route.query.queue && !hasTraceTarget" class="tool-note">
-      Open a message to inspect its traces.
-      <RouterLink :to="queueLocation(route.query.queue, route, 'messages')">Messages of {{ route.query.queue }} →</RouterLink>
-    </p>
-
-    <!-- Summary -->
-    <div v-if="hasTraceTarget && traces.length > 0" class="card" style="margin-bottom:16px;">
-      <div class="card-header">
-        <h3>Trace summary</h3>
-        <span class="card-sub">{{ messageTarget ? `events for message ${messageTarget.transactionId}` : `events carrying the trace name ${currentTraceName}` }}</span>
-        <span class="muted">{{ stamp(tracePanel) }}</span>
-      </div>
-      <div class="card-body">
-        <div class="stat-grid stat-grid-3">
-          <div class="stat">
-            <div class="stat-label">Traces found</div>
-            <div class="stat-value">{{ totalTraces }}</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Unique messages</div>
-            <div class="stat-value">{{ uniqueMessages }}</div>
-            <div class="stat-foot">on this page</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Queues</div>
-            <!-- 0 queues would read as "these traces touched no queue". They
-                 touched queues the broker could not name for these rows. -->
-            <div class="stat-value">{{ queueAttributionAvailable ? uniqueQueues : '—' }}</div>
-            <div class="stat-foot">
-              {{ queueAttributionAvailable ? 'on this page' : 'queue not recorded for these traces' }}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Trace events -->
-    <div v-if="hasTraceTarget" class="card">
-      <div class="card-header">
-        <h3>Trace events</h3>
-        <span class="muted">{{ stamp(tracePanel) }}</span>
-      </div>
-      <div style="overflow-x:auto;">
+    <!-- The events of the name (or message) picked -->
+    <div v-if="hasTraceTarget" class="card tr-card">
+      <div class="tr-table">
         <table class="t">
           <thead>
             <tr>
+              <th class="tr-mark-col"><span class="sr-only">Mark</span></th>
               <th>Event</th>
               <th>Time</th>
               <th>Queue</th>
               <th>Partition</th>
-              <th>Transaction ID</th>
-              <th>Trace Names</th>
+              <th>Transaction</th>
+              <th>Trace names</th>
               <th>Data</th>
-              <th>Worker / Group</th>
+              <th>Worker / group</th>
             </tr>
           </thead>
           <tbody>
             <!-- First paint only: a refresh or a page turn leaves the rows that
                  already loaded on screen. -->
             <template v-if="firstLoad">
-              <tr v-for="i in 8" :key="i">
-                <td><div class="skeleton" style="height:16px; width:72px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:128px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:96px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:80px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:88px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:104px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:120px;" /></td>
-                <td><div class="skeleton" style="height:16px; width:96px;" /></td>
+              <tr v-for="i in 8" :key="i" class="tr-skeleton">
+                <td class="tr-mark-col" />
+                <td v-for="(w, j) in [72, 128, 96, 80, 88, 104, 120, 96]" :key="j"><div class="skeleton" :style="{ height: '14px', width: `${w}px` }" /></td>
               </tr>
             </template>
 
-            <!-- A page we could not load is not a page with nothing on it. Rows
-                 that did load stay on screen; the banner above says they are
-                 the last good ones. -->
-            <tr v-else-if="error && traces.length === 0">
-              <td colspan="8">
-                <div class="empty-state empty-state-failed">
-                  <h3>Nothing loaded</h3>
-                  <p>Could not read events for <span class="font-mono">{{ messageTarget?.transactionId || currentTraceName }}</span>.</p>
+            <!-- A page we could not load is not a page with nothing on it. -->
+            <tr v-else-if="error && traces.length === 0" class="tr-state-row">
+              <td colspan="9">
+                <div class="tr-state" :title="error">
+                  <Icon name="circle-x" :size="20" />
+                  <span>Could not read the events of <span class="tr-mono">{{ messageTarget?.transactionId || currentTraceName }}</span></span>
                 </div>
               </td>
             </tr>
 
-            <tr v-else-if="traces.length === 0">
-              <td colspan="8">
-                <div class="empty-state">
-                  <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <h3>No traces found</h3>
-                  <p>{{ messageTarget ? 'No events were recorded for this message.' : `No events carry the trace name ${currentTraceName}.` }}</p>
+            <tr v-else-if="traces.length === 0" class="tr-state-row">
+              <td colspan="9">
+                <div class="tr-state">
+                  <Icon name="route" :size="20" />
+                  <span>{{ messageTarget ? 'No event was recorded for this message' : `No event carries ${currentTraceName}` }}</span>
                 </div>
               </td>
             </tr>
@@ -142,92 +85,35 @@
               <tr
                 v-for="trace in traces"
                 :key="trace.id"
+                class="tr-row"
+                tabindex="0"
                 @click="viewTrace(trace)"
-                style="cursor:pointer;"
+                @keydown.enter="viewTrace(trace)"
               >
-                <!-- Event Type -->
+                <td class="tr-mark-col"><span v-if="eventMark(trace.event_type)" class="g" :class="eventMark(trace.event_type)" aria-hidden="true" /></td>
+                <td class="tr-event">{{ trace.event_type || '—' }}</td>
+                <td class="tr-time" :title="formatTimestampUtc(trace.created_at)">{{ formatTimestamp(trace.created_at) }}</td>
                 <td>
-                  <div style="display:flex; align-items:center; gap:8px;">
-                    <span
-                      style="width:8px; height:8px; border-radius:var(--r-pill); flex-shrink:0;"
-                      :style="{ background: eventColor(trace.event_type) }"
-                    />
-                    <span style="font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--text-hi);">
-                      {{ trace.event_type }}
-                    </span>
+                  <span v-if="trace.queue_name" class="tr-queue">{{ trace.queue_name }}</span>
+                  <span v-else class="tr-low" title="This trace's partition does not resolve to a queue on this broker, so it cannot name its queue">not recorded</span>
+                </td>
+                <td class="tr-mid">{{ trace.partition_name || (trace.queue_name ? '—' : 'not recorded') }}</td>
+                <td class="tr-mono tr-mid" :title="trace.transaction_id">{{ trace.transaction_id ? `${trace.transaction_id.slice(0, 8)}…` : '—' }}</td>
+                <td>
+                  <div v-if="trace.trace_names?.length" class="tr-tags">
+                    <span v-for="name in trace.trace_names" :key="name" class="tr-tag" :class="{ on: name === currentTraceName }">{{ name }}</span>
                   </div>
+                  <span v-else class="tr-low">—</span>
                 </td>
-
-                <!-- Time -->
-                <td>
-                  <span :title="formatTimestampUtc(trace.created_at)" class="tabular-nums" style="font-size:12px; color:var(--text-mid); white-space:nowrap;">
-                    {{ formatTimestamp(trace.created_at) }}
-                  </span>
+                <td class="tr-data">
+                  <span v-if="trace.data?.text" :title="trace.data.text">{{ trace.data.text }}</span>
+                  <span v-else-if="hasAdditionalData(trace.data)" class="tr-low">JSON</span>
+                  <span v-else class="tr-low">—</span>
                 </td>
-
-                <!-- Queue -->
-                <td>
-                  <span v-if="trace.queue_name" style="font-size:13px; font-weight:500; color:var(--text-hi);">
-                    {{ trace.queue_name }}
-                  </span>
-                  <span
-                    v-else
-                    class="chip chip-mute"
-                    title="This trace's partition does not resolve to a queue on this broker, so it cannot name its queue."
-                  >
-                    not recorded
-                  </span>
-                </td>
-
-                <!-- Partition -->
-                <td>
-                  <span style="font-size:13px; color:var(--text-mid);">
-                    {{ trace.partition_name || (trace.queue_name ? '-' : 'not recorded') }}
-                  </span>
-                </td>
-
-                <!-- Transaction ID -->
-                <td>
-                  <span class="font-mono" style="font-size:12px; color:var(--text-mid);">
-                    {{ trace.transaction_id?.slice(0, 8) }}…
-                  </span>
-                </td>
-
-                <!-- Trace Names -->
-                <td>
-                  <div v-if="trace.trace_names?.length > 0" style="display:flex; flex-wrap:wrap; gap:4px;">
-                    <span
-                      v-for="name in trace.trace_names"
-                      :key="name"
-                      class="chip"
-                      :class="name === currentTraceName ? 'chip-ice' : 'chip-mute'"
-                    >
-                      {{ name }}
-                    </span>
-                  </div>
-                  <span v-else style="font-size:12px; color:var(--text-low);">-</span>
-                </td>
-
-                <!-- Data -->
-                <td style="max-width:200px;">
-                  <div style="font-size:13px; color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-                    <span v-if="trace.data?.text" :title="trace.data.text">{{ trace.data.text }}</span>
-                    <span v-else-if="hasAdditionalData(trace.data)" style="color:var(--text-low); font-style:italic;">JSON data</span>
-                    <span v-else style="color:var(--text-low);">-</span>
-                  </div>
-                </td>
-
-                <!-- Worker / Group -->
-                <td>
-                  <div style="font-size:12px; color:var(--text-mid);">
-                    <div v-if="trace.worker_id" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:120px;" :title="trace.worker_id">
-                      {{ trace.worker_id }}
-                    </div>
-                    <div v-if="trace.consumer_group && trace.consumer_group !== '__QUEUE_MODE__'" style="color:var(--text-low); margin-top:2px;">
-                      {{ trace.consumer_group }}
-                    </div>
-                    <span v-if="!trace.worker_id && (!trace.consumer_group || trace.consumer_group === '__QUEUE_MODE__')" style="color:var(--text-low);">-</span>
-                  </div>
+                <td class="tr-worker">
+                  <span v-if="trace.worker_id" class="tr-ellipsis" :title="trace.worker_id">{{ trace.worker_id }}</span>
+                  <span v-if="hasGroup(trace)" class="tr-low tr-ellipsis">{{ trace.consumer_group }}</span>
+                  <span v-if="!trace.worker_id && !hasGroup(trace)" class="tr-low">—</span>
                 </td>
               </tr>
             </template>
@@ -235,108 +121,82 @@
         </table>
       </div>
 
-      <!-- Pagination. The range counts the rows actually rendered — deriving it
-           from `limit` claimed a page size the response never had. -->
-      <div v-if="showPager && (traces.length > 0 || offset > 0)" class="pager">
-        <span class="pager-count">
-          Showing <span class="tabular-nums">{{ shownFrom }}</span>–<span class="tabular-nums">{{ shownTo }}</span> of <span class="tabular-nums">{{ totalTraces }}</span>
+      <!-- The range counts the rows actually drawn. A broker that answered
+           every event in one response pages nothing: no pager then. -->
+      <div v-if="traces.length && (showPager || !serverPaginates)" class="tr-pager">
+        <span v-if="showPager" class="tr-pager-count">
+          {{ formatNumber(shownFrom) }}–{{ formatNumber(shownTo) }} of {{ formatNumber(totalTraces) }}
         </span>
-        <div class="pager-nav">
-          <button class="btn btn-ghost" :disabled="offset === 0" @click="previousPage">Previous</button>
-          <button class="btn btn-ghost" :disabled="shownTo >= totalTraces" @click="nextPage">Next</button>
+        <span v-else class="tr-pager-count" title="This broker returned every event in one response, so there is nothing to page">
+          All {{ formatNumber(traces.length) }} events
+        </span>
+        <div v-if="showPager" class="tr-pager-nav">
+          <button type="button" class="btn btn-ghost" :disabled="offset === 0" @click="previousPage">Previous</button>
+          <button type="button" class="btn btn-ghost" :disabled="shownTo >= totalTraces" @click="nextPage">Next</button>
         </div>
       </div>
     </div>
 
-    <!-- Nothing searched yet -->
+    <!-- Nothing picked yet -->
     <div v-else class="card">
-      <div class="card-body">
-        <div class="empty-state">
-          <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-          </svg>
-          <h3>Search for traces</h3>
-          <p>Enter a trace name above and press Search to view events.</p>
-        </div>
+      <div class="tr-state tr-state-page">
+        <Icon name="route" :size="20" />
+        <RouterLink v-if="contextQueue" :to="queueLocation(contextQueue, route, 'messages')">Open a message of {{ contextQueue }} to see its events</RouterLink>
+        <!-- With no names to pick (none yet, or the read failed), the search
+             box is the way in: it opens a typed name. -->
+        <span v-else-if="traceNames.loaded && !traceNames.rows.length">{{ traceNames.failed ? 'Type a trace name in the search, then Enter' : 'No trace recorded yet' }}</span>
+        <span v-else>Pick a trace name from the list</span>
       </div>
     </div>
 
     <DetailDrawer
       :open="Boolean(selectedTrace)"
-      :title="selectedTrace ? `${selectedTrace.event_type} trace` : 'Trace detail'"
+      :title="selectedTrace ? `${selectedTrace.event_type || 'Trace'} event` : 'Trace event'"
       @close="selectedTrace = null"
     >
       <template #leading>
-        <span
-          v-if="selectedTrace"
-          style="width:10px; height:10px; border-radius:var(--r-pill); flex-shrink:0;"
-          :style="{ background: eventColor(selectedTrace.event_type) }"
-        />
+        <span v-if="selectedTrace && eventMark(selectedTrace.event_type)" class="g" :class="eventMark(selectedTrace.event_type)" aria-hidden="true" />
       </template>
 
       <template v-if="selectedTrace">
-        <div style="display:flex; flex-direction:column; gap:20px;">
-            <!-- Basic Info -->
-            <div style="display:flex; flex-direction:column; gap:14px;">
-              <div>
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Time</label>
-                <p :title="formatTimestampUtc(selectedTrace.created_at)" style="font-size:13px; color:var(--text-hi);">{{ formatTimestamp(selectedTrace.created_at) }}</p>
-              </div>
-
-              <div>
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Queue / partition</label>
-                <p style="font-size:13px; font-weight:500; color:var(--text-hi);">
-                  {{ selectedTrace.queue_name || '-' }} / {{ selectedTrace.partition_name || '-' }}
-                </p>
-              </div>
-
-              <div>
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Transaction ID</label>
-                <p class="font-mono" style="font-size:12px; color:var(--text-mid); word-break:break-all;">{{ selectedTrace.transaction_id }}</p>
-              </div>
-
-              <div v-if="selectedTrace.worker_id">
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Worker ID</label>
-                <p class="font-mono" style="font-size:12px; color:var(--text-mid); word-break:break-all;">{{ selectedTrace.worker_id }}</p>
-              </div>
-
-              <div v-if="selectedTrace.consumer_group && selectedTrace.consumer_group !== '__QUEUE_MODE__'">
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Consumer group</label>
-                <p style="font-size:13px; color:var(--text-mid);">{{ selectedTrace.consumer_group }}</p>
-              </div>
+        <div class="tr-detail">
+          <dl class="tr-fields">
+            <div>
+              <dt>Time</dt>
+              <dd :title="formatTimestampUtc(selectedTrace.created_at)">{{ formatTimestamp(selectedTrace.created_at) }}</dd>
             </div>
-
-            <!-- Trace Names -->
-            <div v-if="selectedTrace.trace_names?.length > 0">
-              <label class="label-xs" style="display:block; margin-bottom:8px;">Trace names</label>
-              <div style="display:flex; flex-wrap:wrap; gap:6px;">
-                <span
-                  v-for="name in selectedTrace.trace_names"
-                  :key="name"
-                  class="chip"
-                  :class="name === currentTraceName ? 'chip-ice' : 'chip-mute'"
-                >
-                  {{ name }}
-                </span>
-              </div>
+            <div>
+              <dt>Queue / partition</dt>
+              <dd>{{ selectedTrace.queue_name || '—' }} / {{ selectedTrace.partition_name || '—' }}</dd>
             </div>
-
-            <!-- Trace Data -->
-            <div v-if="selectedTrace.data">
-              <label class="label-xs" style="display:block; margin-bottom:8px;">Trace data</label>
-
-              <!-- Text content -->
-              <div v-if="selectedTrace.data.text" style="margin-bottom:12px;">
-                <p class="trace-text">{{ selectedTrace.data.text }}</p>
-              </div>
-
-              <!-- JSON data (excluding text) -->
-              <div v-if="hasAdditionalData(selectedTrace.data)">
-                <div class="trace-code">
-                  <pre class="font-mono" style="font-size:12px; white-space:pre-wrap; color:var(--text-mid); margin:0;">{{ formatTraceData(selectedTrace.data) }}</pre>
-                </div>
-              </div>
+            <div>
+              <dt>Transaction</dt>
+              <dd class="tr-mono tr-break">{{ selectedTrace.transaction_id || '—' }}</dd>
             </div>
+            <div v-if="selectedTrace.worker_id">
+              <dt>Worker</dt>
+              <dd class="tr-mono tr-break">{{ selectedTrace.worker_id }}</dd>
+            </div>
+            <div v-if="hasGroup(selectedTrace)">
+              <dt>Consumer group</dt>
+              <dd>{{ selectedTrace.consumer_group }}</dd>
+            </div>
+          </dl>
+
+          <div v-if="selectedTrace.trace_names?.length">
+            <div class="tr-label">Trace names</div>
+            <div class="tr-tags">
+              <span v-for="name in selectedTrace.trace_names" :key="name" class="tr-tag" :class="{ on: name === currentTraceName }">{{ name }}</span>
+            </div>
+          </div>
+
+          <div v-if="selectedTrace.data">
+            <div class="tr-label">Data</div>
+            <p v-if="selectedTrace.data.text" class="trace-text">{{ selectedTrace.data.text }}</p>
+            <div v-if="hasAdditionalData(selectedTrace.data)" class="trace-code">
+              <pre class="font-mono">{{ formatTraceData(selectedTrace.data) }}</pre>
+            </div>
+          </div>
         </div>
       </template>
 
@@ -347,30 +207,35 @@
           class="btn"
           @click="selectedTrace = null"
         >
-          View Full Message
+          Open message
         </router-link>
       </template>
     </DetailDrawer>
   </div>
+  </SubSidebar>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { contextQuery, queueLocation, readRouteValue, textParam } from '@/composables/navigation'
-const route = useRoute(), router = useRouter()
+
 import { traces as tracesApi, describeApiError } from '@/api'
-import { useApi } from '@/composables/useApi'
+import DetailDrawer from '@/components/DetailDrawer.vue'
+import Icon from '@/components/Icon.vue'
+import PageHead from '@/components/PageHead.vue'
+import SubSidebar from '@/components/SubSidebar.vue'
+import TracesSide from '@/components/TracesSide.vue'
+import { contextQuery, queueLocation, readRouteValue, textParam } from '@/composables/navigation'
+import { TRACE_NAMES_LIMIT, readTraceNames } from '@/composables/tracesSide'
+import { formatNumber, useApi } from '@/composables/useApi'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
-import DetailDrawer from '@/components/DetailDrawer.vue'
-import PageHead from '@/components/PageHead.vue'
-import PageTools from '@/components/PageTools.vue'
+import { onClusterChange } from '@/stores/identity'
 
+const route = useRoute(), router = useRouter()
 
-// Search state
-const searchTraceName = ref('')
+// Search state: the name or the message open, from the address.
 const currentTraceName = ref('')
 const selectedTrace = ref(null)
 const offset = ref(0)
@@ -381,12 +246,13 @@ const messageTarget = computed(() => {
   return partitionId && transactionId ? { partitionId, transactionId } : null
 })
 const hasTraceTarget = computed(() => Boolean(messageTarget.value || currentTraceName.value))
+const contextQueue = computed(() => textParam(route.query.queue))
 // Our own verdict on an unusable page, kept apart from the transport error.
 const pageError = ref(null)
 
 // useApi owns loading/error, aborts on unmount, and discards a response that
 // belongs to a cluster we have since left. The panel object is kept whole so
-// the card headers can stamp their freshness from it.
+// the header can stamp its freshness from it.
 const tracePanel = useApi(
   (name, params, config) => messageTarget.value
     ? tracesApi.getForMessage(messageTarget.value.partitionId, messageTarget.value.transactionId, params, config)
@@ -416,23 +282,49 @@ const lastGoodText = computed(() =>
 // is not applying the limit, so a page range would be fiction.
 const serverPaginates = ref(true)
 
-// Suggestions are the tenant's real trace names or nothing at all — invented
-// examples send every click into "No traces found".
-const exampleTraceNames = ref([])
-
-// Computed stats
-const uniqueMessages = computed(() => {
-  const messageIds = new Set(traces.value.map(t => t.transaction_id))
-  return messageIds.size
+// The list's names: the tenant's real trace names or nothing at all —
+// invented examples send every click into "No event carries…". useApi drops
+// an answer for a cluster we have since left; a failed read keeps the names
+// that loaded before it, and the list says so in one quiet line.
+const namesPanel = useApi(
+  (config) => tracesApi.getAvailableNames({ limit: TRACE_NAMES_LIMIT }, config),
+  { immediate: false },
+)
+const traceNames = computed(() => {
+  const read = readTraceNames(namesPanel.data.value)
+  return {
+    rows: read?.rows || [],
+    total: read?.total || 0,
+    loaded: namesPanel.data.value !== null || namesPanel.failed.value,
+    // A failed read, or an answer that holds no list: not "no names".
+    failed: namesPanel.failed.value || (namesPanel.data.value !== null && read === null),
+  }
 })
 
-const uniqueQueues = computed(() => {
-  const queues = new Set(traces.value.map(t => t.queue_name).filter(Boolean))
-  return queues.size
-})
-
+// The header line: the pick, and what its events add up to.
+const shortId = (id) => (id && id.length > 12 ? `${id.slice(0, 8)}…` : id)
+const headTitle = computed(() => (messageTarget.value ? `Message ${shortId(messageTarget.value.transactionId)}` : currentTraceName.value || 'Traces'))
+const headFull = computed(() => (messageTarget.value ? messageTarget.value.transactionId : currentTraceName.value))
+const currentLabel = computed(() => (messageTarget.value ? `Message ${shortId(messageTarget.value.transactionId)}` : currentTraceName.value))
+const uniqueMessages = computed(() => new Set(traces.value.map(t => t.transaction_id)).size)
+const uniqueQueues = computed(() => new Set(traces.value.map(t => t.queue_name).filter(Boolean)).size)
 /** A trace whose partition does not resolve to a queue carries no queue name. */
 const queueAttributionAvailable = computed(() => traces.value.some(t => t.queue_name))
+const facts = computed(() => {
+  if (!hasTraceTarget.value || !traces.value.length) return []
+  const paged = showPager.value
+  return [
+    { k: 'Events', v: formatNumber(totalTraces.value || traces.value.length) },
+    messageTarget.value ? null : { k: 'Messages', v: formatNumber(uniqueMessages.value), title: paged ? 'On this page of events' : undefined },
+    // 0 queues would read as "these events touched no queue". They touched
+    // queues the broker could not name for these rows.
+    {
+      k: 'Queues',
+      v: queueAttributionAvailable.value ? formatNumber(uniqueQueues.value) : '—',
+      title: queueAttributionAvailable.value ? (paged ? 'On this page of events' : undefined) : 'Not recorded for these events',
+    },
+  ].filter(Boolean)
+})
 
 const shownFrom = computed(() => (traces.value.length ? offset.value + 1 : 0))
 const shownTo = computed(() => offset.value + traces.value.length)
@@ -455,7 +347,7 @@ async function fetchTraces() {
 
   const rows = payload?.traces
   // A missing array is NOT an empty result: it is a page the broker could not
-  // build. Rendering "No traces found" for it denies traces that exist.
+  // build. Saying "no event" for it denies events that exist.
   if (!Array.isArray(rows)) {
     pageError.value = `The broker returned no result page at offset ${offset.value}.`
     return
@@ -464,29 +356,15 @@ async function fetchTraces() {
   totalTraces.value = Number(payload?.total) || rows.length
 }
 
-// Search traces by name
-async function searchTraces() {
-  if (!searchTraceName.value.trim()) return
-  await router.push({ path: '/traces', query: { ...contextQuery(route), trace: searchTraceName.value.trim() } })
-}
-
 async function loadPage() {
   if (hasTraceTarget.value) await fetchTraces()
 }
 
-async function loadExampleTraceNames() {
-  try {
-    const res = await tracesApi.getAvailableNames({ limit: 8 })
-    exampleTraceNames.value = (res.data?.trace_names || [])
-      .map(n => n?.trace_name)
-      .filter(Boolean)
-      .slice(0, 8)
-  } catch {
-    // No suggestions rather than made-up ones; the failure is already reported
-    // by the shared HTTP client and the search box still works.
-    exampleTraceNames.value = []
-  }
-}
+// The failure is reported by the shared HTTP client; the list says it in one
+// quiet line and the search box still opens a typed name.
+const loadTraceNames = () => namesPanel.refresh()
+// Another cluster's names are not this one's: useApi forgets them, ask again.
+onUnmounted(onClusterChange(loadTraceNames))
 
 function previousPage() {
   if (offset.value > 0) router.replace({ query: { ...route.query, offset: Math.max(0, offset.value - limit.value) || undefined } })
@@ -500,7 +378,6 @@ function clearSearch() {
 
 watch(() => [route.query.trace, route.query.partitionId, route.query.transactionId, route.query.offset], () => {
   currentTraceName.value = textParam(route.query.trace)
-  searchTraceName.value = currentTraceName.value
   tracePanel.abort()
   loading.value = false; apiError.value = null
   offset.value = readRouteValue(route.query.offset, 0)
@@ -512,18 +389,14 @@ function viewTrace(trace) {
   selectedTrace.value = trace
 }
 
-// Event type colours from the token set, so a trace dot means the same thing
-// here as a chip does anywhere else in the product.
-function eventColor(eventType) {
-  const colors = {
-    info: 'var(--ice-400)',
-    processing: 'var(--ice-400)',
-    step: 'var(--crown-400)',
-    error: 'var(--ember-400)',
-    warning: 'var(--warn-400)',
-  }
-  return colors[eventType] || 'var(--text-low)'
+// An event's mark: the app's glyphs, and only where the event says something
+// went wrong. Every other event is unmarked.
+function eventMark(eventType) {
+  const type = String(eventType || '').toLowerCase()
+  return type === 'error' ? 'bad' : type === 'warning' || type === 'warn' ? 'warn' : null
 }
+
+const hasGroup = (trace) => Boolean(trace?.consumer_group && trace.consumer_group !== '__QUEUE_MODE__')
 
 function hasAdditionalData(data) {
   if (!data || typeof data !== 'object') return false
@@ -537,32 +410,97 @@ function formatTraceData(data) {
   return JSON.stringify(rest, null, 2)
 }
 
-// Refresh function — only refreshes when there's an active search
+// Refresh: the names in the list, and the events only when one is open.
 const refreshCurrentView = async () => {
-  if (hasTraceTarget.value) {
-    await loadPage()
-  }
+  await Promise.all([loadTraceNames(), hasTraceTarget.value ? loadPage() : null])
 }
 
 // Not useAutoRefresh: this page does not poll, so it shows no live tick. Its
-// freshness fact is the per-card stamp().
+// freshness fact is the stamp in the header.
 useRefresh(refreshCurrentView)
 
-onMounted(loadExampleTraceNames)
+onMounted(loadTraceNames)
 </script>
 
 <style scoped>
-/* Free text stays one step ABOVE the drawer (it was a white-4% lift), the
-   JSON block below it stays recessed — the pair has to keep reading apart. */
+/* The header line's facts: the Queues pilot's chips (QueuesLayout). */
+/* The facts drop under the title when the line is full, as the pilot's do. */
+.page-head :deep(.page-id) { flex-wrap: wrap; row-gap: 6px; }
+.page-head :deep(.page-sub) { overflow: visible; white-space: normal; }
+.tr-facts { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tr-fact {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 2px 8px; border-radius: var(--r-chip);
+  background: var(--ink-3); border: 1px solid var(--bd);
+  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.tr-fact-k { color: var(--text-low); }
+.tr-stamp { font-size: 12px; color: var(--text-low); font-variant-numeric: tabular-nums; }
+.tr-banner { margin-bottom: 16px; }
+
+/* The events: one table, a quiet header row, rows with room. */
+.tr-card { overflow: hidden; }
+.tr-table { overflow-x: auto; }
+.tr-table .t { width: 100%; min-width: 880px; }
+.tr-table .t thead th { background: var(--ink-3); }
+.tr-mark-col { width: 28px; padding-right: 0 !important; text-align: center; }
+.tr-row { cursor: pointer; }
+.tr-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.tr-event { color: var(--text-hi); font-weight: 500; white-space: nowrap; }
+.tr-time { color: var(--text-mid); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tr-queue { color: var(--text-hi); font-weight: 500; }
+.tr-mid { color: var(--text-mid); }
+.tr-low { color: var(--text-low); }
+.tr-mono { font-family: var(--font-mono); font-size: 11.5px; }
+.tr-break { word-break: break-all; }
+.tr-data { max-width: 220px; color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tr-worker { max-width: 160px; }
+.tr-worker > span { display: block; }
+.tr-worker > span + span { margin-top: 2px; font-size: 12px; }
+.tr-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tr-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.tr-tag {
+  display: inline-flex; align-items: center; padding: 1px 7px; border-radius: var(--r-chip);
+  border: 1px solid var(--bd); font-size: 11.5px; color: var(--text-mid); white-space: nowrap;
+}
+.tr-tag.on { color: var(--text-hi); background: var(--selected); border-color: var(--bd-hi); }
+
+/* An empty or failed table, and the page with nothing picked: one icon and
+   one short line. */
+.tr-state-row:hover td { background: transparent !important; }
+.tr-state {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 40px 16px; text-align: center; font-size: 13px; color: var(--text-mid);
+}
+.tr-state > .icon { color: var(--text-low); }
+.tr-state a { color: var(--text-hi); text-decoration: underline; text-underline-offset: 2px; }
+.tr-state-page { padding: 56px 16px; }
+/* Inside a table wider than a phone, the line stays in view. */
+td > .tr-state { position: sticky; left: 0; max-width: min(100%, calc(100vw - 48px)); }
+
+.tr-pager {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap;
+  padding: 10px 14px; border-top: 1px solid var(--bd); font-size: 12px; color: var(--text-low);
+}
+.tr-pager-count { font-variant-numeric: tabular-nums; }
+.tr-pager-nav { display: flex; gap: 4px; }
+
+/* The drawer. */
+.tr-detail { display: flex; flex-direction: column; gap: 20px; }
+.tr-fields { display: flex; flex-direction: column; gap: 14px; margin: 0; }
+.tr-fields dt, .tr-label { margin-bottom: 4px; font-size: 12px; color: var(--text-low); }
+.tr-fields dd { margin: 0; font-size: 13px; color: var(--text-hi); }
+/* Free text stays one step ABOVE the drawer, the JSON block below it stays
+   recessed — the pair has to keep reading apart. */
 .trace-text {
-  font-size: 13px; color: var(--text-hi);
+  margin: 0 0 12px; font-size: 13px; color: var(--text-hi); white-space: pre-wrap; overflow-wrap: anywhere;
   border: 1px solid var(--bd); border-radius: var(--r-card); padding: 12px;
   background: var(--ink-3);
 }
-
 .trace-code {
   border: 1px solid var(--bd); border-radius: var(--r-card);
   padding: 14px; overflow-x: auto;
   background: var(--recessed);
 }
+.trace-code pre { margin: 0; font-size: 12px; white-space: pre-wrap; color: var(--text-mid); }
 </style>

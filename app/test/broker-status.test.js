@@ -205,3 +205,23 @@ test('disk, memory and CPU past their lines, worst first', () => {
   const rank = { bad: 2, warn: 1 }
   list.reduce((prev, i) => { assert.ok(rank[i.sev] <= rank[prev.sev]); return i })
 })
+
+test('a problem several nodes share is one row naming them, not one per node', () => {
+  const nearlyFull = { totalBytes: 100 * GiB, usedBytes: 84 * GiB, usedPct: 84, gate: true, highPct: 85, lowPct: 80, writesRefused: false }
+  const list = issuesOf(three({
+    1: { host: host({ disk: nearlyFull }) },
+    2: { host: host({ disk: nearlyFull }) },
+    3: { host: host({ disk: nearlyFull }) },
+  }))
+  assert.equal(list.length, 1)
+  assert.equal(list[0].name, 'node-1, node-2, node-3')
+  assert.equal(list[0].title, "3 nodes' disks are nearly full")
+  assert.match(list[0].why, /Disk 84% used/)
+  // Different words (84% and 86%) stay two rows: they are not the same reading.
+  const apart = issuesOf(three({
+    1: { host: host({ disk: nearlyFull }) },
+    2: { host: host({ disk: { ...nearlyFull, usedBytes: 86 * GiB, usedPct: 86, writesRefused: true } }) },
+  }))
+  assert.equal(apart.length, 2)
+  assert.equal(apart[0].title, 'node-2 refuses writes: its disk is full')
+})

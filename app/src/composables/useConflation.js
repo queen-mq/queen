@@ -65,10 +65,11 @@ export function partitionConflates(row, keys) {
 }
 
 /**
- * Is this group behind at all? The inclusive rule the Consumers page already
- * uses for its "Lagging only" filter — deliberately the broadest of the three
- * lag rules in the app, because it decides whether an advisory is allowed to go
- * quiet (§5.4) and a narrow rule there would silence a real backlog.
+ * Is this group behind at all? Deliberately the broadest of the lag rules in
+ * the app (the Consumer groups tab's "Lagging only" now keeps the rows its
+ * verdict calls Lagging or Stuck), because it decides whether an advisory is
+ * allowed to go quiet (§5.4) and a narrow rule there would silence a real
+ * backlog.
  */
 export function isGroupLagging(group) {
   if (!group) return false

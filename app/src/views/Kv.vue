@@ -1,276 +1,152 @@
 <template>
-  <div class="view-container">
+  <!-- The KV namespaces are the list (KvSide): one picked on the left, its
+       keys on the right. The namespace is the address (?ns=); the key prefix
+       is a filter of the keys, kept out of the address (see the script). -->
+  <SubSidebar label="KV namespaces" :current="namespace || 'All namespaces'">
+  <template #side>
+    <KvSide
+      :namespace="namespace"
+      :options="options"
+      :settled="nsSettled"
+      :error-text="nsErrorText"
+      :unavailable="quiet ? quiet.title : ''"
+      @open="openNamespace"
+    />
+  </template>
+  <div class="view-container kv">
 
-    <!-- Two key counts sit beside the title and they COUNT DIFFERENT SCOPES:
-         `N keys` is every row of every namespace, counted when the queue
-         listing was read, `N in <ns>` every row of one namespace, counted when
-         the picker was filled. Both include expired rows awaiting sweep. Both
-         titles say so; the script header has the why. -->
-    <PageHead title="KV">
-      <template #sub>
-        <span v-if="usageMeasured" :title="TENANT_TOTAL_TITLE">{{ formatNumber(kvRows) }} keys</span>
-        <template v-if="usageMeasured && kvBytes !== null"> · <span :title="TENANT_BYTES_TITLE">{{ formatBytes(kvBytes) }}</span></template>
-        <template v-if="exactCount !== null"> · <span :title="EXACT_COUNT_TITLE">{{ formatNumber(exactCount) }} in {{ namespace }}</span></template>
-        <template v-if="stamp(listPanel)"> · {{ stamp(listPanel) }}</template>
+    <!-- Every count here is exact and includes expired keys awaiting sweep;
+         the titles say which read each one came from. -->
+    <PageHead :title="namespace || 'All namespaces'">
+      <template v-if="facts.length" #sub>
+        <span class="facts">
+          <span v-for="f in facts" :key="f.k" class="fact" :title="f.title"><span class="fact-k">{{ f.k }}</span>{{ f.v }}</span>
+        </span>
       </template>
-      <!-- §2.5 D6. Said on the page and not only in the plan: a console that
-           can read application state is expected to be able to edit it, and
-           the absence of an Edit button is not an answer. -->
+      <!-- §2.5 D6, said on the page: a console that can read application
+           state is expected to edit it, and a missing button is no answer. -->
       <template #actions>
-        <span class="tool-note" :title="READ_ONLY_TITLE">Read-only — this page never writes to the store</span>
+        <span v-if="namespace && stamp(listPanel)" class="kv-quiet" :title="formatTimestampUtc(listPanel.lastUpdated.value)">{{ stamp(listPanel) }}</span>
+        <span class="kv-quiet" :title="READ_ONLY_TITLE">Read-only</span>
       </template>
     </PageHead>
 
-    <!-- ===================== The three quiet states =====================
-         Not here / not in the plan / not being served right now. One card, no
-         poll, no retry: composables/useGatedVerdict.js owns the rule and the
-         wording, and stores/routeSupport.js remembers the first of them for
-         the whole cluster epoch so a second page cannot re-ask. -->
+    <!-- Not here / not in the plan / not being served right now: one card,
+         no poll (composables/useGatedVerdict.js owns the rule and the words;
+         stores/routeSupport.js remembers the first for the cluster epoch). -->
     <div v-if="quiet" class="card">
       <div class="empty-state">
-        <svg v-if="verdict === 'absent'" class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <path stroke-linecap="round" d="M14 8a4 4 0 11-4 4M11 12l-7 7v2h3v-2h2v-2h2M3 3l18 18" />
-        </svg>
-        <svg v-else-if="verdict === 'gated'" class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <rect x="5" y="11" width="14" height="9" rx="2" />
-          <path stroke-linecap="round" d="M8 11V8a4 4 0 018 0v3" />
-        </svg>
-        <svg v-else class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <circle cx="12" cy="12" r="9" />
-          <path stroke-linecap="round" d="M10 9v6M14 9v6" />
-        </svg>
-        <h3>{{ quiet.title }}</h3>
-        <p>{{ quiet.detail }}</p>
-        <!-- The store is far older than this browser of it: a cell can serve
-             every KV write and read on the wire and still answer 404 here. -->
-        <p v-if="verdict === 'absent'" style="font-size:13px;">
-          <code>/api/v1/resources/kv/*</code> is newer than the KV store itself —
-          the batch route can be alive on this cell while this listing is not.
-        </p>
+        <Icon :name="verdict === 'gated' ? 'lock' : verdict === 'paused' ? 'pause' : 'key-round'" class="empty-state-icon" :size="28" :stroke="1.5" />
+        <h3 :title="quietTitle">{{ quiet.title }}</h3>
         <button class="btn btn-ghost" @click="probeAgain">Check again</button>
       </div>
     </div>
 
     <template v-else>
-      <!-- Stale rows presented as live is the failure mode this banner exists
-           to prevent: the panel keeps the last page that loaded. -->
+      <!-- The page keeps the last rows that loaded: say they are old. -->
       <div v-if="isStale" class="status-banner banner-bad view-banner">
-        <span>
-          <strong>Could not refresh this page of keys</strong> ·
-          {{ listErrorText }} · showing the last page that loaded
-          ({{ stamp(listPanel) }}).
-        </span>
+        <span><strong>Could not refresh the keys</strong> · {{ listErrorText }} · showing the page that loaded {{ stampTime }}.</span>
       </div>
 
-      <!-- The namespace is not a filter, it is the ADDRESS: KV keys are unique
-           inside one namespace and the stored procedure takes it as a required
-           argument, so nothing is listable without one. -->
-      <PageTools>
-        <!-- A select rather than an Autocomplete: the exact key count belongs
-             IN the option. A tenant has a handful of namespaces (declared, not
-             derived from traffic), so the list stays short by construction. -->
-        <label class="tool-field" for="kv-namespace">
-          <span class="tool-label">Namespace</span>
-          <select
-            v-if="!namespacesUnavailable"
-            id="kv-namespace"
-            v-model="namespace"
-            class="input"
-            :disabled="nsLoading && !options.length"
-          >
-            <option value="">{{ namespacePlaceholder }}</option>
-            <option v-for="o in options" :key="o.namespace" :value="o.namespace">{{ o.label }}</option>
-          </select>
-          <input
-            v-else
-            id="kv-namespace"
-            v-model="namespaceDraft"
-            class="input"
-            placeholder="type one, then Enter"
-            spellcheck="false"
-            @change="applyNamespaceDraft"
-          />
-        </label>
-        <!-- The prefix replaces "jump to page 47": keys here are structured
-             (`wh.deliver:<tenant>:<id>`), so a prefix is a tight index range —
-             one seek, the same cost as the first page. -->
-        <label class="tool-field" for="kv-prefix" :title="prefixHint">
+      <!-- The prefix replaces "jump to page 47": keys are structured
+           (`wh.deliver:<tenant>:<id>`), so a prefix is a tight byte range,
+           one seek, the cost of the first page. -->
+      <PageTools v-if="namespace">
+        <label class="tool-field kv-prefix" for="kv-prefix" :title="prefixHint">
           <span class="tool-label">Prefix</span>
           <input
             id="kv-prefix"
             v-model="prefixDraft"
+            type="search"
             class="input"
             placeholder="e.g. wh.deliver:"
             spellcheck="false"
+            autocomplete="off"
             @keyup.enter="applyPrefixNow"
           />
         </label>
-        <span v-if="namespacesUnavailable" class="tool-note">Namespace list unavailable — type a namespace and press Enter</span>
-        <span v-else-if="unlistedNamespace" class="tool-note">Not in this tenant's namespace list — asking the broker anyway</span>
         <template #view>
-          <label class="tool-field" for="kv-limit">
-            <span class="tool-label">Show</span>
-            <select id="kv-limit" v-model.number="limit" class="input">
-              <option :value="25">25</option>
-              <option :value="50">50</option>
-              <option :value="100">100</option>
-              <option :value="250">250</option>
-            </select>
-          </label>
+          <UiSelect v-model="limit" label="Show" :options="LIMITS" aria-label="Keys per page" />
         </template>
       </PageTools>
 
-      <!-- ===================== The page =====================
-           One request, one page, no client-side slice: DataTable is fed
-           exactly what the broker returned and a `pageSize` at least as large
-           as the page, so its own offset pager never appears. Walking is the
-           keyset strip below it. -->
-      <div v-if="showTable" class="kv-sheet">
-        <DataTable
-          title="Keys"
-          :subtitle="stamp(listPanel)"
-          :columns="columns"
-          :data="pageRows"
-          :loading="firstLoad"
-          :page-size="tablePageSize"
-          clickable
-          @row-click="openRow"
-        >
-          <template #key="{ row }">
-            <span class="font-mono kv-key" :title="row.key">{{ row.key }}</span>
-          </template>
+      <!-- One request, one page, nothing sliced in the browser. Walking is the
+           keyset pager at the foot. Not sortable: the cursor for the next page
+           is the LAST ROW ON SCREEN, so a re-ordered page would make "Next
+           continues after the bottom row" false while it still looked true. -->
+      <div class="card">
+        <div v-if="showTable" class="kv-scroll">
+          <table class="t kv-table">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th class="num" :title="SIZE_TITLE">Size</th>
+                <th class="num" :title="VERSION_TITLE">Version</th>
+                <th class="num">Expires</th>
+                <th class="num">Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template v-if="firstLoad">
+                <tr v-for="i in 6" :key="`sk-${i}`"><td colspan="5"><div class="skeleton kv-skeleton" /></td></tr>
+              </template>
+              <template v-else>
+                <tr
+                  v-for="row in pageRows"
+                  :key="row.key"
+                  class="kv-row"
+                  :class="{ expired: row.expired === true }"
+                  tabindex="0"
+                  @click="openRow(row)"
+                  @keydown.enter="openRow(row)"
+                >
+                  <td><span class="kv-key" :title="row.key">{{ row.key }}</span></td>
+                  <td class="num" :title="SIZE_TITLE">{{ row.size === null ? '—' : formatBytes(row.size) }}</td>
+                  <td class="num">{{ row.version ?? '—' }}</td>
+                  <td class="num" :title="row.expired === true ? row.state.title : instantTitle(row.expiresAt)">
+                    {{ row.expired === true ? `expired ${row.expires}` : row.expires }}
+                  </td>
+                  <td class="num" :title="instantTitle(row.updatedAt)">{{ compactStamp(row.updatedAt) }}</td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
 
-          <template #size="{ row }">
-            <span v-if="row.size !== null" class="num" :title="SIZE_TITLE">{{ formatBytes(row.size) }}</span>
-            <span v-else class="num mute">—</span>
-          </template>
-
-          <template #version="{ row }">
-            <span class="num" :title="VERSION_TITLE">{{ row.version ?? '—' }}</span>
-          </template>
-
-          <template #expires="{ row }">
-            <div :class="row.expired ? 'kv-expiry warn' : 'kv-expiry'">{{ row.expires }}</div>
-            <div v-if="row.expiresAt" class="kv-sub tabular-nums" :title="formatTimestampUtc(row.expiresAt)">
-              {{ formatTimestamp(row.expiresAt) }}
-            </div>
-          </template>
-
-          <template #updated="{ row }">
-            <span class="kv-sub tabular-nums" :title="formatTimestampUtc(row.updatedAt)">
-              {{ formatTimestamp(row.updatedAt) }}
-            </span>
-          </template>
-
-          <!-- The state cell carries the marker the row is dimmed by; see the
-               `:has()` rule in this file's styles. -->
-          <template #state="{ row }">
-            <span
-              class="chip"
-              :class="row.state.tone === 'warn' ? 'chip-warn kv-expired' : 'chip-mute'"
-              :title="row.state.title"
-            >{{ row.state.label }}</span>
-            <div v-if="row.state.note" class="kv-sub" :title="row.state.title">{{ row.state.note }}</div>
-          </template>
-        </DataTable>
+        <!-- Nothing to table, for reasons a bare "no rows" would merge: the
+             call failed, no namespace is picked, the tenant has none, the
+             prefix matches nothing, or the namespace really is empty. Only
+             the first is a failure. -->
+        <div v-else-if="listError" class="empty-state empty-state-failed">
+          <h3>Cannot read the keys</h3>
+          <p>{{ listErrorText }}</p>
+          <button class="btn btn-ghost" @click="reload">Retry</button>
+        </div>
+        <div v-else class="empty-state">
+          <Icon name="key-round" class="empty-state-icon" :size="28" :stroke="1.5" />
+          <p :title="emptyTitle">{{ emptyLine }}</p>
+        </div>
 
         <!-- Keyset pager: no page count, because there is no total without a
              count and this is an index range, not an offset. -->
-        <div class="pager kv-pager">
+        <div v-if="namespace && (pageRows.length || canPrev)" class="pager kv-pager">
           <span class="pager-count">
             <template v-if="firstLoad">Loading…</template>
             <template v-else>
-              Page <span class="tabular-nums">{{ loadedPage }}</span>
-              · {{ pageRows.length }} row{{ pageRows.length === 1 ? '' : 's' }}
-              <template v-if="pageBytes !== null">
-                · <span :title="PAGE_BYTES_TITLE">{{ formatBytes(pageBytes) }} of values</span>
-              </template>
-              <template v-if="pageEnd"> · {{ pageEnd }}</template>
+              Page {{ loadedPage }} · {{ exact(pageRows.length) }} {{ pageRows.length === 1 ? 'key' : 'keys' }}<template v-if="pageBytes !== null"> · <span :title="PAGE_BYTES_TITLE">{{ formatBytes(pageBytes) }}</span></template><template v-if="pageEnd"> · {{ pageEnd }}</template>
             </template>
           </span>
           <div class="pager-nav">
-            <button class="btn btn-ghost" :disabled="!canPrev || loading" @click="goPrev">Previous</button>
-            <button class="btn btn-ghost" :disabled="!canNext || loading" @click="goNext">Next</button>
+            <button class="btn btn-ghost" :disabled="!canPrev || loading" @click="goPrev"><Icon name="chevron-left" :size="14" />Previous</button>
+            <button class="btn btn-ghost" :disabled="!canNext || loading" @click="goNext">Next<Icon name="chevron-right" :size="14" /></button>
           </div>
-        </div>
-      </div>
-
-      <!-- Nothing to table, for five different reasons that a naive list would
-           render as one "no rows": the call failed, no namespace is picked, the
-           tenant has no namespaces at all, the prefix matches nothing, or the
-           namespace really is empty. Only the first is a failure. -->
-      <div v-else class="card">
-        <div v-if="listError" class="empty-state empty-state-failed">
-          <h3>{{ listErrorText }}</h3>
-          <p>Nothing loaded — this is a failure, not an empty namespace.</p>
-          <button class="btn btn-ghost" @click="reload">Retry</button>
-        </div>
-
-        <template v-else-if="!namespace && options.length">
-          <div class="card-header">
-            <h3>Namespaces</h3>
-            <span class="card-sub">keys are listed one namespace at a time; the counts are exact</span>
-          </div>
-          <ul class="pick-list">
-            <li v-for="o in options" :key="o.namespace">
-              <button class="pick-row" @click="namespace = o.namespace">
-                <span class="pick-name">{{ o.namespace }}</span>
-                <span class="pick-count">{{ o.keys === null ? '—' : `${formatNumber(o.keys)} ${o.keys === 1 ? 'key' : 'keys'}` }}</span>
-                <span class="pick-go" aria-hidden="true">Open →</span>
-              </button>
-            </li>
-          </ul>
-        </template>
-
-        <div v-else-if="!namespace" class="empty-state">
-          <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-            <path stroke-linecap="round" d="M14 8a4 4 0 11-4 4M11 12l-7 7v2h3v-2h2v-2h2" />
-          </svg>
-          <template v-if="noNamespaces">
-            <h3>This tenant has no KV namespaces</h3>
-            <p>
-              Nothing has been written to the key-value store on this cluster yet.
-              A namespace appears here the moment its first key is set.
-            </p>
-          </template>
-          <template v-else>
-            <h3>Pick a namespace</h3>
-            <p>
-              Keys are listed per namespace, never tenant-wide: a key is unique
-              inside one namespace, and the counts in the picker are exact.
-            </p>
-          </template>
-        </div>
-
-        <div v-else class="empty-state">
-          <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-            <path stroke-linecap="round" d="M14 8a4 4 0 11-4 4M11 12l-7 7v2h3v-2h2v-2h2" />
-          </svg>
-          <h3>
-            No keys<template v-if="appliedPrefix"> under this prefix</template>
-            <template v-else-if="loadedPage > 1"> on this page</template>
-          </h3>
-          <p v-if="appliedPrefix">
-            Nothing in <strong class="font-mono">{{ namespace }}</strong> starts with
-            <strong class="font-mono">{{ appliedPrefix }}</strong>. A prefix is a byte
-            range, not a search: it matches from the first character only, and
-            <code>%</code> and <code>_</code> are ordinary characters here.
-          </p>
-          <p v-else>
-            <strong class="font-mono">{{ namespace }}</strong> holds no keys right now —
-            not even expired ones, which this page would show.
-          </p>
-          <button v-if="appliedPrefix" class="btn btn-ghost" @click="clearPrefix">Clear the prefix</button>
-          <button v-if="canPrev" class="btn btn-ghost" @click="goPrev">Previous page</button>
         </div>
       </div>
     </template>
 
-    <!-- ===================== One key =====================
-         No second request: the list carries the value, which is what the
-         stored procedure's 4 MiB page budget buys. The drawer is therefore a
-         view of the PAGE's snapshot — it closes whenever a new page is asked
-         for, rather than floating over rows it no longer belongs to. -->
+    <!-- One key. No second request: the list carries the value (the 4 MiB
+         page budget buys it), so the drawer is a view of the PAGE's snapshot
+         and closes whenever a new page is asked for. -->
     <DetailDrawer
       :open="Boolean(selectedRow)"
       title="Key"
@@ -290,18 +166,18 @@
         />
         <DetailField
           label="Expires"
-          :value="selectedRow.expiresAt ? `${selectedRow.expires} · ${formatTimestamp(selectedRow.expiresAt)}` : 'never'"
-          :title="selectedRow.expiresAt ? formatTimestampUtc(selectedRow.expiresAt) : 'No TTL — nothing but a delete removes this key'"
+          :value="selectedRow.expiresAt ? `${selectedRow.expires} · ${formatTimestamp(parseBrokerInstant(selectedRow.expiresAt))}` : 'never'"
+          :title="selectedRow.expiresAt ? instantTitle(selectedRow.expiresAt) : 'No TTL: nothing but a delete removes this key'"
         />
         <DetailField
           label="Updated"
-          :value="formatTimestamp(selectedRow.updatedAt)"
-          :title="formatTimestampUtc(selectedRow.updatedAt)"
+          :value="formatTimestamp(parseBrokerInstant(selectedRow.updatedAt))"
+          :title="instantTitle(selectedRow.updatedAt)"
         />
         <DetailField
           label="State"
-          :value="selectedRow.state.label"
-          :tone="selectedRow.state.tone === 'warn' ? 'accent' : 'mid'"
+          :value="selectedRow.state.note ? `${selectedRow.state.label}, ${selectedRow.state.note}` : selectedRow.state.label"
+          tone="high"
           :title="selectedRow.state.title"
         />
       </div>
@@ -311,7 +187,7 @@
           <div class="label-xs kv-value-head">
             <span>Value</span>
             <button v-if="hasValue && canCopy" class="btn btn-ghost kv-copy" @click="copyValue">
-              {{ copied ? 'Copied!' : 'Copy JSON' }}
+              <Icon :name="copied ? 'check' : 'copy'" :size="12" />{{ copied ? 'Copied' : 'Copy JSON' }}
             </button>
           </div>
           <!-- A stored JSON `null` is a value four bytes long, so the absence
@@ -319,22 +195,20 @@
                here. Only a keysOnly page produces it, which this console never
                asks for; the branch exists so a future one cannot render a lie. -->
           <JsonViewer v-if="hasValue" :value="selectedValue" />
-          <div v-else class="empty-tile">
-            This page carries no value for the key — the listing was asked for keys only.
-          </div>
+          <div v-else class="empty-tile">This page carries no value for the key: it was asked for keys only.</div>
         </div>
       </template>
 
       <template #footer>
-        <span class="kv-foot-note" :title="READ_ONLY_TITLE">Read-only view</span>
+        <span class="kv-foot-note" :title="READ_ONLY_TITLE">Read-only</span>
         <button class="btn btn-ghost" @click="closeDrawer">Close</button>
       </template>
     </DetailDrawer>
   </div>
+  </SubSidebar>
 </template>
 
 <script setup>
-import { useRouteState } from '@/composables/useRouteState'
 // KV browser — the tenant's key-value store, namespace by namespace
 // (PLAN_DASHBOARD_ACTIONS.md §2.5, PLAN_KV_TIMERS.md §5).
 //
@@ -362,15 +236,16 @@ import { useRouteState } from '@/composables/useRouteState'
 // page of the dashboard re-asks it, while a 403 or a 503 stops THIS page's
 // calls until it is remounted or "Check again" is pressed.
 //
-// THREE KEY COUNTS, THREE PROVENANCES. The page says which is which, because
-// they are taken at different moments and can disagree while both are right:
-//   · `N keys`        the tenant's footprint across every namespace, from the
-//                     queue listing's root: every stored row, expired ones
-//                     awaiting sweep included, counted when the listing was read
-//   · `N in <ns>`     one namespace, every row, expired-awaiting-sweep
-//                     included, counted when the picker was filled
-//   · the page        exactly the rows on screen; the keyset walk has no
-//                     total, by construction
+// THE COUNTS, AND WHERE EACH COMES FROM. They are taken at different moments
+// and can disagree while both are right, so each chip's title names its read:
+//   · Keys (all namespaces)  the namespace listing's exact counts, summed; the
+//                            queue listing's `kvRows` only when that fails
+//   · Stored                 the queue listing's `kvBytes`: key and value bytes
+//                            of every row, counted when that listing was read
+//   · Keys (one namespace)   the namespace listing's exact count for it
+//   · the page               exactly the rows on screen; the keyset walk has no
+//                            total, by construction
+// Every one of them includes expired rows awaiting sweep.
 //
 // NO WRITES, ANYWHERE (§2.5 D6). Not because the proxy would refuse them — it
 // allows every role but Viewer on the batch route — but because editing
@@ -379,23 +254,29 @@ import { useRouteState } from '@/composables/useRouteState'
 // leaving an operator to conclude the button is missing.
 import { computed, onUnmounted, ref, watch } from 'vue'
 
-import DataTable from '@/components/DataTable.vue'
-import PageHead from '@/components/PageHead.vue'
-import PageTools from '@/components/PageTools.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
+import Icon from '@/components/Icon.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
+import KvSide from '@/components/KvSide.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
+import SubSidebar from '@/components/SubSidebar.vue'
+import UiSelect from '@/components/UiSelect.vue'
 import { kv as kvApi, describeApiError } from '@/api'
-import { formatBytes, formatNumber, toNum, useApi } from '@/composables/useApi'
-import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { formatBytes, toNum, useApi } from '@/composables/useApi'
+import { formatTimestamp, formatTimestampCompact, formatTimestampTime, formatTimestampUtc } from '@/composables/useFormat'
 import { describeVerdict, gatedVerdict } from '@/composables/useGatedVerdict'
 import { useKeysetPager } from '@/composables/useKeysetPager'
+import { exact, namespaceTotal } from '@/composables/useKvSide'
 import {
   describeKvState, describePageEnd, formatExpiry, kvListBody, kvRefusalText,
   namespaceOptions, sweeperUsageIsMeasured, valueBytes,
 } from '@/composables/useKvView'
 import { useRefresh } from '@/composables/useRefresh'
+import { useRouteState } from '@/composables/useRouteState'
 import { stamp } from '@/composables/useStamp'
+import { parseBrokerInstant } from '@/composables/useTimers'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
@@ -409,19 +290,23 @@ const { notifyError } = useToast()
  *  Enter skips the wait for an operator who already knows what they want. */
 const PREFIX_DEBOUNCE_MS = 300
 
-// The tenant figure and the namespace figure are both exact counts of every
-// stored row, expired ones included, but they are taken by two different reads
-// at two different moments, and saying so is the job of these titles.
+/** Keys per page; the broker clamps any limit to 1..1000 on its own. */
+const LIMITS = [25, 50, 100, 250]
+
+const NAMESPACES_TITLE = 'Namespaces this tenant has, from the namespace list'
+const ALL_KEYS_TITLE =
+  'Every key of every namespace, the namespace list\'s exact counts added up. Expired keys awaiting ' +
+  'sweep are included'
 const TENANT_TOTAL_TITLE =
   'Every KV row this tenant stores on the cell, across all namespaces, counted when the queue listing ' +
-  'was read. Expired rows awaiting sweep are included, as they are in the namespace count'
+  'was read. Expired rows awaiting sweep are included'
 const TENANT_BYTES_TITLE =
   'The key and value bytes of every KV row this tenant stores on the cell, expired rows included, ' +
   'counted when the queue listing was read. Not comparable with a page\'s byte figure, which counts ' +
   'values only'
 const EXACT_COUNT_TITLE =
-  'Exact count for this namespace, taken when the picker was filled. It counts every row, expired ones ' +
-  'awaiting sweep included — an expired key is not a live key, but it is still an occupied one'
+  'Exact count for this namespace, taken when the namespace list was read. It counts every row, expired ones ' +
+  'awaiting sweep included: an expired key is not a live key, but it is still an occupied one'
 const SIZE_TITLE =
   'The value\'s JSON size, measured in this browser from the value the broker returned. The page ' +
   'total below is the broker\'s own count of the stored bytes'
@@ -434,6 +319,9 @@ const VERSION_TITLE =
 const READ_ONLY_TITLE =
   'The console lists and reads keys; it never sets, deletes or expires one. Editing application state ' +
   'by hand needs a version check and an audit trail this page does not have (§2.5 D6)'
+const ABSENT_NOTE =
+  '/api/v1/resources/kv/* is newer than the KV store itself: the batch route can be alive on this cell ' +
+  'while this listing is not.'
 
 // ---------------------------------------------------------------------------
 // The tenant's footprint, from the queue listing's root (shared with every
@@ -448,13 +336,10 @@ const { kvRows, kvBytes, fetchQueues } = queuesStore
 // pager's stack address the old one and would silently page through it.
 // ---------------------------------------------------------------------------
 const namespace = ref('')
-const namespaceDraft = ref(namespace.value)
 const prefixDraft = ref('')
 const appliedPrefix = ref('')
 const limit = ref(25)
 useRouteState({ ns: namespace, limit })
-namespaceDraft.value = namespace.value
-prefixDraft.value = appliedPrefix.value
 
 /** What the rows on screen answer. A change here invalidates them, which is
  *  why it is compared rather than assumed: without it, switching namespaces
@@ -504,29 +389,47 @@ const listPanel = useApi(listKeys, { immediate: false })
 const nsPanel = useApi(listNamespaces, { immediate: false })
 
 const options = computed(() => namespaceOptions(nsPanel.data.value))
-const nsLoading = computed(() => nsPanel.loading.value)
-/** The list failed and left nothing behind: the picker degrades to free text
- *  rather than to a dead control, exactly as the timers queue picker does. */
-const namespacesUnavailable = computed(() => Boolean(nsPanel.error.value) && options.value.length === 0)
-const noNamespaces = computed(
-  () => !nsLoading.value && !nsPanel.error.value && nsPanel.lastUpdated.value !== null && options.value.length === 0
-)
-const unlistedNamespace = computed(
-  () => Boolean(namespace.value) && options.value.length > 0 && !options.value.some(o => o.namespace === namespace.value)
-)
-const namespacePlaceholder = computed(() => {
-  if (options.value.length) return 'Pick a namespace'
-  return nsLoading.value ? 'Loading namespaces…' : 'No namespaces'
+/** The namespace list answered or failed at least once on this cluster. */
+const nsSettled = computed(() => nsPanel.lastUpdated.value !== null || nsPanel.error.value !== null)
+/** The list failed and left nothing behind: the sub sidebar says why and takes
+ *  a typed namespace instead, exactly as the timers queue picker does. */
+const nsErrorText = computed(() => {
+  const err = nsPanel.error.value
+  if (!err || options.value.length) return ''
+  return kvRefusalText(err) || describeApiError(err)
 })
+const noNamespaces = computed(
+  () => !nsPanel.loading.value && !nsPanel.error.value && nsPanel.lastUpdated.value !== null && options.value.length === 0
+)
 const exactCount = computed(() => {
   const hit = options.value.find(o => o.namespace === namespace.value)
   return hit ? hit.keys : null
 })
 // The queue listing can be older than the namespace listing (it is shared
-// with every other page), so the strip could otherwise print `0 keys` beside a
-// selector reporting thousands. The selector is the witness; the rule lives in
-// useKvView.js with the why.
+// with every other page), so its figures could otherwise print `0 keys` beside
+// a namespace list reporting thousands. That list is the witness; the rule
+// lives in useKvView.js with the why.
 const usageMeasured = computed(() => sweeperUsageIsMeasured(kvRows.value, options.value))
+
+const facts = computed(() => {
+  if (quiet.value) return []
+  if (namespace.value) {
+    return Number.isFinite(exactCount.value)
+      ? [{ k: 'Keys', v: exact(exactCount.value), title: EXACT_COUNT_TITLE }]
+      : []
+  }
+  const out = []
+  if (nsPanel.lastUpdated.value !== null) {
+    out.push({ k: 'Namespaces', v: exact(options.value.length), title: NAMESPACES_TITLE })
+    const total = namespaceTotal(options.value)
+    if (total !== null) out.push({ k: 'Keys', v: exact(total), title: ALL_KEYS_TITLE })
+    else if (usageMeasured.value) out.push({ k: 'Keys', v: exact(kvRows.value), title: TENANT_TOTAL_TITLE })
+  } else if (usageMeasured.value) {
+    out.push({ k: 'Keys', v: exact(kvRows.value), title: TENANT_TOTAL_TITLE })
+  }
+  if (usageMeasured.value && kvBytes.value !== null) out.push({ k: 'Stored', v: formatBytes(kvBytes.value), title: TENANT_BYTES_TITLE })
+  return out
+})
 
 const rows = computed(() => {
   if (loadedKey.value !== queryKey.value) return []
@@ -544,9 +447,10 @@ const firstLoad = computed(() => loading.value && loadedKey.value !== queryKey.v
 const isStale = computed(() => Boolean(listError.value) && rows.value.length > 0)
 const showTable = computed(() => firstLoad.value || rows.value.length > 0)
 // Every relative "Expires" cell is rendered against ONE instant — the load —
-// which is what the freshness stamp beside the table claims. A column that
+// which is what the freshness stamp in the head claims. A column that
 // silently drifted from the stamp above it would be the worse lie.
 const asOf = computed(() => listPanel.lastUpdated.value?.getTime() ?? Date.now())
+const stampTime = computed(() => (listPanel.lastUpdated.value ? `at ${formatTimestampTime(listPanel.lastUpdated.value)}` : 'earlier'))
 
 const pageRows = computed(() => rows.value.map((row) => ({
   ...row,
@@ -555,23 +459,6 @@ const pageRows = computed(() => rows.value.map((row) => ({
   state: describeKvState(row),
 })))
 
-// Deliberately not `sortable`. The rows are one page of a walk in byte order,
-// and the cursor for the next page is the LAST ROW ON SCREEN: re-ordering them
-// in the browser would make "Next continues after the bottom row" false while
-// leaving it looking true.
-const columns = [
-  { key: 'key', label: 'Key' },
-  { key: 'size', label: 'Size', align: 'right' },
-  { key: 'version', label: 'Version', align: 'right' },
-  { key: 'expires', label: 'Expires' },
-  { key: 'updated', label: 'Updated' },
-  { key: 'state', label: 'State' },
-]
-
-/** At least the whole page, so DataTable's own offset pager stays hidden — the
- *  walking is the keyset strip's job. The floor is the skeleton height while
- *  the first page is in flight, when there are no rows to measure. */
-const tablePageSize = computed(() => Math.max(pageRows.value.length, 6))
 const pageBytes = computed(() => (rows.value.length ? toNum(listPanel.data.value?.bytes) : null))
 const pageEnd = computed(() => describePageEnd({
   rowCount: rows.value.length,
@@ -580,9 +467,40 @@ const pageEnd = computed(() => describePageEnd({
   prefixed: appliedPrefix.value !== '',
 }))
 
+/** The empty card's one line, and what it leaves out. */
+const emptyLine = computed(() => {
+  if (!namespace.value) return noNamespaces.value ? 'No KV namespaces yet' : 'Pick a namespace'
+  if (loadedKey.value !== queryKey.value) return 'Reading keys…'
+  if (appliedPrefix.value) return `No key starts with ${appliedPrefix.value}`
+  if (loadedPage.value > 1) return 'No keys on this page'
+  return `No keys in ${namespace.value}`
+})
+const emptyTitle = computed(() => {
+  if (!namespace.value) {
+    return noNamespaces.value
+      ? 'Nothing has been written to the key-value store on this cluster yet. A namespace appears with its first key.'
+      : 'Keys are listed per namespace, never tenant-wide: a key is unique inside one namespace.'
+  }
+  if (appliedPrefix.value) {
+    return 'A prefix is a byte range, not a search: it matches from the first character only, and % and _ are ordinary characters here.'
+  }
+  return 'Not even an expired key, which this page would show.'
+})
+
 const quiet = computed(() =>
   verdict.value && verdict.value !== 'transient' ? describeVerdict(verdict.value, 'kv') : null
 )
+const quietTitle = computed(() => (quiet.value
+  ? (verdict.value === 'absent' ? `${quiet.value.detail} ${ABSENT_NOTE}` : quiet.value.detail)
+  : ''))
+
+// Both halves of a stamp go through the one parser: the broker prints up to
+// six fractional digits.
+const compactStamp = (value) => formatTimestampCompact(parseBrokerInstant(value))
+const instantTitle = (value) => {
+  const at = parseBrokerInstant(value)
+  return at ? `${formatTimestamp(at)} · ${formatTimestampUtc(at)}` : ''
+}
 
 // A cluster switch can land on a different cell running a different broker, so
 // the cursor, the verdict, the namespace list and the open drawer all belong to
@@ -637,7 +555,7 @@ const loadNamespaces = async () => {
     // parallel on mount, and a namespace list that lands after the listing was
     // refused would wipe the refusal and put the page back into a state where
     // it asks again. The listing is the authority on whether the family is
-    // being served; this call only fills the picker.
+    // being served; this call only fills the namespace list.
     //
     // One namespace is not a choice. More than one and the console must not
     // pick which of a tenant's stores to open — that is the operator's call,
@@ -669,13 +587,19 @@ const probeAgain = async () => {
 // something they can paste into a ticket. The PREFIX does not: it is a
 // fragment of a key, and the reason the cursor travels in a POST body applies
 // to the address bar, the browser history and a screenshot just as well.
-watch(namespace, (ns) => {
-  resetQuery()
-  namespaceDraft.value = ns
-  reload()
-})
-watch(appliedPrefix, value => { prefixDraft.value = value; resetQuery(); reload() })
-watch(limit, () => { resetQuery(); reload() })
+//
+// A prefix belongs to the namespace it was picked in, so a new namespace opens
+// whole. `sync`, so the prefix is already cleared when the reload watcher
+// below runs: it sees both changes in one flush and asks once.
+let prefixTimer = null
+watch(namespace, () => {
+  if (!prefixDraft.value && !appliedPrefix.value) return
+  clearTimeout(prefixTimer)
+  prefixDraft.value = ''
+  appliedPrefix.value = ''
+}, { flush: 'sync' })
+watch(appliedPrefix, value => { prefixDraft.value = value })
+watch([namespace, appliedPrefix, limit], () => { resetQuery(); reload() })
 
 // ---------------------------------------------------------------------------
 // The prefix box. Debounced because each applied prefix is a metered read; NOT
@@ -683,7 +607,6 @@ watch(limit, () => { resetQuery(); reload() })
 // not a search box (the stored procedure uses starts_with, so `%` and `_` are
 // ordinary characters too).
 // ---------------------------------------------------------------------------
-let prefixTimer = null
 const prefixPending = computed(() => prefixDraft.value !== appliedPrefix.value)
 
 watch(prefixDraft, (val) => {
@@ -695,21 +618,14 @@ const applyPrefixNow = () => {
   clearTimeout(prefixTimer)
   appliedPrefix.value = prefixDraft.value
 }
-const clearPrefix = () => {
-  clearTimeout(prefixTimer)
-  prefixDraft.value = ''
-  appliedPrefix.value = ''
-}
 
 const prefixHint = computed(() => (prefixPending.value
   ? 'Applying…'
-  : 'A byte range, not a search: it matches from the first character only.'))
+  : 'Keys that start with this. A byte range, not a search: it matches from the first character only.'))
 
-/** The free-text fallback, used only when the namespace list did not load. */
-const applyNamespaceDraft = () => {
-  const typed = namespaceDraft.value.trim()
-  if (typed === namespace.value) return
-  namespace.value = typed
+/** A namespace typed in the sub sidebar and opened with Enter, listed or not. */
+const openNamespace = (typed) => {
+  if (typeof typed === 'string' && typed !== namespace.value) namespace.value = typed
 }
 
 onUnmounted(() => clearTimeout(prefixTimer))
@@ -766,47 +682,61 @@ reload()
 </script>
 
 <style scoped>
-/* The namespace names and the key prefixes are long and dotted; the page-size
-   select next to them is three digits wide and must not take the same room. */
-
-
-/* DataTable renders its own card and exposes no footer slot, so the keyset
-   strip is a second card joined to the first: one border, one rule between
-   them, no gap for a shadow to fall into. */
-.kv-sheet > :deep(.card) {
-  border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 0;
+/* The head's facts: small chips beside the title, as in the Queues section
+   (the same 16px after the title). On a narrow screen they wrap under the
+   title rather than being cut. */
+.kv :deep(.page-id) { flex-wrap: wrap; gap: 6px 16px; }
+.kv :deep(.page-sub) { overflow: visible; white-space: normal; }
+.facts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.fact {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 2px 8px; border-radius: var(--r-chip);
+  background: var(--ink-3); border: 1px solid var(--bd);
+  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-.kv-pager {
-  border: 1px solid var(--bd);
-  border-radius: 0 0 var(--r-card) var(--r-card);
-  background: var(--ink-2);
+.fact-k { color: var(--text-low); }
+.kv-quiet { font-size: 12px; color: var(--text-low); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* The prefix field takes the room a long key prefix needs. */
+.kv-prefix .input { width: 240px; }
+
+/* The table scrolls inside its card on a narrow screen; one line per row. */
+.kv-scroll { overflow-x: auto; }
+.kv-table th, .kv-table td { white-space: nowrap; }
+.kv-table td { height: 36px; }
+.kv-row { cursor: pointer; }
+.kv-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+/* Keys run long (`wh.deliver:<tenant>:<uuid>`) and are the column worth the
+   room: in full up to a point, then cut, the whole of it on hover and in the
+   drawer. */
+.kv-key {
+  display: block; max-width: 640px;
+  overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-hi);
 }
+/* An expired row awaiting sweep reads quieter, in the low ink that still
+   holds its contrast; its Expires cell says the word. */
+.kv-row.expired td, .kv-row.expired .kv-key { color: var(--text-low); }
+.kv-row.expired td:nth-child(4) { color: var(--text-mid); }
+.kv-skeleton { height: 16px; }
 
-/* Expired rows, greyed. DataTable takes no per-row class (and it is a shared
-   component), so the row reaches its own dimming through the one cell that
-   knows: `:has()` selects the <tr> that contains the expired chip, and the
-   state cell itself stays at full contrast so the word is still readable. A
-   browser that ignores `:has()` loses the dimming and keeps the chip and the
-   "awaiting sweep" line — nothing depends on the colour alone. */
-.kv-sheet :deep(tbody tr:has(.kv-expired) td) { opacity: 0.55; }
-.kv-sheet :deep(tbody tr:has(.kv-expired) td:last-child) { opacity: 1; }
-
-/* Keys run long — `wh.deliver:<tenant>:<uuid>` is 60 characters — and they are
-   the column worth the room, so they wrap rather than push the rest off. */
-.kv-key { font-size: 12px; word-break: break-all; }
-.kv-expiry { font-size: 12px; color: var(--text-hi); font-weight: 500; }
-.kv-expiry.warn { color: var(--warn-400); }
-.kv-sub { font-size: 11px; color: var(--text-low); white-space: nowrap; }
+.kv-pager { flex-wrap: wrap; gap: 8px 16px; }
+.kv-pager .pager-count { font-size: 12px; font-variant-numeric: tabular-nums; }
+.kv-pager .btn { gap: 4px; }
 
 .kv-fields { display: flex; flex-direction: column; gap: 14px; }
-
 .kv-value-head {
   display: flex; align-items: baseline; justify-content: space-between;
   gap: 8px; margin-bottom: 6px;
 }
-.kv-copy { padding: 1px 6px; font-size: 11px; }
+.kv-copy { gap: 4px; padding: 1px 6px; font-size: 11px; }
 
 /* The drawer's footer is `justify-content: flex-end`; the note belongs on the
    other side of it, where a write button would have been. */
-.kv-foot-note { margin-right: auto; font-size: 11.5px; color: var(--text-low); }
+.kv-foot-note { margin-right: auto; font-size: 12px; color: var(--text-low); }
+
+@media (max-width: 640px) {
+  .kv-prefix { flex: 1 1 100%; }
+  .kv-prefix .input { width: 100%; }
+}
 </style>

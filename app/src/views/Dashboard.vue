@@ -1,58 +1,223 @@
 <template>
-  <div class="view-container dash">
+  <!--
+    The Overview: nine views in a fixed sub sidebar, under three groups, kept
+    in the address as ?view= (composables/overviewViews.js OVERVIEW_VIEWS).
 
-    <!--
-      ========================================================================
-      Head — the page's name, the live tick and the range, on one line. Whose
-      numbers these are is stated once, in the sidebar's tenant row.
-      ========================================================================
-    -->
-    <PageHead title="Overview" :live="refreshAgo">
-      <template #range>
-        <div class="seg" role="group" aria-label="Time range">
-          <button
-            v-for="r in timeRanges"
-            :key="r.value"
-            :class="{ on: selectedRange === r.value }"
-            :aria-pressed="selectedRange === r.value ? 'true' : 'false'"
-            @click="selectQuickRange(r.value)"
-          >{{ r.label }}</button>
+      Summary, Issues              the answer first, and everything that needs you
+      Queues: Throughput, Backlog, the tenant's queues, one namespace or all
+        Consumer groups, Dead letters
+      Cell: Nodes, Resources,      the cell under them, a live operator's only
+        Replication
+
+    Each row of the list carries the one number of its view, in coral or
+    amber where that number is the trouble: no signs, and no echo of one
+    problem down the list (Issues counts; Nodes colours only a lost node).
+  -->
+  <SubSidebar label="Overview sections" :current="currentName">
+    <template #side>
+      <nav class="ov-side" aria-label="Overview views">
+        <div v-for="g in side" :key="g.label || 'top'" class="ss-group">
+          <div v-if="g.label" class="ss-label">{{ g.label }}</div>
+          <router-link
+            v-for="r in g.rows"
+            :key="r.key"
+            :to="r.href || viewTo(r.key)"
+            class="ss-row"
+            :class="{ on: view === r.key }"
+            :aria-current="view === r.key ? 'page' : undefined"
+            :title="r.title || undefined"
+          >
+            <Icon v-if="r.icon" :name="r.icon" :size="16" class="ss-icon" />
+            <span class="ss-text"><span class="ss-name">{{ r.name }}</span></span>
+            <span class="ss-num" :class="[r.mark, { 'ov-side-word': r.key === 'summary' }]">{{ r.num }}<span v-if="r.mark" class="sr-only"> · {{ r.mark === 'bad' ? 'failing' : 'needs attention' }}</span></span>
+          </router-link>
         </div>
-      </template>
-    </PageHead>
+      </nav>
+    </template>
 
-    <!--
-      ========================================================================
-      The answer first: a verdict, the sentence behind it, what needs you,
-      and the partitions drawn as a sunflower. Every rule the verdict uses is
-      printed under the list — nothing here is decided out of sight. Selecting
-      an issue opens its evidence in a drawer, keeping this overview in place.
-      ========================================================================
-    -->
-    <section class="hero" aria-labelledby="dash-headline">
-      <div class="hero-left">
-        <div>
-          <span class="hero-status">
-            <span class="g" :class="statusGlyph" aria-hidden="true" />{{ statusWord }}
-          </span>
-          <h2 id="dash-headline" class="hero-title">{{ headline }}</h2>
-          <p class="hero-sum">
-            <template v-if="pushNow !== null">{{ formatNumber(queues.length) }} {{ queues.length === 1 ? 'queue takes' : 'queues take' }} in <b>{{ fmtMsgRate(pushNow) }}</b> and deliver <b>{{ fmtMsgRate(popNow) }}</b> to {{ formatNumber(consumers.length) }} consumer {{ consumers.length === 1 ? 'group' : 'groups' }}.</template>
-            <template v-else>No traffic samples in the last {{ selectedRange }}.</template>
-            <!-- A Kafka fetch counts as a delivery (a pop); its share, said once. -->
-            <template v-if="fetchNow !== null"> Kafka clients fetch <b>{{ fmtMsgRate(fetchNow) }}</b> of it.</template>
-            <template v-if="pendingNow !== null"> The latest overview reports <b>{{ formatNumber(pendingNow) }} pending</b>, excluding in-flight work.</template>
-            <template v-if="lagMaxSeconds !== null"> The oldest message has waited <b>{{ fmtLagSeconds(lagMaxSeconds) }}</b>.</template>
-            <template v-if="ackAttempts > 0">{{ ' ' }}<b>{{ ackFailPct }}</b> of acks failed in this window.</template>
-          </p>
-          <!-- The rates above are queue-ops'; a node that did not answer the
-               broker's gather took its share out of them (usePartial). The one
-               live region for it: the repeat by the Delivery tiles is quiet. -->
-          <div v-if="opsPartial" class="hero-partial">
-            <span class="chip chip-warn" role="status" :title="PARTIAL_TITLE"><span class="dot" />{{ opsPartial }}</span>
+    <div class="view-container ov">
+      <!-- One header line: the title, a few facts, then the view's controls.
+           On the Summary the title is the verdict itself, its mark before it
+           and its word after. -->
+      <header class="ov-head">
+        <div class="ov-id">
+          <h1 class="ov-title" :title="title">{{ title }}</h1>
+        </div>
+        <div v-if="facts.length" class="ov-facts">
+          <span v-for="f in facts" :key="f.k" class="ov-fact" :title="f.title || undefined"><span class="ov-k">{{ f.k }}</span><span :class="f.tone">{{ f.v }}</span></span>
+        </div>
+        <div class="ov-actions">
+          <!-- The rates are gathered from every node; a node that did not
+               answer took its share out of them (usePartial). -->
+          <span v-if="partial" class="chip chip-warn" role="status" :title="PARTIAL_TITLE"><span class="dot" />{{ partial }}</span>
+          <span class="live-tick" title="This page refreshes itself every 30 seconds"><span class="live-dot" aria-hidden="true" /><span>live · {{ refreshAgo }}</span></span>
+          <div v-if="ranged" class="seg" role="group" aria-label="Time range">
+            <button
+              v-for="r in timeRanges"
+              :key="r.value"
+              type="button"
+              :class="{ on: selectedRange === r.value }"
+              :aria-pressed="selectedRange === r.value ? 'true' : 'false'"
+              :title="r.longLabel"
+              @click="selectedRange = r.value"
+            >{{ r.label }}</button>
+          </div>
+          <div v-if="namespaced" class="ov-ns">
+            <NamespacePicker v-model="namespace" :namespaces="namespaceOptions" />
+          </div>
+        </div>
+      </header>
+
+      <!-- =====================================================================
+           SUMMARY — the answer: the sentence behind the verdict, the first
+           issues (Issues holds them all), the partitions, the counts, and four
+           trend tiles that open their view.
+           ===================================================================== -->
+      <template v-if="view === 'summary'">
+        <!-- The answer: the verdict, and the five numbers it stands on. -->
+        <section class="card ov-status" aria-label="Status">
+          <div class="ov-verdict">
+            <span class="ov-verdict-word" :class="verdictTone"><span class="g" :class="verdictGlyph" aria-hidden="true" />{{ verdict.word }}</span>
+            <h2 class="ov-verdict-title" :title="verdict.headline">{{ verdict.headline }}</h2>
+            <p v-if="verdictLine" class="ov-verdict-line">{{ verdictLine }}</p>
+          </div>
+          <div v-for="c in statusCells" :key="c.k" class="ov-kpi" :title="c.title">
+            <span class="ov-kpi-k">{{ c.k }}</span>
+            <span class="ov-kpi-v" :class="c.tone">{{ c.v }}</span>
+          </div>
+        </section>
+
+        <section class="hero" aria-label="What needs you">
+          <div class="hero-left">
+            <QueueTriage
+              :key="epoch" :queues="queues" :groups="consumers"
+              :sample-at="queuesQ.lastUpdated.value" :groups-at="consumersQ.lastUpdated.value"
+              :queues-error="queuesFailed ? queuesErrorText : ''"
+              :groups-error="consumersFailed ? consumersErrorText : ''"
+              :tenant-issues="issues.filter(i => i.tenant)"
+              :cell-issues="cellIssueList"
+              :tenant-error="opsError ? describeApiError(opsError) : ''"
+              :limit="5"
+              :more-to="viewTo('issues')"
+            />
+          </div>
+
+          <section class="card flower-card" aria-labelledby="ov-flower-title">
+            <div class="card-header">
+              <h3 id="ov-flower-title">Partitions</h3>
+              <span class="card-sub">{{ queuesFailed || !queuesRead ? '—' : `${formatNumber(totalPartitions)} across ${formatNumber(queues.length)} ${queues.length === 1 ? 'queue' : 'queues'}` }}</span>
+            </div>
+            <PartitionSunflower :queues="sunflowerQueues" :partitions="sunflowerPartitions" :loading="loadingQueues" :error="queuesQ.error.value" />
+          </section>
+        </section>
+
+        <div class="counts-tiles" role="group" aria-label="Right now">
+          <div class="count-tile" title="Messages stored for this tenant now; retention has swept the rest">
+            <span class="k">Stored</span>
+            <span class="v">{{ overviewFailed || !overview ? '—' : formatNumber(overview.messages?.total ?? 0) }}</span>
+          </div>
+          <router-link class="count-tile" :to="queueTabLocation('overview', null, route)" title="Open the queues">
+            <span class="k">Queues</span>
+            <span class="v">{{ overviewFailed || !overview ? '—' : formatNumber(overview.queues ?? 0) }}</span>
+          </router-link>
+          <div class="count-tile">
+            <span class="k">Partitions</span>
+            <span class="v">{{ queuesFailed || !queuesRead ? '—' : formatNumber(totalPartitions) }}</span>
+          </div>
+          <router-link class="count-tile" :to="queueTabLocation('consumers', null, route)" title="Open the consumer groups">
+            <span class="k">Consumer groups</span>
+            <span class="v">{{ consumersFailed || !groupsRead ? '—' : formatNumber(consumers.length) }}</span>
+          </router-link>
+          <div class="count-tile" title="Waiting to be read now. The tone is how long the work takes at this window's ack rate">
+            <span class="k">Pending</span>
+            <span class="v num" :class="pendingNumClass(overview?.messages?.pending)">{{ overviewFailed || !overview ? '—' : formatNumber(overview.messages?.pending ?? 0) }}</span>
+          </div>
+          <div class="count-tile">
+            <span class="k">Completed</span>
+            <span class="v">{{ overviewFailed || !overview ? '—' : formatNumber(overview.messages?.completed ?? 0) }}</span>
           </div>
         </div>
 
+        <!-- The trends; each opens its view. -->
+        <div class="tile-grid tile-grid-4">
+          <MetricTile
+            label="Throughput"
+            :value="throughput.current"
+            :unit="throughput.current === '—' ? '' : '/s push'"
+            :context="throughputContext"
+            :series="throughputSeries"
+            :labels="chartLabels"
+            :value-format="fmtRate"
+            :loading="loadingOps"
+            :error="opsError"
+            tooltip="Push, pop and ack per second for this tenant, summed across its queues (queue-ops). Kafka clients count as Queen consumers: a record they fetch is a pop, a commit that moves their group past N records is N acks. Fetch (Kafka) is their share of the pops; two groups reading one topic count its records twice, as two Queen groups do."
+            :selected="false"
+            @select="go('throughput')"
+          />
+          <MetricTile
+            label="Pending Δ · history"
+            :value="pendingDeltaDisplay"
+            :unit="pendingDeltaDisplay === '—' ? '' : 'msgs'"
+            :context="pendingDeltaContext"
+            :sparkline="pendingDeltaSeries"
+            :labels="backlogLabels"
+            :value-format="fmtCount"
+            :severity="pendingDeltaSeverity"
+            :loading="loadingOps"
+            :error="opsError"
+            tooltip="Change between the first and last backlog readings of the window. The latest reading can differ from the overview's count; its bucket time is shown below."
+            :selected="false"
+            @select="go('backlog')"
+          />
+          <MetricTile
+            label="Time lag"
+            :context="lagContext"
+            :series="lagSeriesData"
+            :labels="chartLabels"
+            :value-format="fmtLagMs"
+            :severity="lagSeverity"
+            :loading="loadingOverview"
+            :error="overviewError"
+            tooltip="The tenant's oldest-message age now, average / oldest. The chart is sampled at pop, so it has gaps where nothing was consumed: it cannot show the lag of a stalled queue."
+            :selected="false"
+            @select="go('backlog')"
+          >
+            <template #value>
+              <!-- `0` and "no sample" are different answers. -->
+              <template v-if="lagAvgSeconds === null && lagMaxSeconds === null">
+                <span class="num">—</span>
+              </template>
+              <template v-else>
+                <span class="num" :class="lagNumClass(lagAvgSeconds)">{{ lagText(lagAvgSeconds) }}</span>
+                <span class="mr-sep">/</span>
+                <span class="num" :class="lagNumClass(lagMaxSeconds)">{{ lagText(lagMaxSeconds) }}</span>
+              </template>
+            </template>
+          </MetricTile>
+          <MetricTile
+            label="Errors"
+            :value="formatNumber(ackFailedTotal)"
+            unit="ack failures"
+            :context="errorContext"
+            :sparkline="errorSeriesData"
+            :labels="chartLabels"
+            :value-format="fmtCount"
+            :severity="errorSeverity"
+            :loading="loadingOps"
+            :error="opsError"
+            tooltip="Ack failures for this tenant across the window. The dead letter count is a snapshot, not a window count, so it is in the line below."
+            :selected="false"
+            @select="go('dead-letters')"
+          />
+        </div>
+
+      </template>
+
+      <!-- =====================================================================
+           ISSUES — everything that needs you: the cell, the queues, the
+           tenant's ack failures, searchable, with how it is decided.
+           ===================================================================== -->
+      <template v-else-if="view === 'issues'">
         <QueueTriage
           :key="epoch" :queues="queues" :groups="consumers"
           :sample-at="queuesQ.lastUpdated.value" :groups-at="consumersQ.lastUpdated.value"
@@ -85,509 +250,389 @@
             </details>
           </template>
         </QueueTriage>
-      </div>
+      </template>
 
-      <div class="card flower-card">
-        <div class="card-header">
-          <h3>Partitions</h3>
-          <span class="muted">{{ queuesFailed ? '—' : `${formatNumber(totalPartitions)} across ${formatNumber(queues.length)} queues` }}</span>
-        </div>
-        <PartitionSunflower :queues="sunflowerQueues" :partitions="sunflowerPartitions" :loading="loadingQueues" :error="queuesQ.error.value" />
-      </div>
-    </section>
-
-    <!--
-      ========================================================================
-      Right now — point-in-time counts, as of the last good fetch. The range
-      above does not bound these.
-      ========================================================================
-    -->
-    <div class="counts-tiles" role="group" aria-label="Right now">
-      <div class="count-tile" title="Messages currently stored for this tenant (retention has already swept the rest)">
-        <span class="k">Stored</span>
-        <span class="v">{{ overviewFailed ? '—' : formatNumber(overview?.messages?.total ?? 0) }}</span>
-      </div>
-      <button class="count-tile" @click="$router.push('/queues')">
-        <span class="k">Queues</span>
-        <span class="v">{{ overviewFailed ? '—' : formatNumber(overview?.queues ?? 0) }}</span>
-      </button>
-      <div class="count-tile">
-        <span class="k">Partitions</span>
-        <span class="v">{{ queuesFailed ? '—' : formatNumber(totalPartitions) }}</span>
-      </div>
-      <button class="count-tile" @click="$router.push('/consumers')">
-        <span class="k">Consumer groups</span>
-        <span class="v">{{ consumersFailed ? '—' : formatNumber(consumers?.length || 0) }}</span>
-      </button>
-      <div class="count-tile">
-        <span class="k">Pending</span>
-        <span class="v num" :class="pendingNumClass(overview?.messages?.pending)">{{ overviewFailed ? '—' : formatNumber(overview?.messages?.pending ?? 0) }}</span>
-      </div>
-      <div class="count-tile">
-        <span class="k">Completed</span>
-        <span class="v">{{ overviewFailed ? '—' : formatNumber(overview?.messages?.completed ?? 0) }}</span>
-      </div>
-    </div>
-
-    <!--
-      ========================================================================
-      Headline metrics. A tile hands its series to the chart below; it does
-      not grow. Same sources, same verdicts as the old metric table.
-      ========================================================================
-    -->
-    <div class="tile-grid tile-grid-4">
-      <MetricTile
-        label="Throughput"
-        :value="throughput.current"
-        :unit="throughput.current === '—' ? '' : '/s push'"
-        :context="throughputContext"
-        :series="throughputSeries"
-        :labels="chartLabels"
-        :value-format="fmtRate"
-        :loading="loadingOps"
-        :error="opsError"
-        tooltip="Push / pop / ack rates for this tenant, summed across its queues (from queue-ops). Kafka clients count as Queen consumers: a record they fetch is a pop, a commit that moves their group past N records is N acks. Fetch (Kafka) is their share of the pops; two groups reading one topic count its records twice, as two Queen groups do."
-        :selected="selectedMetric === 'throughput'"
-        @select="selectMetric('throughput')"
-      />
-      <MetricTile
-        label="Pending Δ · history"
-        :value="pendingDeltaDisplay"
-        :unit="pendingDeltaDisplay === '—' ? '' : 'msgs'"
-        :context="pendingDeltaContext"
-        :sparkline="pendingDeltaSeries"
-        :labels="backlogLabels"
-        :value-format="fmtCount"
-        :severity="pendingDeltaSeverity"
-        :loading="loadingOps"
-        :error="opsError"
-        tooltip="Change between the first and last historical backlog samples. The latest sample can differ from the current overview reading. Its bucket time is shown below."
-        :selected="selectedMetric === 'pendingDelta'"
-        @select="selectMetric('pendingDelta')"
-      />
-      <MetricTile
-        label="Time lag"
-        :context="lagContext"
-        :series="lagSeriesData"
-        :labels="chartLabels"
-        :value-format="fmtLagMs"
-        :severity="lagSeverity"
-        :loading="loadingOverview"
-        :error="overviewError"
-        tooltip="Headline is the tenant's current oldest-message age (avg / max). The chart is pop-sampled per bucket, so it has gaps whenever nothing was consumed — it cannot report the lag of a stalled queue."
-        :selected="selectedMetric === 'timeLag'"
-        @select="selectMetric('timeLag')"
-      >
-        <template #value>
-          <!-- `0` and "no sample" are different answers. -->
-          <template v-if="lagAvgSeconds === null && lagMaxSeconds === null">
-            <span class="num">—</span>
-          </template>
-          <template v-else>
-            <span class="num" :class="lagNumClass(lagAvgSeconds)">{{ fmtLagSeconds(lagAvgSeconds) }}</span>
-            <span class="mr-sep">/</span>
-            <span class="num" :class="lagNumClass(lagMaxSeconds)">{{ fmtLagSeconds(lagMaxSeconds) }}</span>
-          </template>
-        </template>
-      </MetricTile>
-      <MetricTile
-        label="Errors"
-        :value="formatNumber(errorTotal)"
-        :unit="'ack failures'"
-        :context="errorContext"
-        :sparkline="errorSeriesData"
-        :labels="chartLabels"
-        :value-format="fmtCount"
-        :severity="errorSeverity"
-        :loading="loadingOps"
-        :error="opsError"
-        tooltip="Ack failures for this tenant across the window. DLQ depth is a current snapshot, not a per-window count, so it is shown in the context line."
-        :selected="selectedMetric === 'errors'"
-        @select="selectMetric('errors')"
-      />
-    </div>
-
-    <!-- The chart the tiles hand their series to. -->
-    <section class="card focus" aria-labelledby="focus-title">
-      <div class="card-header">
-        <h3 id="focus-title">{{ focus.title }}</h3>
-        <span class="card-sub">{{ focus.sub }}</span>
-        <span class="muted">last {{ selectedRange }}</span>
-      </div>
-      <div class="card-body">
-        <div v-if="focus.error" class="panel-err">{{ describeApiError(focus.error) }}</div>
-        <RowChart
-          v-else
-          :data="focus.sparkline || []"
-          :series="focus.series || null"
-          :labels="focus.labels || []"
-          :tone="focus.tone || 'mute'"
-          :value-format="focus.valueFormat || null"
-          :unit="focus.unit"
-          variant="full"
-        />
-      </div>
-    </section>
-
-    <!-- Delivery and housekeeping — this tenant, every queue. -->
-    <section class="dash-sect" aria-labelledby="sect-tenant">
-      <div class="sect-head">
-        <h3 id="sect-tenant">Delivery and housekeeping</h3>
-        <span>{{ actingTenantSlug || 'this tenant' }} · every queue</span>
-        <span v-if="opsPartial" class="chip chip-warn" aria-hidden="true" :title="PARTIAL_TITLE"><span class="dot" />{{ opsPartial }}</span>
-      </div>
-      <div class="tile-grid tile-grid-4">
-        <MetricTile
-          label="Parked"
-          :value="parkedLatest === null ? '—' : formatNumber(Math.round(parkedLatest))"
-          :unit="parkedLatest === null ? '' : 'long-polls'"
-          :context="parkedContext"
-          :series="parkedSeriesData"
-          :labels="chartLabels"
-          :value-format="fmtCount"
-          :loading="loadingOps"
-          :error="opsError"
-          tooltip="Long-poll consumer connections currently waiting for work, summed across all queues."
-          :selected="selectedMetric === 'parked'"
-          @select="selectMetric('parked')"
-        />
-        <MetricTile
-          label="Fill ratio"
-          :context="fillContext"
-          :series="fillSeriesData"
-          :labels="chartLabels"
-          :value-format="fmtFillPct"
-          :severity="fillSeverity"
-          :loading="loadingOps"
-          :error="opsError"
-          tooltip="Long-polls returning a message ÷ all long-poll completions, across all queues."
-          :selected="selectedMetric === 'fillRatio'"
-          @select="selectMetric('fillRatio')"
-        >
-          <template #value>
-            <span v-if="fillLatest === null" class="num">—</span>
-            <template v-else><span class="num" :class="fillSeverity">{{ fillLatest.toFixed(1) }}</span><i class="mr-unit">%</i></template>
-          </template>
-        </MetricTile>
-        <MetricTile
-          label="Partitions"
-          context="created / deleted in window"
-          :series="partitionSeriesData"
-          :labels="chartLabels"
-          :value-format="fmtCount"
-          :loading="loadingOps"
-          :error="opsError"
-          :selected="selectedMetric === 'partitions'"
-          @select="selectMetric('partitions')"
-        >
-          <template #value>
-            <span class="num">+{{ formatNumber(partitionCreatedTotal) }}</span>
-            <span class="mr-sep">/</span>
-            <span class="num mute">−{{ formatNumber(partitionDeletedTotal) }}</span>
-          </template>
-        </MetricTile>
-        <MetricTile
-          label="Retention"
-          :context="retentionContext"
-          :series="retentionSeriesData"
-          :labels="retentionLabels"
-          :value-format="fmtCount"
-          :error="retentionError"
-          tooltip="Messages deleted by the retention / eviction workers."
-          :selected="selectedMetric === 'retention'"
-          @select="selectMetric('retention')"
-        >
-          <template #value>
-            <span v-if="retentionTotal === null" class="num">—</span>
-            <template v-else><span class="num">{{ formatNumber(retentionTotal) }}</span><i class="mr-unit">msgs</i></template>
-          </template>
-        </MetricTile>
-      </div>
-    </section>
-
-    <!-- The cell — every tenant on it. Operator routes only. -->
-    <section v-if="can('operator')" class="dash-sect" aria-labelledby="sect-cell">
-      <div class="sect-head">
-        <h3 id="sect-cell">Cell</h3>
-        <span class="mono">{{ actingCellSlug || 'unknown cell' }}</span>
-        <span class="sect-scope">Shared by every tenant on this cell, not just {{ actingTenantSlug || 'this tenant' }}</span>
-        <span v-if="cellPartial" class="chip chip-warn" role="status" :title="PARTIAL_TITLE"><span class="dot" />{{ cellPartial }}</span>
-      </div>
-      <div class="tile-grid tile-grid-3">
-        <MetricTile
-          label="Batch efficiency"
-          context="rows per batch: push · pop · ack"
-          :error="statusError"
-          :loading="loadingStatus"
-          :spark="false"
-          tooltip="Average rows per batch across every tenant on this cell. Higher = less per-commit overhead."
-        >
-          <template #value>
-            <span class="num">{{ batchEfficiency.push }}</span><span class="mr-sep">·</span><span class="num">{{ batchEfficiency.pop }}</span><span class="mr-sep">·</span><span class="num">{{ batchEfficiency.ack }}</span>
-          </template>
-        </MetricTile>
-        <MetricTile
-          label="Event loop"
-          :context="eventLoopContext"
-          :series="elSeriesData"
-          :labels="statusChartLabels"
-          :value-format="(v) => v + ' ms'"
-          :severity="elNumClass(maxEventLoopLag)"
-          :loading="loadingStatus"
-          :error="statusError"
-          :selected="selectedMetric === 'eventLoop'"
-          @select="selectMetric('eventLoop')"
-        >
-          <template #value>
-            <template v-if="avgEventLoopLag === null && maxEventLoopLag === null"><span class="num">—</span></template>
-            <template v-else>
-              <span class="num" :class="elNumClass(avgEventLoopLag)">{{ avgEventLoopLag ?? '—' }}</span><i class="mr-unit">ms</i>
-              <span class="mr-sep">/</span>
-              <span class="num" :class="elNumClass(maxEventLoopLag)">{{ maxEventLoopLag ?? '—' }}</span><i class="mr-unit">ms</i>
-            </template>
-          </template>
-        </MetricTile>
-        <MetricTile
-          label="Queen CPU"
-          :context="cpuContext"
-          :series="cpuSeriesData"
-          :labels="cpuLabels"
-          :value-format="(v) => v.toFixed(1) + '%'"
-          :loading="loadingStatus"
-          :error="cpuError"
-          :selected="selectedMetric === 'cpu'"
-          @select="selectMetric('cpu')"
-        >
-          <template #value>
-            <span v-if="cpuLatest === null" class="num">—</span>
-            <template v-else><span class="num">{{ cpuLatest.toFixed(1) }}</span><i class="mr-unit">%</i></template>
-          </template>
-        </MetricTile>
-      </div>
-    </section>
-
-    <!--
-      ========================================================================
-      Bottom row — two symmetric panels using the same row idiom:
-          dot · name · right-side metric  |  meta line below.
-      Top queues is sorted by pending depth (the operational priority);
-      consumer groups by max time lag (the operational symptom). Click a
-      row to drill into its detail page; "see all" footer links the full
-      list view.
-      ========================================================================
-    -->
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-header">
-          <h3>Top queues by pending</h3>
-          <span class="card-sub">{{ queuesFailed ? '—' : `${enrichedQueues.length} queues` }}</span>
-          <span class="muted">{{ stamp(queuesQ) }}</span>
-        </div>
-
-        <div v-if="loadingQueues" class="card-body entity-list">
-          <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:var(--r-card);" />
-        </div>
-
-        <div v-else-if="queuesFailed" class="card-body">
-          <div class="panel-err">{{ queuesErrorText }}</div>
-        </div>
-
-        <div v-else-if="topPendingQueues.length" class="card-body entity-list">
-          <button
-            v-for="q in topPendingQueues"
-            :key="q.name"
-            class="entity-row"
-            @click="$router.push(queueLocation(q.name, route))"
-          >
-            <div class="entity-head">
-              <span class="g" :class="queueGlyph(q)" aria-hidden="true" />
-              <span class="entity-name">{{ q.name }}</span>
-              <span class="entity-right num" :class="lagNumClass(q._lag, q.name)">
-                {{ q._lag > 0 ? fmtLagSeconds(q._lag) : '—' }}
-              </span>
+      <!-- =====================================================================
+           THROUGHPUT — what the queues take in and deliver, the busiest, and
+           how the long-polls are served.
+           ===================================================================== -->
+      <template v-else-if="view === 'throughput'">
+        <section class="card" aria-labelledby="ov-tp-title">
+            <div class="card-header">
+              <h3 id="ov-tp-title">Messages per second</h3>
+              <span class="card-sub">push, pop and ack</span>
+              <span v-if="opsQ.failed.value && opsQ.data.value" class="muted">{{ stamp(opsQ) }}</span>
             </div>
-            <div class="entity-meta">
-              <span class="bar bar-meta">
-                <i :class="queueGlyph(q) === 'ok' ? '' : queueGlyph(q)" :style="{ width: q._depthPct + '%' }" />
-              </span>
-              <span class="meta-text">
-                <strong>{{ q._pending === null ? '—' : formatNumber(q._pending) }}</strong> pending
-                <span class="meta-sep">·</span>
-                {{ formatNumber(q.partitions || 1) }} {{ (q.partitions || 1) === 1 ? 'partition' : 'partitions' }}
-              </span>
+            <div class="card-body">
+              <div v-if="cards.throughput.state === 'error'" class="panel-err">{{ describeApiError(cards.throughput.error) }}</div>
+              <div v-else-if="cards.throughput.state === 'loading'" class="skeleton ov-chart-skeleton" />
+              <RowChart v-else :series="nsThroughputSeries" :labels="nsChartLabels" :value-format="fmtRate" unit="msgs / sec" variant="full" />
             </div>
-          </button>
-        </div>
+          </section>
 
-        <div v-else class="card-body"><div class="panel-msg">No queues</div></div>
-
-        <div class="card-foot">
-          <a class="card-foot-link" @click="$router.push('/queues')">All queues ›</a>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <h3>Consumer groups by lag</h3>
-          <span class="card-sub">{{ consumersFailed ? '—' : `${consumers.length} total · ${laggingCount} lagging` }}</span>
-          <span class="muted">{{ stamp(consumersQ) }}</span>
-        </div>
-
-        <div v-if="loadingConsumers" class="card-body entity-list">
-          <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:var(--r-card);" />
-        </div>
-
-        <div v-else-if="consumersFailed" class="card-body">
-          <div class="panel-err">{{ consumersErrorText }}</div>
-        </div>
-
-        <div v-else-if="sortedConsumers.length" class="card-body entity-list">
-          <button
-            v-for="g in sortedConsumers.slice(0, 6)"
-            :key="g.name + '@' + g.queueName"
-            class="entity-row"
-            @click="$router.push(consumerLocation(g, route))"
-          >
-            <div class="entity-head">
-              <span class="g" :class="groupGlyph(g)" aria-hidden="true" />
-              <span class="entity-name">{{ g.queueName || '?' }}</span>
-              <!-- A conflating group is delivered ONE message per partition —
-                   the newest — so the partitions still to visit are the whole
-                   of the work left, and they take the lead figure. -->
-              <span
-                v-if="isConflating(g)"
-                class="entity-right num"
-                :class="{ warn: !isInactive(g) && (g.partitionsWithLag || 0) > 0 }"
+          <section class="card" aria-labelledby="ov-busy-title">
+            <div class="card-header">
+              <h3 id="ov-busy-title">Busiest</h3>
+              <span class="card-sub">last {{ selectedRange }}</span>
+            </div>
+            <div v-if="cards.busiest.state === 'loading'" class="ov-list" aria-hidden="true">
+              <div v-for="i in 3" :key="i" class="ov-lrow ov-skel"><span /><span class="skeleton" /><span /></div>
+            </div>
+            <div v-else-if="cards.busiest.state === 'error'" class="card-body"><div class="panel-err">{{ describeApiError(cards.busiest.error) }}</div></div>
+            <div v-else-if="!busiest.length" class="ov-quiet">No traffic in the last {{ selectedRange }}</div>
+            <div v-else class="ov-list ov-cols-busy">
+              <div class="ov-lhead" aria-hidden="true">
+                <span /><span>Queue</span>
+                <span class="ov-r" title="Messages pushed per second, averaged over the window">Push /s</span>
+                <span class="ov-r" title="Messages popped per second, averaged over the window">Pop /s</span>
+              </div>
+              <router-link
+                v-for="b in busiest"
+                :key="b.name"
+                class="ov-lrow"
+                :to="queueTabLocation('overview', b.name, route, carry)"
+                :title="`${b.name} · ${formatNumber(b.pushMessages)} pushed, ${formatNumber(b.popMessages)} popped in the last ${selectedRange}`"
               >
-                {{ (g.partitionsWithLag || 0) > 0 ? `${g.partitionsWithLag} behind` : '—' }}
-              </span>
-              <span v-else class="entity-right num" :class="groupLagClass(g)">
-                {{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '—' }}
-              </span>
+                <span class="ss-mark" aria-hidden="true"><span v-if="issueSevByQueue.get(b.name)" class="g" :class="issueSevByQueue.get(b.name)" /></span>
+                <span class="ov-cell"><span class="ov-name">{{ b.name }}</span></span>
+                <span class="ov-n">{{ perSecond(b.pushPerSecond) }}</span>
+                <span class="ov-n">{{ perSecond(b.popPerSecond) }}</span>
+              </router-link>
             </div>
-            <div class="entity-meta">
-              <span class="meta-text">
-                <span v-if="g.name === '__QUEUE_MODE__'" class="meta-tag">queue mode</span>
-                <span v-if="isConflating(g)" class="meta-tag meta-tag-cfl">conflation</span>
-                <span v-if="g.name !== '__QUEUE_MODE__'"><strong>{{ g.name }}</strong></span>
-                <template v-if="isConflating(g)">
-                  <span class="meta-sep">·</span>
-                  <span class="num">{{ formatNumber(g.totalLag || 0) }} log lag</span>
-                  <span class="meta-sep">·</span>
-                  <span class="num" :class="groupLagClass(g)">{{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '0s' }} time lag</span>
-                </template>
-                <span class="meta-sep">·</span>
-                <!-- One row per (partition, group) cursor — NOT a consumer
-                     count: one process on a 32-partition queue is 32 rows. -->
-                {{ formatNumber(g.members || 0) }} {{ (g.members || 0) === 1 ? 'partition' : 'partitions' }} assigned
-                <template v-if="!isConflating(g) && (g.partitionsWithLag || 0) > 0">
-                  <span class="meta-sep">·</span>
-                  <!-- Plain ink on an inactive Kafka group, as its lag is. -->
-                  <span class="num" :class="{ warn: !isInactive(g) }">{{ formatNumber(g.partitionsWithLag) }} lagging</span>
-                </template>
-              </span>
+          </section>
+        <div class="tile-grid tile-grid-4 ov-tiles-2">
+            <MetricTile
+            label="Parked"
+            :value="parkedLatest === null ? '—' : formatNumber(Math.round(parkedLatest))"
+            :unit="parkedLatest === null ? '' : 'long-polls'"
+            :context="parkedContext"
+            :series="parkedSeriesData"
+            :labels="chartLabels"
+            :value-format="fmtCount"
+            :loading="loadingOps"
+            :error="opsError"
+            tooltip="Long-poll consumer connections waiting for work, summed across every queue."
+            :selected="false"
+          />
+          <MetricTile
+            label="Fill ratio"
+            :context="fillContext"
+            :series="fillSeriesData"
+            :labels="chartLabels"
+            :value-format="fmtFillPct"
+            :loading="loadingOps"
+            :error="opsError"
+            tooltip="Long-polls that came back with a message, of every long-poll that ended, across every queue."
+            :selected="false"
+          >
+            <template #value>
+              <span v-if="fillLatest === null" class="num">—</span>
+              <template v-else><span class="num">{{ fillLatest.toFixed(1) }}</span><i class="mr-unit">%</i></template>
+            </template>
+          </MetricTile>
+        </div>
+      </template>
+
+      <!-- =====================================================================
+           BACKLOG — what waits: the backlog over time, the queues behind, the
+           oldest message, and what partitions and retention did.
+           ===================================================================== -->
+      <template v-else-if="view === 'backlog'">
+          <section class="card" aria-labelledby="ov-bl-title">
+            <div class="card-header">
+              <h3 id="ov-bl-title">Messages waiting</h3>
+              <span class="card-sub">pending and in flight</span>
             </div>
-          </button>
-        </div>
+            <div class="card-body">
+              <div
+                v-if="nsBacklog.state === 'unsplit'"
+                class="ov-chart-note"
+                title="The broker keeps the backlog over time for the whole tenant and for each queue, not for a namespace. All namespaces shows the tenant's; a queue's own page shows its."
+              >Not kept per namespace</div>
+              <div v-else-if="nsBacklog.state === 'error'" class="panel-err">{{ describeApiError(nsBacklog.error) }}</div>
+              <div v-else-if="nsBacklog.state === 'loading'" class="skeleton ov-chart-skeleton" />
+              <RowChart v-else :series="nsBacklog.series" :labels="nsBacklog.labels" :value-format="fmtCount" unit="msgs" variant="full" />
+            </div>
+          </section>
+          <section class="card" aria-labelledby="ov-att-title">
+            <div class="card-header">
+              <h3 id="ov-att-title">Needs attention</h3>
+              <span v-if="statusKnown" class="card-sub">{{ formatNumber(nsAttention.length) }} of {{ formatNumber(nsQueues.length) }} {{ nsQueues.length === 1 ? 'queue' : 'queues' }}</span>
+              <router-link class="ov-more" :to="queueTabLocation('overview', null, route, carry)">All queues<Icon name="chevron-right" :size="14" /></router-link>
+            </div>
+            <div v-if="cards.attention.state === 'loading'" class="ov-list" aria-hidden="true">
+              <div v-for="i in 3" :key="i" class="ov-lrow ov-skel"><span /><span class="skeleton" /><span /></div>
+            </div>
+            <div v-else-if="cards.attention.state === 'error'" class="card-body"><div class="panel-err">{{ describeApiError(cards.attention.error) }}</div></div>
+            <div v-else-if="!nsAttention.length" class="ov-quiet">Nothing needs you</div>
+            <div v-else class="ov-list ov-cols-att">
+              <div class="ov-lhead" aria-hidden="true"><span /><span>Queue</span><span class="ov-r">Lag</span><span class="ov-r">Pending</span></div>
+              <router-link
+                v-for="a in nsAttention.slice(0, LIST)"
+                :key="a.name"
+                class="ov-lrow"
+                :to="queueTabLocation('alerts', a.name, route, carry)"
+                :title="`${a.name} · ${attentionWhy(a)}`"
+              >
+                <span class="ss-mark" aria-hidden="true"><span class="g" :class="a.sev" /></span>
+                <span class="ov-cell">
+                  <span class="ov-name">{{ a.name }}</span>
+                  <span class="ov-sub">{{ attentionWhy(a) }}</span>
+                </span>
+                <span class="ov-n" :class="a.reason === 'lag' ? a.sev : ''">{{ a.reason === 'lag' ? lagText(a.lag) : '—' }}</span>
+                <span class="ov-n">{{ formatNumber(a.pending) }}</span>
+              </router-link>
+            </div>
+          </section>
 
-        <div v-else class="card-body"><div class="panel-msg">No consumer groups</div></div>
-
-        <div class="card-foot">
-          <a class="card-foot-link" @click="$router.push('/consumers')">All consumer groups ›</a>
+        <section class="card" aria-labelledby="ov-lag-title">
+          <div class="card-header">
+            <h3 id="ov-lag-title">{{ metricChart('timeLag').title }}</h3>
+            <span class="card-sub">{{ metricChart('timeLag').sub }}</span>
+          </div>
+          <div class="card-body">
+            <div v-if="metricChart('timeLag').error" class="panel-err">{{ describeApiError(metricChart('timeLag').error) }}</div>
+            <RowChart v-else :series="metricChart('timeLag').series || null" :labels="metricChart('timeLag').labels || []" :value-format="metricChart('timeLag').valueFormat" :unit="metricChart('timeLag').unit" variant="full" />
+          </div>
+        </section>
+        <div class="tile-grid tile-grid-4 ov-tiles-2">
+            <MetricTile
+            label="Partitions"
+            context="created / deleted in window"
+            :series="partitionSeriesData"
+            :labels="chartLabels"
+            :value-format="fmtCount"
+            :loading="loadingOps"
+            :error="opsError"
+            :selected="false"
+          >
+            <template #value>
+              <span class="num">+{{ formatNumber(partitionCreatedTotal) }}</span>
+              <span class="mr-sep">/</span>
+              <span class="num mute">−{{ formatNumber(partitionDeletedTotal) }}</span>
+            </template>
+          </MetricTile>
+          <MetricTile
+            label="Retention"
+            :context="retentionContext"
+            :series="retentionSeriesData"
+            :labels="retentionLabels"
+            :value-format="fmtCount"
+            :error="retentionError"
+            tooltip="Messages deleted by the retention and eviction workers."
+            :selected="false"
+          >
+            <template #value>
+              <span v-if="retentionTotal === null" class="num">—</span>
+              <template v-else><span class="num">{{ formatNumber(retentionTotal) }}</span><i class="mr-unit">msgs</i></template>
+            </template>
+          </MetricTile>
         </div>
-      </div>
+      </template>
+
+      <!-- =====================================================================
+           CONSUMER GROUPS — every group of the namespace, the worst first.
+           ===================================================================== -->
+      <template v-else-if="view === 'groups'">
+        <section class="card" aria-labelledby="ov-groups-title">
+          <div class="card-header">
+            <h3 id="ov-groups-title">Worst first</h3>
+            <span v-if="cards.groups.state === 'ok'" class="card-sub">{{ formatNumber(nsGroups.total) }} {{ nsGroups.total === 1 ? 'group' : 'groups' }}<template v-if="nsGroups.behind"> · {{ formatNumber(nsGroups.behind) }} behind</template></span>
+            <router-link class="ov-more" :to="queueTabLocation('consumers', null, route, carry)">All consumer groups<Icon name="chevron-right" :size="14" /></router-link>
+          </div>
+          <div v-if="cards.groups.state === 'loading'" class="ov-list" aria-hidden="true">
+            <div v-for="i in 3" :key="i" class="ov-lrow ov-skel"><span /><span class="skeleton" /><span /></div>
+          </div>
+          <div v-else-if="cards.groups.state === 'error'" class="card-body"><div class="panel-err">{{ describeApiError(cards.groups.error) }}</div></div>
+          <div v-else-if="!groupRowsAll.length" class="ov-quiet">No consumer groups</div>
+          <div v-else class="ov-list ov-cols-groups">
+            <div class="ov-lhead" aria-hidden="true">
+              <span /><span>Group</span>
+              <span class="ov-r" title="The oldest message the group has not read">Lag</span>
+              <span class="ov-r" title="Partitions with messages the group has not read">Behind</span>
+            </div>
+            <router-link
+              v-for="r in groupRowsAll"
+              :key="r.key"
+              class="ov-lrow"
+              :to="r.to"
+              :title="`${r.name} on ${r.queue}`"
+            >
+              <span class="ss-mark" aria-hidden="true"><span v-if="r.mark" class="g" :class="r.mark" /></span>
+              <span class="ov-cell">
+                <span class="ov-name">{{ r.name }}</span>
+                <span class="ov-sub">{{ r.queue }}<template v-if="r.presence"> · {{ r.presence }}</template></span>
+              </span>
+              <span class="ov-n" :class="r.mark">{{ r.lag }}</span>
+              <span class="ov-n">{{ r.behind }}</span>
+            </router-link>
+          </div>
+        </section>
+      </template>
+
+      <!-- =====================================================================
+           DEAD LETTERS — the failed acks over the window, and where the dead
+           letters are now, queue by queue.
+           ===================================================================== -->
+      <template v-else-if="view === 'dead-letters'">
+        <section class="card" aria-labelledby="ov-err-title">
+          <div class="card-header">
+            <h3 id="ov-err-title">Ack failures</h3>
+            <span class="card-sub">failed acks per bucket, every queue</span>
+          </div>
+          <div class="card-body">
+            <div v-if="opsError" class="panel-err">{{ describeApiError(opsError) }}</div>
+            <RowChart v-else :data="errorSeriesData || []" :labels="chartLabels || []" :tone="errorSeverity || 'mute'" :value-format="fmtCount" unit="ack failures" variant="full" />
+          </div>
+        </section>
+        <section class="card" aria-labelledby="ov-dlq-title">
+          <div class="card-header">
+            <h3 id="ov-dlq-title">By queue</h3>
+            <span class="card-sub">now</span>
+            <router-link class="ov-more" :to="queueTabLocation('failed', null, route, carry)">All dead letters<Icon name="chevron-right" :size="14" /></router-link>
+          </div>
+          <div v-if="!queuesRead" class="ov-list" aria-hidden="true">
+            <div v-for="i in 3" :key="i" class="ov-lrow ov-skel"><span /><span class="skeleton" /><span /></div>
+          </div>
+          <div v-else-if="!dlqRows.length" class="ov-quiet">No dead letters</div>
+          <div v-else class="ov-list ov-cols-dlq">
+            <div class="ov-lhead" aria-hidden="true"><span /><span>Queue</span><span class="ov-r">Dead letters</span></div>
+            <router-link
+              v-for="d in dlqRows"
+              :key="d.name"
+              class="ov-lrow"
+              :to="queueTabLocation('failed', d.name, route, carry)"
+            >
+              <span class="ss-mark" aria-hidden="true" />
+              <span class="ov-cell">
+                <span class="ov-name">{{ d.name }}</span>
+                <span v-if="d.namespace" class="ov-sub">{{ d.namespace }}</span>
+              </span>
+              <span class="ov-n">{{ formatNumber(d.count) }}</span>
+            </router-link>
+          </div>
+        </section>
+      </template>
+
     </div>
-  </div>
+  </SubSidebar>
 </template>
 
 <script setup>
-import { queueLocation, consumerLocation } from '@/composables/navigation'
-const route = useRoute()
-import { useRoute } from 'vue-router'
-import { ref, computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+
 import {
-  resources,
-  queues as queuesApi,
   consumers as consumersApi,
-  system as systemApi,
-  operator as operatorApi,
   describeApiError,
+  operator as operatorApi,
+  queues as queuesApi,
+  resources,
+  system as systemApi,
 } from '@/api'
+import BaseChart from '@/components/BaseChart.vue'
+import Icon from '@/components/Icon.vue'
+import MetricTile from '@/components/MetricTile.vue'
+import NamespacePicker from '@/components/NamespacePicker.vue'
+import PartitionSunflower, { MAX_SEEDS } from '@/components/PartitionSunflower.vue'
+import QueueTriage from '@/components/QueueTriage.vue'
+import RowChart from '@/components/RowChart.vue'
+import SubSidebar from '@/components/SubSidebar.vue'
+import { namespaceCounts, queueTabLocation } from '@/composables/navigation'
 import {
-  useApi, formatNumber, toNum, latestFinite, trimIncompleteBuckets,
-} from '@/composables/useApi'
-import { formatChartLabel } from '@/composables/useFormat'
-import { isConflating } from '@/composables/useConflation'
-import { semanticColors } from '@/composables/useChartTheme'
-import {
-  ackFailureSeverity, backlogSeverity, eventLoopSeverity, groupActivity, numTone,
-  pendingDriftSeverity, timeLagSeverity,
-} from '@/composables/useSeverity'
-import { byLagInactiveLast, groupAttention, queueAttention } from '@/composables/useAttention'
-import { useGroupsStore } from '@/stores/groupsStore'
-import { useSettingsStore } from '@/stores/settingsStore'
+  attentionList, attentionWhy, busiestQueues, groupsSummary, inRateUnit, lagText, nodeLines,
+  nodeRows, overviewVerdict, overviewView, perSecond, queuesIn, queueTotals, rollupQueueOps,
+  NAMESPACED_VIEWS, OVERVIEW_VIEWS, sideGroups, systemRedirect, trafficWindow, viewAlias, viewQuery, windowSeconds, worstMark,
+} from '@/composables/overviewViews'
 import { LINE_META, formatLine, formatSpan } from '@/composables/settingsDoc'
+import { groupAttention, groupPresence, queueAttention } from '@/composables/useAttention'
+import {
+  formatBytes, formatNumber, latestFinite, toNum, trimIncompleteBuckets, useApi,
+} from '@/composables/useApi'
+import { brokerStatus, cellIssues } from '@/composables/useBrokerStatus'
+import { chartColor, semanticColors } from '@/composables/useChartTheme'
+import { formatChartLabel, isMultiDay } from '@/composables/useFormat'
+import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
+import { useRouteState } from '@/composables/useRouteState'
+import {
+  ackFailureSeverity, backlogSeverity, eventLoopSeverity, numTone,
+  pendingDriftSeverity, timeLagSeverity,
+} from '@/composables/useSeverity'
 import { stamp } from '@/composables/useStamp'
+import { useGroupsStore } from '@/stores/groupsStore'
 import { useIdentity } from '@/stores/identity'
-import { brokerStatus, cellIssues } from '@/composables/useBrokerStatus'
-import { missingNodes, partialText, PARTIAL_TITLE } from '@/composables/usePartial'
-import MetricTile from '@/components/MetricTile.vue'
-import PartitionSunflower, { MAX_SEEDS } from '@/components/PartitionSunflower.vue'
-import { routeSupport } from '@/stores/routeSupport'
-import PageHead from '@/components/PageHead.vue'
-import RowChart from '@/components/RowChart.vue'
-import QueueTriage from '@/components/QueueTriage.vue'
+import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { DEFAULT_TIME_RANGE, TIME_RANGES as timeRanges, relativeTimeRange } from '../../../shared/timeRanges.mjs'
 
-// The scope strip states all three slugs, so it is built from identity and
-// never from a fetch — it must survive a failed load and an empty tenant.
-const { can, actingTenantSlug, actingClusterSlug, actingCellSlug, epoch } = useIdentity()
+const route = useRoute()
+const router = useRouter()
+const pageName = route.name
+const { can, actingTenantSlug, actingCellSlug, epoch } = useIdentity()
+const canOperate = computed(() => can('operator'))
+const { lines, linesFor } = useSettingsStore()
+
+// Rows a list card draws; the rest is one click away in the Queues section.
+const LIST = 8
 
 // ---------------------------------------------------------------------------
-// Range. Quick ranges only — this view has no Custom mode, so there is no
-// custom sub-row and no applied/typed split to keep.
+// The view, the range and the namespace: all three in the address, so a link
+// opens the page as it was. An old ?view= (consumers, cell) is rewritten to
+// the view that holds it now.
 // ---------------------------------------------------------------------------
+const view = computed(() => overviewView(route.query.view, canOperate.value))
+watch(() => route.query.view, (v) => {
+  if (route.name !== pageName) return
+  // The cell's views are System's now: an old address goes there.
+  const sys = systemRedirect(v)
+  if (sys) { router.replace({ path: '/system', query: sys === 'overview' ? {} : { view: sys } }); return }
+  const to = viewAlias(v)
+  if (to) router.replace({ query: { ...route.query, view: to } })
+}, { immediate: true })
+const viewTo = (key) => ({ path: '/', query: { ...route.query, view: viewQuery(key) } })
+const go = (key) => router.push(viewTo(key))
+const currentName = computed(() => OVERVIEW_VIEWS.find((v) => v.key === view.value)?.name || 'Summary')
+// The views drawn over a window take the range; the views a namespace
+// narrows take the namespace picker.
+const RANGED = new Set(['summary', 'throughput', 'backlog', 'dead-letters', 'resources'])
+const CELL_VIEWS = new Set(['nodes', 'resources', 'replication'])
+const ranged = computed(() => RANGED.has(view.value))
+const namespaced = computed(() => NAMESPACED_VIEWS.includes(view.value))
+
 const selectedRange = ref(DEFAULT_TIME_RANGE)
-const selectQuickRange = (value) => { selectedRange.value = value }
-// Resolved range, for the scope strip's free slot.
-const rangeLabel = computed(() => `last ${selectedRange.value}`)
+// null is every namespace; '' is the default namespace, a real one.
+const namespace = ref(null)
+useRouteState({ range: selectedRange, namespace })
 const getTimeRangeParams = () => {
   const { from, to } = relativeTimeRange(selectedRange.value)
-  return {
-    from: from.toISOString(),
-    to: to.toISOString(),
-  }
+  return { from: from.toISOString(), to: to.toISOString() }
 }
 
 // ---------------------------------------------------------------------------
-// SOURCES. Two surfaces, and each row says which one it came from.
+// SOURCES. Tenant-scoped (the proxy injects the acting cluster's tenant):
+// overview, queues, consumer groups, queue-ops, retention. Cell-level, an
+// operator's only (404 route_blocked for anyone else, so never asked): the
+// raft members, /api/v1/status and system-metrics. Nothing swallows a failure:
+// `error` drives an inline "unavailable", never an idle-looking zero.
 //
-//   TENANT-SCOPED (the proxy injects the acting cluster's tenant): overview,
-//   queues, consumer groups, queue-ops, retention. These answer "for this
-//   tenant" and every row built from them is unlabelled.
-//
-//   CELL-LEVEL: /api/v1/status and /analytics/system-metrics are operator
-//   routes — 404 route_blocked for every other principal. They are fetched
-//   only when can('operator') and every row built from them carries the
-//   `cell` chip, because a cell figure read as a tenant figure is a lie.
-//
-// Nothing here swallows a failure: `error` drives an inline "unavailable"
-// state, so an endpoint we cannot reach never renders as an idle cluster.
+// Each view asks for what it draws. The queues, the groups, queue-ops (the
+// ack failures are part of the verdict) and the members are read on every
+// view: the sub sidebar's marks need them whichever view is open.
 // ---------------------------------------------------------------------------
 const groupsStore = useGroupsStore()
-const overviewQ  = useApi((config) => resources.getOverview(config), { immediate: false })
-const queuesQ    = useApi((config) => queuesApi.list(undefined, config), { immediate: false })
+const overviewQ = useApi((config) => resources.getOverview(config), { immediate: false })
+const queuesQ = useApi((config) => queuesApi.list(undefined, config), { immediate: false })
 // Handed to the shared store, so the sidebar and Queues reuse this read.
 const consumersQ = useApi((config) => consumersApi.list(config), { immediate: false, onSuccess: (d) => groupsStore.publish(d) })
-const opsQ       = useApi((config) => systemApi.getQueueOps(getTimeRangeParams(), config), { immediate: false })
+const opsQ = useApi((config) => systemApi.getQueueOps(getTimeRangeParams(), config), { immediate: false })
 const retentionQ = useApi((config) => systemApi.getRetention(getTimeRangeParams(), config), { immediate: false })
-const statusQ    = useApi((config) => operatorApi.getStatus(getTimeRangeParams(), config), { immediate: false })
-const sysQ       = useApi((config) => operatorApi.getSystemMetrics(getTimeRangeParams(), config), { immediate: false })
-// The cell's nodes, for the verdict: the read the top bar makes, guarded the
-// same way, so a broker without the route is asked once and stays quiet.
-const membersQ   = useApi(
+const statusQ = useApi((config) => operatorApi.getStatus(getTimeRangeParams(), config), { immediate: false })
+const sysQ = useApi((config) => operatorApi.getSystemMetrics(getTimeRangeParams(), config), { immediate: false })
+// The cell's nodes: the read the top bar makes, guarded the same way, so a
+// broker without the route is asked once and stays quiet.
+const membersQ = useApi(
   routeSupport.guard('raft-members', (config) => operatorApi.getRaftMembers({ ...config, probe: true })),
   { immediate: false },
 )
@@ -602,138 +647,81 @@ const consumers = computed(() => {
   return Array.isArray(d) ? d : (d?.consumer_groups || [])
 })
 
-// Skeletons only until the first payload lands; a 30s refresh must not blank
-// the page the user is reading.
-const firstLoad = (q) => computed(() => q.loading.value && q.data.value === null)
-const loadingOverview  = firstLoad(overviewQ)
-const loadingQueues    = firstLoad(queuesQ)
+// Skeletons until the first payload lands, from before the first request
+// starts; a refresh must not blank the page being read.
+const firstLoad = (q) => computed(() => q.data.value === null && q.error.value === null)
+const loadingOverview = firstLoad(overviewQ)
+const loadingQueues = firstLoad(queuesQ)
 const loadingConsumers = firstLoad(consumersQ)
-const loadingOps       = firstLoad(opsQ)
-const loadingStatus    = firstLoad(statusQ)
+const loadingOps = firstLoad(opsQ)
+const loadingStatus = firstLoad(statusQ)
+const sysFirstLoad = firstLoad(sysQ)
 
-const overviewError  = computed(() => overviewQ.error.value)
-const opsError       = computed(() => opsQ.error.value)
+const overviewError = computed(() => overviewQ.error.value)
+const opsError = computed(() => opsQ.error.value)
 const retentionError = computed(() => retentionQ.error.value)
-const statusError    = computed(() => statusQ.error.value)
+const statusError = computed(() => statusQ.error.value)
 
-const overviewFailed  = computed(() => overviewQ.error.value !== null)
-const queuesFailed    = computed(() => queuesQ.error.value !== null)
+const overviewFailed = computed(() => overviewQ.error.value !== null)
+const queuesFailed = computed(() => queuesQ.error.value !== null)
 const consumersFailed = computed(() => consumersQ.error.value !== null)
-const statusFailed    = computed(() => statusQ.error.value !== null)
 
-const queuesErrorText    = computed(() => describeApiError(queuesQ.error.value))
+const queuesRead = computed(() => queuesQ.data.value !== null)
+const groupsRead = computed(() => consumersQ.data.value !== null)
+const queuesErrorText = computed(() => describeApiError(queuesQ.error.value))
 const consumersErrorText = computed(() => describeApiError(consumersQ.error.value))
 
-// A node that did not answer the broker's gather (usePartial): queue-ops
-// feeds the tenant rows, status and system-metrics the cell's.
-const opsPartial  = computed(() => partialText(missingNodes(opsQ.data.value)))
+// A node that did not answer the broker's gather (usePartial): queue-ops feeds
+// the Overview and Queues, status and system-metrics the Server.
+const opsPartial = computed(() => partialText(missingNodes(opsQ.data.value)))
 const cellPartial = computed(() => partialText(missingNodes(statusQ.data.value, sysQ.data.value)))
+const partial = computed(() => (CELL_VIEWS.has(view.value) ? cellPartial.value : opsPartial.value))
 
 // ---------------------------------------------------------------------------
-// TENANT history — queue-ops rolled up from one row per (queue, bucket) to one
-// row per bucket. This is the source for every unlabelled row on the page.
+// Charts' clock.
 // ---------------------------------------------------------------------------
-const history = computed(() => {
+const labelsFor = (stamps) => {
+  const multi = isMultiDay(stamps)
+  return stamps.map((ts) => formatChartLabel(new Date(ts), multi))
+}
+
+// ---------------------------------------------------------------------------
+// TENANT history: queue-ops rolled up from one row per (queue, bucket) to one
+// row per bucket, the still-filling tail bucket dropped so no chart ends in a
+// false drop. The source of every tenant tile.
+// ---------------------------------------------------------------------------
+const trimmedRollup = (names) => {
   const payload = opsQ.data.value
-  const series = payload?.series || []
-  if (!series.length) return []
-
-  const byBucket = new Map()
-  for (const row of series) {
-    let b = byBucket.get(row.bucket)
-    if (!b) {
-      b = {
-        bucket: row.bucket,
-        pushPerSecond: 0, popPerSecond: 0, ackPerSecond: 0,
-        // Kafka consumers' reads (queue-ops fetchMessages): already counted in
-        // pop by the broker (a fetch is a delivery, a commit an ack); kept
-        // apart only to chart the Kafka share.
-        fetchPerSecond: 0, fetchMessages: 0,
-        pushMessages: 0, popMessages: 0, ackSuccess: 0, ackFailed: 0, popEmpty: 0,
-        partitionsCreated: 0, partitionsDeleted: 0,
-        // parkedCount is already SUM-ed across workers per (queue, bucket);
-        // summing again across queues is a legitimate gauge composition since
-        // a long-poll lives on exactly one (queue, partition, worker).
-        parkedTotal: 0,
-        lagWeighted: 0, lagPops: 0, maxLagMs: null,
-      }
-      byBucket.set(row.bucket, b)
-    }
-    b.pushPerSecond += toNum(row.pushPerSecond) || 0
-    b.popPerSecond  += toNum(row.popPerSecond)  || 0
-    b.ackPerSecond  += toNum(row.ackPerSecond)  || 0
-    b.fetchPerSecond += toNum(row.fetchPerSecond) || 0
-    b.fetchMessages += toNum(row.fetchMessages) || 0
-    b.pushMessages  += toNum(row.pushMessages)  || 0
-    b.popMessages   += toNum(row.popMessages)   || 0
-    b.ackSuccess    += toNum(row.ackSuccess)    || 0
-    b.ackFailed     += toNum(row.ackFailed)     || 0
-    b.popEmpty      += toNum(row.popEmpty)      || 0
-    b.partitionsCreated += toNum(row.partitionsCreated) || 0
-    b.partitionsDeleted += toNum(row.partitionsDeleted) || 0
-    b.parkedTotal   += toNum(row.parkedCount)   || 0
-
-    // Lag is sampled AT POP. A queue with no pops in the bucket contributes no
-    // measurement — folding its 0 in would report a stalled backlog as zero lag.
-    const pops = toNum(row.popMessages) || 0
-    if (pops > 0) {
-      b.lagWeighted += (toNum(row.avgLagMs) || 0) * pops
-      b.lagPops += pops
-      const mx = toNum(row.maxLagMs)
-      if (mx !== null) b.maxLagMs = b.maxLagMs === null ? mx : Math.max(b.maxLagMs, mx)
-    }
-  }
-
-  const rows = [...byBucket.values()].sort((a, b) => a.bucket.localeCompare(b.bucket))
-  for (const b of rows) b.avgLagMs = b.lagPops > 0 ? b.lagWeighted / b.lagPops : null
-  // Drop the still-aggregating tail bucket so the right edge of every chart
-  // isn't a partial sample reading low.
-  return trimIncompleteBuckets(rows, {
+  return trimIncompleteBuckets(rollupQueueOps(payload?.series, names), {
     bucketKey: 'bucket',
     bucketMinutes: payload?.bucketMinutes || 1,
   })
-})
+}
+const history = computed(() => trimmedRollup(null))
+const chartLabels = computed(() => labelsFor(history.value.map((h) => h.bucket)))
 
-const multiDay = computed(() => {
-  const h = history.value
-  if (h.length < 2) return false
-  return new Date(h[0].bucket).toDateString() !== new Date(h[h.length - 1].bucket).toDateString()
-})
-const chartLabels = computed(() =>
-  history.value.map(h => formatChartLabel(new Date(h.bucket), multiDay.value))
-)
+const totalPartitions = computed(() => queues.value.reduce((sum, q) => sum + (q.partitions || 1), 0))
 
-// ---------------------------------------------------------------------------
-// Counts strip helpers
-// ---------------------------------------------------------------------------
-const totalPartitions = computed(() =>
-  queues.value.reduce((sum, q) => sum + (q.partitions || 1), 0)
-)
-
-// ---------------------------------------------------------------------------
-// Throughput row — real push / pop / ack rates for this tenant, summed across
-// its queues. NOT the overview's ingestedPerSecond, which under the per-tenant
-// path is a retained-message delta and collapses to 0 after a retention sweep.
-// ---------------------------------------------------------------------------
-const throughput = computed(() => {
-  const v = latestFinite(history.value.map(x => x.pushPerSecond))
-  return { current: v === null ? '—' : v.toFixed(1) }
-})
-const throughputSeries = computed(() => {
-  const h = history.value
+// Throughput: real push / pop / ack rates, summed across the queues. Not the
+// overview's ingestedPerSecond, which per tenant is a retained-message delta
+// and falls to 0 after a retention sweep.
+const throughputOf = (h) => {
   if (!h.length) return null
   return [
-    { label: 'Push', data: h.map(x => toNum(x.pushPerSecond)) },
-    { label: 'Pop',  data: h.map(x => toNum(x.popPerSecond)) },
-    { label: 'Ack',  data: h.map(x => toNum(x.ackPerSecond)), color: semanticColors.ok.line },
+    { label: 'Push', data: h.map((x) => toNum(x.pushPerSecond)) },
+    { label: 'Pop', data: h.map((x) => toNum(x.popPerSecond)) },
+    { label: 'Ack', data: h.map((x) => toNum(x.ackPerSecond)), color: semanticColors.ok.line },
     // Only once a fetch is counted: a tenant without Kafka keeps three lines.
-    ...(h.some(x => x.fetchMessages > 0)
-      ? [{ label: 'Fetch (Kafka)', data: h.map(x => toNum(x.fetchPerSecond)) }]
-      : []),
+    ...(h.some((x) => x.fetchMessages > 0) ? [{ label: 'Fetch (Kafka)', data: h.map((x) => toNum(x.fetchPerSecond)) }] : []),
   ]
+}
+const throughput = computed(() => {
+  const v = latestFinite(history.value.map((x) => x.pushPerSecond))
+  return { current: v === null ? '—' : v.toFixed(1) }
 })
+const throughputSeries = computed(() => throughputOf(history.value))
 const throughputPeak = computed(() => {
-  const finite = history.value.map(x => toNum(x.pushPerSecond)).filter(v => v !== null)
+  const finite = history.value.map((x) => toNum(x.pushPerSecond)).filter((v) => v !== null)
   return finite.length ? Math.max(0, ...finite) : 0
 })
 const throughputContext = computed(() => {
@@ -745,36 +733,27 @@ const throughputContext = computed(() => {
   return `peak ${formatNumber(Math.round(peak))} /s push`
 })
 
-// ---------------------------------------------------------------------------
-// Pending Δ row — the backlog itself, as the broker reads it once a minute
+// Pending Δ — the backlog itself, as the broker reads it once a minute
 // (queue-ops `backlog`: per bucket its last reading of what waits and what is
-// in flight). VALUE = how much Pending changed across the window; the chart is
-// Pending itself, so it comes back down when consumers catch up.
-//
-// It is NOT push − ack. A message also leaves by a transaction, a stream
-// cycle, retention or the DLQ, and every consumer group acks it once: summed
-// over a window that difference drifts for ever — on stage it read +436 over
-// an hour while the backlog was 0.
-// ---------------------------------------------------------------------------
-const backlog = computed(() => {
-  const b = opsQ.data.value?.backlog
-  return Array.isArray(b) ? b.filter(x => toNum(x?.pending) !== null) : []
+// in flight). The value is how much Pending changed across the window; the
+// chart is Pending itself. It is NOT push − ack: a message also leaves by a
+// transaction, a stream cycle, retention or the DLQ, and every group acks it
+// once, so that difference drifts for ever.
+const backlogRowsOf = (rows) => (Array.isArray(rows) ? rows.filter((x) => toNum(x?.pending) !== null) : [])
+const backlogChartOf = (rows) => ({
+  labels: labelsFor(rows.map((b) => b.bucket)),
+  series: rows.length
+    ? [
+        { label: 'Pending', data: rows.map((b) => toNum(b.pending)) },
+        { label: 'In flight', data: rows.map((b) => toNum(b.processing)) },
+      ]
+    : null,
 })
-const backlogMultiDay = computed(() => {
-  const b = backlog.value
-  return b.length > 1 && new Date(b[0].bucket).toDateString() !== new Date(b[b.length - 1].bucket).toDateString()
-})
-const backlogLabels = computed(() =>
-  backlog.value.map(b => formatChartLabel(new Date(b.bucket), backlogMultiDay.value))
-)
-const pendingDeltaSeries = computed(() => backlog.value.map(b => toNum(b.pending)))
-const backlogSeries = computed(() => {
-  if (!backlog.value.length) return null
-  return [
-    { label: 'Pending', data: pendingDeltaSeries.value },
-    { label: 'In flight', data: backlog.value.map(b => toNum(b.processing)) },
-  ]
-})
+const backlog = computed(() => backlogRowsOf(opsQ.data.value?.backlog))
+const backlogMultiDay = computed(() => isMultiDay(backlog.value.map((b) => b.bucket)))
+const backlogLabels = computed(() => labelsFor(backlog.value.map((b) => b.bucket)))
+const pendingDeltaSeries = computed(() => backlog.value.map((b) => toNum(b.pending)))
+const backlogSeries = computed(() => backlogChartOf(backlog.value).series)
 const backlogLast = computed(() => latestFinite(pendingDeltaSeries.value))
 // A change needs two readings; a broker that has just started reading has one.
 const pendingDeltaLatest = computed(() => {
@@ -787,8 +766,8 @@ const pendingDeltaDisplay = computed(() => {
   if (v === 0) return '0'
   return (v > 0 ? '+' : '−') + formatNumber(Math.abs(v))
 })
-// The readings can begin inside the window (a broker that started reading
-// recently): the change is then "since" the first reading, not "over" the range.
+// Readings that begin inside the window (a broker that started reading
+// recently) make the change "since" the first reading, not "over" the range.
 const pendingDeltaSpan = computed(() => {
   const b = backlog.value
   const from = Date.parse(opsQ.data.value?.timeRange?.from || '')
@@ -799,161 +778,95 @@ const pendingDeltaSpan = computed(() => {
     ? `since ${formatChartLabel(new Date(first), backlogMultiDay.value)}`
     : `over ${selectedRange.value}`
 })
-// The drift is judged against the work that arrived, not against a constant:
-// +1 000 is a rounding error on a window that pushed half a million and a
-// stall on one that pushed two thousand. useSeverity owns the shares.
-const pushedTotal = computed(() =>
-  history.value.reduce((s, x) => s + (toNum(x.pushMessages) || 0), 0)
-)
-const pendingDeltaSeverity = computed(() =>
-  pendingDriftSeverity({ delta: pendingDeltaLatest.value, pushed: pushedTotal.value })
-)
+// Judged against the work that arrived: +1 000 is noise on a window that
+// pushed half a million and a stall on one that pushed two thousand.
+const pushedTotal = computed(() => history.value.reduce((s, x) => s + (toNum(x.pushMessages) || 0), 0))
+const pendingDeltaSeverity = computed(() => pendingDriftSeverity({ delta: pendingDeltaLatest.value, pushed: pushedTotal.value }))
 const pendingDeltaContext = computed(() => {
   const now = backlogLast.value
   if (now === null) return 'no backlog readings in window'
   const lastBucket = backlog.value.at(-1)?.bucket
   const when = lastBucket ? formatChartLabel(new Date(lastBucket), backlogMultiDay.value) : 'unknown time'
   const waiting = `${formatNumber(now)} pending · bucket ${when}`
-  const v = pendingDeltaLatest.value
-  if (v === null) return `${waiting} · first reading`
-  return `${waiting} · ${pendingDeltaSpan.value}`
+  return pendingDeltaLatest.value === null ? `${waiting} · first reading` : `${waiting} · ${pendingDeltaSpan.value}`
 })
 
-// ---------------------------------------------------------------------------
-// Time lag row.
-//
-// VALUE  = the tenant overview's lag: the age of each queue's oldest
-//          unconsumed message — so it stays correct with consumers
-//          stopped. NULL means the broker has no measurement, and
-//          that must render '—', never 0s.
-// CHART  = per-bucket pop-sampled lag, with a gap for every bucket that had no
-//          pops (see `history` above).
-// ---------------------------------------------------------------------------
+// Time lag. The value is the tenant overview's: the age of each queue's oldest
+// unconsumed message, right with consumers stopped; null is "no measurement"
+// and renders '—', never 0s. The chart is sampled at pop, with a gap for every
+// bucket without pops.
 const lagAvgSeconds = computed(() => toNum(overview.value?.lag?.time?.avg))
 const lagMaxSeconds = computed(() => toNum(overview.value?.lag?.time?.max))
 const lagSeriesData = computed(() => {
   const h = history.value
   if (!h.length) return null
   return [
-    { label: 'Avg', data: h.map(x => toNum(x.avgLagMs)) },
-    { label: 'Max', data: h.map(x => toNum(x.maxLagMs)) },
+    { label: 'Avg', data: h.map((x) => toNum(x.avgLagMs)) },
+    { label: 'Max', data: h.map((x) => toNum(x.maxLagMs)) },
   ]
 })
-// An age is proportional by construction — "five minutes late" means the same
-// at 14 msg/s and at 140 000 — so it is judged against two lines and nothing
-// else: the queue's own when a row names its queue and Settings holds some,
-// else the tenant's.
-const { lines, linesFor } = useSettingsStore()
+// An age means the same at any message rate, so it is judged against two
+// lines only: the queue's own when a row names its queue, else the tenant's.
 const lagNumClass = (s, queue) => numTone(timeLagSeverity(s, queue === undefined ? undefined : linesFor(queue)))
-// An inactive Kafka group (groupActivity): a consumer nobody runs any more,
-// whose lag grows forever. Its figure is plain ink, as on Consumer groups, and
-// it is no part of its queue's lag.
-const isInactive = (g) => groupActivity(g, linesFor(g.queueName)) === 'inactive'
-const groupLagClass = (g) => (isInactive(g) ? '' : lagNumClass(g.maxTimeLag, g.queueName))
 const lagSeverity = computed(() => lagNumClass(lagMaxSeconds.value || 0))
-const lagContext = computed(() => {
-  const sampled = history.value.some(x => x.avgLagMs !== null)
-  return sampled
-    ? 'oldest-message age now · chart is pop-sampled'
-    : 'oldest-message age now · no pops in window, chart empty'
-})
+const lagContext = computed(() => (history.value.some((x) => x.avgLagMs !== null)
+  ? 'oldest-message age now · chart is pop-sampled'
+  : 'oldest-message age now · no pops in window, chart empty'))
 
-// ---------------------------------------------------------------------------
-// Errors row — ack failures for this tenant across the window, plus the CURRENT
-// DLQ depth (a snapshot, so it is named as one rather than added to a window
-// sum). `db_errors` is deliberately absent: it is a cell-wide counter the
-// broker never increments, and charting a constant zero labelled "DB errors"
-// is worse than not charting it.
-// ---------------------------------------------------------------------------
-const errorSeriesData = computed(() => history.value.map(x => toNum(x.ackFailed)))
-const ackFailedTotal = computed(() =>
-  history.value.reduce((s, x) => s + (toNum(x.ackFailed) || 0), 0)
-)
+// Errors — ack failures across the window, read as a share of the acks
+// attempted (success + failed); the dead letter depth is a snapshot, context
+// only: nothing purges it, so it could never go back to neutral.
+const errorSeriesData = computed(() => history.value.map((x) => toNum(x.ackFailed)))
+const ackFailedTotal = computed(() => history.value.reduce((s, x) => s + (toNum(x.ackFailed) || 0), 0))
+const ackSuccessTotal = computed(() => history.value.reduce((s, x) => s + (toNum(x.ackSuccess) || 0), 0))
 const dlqDepth = computed(() => toNum(overview.value?.messages?.deadLetter))
-const errorTotal = computed(() => ackFailedTotal.value)
 const errorContext = computed(() => {
   const dlq = dlqDepth.value
   const dlqText = dlq === null ? 'dlq —' : `dlq ${formatNumber(dlq)} now`
   const acks = ackSuccessTotal.value + ackFailedTotal.value
-  // The rate is the verdict, so the rate is what the line says. Without it the
-  // reader cannot tell whether the tone was earned.
+  // The rate is the verdict, so the rate is what the line says.
   const rate = acks > 0
     ? `${formatNumber(ackFailedTotal.value)} of ${formatNumber(acks)} acks (${((ackFailedTotal.value / acks) * 100).toFixed(2)}%)`
     : `ack ${formatNumber(ackFailedTotal.value)} in window`
   return `${rate} · ${dlqText}`
 })
-// THE ROW THIS POLICY WAS WRITTEN FOR. The old rule was `ack > 0 || dlq > 0 →
-// amber`, so 90 failed acks in an hour on a cell doing ~14 msg/s — 0.18% of
-// ~50 000 acks, i.e. a healthy hour — painted the number and its sparkline
-// amber, and so did a DLQ that had held the same three messages since March.
-//
-// Now: the failures are read as a share of the acks ATTEMPTED in the same
-// window (success + failed, both already summed here), and the DLQ DEPTH is
-// context only. Depth is monotonic — nothing purges it — so it can never go
-// back to neutral and is worthless as a signal; DLQ GROWTH would be one, but
-// the tenant overview reports a snapshot and the window series carries no
-// dead-letter counter, so this row does not claim to know it.
-const ackSuccessTotal = computed(() =>
-  history.value.reduce((s, x) => s + (toNum(x.ackSuccess) || 0), 0)
-)
-const errorSeverity = computed(() => ackFailureSeverity({
-  failed: ackFailedTotal.value,
-  succeeded: ackSuccessTotal.value,
-}))
+const errorSeverity = computed(() => ackFailureSeverity({ failed: ackFailedTotal.value, succeeded: ackSuccessTotal.value }))
 
-// ---------------------------------------------------------------------------
-// Partitions row — admin events from the same queue-ops buckets.
-// ---------------------------------------------------------------------------
+// Partitions created and deleted, from the same buckets.
 const partitionSeriesData = computed(() => {
   const h = history.value
   if (!h.length) return null
   return [
-    { label: 'Created', data: h.map(x => toNum(x.partitionsCreated)) },
-    { label: 'Deleted', data: h.map(x => toNum(x.partitionsDeleted)) },
+    { label: 'Created', data: h.map((x) => toNum(x.partitionsCreated)) },
+    { label: 'Deleted', data: h.map((x) => toNum(x.partitionsDeleted)) },
   ]
 })
-const partitionCreatedTotal = computed(() =>
-  history.value.reduce((s, x) => s + (toNum(x.partitionsCreated) || 0), 0)
-)
-const partitionDeletedTotal = computed(() =>
-  history.value.reduce((s, x) => s + (toNum(x.partitionsDeleted) || 0), 0)
-)
+const partitionCreatedTotal = computed(() => history.value.reduce((s, x) => s + (toNum(x.partitionsCreated) || 0), 0))
+const partitionDeletedTotal = computed(() => history.value.reduce((s, x) => s + (toNum(x.partitionsDeleted) || 0), 0))
 
-// ---------------------------------------------------------------------------
-// Parked row — in-flight long-poll consumer connections, summed across the
-// tenant's queues per bucket.
-// ---------------------------------------------------------------------------
+// Parked — long-polls waiting for work, summed across the queues per bucket.
 const parkedSeriesData = computed(() => {
   const h = history.value
   if (!h.length) return null
-  return [{ label: 'Parked', data: h.map(x => toNum(x.parkedTotal)) }]
+  return [{ label: 'Parked', data: h.map((x) => toNum(x.parkedTotal)) }]
 })
-const parkedLatest = computed(() => latestFinite(history.value.map(x => x.parkedTotal)))
+const parkedLatest = computed(() => latestFinite(history.value.map((x) => x.parkedTotal)))
 const parkedAvg = computed(() => {
-  const finite = history.value.map(x => toNum(x.parkedTotal)).filter(v => v !== null)
-  if (!finite.length) return 0
-  return finite.reduce((s, v) => s + v, 0) / finite.length
+  const finite = history.value.map((x) => toNum(x.parkedTotal)).filter((v) => v !== null)
+  return finite.length ? finite.reduce((s, v) => s + v, 0) / finite.length : 0
 })
-const parkedContext = computed(() => {
-  if (!history.value.length) return '—'
-  return `avg ${parkedAvg.value.toFixed(1)} across window · idle long-polls`
-})
+const parkedContext = computed(() => (history.value.length ? `avg ${parkedAvg.value.toFixed(1)} across window · idle long-polls` : '—'))
 
-// ---------------------------------------------------------------------------
-// Fill ratio row — popMessages / (popMessages + popEmpty) per bucket.
-//   • near 0% with traffic → consumers waiting in vain (over-provisioned)
-//   • near 100% sustained  → consumers fully utilized; watch the lag row
-// Buckets below the noise floor carry the previous value forward so the line
-// stays continuous; the headline uses a real null → '—' so a truly idle window
-// is distinguishable from 0% delivery.
-// ---------------------------------------------------------------------------
+// Fill ratio — popMessages / (popMessages + popEmpty) per bucket. Buckets
+// under the noise floor carry the previous value, so the line stays whole;
+// the headline uses a real null, so an idle window is not 0% delivery. No
+// tone: low fill is a pool larger than its work, a sizing observation.
 const FILL_NOISE_FLOOR = 5
-
 const fillSeriesData = computed(() => {
   const h = history.value
   if (!h.length) return null
   let last = null
-  const data = h.map(x => {
+  const data = h.map((x) => {
     const pop = toNum(x.popMessages)
     const empty = toNum(x.popEmpty)
     if (pop === null && empty === null) return null
@@ -964,72 +877,47 @@ const fillSeriesData = computed(() => {
   })
   return [{ label: 'Fill', data }]
 })
-
 const fillLatest = computed(() => {
   const tail = history.value.slice(-5)
   if (!tail.length) return null
-  let pop = 0, empty = 0
+  let pop = 0
+  let empty = 0
   for (const r of tail) {
-    pop   += toNum(r.popMessages) || 0
-    empty += toNum(r.popEmpty)    || 0
+    pop += toNum(r.popMessages) || 0
+    empty += toNum(r.popEmpty) || 0
   }
   if (pop + empty < FILL_NOISE_FLOOR) return null
   return Math.round((pop / (pop + empty)) * 1000) / 10
 })
-
 const fillContext = computed(() => {
   const v = fillLatest.value
   if (v === null) return 'idle window · no long-poll activity'
   if (v >= 80) return 'high utilization · consumers busy serving'
-  if (v < 30)  return 'low utilization · consumers mostly empty'
+  if (v < 30) return 'low utilization · consumers mostly empty'
   return 'balanced · consumer pool sized OK'
 })
 
-// No tone at all. Low fill means the consumers asked more often than there was
-// work — which is what an idle or over-provisioned pool looks like, and an
-// over-provisioned pool is a sizing observation, not a degradation. The
-// context line above already says which band the number is in, in words. High
-// fill only matters alongside rising lag, and lag has its own row.
-const fillSeverity = computed(() => '')
-
-// ---------------------------------------------------------------------------
-// Retention row.
-//
-// Every retention step is recorded when it applies (rsm/local_metrics.rs), so
-// an empty series IS "nothing deleted in the window".
-// ---------------------------------------------------------------------------
+// Retention — every step is recorded when it applies, so an empty series is
+// "nothing deleted in the window".
 const retentionRows = computed(() => {
   const payload = retentionQ.data.value
-  const series = payload?.series || []
-  return trimIncompleteBuckets(series, {
-    bucketKey: 'bucket',
-    bucketMinutes: payload?.bucketMinutes || 1,
-  })
+  return trimIncompleteBuckets(payload?.series || [], { bucketKey: 'bucket', bucketMinutes: payload?.bucketMinutes || 1 })
 })
 const retentionSeriesData = computed(() => {
   const rows = retentionRows.value
   if (!rows.length) return null
   return [
-    { label: 'Retention', data: rows.map(r => toNum(r.retentionMsgs)) },
-    { label: 'Completed', data: rows.map(r => toNum(r.completedRetentionMsgs)) },
-    // No status hue: retention deleting messages is retention working. The
-    // series is one of three on the same chart and is told apart by the
-    // legend, which is what the grey ramp is for.
-    { label: 'Evicted',   data: rows.map(r => toNum(r.evictionMsgs)) },
+    { label: 'Retention', data: rows.map((r) => toNum(r.retentionMsgs)) },
+    { label: 'Completed', data: rows.map((r) => toNum(r.completedRetentionMsgs)) },
+    // No status hue: retention deleting messages is retention working.
+    { label: 'Evicted', data: rows.map((r) => toNum(r.evictionMsgs)) },
   ]
 })
-const retentionLabels = computed(() =>
-  retentionRows.value.map(r => formatChartLabel(new Date(r.bucket), false))
-)
+const retentionLabels = computed(() => labelsFor(retentionRows.value.map((r) => r.bucket)))
 const retentionTotal = computed(() => {
   const rows = retentionRows.value
   if (!rows.length) return null
-  return rows.reduce((s, r) =>
-    s +
-    (toNum(r.retentionMsgs) || 0) +
-    (toNum(r.completedRetentionMsgs) || 0) +
-    (toNum(r.evictionMsgs) || 0)
-  , 0)
+  return rows.reduce((s, r) => s + (toNum(r.retentionMsgs) || 0) + (toNum(r.completedRetentionMsgs) || 0) + (toNum(r.evictionMsgs) || 0), 0)
 })
 const retentionContext = computed(() => {
   if (retentionQ.data.value === null) return 'loading…'
@@ -1037,424 +925,565 @@ const retentionContext = computed(() => {
   return 'evicted + completed-retention in window'
 })
 
-// ===========================================================================
-// CELL · OPERATOR sources. Everything below reads /api/v1/status or
-// /analytics/system-metrics — cell-wide by nature, operator-only at the proxy.
-// ===========================================================================
-const statusHistory = computed(() => {
-  const s = statusQ.data.value
-  if (!s?.throughput?.length) return []
-  // status_v3 returns rows newest → oldest; charts read left→right.
-  return trimIncompleteBuckets([...s.throughput].reverse(), {
-    bucketKey: 'timestamp',
-    bucketMinutes: s.bucketMinutes || 1,
-  })
-})
-const statusMultiDay = computed(() => {
-  const h = statusHistory.value
-  if (h.length < 2) return false
-  return new Date(h[0].timestamp).toDateString() !== new Date(h[h.length - 1].timestamp).toDateString()
-})
-const statusChartLabels = computed(() =>
-  statusHistory.value.map(h => formatChartLabel(new Date(h.timestamp), statusMultiDay.value))
-)
-
-// --- Event loop (cell) ---
-const workerCount = computed(() => statusQ.data.value?.workers?.length || 0)
-const avgEventLoopLag = computed(() => {
-  const w = statusQ.data.value?.workers
-  if (!w?.length) return null
-  // Average only over workers that actually reported — a worker missing the
-  // field must not pull the cell average towards zero.
-  const finite = w.map(x => toNum(x.avgEventLoopLagMs)).filter(v => v !== null)
-  if (!finite.length) return null
-  return Math.round(finite.reduce((s, x) => s + x, 0) / finite.length)
-})
-const maxEventLoopLag = computed(() => {
-  const w = statusQ.data.value?.workers
-  if (!w?.length) return null
-  const finite = w.map(x => toNum(x.maxEventLoopLagMs)).filter(v => v !== null)
-  return finite.length ? Math.max(...finite) : null
-})
-const elSeriesData = computed(() => {
-  const h = statusHistory.value
-  if (!h.length) return null
-  return [
-    { label: 'Avg', data: h.map(x => toNum(x.avgEventLoopLagMs)) },
-    { label: 'Max', data: h.map(x => toNum(x.maxEventLoopLagMs)) },
-  ]
-})
-// Kept: an event loop that is 100 ms behind is degradation of the broker
-// itself, at any message rate.
-const elNumClass = (ms) => eventLoopSeverity(ms)
-const eventLoopContext = computed(() => {
-  const n = workerCount.value
-  if (!n) return 'no workers reporting on this cell'
-  return `${n} worker${n === 1 ? '' : 's'} on this cell · avg / max`
-})
-
-// --- Queen CPU (cell) ---
-// CPU is cumulative across cores (4 cores pinned = 400%), so it is shown
-// without a semantic tone: without a core count a threshold would be a guess.
-const hasMultipleReplicas = computed(() => (sysQ.data.value?.replicas || []).length > 1)
-const cpuError = computed(() => hasMultipleReplicas.value ? sysQ.error.value : statusQ.error.value)
-
-const combinedCpu = (t) => {
-  const user = toNum(t.metrics?.cpu?.user_us?.avg)
-  const sys  = toNum(t.metrics?.cpu?.system_us?.avg)
-  if (user === null && sys === null) return null
-  return ((user || 0) + (sys || 0)) / 100
-}
-
-// Single replica → user vs system split. Multi replica → one line per replica
-// so fanout imbalance is visible (the value still shows the hottest).
-const cpuSeriesData = computed(() => {
-  if (hasMultipleReplicas.value) {
-    return (sysQ.data.value?.replicas || []).map(r => ({
-      label: r.hostname?.substring(0, 12) || 'replica',
-      data: (r.timeSeries || []).map(combinedCpu),
-    }))
-  }
-  const h = statusHistory.value
-  if (!h.length) return null
-  return [
-    { label: 'User',   data: h.map(x => toNum(x.queenCpuUserPct)) },
-    { label: 'System', data: h.map(x => toNum(x.queenCpuSysPct)) },
-  ]
-})
-
-// Per-replica buckets aren't necessarily aligned with the status buckets that
-// drive the other cell rows, so multi-replica mode carries its own labels.
-const cpuLabels = computed(() => {
-  if (!hasMultipleReplicas.value) return statusChartLabels.value
-  const ts = (sysQ.data.value?.replicas || [])[0]?.timeSeries || []
-  if (!ts.length) return []
-  const multi = ts.length >= 2 &&
-    new Date(ts[0].timestamp).toDateString() !== new Date(ts[ts.length - 1].timestamp).toDateString()
-  return ts.map(t => formatChartLabel(new Date(t.timestamp), multi))
-})
-const cpuLatest = computed(() => {
-  if (hasMultipleReplicas.value) {
-    let max = null
-    for (const r of (sysQ.data.value?.replicas || [])) {
-      const v = latestFinite((r.timeSeries || []).map(combinedCpu))
-      if (v !== null && (max === null || v > max)) max = v
-    }
-    return max
-  }
-  const u = latestFinite(statusHistory.value.map(x => x.queenCpuUserPct))
-  const s = latestFinite(statusHistory.value.map(x => x.queenCpuSysPct))
-  if (u === null && s === null) return null
-  return (u || 0) + (s || 0)
-})
-const cpuContext = computed(() => {
-  if (hasMultipleReplicas.value) {
-    return `${(sysQ.data.value?.replicas || []).length} replicas on this cell · hottest shown`
-  }
-  const u = latestFinite(statusHistory.value.map(x => x.queenCpuUserPct))
-  const s = latestFinite(statusHistory.value.map(x => x.queenCpuSysPct))
-  if (u === null && s === null) return 'no CPU samples for this cell'
-  return `user ${(u || 0).toFixed(0)}% · sys ${(s || 0).toFixed(0)}% · whole cell`
-})
-
-// --- Batch efficiency (cell) — point-in-time averages. <5 = tiny commits. ---
-const batchEfficiency = computed(() => {
-  const b = statusQ.data.value?.messages?.batchEfficiency
-  const one = (v) => {
-    const n = toNum(v)
-    return n === null ? '—' : n.toFixed(1)
-  }
-  return { push: one(b?.push), pop: one(b?.pop), ack: one(b?.ack) }
-})
-
-// ---------------------------------------------------------------------------
-// Counts strip — pending tone (the only number thresholded inline).
-//
-// A depth has no verdict in it: 50 000 pending drains in four seconds at
-// 12k/s and never drains at 0/s. The tone is therefore computed in SECONDS OF
-// WORK at the ack rate this window actually measured, and stays neutral when
-// there is no drain rate to divide by — a stalled queue is the Time lag row's
-// story, told as an age, and telling it twice in two colours is not telling it
-// better.
-// ---------------------------------------------------------------------------
-const drainPerSec = computed(() => latestFinite(history.value.map(x => x.ackPerSecond)))
+// Pending tone (the counts strip): a depth has no verdict on its own, so it is
+// judged in SECONDS OF WORK at the ack rate this window measured, and stays
+// neutral with no drain rate to divide by — a stalled queue is the Time lag
+// tile's story.
+const drainPerSec = computed(() => latestFinite(history.value.map((x) => x.ackPerSecond)))
 const pendingNumClass = (n) => backlogSeverity({ pending: n, drainPerSec: drainPerSec.value })
 
 // ---------------------------------------------------------------------------
-// Bottom panels — Top queues by pending + Consumer groups by lag.
-// Both panels share one row idiom (dot · name · right metric · meta line).
-// ---------------------------------------------------------------------------
-
-// Per-queue worst-lag rollup, keyed off consumer-group lag (the queue itself
-// doesn't carry a lag; it's a property of its consumer groups — of the ones
-// still there, so not of an inactive Kafka group).
-const queueLagMap = computed(() => {
-  const m = {}
-  for (const c of consumers.value) {
-    const q = c.queueName
-    if (!q || isInactive(c)) continue
-    const lag = c.maxTimeLag || 0
-    if (!m[q] || lag > m[q]) m[q] = lag
-  }
-  return m
-})
-
-const enrichedQueues = computed(() => {
-  // `pending` is passed through verbatim: null when the broker did not report
-  // one, so the panel can render '—' instead of claiming an empty queue.
-  const base = queues.value.map(q => ({ ...q, _pending: toNum(q.messages?.pending) }))
-  const maxPending = Math.max(...base.map(q => q._pending ?? 0), 1)
-  return base
-    .map(q => {
-      const lag = queueLagMap.value[q.name] || 0
-      const depth = q._pending ?? 0
-      // The bar shows the depth RANK — that is what a bar is for. The verdict
-      // is never the rank (the biggest queue would always be red); it comes
-      // from useAttention, by lag and by whether anyone reads the queue.
-      return {
-        ...q,
-        _lag: lag,
-        _depthPct: Math.min(100, (depth / maxPending) * 100),
-      }
-    })
-    .sort((a, b) => (b._pending ?? -1) - (a._pending ?? -1))
-})
-
-// Top 6 by pending depth — the operational priority for "what's piling up".
-const topPendingQueues = computed(() => enrichedQueues.value.slice(0, 6))
-
-// Worst lag first, inactive Kafka groups last: a consumer nobody runs any
-// more has the oldest message of all, and would take the panel's six rows
-// from the groups that are behind now.
-const sortedConsumers = computed(() => byLagInactiveLast(consumers.value, linesFor))
-const laggingCount = computed(() =>
-  consumers.value.filter(c => !isInactive(c) && ((c.maxTimeLag || 0) >= 60 || (c.partitionsWithLag || 0) > 0)).length
-)
-
-
-// ---------------------------------------------------------------------------
-// Formatters. The unit is in the name: `fmtLagMs` takes milliseconds,
-// `fmtLagSeconds` takes seconds — the two used to share one name across views.
+// Formatters. The unit is in the name.
 // ---------------------------------------------------------------------------
 const fmtRate = (n) => {
   const v = Number(n) || 0
-  if (Math.abs(v) >= 1000) return (v / 1000).toFixed(1) + 'k /s'
-  if (Math.abs(v) >= 100)  return Math.round(v) + ' /s'
-  if (Math.abs(v) >= 10)   return v.toFixed(1) + ' /s'
-  return v.toFixed(2) + ' /s'
+  if (Math.abs(v) >= 1000) return `${(v / 1000).toFixed(1)}k /s`
+  if (Math.abs(v) >= 100) return `${Math.round(v)} /s`
+  if (Math.abs(v) >= 10) return `${v.toFixed(1)} /s`
+  return `${v.toFixed(2)} /s`
 }
-const fmtCount = (n) => {
-  const v = Number(n) || 0
-  return formatNumber(Math.round(v))
-}
+const fmtMsgRate = (n) => fmtRate(n).replace(' /s', ' msg/s')
+const fmtCount = (n) => formatNumber(Math.round(Number(n) || 0))
 const fmtLagMs = (n) => {
   const v = Number(n) || 0
   if (v < 1) return '0'
-  if (v < 1000) return Math.round(v) + ' ms'
-  if (v < 60000) return (v / 1000).toFixed(1) + ' s'
-  return (v / 60000).toFixed(1) + ' m'
+  if (v < 1000) return `${Math.round(v)} ms`
+  if (v < 60000) return `${(v / 1000).toFixed(1)} s`
+  return `${(v / 60000).toFixed(1)} m`
 }
-const fmtLagSeconds = (seconds) => {
-  if (seconds === null || seconds === undefined) return '—'
-  if (seconds === 0) return '0s'
-  if (seconds < 60) return `${Math.round(seconds)}s`
-  if (seconds < 3600) {
-    const m = Math.floor(seconds / 60); const s = Math.round(seconds % 60)
-    return s ? `${m}m ${s}s` : `${m}m`
-  }
-  if (seconds < 86400) {
-    const h = Math.floor(seconds / 3600); const m = Math.floor((seconds % 3600) / 60)
-    return m ? `${h}h ${m}m` : `${h}h`
-  }
-  const d = Math.floor(seconds / 86400); const h = Math.floor((seconds % 86400) / 3600)
-  return h ? `${d}d ${h}h` : `${d}d`
-}
-// Fill-ratio buckets can be null ("not enough long-poll activity"); render
-// those as an em dash so the user can tell it apart from "0% delivered".
+const fmtMs = (v) => `${Math.round(Number(v) || 0)} ms`
+// A fill bucket can be null ("not enough long-poll activity"): a dash, not 0%.
 const fmtFillPct = (n) => {
   if (n === null || n === undefined) return '—'
   const v = Number(n)
-  if (!Number.isFinite(v)) return '—'
-  return v.toFixed(1) + '%'
+  return Number.isFinite(v) ? `${v.toFixed(1)}%` : '—'
 }
 
-// ---------------------------------------------------------------------------
-// Last-refresh ticker — drives the live tick in the filter card. One ticker
-// for the whole app (useRefreshAgo), so the four auto-polling views neither
-// each own a timer nor each spell the string their own way.
-// ---------------------------------------------------------------------------
+// The live tick: the last refresh attempt, off the app's one ticker.
 const lastRefreshAt = ref(null)
 const refreshAgo = useRefreshAgo(lastRefreshAt)
 
-
 // ---------------------------------------------------------------------------
-// Focus chart — the tiles hand it their series; it replaces the old per-row
-// expansion. Same data, same formatters, same tones as the tiles.
+// The chart the Overview's tiles hand their series to.
 // ---------------------------------------------------------------------------
-const selectedMetric = ref('throughput')
-const selectMetric = (key) => { selectedMetric.value = key }
-const focus = computed(() => {
-  switch (selectedMetric.value) {
-    case 'pendingDelta': return { title: 'Pending', sub: 'waiting and in flight, read by the broker once a minute', series: backlogSeries.value, labels: backlogLabels.value, valueFormat: fmtCount, unit: 'msgs', error: opsError.value }
-    case 'timeLag': return { title: 'Time lag', sub: 'pop-sampled per bucket, with gaps where nothing was consumed', series: lagSeriesData.value, labels: chartLabels.value, valueFormat: fmtLagMs, unit: 'ms', error: opsError.value }
+const metricChart = (metric) => {
+  switch (metric) {
+    case 'pendingDelta': return { title: 'Pending', sub: 'waiting and in flight, read once a minute', series: backlogSeries.value, labels: backlogLabels.value, valueFormat: fmtCount, unit: 'msgs', error: opsError.value }
+    case 'timeLag': return { title: 'Time lag', sub: 'sampled at pop, gaps where nothing was consumed', series: lagSeriesData.value, labels: chartLabels.value, valueFormat: fmtLagMs, unit: 'ms', error: opsError.value }
     case 'errors': return { title: 'Ack failures', sub: 'failed acks per bucket', sparkline: errorSeriesData.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'ack failures', tone: errorSeverity.value || 'mute', error: opsError.value }
-    case 'parked': return { title: 'Parked', sub: 'long-polls waiting for work, summed across queues', series: parkedSeriesData.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'long-polls', error: opsError.value }
+    case 'parked': return { title: 'Parked', sub: 'long-polls waiting for work, every queue', series: parkedSeriesData.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'long-polls', error: opsError.value }
     case 'fillRatio': return { title: 'Fill ratio', sub: 'long-polls that came back with a message', series: fillSeriesData.value, labels: chartLabels.value, valueFormat: fmtFillPct, unit: '%', error: opsError.value }
     case 'partitions': return { title: 'Partitions', sub: 'created and deleted per bucket', series: partitionSeriesData.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'count', error: opsError.value }
     case 'retention': return { title: 'Retention', sub: 'messages removed by retention and eviction', series: retentionSeriesData.value, labels: retentionLabels.value, valueFormat: fmtCount, unit: 'msgs', error: retentionError.value }
-    case 'eventLoop': return { title: 'Event loop', sub: 'scheduling delay, every tenant on this cell', series: elSeriesData.value, labels: statusChartLabels.value, valueFormat: (v) => v + ' ms', unit: 'ms', error: statusError.value }
-    case 'cpu': return { title: 'Queen CPU', sub: 'the whole cell', series: cpuSeriesData.value, labels: cpuLabels.value, valueFormat: (v) => v.toFixed(1) + '%', unit: '%', error: cpuError.value }
-    default: return { title: 'Throughput', sub: 'push, pop, ack and Kafka fetch per second, summed across queues', series: throughputSeries.value, labels: chartLabels.value, valueFormat: fmtRate, unit: 'msgs / sec', error: opsError.value }
+    default: return { title: 'Throughput', sub: 'push, pop, ack and Kafka fetch per second, every queue', series: throughputSeries.value, labels: chartLabels.value, valueFormat: fmtRate, unit: 'msgs / sec', error: opsError.value }
   }
-})
+}
 
 // ---------------------------------------------------------------------------
-// Status — what needs you, worked out from data already on this page and
-// printed with its rules under the list. It never claims "healthy" when it
-// could not read the queues or the groups: that is "status unknown".
-//
-//   bad   a consumer group on the queue is past the queue's second lag line
-//   warn  a consumer group on the queue is past its first (5 min and 1 min
-//         unless Settings moved them)
-//   warn  the queue holds messages and nothing is set up to read them: no
-//         live group and no named one, on a queue Kafka clients did not create
-//   warn/bad  the tenant's ack failures, by ackFailureSeverity (useSeverity)
-//
-// The first three are composables/useAttention — the sidebar, Queues and
-// Consumer groups read the same function, so none of them can disagree.
+// What needs you, worked out from data already on the page (composables/
+// useAttention: the sidebar, Queues and Consumer groups read the same rule),
+// plus the tenant's ack failures, which only this page reads. It never says
+// "healthy" when it could not read the queues or the groups.
 // ---------------------------------------------------------------------------
-const queuePath = (name) => queueLocation(name, route)
+// The queue listing by depth, as the sunflower and the issues list read it.
+const queuesByDepth = computed(() => queues.value
+  .map((q) => ({ ...q, _pending: toNum(q.messages?.pending) }))
+  .sort((a, b) => (b._pending ?? -1) - (a._pending ?? -1)))
+
+// Known only once both were read and their last reads succeeded: before the
+// first answer lands nothing is "healthy".
+const statusKnown = computed(() => queuesRead.value && groupsRead.value && !queuesFailed.value && !consumersFailed.value)
 const issues = computed(() => {
   if (queuesFailed.value || consumersFailed.value) return []
-  const out = []
-  // enrichedQueues is sorted by depth; the rule keeps that order.
-  for (const a of queueAttention(enrichedQueues.value, consumers.value, linesFor)) {
-    const why = a.reason === 'lag'
-      ? `A consumer group is ${fmtLagSeconds(a.lag)} behind · ${formatNumber(a.pending)} pending`
-      : `${a.deadOnly ? 'Queue mode has never consumed from it' : 'No consumer group reads it'} · ${formatNumber(a.pending)} waiting`
-    out.push({ key: `q:${a.name}`, sev: a.sev, name: a.name, why, to: queuePath(a.name) })
-  }
+  const out = queueAttention(queuesByDepth.value, consumers.value, linesFor)
+    .map((a) => ({ key: `q:${a.name}`, sev: a.sev, name: a.name, why: attentionWhy(a) }))
   const es = errorSeverity.value
   if (es === 'warn' || es === 'bad') out.push({ key: 'acks', sev: es, name: 'Ack failures', why: errorContext.value, to: '/dlq', tenant: true })
   const rank = { bad: 2, warn: 1 }
   return out.sort((a, b) => rank[b.sev] - rank[a.sev])
 })
-const issueSevByQueue = computed(() => new Map(issues.value.filter(i => !i.tenant).map(i => [i.name, i.sev])))
-const queueGlyph = (q) => issueSevByQueue.value.get(q.name) || 'ok'
-const groupGlyph = (g) => {
-  const s = groupAttention(g, linesFor)
-  return s === 'bad' || s === 'warn' ? s : s === 'mute' ? 'idle' : 'ok'
-}
+const issueSevByQueue = computed(() => new Map(issues.value.filter((i) => !i.tenant).map((i) => [i.name, i.sev])))
 
-// The cell's own problems, an operator's only (cell-level, like the top bar
-// that colours by the same lines): a follower behind or silent, a snapshot on
-// the wire, quorum, a node's disk, memory or CPU (useBrokerStatus cellIssues).
-// A failed read adds nothing here; the top bar says it could not read.
-const cellIssueList = computed(() => (can('operator') ? cellIssues(brokerStatus(membersQ.data.value)) : []))
+// The cell's own problems, an operator's only (useBrokerStatus cellIssues, the
+// lines the top bar colours by). A failed read adds nothing here.
+const cellStatus = computed(() => (canOperate.value ? brokerStatus(membersQ.data.value) : null))
+const cellIssueList = computed(() => cellIssues(cellStatus.value))
 
-const statusKnown = computed(() =>
-  !loadingQueues.value && !loadingConsumers.value && !queuesFailed.value && !consumersFailed.value
-)
-const statusSev = computed(() => {
-  // A failing cell is a fact even while the queues cannot be read.
-  if (cellIssueList.value.some(i => i.sev === 'bad')) return 'bad'
-  if (!statusKnown.value) return 'unknown'
-  const all = [...cellIssueList.value, ...issues.value]
-  if (all.some(i => i.sev === 'bad')) return 'bad'
-  return all.length ? 'warn' : 'ok'
+const verdict = computed(() => overviewVerdict({
+  loading: loadingQueues.value || loadingConsumers.value,
+  known: statusKnown.value,
+  issues: issues.value,
+  cellIssues: cellIssueList.value,
+}))
+const verdictGlyph = computed(() => (verdict.value.sev === 'unknown' ? 'idle' : verdict.value.sev))
+
+// The sub sidebar: every view's mark and one number, from what the page
+// already reads, so the list alone says where the trouble is.
+const queueIssues = computed(() => issues.value.filter((i) => !i.tenant))
+const allIssues = computed(() => [...issues.value, ...(canOperate.value ? cellIssueList.value : [])])
+const groupsBehind = computed(() => consumers.value
+  .map((g) => groupAttention(g, linesFor))
+  .filter((sev) => sev === 'warn' || sev === 'bad'))
+// The resource that needs you most; with none, the disk: the one that runs out.
+const resourceStatus = computed(() => {
+  const s = cellStatus.value
+  if (!s) return {}
+  const rank = { bad: 2, warn: 1 }
+  let pick = null
+  for (const [label, r] of [['CPU', s.cpu], ['Memory', s.mem], ['Disk', s.disk]]) {
+    if ((rank[r?.sev] || 0) > (rank[pick?.sev] || 0)) pick = { label, sev: r.sev, top: r.top }
+  }
+  if (!pick) pick = { label: 'Disk', sev: null, top: s.disk?.top }
+  const share = toNum(pick.top?.share)
+  return {
+    mark: pick.sev,
+    num: share === null ? '—' : `${pick.label} ${Math.round(share * 100)}%`,
+    title: pick.top?.name ? `${pick.label}, the highest: ${pick.top.name}` : '',
+  }
 })
-/** One cell issue says itself; several are counted. */
-const cellHeadline = (list) => (list.length === 1 ? list[0].title : `${list.length} problems in the cell`)
-const statusGlyph = computed(() => statusSev.value === 'unknown' ? 'idle' : statusSev.value)
-const statusWord = computed(() => {
-  const w = { ok: 'Healthy', warn: 'Degraded', bad: 'Failing' }[statusSev.value]
-  if (w) return w
-  return loadingQueues.value || loadingConsumers.value ? 'Checking' : 'Unknown'
-})
-const headline = computed(() => {
-  // The cell first when it is failing: every queue stands on it.
-  const cellBad = cellIssueList.value.filter(i => i.sev === 'bad')
-  if (cellBad.length) return cellHeadline(cellBad)
-  if (loadingQueues.value || loadingConsumers.value) return 'Checking your queues…'
-  if (!statusKnown.value) return 'Status unknown'
-  const qIssues = issues.value.filter(i => !i.tenant)
-  const bad = qIssues.filter(i => i.sev === 'bad')
-  if (bad.length === 1) return `${bad[0].name} is falling behind`
-  if (bad.length > 1) return `${bad.length} queues are falling behind`
-  if (qIssues.length) return `${qIssues.length} ${qIssues.length === 1 ? 'queue needs' : 'queues need'} attention`
-  if (issues.value.length) return 'Ack failures need attention'
-  if (cellIssueList.value.length) return cellHeadline(cellIssueList.value)
-  return 'All queues are healthy'
+const side = computed(() => {
+  const s = cellStatus.value
+  const raft = s?.raft
+  const n = allIssues.value.length
+  const reachable = s ? s.nodes.filter((x) => !x.unreachable).length : 0
+  return sideGroups({
+    summary: { mark: verdict.value.sev, num: verdict.value.word, title: verdict.value.headline },
+    issues: statusKnown.value || allIssues.value.length
+      ? { num: formatNumber(n), title: n ? `${formatNumber(n)} ${n === 1 ? 'thing needs' : 'things need'} you` : 'Nothing needs you' }
+      : {},
+    throughput: pushNow.value === null ? {} : {
+      num: `${perSecond(pushNow.value)}/s`,
+      title: `${fmtMsgRate(pushNow.value)} in, ${popNow.value === null ? '—' : fmtMsgRate(popNow.value)} out`,
+    },
+    backlog: pendingNow.value === null ? {} : {
+      mark: worstMark([pendingNumClass(pendingNow.value), lagSeverity.value]),
+      num: formatNumber(pendingNow.value),
+      title: lagMaxSeconds.value === null ? 'Messages waiting' : `Messages waiting; the oldest for ${lagText(lagMaxSeconds.value)}`,
+    },
+    groups: groupsRead.value && !consumersFailed.value ? {
+      mark: worstMark(groupsBehind.value),
+      num: groupsBehind.value.length ? `${formatNumber(groupsBehind.value.length)} behind` : formatNumber(consumers.value.length),
+      title: `${formatNumber(consumers.value.length)} consumer ${consumers.value.length === 1 ? 'group' : 'groups'}`,
+    } : {},
+    'dead-letters': dlqDepth.value === null ? {} : {
+      mark: errorSeverity.value,
+      num: formatNumber(dlqDepth.value),
+      title: errorContext.value || 'Messages in dead letter now',
+    },
+    // How the cell is: its worst problem said short, else its nodes up.
+    cell: s ? (() => {
+      const mark = worstMark(cellIssueList.value.map((i) => i.sev))
+      const num = reachable < s.nodes.length ? `${reachable}/${s.nodes.length} up`
+        : raft?.alert ? raft.alert.title
+          : resourceStatus.value.mark ? resourceStatus.value.num
+            : cellIssueList.value.length ? `${formatNumber(cellIssueList.value.length)} issues`
+              : `${reachable}/${s.nodes.length}`
+      return { mark, num, title: cellIssueList.value[0]?.title || 'The cell is healthy · opens System' }
+    })() : {},
+  }, canOperate.value)
 })
 
-
-// The sentence under the headline: only numbers the page already has.
-const pushNow = computed(() => latestFinite(history.value.map(x => x.pushPerSecond)))
-const popNow = computed(() => latestFinite(history.value.map(x => x.popPerSecond)))
+// The sentence under the verdict: only numbers the page already has.
+const pushNow = computed(() => latestFinite(history.value.map((x) => x.pushPerSecond)))
+const popNow = computed(() => latestFinite(history.value.map((x) => x.popPerSecond)))
 // Only when Kafka clients read in the window: a 0 would say nothing new.
-const fetchNow = computed(() => (
-  history.value.some(x => x.fetchMessages > 0) ? latestFinite(history.value.map(x => x.fetchPerSecond)) : null
-))
+const fetchNow = computed(() => (history.value.some((x) => x.fetchMessages > 0) ? latestFinite(history.value.map((x) => x.fetchPerSecond)) : null))
 const pendingNow = computed(() => (overviewFailed.value ? null : toNum(overview.value?.messages?.pending)))
 const ackAttempts = computed(() => ackSuccessTotal.value + ackFailedTotal.value)
-const ackFailPct = computed(() =>
-  ackAttempts.value > 0 ? `${((ackFailedTotal.value / ackAttempts.value) * 100).toFixed(2)}%` : '—'
-)
-const fmtMsgRate = (n) => fmtRate(n).replace(' /s', ' msg/s')
+const ackFailPct = computed(() => (ackAttempts.value > 0 ? `${((ackFailedTotal.value / ackAttempts.value) * 100).toFixed(2)}%` : '—'))
 
 // The sunflower: one entry per queue; the component decides how many seeds.
-const sunflowerQueues = computed(() =>
-  enrichedQueues.value.map(q => ({
-    name: q.name,
-    partitions: q.partitions || 1,
-    pending: q._pending ?? 0,
-    sev: queueGlyph(q),
-  }))
-)
-
-// One seed per real partition, with its own pending and lag, needs
-// /resources/partitions. It is asked only while the flower draws one seed per
-// partition; past MAX_SEEDS a seed is a slice of a queue and the queue listing
-// is all it can show. New in 2.0: an older broker 404s once (a probe, so no
-// toast), stores/routeSupport remembers it, and the seeds stay per queue.
+const sunflowerQueues = computed(() => queuesByDepth.value.map((q) => ({
+  name: q.name,
+  partitions: q.partitions || 1,
+  pending: q._pending ?? 0,
+  sev: issueSevByQueue.value.get(q.name) || 'ok',
+})))
+// One seed per real partition needs /resources/partitions, asked only while
+// the flower draws one seed per partition. New in 2.0: an older broker 404s
+// once (a probe, no toast), routeSupport remembers, and seeds stay per queue.
 const getPartitions = routeSupport.guard('resources-partitions', (params, config) =>
   queuesApi.partitions(params, { ...config, probe: true }))
 const partitionsQ = useApi((config) => getPartitions({ limit: MAX_SEEDS }, config), { immediate: false })
 const refreshPartitions = () => {
-  if (queuesFailed.value || totalPartitions.value > MAX_SEEDS) return
+  if (view.value !== 'summary' || queuesFailed.value || totalPartitions.value > MAX_SEEDS) return undefined
   return partitionsQ.refresh()
 }
 const sunflowerPartitions = computed(() => {
   const d = partitionsQ.data.value
-  // A failed tick keeps the last rows (useApi keeps data); a missing route
-  // never had any.
   if (!d || d.truncated || totalPartitions.value > MAX_SEEDS) return null
   return d.partitions || null
 })
 
 // ---------------------------------------------------------------------------
-// Loading
+// QUEUES — one namespace (or every one), from the listing, the groups and
+// queue-ops already read. Throughput is queue-ops' rows of the namespace's
+// queues, the same rows /api/v1/status sums for `namespace=`; queue-ops is
+// the tenant's route, so it answers every reader and not only an operator.
 // ---------------------------------------------------------------------------
-const fetchAll = async () => {
-  const jobs = [
-    overviewQ.refresh(), queuesQ.refresh().then(refreshPartitions), consumersQ.refresh(),
-    opsQ.refresh(), retentionQ.refresh(),
+const nsQueues = computed(() => queuesIn(queues.value, namespace.value))
+const nsNames = computed(() => new Set(nsQueues.value.map((q) => q.name)))
+// Each namespace with its count and its worst queue's mark; one picked in the
+// address that no queue has any more stays in the menu, at 0.
+const namespaceOptions = computed(() => {
+  const all = namespaceCounts(queues.value, (q) => issueSevByQueue.value.get(q.name) || null)
+  if (namespace.value !== null && !all.some((n) => n.name === namespace.value)) all.push({ name: namespace.value, count: 0, sev: null })
+  return all
+})
+// The namespace rides along into the Queues section, so its list stays filtered.
+const carry = computed(() => (namespace.value === null ? {} : { namespace: namespace.value }))
+
+// Every namespace is the tenant's whole traffic, deleted queues included.
+const nsHistory = computed(() => (namespace.value === null ? history.value : trimmedRollup(nsNames.value)))
+const nsChartLabels = computed(() => labelsFor(nsHistory.value.map((h) => h.bucket)))
+const nsThroughputSeries = computed(() => throughputOf(nsHistory.value))
+
+// The backlog over time is kept for the tenant and for each queue: a
+// namespace of one queue is that queue's (one more queue-ops read), one of
+// several has none to show.
+const soleQueue = computed(() => (namespace.value !== null && nsQueues.value.length === 1 ? nsQueues.value[0].name : null))
+const soleQ = useApi(async (config) => {
+  const queue = soleQueue.value
+  const res = await systemApi.getQueueOps({ ...getTimeRangeParams(), queue }, config)
+  return { data: { queue, backlog: res.data?.backlog } }
+}, { immediate: false })
+const refreshSole = () => (view.value === 'backlog' && soleQueue.value ? soleQ.refresh() : undefined)
+const nsBacklog = computed(() => {
+  if (namespace.value === null) {
+    const n = need(opsQ)
+    return n.state === 'ok' ? { state: 'chart', ...backlogChartOf(backlog.value) } : n
+  }
+  const n = need(queuesQ)
+  if (n.state !== 'ok') return n
+  if (nsQueues.value.length > 1) return { state: 'unsplit' }
+  if (!soleQueue.value) return { state: 'chart', labels: [], series: null }
+  const d = soleQ.data.value
+  if (d?.queue !== soleQueue.value) return soleQ.error.value ? { state: 'error', error: soleQ.error.value } : { state: 'loading' }
+  return { state: 'chart', ...backlogChartOf(backlogRowsOf(d.backlog)) }
+})
+
+// What a card can draw, from the reads it needs: an error when one failed
+// before it ever answered, loading while one has not answered yet. A read that
+// answered once keeps its rows through a failed refresh.
+function need(...reads) {
+  const failed = reads.find((q) => q.data.value === null && q.error.value !== null)
+  if (failed) return { state: 'error', error: failed.error.value }
+  if (reads.some((q) => q.data.value === null)) return { state: 'loading' }
+  return { state: 'ok' }
+}
+const cards = computed(() => {
+  const scoped = namespace.value === null ? [] : [queuesQ]
+  // What needs you is never shown from a stale read: unknown is not healthy.
+  let attention = { state: 'ok' }
+  if (!statusKnown.value) {
+    const failed = [queuesQ, consumersQ].find((q) => q.error.value !== null)
+    attention = failed ? { state: 'error', error: failed.error.value } : { state: 'loading' }
+  }
+  return {
+    throughput: need(opsQ, ...scoped),
+    attention,
+    busiest: need(opsQ, queuesQ),
+    groups: need(consumersQ, ...scoped),
+  }
+})
+
+const nsAttention = computed(() => (statusKnown.value ? attentionList(nsQueues.value, consumers.value, linesFor) : []))
+const busiest = computed(() => busiestQueues(opsQ.data.value?.series, nsNames.value, {
+  seconds: windowSeconds(opsQ.data.value?.timeRange),
+  limit: LIST,
+}))
+const nsGroups = computed(() => groupsSummary(consumers.value, namespace.value === null ? null : nsNames.value, linesFor))
+const groupRowFor = (g) => {
+  const sev = groupAttention(g, linesFor)
+  const mark = sev === 'warn' || sev === 'bad' ? sev : null
+  return {
+    key: `${g.name}@${g.queueName}`,
+    name: g.name === '__QUEUE_MODE__' ? 'Queue mode' : g.name,
+    queue: g.queueName,
+    presence: groupPresence(g, linesFor),
+    mark,
+    lag: (toNum(g.maxTimeLag) || 0) > 0 ? lagText(g.maxTimeLag) : '—',
+    behind: (toNum(g.partitionsWithLag) || 0) > 0 ? formatNumber(toNum(g.partitionsWithLag)) : '—',
+    to: queueTabLocation('consumers', g.queueName, route, { ...carry.value, group: g.name }),
+  }
+}
+const groupRowsAll = computed(() => nsGroups.value.rows.slice(0, 200).map(groupRowFor))
+
+// Dead letters by queue, the namespace's, most first: a snapshot of the queue
+// listing, so no request of its own.
+const dlqRows = computed(() => nsQueues.value
+  .map((q) => ({ name: q.name, namespace: q.namespace || '', count: toNum(q.messages?.deadLetter) || 0 }))
+  .filter((d) => d.count > 0)
+  .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)))
+
+// ---------------------------------------------------------------------------
+// SERVER — the cell: the members read (brokerStatus) for the issues and the
+// nodes now; system-metrics for each node over time, drawn as the System
+// page's "Per server" view; /api/v1/status for the workers' event loop.
+// ---------------------------------------------------------------------------
+const cellNodes = computed(() => nodeRows(cellStatus.value))
+const cellWindow = computed(() => trafficWindow(cellStatus.value))
+const nodesNote = computed(() => {
+  if (isMissingRoute(membersQ.error.value)) return 'This broker does not list its nodes'
+  if (membersQ.error.value) return `Cannot read the nodes · ${describeApiError(membersQ.error.value)}`
+  return 'Reading the nodes…'
+})
+
+// The workers' event loop, now (the last two minutes) and over the window.
+const statusHistory = computed(() => {
+  const s = statusQ.data.value
+  if (!s?.throughput?.length) return []
+  // status_v3 answers newest first; charts read left to right.
+  return trimIncompleteBuckets([...s.throughput].reverse(), { bucketKey: 'timestamp', bucketMinutes: s.bucketMinutes || 1 })
+})
+const statusChartLabels = computed(() => labelsFor(statusHistory.value.map((h) => h.timestamp)))
+const elSeriesData = computed(() => {
+  const h = statusHistory.value
+  if (!h.length) return null
+  return [
+    { label: 'Avg', data: h.map((x) => toNum(x.avgEventLoopLagMs)) },
+    { label: 'Max', data: h.map((x) => toNum(x.maxEventLoopLagMs)) },
   ]
-  // The two cell-level sources are operator routes: for anyone else the proxy
-  // answers 404 route_blocked, so we don't ask and don't render their rows.
-  if (can('operator')) jobs.push(statusQ.refresh(), sysQ.refresh(), membersQ.refresh())
+})
+const workerReadings = (key) => (statusQ.data.value?.workers || []).map((w) => toNum(w[key])).filter((v) => v !== null)
+// Averaged over the workers that reported: one without the field must not
+// pull the cell towards zero.
+const avgEventLoopLag = computed(() => {
+  const v = workerReadings('avgEventLoopLagMs')
+  return v.length ? Math.round(v.reduce((s, x) => s + x, 0) / v.length) : null
+})
+const maxEventLoopLag = computed(() => {
+  const v = workerReadings('maxEventLoopLagMs')
+  return v.length ? Math.max(...v) : null
+})
+// Rows per request, lifetime, every tenant on the cell. Fewer means more
+// overhead per commit; no line is drawn on it.
+const batchText = computed(() => {
+  const b = statusQ.data.value?.messages?.batchEfficiency
+  if (!b) return null
+  const one = (v) => {
+    const n = toNum(v)
+    return n === null ? '—' : n >= 10 || n === 0 ? String(Math.round(n)) : n.toFixed(1)
+  }
+  return `${one(b.push)} · ${one(b.pop)} · ${one(b.ack)}`
+})
+
+// Per node over time: System's "Per server" lines, one colour per node; the
+// second measure of a node (out, write) dashed.
+const replicas = computed(() => sysQ.data.value?.replicas || [])
+const chartOf = (lines) => ({
+  labels: labelsFor(lines.timeline),
+  hasData: lines.hasData,
+  unit: lines.unit || null,
+  datasets: lines.datasets.map((d) => ({
+    label: d.label,
+    data: d.data,
+    borderColor: chartColor(d.node).line,
+    borderDash: d.dashed ? [5, 4] : [],
+    fill: false,
+    tension: 0,
+  })),
+})
+const cpuChart = computed(() => chartOf(nodeLines(replicas.value, [{ path: ['cpu', 'user_us'] }], { scale: (v) => v / 100, suffix: ' · user' })))
+const memoryChart = computed(() => chartOf(nodeLines(replicas.value, [{ path: ['memory', 'rss_bytes'] }], { scale: (v) => Math.round(v / 1024 / 1024) })))
+const networkChart = computed(() => chartOf(inRateUnit(nodeLines(replicas.value, [
+  { path: ['network', 'received_bytes_per_sec'], short: 'in' },
+  { path: ['network', 'sent_bytes_per_sec'], short: 'out' },
+]))))
+const diskChart = computed(() => chartOf(inRateUnit(nodeLines(replicas.value, [
+  { path: ['disk', 'read_bytes_per_sec'], short: 'read' },
+  { path: ['disk', 'written_bytes_per_sec'], short: 'write' },
+]))))
+
+// A new options object only when a chart's unit changes: BaseChart rebuilds
+// the whole chart for new options and only re-plots for new data.
+const legendTop = { display: true, position: 'top' }
+const cpuOptions = {
+  plugins: { legend: legendTop },
+  scales: { y: { title: { display: true, text: 'CPU %', font: { size: 11 } }, ticks: { callback: (value) => `${Number(value).toFixed(1)}%` } } },
+}
+const memoryOptions = {
+  plugins: { legend: legendTop },
+  scales: { y: { title: { display: true, text: 'Memory (MB)', font: { size: 11 } } } },
+}
+const rateOptions = (unitLabel) => ({
+  plugins: { legend: legendTop },
+  scales: { y: { title: { display: true, text: unitLabel, font: { size: 11 } } } },
+})
+const networkUnit = computed(() => networkChart.value.unit?.label || 'B/s')
+const diskUnit = computed(() => diskChart.value.unit?.label || 'B/s')
+const networkOptions = computed(() => rateOptions(networkUnit.value))
+const diskOptions = computed(() => rateOptions(diskUnit.value))
+
+const noSamples = computed(() => ({ text: `No samples in the last ${selectedRange.value}`, title: '' }))
+const serverCharts = computed(() => [
+  {
+    key: 'cpu',
+    title: 'CPU',
+    sub: 'user time, per node',
+    help: 'User CPU time of each node\'s broker process, in percent of one core: four busy cores read 400%.',
+    chart: cpuChart.value,
+    options: cpuOptions,
+    none: noSamples.value,
+  },
+  {
+    key: 'memory',
+    title: 'Memory',
+    sub: 'resident, per node',
+    help: 'Resident memory of each node\'s broker process.',
+    chart: memoryChart.value,
+    options: memoryOptions,
+    none: noSamples.value,
+  },
+  {
+    key: 'network',
+    title: 'Network',
+    sub: 'solid in · dashed out',
+    help: 'What each node\'s network interfaces received and sent: every client, the Raft port and anything else on them. In a container, its own interfaces; loopback and bridges are left out.',
+    chart: networkChart.value,
+    options: networkOptions.value,
+    none: { text: 'Not reported', title: 'A broker records the network on Linux only, and older releases not at all.' },
+  },
+  {
+    key: 'disk',
+    title: 'Disk',
+    sub: 'solid read · dashed write',
+    help: 'What each node\'s broker process read from and wrote to storage. A read the page cache serves is not a disk read.',
+    chart: diskChart.value,
+    options: diskOptions.value,
+    none: { text: 'Not reported', title: 'Older releases do not record disk reads and writes.' },
+  },
+])
+
+// ---------------------------------------------------------------------------
+// The head: the title and the facts of the view.
+// ---------------------------------------------------------------------------
+// The Summary's status card: the verdict's word and tone, the scope it was
+// worked out over, and the five numbers the paragraph used to carry.
+const verdictTone = computed(() => (verdict.value.sev === 'bad' || verdict.value.sev === 'warn' ? verdict.value.sev : ''))
+const verdictLine = computed(() => {
+  const parts = []
+  if (queuesRead.value && !queuesFailed.value) parts.push(`${formatNumber(queues.value.length)} ${queues.value.length === 1 ? 'queue' : 'queues'}`)
+  if (groupsRead.value && !consumersFailed.value) parts.push(`${formatNumber(consumers.value.length)} consumer ${consumers.value.length === 1 ? 'group' : 'groups'}`)
+  return parts.join(' · ')
+})
+const statusCells = computed(() => [
+  {
+    k: 'In',
+    v: pushNow.value === null ? '—' : `${perSecond(pushNow.value)}/s`,
+    title: 'Messages pushed per second, the latest bucket of the window',
+  },
+  {
+    k: 'Out',
+    v: popNow.value === null ? '—' : `${perSecond(popNow.value)}/s`,
+    title: `Messages delivered per second, the latest bucket${fetchNow.value !== null ? `; Kafka clients fetch ${fmtMsgRate(fetchNow.value)} of it` : ''}`,
+  },
+  {
+    k: 'Pending',
+    v: pendingNow.value === null ? '—' : formatNumber(pendingNow.value),
+    tone: pendingNow.value === null ? '' : pendingNumClass(pendingNow.value),
+    title: 'Waiting to be read now, excluding in-flight work. The tone is how long the work takes at this window\'s ack rate',
+  },
+  {
+    k: 'Oldest',
+    v: lagMaxSeconds.value === null ? '—' : lagText(lagMaxSeconds.value),
+    tone: lagMaxSeconds.value === null ? '' : lagSeverity.value,
+    title: 'How long the oldest message has waited',
+  },
+  {
+    k: 'Failed acks',
+    v: ackAttempts.value > 0 ? ackFailPct.value : '—',
+    tone: ackAttempts.value > 0 ? errorSeverity.value : '',
+    title: ackAttempts.value > 0 ? `${formatNumber(ackFailedTotal.value)} of ${formatNumber(ackAttempts.value)} acks failed in the window` : 'No acks in the window',
+  },
+])
+
+// Every view is titled by its name; the Summary's verdict is its first card.
+const title = computed(() => currentName.value)
+const dash = (v) => (v === null || v === undefined ? '—' : formatNumber(v))
+const facts = computed(() => {
+  const v = view.value
+  const t = queuesQ.data.value === null ? null : queueTotals(nsQueues.value)
+  const cellFact = () => (actingCellSlug.value
+    ? [{ k: 'Cell', v: actingCellSlug.value, title: `Shared by every tenant on this cell, not just ${actingTenantSlug.value || 'this tenant'}` }]
+    : [])
+  if (v === 'issues') {
+    const out = [{ k: 'Queues', v: formatNumber(queueIssues.value.length), tone: worstMark(queueIssues.value.map((i) => i.sev)) || '' }]
+    if (canOperate.value) out.push({ k: 'Cell', v: formatNumber(cellIssueList.value.length), tone: worstMark(cellIssueList.value.map((i) => i.sev)) || '' })
+    if (issues.value.some((i) => i.tenant)) out.push({ k: 'Ack failures', v: ackFailPct.value, tone: errorSeverity.value || '' })
+    return out
+  }
+  if (v === 'throughput') {
+    if (!t) return []
+    return [
+      { k: 'Queues', v: formatNumber(t.queues) },
+      { k: 'In', v: pushNow.value === null ? '—' : fmtMsgRate(pushNow.value) },
+      { k: 'Out', v: popNow.value === null ? '—' : fmtMsgRate(popNow.value) },
+    ]
+  }
+  if (v === 'backlog') {
+    if (!t) return []
+    return [
+      { k: 'Queues', v: formatNumber(t.queues) },
+      { k: 'Pending', v: dash(t.pending) },
+      { k: 'Oldest', v: lagMaxSeconds.value === null ? '—' : lagText(lagMaxSeconds.value), tone: lagSeverity.value || '' },
+      { k: 'Stored', v: t.retainedBytes === null ? '—' : formatBytes(t.retainedBytes) },
+    ]
+  }
+  if (v === 'groups') {
+    if (consumersQ.data.value === null) return []
+    const behind = nsGroups.value.rows.filter((g) => { const sev = groupAttention(g, linesFor); return sev === 'warn' || sev === 'bad' }).length
+    return [
+      { k: 'Groups', v: formatNumber(nsGroups.value.rows.length) },
+      { k: 'Behind', v: formatNumber(behind), tone: behind ? worstMark(groupsBehind.value) || '' : '' },
+    ]
+  }
+  if (v === 'dead-letters') {
+    return [
+      { k: 'Dead letters', v: t ? dash(t.deadLetter) : '—' },
+      { k: 'Failed acks', v: formatNumber(ackFailedTotal.value), tone: errorSeverity.value || '' },
+      { k: 'Failure rate', v: ackFailPct.value },
+    ]
+  }
+  return []
+})
+
+// ---------------------------------------------------------------------------
+// Loading. Each view asks for what it draws; the rest waits for its view.
+// ---------------------------------------------------------------------------
+const viewJobs = (v) => {
+  if (v === 'backlog') return [retentionQ.refresh(), refreshSole()]
+  return []
+}
+const fetchAll = async () => {
+  // The list's numbers come from these on every view: the queues, the
+  // groups, the window's queue-ops and the tenant's overview.
+  const jobs = [
+    queuesQ.refresh().then(refreshPartitions),
+    consumersQ.refresh(),
+    opsQ.refresh(),
+    overviewQ.refresh(),
+    ...viewJobs(view.value),
+  ]
+  // The members are an operator route: for anyone else the proxy answers 404
+  // route_blocked, so they are not asked.
+  if (canOperate.value) jobs.push(membersQ.refresh())
   await Promise.all(jobs)
   lastRefreshAt.value = Date.now()
 }
 
-// One shared ticker for the whole app (paused while the tab is hidden) —
-// a private setInterval here would keep spending the tenant's rate budget.
+// One shared ticker for the whole app (paused while the tab is hidden).
 useAutoRefresh(fetchAll)
 
+// A view opened for the first time reads what it draws now, not at the tick.
+watch(view, (v) => {
+  viewJobs(v)
+  if (v === 'summary' && queuesQ.data.value !== null) refreshPartitions()
+})
+watch(soleQueue, refreshSole)
 watch(selectedRange, () => {
   opsQ.refresh()
-  retentionQ.refresh()
-  if (can('operator')) { statusQ.refresh(); sysQ.refresh() }
+  viewJobs(view.value)
 })
 
 onMounted(fetchAll)
@@ -1462,123 +1491,192 @@ onMounted(fetchAll)
 
 <style scoped>
 /* ---------------------------------------------------------------------------
-   Page layout lives in style.css (OVERVIEW); what is here is the two ranked
-   lists at the bottom and the value fragments the tiles' slots render.
+   The sub sidebar: three rows, nothing above them but the column's air.
    --------------------------------------------------------------------------- */
+.ov-side { padding-top: 12px; }
+/* The number is the mark: coral when it is failing, amber when it needs you. */
+.ov-side .ss-num.bad { color: var(--ember-400); }
+.ov-side .ss-num.warn { color: var(--warn-400); }
+/* The Overview's word ("Healthy") is a word, not a number. */
+.ss-num.ov-side-word { font-family: inherit; font-size: 12px; }
 
-:deep(.mr-sep) {
-  color: var(--text-faint);
-  margin: 0 4px;
-  font-weight: 400;
-}
-:deep(.mr-unit) {
-  font-style: normal;
-  color: var(--text-low);
-  margin-left: 4px;
-  font-size: 12px;
-  font-weight: 400;
-}
+/* ---------------------------------------------------------------------------
+   The page: the Queues section's rhythm — the title 18px from the top, cards
+   16px apart.
+   --------------------------------------------------------------------------- */
+.ov { display: flex; flex-direction: column; gap: 16px; }
 
-/* Ranked lists: rows on hairlines inside one card — no box per row. */
-.entity-list {
-  display: flex;
-  flex-direction: column;
-  padding: 4px 0;
+.ov-head { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; min-height: 32px; margin-top: 4px; }
+.ov-id { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 100%; }
+.ov-title {
+  margin: 0; min-width: 0;
+  font-size: 18px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-hi);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.entity-row {
-  display: block;
-  width: 100%;
-  text-align: left;
-  border: 0;
+.ov-word { flex: none; font-size: 12px; color: var(--text-low); }
+
+/* The Summary's status card: the verdict on the left, five number cells
+   beside it, hairlines between; colour only on a number that is trouble. */
+.ov-status {
+  display: grid; grid-template-columns: minmax(260px, 1.5fr) repeat(5, minmax(0, 1fr));
+  overflow: hidden;
+}
+.ov-verdict { min-width: 0; padding: 15px 18px; border-right: 1px solid var(--bd); }
+.ov-verdict-word {
+  display: inline-flex; align-items: center; gap: 7px; margin-bottom: 6px;
+  font-size: 12px; font-weight: 600; color: var(--text-mid);
+}
+.ov-verdict-word.bad { color: var(--ember-400); }
+.ov-verdict-word.warn { color: var(--warn-400); }
+.ov-verdict-title {
+  margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; color: var(--text-hi);
+  text-wrap: balance;
+}
+.ov-verdict-line { margin: 5px 0 0; font-size: 12px; color: var(--text-low); }
+.ov-kpi {
+  min-width: 0; padding: 15px 16px; border-right: 1px solid var(--bd);
+  display: flex; flex-direction: column; justify-content: center; gap: 5px;
+}
+.ov-kpi:last-child { border-right: 0; }
+.ov-kpi-k { font-size: 11.5px; color: var(--text-low); white-space: nowrap; }
+.ov-kpi-v {
+  font-size: 18px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-hi);
+  font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ov-kpi-v.bad { color: var(--ember-400); }
+.ov-kpi-v.warn { color: var(--warn-400); }
+
+/* Narrow: the verdict on its own row, the cells under it, three a row. */
+@media (max-width: 1100px) {
+  .ov-status { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ov-verdict { grid-column: 1 / -1; border-right: 0; border-bottom: 1px solid var(--bd); }
+  .ov-kpi { border-bottom: 1px solid var(--bd); }
+  .ov-kpi:nth-child(4) { border-right: 0; }
+  .ov-kpi:nth-child(n+5) { border-bottom: 0; }
+}
+@media (max-width: 480px) {
+  .ov-kpi { padding: 12px; }
+  .ov-kpi-v { font-size: 16px; }
+}
+.ov-facts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.ov-fact {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 2px 8px; border-radius: var(--r-chip);
+  background: var(--ink-3); border: 1px solid var(--bd);
+  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.ov-k { color: var(--text-low); }
+.ov-fact .warn { color: var(--warn-400); }
+.ov-fact .bad { color: var(--ember-400); }
+.ov-actions { margin-left: auto; display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; }
+.ov-actions > .chip { white-space: normal; }
+.ov-ns { width: 220px; max-width: 100%; }
+
+/* ---------------------------------------------------------------------------
+   Overview: the shared OVERVIEW blocks (style.css), on the 4px grid.
+   --------------------------------------------------------------------------- */
+.hero { gap: 16px 24px; }
+.hero-left { gap: 16px; }
+a.count-tile { text-decoration: none; cursor: pointer; }
+a.count-tile:hover { background: var(--ink-3); }
+/* Inside a clipping frame the focus ring sits within the element. */
+a.count-tile:focus-visible, a.ov-lrow:focus-visible { outline-offset: -2px; }
+
+/* The rules under the issues list, on the card's 14px edge. */
+.issues-rules { padding: 8px 14px 10px; }
+
+:deep(.mr-sep) { color: var(--text-faint); margin: 0 4px; font-weight: 400; }
+:deep(.mr-unit) { font-style: normal; color: var(--text-low); margin-left: 4px; font-size: 12px; font-weight: 400; }
+
+/* ---------------------------------------------------------------------------
+   Cards side by side, one column when the page is narrow.
+   --------------------------------------------------------------------------- */
+.ov-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+/* As tall as the chart that takes their place: RowChart's 210px, and the
+   per-node charts' 240px with their legend inside. */
+.ov-chart-skeleton { height: 210px; }
+.ov-chart-note {
+  height: 210px; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--text-low); text-align: center;
+}
+.ov-tall .ov-chart-skeleton, .ov-tall .ov-chart-note { height: 240px; }
+.ov-quiet { padding: 14px; font-size: 13px; color: var(--text-mid); }
+.ov-more {
+  margin-left: auto; flex: none;
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 12px; color: var(--text-mid); text-decoration: none; white-space: nowrap;
+}
+.ov-more:hover { color: var(--text-hi); }
+.card-header .muted + .ov-more { margin-left: 12px; }
+
+/* ---------------------------------------------------------------------------
+   Lists: the Queues table's rows — a label row, then one link per row on a
+   hairline, numbers right-aligned on a common baseline.
+   --------------------------------------------------------------------------- */
+.ov-list { display: flex; flex-direction: column; }
+.ov-lhead, .ov-lrow {
+  display: grid; align-items: center; gap: 12px;
+  padding: 0 14px;
+}
+.ov-cols-att .ov-lhead, .ov-cols-att .ov-lrow,
+.ov-cols-groups .ov-lhead, .ov-cols-groups .ov-lrow { grid-template-columns: 8px minmax(0, 1fr) 72px 72px; }
+.ov-cols-busy .ov-lhead, .ov-cols-busy .ov-lrow { grid-template-columns: 8px minmax(0, 1fr) 64px 64px; }
+.ov-cols-issues .ov-lrow { grid-template-columns: 8px minmax(0, 1fr); }
+.ov-cols-dlq .ov-lhead, .ov-cols-dlq .ov-lrow { grid-template-columns: 8px minmax(0, 1fr) 96px; }
+/* Two tiles side by side: a view's two small trends. */
+.ov-tiles-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 640px) { .ov-tiles-2 { grid-template-columns: minmax(0, 1fr); } }
+.ov-lhead {
+  height: 32px; border-bottom: 1px solid var(--bd);
+  font-size: 12px; font-weight: 500; color: var(--text-low);
+}
+.ov-lrow {
+  min-height: 40px; padding-top: 6px; padding-bottom: 6px;
   border-bottom: 1px solid var(--bd-soft);
-  background: transparent;
-  padding: 10px 16px;
-  cursor: pointer;
-  color: inherit;
+  font-size: 13px; color: var(--text-mid); text-decoration: none;
   transition: background .12s var(--ease);
 }
-.entity-row:last-child { border-bottom: 0; }
-.entity-row:hover { background: var(--ink-3); }
+.ov-lrow:last-child { border-bottom: 0; }
+a.ov-lrow:hover { background: var(--ink-3); }
+.ov-lrow .ss-mark { justify-content: center; }
+.ov-r { text-align: right; }
+.ov-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ov-name { color: var(--text-hi); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-sub { font-size: 12px; color: var(--text-low); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-wrap { white-space: normal; overflow-wrap: anywhere; }
+.ov-n { text-align: right; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ov-n.warn { color: var(--warn-400); }
+.ov-n.bad { color: var(--ember-400); }
+.ov-lrow.ov-skel { grid-template-columns: 8px minmax(0, 1fr) 64px; }
+.ov-skel .skeleton { height: 12px; width: 60%; }
 
-.entity-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.entity-name {
-  flex: 1;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-hi);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.entity-right {
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  color: var(--text-mid);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
+/* ---------------------------------------------------------------------------
+   Server: the nodes table scrolls inside its card on a phone.
+   --------------------------------------------------------------------------- */
+.ov-scroll { overflow-x: auto; }
+.ov-nodes { min-width: 760px; }
+.ov-nodes th:first-child, .ov-nodes td:first-child { padding-left: 14px; }
+.ov-nodes th:last-child, .ov-nodes td:last-child { padding-right: 14px; }
+.ov-nodes td { white-space: nowrap; color: var(--text-mid); }
+.ov-nodes td.ov-node { color: var(--text-hi); font-weight: 500; }
+.ov-node .ss-mark { display: inline-flex; margin-right: 10px; vertical-align: middle; }
+.ov-nodes td.num { color: var(--text-hi); }
+.ov-nodes td.warn { color: var(--warn-400); }
+.ov-nodes td.bad { color: var(--ember-400); }
 
-.entity-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 5px;
-  padding-left: 18px;  /* under the name, past the glyph */
+@media (max-width: 1100px) {
+  .ov-pair { grid-template-columns: minmax(0, 1fr); }
 }
-.entity-meta .bar-meta {
-  flex: 0 1 140px;
-  width: 140px;
-  height: 4px;
-  background: var(--ink-4);
+@media (max-width: 640px) {
+  .ov-title { font-size: 17px; }
+  /* The verdict is a sentence: on a phone it wraps rather than hides. */
+  .ov-title-verdict { white-space: normal; text-wrap: balance; }
+  .ov-actions { margin-left: 0; width: 100%; }
+  .ov-ns { flex: 1 1 100%; width: auto; }
+  .ov-lhead, .ov-lrow { padding-left: 12px; padding-right: 12px; gap: 10px; }
+  .ov-quiet { padding: 12px; }
+  .issues-rules { padding-left: 12px; padding-right: 12px; }
+  .ov-nodes th:first-child, .ov-nodes td:first-child { padding-left: 12px; }
+  .ov-nodes th:last-child, .ov-nodes td:last-child { padding-right: 12px; }
 }
-.entity-meta .bar-meta i { background: var(--text-faint); }
-.entity-meta .bar-meta i.warn { background: var(--warn-400); }
-.entity-meta .bar-meta i.bad { background: var(--ember-400); }
-.meta-text {
-  font-size: 12px;
-  color: var(--text-low);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-variant-numeric: tabular-nums;
-}
-.meta-text strong {
-  color: var(--text-mid);
-  font-weight: 600;
-}
-.meta-sep { color: var(--text-faint); margin: 0 4px; }
-.meta-tag {
-  display: inline-block;
-  padding: 0 6px;
-  border-radius: var(--r-chip);
-  border: 1px solid var(--bd);
-  color: var(--text-mid);
-  font-size: 11px;
-  font-weight: 500;
-  margin-right: 4px;
-}
-.meta-tag-cfl { color: var(--text-hi); }
-
-/* The partial-gather chip (usePartial): under the hero's sentence, and in a
-   section head the chip's ink rather than the head's grey. */
-.hero-partial { margin-top: 10px; }
-.sect-head > .chip-warn { color: var(--warn-400); font-size: 11px; }
-
-.card-foot {
-  border-top: 1px solid var(--bd);
-  padding: 8px 16px;
-  display: flex;
-  justify-content: flex-end;
-}
-.card-foot-link {
-  font-size: 12px;
-  color: var(--text-mid);
-  cursor: pointer;
-  transition: color .12s var(--ease);
-}
-.card-foot-link:hover { color: var(--text-hi); }
 </style>

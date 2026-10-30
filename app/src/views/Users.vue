@@ -1,176 +1,125 @@
 <template>
-  <div class="view-container">
+  <SubSidebar label="Users" :current="title">
+    <template #side><UsersSide :users="users" :tenants="tenants" :loaded="loaded" :error="error" /></template>
 
-    <PageHead title="Users">
-      <template #sub>
-        <span>cell <b>{{ cellSlug }}</b> · every tenant represented on it</span>
-      </template>
-      <template #switch><AccessScope /></template>
+    <PaneHead :title="title" :facts="facts">
       <template #actions>
+        <AccessScope />
         <button class="btn btn-primary" :disabled="!tenants.length" @click="openCreate">Add user</button>
       </template>
-    </PageHead>
+    </PaneHead>
 
-    <div v-if="error" class="status-banner banner-bad view-banner">
-      <span>
-        <strong>Could not load users</strong> · {{ describeApiError(error) }}
-        <template v-if="loaded"> · showing the last list that loaded</template>
-      </span>
-    </div>
+    <div class="view-container">
+      <div v-if="error" class="status-banner banner-bad view-banner">
+        <span>
+          <strong>Could not load users</strong> · {{ describeApiError(error) }}<template v-if="loaded"> · showing the last list</template>
+        </span>
+      </div>
 
-    <div class="users-summary">
-      <div class="stat">
-        <div class="stat-label">Users</div>
-        <div class="stat-value">{{ users.length }}</div>
-        <div class="stat-foot">accounts in cell tenants</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Tenants</div>
-        <div class="stat-value">{{ tenants.length }}</div>
-        <div class="stat-foot">represented on this cell</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Access grants</div>
-        <div class="stat-value">{{ grantCount }}</div>
-        <div class="stat-foot">roles on cell clusters</div>
-      </div>
-    </div>
-
-    <PageTools>
-      <div class="filter-search">
-        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-        </svg>
-        <input id="users-search" v-model="search" class="input" placeholder="Name, email or tenant" />
-      </div>
-      <label class="tool-field" for="users-tenant">
-        <span class="tool-label">Tenant</span>
-        <select id="users-tenant" v-model="tenantFilter" class="input">
-          <option value="">All</option>
-          <option v-for="tenant in tenants" :key="tenant.id" :value="tenant.id">{{ tenant.slug }}</option>
-        </select>
-      </label>
-    </PageTools>
-
-    <div class="card">
-      <div class="card-header">
-        <h3>Cell users</h3>
-        <span class="card-sub">{{ filteredUsers.length }} shown</span>
-        <span v-if="loading" class="muted">refreshing…</span>
-      </div>
-      <div class="table-container">
-        <table v-if="filteredUsers.length" class="t">
-          <thead>
-            <tr>
-              <th>User</th>
-              <th>Tenant</th>
-              <th>Sign-in</th>
-              <th>Cluster access</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="user in filteredUsers" :key="user.id">
-              <td>
-                <div class="users-name">{{ user.name || 'Unnamed user' }}</div>
-                <div class="users-email">{{ user.email }}</div>
-                <div class="users-created">created {{ formatDate(user.created_at) }}</div>
-                <div class="users-last-login">
-                  {{ user.last_login_at ? `last sign-in ${formatDateTime(user.last_login_at)}` : 'never signed in' }}
-                </div>
-              </td>
-              <td><span class="font-mono">{{ user.tenant_slug }}</span></td>
-              <td>
-                <span class="chip chip-mute">{{ user.has_local_password ? 'local' : 'OAuth' }}</span>
-                <!-- A role, i.e. an identity: the scope hue, not a warning. -->
-                <span v-if="user.is_operator" class="chip chip-scope users-operator">operator</span>
-              </td>
-              <td>
-                <div v-if="user.roles.length" class="users-role-list">
-                  <span v-for="grant in user.roles" :key="grant.cluster_id" class="chip chip-mute">
-                    <span class="font-mono">{{ grant.cluster_slug }}</span> · {{ grant.role }}
+      <div class="card">
+        <div v-if="filteredUsers.length" class="table-container">
+          <table class="t usr-table">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Tenant</th>
+                <th>Sign-in</th>
+                <th>Last sign-in</th>
+                <th title="Roles are per cluster: the user's role on each cluster of this cell">Cluster access</th>
+                <th><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="user in filteredUsers" :key="user.id">
+                <td class="usr-who-cell">
+                  <div class="usr-who">
+                    <span class="usr-name" :class="{ none: !user.name }">{{ user.name || 'Unnamed' }}</span>
+                    <span class="usr-email">{{ user.email }}</span>
+                  </div>
+                </td>
+                <td class="usr-tenant">{{ user.tenant_slug }}</td>
+                <td class="usr-method">
+                  <span class="chip chip-mute">{{ user.has_local_password ? 'local' : 'OAuth' }}</span>
+                  <!-- A role, i.e. an identity: the scope's neutral outline, not a warning. -->
+                  <span v-if="user.is_operator" class="chip chip-scope">operator</span>
+                </td>
+                <td class="usr-when" :title="whenTitle(user)">{{ user.last_login_at ? formatRelativeTime(user.last_login_at) : 'never' }}</td>
+                <td class="usr-access">
+                  <span v-if="user.roles.length" class="usr-grants">
+                    <span v-for="g in user.roles" :key="g.cluster_id" class="chip chip-mute">{{ g.cluster_slug }} · {{ g.role }}</span>
                   </span>
-                </div>
-                <span v-else class="users-no-access">No access on this cell</span>
-              </td>
-              <td class="right">
-                <button class="btn btn-ghost" @click="openEdit(user)">Edit</button>
-                <button class="btn btn-ghost" @click="openAccess(user)">Manage access</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+                  <span v-else class="usr-none">No access</span>
+                </td>
+                <td class="usr-act">
+                  <button class="btn btn-ghost" @click="openEdit(user)">Rename</button>
+                  <button class="btn btn-ghost" @click="openAccess(user)">Access</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-        <div v-else-if="loading && !loaded" class="users-loading">
+        <div v-else-if="loading && !loaded" class="acc-loading">
           <div v-for="i in 5" :key="i" class="skeleton" />
         </div>
-        <div v-else class="empty-state">
-          <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-            <circle cx="9" cy="8" r="3" />
-            <path stroke-linecap="round" d="M3.5 20c0-3.3 2.5-6 5.5-6s5.5 2.7 5.5 6M17 8v6M14 11h6" />
-          </svg>
-          <h3>{{ users.length ? 'No users match these filters' : 'No users on this cell' }}</h3>
-          <p>{{ users.length ? 'Try another email or tenant.' : 'Create the first account and grant its initial cluster role.' }}</p>
-          <button v-if="!users.length && tenants.length" class="btn btn-primary" @click="openCreate">Add user</button>
+        <div v-else-if="users.length" class="empty-state">
+          <Icon name="users-round" :size="28" class="empty-state-icon" />
+          <p>No user matches</p>
+          <button class="btn btn-ghost" @click="showAll">Show all users</button>
+        </div>
+        <div v-else-if="loaded" class="empty-state">
+          <Icon name="users-round" :size="28" class="empty-state-icon" />
+          <p>No users on this cell</p>
+          <button v-if="tenants.length" class="btn" @click="openCreate">Add user</button>
+        </div>
+        <div v-else-if="error" class="empty-state">
+          <Icon name="users-round" :size="28" class="empty-state-icon" />
+          <p>Cannot read the users</p>
+          <button class="btn btn-ghost" @click="loadUsers">Retry</button>
         </div>
       </div>
     </div>
 
+    <!-- =================== ADD =================== -->
     <Teleport to="body">
       <div v-if="showCreate" class="modal-backdrop" @click.self="closeCreate">
         <form class="card modal-card" @submit.prevent="createUser">
           <div class="card-header"><h3>Add user</h3></div>
-          <div class="card-body users-form">
+          <div class="card-body acc-form">
             <div v-if="createError" class="panel-err">{{ createError }}</div>
-
-            <label class="users-field">
-              <span class="label-xs">Tenant</span>
-              <select v-model="createForm.tenant_id" class="input" required>
-                <option v-for="tenant in tenants" :key="tenant.id" :value="tenant.id">
-                  {{ tenant.slug }} · {{ tenant.name }}
-                </option>
-              </select>
-            </label>
-            <label class="users-field">
-              <span class="label-xs">Name</span>
+            <div class="acc-field">
+              <span class="acc-label">Tenant</span>
+              <UiSelect v-model="createForm.tenant_id" :options="tenantOptions" block aria-label="Tenant" />
+            </div>
+            <label class="acc-field">
+              <span class="acc-label">Name</span>
               <input v-model.trim="createForm.name" class="input" maxlength="160" autocomplete="off" required placeholder="Ada Lovelace" />
             </label>
-            <label class="users-field">
-              <span class="label-xs">Email</span>
+            <label class="acc-field">
+              <span class="acc-label">Email</span>
               <input v-model.trim="createForm.email" class="input" type="email" autocomplete="off" required placeholder="user@example.com" />
             </label>
-            <label class="users-field">
-              <span class="label-xs">Sign-in method</span>
-              <select v-model="createForm.provider" class="input">
-                <option value="google">Google OAuth</option>
-                <option value="github">GitHub OAuth</option>
-                <option value="local">Local password</option>
-              </select>
-            </label>
-            <label v-if="createForm.provider === 'local'" class="users-field">
-              <span class="label-xs">Initial password</span>
+            <div class="acc-field">
+              <span class="acc-label">Sign-in</span>
+              <UiSelect v-model="createForm.provider" :options="PROVIDERS" block aria-label="Sign-in method" />
+              <span v-if="createForm.provider !== 'local'" class="acc-help">Linked on the first verified {{ providerLabel }} sign-in with this email.</span>
+            </div>
+            <label v-if="createForm.provider === 'local'" class="acc-field">
+              <span class="acc-label">Initial password</span>
               <input v-model="createForm.password" class="input" type="password" minlength="12" maxlength="128" autocomplete="new-password" required />
-              <span class="users-help">At least 12 characters.</span>
+              <span class="acc-help">At least 12 characters.</span>
             </label>
-            <div v-else class="users-help users-oauth-note">
-              The first verified {{ providerLabel }} login with this email links the identity to this account.
+            <div class="usr-pair">
+              <div class="acc-field">
+                <span class="acc-label">Cluster</span>
+                <UiSelect v-model="createForm.cluster_id" :options="createClusterOptions" block placeholder="No cluster" :disabled="!createClusterOptions.length" aria-label="Initial cluster" />
+              </div>
+              <div class="acc-field">
+                <span class="acc-label">Role</span>
+                <UiSelect v-model="createForm.role" :options="roleOptions" block aria-label="Role on that cluster" />
+              </div>
             </div>
-            <div class="users-form-grid">
-              <label class="users-field">
-                <span class="label-xs">Initial cluster</span>
-                <select v-model="createForm.cluster_id" class="input" required>
-                  <option v-for="cluster in createClusters" :key="cluster.id" :value="cluster.id">
-                    {{ cluster.slug }}
-                  </option>
-                </select>
-              </label>
-              <label class="users-field">
-                <span class="label-xs">Role</span>
-                <select v-model="createForm.role" class="input">
-                  <option v-for="role in roles" :key="role" :value="role">{{ role }}</option>
-                </select>
-              </label>
-            </div>
+            <span v-if="!createClusterOptions.length" class="acc-help">This tenant has no cluster on this cell.</span>
           </div>
           <div class="modal-foot">
             <button type="button" class="btn btn-ghost" @click="closeCreate">Cancel</button>
@@ -182,49 +131,48 @@
       </div>
     </Teleport>
 
+    <!-- =================== RENAME =================== -->
     <Teleport to="body">
       <div v-if="editedUser" class="modal-backdrop" @click.self="closeEdit">
         <form class="card modal-card" @submit.prevent="updateUser">
-          <div class="card-header"><h3>Edit user</h3></div>
-          <div class="card-body users-form">
+          <div class="card-header">
+            <h3>Rename user</h3>
+            <span class="card-sub">{{ editedUser.email }}</span>
+          </div>
+          <div class="card-body acc-form">
             <div v-if="editError" class="panel-err">{{ editError }}</div>
-            <div class="users-modal-email">{{ editedUser.email }} · {{ editedUser.tenant_slug }}</div>
-            <label class="users-field">
-              <span class="label-xs">Name</span>
-              <input v-model.trim="editName" class="input" maxlength="160" autocomplete="off" required />
+            <label class="acc-field">
+              <span class="acc-label">Name</span>
+              <input ref="editInput" v-model.trim="editName" class="input" maxlength="160" autocomplete="off" required />
             </label>
           </div>
           <div class="modal-foot">
             <button type="button" class="btn btn-ghost" @click="closeEdit">Cancel</button>
             <button type="submit" class="btn btn-primary" :disabled="editing || !editName.trim()">
-              {{ editing ? 'Saving…' : 'Save name' }}
+              {{ editing ? 'Saving…' : 'Save' }}
             </button>
           </div>
         </form>
       </div>
     </Teleport>
 
+    <!-- =================== ACCESS =================== -->
     <Teleport to="body">
       <div v-if="managedUser" class="modal-backdrop" @click.self="managedUser = null">
-        <div class="card modal-card users-access-modal">
+        <div class="card modal-card usr-access-card">
           <div class="card-header">
-            <div>
-              <h3>Manage cluster access</h3>
-              <div class="users-modal-email">{{ managedUser.email }} · {{ managedUser.tenant_slug }}</div>
-            </div>
+            <h3>Cluster access</h3>
+            <span class="card-sub">{{ managedUser.email }} · {{ managedUser.tenant_slug }}</span>
           </div>
           <div class="card-body">
             <div v-if="accessError" class="panel-err">{{ accessError }}</div>
-            <div class="users-access-list">
-              <div v-for="cluster in managedClusters" :key="cluster.id" class="users-access-row">
-                <div class="users-cluster">
-                  <span class="font-mono">{{ cluster.slug }}</span>
-                  <span class="chip chip-mute">{{ cluster.status }}</span>
-                </div>
-                <select v-model="roleDrafts[cluster.id]" class="input users-role-select">
-                  <option value="">No access</option>
-                  <option v-for="role in roles" :key="role" :value="role">{{ role }}</option>
-                </select>
+            <div v-if="managedClusters.length" class="usr-access-list">
+              <div v-for="cluster in managedClusters" :key="cluster.id" class="usr-access-row">
+                <span class="usr-cluster" :title="cluster.status ? `Cluster ${cluster.slug} · ${cluster.status}` : undefined">
+                  <span class="usr-cluster-slug">{{ cluster.slug }}</span>
+                  <span v-if="cluster.status" class="usr-cluster-status">{{ cluster.status }}</span>
+                </span>
+                <UiSelect v-model="roleDrafts[cluster.id]" :options="accessOptions" block size="sm" :aria-label="`Role on ${cluster.slug}`" />
                 <button
                   class="btn"
                   :class="{ 'btn-danger': !roleDrafts[cluster.id] && currentRole(cluster.id) }"
@@ -235,9 +183,8 @@
                 </button>
               </div>
             </div>
-            <p class="users-help users-access-note">
-              A cluster must keep at least one admin. Removing access here affects only this cell.
-            </p>
+            <p v-else class="acc-help">This tenant has no cluster on this cell.</p>
+            <p class="acc-help usr-access-note" title="Removing access here affects only this cell">A cluster keeps at least one admin.</p>
           </div>
           <div class="modal-foot">
             <button class="btn btn-ghost" @click="managedUser = null">Close</button>
@@ -245,21 +192,36 @@
         </div>
       </div>
     </Teleport>
-  </div>
+  </SubSidebar>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import { operator, describeApiError } from '@/api'
+import { ROLES, filterUsers, userPickTitle } from '@/composables/accessGroups'
+import { formatRelativeTime } from '@/composables/useApi'
+import { formatTimestamp } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
+import { useRouteState } from '@/composables/useRouteState'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import AccessScope from '@/components/AccessScope.vue'
-import PageHead from '@/components/PageHead.vue'
-import PageTools from '@/components/PageTools.vue'
+import Icon from '@/components/Icon.vue'
+import PaneHead from '@/components/PaneHead.vue'
+import SubSidebar from '@/components/SubSidebar.vue'
+import UiSelect from '@/components/UiSelect.vue'
+import UsersSide from '@/components/UsersSide.vue'
 
-const roles = ['admin', 'producer', 'consumer', 'viewer']
+const PROVIDERS = [
+  { value: 'google', label: 'Google' },
+  { value: 'github', label: 'GitHub' },
+  { value: 'local', label: 'Local password' },
+]
+// The roles as a picker names them; the values are the proxy's.
+const roleOptions = ROLES.map(r => ({ value: r.name, label: r.name[0].toUpperCase() + r.name.slice(1) }))
+const accessOptions = [{ value: '', label: 'No access' }, ...roleOptions]
+
 const { actingCellSlug } = useIdentity()
 const { notifySuccess } = useToast()
 
@@ -270,20 +232,35 @@ const responseCell = ref(null)
 const loading = ref(false)
 const loaded = ref(false)
 const error = ref(null)
+// The search and the pick live in the list (UsersSide), under the same
+// address fields, so the list and the table show the same users. A tenant is
+// kept by its slug; role is a role held on a cell cluster, or NO_ACCESS.
 const search = ref('')
-const tenantFilter = ref('')
+const tenant = ref('')
+const role = ref('')
+useRouteState({ search, tenant, role })
 
 const cellSlug = computed(() => responseCell.value?.slug || actingCellSlug.value || 'unknown')
-const grantCount = computed(() => users.value.reduce((sum, user) => sum + user.roles.length, 0))
-const filteredUsers = computed(() => {
-  const query = search.value.trim().toLowerCase()
-  return users.value.filter(user => {
-    if (tenantFilter.value && user.tenant_id !== tenantFilter.value) return false
-    if (!query) return true
-    return (user.name || '').toLowerCase().includes(query) ||
-      user.email.toLowerCase().includes(query) || user.tenant_slug.toLowerCase().includes(query)
-  })
-})
+const grantCount = computed(() => users.value.reduce((sum, user) => sum + (user.roles?.length || 0), 0))
+const filteredUsers = computed(() =>
+  filterUsers(users.value, { search: search.value, tenant: tenant.value, role: role.value }))
+const title = computed(() => userPickTitle({ tenant: tenant.value, role: role.value }))
+const facts = computed(() => [
+  { k: 'Cell', v: cellSlug.value, title: 'Every account of every tenant represented on this cell' },
+  loaded.value ? { k: 'Tenants', v: String(tenants.value.length) } : null,
+  loaded.value ? { k: 'Grants', v: String(grantCount.value), title: 'Roles held on the cell’s clusters, one per user and cluster' } : null,
+].filter(Boolean))
+
+function showAll() {
+  search.value = ''
+  tenant.value = ''
+  role.value = ''
+}
+
+const whenTitle = user => [
+  user.last_login_at ? `Last sign-in ${formatTimestamp(user.last_login_at)}` : 'Never signed in',
+  user.created_at ? `created ${formatTimestamp(user.created_at)}` : null,
+].filter(Boolean).join(' · ')
 
 async function loadUsers() {
   if (loading.value) return
@@ -291,12 +268,11 @@ async function loadUsers() {
   error.value = null
   try {
     const { data } = await operator.listUsers()
-    users.value = data.users || []
+    users.value = (data.users || []).map(u => ({ ...u, roles: Array.isArray(u.roles) ? u.roles : [] }))
     tenants.value = data.tenants || []
     clusters.value = data.clusters || []
     responseCell.value = data.cell || null
     loaded.value = true
-    if (tenantFilter.value && !tenants.value.some(t => t.id === tenantFilter.value)) tenantFilter.value = ''
   } catch (err) {
     error.value = err
   } finally {
@@ -307,14 +283,22 @@ async function loadUsers() {
 onMounted(loadUsers)
 useRefresh(loadUsers)
 
+// ---------------------------------------------------------------------------
+// Add
+// ---------------------------------------------------------------------------
 const showCreate = ref(false)
 const creating = ref(false)
 const createError = ref('')
 const createForm = reactive({
   tenant_id: '', name: '', email: '', provider: 'google', password: '', cluster_id: '', role: 'viewer',
 })
+const tenantOptions = computed(() => tenants.value.map(t => ({
+  value: t.id,
+  label: t.name && t.name !== t.slug ? `${t.slug} · ${t.name}` : t.slug,
+})))
 const createClusters = computed(() => clusters.value.filter(c => c.tenant_id === createForm.tenant_id))
-const providerLabel = computed(() => createForm.provider === 'github' ? 'GitHub' : 'Google')
+const createClusterOptions = computed(() => createClusters.value.map(c => ({ value: c.id, label: c.slug })))
+const providerLabel = computed(() => PROVIDERS.find(p => p.value === createForm.provider)?.label || '')
 
 watch(() => createForm.tenant_id, () => {
   if (!createClusters.value.some(c => c.id === createForm.cluster_id)) {
@@ -323,8 +307,8 @@ watch(() => createForm.tenant_id, () => {
 })
 
 function openCreate() {
-  const tenant = tenants.value.find(t => t.id === tenantFilter.value) || tenants.value[0]
-  createForm.tenant_id = tenant?.id || ''
+  const picked = tenants.value.find(t => t.slug === tenant.value) || tenants.value[0]
+  createForm.tenant_id = picked?.id || ''
   createForm.name = ''
   createForm.email = ''
   createForm.provider = 'google'
@@ -365,15 +349,20 @@ async function createUser() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Rename
+// ---------------------------------------------------------------------------
 const editedUser = ref(null)
 const editName = ref('')
 const editing = ref(false)
 const editError = ref('')
+const editInput = ref(null)
 
 function openEdit(user) {
   editedUser.value = user
   editName.value = user.name || ''
   editError.value = ''
+  nextTick(() => editInput.value?.focus())
 }
 
 function closeEdit() {
@@ -389,7 +378,7 @@ async function updateUser() {
   editError.value = ''
   try {
     await operator.updateUser(userId, { name: editName.value })
-    notifySuccess(`Updated ${editName.value}`)
+    notifySuccess(`Renamed to ${editName.value}`)
     editedUser.value = null
     await loadUsers()
   } catch (err) {
@@ -399,6 +388,9 @@ async function updateUser() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Access, cluster by cluster
+// ---------------------------------------------------------------------------
 const managedUser = ref(null)
 const roleDrafts = ref({})
 const savingCluster = ref(null)
@@ -418,7 +410,7 @@ function openAccess(user) {
 }
 
 function currentRole(clusterId) {
-  return managedUser.value?.roles.find(role => role.cluster_id === clusterId)?.role || ''
+  return managedUser.value?.roles.find(r => r.cluster_id === clusterId)?.role || ''
 }
 
 async function saveRole(cluster) {
@@ -441,63 +433,60 @@ async function saveRole(cluster) {
     savingCluster.value = null
   }
 }
-
-function formatDate(value) {
-  if (!value) return 'unknown'
-  return new Date(value).toLocaleDateString()
-}
-
-function formatDateTime(value) {
-  if (!value) return 'unknown'
-  return new Date(value).toLocaleString()
-}
 </script>
 
 <style scoped>
-.users-summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 12px;
+.usr-who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.usr-name { font-weight: 500; color: var(--text-hi); }
+.usr-name.none { font-weight: 400; color: var(--text-low); }
+.usr-email { font-size: 12px; color: var(--text-mid); overflow-wrap: anywhere; }
+.usr-tenant { font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); white-space: nowrap; }
+.usr-method { white-space: nowrap; }
+.usr-method .chip + .chip { margin-left: 4px; }
+.usr-when { color: var(--text-mid); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.usr-grants { display: flex; flex-wrap: wrap; gap: 4px; }
+.usr-none { font-size: 12px; color: var(--text-low); }
+.usr-act { text-align: right; white-space: nowrap; }
+
+.acc-loading { display: grid; gap: 8px; padding: 16px; }
+.acc-loading .skeleton { height: 34px; }
+
+/* The forms: a label over each field, one short line under it at most. */
+.acc-form { display: grid; gap: 16px; }
+.acc-field { display: grid; gap: 4px; min-width: 0; }
+.acc-label { font-size: 12px; font-weight: 500; color: var(--text-mid); }
+.acc-help { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-low); }
+.usr-pair { display: grid; grid-template-columns: minmax(0, 1fr) 150px; gap: 12px; }
+
+/* Access: a row per cluster of the user's tenant. */
+.usr-access-card { max-width: 560px; }
+.usr-access-list { display: flex; flex-direction: column; }
+.usr-access-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 150px 84px; align-items: center; gap: 8px;
+  padding: 8px 0; border-top: 1px solid var(--bd-soft);
 }
-.users-filters { margin-bottom: 12px; }
-.users-toolbar { display: flex; align-items: end; gap: 10px; }
-.users-search { flex: 1 1 320px; max-width: 460px; }
-.users-tenant-filter { flex: 0 1 220px; }
-.users-name { font-weight: 550; }
-.users-email { margin-top: 1px; color: var(--text-mid); font-size: 12px; }
-.users-created, .users-last-login, .users-modal-email { margin-top: 2px; color: var(--text-low); font-size: 11px; }
-.users-operator { margin-left: 5px; }
-.users-role-list { display: flex; flex-wrap: wrap; gap: 5px; }
-.users-no-access { color: var(--text-low); font-style: italic; }
-.users-loading { display: grid; gap: 8px; padding: 16px; }
-.users-loading .skeleton { height: 34px; }
-.users-form { display: grid; gap: 14px; }
-.users-field { display: grid; gap: 6px; }
-.users-form-grid { display: grid; grid-template-columns: 1fr 140px; gap: 10px; }
-.users-help { color: var(--text-low); font-size: 11.5px; line-height: 1.45; }
-.users-oauth-note { padding: 9px 10px; border: 1px solid var(--bd); border-radius: var(--r-control); background: var(--ink-3); }
-.users-access-modal { max-width: 620px; }
-.users-access-list { display: grid; gap: 8px; }
-.users-access-row {
-  display: grid;
-  grid-template-columns: minmax(140px, 1fr) 150px 76px;
-  gap: 8px;
-  align-items: center;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--bd-soft);
-}
-.users-access-row:last-child { padding-bottom: 0; border-bottom: 0; }
-.users-cluster { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.users-role-select { min-width: 0; }
-.users-access-note { margin-top: 14px; }
-.right { text-align: right; }
+.usr-access-row:first-child { border-top: 0; padding-top: 0; }
+.usr-access-row .btn { justify-content: center; }
+.usr-cluster { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.usr-cluster-slug { font-family: var(--font-mono); font-size: 12.5px; color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usr-cluster-status { font-size: 12px; color: var(--text-low); }
+.usr-access-note { margin-top: 12px; }
+
+/* Phone: a row is a small block — who, then tenant and sign-in, then access
+   and the buttons — instead of a table wider than the screen. */
 @media (max-width: 720px) {
-  .users-summary { grid-template-columns: 1fr; }
-  .users-toolbar { align-items: stretch; flex-direction: column; }
-  .users-search, .users-tenant-filter { max-width: none; width: 100%; }
-  .users-form-grid { grid-template-columns: 1fr; }
-  .users-access-row { grid-template-columns: 1fr 1fr; }
-  .users-access-row .btn { grid-column: 2; justify-self: end; }
+  .usr-table thead { display: none; }
+  .usr-table tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+    gap: 8px 12px; padding: 12px 16px; border-bottom: 1px solid var(--bd-soft);
+  }
+  .usr-table tr:last-child { border-bottom: 0; }
+  .usr-table td { display: block; padding: 0; border: 0; }
+  .usr-table .usr-who-cell, .usr-table .usr-access { grid-column: 1 / -1; }
+  .usr-table .usr-when { display: none; }
+  .usr-act { grid-column: 1 / -1; text-align: left; }
+  .usr-pair { grid-template-columns: minmax(0, 1fr); }
+  .usr-access-row { grid-template-columns: minmax(0, 1fr) 130px; }
+  .usr-access-row .btn { grid-column: 2; }
 }
 </style>

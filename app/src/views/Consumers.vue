@@ -1,700 +1,412 @@
 <template>
-  <div class="view-container">
-
-    <PageHead title="Consumer groups" :sub="headSub" />
-
-    <!-- A failed list must not look like an empty one: say the grid below is
-         stale (or absent), and how stale. Page-level fact, so it is a page
-         banner — the same container Queues uses for the same event, not a
-         loose .panel-err, which belongs inside the panel it describes. -->
-    <div v-if="groups.failed.value" class="status-banner banner-bad view-banner">
-      <span :title="formatTimestampUtc(groups.lastUpdated.value)">
-        <strong>Could not load consumer groups</strong> · {{ groupsErrorText }}<template v-if="consumers.length"> · showing the last rows that loaded{{ groups.lastUpdated.value ? ` (${formatTimestamp(groups.lastUpdated.value)})` : '' }}</template>
-      </span>
-    </div>
-
-    <PageTools>
-      <div class="filter-search">
-        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-        </svg>
-        <input v-model="searchQuery" type="text" placeholder="Search consumer groups…" class="input" />
+  <!-- A tab of the Queues section: the groups of the queue picked in the list
+       beside (?queue=), every group when none is (inside the list's
+       namespace, if one is picked there). -->
+  <QueuesLayout>
+    <div class="view-container cg">
+      <!-- A failed list must not look like an empty one. -->
+      <div v-if="groupsFailed" class="status-banner banner-bad view-banner">
+        <span :title="groupsLoaded ? formatTimestampUtc(groupsStore.lastFetched.value) : undefined">
+          <strong>Could not load consumer groups</strong> · {{ groupsErrorText }}<template v-if="consumers.length"> · showing the last list</template>
+        </span>
       </div>
-      <label class="tool-field">
-        <span class="tool-label">Namespace</span>
-        <select v-model="filterNamespace" class="input">
-          <option value="">All</option>
-          <option v-for="ns in namespaces" :key="ns" :value="ns">{{ ns || '(empty)' }}</option>
-        </select>
-      </label>
-      <label class="tool-field">
-        <span class="tool-label">Task</span>
-        <select v-model="filterTask" class="input">
-          <option value="">All</option>
-          <option v-for="t in tasks" :key="t" :value="t">{{ t || '(empty)' }}</option>
-        </select>
-      </label>
-      <!-- No free entry: this filter is applied to the loaded rows, so a name
-           outside the list can only produce an empty table. -->
-      <label class="tool-field" for="cg-queue-filter">
-        <span class="tool-label">Queue</span>
-        <Autocomplete
-          id="cg-queue-filter"
-          v-model="filterQueue"
-          :options="scopedQueueNames"
-          :loading="groupsFirstLoad"
-          label="Queue"
-          placeholder="All"
+
+      <PageTools>
+        <input
+          v-model="searchQuery"
+          type="search"
+          class="input cg-search"
+          placeholder="Search groups"
+          aria-label="Search consumer groups by name or queue"
         />
-      </label>
-      <label class="tool-check">
-        <input v-model="showLaggingOnly" type="checkbox" />
-        <span>Lagging only</span>
-      </label>
-      <template #view>
-        <div class="tool-seg">
-          <span class="tool-label">Sort</span>
-          <div class="seg">
-            <button
-              v-for="opt in sortOptions"
-              :key="opt.value"
-              :class="{ on: sortBy === opt.value }"
-              @click="sortBy = opt.value"
-            >{{ opt.label }}</button>
-          </div>
-        </div>
-      </template>
-    </PageTools>
+        <UiCheck v-model="showLaggingOnly" title="Only the groups past their queue’s lag lines (Settings)">Lagging only</UiCheck>
+        <span v-if="countLine" class="tool-note">{{ countLine }}</span>
+        <template #view>
+          <UiSelect v-model="sortBy" label="Sort" :options="SORTS" aria-label="Sort the groups" />
+        </template>
+      </PageTools>
 
-    <!--
-      ========================================================================
-      Lagging Partitions — placed at the top because it's actionable: the
-      operator wants to know "is anything stuck right now?" before they scan
-      the per-group list. The badge has THREE states, never two: a count, a
-      clean bill of health, and "unavailable" — a failed fetch must never
-      render as "none above the threshold".
-      ========================================================================
-    -->
-    <div class="lp-card" :class="{ 'lp-card-warn': laggingPartitions.length > 0 }">
-      <button
-        class="lp-head"
-        :class="{ 'lp-head-open': showLaggingSection }"
-        @click="showLaggingSection = !showLaggingSection"
+      <ConsumerHealthGrid
+        :consumers="shown"
+        :loading="groupsFirstLoad"
+        :can-admin="canAdmin"
+        :show-queue="!filterQueue"
+        :selected-key="selectedKey"
+        @select="viewConsumer"
+        @delete="confirmDelete"
       >
-        <svg class="lp-head-chevron" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M6 4l4 4-4 4" />
-        </svg>
-        <span class="lp-head-title">Lagging partitions</span>
-
-        <!-- One loading treatment, not four: the Refresh button says it is
-             working, the body shows a table-shaped skeleton on first paint,
-             and the badge keeps stating the last answer it actually has. -->
-        <span
-          v-if="lagging.failed.value"
-          class="lp-head-badge lp-head-badge-bad"
-          :title="laggingErrorText"
-        >unavailable</span>
-        <span
-          v-else-if="laggingLoaded && laggingPartitions.length > 0"
-          class="lp-head-badge lp-head-badge-warn"
-        >
-          {{ laggingPartitions.length }}
-          {{ laggingPartitions.length === 1 ? 'partition' : 'partitions' }} above {{ getLagLabel(lagThreshold) }}
-        </span>
-        <span
-          v-else-if="laggingLoaded"
-          class="lp-head-badge lp-head-badge-ok"
-        >
-          none above {{ getLagLabel(lagThreshold) }}
-        </span>
-        <span v-else class="lp-head-hint">expand to inspect partitions individually</span>
-
-        <span style="flex:1;"></span>
-
-        <span v-if="showLaggingSection" class="lp-head-meta" @click.stop>
-          <span class="label-xs">Threshold</span>
-          <div class="seg">
-            <button
-              v-for="preset in lagPresets"
-              :key="preset.value"
-              :class="{ on: lagThreshold === preset.seconds }"
-              @click="lagThreshold = preset.seconds; loadLaggingPartitions()"
-            >{{ preset.label }}</button>
+        <template #empty>
+          <!-- "No consumer groups" is a claim: a failed read says so instead. -->
+          <div v-if="groupsFailed" class="empty-state empty-state-failed">
+            <h3>Cannot list consumer groups</h3>
+            <button class="btn btn-ghost" @click="refreshAll">Retry</button>
           </div>
-          <button
-            class="btn btn-ghost"
-            :disabled="laggingLoading"
-            @click="loadLaggingPartitions"
-          >
-            <svg style="width:12px; height:12px;" :class="{ 'animate-spin': laggingLoading }" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            {{ laggingLoading ? 'Loading…' : 'Refresh' }}
-          </button>
-        </span>
-      </button>
+          <div v-else class="empty-state">
+            <Icon name="users-round" class="empty-state-icon" :size="28" />
+            <h3>{{ emptyLine }}</h3>
+          </div>
+        </template>
+      </ConsumerHealthGrid>
 
-      <div v-if="showLaggingSection" class="lp-body">
-        <!-- First paint only, and shaped like the table it stands in for: a
-             refresh leaves the rows that are already on screen alone. -->
-        <div v-if="laggingFirstLoad" class="lp-table-wrap lp-skel">
-          <span v-for="i in 3" :key="`lp-skel-${i}`" class="skeleton" style="height:28px;"></span>
-        </div>
-
-        <div v-else-if="lagging.failed.value" class="panel-err">
-          Lagging partitions could not be loaded — {{ laggingErrorText }}.
-          Nothing here means "unknown", not "nothing is behind".
-        </div>
-
-        <div v-else-if="laggingPartitions.length > 0" class="lp-table-wrap">
-          <table class="t lp-table">
-            <thead>
-              <tr>
-                <th>Group</th>
-                <th>Queue</th>
-                <th>Partition</th>
-                <th>Worker</th>
-                <th style="text-align:right;">Offset lag</th>
-                <th style="text-align:right;">Time lag</th>
-                <th>Oldest unconsumed</th>
-                <th v-if="canAdmin" style="text-align:right;">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="p in laggingPartitions" :key="`${p.consumer_group}@${p.queue_name}@${p.partition_name}`">
-                <td>
-                  <span class="lp-cell-strong">{{ p.consumer_group === '__QUEUE_MODE__' ? 'queue mode' : p.consumer_group }}</span>
-                  <!-- The lagging-partition payload carries no policy field of
-                       its own; the group listing this page already holds does,
-                       so the tag costs no extra request. -->
-                  <span v-if="rowConflates(p)" class="cfl-tag">conflation</span>
-                </td>
-                <td><span class="lp-cell-mid">{{ p.queue_name }}</span></td>
-                <td class="font-mono tabular-nums" style="color:var(--text-mid);">{{ p.partition_name }}</td>
-                <td>
-                  <code class="lp-cell-code">{{ p.worker_id || '—' }}</code>
-                </td>
-                <!-- For a conflating group this number is LOG lag — positions
-                     still to retire — and the work behind it is one message per
-                     partition. It is stated, not toned as a warning, because on
-                     that policy a large one is the design working. -->
-                <td style="text-align:right;">
-                  <template v-if="rowConflates(p)">
-                    <span class="tabular-nums num">{{ formatNumber(p.offset_lag) }}</span>
-                    <span class="lp-lag-note">log lag</span>
-                  </template>
-                  <span v-else class="tabular-nums num warn">{{ formatNumber(p.offset_lag) }}</span>
-                </td>
-                <td style="text-align:right;">
-                  <span
-                    class="tabular-nums"
-                    :class="{ 'num': true, 'warn': (p.time_lag_seconds || 0) > 60, 'bad': (p.time_lag_seconds || 0) > 600 }"
-                  >{{ formatDuration((p.time_lag_seconds || 0) * 1000) }}</span>
-                </td>
-                <td>
-                  <span :title="formatTimestampUtc(p.oldest_unconsumed_at)" class="tabular-nums" style="font-size:12px; color:var(--text-mid);">{{ formatTimestamp(p.oldest_unconsumed_at) }}</span>
-                </td>
-                <td v-if="canAdmin" style="text-align:right;">
-                  <button
-                    class="btn btn-ghost"
-                    style="font-size:11px; padding:3px 8px;"
-                    :disabled="skippingPartition === partitionKey(p)"
-                    @click="askSkipPartition(p)"
-                  >
-                    {{ skippingPartition === partitionKey(p) ? 'Skipping…' : 'Skip to end' }}
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div v-else class="lp-empty lp-empty-ok">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--ok-500);">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <span>No partitions lag more than {{ getLagLabel(lagThreshold) }}.</span>
-        </div>
+      <div v-if="shown.length" class="list-legend">
+        <span><i class="g ok" aria-hidden="true" />stable</span>
+        <span><i class="g warn" aria-hidden="true" />lagging</span>
+        <span><i class="g bad" aria-hidden="true" />stuck</span>
+        <span><i class="g idle" aria-hidden="true" />never consumed, or inactive</span>
       </div>
+
+      <!-- The partitions behind more than a chosen age, across the groups this
+           tab shows. Three states, never two: rows, none, or unknown. -->
+      <section v-if="scoped.length || lagRows.length || lagging.failed.value" class="card lp" aria-labelledby="lp-title">
+        <div class="card-header">
+          <h3 id="lp-title">Lagging partitions</h3>
+          <span v-if="lagRows.length" class="card-sub tabular-nums">{{ formatNumber(lagRows.length) }}</span>
+          <UiSelect
+            v-model="lagThreshold"
+            class="lp-pick"
+            size="sm"
+            label="Behind more than"
+            :options="lagOptions"
+            aria-label="Show partitions behind more than"
+          />
+        </div>
+
+        <div v-if="laggingFirstLoad" class="lp-skel" aria-hidden="true">
+          <span v-for="i in 3" :key="i" class="skeleton" />
+        </div>
+        <div v-else-if="lagging.failed.value" class="lp-quiet lp-err">
+          Unavailable · {{ laggingErrorText }}
+        </div>
+        <div v-else-if="!lagRows.length" class="lp-quiet">
+          No partition is behind more than {{ lagLabel(lagThreshold) }}.
+        </div>
+        <template v-else>
+          <div class="lp-scroll">
+            <table class="t lp-table">
+              <thead>
+                <tr>
+                  <th>Group</th>
+                  <th v-if="!filterQueue">Queue</th>
+                  <th>Partition</th>
+                  <th>Worker</th>
+                  <th class="r" title="Messages this group has not read in the partition">Offset lag</th>
+                  <th class="r">Time lag</th>
+                  <th class="r">Oldest unread</th>
+                  <th v-if="canAdmin" class="r"><span class="sr-only">Action</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="p in lagRowsShown" :key="`${p.consumer_group}@${p.queue_name}@${p.partition_name}`">
+                  <td>
+                    <span class="lp-name">{{ groupLabel({ name: p.consumer_group }) }}</span>
+                    <!-- The lagging rows carry no policy field; the group listing does. -->
+                    <span v-if="rowConflates(p)" class="lp-tag" title="Delivered one message per partition, the newest">conflation</span>
+                  </td>
+                  <td v-if="!filterQueue" class="lp-mid">{{ p.queue_name }}</td>
+                  <td class="lp-mono">{{ p.partition_name }}</td>
+                  <td class="lp-mono lp-mid">{{ p.worker_id || '—' }}</td>
+                  <!-- On a conflating group this is log lag: positions to retire,
+                       not messages owed, so it is stated, never toned. -->
+                  <td
+                    class="r lp-num"
+                    :title="rowConflates(p) ? 'Log lag: positions still to retire. The work left is one message per partition.' : undefined"
+                  >{{ formatNumber(p.offset_lag) }}<i v-if="rowConflates(p)" class="lp-unit">log</i></td>
+                  <td class="r lp-num" :class="lagTone(p)">{{ formatSpan(toNum(p.time_lag_seconds) || 0) }}</td>
+                  <td class="r lp-mid lp-when" :title="formatTimestampUtc(p.oldest_unconsumed_at)">{{ formatTimestampCompact(p.oldest_unconsumed_at) }}</td>
+                  <td v-if="canAdmin" class="r">
+                    <button
+                      class="btn btn-ghost lp-skip"
+                      :disabled="skippingPartition === partitionKey(p)"
+                      @click="askSkipPartition(p)"
+                    >{{ skippingPartition === partitionKey(p) ? 'Skipping…' : 'Skip to end' }}</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="lagRows.length > LAG_ROWS" class="pager">
+            <span class="pager-count tabular-nums">{{ formatNumber(lagRowsShown.length) }} of {{ formatNumber(lagRows.length) }}</span>
+            <button class="btn btn-ghost" @click="showAllLag = !showAllLag">{{ showAllLag ? 'Show fewer' : 'Show all' }}</button>
+          </div>
+        </template>
+      </section>
     </div>
 
-    <!--
-      ========================================================================
-      Health grid — the main entity list. Click row → detail modal; hover
-      reveals per-row actions (view, move-to-now, seek, delete).
-      ========================================================================
-    -->
-    <ConsumerHealthGrid
-      :consumers="filteredConsumers"
-      :loading="groupsFirstLoad"
-      :sort-by="sortBy"
-      :can-admin="canAdmin"
-      @select="viewConsumer"
-      @view="viewConsumer"
-      @move-now="askMoveToNow"
-      @seek="openSeekModal"
-      @delete="confirmDelete"
+    <!-- ===================== The group ===================== -->
+    <DetailDrawer
+      :open="Boolean(selectedConsumer)"
+      :title="selectedConsumer ? groupLabel(selectedConsumer) : 'Consumer group'"
+      :subtitle="selectedConsumer?.queueName || ''"
+      @close="closeDetail"
     >
-      <template #empty>
-        <!-- "No consumer groups" is a claim. Only make it when the list
-             actually loaded — a failed fetch has to say so instead, and
-             offer the retry the page otherwise hides. -->
-        <div v-if="groups.failed.value" class="empty-state empty-state-failed">
-          <h3>Cannot list consumer groups</h3>
-          <p>{{ groupsErrorText }}</p>
-          <button class="btn btn-ghost" @click="refreshAll">Retry</button>
+      <template v-if="selectedConsumer">
+        <!-- The same verdict as the row it was opened from. -->
+        <div class="detail-status-row cg-status">
+          <span class="g" :class="selectedVerdict.glyph" aria-hidden="true" />
+          <span class="detail-status" :class="`is-${selectedVerdict.tone || 'quiet'}`">{{ selectedVerdict.word }}</span>
+          <!-- Said here only when the Last seen row below cannot say it. -->
+          <span v-if="presence?.said && presence.seen === '—'" class="detail-note">· {{ presence.said }}</span>
+          <span v-if="isConflating(selectedConsumer)" class="lp-tag" title="Delivered one message per partition, the newest">conflation</span>
+          <span v-if="selectedConsumer.kind === 'kafka'" class="lp-tag" title="Read through the Kafka facade">Kafka</span>
         </div>
-        <div v-else class="empty-state">
-          <!-- Same block, same 40px glyph, as every other empty state in the
-               app (Queues · Messages · DeadLetter · Traces). -->
-          <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
-          </svg>
-          <h3>{{ consumers.length === 0 ? 'No consumer groups found' : 'No groups match your filters' }}</h3>
-          <p>
-            {{ consumers.length === 0
-              ? 'Consumer groups will appear here when clients connect.'
-              : 'Try adjusting your search or filter.' }}
-          </p>
-        </div>
+        <p v-if="presence?.note" class="cg-note" :title="presence.noteTitle">{{ presence.note }}</p>
+
+        <ul class="detail-list cg-facts">
+          <li>
+            <span class="detail-note">Queue</span>
+            <RouterLink v-if="selectedConsumer.queueName" class="cg-link" :to="queueLocation(selectedConsumer.queueName, route)">{{ selectedConsumer.queueName }}</RouterLink>
+            <span v-else>—</span>
+          </li>
+          <li>
+            <span class="detail-note" title="Partitions this group reads">Partitions</span>
+            <span class="tabular-nums">{{ dash(selectedConsumer.members) }}</span>
+          </li>
+          <li>
+            <!-- On a conflating group the partitions behind ARE the work: one
+                 handler run each, whatever the backlog. -->
+            <span class="detail-note" title="Partitions with messages this group has not read yet">Behind</span>
+            <span class="tabular-nums">{{ dash(selectedConsumer.partitionsWithLag) }}<i v-if="isConflating(selectedConsumer)" class="cg-unit">handler runs left</i></span>
+          </li>
+          <li>
+            <span class="detail-note" :title="isConflating(selectedConsumer) ? 'Positions still to retire; superseded, not owed' : 'Messages this group has not read'">{{ isConflating(selectedConsumer) ? 'Log lag' : 'Backlog' }}</span>
+            <span class="tabular-nums">{{ dash(selectedConsumer.totalLag) }}<i class="cg-unit">{{ isConflating(selectedConsumer) ? 'positions' : 'messages' }}</i></span>
+          </li>
+          <li>
+            <span class="detail-note" title="Age of the oldest message this group has not read">Time lag</span>
+            <span class="tabular-nums" :class="selectedLagTone">{{ toNum(selectedConsumer.maxTimeLag) > 0 ? formatSpan(Math.round(toNum(selectedConsumer.maxTimeLag))) : '—' }}</span>
+          </li>
+          <template v-if="presence">
+            <li>
+              <span class="detail-note">Live members</span>
+              <span class="tabular-nums">{{ presence.members }}</span>
+            </li>
+            <li>
+              <span class="detail-note">Last seen</span>
+              <span class="tabular-nums" :title="presence.seenAt ? formatTimestampUtc(presence.seenAt) : undefined">{{ presence.seen }}</span>
+            </li>
+          </template>
+          <li v-for="topic in selectedConsumer.topics || []" :key="topic">
+            <span class="detail-note">Topic</span>
+            <span class="cg-topic">
+              <span class="lp-mono">{{ topic }}</span>
+              <button v-if="canAdmin" class="btn btn-ghost" @click="openSeekModal({ ...selectedConsumer, queueName: topic })">Seek</button>
+            </span>
+          </li>
+          <li v-if="selectedConsumer.queueName">
+            <span class="detail-note">Supervisors</span>
+            <RouterLink class="cg-link" :to="queueLocation(selectedConsumer.queueName, route, 'supervisors')">Open</RouterLink>
+          </li>
+        </ul>
       </template>
-    </ConsumerHealthGrid>
 
-    <!-- The glyphs the rows use. -->
-    <div v-if="consumers.length" class="list-legend">
-      <span><i class="g ok" aria-hidden="true" />stable</span>
-      <span><i class="g warn" aria-hidden="true" />lagging</span>
-      <span><i class="g bad" aria-hidden="true" />stuck</span>
-      <span><i class="g idle" aria-hidden="true" />never consumed, or inactive</span>
-    </div>
+      <template v-if="selectedConsumer" #footer>
+        <template v-if="canAdmin">
+          <button class="btn btn-danger cg-delete" @click="confirmDelete(selectedConsumer)">Delete</button>
+          <template v-if="selectedConsumer.queueName">
+            <button class="btn" title="Move the cursor to a point in time" @click="openSeekModal(selectedConsumer)">Seek…</button>
+            <button class="btn" title="Skip every pending message for this group" @click="askMoveToNow(selectedConsumer)">Move to now</button>
+          </template>
+        </template>
+        <span v-else class="detail-note cg-readonly">Cursor and delete actions need the admin role.</span>
+      </template>
+    </DetailDrawer>
 
-    <!-- ===================== Detail modal ===================== -->
+    <!-- ===================== Delete ===================== -->
     <Teleport to="body">
-      <div
-        v-if="selectedConsumer"
-        class="modal-backdrop"
-        @click.self="selectedConsumer = null"
-      >
-        <!-- Wider than the shared 480px: five tiles at the shared tile size
-             is what this modal is for. -->
-        <div class="card modal-card" style="max-width:672px;">
-          <div class="card-header">
-            <h3>{{ selectedConsumer.name === '__QUEUE_MODE__' ? selectedConsumer.queueName : selectedConsumer.name }}</h3>
-            <!-- Conflation next to the name, like the queue-mode label above:
-                 it is a property of this group's identity, and it is the key to
-                 the two tiles below — without it "Backlog: 4.0M" reads as an
-                 incident on a queue that is doing exactly what it was told. -->
-            <span v-if="isConflating(selectedConsumer)" class="cfl-tag">conflation</span>
-            <span v-if="selectedConsumer.kind === 'kafka'" class="cfl-tag kind-tag">kafka</span>
-            <button @click="selectedConsumer = null" class="btn btn-ghost btn-icon modal-close">
-              <svg style="width:18px; height:18px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-          <div class="card-body">
-            <div class="stat-grid stat-grid-5" style="margin-bottom:20px;">
-              <div class="stat">
-                <div class="stat-label">Partitions</div>
-                <div class="stat-value">{{ dash(selectedConsumer.members) }}</div>
-              </div>
-              <div class="stat">
-                <div class="stat-label">State</div>
-                <!-- The same verdict as the row it was opened from. -->
-                <div class="stat-value cg-verdict" :class="verdictTone(selectedConsumer)">
-                  <span class="g" :class="verdictGlyph(selectedConsumer)" aria-hidden="true" />{{ verdictWord(selectedConsumer) }}
-                </div>
-                <div v-if="presence?.said" class="stat-foot">{{ presence.said }}</div>
-              </div>
-              <div class="stat">
-                <!-- Partitions behind. On a conflating group this is the WHOLE
-                     of the work — one handler run each, whatever the backlog —
-                     so it is the figure to size consumers against, and it says
-                     so. -->
-                <div class="stat-label">Lag parts</div>
-                <div class="stat-value">{{ dash(selectedConsumer.partitionsWithLag) }}</div>
-                <div v-if="isConflating(selectedConsumer)" class="stat-foot">
-                  handler runs left
-                </div>
-              </div>
-              <div class="stat">
-                <!-- Real message-count backlog from the broker — the number
-                     operators actually ask for, and it is returned already.
-                     Under conflation those messages are superseded, not owed:
-                     the label says log lag so the tile beside it is read as the
-                     work. -->
-                <div class="stat-label">{{ isConflating(selectedConsumer) ? 'Log lag' : 'Backlog' }}</div>
-                <div class="stat-value">{{ dash(selectedConsumer.totalLag) }}</div>
-                <div class="stat-foot">
-                  {{ isConflating(selectedConsumer) ? 'positions to retire' : 'messages behind' }}
-                </div>
-              </div>
-              <div class="stat">
-                <div class="stat-label">Time lag</div>
-                <div class="stat-value">
-                  {{ (selectedConsumer.maxTimeLag || 0) > 0 ? formatDuration(selectedConsumer.maxTimeLag * 1000) : '—' }}
-                </div>
-              </div>
-            </div>
-
-            <!-- A Kafka group's state said plainly: the row's word is one
-                 word, and "No members" or "Inactive" each need the clock
-                 they are judged by. -->
-            <p v-if="presence?.note" class="cg-presence">{{ presence.note }}</p>
-
-            <RouterLink v-if="selectedConsumer.queueName" class="btn btn-ghost" :to="queueLocation(selectedConsumer.queueName, route, 'supervisors')">Supervisors for this queue →</RouterLink>
-            <ul class="detail-list">
-              <li>
-                <span class="detail-note">Queue</span>
-                <RouterLink v-if="selectedConsumer.queueName" :to="queueLocation(selectedConsumer.queueName, route)">{{ selectedConsumer.queueName }} →</RouterLink>
-                <span v-else>—</span>
-              </li>
-              <template v-if="presence">
-                <li>
-                  <span class="detail-note">Live members</span>
-                  <span class="tabular-nums">{{ presence.members }}</span>
-                </li>
-                <li>
-                  <span class="detail-note">Last seen</span>
-                  <span class="tabular-nums" :title="presence.seenAt ? formatTimestampUtc(presence.seenAt) : null">{{ presence.seen }}</span>
-                </li>
-              </template>
-              <li v-for="topic in selectedConsumer.topics || []" :key="topic">
-                <span class="detail-note">Topic</span>
-                <span class="cg-topic">
-                  {{ topic }}
-                  <button
-                    v-if="canAdmin"
-                    class="btn btn-ghost"
-                    @click="openSeekModal({ ...selectedConsumer, queueName: topic })"
-                  >Seek</button>
-                </span>
-              </li>
-            </ul>
-          </div>
-        </div>
-      </div>
-    </Teleport>
-
-    <!-- ===================== Delete modal ===================== -->
-    <Teleport to="body">
-      <div
-        v-if="consumerToDelete"
-        class="modal-backdrop"
-        @click.self="closeDeleteModal"
-      >
+      <div v-if="consumerToDelete" class="modal-backdrop cg-over" @click.self="closeDeleteModal">
         <div class="card modal-card">
           <div class="card-header"><h3>Delete consumer group</h3></div>
-          <div class="card-body">
+          <div class="card-body cg-form">
             <div v-if="deleteError" class="panel-err">{{ deleteError }}</div>
-
-            <p style="color:var(--text-mid); margin-bottom:16px;">
-              Are you sure you want to delete <strong>{{ consumerToDelete.name === '__QUEUE_MODE__' ? '(queue mode)' : consumerToDelete.name }}</strong>
-              <span v-if="consumerToDelete.queueName"> for queue <strong>{{ consumerToDelete.queueName }}</strong></span>?
+            <p class="cg-lead">
+              Delete <strong>{{ groupLabel(consumerToDelete) }}</strong><template v-if="consumerToDelete.queueName"> on <strong>{{ consumerToDelete.queueName }}</strong></template>?
             </p>
-            <p style="font-size:13px; color:var(--text-low); margin-bottom:16px;">
-              This will remove partition consumer state{{ consumerToDelete.queueName ? ' for this queue only' : '' }}.
-            </p>
-
-            <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-mid); cursor:pointer;">
-              <input v-model="deleteMetadata" type="checkbox" style="width:16px; height:16px; accent-color:var(--accent);" />
-              Also delete subscription metadata
-            </label>
+            <p class="cg-help">Its cursor{{ consumerToDelete.queueName ? ' on this queue' : 's' }} and partition state are removed.</p>
+            <UiCheck v-model="deleteMetadata">Also delete its subscription</UiCheck>
           </div>
-
           <div class="modal-foot">
-            <button @click="closeDeleteModal" class="btn btn-ghost">Cancel</button>
-            <button @click="deleteConsumer" :disabled="actionLoading" class="btn btn-danger">
-              {{ actionLoading ? 'Deleting…' : 'Delete' }}
-            </button>
+            <button class="btn btn-ghost" @click="closeDeleteModal">Cancel</button>
+            <button class="btn btn-danger" :disabled="actionLoading" @click="deleteConsumer">{{ actionLoading ? 'Deleting…' : 'Delete' }}</button>
           </div>
         </div>
       </div>
     </Teleport>
 
-    <!-- ===================== Seek modal ===================== -->
+    <!-- ===================== Seek ===================== -->
     <Teleport to="body">
-      <div
-        v-if="showSeekModal"
-        class="modal-backdrop"
-        @click.self="showSeekModal = false"
-      >
-        <div class="card modal-card">
-          <div class="card-header"><h3>Seek cursor position</h3></div>
-          <div class="card-body">
+      <div v-if="showSeekModal" class="modal-backdrop cg-over" @click.self="showSeekModal = false">
+        <form class="card modal-card" @submit.prevent="handleSeekToTimestamp">
+          <div class="card-header">
+            <h3>Seek</h3>
+            <span class="card-sub">{{ groupLabel(seekConsumer) }} · {{ seekConsumer?.queueName }}</span>
+          </div>
+          <div class="card-body cg-form">
             <div v-if="seekError" class="panel-err">{{ seekError }}</div>
-
-            <p style="color:var(--text-mid); margin-bottom:16px;">
-              {{ seekConsumer?.name === '__QUEUE_MODE__' ? '(queue mode)' : seekConsumer?.name }} / {{ seekConsumer?.queueName }}
-            </p>
-
-            <div>
-              <span class="label-xs" style="display:block; margin-bottom:8px;">Target timestamp</span>
+            <label class="cg-field">
+              <span class="cg-field-label">Move the cursor to</span>
               <input v-model="seekTimestamp" type="datetime-local" class="input" :title="formatTimestampUtc(seekTimestamp)" />
-              <p style="font-size:12px; color:var(--text-low); margin-top:8px;">
-                The cursor will move to the last message at or before this timestamp. Messages after this point will be re-consumed.
-              </p>
-            </div>
+            </label>
+            <p class="cg-help" title="The cursor moves to the last message at or before this time">Messages after this time are delivered again.</p>
           </div>
-
           <div class="modal-foot">
-            <button @click="showSeekModal = false" class="btn btn-ghost">Cancel</button>
-            <button @click="handleSeekToTimestamp" :disabled="actionLoading || !seekTimestamp" class="btn btn-primary">
-              {{ actionLoading ? 'Seeking…' : 'Seek to timestamp' }}
-            </button>
+            <button type="button" class="btn btn-ghost" @click="showSeekModal = false">Cancel</button>
+            <button type="submit" class="btn btn-primary" :disabled="actionLoading || !seekTimestamp">{{ actionLoading ? 'Seeking…' : 'Seek' }}</button>
           </div>
-        </div>
+        </form>
       </div>
     </Teleport>
 
-    <!-- ===================== Confirmation modal =====================
-         Replaces the native confirm() that used to guard the two cursor-
-         skipping actions: same modal system the rest of the page uses, and
-         the outcome is reported instead of assumed. -->
+    <!-- ===================== Confirm (move to now, skip a partition) ===================== -->
     <Teleport to="body">
-      <div v-if="pendingConfirm" class="modal-backdrop" @click.self="pendingConfirm = null">
+      <div v-if="pendingConfirm" class="modal-backdrop cg-over" @click.self="pendingConfirm = null">
         <div class="card modal-card">
           <div class="card-header"><h3>{{ pendingConfirm.title }}</h3></div>
-          <div class="card-body">
-            <p style="color:var(--text-mid); margin-bottom:8px;">{{ pendingConfirm.body }}</p>
-            <p style="font-size:13px; color:var(--text-low);">{{ pendingConfirm.consequence }}</p>
+          <div class="card-body cg-form">
+            <p class="cg-lead">{{ pendingConfirm.body }}</p>
+            <p class="cg-help">{{ pendingConfirm.consequence }}</p>
           </div>
-
           <div class="modal-foot">
-            <button @click="pendingConfirm = null" class="btn btn-ghost">Cancel</button>
-            <button @click="runPendingConfirm" :disabled="actionLoading" class="btn btn-primary">
-              {{ actionLoading ? 'Working…' : pendingConfirm.confirmLabel }}
-            </button>
+            <button class="btn btn-ghost" @click="pendingConfirm = null">Cancel</button>
+            <button class="btn btn-primary" :disabled="actionLoading" @click="runPendingConfirm">{{ actionLoading ? 'Working…' : pendingConfirm.confirmLabel }}</button>
           </div>
         </div>
       </div>
     </Teleport>
-  </div>
+  </QueuesLayout>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { useRouteState } from '@/composables/useRouteState'
-import { queueLocation } from '@/composables/navigation'
 
-import ConsumerHealthGrid from '@/components/ConsumerHealthGrid.vue'
 import { consumers as consumersApi, describeApiError } from '@/api'
-import { useGroupsStore } from '@/stores/groupsStore'
-import {
-  formatDuration, formatNumber, toNum, useApi,
-} from '@/composables/useApi'
-import { conflatingKeys, isConflating, partitionConflates } from '@/composables/useConflation'
-import { formatDateTimeLocal, formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
-import { useRefresh } from '@/composables/useRefresh'
-import { useToast } from '@/composables/useToast'
-import { useIdentity } from '@/stores/identity'
-import Autocomplete from '@/components/Autocomplete.vue'
-import { groupPresence, groupState } from '@/composables/useAttention'
-import { formatSpan } from '@/composables/settingsDoc'
-import { groupActivity } from '@/composables/useSeverity'
-import PageHead from '@/components/PageHead.vue'
+import ConsumerHealthGrid from '@/components/ConsumerHealthGrid.vue'
+import DetailDrawer from '@/components/DetailDrawer.vue'
+import Icon from '@/components/Icon.vue'
 import PageTools from '@/components/PageTools.vue'
+import QueuesLayout from '@/components/QueuesLayout.vue'
+import UiCheck from '@/components/UiCheck.vue'
+import UiSelect from '@/components/UiSelect.vue'
+import {
+  groupCount, groupLabel, sortGroups, verdictOf, visibleGroups, visiblePartitions, SORTS,
+} from '@/composables/consumerGroups'
+import { queueLocation, queueOf } from '@/composables/navigation'
+import { formatSpan } from '@/composables/settingsDoc'
+import { formatNumber, toNum, useApi } from '@/composables/useApi'
+import { groupPresence } from '@/composables/useAttention'
+import { conflatingKeys, isConflating, partitionConflates } from '@/composables/useConflation'
+import { formatDateTimeLocal, formatTimestamp, formatTimestampCompact, formatTimestampUtc } from '@/composables/useFormat'
+import { useRefresh } from '@/composables/useRefresh'
+import { useRouteState } from '@/composables/useRouteState'
+import { groupActivity, timeLagSeverity } from '@/composables/useSeverity'
+import { useToast } from '@/composables/useToast'
+import { useGroupsStore } from '@/stores/groupsStore'
+import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { DEFAULT_TIME_RANGE, LAG_THRESHOLDS as lagPresets, rangeSeconds } from '../../../shared/timeRanges.mjs'
+import { DEFAULT_TIME_RANGE, LAG_THRESHOLDS, rangeSeconds } from '../../../shared/timeRanges.mjs'
 
-// TENANT PAGE. /api/v1/consumer-groups* is tenant-scoped broker-side; the
-// mutating routes (delete / seek) are RouteClass::QueueAdmin at the proxy, so
-// their controls are shown only to a role that may actually use them.
+// TENANT PAGE. /api/v1/consumer-groups* is tenant-scoped broker-side; delete
+// and seek are RouteClass::QueueAdmin at the proxy, so their controls are
+// offered only to a role that may use them.
 const { can } = useIdentity()
-// notifyWarn carries an outcome the shared HTTP client cannot see: a 2xx that did
+// notifyWarn carries an outcome the HTTP client cannot see: a 2xx that did
 // nothing (no partition matched, nothing deleted) is a failure to the user.
 const { notifySuccess, notifyWarn } = useToast()
 const canAdmin = computed(() => can('queueAdmin'))
-// The count, and what this role may do here: a Viewer sees no cursor or
-// delete actions, and should be told why rather than wonder.
-const headSub = computed(() => [
-  consumers.value.length ? String(consumers.value.length) : '',
-  canAdmin.value ? '' : 'read-only role, cursor and delete actions hidden',
-].filter(Boolean).join(' · '))
-
-// Shared queues store. The Queues page populates it; we just consume here.
-// queueMeta gives us the queue → { namespace, task } join we need to scope
-// consumer rows by namespace/task without a second API call when the data
-// is fresh.
-const { queueMeta, namespaces, tasks, fetchQueues } = useQueuesStore()
 
 const route = useRoute()
+const { queueMeta, fetchQueues } = useQueuesStore()
+const { linesFor } = useSettingsStore()
 
 // ---------------------------------------------------------------------------
-// State
+// The scope is the section's: the queue picked in the list, else the list's
+// namespace (null = every namespace; '' is the default one). Read, never written.
 // ---------------------------------------------------------------------------
+const filterQueue = computed(() => queueOf(route))
+const filterNamespace = computed(() => (typeof route.query.namespace === 'string' ? route.query.namespace : null))
+
+// The tab's own fields, in the address.
 const searchQuery = ref('')
 const showLaggingOnly = ref(false)
-const filterNamespace = ref('')
-const filterTask = ref('')
-const filterQueue = ref('')
 const sortBy = ref('health')
+// The open group: its name, and its queue when no queue is picked (a group's
+// name alone can belong to several queues).
 const selectedGroup = ref('')
-const { restoring: restoringRoute } = useRouteState({ search: searchQuery, queue: filterQueue, namespace: filterNamespace, task: filterTask, sort: sortBy, lagging: showLaggingOnly, group: selectedGroup })
-
-const selectedConsumer = computed({
-  get: () => selectedGroup.value ? consumers.value.find(g => g.name === selectedGroup.value && (!filterQueue.value || g.queueName === filterQueue.value)) || null : null,
-  set: group => { selectedGroup.value = group?.name || ''; if (group?.queueName) filterQueue.value = group.queueName },
-})
-const consumerToDelete = ref(null)
-const deleteMetadata = ref(true)
-const deleteError = ref('')
-const actionLoading = ref(false)
-
-const showSeekModal = ref(false)
-const seekConsumer = ref(null)
-const seekTimestamp = ref('')
-const seekError = ref('')
-
-const pendingConfirm = ref(null)
-
-const showLaggingSection = ref(false)
+const groupQueue = ref('')
 const lagThreshold = ref(rangeSeconds(DEFAULT_TIME_RANGE))
-const skippingPartition = ref(null)
-
-const sortOptions = [
-  { value: 'health',  label: 'Worst first' },
-  { value: 'lag',     label: 'Lag' },
-  { value: 'members', label: 'Partitions' },  // sort key kept for back-compat with grid
-  { value: 'name',    label: 'Name' },
-]
+useRouteState({
+  search: searchQuery, lagging: showLaggingOnly, sort: sortBy,
+  group: selectedGroup, groupQueue, behind: lagThreshold,
+})
 
 // ---------------------------------------------------------------------------
-// Fetchers. Both keep their own error so a failed refresh can never be shown
-// as an empty list or as a clean bill of health.
+// The groups: the app's one listing (stores/groupsStore), which the queue list
+// beside keeps fresh, so this tab, the list's marks and the tab counts never
+// disagree and nobody pays for the scan twice.
 // ---------------------------------------------------------------------------
-// Handed to the shared store, so the sidebar and Queues reuse this read.
 const groupsStore = useGroupsStore()
-const groups = useApi((config) => consumersApi.list(config), { onSuccess: (d) => groupsStore.publish(d) })
-const lagging = useApi((config) => consumersApi.getLagging(lagThreshold.value, config))
+const consumers = computed(() => groupsStore.groups.value || [])
+const groupsLoaded = computed(() => groupsStore.groups.value !== null)
+const groupsFailed = computed(() => groupsStore.error.value !== null)
+const groupsFirstLoad = computed(() => !groupsLoaded.value && !groupsFailed.value)
+const groupsErrorText = computed(() => describeApiError(groupsStore.error.value))
+const fetchConsumers = (force = true) => groupsStore.fetchGroups(force ? { force: true } : { ttlMs: 25_000 })
 
-const consumers = computed(() => {
-  const d = groups.data.value
-  if (Array.isArray(d)) return d
-  return d?.consumer_groups || []
+const metaOf = (q) => queueMeta.value.get(q)
+const scoped = computed(() => visibleGroups(consumers.value, {
+  queue: filterQueue.value, namespace: filterNamespace.value, metaOf, linesFor,
+}))
+const shown = computed(() => sortGroups(
+  visibleGroups(scoped.value, { search: searchQuery.value, laggingOnly: showLaggingOnly.value, linesFor }),
+  sortBy.value, linesFor,
+))
+const narrowed = computed(() => Boolean(searchQuery.value.trim()) || showLaggingOnly.value)
+// The tab's count names the picked queue's groups already; the line speaks
+// when it adds something: across every queue, or narrowed.
+const countLine = computed(() => (
+  groupsLoaded.value && scoped.value.length && (narrowed.value || !filterQueue.value)
+    ? groupCount(shown.value.length, scoped.value.length) : ''
+))
+const emptyLine = computed(() => {
+  if (!consumers.value.length) return 'No consumer groups yet'
+  if (!scoped.value.length) return filterQueue.value ? 'No consumer group reads this queue yet' : 'No consumer groups in this namespace'
+  if (showLaggingOnly.value && !searchQuery.value.trim()) return 'No group is lagging'
+  return 'No group matches'
 })
-const groupsFirstLoad = computed(() => groups.loading.value && !groups.data.value)
-const groupsErrorText = computed(() => describeApiError(groups.error.value))
 
-const laggingPartitions = computed(() => {
-  const d = lagging.data.value
-  return Array.isArray(d) ? d : []
+// ---------------------------------------------------------------------------
+// The open group
+// ---------------------------------------------------------------------------
+const openQueue = computed(() => filterQueue.value || groupQueue.value)
+const selectedConsumer = computed(() => (
+  selectedGroup.value
+    ? consumers.value.find((g) => g.name === selectedGroup.value && (!openQueue.value || g.queueName === openQueue.value)) || null
+    : null
+))
+const selectedKey = computed(() => {
+  const g = selectedConsumer.value
+  return g ? `${g.queueName ?? ''}\u0000${g.name ?? ''}` : ''
 })
-const laggingLoading = computed(() => lagging.loading.value)
-// First paint only: a refresh must leave the rows that are already on screen
-// where they are, so the skeleton is gated on "loading AND nothing yet".
-const laggingFirstLoad = computed(() => lagging.loading.value && !lagging.data.value)
-const laggingLoaded = computed(() => lagging.lastUpdated.value !== null && !lagging.failed.value)
-const laggingErrorText = computed(() => describeApiError(lagging.error.value))
-
-const fetchConsumers = () => groups.refresh()
-const loadLaggingPartitions = () => lagging.refresh()
-
-// Pull queues into the shared store (cache-respecting). If another view
-// already populated it within the TTL window, this is a no-op.
-const ensureQueues = (force = false) => fetchQueues({ force })
-
-// Refresh everything the page shows — including the lagging badge, which used
-// to keep stating its mount-time count while the grid beside it updated.
-const refreshAll = async () => {
-  await Promise.all([fetchConsumers(), ensureQueues(true), loadLaggingPartitions()])
+const selectedVerdict = computed(() => verdictOf(selectedConsumer.value, linesFor))
+const selectedLagTone = computed(() => {
+  const g = selectedConsumer.value
+  if (!g || groupActivity(g, linesFor(g.queueName)) === 'inactive') return ''
+  const sev = timeLagSeverity(g.maxTimeLag, linesFor(g.queueName))
+  return sev === 'warn' || sev === 'bad' ? `is-${sev}` : ''
+})
+const viewConsumer = (g) => {
+  selectedGroup.value = g?.name || ''
+  groupQueue.value = filterQueue.value ? '' : g?.queueName || ''
+}
+const closeDetail = () => {
+  selectedGroup.value = ''
+  groupQueue.value = ''
 }
 
-// ---------------------------------------------------------------------------
-// Computed
-// ---------------------------------------------------------------------------
-const isLagging = (g) => {
-  if (g.state === 'Lagging') return true
-  return (g.maxTimeLag || 0) > 0 || (g.partitionsWithLag || 0) > 0
-}
-
-// Conflation is declared per (group, queue) and only the GROUP listing carries
-// it — the lagging-partition rows below do not. One set built from the listing
-// the page already has, so the partition table can label its number without a
-// second request.
-const conflatingGroupKeys = computed(() => conflatingKeys(consumers.value))
-const rowConflates = (p) => partitionConflates(p, conflatingGroupKeys.value)
-
-// Helper — pull the queue meta (namespace/task) for a consumer row.
-// Returns an empty object when the queue isn't in the store yet, so
-// undefined-namespace queues match an empty namespace filter.
-const metaFor = (c) => queueMeta.value.get(c.queueName) || {}
-
-// "Queue" dropdown is scoped to the active namespace/task filter, so it
-// doesn't show every queue in the cluster when the user has narrowed.
-// Also limited to queues that actually have consumer groups, so the
-// dropdown isn't padded with idle queues.
-const scopedQueueNames = computed(() => {
-  const seen = new Set()
-  for (const c of consumers.value) {
-    const meta = metaFor(c)
-    if (filterNamespace.value && meta.namespace !== filterNamespace.value) continue
-    if (filterTask.value && meta.task !== filterTask.value) continue
-    if (c.queueName) seen.add(c.queueName)
-  }
-  return [...seen].sort()
-})
-
-const filteredConsumers = computed(() => {
-  let result = [...consumers.value]
-  if (searchQuery.value) {
-    const q = searchQuery.value.toLowerCase()
-    result = result.filter(c =>
-      (c.name || '').toLowerCase().includes(q) ||
-      (c.queueName || '').toLowerCase().includes(q)
-    )
-  }
-  if (filterNamespace.value) {
-    result = result.filter(c => metaFor(c).namespace === filterNamespace.value)
-  }
-  if (filterTask.value) {
-    result = result.filter(c => metaFor(c).task === filterTask.value)
-  }
-  if (filterQueue.value) {
-    result = result.filter(c => c.queueName === filterQueue.value)
-  }
-  if (showLaggingOnly.value) {
-    result = result.filter(isLagging)
-  }
-  return result
-})
-
-// Clear queue filter when it falls out of the namespace/task scope, so
-// the user doesn't end up with an empty result set after narrowing.
-watch([filterNamespace, filterTask], () => {
-  if (!restoringRoute.value && filterQueue.value && !scopedQueueNames.value.includes(filterQueue.value)) {
-    filterQueue.value = ''
-  }
-})
-
-// ---------------------------------------------------------------------------
-// Presentation helpers
-// ---------------------------------------------------------------------------
-const getStatusText = (g) => g.state || 'Unknown'
-// The panel's verdict is the grid's (useAttention), not the broker's raw
-// state word: a group 1d behind is "Stuck" in both places. Mute is two states
-// with one shape: a native group that has never consumed, and a Kafka group
-// that is inactive — which may well have consumed, so it is never called the
-// first.
-const VERDICT = {
-  bad: { glyph: 'bad', word: 'Stuck', tone: 'bad' },
-  warn: { glyph: 'warn', word: 'Lagging', tone: 'warn' },
-  mute: { glyph: 'idle', word: 'Never consumed', tone: '' },
-  inactive: { glyph: 'idle', word: 'Inactive', tone: '' },
-  empty: { glyph: 'ok', word: 'No members', tone: '' },
-  ok: { glyph: 'ok', word: 'Stable', tone: '' },
-}
-const { linesFor } = useSettingsStore()
-const verdictOf = (g) => VERDICT[groupState(g, linesFor)] || VERDICT.ok
-const verdictGlyph = (g) => verdictOf(g).glyph
-const verdictWord = (g) => verdictOf(g).word
-const verdictTone = (g) => verdictOf(g).tone
-
-// A Kafka group's presence as the facade reports it, for the detail: its live
-// members, when it was last seen, and what its state means. Every age here is
-// `inactiveSeconds`, measured on the broker's clock — never this browser's.
+// A Kafka group's presence as the facade reports it: its live members, when it
+// was last seen, and what its state means. Every age is `inactiveSeconds`, on
+// the broker's clock, never this browser's.
 const presence = computed(() => {
   const g = selectedConsumer.value
   if (g?.kind !== 'kafka') return null
@@ -707,13 +419,16 @@ const presence = computed(() => {
   if (activity === 'live') seen = 'now'
   else if (g.lastSeenAt) seen = formatTimestamp(g.lastSeenAt) + (away > 0 ? ` · ${formatSpan(away)} ago` : '')
   let note = ''
+  let noteTitle = ''
   if (activity === 'live' && members === 0) {
-    note = 'Live with no members: its client assigns its own partitions and commits offsets.'
+    note = 'Its client assigns its own partitions.'
+    noteTitle = 'Live with no members: its client assigns its own partitions and commits offsets.'
   } else if (activity === 'idle') {
-    note = `No live member right now, which is also what a restart or a rebalance looks like for a while. It is judged by its lag until it has been away ${grace}, then shown as inactive.`
+    note = `Judged by its lag until it has been away ${grace}.`
+    noteTitle = 'No live member right now, which is also what a restart or a rebalance looks like for a while. Past the grace it is shown as inactive.'
   } else if (activity === 'inactive') {
-    note = (away !== null ? `No live member for longer than ${grace}. ` : '')
-      + 'An inactive group is not judged by its lag and raises no issue.'
+    note = 'Inactive: not judged by its lag.'
+    noteTitle = `${away !== null ? `No live member for longer than ${grace}. ` : ''}An inactive group raises no issue.`
   }
   return {
     members: members === null ? '—' : formatNumber(members),
@@ -721,42 +436,84 @@ const presence = computed(() => {
     seenAt: activity === 'live' ? null : g.lastSeenAt || null,
     said: groupPresence(g, linesFor),
     note,
+    noteTitle,
   }
 })
-const stateClass = (g) => {
-  const s = getStatusText(g)
-  if (s === 'Stable') return 'cg-state-ok'
-  if (s === 'Lagging') return 'cg-state-warn'
-  return 'cg-state-mute'
-}
-/** A count we hold, or an em dash — a missing value is not a zero. */
+
+/** A count we hold, or an em dash: a missing value is not a zero. */
 const dash = (v) => {
   const n = toNum(v)
   return n === null ? '—' : formatNumber(n)
 }
-const partitionKey = (p) => `${p.consumer_group}-${p.queue_name}-${p.partition_name}`
 
-const getLagLabel = (seconds) => {
-  if (seconds < 3600) {
-    const m = Math.round(seconds / 60); return `${m} minute${m !== 1 ? 's' : ''}`
-  } else if (seconds < 86400) {
-    const h = Math.round(seconds / 3600); return `${h} hour${h !== 1 ? 's' : ''}`
-  }
-  const d = Math.round(seconds / 86400); return `${d} day${d !== 1 ? 's' : ''}`
+// ---------------------------------------------------------------------------
+// Lagging partitions, behind more than a chosen age
+// ---------------------------------------------------------------------------
+const LAG_ROWS = 25
+const showAllLag = ref(false)
+const lagLabel = (seconds) => {
+  if (seconds < 3600) { const m = Math.round(seconds / 60); return `${m} minute${m !== 1 ? 's' : ''}` }
+  if (seconds < 86400) { const h = Math.round(seconds / 3600); return `${h} hour${h !== 1 ? 's' : ''}` }
+  const d = Math.round(seconds / 86400)
+  return `${d} day${d !== 1 ? 's' : ''}`
+}
+const lagOptions = LAG_THRESHOLDS.map((p) => ({ value: p.seconds, label: lagLabel(p.seconds) }))
+
+const lagging = useApi((config) => consumersApi.getLagging(lagThreshold.value, config))
+const laggingPartitions = computed(() => (Array.isArray(lagging.data.value) ? lagging.data.value : []))
+// First paint only: a refresh leaves the rows on screen where they are.
+const laggingFirstLoad = computed(() => lagging.loading.value && !lagging.data.value)
+const laggingErrorText = computed(() => describeApiError(lagging.error.value))
+const loadLaggingPartitions = () => lagging.refresh()
+const lagRows = computed(() => visiblePartitions(laggingPartitions.value, {
+  queue: filterQueue.value, namespace: filterNamespace.value, metaOf, search: searchQuery.value,
+}))
+const lagRowsShown = computed(() => (showAllLag.value ? lagRows.value : lagRows.value.slice(0, LAG_ROWS)))
+
+// Conflation is declared per (group, queue) and only the GROUP listing carries
+// it, so the partition rows are labelled from the listing already held.
+const conflatingGroupKeys = computed(() => conflatingKeys(consumers.value))
+const rowConflates = (p) => partitionConflates(p, conflatingGroupKeys.value)
+// An age, judged by its queue's lines (Settings); a conflating group's is
+// stated, not toned: on that policy a backlog is the design working.
+const lagTone = (p) => {
+  if (rowConflates(p)) return ''
+  const sev = timeLagSeverity(p.time_lag_seconds, linesFor(p.queue_name))
+  return sev === 'warn' || sev === 'bad' ? sev : ''
+}
+const partitionKey = (p) => `${p.consumer_group}-${p.queue_name}-${p.partition_name}`
+const skippingPartition = ref(null)
+
+watch(lagThreshold, () => {
+  showAllLag.value = false
+  loadLaggingPartitions()
+})
+
+// Pull the queue listing (cache-respecting): it scopes groups by namespace.
+const ensureQueues = (force = false) => fetchQueues({ force })
+
+const refreshAll = async () => {
+  await Promise.all([fetchConsumers(true), ensureQueues(true), loadLaggingPartitions()])
 }
 
-const viewConsumer = (g) => { selectedConsumer.value = g }
-
 // ---------------------------------------------------------------------------
-// Actions
-//
-// Every one of these returns a body the UI has to READ: the seek SPs report
-// `partitionsUpdated`, the deletes report `deletedPartitions`. A 2xx carrying
-// zero of either means nothing happened, and saying "done" there is the same
-// lie as a success toast on a failed call.
+// Actions. Every one returns a body the UI has to READ: the seeks report
+// `partitionsUpdated`, the deletes `deletedPartitions`. A 2xx carrying zero of
+// either did nothing, and saying "done" there is a lie.
 // ---------------------------------------------------------------------------
+const consumerToDelete = ref(null)
+const deleteMetadata = ref(true)
+const deleteError = ref('')
+const actionLoading = ref(false)
 
-/** Null when the payload says work was done, else why it wasn't. */
+const showSeekModal = ref(false)
+const seekConsumer = ref(null)
+const seekTimestamp = ref('')
+const seekError = ref('')
+
+const pendingConfirm = ref(null)
+
+/** Null when the payload says work was done, else why it was not. */
 const seekProblem = (data) => {
   if (!data || typeof data !== 'object') return 'The broker returned no result.'
   if (data.success === false) return data.error || 'The broker refused the seek.'
@@ -764,6 +521,7 @@ const seekProblem = (data) => {
   if (n !== null && n === 0) return 'No partition matched — the cursor did not move.'
   return null
 }
+const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`
 
 const confirmDelete = (g) => {
   deleteError.value = ''
@@ -786,20 +544,17 @@ const deleteConsumer = async () => {
       : await consumersApi.delete(target.name, deleteMetadata.value)
     const deleted = toNum(res.data?.deletedPartitions)
     if (deleted !== null && deleted === 0) {
-      // 200 + nothing removed: the group has no state on this tenant. Keep the
-      // modal open rather than close it as if the delete had landed.
+      // 200 + nothing removed: keep the modal open rather than close it as if
+      // the delete had landed.
       deleteError.value = 'Nothing was deleted — no partition state matched this group.'
       return
     }
     consumerToDelete.value = null
-    notifySuccess(
-      `Deleted ${label}`,
-      deleted === null ? null : `${deleted} partition${deleted === 1 ? '' : 's'} cleared`,
-    )
+    if (selectedConsumer.value && selectedKey.value === `${target.queueName ?? ''}\u0000${target.name ?? ''}`) closeDetail()
+    notifySuccess(`Deleted ${label}`, deleted === null ? null : `${plural(deleted, 'partition')} cleared`)
     fetchConsumers()
   } catch (err) {
-    // The failure is already on the global surface; this keeps the modal open
-    // and says why, instead of closing as though it had worked.
+    // Already on the global surface; this keeps the modal open and says why.
     deleteError.value = describeApiError(err)
   } finally {
     actionLoading.value = false
@@ -808,12 +563,12 @@ const deleteConsumer = async () => {
 
 const askMoveToNow = (g) => {
   if (!g.queueName) return
-  const label = g.name === '__QUEUE_MODE__' ? '(queue mode)' : g.name
+  const label = groupLabel(g)
   pendingConfirm.value = {
-    title: 'Move cursor to now',
-    body: `Move the cursor for "${label}" on queue "${g.queueName}" to the latest message?`,
-    consequence: 'Every pending message on that queue is skipped and will never be delivered to this group.',
-    confirmLabel: 'Move cursor',
+    title: 'Move to now',
+    body: `Move ${label} on ${g.queueName} to the latest message?`,
+    consequence: 'Every pending message is skipped and never delivered to this group.',
+    confirmLabel: 'Move to now',
     run: () => moveToNow(g, label),
   }
 }
@@ -826,10 +581,7 @@ const moveToNow = async (g, label) => {
       notifyWarn(`Cursor not moved for ${label}`, problem)
       return
     }
-    notifySuccess(
-      `Cursor moved to now for ${label}`,
-      `${res.data.partitionsUpdated} partition${res.data.partitionsUpdated === 1 ? '' : 's'} on ${g.queueName}`,
-    )
+    notifySuccess(`Moved ${label} to now`, `${plural(res.data.partitionsUpdated, 'partition')} on ${g.queueName}`)
     fetchConsumers()
   } catch {
     // Already announced by the shared HTTP client with the status and reason.
@@ -838,9 +590,9 @@ const moveToNow = async (g, label) => {
 
 const askSkipPartition = (p) => {
   pendingConfirm.value = {
-    title: 'Skip partition to end',
-    body: `Skip partition "${p.partition_name}" on queue "${p.queue_name}" (group ${p.consumer_group}) to the latest message?`,
-    consequence: 'Every pending message on that partition is skipped and will never be delivered to this group.',
+    title: 'Skip to end',
+    body: `Skip partition ${p.partition_name} on ${p.queue_name} to the latest message for ${groupLabel({ name: p.consumer_group })}?`,
+    consequence: 'Every pending message in it is skipped and never delivered to this group.',
     confirmLabel: 'Skip to end',
     run: () => skipPartition(p),
   }
@@ -855,7 +607,7 @@ const skipPartition = async (p) => {
       notifyWarn(`Partition ${p.partition_name} not skipped`, problem)
       return
     }
-    notifySuccess(`Skipped ${p.partition_name} to the end`, `${p.queue_name} · ${p.consumer_group}`)
+    notifySuccess(`Skipped ${p.partition_name} to the end`, `${p.queue_name} · ${groupLabel({ name: p.consumer_group })}`)
     await loadLaggingPartitions()
   } catch {
     // Already announced by the shared HTTP client.
@@ -886,7 +638,7 @@ const openSeekModal = (g) => {
 const handleSeekToTimestamp = async () => {
   if (!seekConsumer.value || !seekTimestamp.value) return
   const target = seekConsumer.value
-  const label = target.name === '__QUEUE_MODE__' ? '(queue mode)' : target.name
+  const label = groupLabel(target)
   actionLoading.value = true
   seekError.value = ''
   try {
@@ -899,10 +651,7 @@ const handleSeekToTimestamp = async () => {
     }
     showSeekModal.value = false
     seekTimestamp.value = ''
-    notifySuccess(
-      `Cursor moved for ${label}`,
-      `${res.data.partitionsUpdated} partition${res.data.partitionsUpdated === 1 ? '' : 's'} on ${target.queueName}`,
-    )
+    notifySuccess(`Moved the cursor of ${label}`, `${plural(res.data.partitionsUpdated, 'partition')} on ${target.queueName}`)
     fetchConsumers()
   } catch (err) {
     seekError.value = describeApiError(err)
@@ -911,220 +660,75 @@ const handleSeekToTimestamp = async () => {
   }
 }
 
-// When the user expands the section, refresh the lagging list — even if it's
-// already loaded the threshold may have been adjusted while collapsed.
-watch(showLaggingSection, (shown) => {
-  if (shown) loadLaggingPartitions()
-})
-
 useRefresh(refreshAll)
 
 onMounted(() => {
-  // Reuse the shared queue cache when possible — if the Queues page recently
-  // populated it, this returns immediately without a network round-trip.
-  // (The consumer and lagging lists are already in flight via useApi.)
+  // Cache-respecting: the list beside has usually just read both.
   ensureQueues()
+  fetchConsumers(false)
 })
 </script>
 
 <style scoped>
-/* The scope strip, the filter card, the ember panel-err, the stat grid and
-   the modal shell now live in style.css — this file keeps only what is
-   genuinely local to the Consumers page. */
-.qhg-legend {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text-mid);
-  margin-left: 4px;
-}
-.qhg-legend .ld { width: 7px; height: 7px; border-radius: var(--r-pill); }
-@media (max-width: 880px) {
-  .qhg-legend { display: none; }
-}
+.cg { display: flex; flex-direction: column; gap: 16px; }
+.cg > .page-tools, .cg > .view-banner { margin-bottom: 0; }
+.cg > .list-legend { margin-top: -8px; }
+.cg-search { flex: 0 1 240px; min-width: 160px; height: 32px; }
 
-/* Lagging Partitions card — placed at the top, collapsible. Same surface
-   tokens as the filter card above it, and the 16px top-level block rhythm.
-   When any partition is above threshold, the card carries a subtle warn
-   tint along the left edge so the operator sees something is off without
-   having to read the badge. */
-.lp-card {
-  background: var(--ink-2);
-  border: 1px solid var(--bd);
-  border-radius: var(--r-card);
-  overflow: hidden;
-  margin-bottom: 16px;
-  transition: border-color .15s var(--ease);
+/* --- Lagging partitions ---------------------------------------------------- */
+.lp .card-header { flex-wrap: wrap; row-gap: 8px; }
+.lp-pick { margin-left: auto; }
+.lp-quiet { padding: 12px 16px; font-size: 13px; color: var(--text-low); }
+.lp-err { color: var(--ember-400); }
+.lp-skel { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
+.lp-skel .skeleton { height: 24px; }
+.lp-scroll { overflow-x: auto; }
+.lp-table { min-width: 720px; }
+.lp-table th, .lp-table td { white-space: nowrap; }
+.lp-table .r { text-align: right; }
+.lp-name { font-weight: 500; color: var(--text-hi); }
+.lp-mid { color: var(--text-mid); }
+.lp-mono { font-family: var(--font-mono); font-size: 12px; }
+.lp-num { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-hi); }
+.lp-num.warn { color: var(--warn-400); }
+.lp-num.bad { color: var(--ember-400); }
+.lp-when { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.lp-table td { height: 40px; font-size: 13px; }
+.lp-unit { margin-left: 4px; font-family: var(--font-sans); font-style: normal; font-size: 11px; color: var(--text-low); }
+.lp-tag {
+  display: inline-block; margin-left: 8px; padding: 0 6px;
+  border: 1px solid var(--bd); border-radius: var(--r-chip);
+  font-size: 11px; line-height: 17px; color: var(--text-low); vertical-align: 1px;
 }
-.lp-card-warn {
-  border-color: color-mix(in srgb, var(--warn-400) 35%, transparent);
-  box-shadow: inset 3px 0 0 var(--warn-400);
-}
-.lp-head {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 14px;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid transparent;
-  cursor: pointer;
-  text-align: left;
-  color: var(--text-mid);
-  font-size: 12px;
-  transition: background .12s var(--ease), border-color .12s var(--ease);
-}
-.lp-head:hover { background: var(--ink-4); }
-.lp-head-open { border-bottom-color: var(--bd); }
-.lp-head-chevron {
-  color: var(--text-low);
-  transition: transform .15s var(--ease);
-  flex-shrink: 0;
-}
-.lp-head-open .lp-head-chevron { transform: rotate(90deg); }
-.lp-head-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-hi);
-  letter-spacing: -.005em;
-}
+.lp-skip { padding: 3px 8px; font-size: 12px; }
 
-/* Always-visible count badge — warn-toned when partitions are behind,
-   muted-ok when none, ember when the answer is unknown. The badge is the
-   operator's first signal; the expanded body is the detail. */
-.lp-head-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: var(--r-pill);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  font-weight: 500;
-  border: 1px solid transparent;
-  white-space: nowrap;
-}
-.lp-head-badge-warn {
-  color: var(--warn-400);
-  background: color-mix(in srgb, var(--warn-400) 10%, transparent);
-  border-color: color-mix(in srgb, var(--warn-400) 26%, transparent);
-}
-.lp-head-badge-ok {
-  color: var(--text-low);
-  background: var(--ink-3);
-  border-color: var(--bd);
-}
-.lp-head-badge-bad {
-  color: var(--ember-400);
-  background: var(--ember-glow);
-  border-color: var(--ember-bd);
-}
+/* --- The group's drawer ------------------------------------------------------ */
+.cg-status { flex-wrap: wrap; }
+.cg-status .lp-tag { margin-left: 2px; }
+.cg-status .detail-status.is-warn { color: var(--warn-400); }
+.cg-status .detail-status.is-bad { color: var(--ember-400); }
+.cg-note { margin: -8px 0 16px; font-size: 12px; color: var(--text-mid); }
+.cg-facts .tabular-nums.is-warn { color: var(--warn-400); }
+.cg-facts .tabular-nums.is-bad { color: var(--ember-400); }
+.cg-unit { margin-left: 4px; font-style: normal; font-size: 12px; color: var(--text-low); }
+.cg-link { color: var(--text-hi); text-decoration: underline; text-decoration-color: var(--bd-hi); text-underline-offset: 3px; }
+.cg-link:hover { text-decoration-color: currentColor; }
+.cg-topic { display: inline-flex; align-items: center; gap: 8px; }
+.cg-delete { margin-right: auto; }
+.cg-readonly { margin-right: auto; }
 
-.lp-head-hint {
-  font-size: 11.5px;
-  color: var(--text-low);
-}
-.lp-head-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-.lp-body {
-  padding: 6px 0;
-}
-.lp-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 24px;
-  color: var(--text-mid);
-  font-size: 13px;
-}
-.lp-empty-ok { color: var(--text-low); }
-/* The shared ember box is full-bleed by default; this card's body is
-   flush to its edges (the table spans it), so inset it here. */
-.lp-body > .panel-err { margin: 12px 14px; }
-.lp-table-wrap {
-  overflow-x: auto;
-}
-/* Skeleton shaped like the table it stands in for: three rows at row height,
-   inset to the table's own padding. */
-.lp-skel {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 14px;
-}
-.lp-table { width: 100%; }
-.lp-cell-strong { color: var(--text-hi); font-weight: 500; }
-.lp-cell-mid { color: var(--text-mid); }
+/* --- Modals: over the drawer that opens them (drawer 51, scrim 50) ---------- */
+.cg-over { z-index: 55; }
+.cg-form { display: flex; flex-direction: column; gap: 12px; }
+.cg-form .panel-err { margin: 0; }
+.cg-lead { margin: 0; font-size: 13px; color: var(--text-hi); overflow-wrap: anywhere; }
+.cg-lead strong { font-weight: 600; }
+.cg-help { margin: 0; font-size: 12px; color: var(--text-low); }
+.cg-field { display: flex; flex-direction: column; gap: 6px; }
+.cg-field-label { font-size: 12px; color: var(--text-mid); }
+.cg-field .input { height: 32px; }
 
-/* Conflation tag — the group's delivery policy, in the app's "idle, proven"
-   ice tone (the same token .chip-ice uses) and never a severity colour. One
-   shape for both places this page names a group: the partition table and the
-   detail modal's header. */
-.cfl-tag {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 1px 6px;
-  border-radius: var(--r-chip);
-  border: 1px solid var(--ice-bd);
-  background: var(--ice-glow);
-  color: var(--ice-400);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  vertical-align: middle;
-  white-space: nowrap;
+@media (max-width: 640px) {
+  .cg-search { flex: 1 1 100%; }
 }
-/* The unit under a conflating row's offset lag. Same right-aligned column, so
-   it sits under the figure it renames rather than beside it. */
-.lp-lag-note {
-  display: block;
-  font-size: 9.5px;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  color: var(--text-low);
-}
-/* The client kind is identity, not a policy: the tag's shape, in neutral ink
-   rather than conflation's ice. */
-.kind-tag {
-  border-color: var(--bd);
-  background: var(--ink-3);
-  color: var(--text-low);
-}
-.lp-cell-code {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11.5px;
-  padding: 1px 6px;
-  border-radius: var(--r-chip);
-  background: var(--ink-3);
-  border: 1px solid var(--bd);
-  color: var(--text-mid);
-}
-
-/* The State tile shows a word, not a figure — its own scale and its own
-   three colours, which is a meaning, not a chrome variant. */
-.cg-state { font-size: 16px; font-weight: 600; margin-top: 8px; }
-.cg-verdict { display: inline-flex; align-items: center; gap: 8px; font-size: 16px !important; }
-.cg-verdict.warn { color: var(--warn-400); }
-.cg-verdict.bad { color: var(--ember-400); }
-.cg-topic { display: inline-flex; align-items: center; gap: 12px; }
-.cg-presence { margin: 0 0 16px; font-size: 12px; line-height: 1.6; color: var(--text-mid); }
-.cg-state-ok { color: var(--ok-500); }
-.cg-state-warn { color: var(--warn-400); }
-.cg-state-mute { color: var(--text-mid); }
-
-.modal-queue-pill {
-  padding: 12px;
-  border-radius: var(--r-card);
-  border: 1px solid var(--bd);
-  background: var(--ink-3);
-}
-
-.qhg-legend .g:not(:first-child) { margin-left: 8px; }
 </style>

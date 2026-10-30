@@ -5,7 +5,9 @@
 
 import { computed, ref } from 'vue'
 
-export const SIDEBAR_STORAGE_KEY = 'queen-sidebar'
+// A new key since the pages gained their own sub sidebar (2026-10-30): the
+// rail is the default now, and a choice made before it does not carry over.
+export const SIDEBAR_STORAGE_KEY = 'queen-sidebar-2'
 
 // Storage and matchMedia both throw in hardened contexts (Safari private
 // mode, storage access denied); a sidebar width is never worth an exception.
@@ -35,7 +37,10 @@ const wideQuery = (() => {
   }
 })()
 
-export const collapsed = ref(readStored() === 'rail')
+// Always the rail since 2026-10-30: every page has its own sub sidebar, so the
+// full column would only repeat the rail's names. The stored choice is kept
+// for the drawer-era code that still reads it, never offered.
+export const collapsed = ref(true)
 /** Above the drawer breakpoint, where the rail exists at all. */
 export const wide = ref(wideQuery ? wideQuery.matches : true)
 wideQuery?.addEventListener?.('change', (e) => { wide.value = e.matches })
@@ -43,7 +48,5 @@ wideQuery?.addEventListener?.('change', (e) => { wide.value = e.matches })
 /** True when the sidebar is drawn as the icon rail right now. */
 export const rail = computed(() => collapsed.value && wide.value)
 
-export const toggleSidebar = () => {
-  collapsed.value = !collapsed.value
-  writeStored(collapsed.value ? 'rail' : 'full')
-}
+/** Kept for callers; the rail no longer widens. */
+export const toggleSidebar = () => {}

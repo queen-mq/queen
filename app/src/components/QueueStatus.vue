@@ -1,4 +1,6 @@
 <template>
+  <!-- A queue's verdict as a mark and a word: the word carries the colour only
+       when a line says so (warn, bad); healthy and idle stay grey. -->
   <span class="queue-status" :class="`queue-status-${tone}`">
     <span class="g" :class="glyph" aria-hidden="true" />
     <span>{{ label }}</span>
@@ -20,22 +22,10 @@ const glyph = computed(() => ({ healthy: 'ok', warning: 'warn', critical: 'bad' 
 
 <style scoped>
 .queue-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 7px;
-  border: 1px solid var(--bd);
-  border-radius: var(--r-chip);
-  color: var(--text-low);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.4;
-  white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 8px; min-width: 0;
+  font-size: 12px; color: var(--text-low); white-space: nowrap;
 }
-.queue-status-healthy { color: var(--text-mid); background: var(--ok-glow); border-color: var(--ok-bd); }
-.queue-status-healthy .g.ok { background: currentColor; }
-.queue-status .g.idle { border-color: currentColor; }
-.queue-status-warning { color: var(--warn-400); background: var(--warn-glow); border-color: var(--warn-bd); }
-.queue-status-critical { color: var(--ember-400); background: var(--ember-glow); border-color: var(--ember-bd); }
-.queue-status-unknown { border-style: dashed; border-color: var(--bd-hi); }
+.queue-status-healthy { color: var(--text-mid); }
+.queue-status-warning { color: var(--warn-400); }
+.queue-status-critical { color: var(--ember-400); }
 </style>

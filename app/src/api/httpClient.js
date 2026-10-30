@@ -103,9 +103,14 @@ export function createApiClient({
   // not one of the switch codes, a 429, an unreachable proxy. Those ARE
   // failures, and a page that quietly swallowed them would show stale rows with
   // nothing anywhere saying why.
-  function fail(err, probe = false) {
+  //
+  // `quiet: true` goes one step further, for a read the page states on its
+  // own, failure included (Traces' list of names says "Cannot read trace
+  // names" where the names would be): no toast at all, since it would say
+  // the same thing twice.
+  function fail(err, probe = false, quiet = false) {
     const rendersItself = isMissingRouteError(err) || isGatedVerdictError(err)
-    if (!(probe && rendersItself)) reportApiFailure(err)
+    if (!quiet && !(probe && rendersItself)) reportApiFailure(err)
     return Promise.reject(err)
   }
 
@@ -119,6 +124,7 @@ export function createApiClient({
       responseType,
       data: configBody,
       probe = false,
+      quiet = false,
       ...requestOptions
     } = config || {}
 
@@ -144,7 +150,7 @@ export function createApiClient({
           status: response.status,
           code: 'not_an_api_response',
           path,
-        }), probe)
+        }), probe, quiet)
       }
 
       const data = await responseData(response, responseType)
@@ -162,7 +168,7 @@ export function createApiClient({
 
       // Response validation already produced the public error contract; only
       // report it once.
-      if (error instanceof ApiError) return fail(error, probe)
+      if (error instanceof ApiError) return fail(error, probe, quiet)
 
       const response = isHTTPError(error) ? error.response : null
       const status = response?.status ?? 0
@@ -188,7 +194,7 @@ export function createApiClient({
         return new Promise(() => {})
       }
 
-      return fail(apiErr, probe)
+      return fail(apiErr, probe, quiet)
     }
   }
 

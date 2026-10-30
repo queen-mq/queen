@@ -1,22 +1,43 @@
 <template>
+  <SubSidebar :label="groupBy === 'task' ? 'Tasks' : 'Namespaces'" :current="scopeTitle">
+  <!-- The tenant and its namespaces (or tasks), one line each, always in
+       sight. A click calls the page's own drill-down, so it refetches exactly
+       as a chart click does; a group's queues are on the right. -->
+  <template #side>
+    <WorkloadSide
+      :group-by="groupBy"
+      :focus="focus"
+      :keys="focusKeys"
+      :groups="consumerGroups.data.value ? groupRows : null"
+      @group-by="selectGroupBy"
+      @root="goRoot"
+      @focus="focusNode"
+    />
+  </template>
   <div class="view-container">
 
-    <PageHead title="Workload" :live="refreshAgo">
-      <template #sub>
-        <span :title="rangeUtcTitle">{{ rangeLabel }}</span>
-        <!-- The fallback is a DIFFERENT provenance, so it is labelled: these
-             numbers were rolled up in this browser, not by the broker. -->
-        <template v-if="fallbackMode"> · <span :title="FALLBACK_TITLE">computed in this browser</span></template>
+    <PageHead :title="scopeTitle" :live="refreshAgo">
+      <template #title><span :title="scopeTitle">{{ scopeTitle }}</span></template>
+      <template v-if="headFacts.length" #sub>
+        <span class="wl-facts">
+          <span v-for="f in headFacts" :key="f.k" class="wl-fact" :title="f.title || undefined">
+            <span class="wl-fact-k">{{ f.k }}</span><span class="wl-fact-v">{{ f.v }}</span>
+            <button v-if="f.clear" type="button" class="wl-fact-x" :aria-label="f.clearLabel" @click="f.clear"><Icon name="x" :size="12" :stroke="2" /></button>
+          </span>
+        </span>
       </template>
       <template #range>
-        <div class="seg" role="group" aria-label="Time range">
+        <div class="seg wl-range" role="group" aria-label="Time range">
           <button
             v-for="r in timeRanges"
             :key="r.value"
+            type="button"
             :class="{ on: selectedRange === r.value && !customMode }"
+            :aria-pressed="selectedRange === r.value && !customMode"
+            :title="r.longLabel"
             @click="selectQuickRange(r.value)"
           >{{ r.label }}</button>
-          <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
+          <button type="button" :class="{ on: customMode }" :aria-pressed="customMode" @click="toggleCustomMode">Custom</button>
         </div>
       </template>
       <!-- A node that did not answer the broker's gather took its counts out
@@ -26,51 +47,24 @@
       </template>
     </PageHead>
 
+    <!-- Group by and the pick are the list's (WorkloadSide). Drilling in is
+         still a REFETCH with groupBy=queue and the namespace/task as a
+         filter, not a client-side slice. -->
     <PageTools>
-      <label class="tool-field" :title="focusHint">
-        <span class="tool-label">{{ groupBy === 'task' ? 'Task' : 'Namespace' }}</span>
-        <select class="input" :value="focus === null ? '*' : focus" @change="pickFocus($event.target.value)">
-          <option value="*">{{ rootCrumb }}</option>
-          <option v-for="o in focusOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-        </select>
-      </label>
-      <!-- Where the drill stands, once it has left the root. Drilling in is a
-           REFETCH with groupBy=queue and the namespace/task as a filter, not a
-           client-side slice. -->
-      <div v-if="focus !== null" class="wl-crumbs">
-        <button class="crumb" @click="goRoot">{{ rootCrumb }}</button>
-        <span class="crumb-sep">›</span>
-        <button class="crumb" :disabled="!selectedQueue" @click="selectedQueue = null">{{ focusName }}</button>
-        <template v-if="selectedQueue">
-          <span class="crumb-sep">›</span>
-          <button class="crumb" disabled>{{ selectedQueue }}</button>
-        </template>
-      </div>
       <template #view>
-        <div class="tool-seg">
-          <span class="tool-label">Group by</span>
-          <div class="seg">
-            <button :class="{ on: groupBy === 'namespace' }" @click="selectGroupBy('namespace')">Namespace</button>
-            <button :class="{ on: groupBy === 'task' }" @click="selectGroupBy('task')">Task</button>
-          </div>
-        </div>
-        <div class="tool-seg">
-          <span class="tool-label">Compare</span>
-          <div class="seg">
-            <button
-              v-for="c in compareModes"
-              :key="c.value"
-              :class="{ on: compare === c.value }"
-              @click="selectCompare(c.value)"
-            >{{ c.label }}</button>
-          </div>
-        </div>
+        <UiSelect
+          :model-value="compare"
+          label="Compare"
+          :options="compareModes"
+          aria-label="Compare with another window"
+          @update:model-value="selectCompare"
+        />
       </template>
     </PageTools>
 
     <!-- A window of your own: the only range that waits for Apply, because a
          half-typed date must not re-scope the page. -->
-    <div v-if="customMode" class="page-tools">
+    <div v-if="customMode" class="page-tools wl-custom">
       <label class="tool-field">
         <span class="tool-label">From</span>
         <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
@@ -79,19 +73,26 @@
         <span class="tool-label">To</span>
         <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
       </label>
-      <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+      <button type="button" class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
       <span v-if="customError" class="tool-note is-bad">{{ customError }}</span>
+    </div>
+
+    <!-- One line for a failed read, here, rather than in every card: the
+         cards keep the last read that loaded, or say they have none. -->
+    <div v-if="workload.failed.value" class="status-banner banner-bad view-banner wl-block" role="status">
+      <span>
+        <strong>Could not load the workload</strong> · {{ workloadErrorText }}<template v-if="loaded && lastLoadedText"> · showing the read of {{ lastLoadedText }}</template>
+      </span>
     </div>
 
     <!-- Counts. The tenant totals, whatever the rows below are filtered to:
          the Overview's count tiles, in two rows. The first is what there is
          right now; the second is what the window added up to, and is the only
          one the range picker moves. -->
-    <div v-if="workloadFailed" class="panel-err wl-block">{{ workloadErrorText }}</div>
-    <div v-else-if="!tenant" class="skeleton wl-block" style="height: 132px" />
-    <div v-else class="wl-counts wl-block">
-      <div class="wl-counts-row" role="group" aria-label="Right now">
-        <span class="wl-counts-head">now</span>
+    <div v-if="!tenant && !workload.failed.value" class="skeleton wl-block" style="height: 132px" />
+    <div v-else-if="tenant" class="wl-counts wl-block">
+      <div class="wl-counts-row" role="group" :aria-label="nowHead">
+        <span class="wl-counts-head">{{ nowHead }}</span>
         <div class="count-tile"><span class="k">Queues</span><span class="v">{{ fmt.n(tenant.queues) }}</span></div>
         <div class="count-tile"><span class="k">Consumer groups</span><span class="v">{{ fmt.n(tenant.now.groups) }}</span></div>
         <div class="count-tile"><span class="k">Partitions</span><span class="v">{{ fmt.n(tenant.now.partitions) }}</span></div>
@@ -102,8 +103,8 @@
         <div class="count-tile"><span class="k">In DLQ</span><span class="v">{{ fmt.n(tenant.now.deadLetter) }}</span></div>
         <div class="count-tile"><span class="k">Retained</span><span class="v">{{ fmt.bytes(tenant.now.retainedBytes) }}</span></div>
       </div>
-      <div class="wl-counts-row" role="group" :aria-label="rangeLabel">
-        <span class="wl-counts-head">{{ rangeLabel }}<template v-if="deltas"><br />vs {{ compareLabel }}</template></span>
+      <div class="wl-counts-row" role="group" :aria-label="windowHead">
+        <span class="wl-counts-head" :title="rangeUtcTitle || undefined">{{ windowHead }}<template v-if="deltas"> <br /><span class="wl-vs">vs {{ compareLabel }}</span></template></span>
         <div class="count-tile"><span class="k">Pushed</span><span class="v">{{ fmt.n(tenant.window.pushMessages) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.pushMessages.pct) }}</em></span></div>
         <div class="count-tile"><span class="k">Delivered</span><span class="v">{{ fmt.n(tenant.window.popMessages) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.popMessages.pct) }}</em></span></div>
         <!-- Its own tile, never added to Delivered: see FETCHED_TITLE. -->
@@ -111,27 +112,20 @@
         <div class="count-tile"><span class="k">Acked</span><span class="v">{{ fmt.n(tenant.window.ackSuccess) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackSuccess.pct) }}</em></span></div>
         <div class="count-tile"><span class="k">Ack failures</span><span class="v" :class="ackFailedTone">{{ fmt.n(tenant.window.ackFailed) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackFailed.pct) }}</em></span></div>
         <div class="count-tile"><span class="k">Empty polls</span><span class="v">{{ fmt.n(tenant.window.popEmpty) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.popEmpty.pct) }}</em></span></div>
-        <div class="count-tile"><span class="k">Fill</span><span class="v">{{ fmt.pct(tenantFill) }}</span></div>
+        <div class="count-tile" title="Deliveries per poll in the window"><span class="k">Fill</span><span class="v">{{ fmt.pct(tenantFill) }}</span></div>
       </div>
     </div>
 
     <!-- Work over time -->
     <div class="card">
       <div class="card-header">
-        <h3>{{ `Work over time by ${level === 'queue' ? 'queue' : groupBy}` }}</h3>
-        <span class="card-sub">stacked, {{ bucketMinutes }} min buckets</span>
-        <div class="seg seg-sm">
-          <button
-            v-for="m in metrics"
-            :key="m.value"
-            :class="{ on: metric === m.value }"
-            @click="metric = m.value"
-          >{{ m.label }}</button>
-        </div>
+        <h3>{{ `Work over time by ${levelWord}` }}</h3>
+        <span class="card-sub">stacked, {{ bucketMinutes }}-minute buckets</span>
+        <UiSelect v-model="metric" class="wl-card-select" size="sm" :options="metrics" aria-label="Measure" />
         <span class="muted">{{ rangeLabel }}</span>
       </div>
       <div class="card-body">
-        <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
+        <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
         <div v-else class="wl-chart" style="height: 280px">
           <canvas :ref="(el) => setCanvas('flow', el)" />
         </div>
@@ -142,13 +136,13 @@
     <div class="wl-grid-2">
       <div class="card">
         <div class="card-header">
-          <h3>{{ `Share of the work by ${level === 'queue' ? 'queue' : groupBy}` }}</h3>
-          <span class="card-sub" :title="FETCHED_TITLE">delivered and fetched (Kafka), with pushed under it · share is of the tenant's reads</span>
+          <h3>{{ `Share of the work by ${levelWord}` }}</h3>
+          <span class="card-sub" :title="`Delivered and fetched (Kafka), with pushed under it; the share is of the tenant's reads. ${FETCHED_TITLE}`">delivered, then pushed</span>
           <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length * (prevPayload ? 1.5 : 1.15)) }">
             <canvas :ref="(el) => setCanvas('share', el)" />
           </div>
@@ -157,12 +151,13 @@
 
       <div class="card">
         <div class="card-header">
-          <h3>{{ `Activity map by ${level === 'queue' ? 'queue' : groupBy}` }}</h3>
-          <span class="card-sub">deliveries per bucket · strongest = {{ fmt.n(heat.max) }} / {{ bucketMinutes }} min</span>
+          <h3>{{ `Activity map by ${levelWord}` }}</h3>
+          <span class="card-sub" :title="`The strongest cell is ${fmt.n(heat.max)} deliveries in ${bucketMinutes} minutes`">deliveries per bucket</span>
           <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!heatRows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <Heatmap
             v-else
             :rows="heatRows"
@@ -180,12 +175,12 @@
       <div class="card">
         <div class="card-header">
           <h3>{{ `Partitions by ${levelWord}` }}</h3>
-          <span class="card-sub">live partitions · label = partitions per queue</span>
+          <span class="card-sub" title="Live partitions; the label beside a bar adds partitions per queue">live partitions</span>
           <span class="muted">now</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length) }">
             <canvas :ref="(el) => setCanvas('partsBy', el)" />
           </div>
@@ -195,12 +190,12 @@
       <div class="card">
         <div class="card-header">
           <h3>{{ `Queues and consumer groups by ${levelWord}` }}</h3>
-          <span class="card-sub">queues, with the consumer groups attached to them under</span>
+          <span class="card-sub" title="Queues, with the consumer groups attached to them under">queues, then groups</span>
           <span class="muted">now</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length * 1.15) }">
             <canvas :ref="(el) => setCanvas('structure', el)" />
           </div>
@@ -212,12 +207,12 @@
       <div class="card">
         <div class="card-header">
           <h3>{{ `Retained bytes by ${levelWord}` }}</h3>
-          <span class="card-sub">what is on disk for each</span>
+          <span class="card-sub">on disk</span>
           <span class="muted">now</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length) }">
             <canvas :ref="(el) => setCanvas('retained', el)" />
           </div>
@@ -227,12 +222,12 @@
       <div class="card">
         <div class="card-header">
           <h3>{{ `Partition churn by ${levelWord}` }}</h3>
-          <span class="card-sub">partitions created, then deleted, in the window</span>
+          <span class="card-sub" title="Partitions created, then deleted, in the window">created, then deleted</span>
           <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length * 1.15) }">
             <canvas :ref="(el) => setCanvas('churn', el)" />
           </div>
@@ -246,12 +241,12 @@
       <div class="card">
         <div class="card-header">
           <h3>Pending</h3>
-          <span class="card-sub">amber = no consumer group</span>
+          <span class="card-sub" title="Amber is pending on queues no consumer group reads, unless Settings says none is expected">amber: no consumer group</span>
           <span class="muted">now</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length) }">
             <canvas :ref="(el) => setCanvas('pending', el)" />
           </div>
@@ -261,33 +256,32 @@
       <div class="card">
         <div class="card-header">
           <h3>Oldest waiting</h3>
-          <span class="card-sub">worst consumer-group time lag · coloured by each queue's lag lines</span>
+          <span class="card-sub" title="The worst consumer-group time lag of each, coloured by that queue's lag lines">worst group lag</span>
           <span class="muted">now</span>
         </div>
         <div class="card-body">
           <!-- This panel is the consumer-groups list, not the workload
                endpoint: with that list down there is no honest bar to draw. -->
           <div v-if="groupsFailed" class="panel-err">{{ groupsErrorText }}</div>
-          <div v-else-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-else-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length) }">
             <canvas :ref="(el) => setCanvas('oldest', el)" />
           </div>
         </div>
       </div>
-
     </div>
 
     <div class="wl-grid-2">
       <div class="card">
         <div class="card-header">
           <h3>In DLQ</h3>
-          <span class="card-sub">rows parked in dead-letter</span>
+          <span class="card-sub">dead-letter rows</span>
           <span class="muted">now</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length) }">
             <canvas :ref="(el) => setCanvas('dlq', el)" />
           </div>
@@ -297,18 +291,17 @@
       <div class="card">
         <div class="card-header">
           <h3>Fill</h3>
-          <span class="card-sub">deliveries per poll · blank under 5 polls · a Kafka consumer fetches and never polls</span>
+          <span class="card-sub" title="Deliveries per poll; blank under 5 polls. A Kafka consumer fetches and never polls.">deliveries per poll</span>
           <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length) }">
             <canvas :ref="(el) => setCanvas('fill', el)" />
           </div>
         </div>
       </div>
-
     </div>
 
     <div class="wl-grid-2">
@@ -319,8 +312,8 @@
           <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length) }">
             <canvas :ref="(el) => setCanvas('ack', el)" />
           </div>
@@ -330,12 +323,12 @@
       <div class="card">
         <div class="card-header">
           <h3>Lag at pop</h3>
-          <span class="card-sub">average → worst, log scale</span>
+          <span class="card-sub" title="From the average to the worst, on a log scale">average to worst</span>
           <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
-          <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-          <div v-else-if="!rows.length" class="empty">No queue in this scope.</div>
+          <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
+          <div v-else-if="!rows.length" class="empty"><Icon name="chart-column" :size="16" />No queue in this scope</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(rows.length) }">
             <canvas :ref="(el) => setCanvas('lag', el)" />
           </div>
@@ -344,17 +337,19 @@
     </div>
 
     <!-- Consumer groups of the clicked queue -->
-    <div v-if="selectedQueue" class="card">
+    <div v-if="selectedQueue" ref="groupsCard" class="card wl-groups-card">
       <div class="card-header">
-        <h3>Consumer groups of {{ selectedQueue }}</h3>
-        <RouterLink class="btn btn-ghost" :to="queueLocation(selectedQueue, route, 'overview', windowQuery(currentRange()))">Inspect queue →</RouterLink>
-        <RouterLink class="btn btn-ghost" :to="queueLocation(selectedQueue, route, 'consumers', windowQuery(currentRange()))">Inspect consumer groups →</RouterLink>
+        <h3 :title="selectedQueue">Consumer groups of {{ selectedQueue }}</h3>
         <span class="card-sub">{{ groupsSub }}</span>
-        <span class="muted">now</span>
+        <div class="wl-card-actions">
+          <RouterLink class="btn btn-ghost" :to="queueLocation(selectedQueue, route, 'overview', windowQuery(currentRange()))">Open queue</RouterLink>
+          <RouterLink class="btn btn-ghost" :to="queueLocation(selectedQueue, route, 'consumers', windowQuery(currentRange()))">Consumer groups</RouterLink>
+          <button type="button" class="btn btn-ghost btn-icon" aria-label="Close the queue" title="Close" @click="selectedQueue = null"><Icon name="x" :size="15" /></button>
+        </div>
       </div>
       <div class="card-body">
         <div v-if="groupsFailed" class="panel-err">{{ groupsErrorText }}</div>
-        <div v-else-if="!queueGroups.length" class="empty">No consumer group has ever attached to this queue.</div>
+        <div v-else-if="!queueGroups.length" class="empty"><Icon name="users-round" :size="16" />No consumer group has ever read this queue</div>
         <div v-else class="wl-chart" :style="{ height: chartHeight(queueGroups.length) }">
           <canvas :ref="(el) => setCanvas('groups', el)" />
         </div>
@@ -371,7 +366,7 @@
     <div class="wl-eyebrow">
       <span class="eyebrow-text">Deeper</span>
       <span class="eyebrow-rule"></span>
-      <span class="eyebrow-sub">a 7 day profile and a 24 hour queue-level read · loaded on open and on a range or group-by change, not on every refresh</span>
+      <span class="eyebrow-sub" title="A 7-day profile and a 24-hour queue-level read, loaded on open and on a range or group-by change, not on every refresh">7 days and 24 hours, read on open</span>
       <!-- Its own reads, at their own time: a node missing from them is said
            here, not by the page's chip, which speaks for the panels above. -->
       <span v-if="deeperPartial" class="chip chip-warn" role="status" :title="PARTIAL_TITLE"><span class="dot" />{{ deeperPartial }}</span>
@@ -381,20 +376,13 @@
       <div class="card-header">
         <h3>Weekly profile</h3>
         <span class="card-sub">{{ weekSub }}</span>
+        <UiSelect v-if="week && weekPills.length > 1" v-model="weekPick" class="wl-card-select" size="sm" label="Show" :options="weekPills" aria-label="Whose week" />
         <span class="muted">last 7d</span>
       </div>
       <div class="card-body">
         <div v-if="deepWeek.failed.value" :class="deeperErrorClass(deepWeek)">{{ deeperErrorText(deepWeek) }}</div>
         <div v-else-if="!week" class="empty">Loading…</div>
         <template v-else>
-          <div class="seg seg-sm wl-seg">
-            <button
-              v-for="p in weekPills"
-              :key="p.value"
-              :class="{ on: weekPick === p.value }"
-              @click="weekPick = p.value"
-            >{{ p.label }}</button>
-          </div>
           <Heatmap :rows="weekRows" :buckets="HOURS" />
           <p class="wl-note">{{ weekStats }}</p>
         </template>
@@ -409,7 +397,7 @@
       <div class="card-body">
         <div v-if="deepWeek.failed.value" :class="deeperErrorClass(deepWeek)">{{ deeperErrorText(deepWeek) }}</div>
         <div v-else-if="!baseline.rows.length" class="empty">
-          {{ deepWeek.loading.value ? 'Loading…' : 'No deliveries in the last 7 days to compare against.' }}
+          <Icon v-if="!deepWeek.loading.value" name="chart-column" :size="16" />{{ deepWeek.loading.value ? 'Loading…' : 'No deliveries in the last 7 days to compare' }}
         </div>
         <div v-else class="wl-chart" :style="{ height: chartHeight(baseline.rows.length) }">
           <canvas :ref="(el) => setCanvas('base', el)" />
@@ -421,12 +409,12 @@
       <div class="card">
         <div class="card-header">
           <h3>Reads per pushed message</h3>
-          <span class="card-sub" :title="FETCHED_TITLE">deliveries + Kafka fetches · top 12 queues by reads</span>
+          <span class="card-sub" :title="`Deliveries and Kafka fetches, for the 12 queues with the most reads. ${FETCHED_TITLE}`">top 12 queues by reads</span>
           <span class="muted">last 24h</span>
         </div>
         <div class="card-body">
           <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
-          <div v-else-if="!topQueues.length" class="empty">{{ deepEff.loading.value ? 'Loading…' : 'No deliveries in the last 24h.' }}</div>
+          <div v-else-if="!topQueues.length" class="empty"><Icon v-if="!deepEff.loading.value" name="chart-column" :size="16" />{{ deepEff.loading.value ? 'Loading…' : 'No deliveries in the last 24h' }}</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(topQueues.length) }">
             <canvas :ref="(el) => setCanvas('fan', el)" />
           </div>
@@ -436,18 +424,17 @@
       <div class="card">
         <div class="card-header">
           <h3>Acks per delivery</h3>
-          <span class="card-sub">acks inside /transaction are not attributed</span>
+          <span class="card-sub" title="Acks made inside a /transaction are not attributed to a queue">top 12 queues by reads</span>
           <span class="muted">last 24h</span>
         </div>
         <div class="card-body">
           <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
-          <div v-else-if="!topQueues.length" class="empty">{{ deepEff.loading.value ? 'Loading…' : 'No deliveries in the last 24h.' }}</div>
+          <div v-else-if="!topQueues.length" class="empty"><Icon v-if="!deepEff.loading.value" name="chart-column" :size="16" />{{ deepEff.loading.value ? 'Loading…' : 'No deliveries in the last 24h' }}</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(topQueues.length) }">
             <canvas :ref="(el) => setCanvas('ackd', el)" />
           </div>
         </div>
       </div>
-
     </div>
 
     <div class="wl-grid-2">
@@ -459,7 +446,7 @@
         </div>
         <div class="card-body">
           <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
-          <div v-else-if="!topQueues.length" class="empty">{{ deepEff.loading.value ? 'Loading…' : 'No deliveries in the last 24h.' }}</div>
+          <div v-else-if="!topQueues.length" class="empty"><Icon v-if="!deepEff.loading.value" name="chart-column" :size="16" />{{ deepEff.loading.value ? 'Loading…' : 'No deliveries in the last 24h' }}</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(topQueues.length * 1.15) }">
             <canvas :ref="(el) => setCanvas('batch', el)" />
           </div>
@@ -469,36 +456,35 @@
       <div class="card">
         <div class="card-header">
           <h3>Lag budget</h3>
-          <span class="card-sub">share of the queue's active buckets, by worst lag at pop</span>
+          <span class="card-sub" title="The share of each queue's active buckets, by the worst lag at pop in the bucket">active buckets by lag</span>
           <span class="muted">last 24h</span>
         </div>
         <div class="card-body">
           <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
           <div v-else-if="!budgetRows.length" class="empty">
-            {{ deepEff.loading.value ? 'Loading…' : 'No lag sampled in the last 24h.' }}
+            <Icon v-if="!deepEff.loading.value" name="chart-column" :size="16" />{{ deepEff.loading.value ? 'Loading…' : 'No lag sampled in the last 24h' }}
           </div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(budgetRows.length) }">
             <canvas :ref="(el) => setCanvas('budget', el)" />
           </div>
         </div>
       </div>
-
     </div>
 
     <div class="wl-grid-2">
       <div class="card">
         <div class="card-header">
           <h3>Retention and eviction</h3>
-          <span class="card-sub">per queue · evicted = older than the max wait, never delivered</span>
+          <span class="card-sub" title="Per queue. Evicted: older than the max wait, never delivered.">per queue</span>
           <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="retention.failed.value" :class="deeperErrorClass(retention)">{{ deeperErrorText(retention) }}</div>
-          <div v-else-if="retentionUngrouped" class="empty">
-            Not available on this broker: it answers retention totals without the per-queue split.
+          <div v-else-if="retentionUngrouped" class="empty" title="This broker answers retention totals without the per-queue split">
+            Not available on this broker
           </div>
           <div v-else-if="!retentionRows.length" class="empty">
-            {{ retention.loading.value ? 'Loading…' : 'Nothing was retained or evicted in this window.' }}
+            <Icon v-if="!retention.loading.value" name="chart-column" :size="16" />{{ retention.loading.value ? 'Loading…' : 'Nothing retained or evicted in this window' }}
           </div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(retentionRows.length) }">
             <canvas :ref="(el) => setCanvas('ret', el)" />
@@ -509,12 +495,12 @@
       <div class="card">
         <div class="card-header">
           <h3>Partitions alive</h3>
-          <span class="card-sub">total vs written to in the last 24h</span>
+          <span class="card-sub" title="Every partition, and those written to in the last 24 hours">total, written in 24h</span>
           <span class="muted">now</span>
         </div>
         <div class="card-body">
           <div v-if="partitions.failed.value" :class="deeperErrorClass(partitions)">{{ deeperErrorText(partitions) }}</div>
-          <div v-else-if="!partitionRows.length" class="empty">{{ partitions.loading.value ? 'Loading…' : 'No partition reported.' }}</div>
+          <div v-else-if="!partitionRows.length" class="empty"><Icon v-if="!partitions.loading.value" name="chart-column" :size="16" />{{ partitions.loading.value ? 'Loading…' : 'No partition reported' }}</div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(partitionRows.length * 1.15) }">
             <canvas :ref="(el) => setCanvas('parts', el)" />
           </div>
@@ -526,23 +512,16 @@
     <div class="card">
       <div class="card-header">
         <h3>Why messages are in the DLQ</h3>
-        <span class="card-sub">{{ dlqSub }}</span>
+        <span class="card-sub" :title="dlqTitle">{{ dlqSub }}</span>
+        <UiSelect v-if="dlqPills.length > 1" :model-value="dlqPick" class="wl-card-select" size="sm" label="Queue" :options="dlqOptions" aria-label="Dead-letter queue" @update:model-value="pickDlq" />
         <span class="muted">now</span>
       </div>
       <div class="card-body">
-        <div v-if="!dlqPills.length" class="empty">No queue has a dead-letter row right now.</div>
+        <div v-if="!dlqPills.length" class="empty"><Icon name="archive-x" :size="16" />No dead-letter rows right now</div>
         <template v-else>
-          <div class="seg seg-sm wl-seg">
-            <button
-              v-for="p in dlqPills"
-              :key="p"
-              :class="{ on: dlqPick === p }"
-              @click="pickDlq(p)"
-            >{{ shortQueue(p) }}</button>
-          </div>
           <div v-if="dlqSignatures.failed.value" :class="deeperErrorClass(dlqSignatures)">{{ deeperErrorText(dlqSignatures) }}</div>
           <div v-else-if="!dlqSigRows.length" class="empty">
-            {{ dlqSignatures.loading.value ? 'Loading…' : 'No error message in the sample.' }}
+            <Icon v-if="!dlqSignatures.loading.value" name="archive-x" :size="16" />{{ dlqSignatures.loading.value ? 'Loading…' : 'No error message in the sample' }}
           </div>
           <div v-else class="wl-chart" :style="{ height: chartHeight(dlqSigRows.length) }">
             <canvas :ref="(el) => setCanvas('dlqsig', el)" />
@@ -554,13 +533,13 @@
     <div class="card">
       <div class="card-header">
         <h3>Where the bytes are</h3>
-        <span class="card-sub">retained bytes per message · top 10 by retained</span>
+        <span class="card-sub" title="Retained bytes per message, for the 10 queues that retain the most">bytes per message, top 10</span>
         <span class="muted">now</span>
       </div>
       <div class="card-body">
         <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
         <div v-else-if="!byteRows.length" class="empty">
-          {{ deepEff.loading.value ? 'Loading…' : 'No queue reports both retained bytes and a message count.' }}
+          <Icon v-if="!deepEff.loading.value" name="hard-drive" :size="16" />{{ deepEff.loading.value ? 'Loading…' : 'No queue reports both bytes and a message count' }}
         </div>
         <div v-else class="wl-chart" :style="{ height: chartHeight(byteRows.length) }">
           <canvas :ref="(el) => setCanvas('bytes', el)" />
@@ -576,7 +555,7 @@
     <div class="wl-eyebrow">
       <span class="eyebrow-text">Findings</span>
       <span class="eyebrow-rule"></span>
-      <span class="eyebrow-sub">what the panels above add up to · a row in the first list drills into it</span>
+      <span class="eyebrow-sub" title="What the panels above add up to; a row in the first list drills into it">what the panels add up to</span>
     </div>
 
     <div class="card">
@@ -585,21 +564,21 @@
         <span class="muted">{{ rangeLabel }}</span>
       </div>
       <div class="card-body">
-        <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
+        <div v-if="!loaded" class="empty"><Icon v-if="workload.failed.value" name="circle-x" :size="16" />{{ notLoaded }}</div>
         <template v-else>
           <p class="wl-summary">{{ summary }}</p>
-          <div v-if="groupsFailed" class="panel-err">
-            Consumer groups unavailable — {{ groupsErrorText }} The waiting and no-group rules are suspended.
+          <div v-if="groupsFailed" class="panel-err" :title="groupsErrorText">
+            Consumer groups unavailable: the waiting and no-group rules are off.
           </div>
           <ul class="wl-findings">
             <li v-for="(f, i) in attention" :key="i">
-              <button class="finding" :class="`sev-${f.sev}`" @click="drill(f.row)">
+              <button type="button" class="finding" :class="`sev-${f.sev}`" @click="drill(f.row)">
                 <span class="g" :class="findingGlyph(f.sev)" aria-hidden="true" />
                 <span class="ftext">{{ f.text }}</span>
                 <span class="fev">{{ f.evidence }}</span>
               </button>
             </li>
-            <li v-if="!attention.length" class="empty">Nothing needs attention in this window.</li>
+            <li v-if="!attention.length" class="empty"><Icon name="circle-check" :size="16" />Nothing needs attention in this window</li>
           </ul>
         </template>
       </div>
@@ -613,18 +592,19 @@
       <div class="card-body">
         <ul class="wl-findings">
           <li v-for="(f, i) in deepAttention" :key="i">
-            <div class="finding finding-stack" :class="`sev-${f.sev}`" style="cursor: default">
+            <div class="finding finding-stack" :class="`sev-${f.sev}`">
               <span class="g" :class="findingGlyph(f.sev)" aria-hidden="true" />
               <span class="ftext">{{ f.text }}</span>
               <span class="fev">{{ f.evidence }}</span>
             </div>
           </li>
-          <li v-if="!deepAttention.length" class="empty">{{ deepEff.loading.value ? 'Loading…' : 'Nothing to add from the deeper reads.' }}</li>
+          <li v-if="!deepAttention.length" class="empty"><Icon v-if="!deepEff.loading.value" name="circle-check" :size="16" />{{ deepEff.loading.value ? 'Loading…' : 'Nothing to add from the deeper reads' }}</li>
         </ul>
       </div>
     </div>
 
   </div>
+  </SubSidebar>
 </template>
 
 <script setup>
@@ -641,19 +621,24 @@ import {
 } from 'chart.js'
 
 import Heatmap from '@/components/Heatmap.vue'
+import Icon from '@/components/Icon.vue'
+import UiSelect from '@/components/UiSelect.vue'
 import { analytics, consumers, describeApiError, system } from '@/api'
 import { useApi } from '@/composables/useApi'
 import { alpha, chartPalette, chartTheme, legendLabels, semanticColors, themeVersion } from '@/composables/useChartTheme'
 import { ackFailureSeverity, backlogSeverity, groupActivity } from '@/composables/useSeverity'
 import { byLagInactiveLast } from '@/composables/useAttention'
 import {
-  formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc, formatTimestampUtc,
+  formatDateTimeLocal, formatTimestamp, formatTimestampRange, formatTimestampRangeUtc, formatTimestampUtc,
   validateRange,
 } from '@/composables/useFormat'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
+import SubSidebar from '@/components/SubSidebar.vue'
+import WorkloadSide from '@/components/WorkloadSide.vue'
+import { groupName, rootName } from '@/composables/workloadSide'
 import { stamp } from '@/composables/useStamp'
 import {
   comparisonRange, deeperFindings, efficiency, enrichRows, findings, flowSeries, formatters as fmt,
@@ -830,12 +815,12 @@ const { restoring: restoringRoute } = useRouteState({ groupBy, focus, selectedQu
 watch([groupBy, focus], () => { if (restoringRoute.value) fetchWorkload() })
 
 const metrics = [
-  { label: 'delivered', value: 'pop' },
-  { label: 'fetched (Kafka)', value: 'fetch' },
-  { label: 'pushed', value: 'push' },
-  { label: 'empty polls', value: 'popEmpty' },
-  { label: 'ack failures', value: 'ackFailed' },
-  { label: 'parked', value: 'parked' },
+  { label: 'Delivered', value: 'pop' },
+  { label: 'Fetched (Kafka)', value: 'fetch' },
+  { label: 'Pushed', value: 'push' },
+  { label: 'Empty polls', value: 'popEmpty' },
+  { label: 'Ack failures', value: 'ackFailed' },
+  { label: 'Parked', value: 'parked' },
 ]
 const METRIC_LABEL = {
   pop: 'deliveries', fetch: 'Kafka-fetched records', push: 'pushes', popEmpty: 'empty polls',
@@ -1065,10 +1050,12 @@ const stopClusterWatch = onClusterChange(() => {
   fetchDeeper()
 })
 
-const workloadFailed = computed(() => workload.failed.value || !workload.data.value)
-const workloadErrorText = computed(() => (
-  workload.failed.value ? describeApiError(workload.error.value) : 'No workload data yet.'
-))
+// A read that loaded at least once: the cards keep it through a failed
+// refresh, and the banner over them says how old it is.
+const loaded = computed(() => Boolean(workload.data.value))
+const notLoaded = computed(() => (workload.failed.value ? 'Not loaded' : 'Loading…'))
+const workloadErrorText = computed(() => describeApiError(workload.error.value))
+const lastLoadedText = computed(() => (workload.lastUpdated.value ? formatTimestamp(workload.lastUpdated.value) : ''))
 const groupsFailed = computed(() => consumerGroups.failed.value)
 const groupsErrorText = computed(() => describeApiError(consumerGroups.error.value))
 // The nodes the broker's gather lacked (usePartial), for this window and the
@@ -1189,30 +1176,47 @@ const summary = computed(() => {
   return `In the ${rangeLabel.value} ${who} ${fmt.n(total)} messages: ${parts.join(', ')}.${kafka}`
 })
 
-const rootCrumb = computed(() => (groupBy.value === 'namespace' ? 'all namespaces' : 'all tasks'))
-const focusName = computed(() => (
-  focus.value || (groupBy.value === 'namespace' ? '(no namespace)' : '(no task)')
-))
-const focusHint = computed(() => (
-  focus.value === null ? `or click a ${groupBy.value} anywhere to drill in`
-    : selectedQueue.value ? '' : 'click a queue for its consumer groups'
-))
+const focusName = computed(() => groupName(focus.value, groupBy.value))
 
-// Every namespace (or task) the tenant has, from the queue list, so a group
-// that is quiet in this window can still be picked; the empty key is the
-// real group of queues without one and sorts last.
-const focusOptions = computed(() => {
-  const kind = groupBy.value
-  const seen = new Set()
-  for (const m of queueMetaMap.value.values()) seen.add((kind === 'task' ? m.task : m.namespace) ?? '')
-  for (const r of rows.value) if (r.level !== 'queue') seen.add(r.key ?? '')
-  const keys = [...seen].sort((a, b) => (a === '' ? 1 : b === '' ? -1 : a.localeCompare(b)))
-  return keys.map((k) => ({ value: k, label: k || (kind === 'task' ? '(no task)' : '(no namespace)') }))
+// The header line: the pick (or the tenant), and the facts of that scope from
+// the queue list. The counts strip under it is always the tenant's, so it
+// says so once a group is picked.
+const scopeTitle = computed(() => (focus.value === null ? rootName(groupBy.value) : focusName.value))
+const scopeQueues = computed(() => (queuesStore.queues.value || []).filter((q) => q?.name
+  && (focus.value === null || ((groupBy.value === 'task' ? q.task : q.namespace) ?? '') === focus.value)))
+const headFacts = computed(() => {
+  const out = []
+  const listed = queuesStore.lastFetched.value > 0 || queuesStore.queues.value.length > 0
+  if (listed && focus.value === null) {
+    const keys = new Set(scopeQueues.value.map((q) => (groupBy.value === 'task' ? q.task : q.namespace) ?? ''))
+    out.push({ k: groupBy.value === 'task' ? 'Tasks' : 'Namespaces', v: fmt.n(keys.size) })
+  } else if (listed) {
+    const pending = scopeQueues.value.reduce((s, q) => s + (Number(q.messages?.pending) || 0), 0)
+    out.push({ k: 'Queues', v: fmt.n(scopeQueues.value.length) }, { k: 'Pending', v: fmt.n(pending) })
+  }
+  if (selectedQueue.value) {
+    out.push({ k: 'Queue', v: selectedQueue.value, title: 'Its consumer groups are under the charts', clear: () => { selectedQueue.value = null }, clearLabel: 'Close the queue' })
+  }
+  if (customMode.value && appliedCustom.value) out.push({ k: 'Window', v: rangeLabel.value, title: rangeUtcTitle.value })
+  if (fallbackMode.value) out.push({ k: 'Computed', v: 'in this browser', title: FALLBACK_TITLE })
+  return out
 })
+const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t)
+const nowHead = computed(() => (focus.value === null ? 'Now' : 'Tenant, now'))
+const windowHead = computed(() => (focus.value === null ? cap(rangeLabel.value) : `Tenant, ${rangeLabel.value}`))
 
-function pickFocus(v) {
-  if (v === '*') { goRoot(); return }
-  if (focus.value === v) return
+// The list takes every namespace (or task) from the queue list,
+// so a group that is quiet in this window can still be picked; these are the
+// keys the window's rows add to it — read only once the rows are at the level
+// Group by asks for, not the old level between a switch and its answer.
+const focusKeys = computed(() => (
+  rowsLevel.value === groupBy.value ? rows.value.map((r) => r.key ?? '') : []
+))
+
+// A namespace (or task) clicked in the list: drill into it; clicked again
+// with a queue open, back to the group.
+function focusNode(v) {
+  if (focus.value === v) { selectedQueue.value = null; return }
   focus.value = v
   selectedQueue.value = null
   fetchWorkload()
@@ -1269,10 +1273,18 @@ const ackFailedTone = computed(() => toneClass(ackFailureSeverity({
 // ---------------------------------------------------------------------------
 // Drill-down
 // ---------------------------------------------------------------------------
+const groupsCard = ref(null)
 function drill(row) {
   if (!row) return
-  if (row.level === 'queue') selectedQueue.value = row.key
-  else { focus.value = row.key; selectedQueue.value = null; fetchWorkload() }
+  if (row.level === 'queue') {
+    selectedQueue.value = row.key
+    // The answer to the click is the card of its consumer groups, under the
+    // charts: bring it into view rather than leave it off screen.
+    nextTick(() => {
+      const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      groupsCard.value?.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' })
+    })
+  } else { focus.value = row.key; selectedQueue.value = null; fetchWorkload() }
 }
 const drillByKey = (heatRow) => drill(rows.value.find((r) => r.key === heatRow.key))
 
@@ -1311,6 +1323,11 @@ function mount(id, cfg) {
   if (charts[id]) { charts[id].destroy(); delete charts[id] }
   const el = canvases[id]
   if (!el) return
+  // A phone's card: the room kept for the labels past the bars never takes
+  // more than a third of the canvas from the bars themselves.
+  const pad = cfg.options?.layout?.padding
+  const width = el.parentElement?.clientWidth || 0
+  if (pad && typeof pad.right === 'number' && width) pad.right = Math.min(pad.right, Math.round(width * 0.3))
   charts[id] = new Chart(el, cfg)
 }
 
@@ -1350,7 +1367,9 @@ function barBase(labels, onClick) {
     onHover: (e, els) => { e.native.target.style.cursor = els.length && onClick ? 'pointer' : 'default' },
     layout: { padding: { right: 122, top: 10 } },
     scales: {
-      x: { grid: { color: chartTheme.grid }, ticks: { maxTicksLimit: 5 }, beginAtZero: true },
+      // Every bar here is a count: whole-number ticks, so an empty window
+      // reads 0 and 1 rather than 0 0 0 1 1 1.
+      x: { grid: { color: chartTheme.grid }, ticks: { maxTicksLimit: 5, precision: 0 }, beginAtZero: true },
       y: {
         grid: { display: false },
         ticks: {
@@ -1399,7 +1418,7 @@ function renderFlow() {
         y: {
           stacked: true, beginAtZero: true, grid: { color: chartTheme.grid },
           title: { display: true, text: `${METRIC_LABEL[metric.value]} per ${bucketMinutes.value} min bucket`, font: { size: 10 } },
-          ticks: { callback: (v) => fmt.k(v) },
+          ticks: { callback: (v) => fmt.k(v), precision: 0 },
         },
       },
       plugins: {
@@ -1936,9 +1955,15 @@ const week = computed(() => (deepWeek.data.value ? weeklyProfile(deepWeek.data.v
 const weekPills = computed(() => {
   if (!week.value) return []
   const byTotal = [...week.value.totals.entries()].sort((a, b) => b[1] - a[1])
-  return [{ value: '*', label: 'tenant' }].concat(
+  return [{ value: '*', label: 'Tenant' }].concat(
     byTotal.map(([k]) => ({ value: k, label: k || (groupBy.value === 'task' ? '(no task)' : '(no namespace)') })),
   )
+})
+
+// A pick the new week no longer has (another Group by, a group gone quiet)
+// goes back to the tenant rather than leaving the field blank.
+watch(weekPills, (pills) => {
+  if (pills.length && !pills.some((p) => p.value === weekPick.value)) weekPick.value = '*'
 })
 
 const weekMatrix = computed(() => {
@@ -2055,13 +2080,19 @@ watch(dlqPills, (pills) => {
   if (!dlqPick.value || !pills.includes(dlqPick.value)) pickDlq(pills[0])
 })
 
+const dlqOptions = computed(() => dlqPills.value.map((q) => ({ value: q, label: shortQueue(q) })))
 const dlqSig = computed(() => dlqSignatures.data.value)
 const dlqSigRows = computed(() => dlqSig.value?.signatures || [])
 const dlqSub = computed(() => {
   const d = dlqSig.value
-  if (!d || dlqSignatures.failed.value) return 'folded error messages of the newest rows'
-  return `${fmt.n(d.rowsNow)} rows now · sample of the last ${fmt.n(d.sample)} · `
-    + `${fmt.bytes(d.avgBytes)} per row · retries ${(d.retryCounts || []).join(' / ') || '—'}`
+  if (!d || dlqSignatures.failed.value) return 'folded error messages'
+  return `${fmt.n(d.rowsNow)} rows · newest ${fmt.n(d.sample)} sampled`
+})
+const dlqTitle = computed(() => {
+  const d = dlqSig.value
+  const head = `Folded error messages of the newest dead-letter rows${dlqPick.value ? ` of ${dlqPick.value}` : ''}`
+  if (!d || dlqSignatures.failed.value) return head
+  return `${head}. ${fmt.bytes(d.avgBytes)} per row; retries ${(d.retryCounts || []).join(' / ') || '—'}.`
 })
 
 // --- partition liveness ----------------------------------------------------
@@ -2455,7 +2486,7 @@ function renderBytes() {
 async function renderAll() {
   await nextTick()
   applyDefaults()
-  if (!payload.value || workload.failed.value) {
+  if (!payload.value) {
     for (const id of Object.keys(charts)) { charts[id].destroy(); delete charts[id] }
     return
   }
@@ -2505,6 +2536,28 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* The header line's facts: the Queues pilot's chips (QueuesLayout). */
+/* The facts drop under the title when the line is full, as the pilot's do. */
+.page-head :deep(.page-id) { flex-wrap: wrap; row-gap: 6px; }
+.page-head :deep(.page-sub) { overflow: visible; white-space: normal; }
+.wl-facts { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.wl-fact {
+  display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%;
+  padding: 2px 8px; border-radius: var(--r-chip);
+  background: var(--ink-3); border: 1px solid var(--bd);
+  font-size: 11.5px; color: var(--text-hi); font-variant-numeric: tabular-nums; white-space: nowrap;
+  overflow: hidden;
+}
+.wl-fact-k { color: var(--text-low); }
+.wl-fact-v { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wl-fact-x {
+  align-self: center; display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; margin: 0 -4px 0 1px; padding: 0;
+  border: 0; border-radius: var(--r-chip); background: transparent; color: var(--text-low); cursor: pointer;
+}
+.wl-fact-x:hover { background: var(--ink-4); color: var(--text-hi); }
+.wl-range { flex-wrap: wrap; }
+
 /* Layout rhythm: the same 16px the other views keep between cards. Cards
    inside a grid row take their spacing from the grid, not from themselves. */
 .card { margin-bottom: 16px; }
@@ -2517,6 +2570,13 @@ onUnmounted(() => {
 .card-header { flex-wrap: wrap; row-gap: 4px; }
 .card-header .card-sub { white-space: normal; }
 .card-body { padding: 14px 16px 16px; }
+/* A control inside a card's header sits before its stamp, on the right. */
+.wl-card-select { margin-left: auto; }
+.wl-card-select + .muted { margin-left: 0; }
+.wl-card-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; flex-wrap: wrap; }
+.wl-card-actions .btn { height: 28px; }
+.wl-groups-card .card-header h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-custom { margin-top: -6px; }
 
 .wl-chart { position: relative; width: 100%; }
 
@@ -2529,10 +2589,11 @@ onUnmounted(() => {
 }
 .wl-counts-row { display: grid; grid-template-columns: 96px repeat(7, minmax(0, 1fr)); gap: 1px; }
 .wl-counts-head {
-  display: flex; align-items: center; padding: 12px 16px; background: var(--ink-2);
-  font-size: 12px; line-height: 1.35; color: var(--text-low);
+  display: block; align-self: stretch; padding: 12px 16px; background: var(--ink-2);
+  font-size: 12px; font-weight: 500; line-height: 1.4; color: var(--text-mid);
 }
 .wl-counts .count-tile .v { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wl-vs { color: var(--text-low); }
 .wl-warn { color: var(--warn-400) !important; }
 .wl-bad { color: var(--ember-400) !important; }
 .count-delta { margin-left: 6px; font-style: normal; font-size: 11px; font-weight: 400; letter-spacing: 0; color: var(--text-low); }
@@ -2563,27 +2624,20 @@ onUnmounted(() => {
   .finding { grid-template-columns: 10px minmax(0, 1fr); }
   .finding .fev { grid-column: 2; justify-self: start; text-align: left; max-width: none; }
 }
-.finding:hover { background: color-mix(in srgb, var(--text-hi) 2.5%, transparent); }
+.finding:hover { background: var(--ink-3); }
 .finding .g { justify-self: center; }
 .ftext { font-size: 13px; color: var(--text-hi); line-height: 1.45; }
 .fev { font-size: 12px; color: var(--text-low); font-variant-numeric: tabular-nums; line-height: 1.45; }
 /* The deeper findings carry evidence that is a list (queues, shares), too
    long to sit beside the sentence: stack it under the text instead. */
-.finding-stack { grid-template-columns: 10px 1fr; }
+.finding-stack { grid-template-columns: 10px 1fr; cursor: default; }
+.finding-stack:hover { background: none; }
 .finding-stack .fev { grid-column: 2; justify-self: start; text-align: left; max-width: none; overflow-wrap: anywhere; }
-.empty { padding: 22px 0; text-align: center; font-size: 13px; color: var(--text-low); }
-
-/* Focus breadcrumb in the filter card. */
-.wl-crumbs { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
-.crumb {
-  background: none; border: none; padding: 2px 4px; font-size: 13px;
-  color: var(--text-hi); cursor: pointer; border-radius: var(--r-chip, 4px);
-  text-decoration: underline; text-decoration-color: var(--text-faint); text-underline-offset: 3px;
+.empty {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 24px 0; text-align: center; font-size: 13px; color: var(--text-low);
 }
-.crumb:disabled { color: var(--text-mid); cursor: default; text-decoration: none; }
-.crumb:not(:disabled):hover { background: var(--ink-3); }
-.crumb-sep { color: var(--text-faint); }
-.seg-sm button { font-size: 11px; padding: 2px 8px; }
+.empty > .icon { flex: none; color: var(--text-low); }
 
 /* Section label between the two layers: the app's uppercase label, a rule, a note. */
 .wl-eyebrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 28px 2px 14px; }
@@ -2591,8 +2645,5 @@ onUnmounted(() => {
 .eyebrow-rule { height: 1px; background: var(--bd); flex: 0 0 48px; }
 .eyebrow-sub { font-size: 12px; color: var(--text-low); }
 
-/* A choice inside a card: the app's segmented control, wrapping when a tenant
-   has more namespaces than the card is wide. */
-.wl-seg { flex-wrap: wrap; margin: 0 0 12px; }
 .wl-note { font-size: 12px; color: var(--text-low); margin: 10px 0 0; }
 </style>

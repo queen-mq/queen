@@ -20,6 +20,13 @@ const { standalone } = useIdentity()
 //   navParent: the nav row that stands for this page when it has none of its
 //              own: that row is the one lit while you are here.
 //   proxyOnly: the broker-direct dashboard has no pxdb-backed account store.
+//   pick     : the address field naming what the page's list has picked
+//              (KV's ?ns=, Ephemeral's ?name=): the top bar reads
+//              "Title / <pick>", and Title drops the pick.
+//   queueTab : the page is a tab of the Queues section (its queue list on the
+//              left, the queue's tabs on the right). With queueTabNeedsQueue
+//              it is one only while a queue is picked (?queue=); without one
+//              it is its own page (Consumer groups, Supervisors).
 function performanceMoved(to) {
   const query = {}
   for (const key of ['range', 'from', 'to']) {
@@ -46,7 +53,7 @@ const routes = [
     component: () => import('@/views/Queues.vue'),
     meta: {
       title: 'Queues', subtitle: 'Manage message queues and partitions',
-      requires: 'read', scope: 'tenant',
+      requires: 'read', scope: 'tenant', queueTab: 'overview',
       nav: { group: 'Messaging', icon: 'queues', order: 1 },
     }
   },
@@ -56,7 +63,18 @@ const routes = [
     component: () => import('@/views/QueueDetail.vue'),
     meta: {
       title: 'Queue', subtitle: 'Queue configuration and status',
-      requires: 'read', scope: 'tenant',
+      requires: 'read', scope: 'tenant', queueTab: 'overview', navParent: '/queues',
+    }
+  },
+  {
+    // A queue's Alerts tab: what needs you on it now, and the lines it is
+    // judged by (the Settings document's entry for this queue).
+    path: '/queues/:queueName/alerts',
+    name: 'QueueAlerts',
+    component: () => import('@/views/QueueAlerts.vue'),
+    meta: {
+      title: 'Alerts', subtitle: 'What needs you on this queue, and the lines it is judged by',
+      requires: 'read', scope: 'tenant', queueTab: 'alerts', navParent: '/queues',
     }
   },
   {
@@ -71,7 +89,7 @@ const routes = [
     component: () => import('@/views/Ephemeral.vue'),
     meta: {
       title: 'Ephemeral queues', subtitle: 'RAM-class queues — contents survive nothing',
-      requires: 'read', scope: 'tenant',
+      requires: 'read', scope: 'tenant', pick: 'name',
       nav: { group: 'Messaging', icon: 'ephemeral', order: 2 },
     }
   },
@@ -81,8 +99,7 @@ const routes = [
     component: () => import('@/views/Consumers.vue'),
     meta: {
       title: 'Consumer groups', subtitle: 'Monitor consumer lag and status',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Workers', icon: 'consumers', order: 1 },
+      requires: 'read', scope: 'tenant', queueTab: 'consumers', navParent: '/queues',
     }
   },
   {
@@ -91,8 +108,7 @@ const routes = [
     component: () => import('@/views/Messages.vue'),
     meta: {
       title: 'Messages', subtitle: 'Browse, inspect and push messages',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Messaging', icon: 'messages', order: 4 },
+      requires: 'read', scope: 'tenant', queueTab: 'messages', navParent: '/queues',
     }
   },
   {
@@ -102,7 +118,7 @@ const routes = [
     component: () => import('@/views/Kv.vue'),
     meta: {
       title: 'KV', subtitle: 'Browse the key-value store, namespace by namespace',
-      requires: 'read', scope: 'tenant',
+      requires: 'read', scope: 'tenant', pick: 'ns',
       nav: { group: 'Messaging', icon: 'kv', order: 7 },
     }
   },
@@ -116,8 +132,7 @@ const routes = [
     component: () => import('@/views/Timers.vue'),
     meta: {
       title: 'Timers', subtitle: 'Scheduled messages waiting to fire, per queue',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Messaging', icon: 'timers', order: 6 },
+      requires: 'read', scope: 'tenant', queueTab: 'scheduled', navParent: '/queues',
     }
   },
   {
@@ -140,7 +155,7 @@ const routes = [
     component: () => import('@/views/Traces.vue'),
     meta: {
       title: 'Traces', subtitle: 'Track message flows across queues',
-      requires: 'read', scope: 'tenant',
+      requires: 'read', scope: 'tenant', pick: 'trace',
       nav: { group: 'Analysis', icon: 'traces', order: 3 },
     }
   },
@@ -150,8 +165,8 @@ const routes = [
     component: () => import('@/views/Supervisors.vue'),
     meta: {
       title: 'Supervisors', subtitle: 'Published supervisor status and worker pool health',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Workers', icon: 'system', order: 2 },
+      requires: 'read', scope: 'tenant', queueTab: 'supervisors', queueTabNeedsQueue: true,
+      nav: { group: 'Workers', icon: 'supervisors', order: 2 },
     }
   },
   // The two Performance pages are gone: what they showed is on Workload, on a
@@ -178,8 +193,7 @@ const routes = [
     component: () => import('@/views/DeadLetter.vue'),
     meta: {
       title: 'Dead letter', subtitle: 'Inspect, replay and purge failed messages',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Messaging', icon: 'dlq', order: 5 },
+      requires: 'read', scope: 'tenant', queueTab: 'failed', navParent: '/queues',
     }
   },
   {
@@ -192,7 +206,7 @@ const routes = [
     component: () => import('@/views/Settings.vue'),
     meta: {
       title: 'Settings', subtitle: 'The lines this console judges by',
-      requires: 'read', scope: 'tenant',
+      requires: 'read', scope: 'tenant', pick: 'for',
       nav: { group: 'Analysis', icon: 'settings', order: 4 },
     }
   },

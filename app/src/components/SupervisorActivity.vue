@@ -9,11 +9,11 @@
       <div class="sect-head">
         <h3>Reported queues</h3>
         <span>{{ queues.length }}</span>
-        <RouterLink v-if="queue" class="activity-open" :to="queueLocation(queue, route)">Open queue →</RouterLink>
+        <RouterLink v-if="queue" class="activity-open" :to="queueLocation(queue, route)">Open queue<Icon name="arrow-right" :size="13" /></RouterLink>
       </div>
       <div v-if="queues.length" class="queue-table">
         <table class="t">
-          <thead><tr><th>Queue</th><th class="right">Workers reporting</th></tr></thead>
+          <thead><tr><th>Queue</th><th class="num" title="Running / desired, on instances with a recent running heartbeat">Workers</th></tr></thead>
           <tbody>
             <tr :class="{ selected: queue === null }">
               <td colspan="2"><button class="row-open" :aria-pressed="queue === null" aria-label="Show activity for all reported queues" @click="queue = null">All queues</button></td>
@@ -22,7 +22,7 @@
               <td>
                 <button class="row-open" :aria-pressed="queue === item.name" :aria-label="`Show activity for ${item.name}`" :title="item.name" @click="queue = item.name"><span v-if="item.tone === 'warn' || item.tone === 'bad'" class="g" :class="item.tone" aria-hidden="true" />{{ item.name }}</button>
               </td>
-              <td class="num right">{{ number(item.running) }} <span class="of">/ {{ number(item.desired) }}</span></td>
+              <td class="num">{{ number(item.running) }} <span class="of">/ {{ number(item.desired) }}</span></td>
             </tr>
           </tbody>
         </table>
@@ -32,7 +32,7 @@
     <div class="activity-chart">
       <div class="sect-head">
         <h3>Queue activity</h3>
-        <span v-if="queues.length" class="activity-scope" :title="scopeTitle"><span :class="{ mono: queue }">{{ scopeLabel }}</span> · last 60 min · all consumers</span>
+        <span v-if="queues.length" class="activity-scope" :title="scopeTitle"><span :class="{ mono: queue }">{{ scopeLabel }}</span> · last hour</span>
         <div class="seg activity-mode" role="group" aria-label="Chart metric">
           <button :class="{ on: mode === 'traffic' }" :aria-pressed="mode === 'traffic'" @click="mode = 'traffic'">Traffic</button>
           <button :class="{ on: mode === 'backlog' }" :aria-pressed="mode === 'backlog'" @click="mode = 'backlog'">Backlog</button>
@@ -40,7 +40,7 @@
       </div>
       <template v-if="queues.length">
         <div v-if="loading" class="activity-placeholder" role="status">Reading queue history…</div>
-        <div v-else-if="error" class="activity-placeholder" role="status"><strong>Queue history unavailable</strong><span>{{ error }}</span></div>
+        <div v-else-if="error" class="activity-placeholder" role="status" :title="error">Queue history unavailable</div>
         <template v-else-if="metrics">
           <div class="activity-plot" role="img" :aria-label="chartDescription">
             <BaseChart v-if="hasSamples" :key="mode" :data="chartData" :options="chartOptions" height="96px" />
@@ -67,7 +67,7 @@
           </div>
         </div>
       </template>
-      <div v-else class="activity-placeholder">No named queue reported. Dynamic consumers show their scope in the instance details.</div>
+      <div v-else class="activity-placeholder" title="Consumers with a dynamic scope show it in the instance details">No named queue reported</div>
     </div>
   </section>
 </template>
@@ -78,6 +78,7 @@ const route = useRoute()
 import { useRoute } from 'vue-router'
 import { computed, inject, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import BaseChart from '@/components/BaseChart.vue'
+import Icon from '@/components/Icon.vue'
 import { aggregateSupervisorActivity, supervisorActivityKey } from '@/composables/supervisorActivity'
 import { chartTheme } from '@/composables/useChartTheme'
 import { describeApiError } from '@/api'
@@ -118,10 +119,10 @@ const chartData = computed(() => ({
     { label: 'Delivered / min', data: metrics.value?.points.map(point => point.delivered), fill: false, borderDash: [4, 3], pointRadius: isolatedPoint },
   ] : [{ label: 'Pending', data: metrics.value?.points.map(point => point.pending), fill: true, pointRadius: isolatedPoint }],
 }))
-const chartOptions = computed(() => ({ scales: { x: { grid: { display: false }, ticks: { color: chartTheme.tick, maxTicksLimit: 5, maxRotation: 0, font: { size: 9 } } }, y: { ticks: { color: chartTheme.tick, maxTicksLimit: 3, precision: 0, font: { size: 9 } } } } }))
-const scopeLabel = computed(() => queue.value || `All queues (${props.queues.length})`)
+const chartOptions = computed(() => ({ scales: { x: { grid: { display: false }, ticks: { color: chartTheme.tick, maxTicksLimit: 5, maxRotation: 0, font: { size: 10 } } }, y: { ticks: { color: chartTheme.tick, maxTicksLimit: 3, precision: 0, font: { size: 10 } } } } }))
+const scopeLabel = computed(() => queue.value || (props.queues.length === 1 ? 'The one queue' : `All ${props.queues.length} queues`))
 const chartDescription = computed(() => `${mode.value === 'traffic' ? 'Incoming and delivered messages per minute' : 'Pending messages'} over the last hour for ${queue.value || `all ${props.queues.length} reported queues`}, all consumers on ${actingClusterSlug.value || 'the current cluster'}. Missing samples appear as gaps.`)
-const scopeTitle = computed(() => `History covers ${queue.value ? 'this queue' : 'all reported queues'} on the current cluster, for all consumers. A supervisor may use a different connection.`)
+const scopeTitle = computed(() => `The last 60 minutes of ${queue.value ? 'this queue' : 'all reported queues'} on the current cluster, for all consumers. A supervisor may use a different connection.`)
 const sampleNote = computed(() => {
   if (!metrics.value) return 'Queue metrics are independent of the supervisor heartbeat.'
   if (mode.value === 'backlog') return `Latest depth ${metrics.value.pendingAt ? time(metrics.value.pendingAt) : 'unavailable'} · Δ across available samples`
@@ -131,18 +132,16 @@ const sampleNote = computed(() => {
 </script>
 
 <style scoped>
-.supervisor-activity { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(0, 1.6fr); gap: 24px; padding-top: 14px; min-width: 0; }
+.supervisor-activity { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(0, 1.6fr); gap: 24px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--bd); min-width: 0; }
 .activity-chart, .activity-queues { min-width: 0; }
 .sect-head { align-items: center; margin-bottom: 10px; min-height: 26px; }
 .activity-scope { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-mode, .activity-open { margin-left: auto; }
-.activity-open { font-size: 12px; color: var(--text-mid); text-decoration: none; white-space: nowrap; }
+.activity-open { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-mid); text-decoration: none; white-space: nowrap; }
 .activity-open:hover { color: var(--text-hi); }
 .activity-open:focus-visible, .row-open:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .activity-plot { min-height: 96px; }
 .activity-placeholder { min-height: 96px; display: flex; flex-direction: column; justify-content: center; gap: 4px; color: var(--text-low); font-size: 12px; line-height: 1.5; }
-.activity-placeholder strong { font-weight: 500; color: var(--text-mid); }
-.activity-placeholder span { overflow-wrap: anywhere; }
 .activity-legend { display: flex; align-items: center; gap: 14px; margin: 4px 0 12px; color: var(--text-mid); font-size: 11px; }
 .activity-legend > span { display: flex; align-items: center; gap: 6px; }
 .activity-legend i { width: 12px; border-top: 1.4px solid var(--series-1); }
@@ -152,8 +151,8 @@ const sampleNote = computed(() => {
 .stat-value.warn { color: var(--warn-400); }
 .queue-table { max-height: 232px; overflow-y: auto; scrollbar-width: thin; border: 1px solid var(--bd); border-radius: var(--r-card); }
 .queue-table .t { width: 100%; }
+.queue-table .t th { background: var(--ink-3); position: sticky; top: 0; z-index: 1; }
 .queue-table tr.selected td { background: color-mix(in srgb, var(--text-hi) 4%, transparent); }
-.right { text-align: right; }
 .row-open { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 0; border: 0; background: none; font: inherit; color: var(--text-mid); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .row-open:hover, tr.selected .row-open { color: var(--text-hi); }
 .of { color: var(--text-low); }

@@ -198,5 +198,45 @@ export function cellIssues(status) {
     if (n.mem.share !== null) add(`${n.name}:memory`, n.mem.sev, n.name, `${n.name} is short of memory`, `Memory ${share(n.mem.share)} of its limit`)
     if (n.cpu.share !== null) add(`${n.name}:cpu`, n.cpu.sev, n.name, `${n.name} is busy`, `CPU ${share(n.cpu.share)} of the cores it may use`)
   }
-  return out.sort((a, b) => (RANK[b.sev] || 0) - (RANK[a.sev] || 0))
+  return mergeShared(out).sort((a, b) => (RANK[b.sev] || 0) - (RANK[a.sev] || 0))
+}
+
+// What several nodes share, said once: the same problem, tone and words.
+const PLURAL = {
+  snapshot: (n) => `${n} nodes are moving a snapshot`,
+  heartbeat: (n) => `${n} followers stopped answering the leader`,
+  lag: (n) => `${n} followers are falling behind the leader`,
+  disk: (n, i) => (/writes answer 507/.test(i.why) ? `${n} nodes refuse writes: their disks are full` : `${n} nodes' disks are nearly full`),
+  memory: (n) => `${n} nodes are short of memory`,
+  cpu: (n) => `${n} nodes are busy`,
+}
+
+/**
+ * One row per (problem, tone, words): three nodes whose disks read "84%
+ * used" are one issue naming the three, not three rows saying it again.
+ * Named in full up to three nodes, counted past that. Exported for tests.
+ */
+export function mergeShared(issues) {
+  const out = []
+  const byShape = new Map()
+  for (const i of issues) {
+    const [node, kind] = i.key.slice('cell:'.length).split(':')
+    if (!kind || !PLURAL[kind]) { out.push(i); continue }
+    const shape = `${kind}|${i.sev}|${i.why}`
+    const seen = byShape.get(shape)
+    if (seen) { seen.nodes.push(node); continue }
+    const entry = { ...i, kind, nodes: [node] }
+    byShape.set(shape, entry)
+    out.push(entry)
+  }
+  return out.map((i) => {
+    if (!i.nodes || i.nodes.length < 2) return i
+    const n = i.nodes.length
+    return {
+      ...i,
+      key: `cell:${i.kind}:${i.nodes.join(',')}`,
+      name: n <= 3 ? i.nodes.join(', ') : `${n} nodes`,
+      title: PLURAL[i.kind](n, i),
+    }
+  })
 }

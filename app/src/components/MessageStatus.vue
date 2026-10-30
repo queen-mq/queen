@@ -1,6 +1,9 @@
 <template>
+  <!-- A message's state as a mark and a word, in greys: a pending message is
+       work waiting, not an alarm, and a dead letter is parked history (the
+       Dead letter tab is where it is worked on). The shape tells them apart. -->
   <span class="message-status" :class="`message-status-${appearance.tone}`">
-    <span class="message-status-dot" aria-hidden="true" />
+    <span class="message-status-mark" aria-hidden="true" />
     {{ appearance.label }}
   </span>
 </template>
@@ -22,11 +25,16 @@ const appearance = computed(() => Object.hasOwn(states, props.status)
 </script>
 
 <style scoped>
-.message-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-low); white-space: nowrap; }
-.message-status-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.message-status-pending { color: var(--warn-400); }
+.message-status { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-mid); white-space: nowrap; }
+.message-status-mark { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+/* Waiting: a ring. In flight: a full dot. Done: a quiet dot. Parked: a square. */
+.message-status-pending { color: var(--text-hi); }
+.message-status-pending .message-status-mark { background: transparent; border: 1.5px solid var(--text-mid); }
 .message-status-processing { color: var(--text-hi); }
-.message-status-processing .message-status-dot { background: var(--warn-400); box-shadow: 0 0 0 3px var(--warn-glow); }
-.message-status-completed { color: var(--ok-500); }
-.message-status-failed { color: var(--ember-400); }
+.message-status-processing .message-status-mark { background: var(--text-hi); }
+.message-status-completed { color: var(--text-low); }
+.message-status-failed { color: var(--text-mid); }
+.message-status-failed .message-status-mark { border-radius: 1.5px; background: var(--text-low); }
+.message-status-unknown { color: var(--text-low); }
+.message-status-unknown .message-status-mark { background: transparent; border: 1.5px solid var(--text-faint); }
 </style>

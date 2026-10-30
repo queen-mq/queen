@@ -128,7 +128,11 @@ export function normalizeEphemeralQueue(raw, fallbackName = null) {
     // EXPLICIT true / EXPLICIT false only. A payload that carries neither is
     // not evidence for either tier (§1.1), and the badge renders nothing
     // rather than guess which one this queue is.
-    declared: r.declared === true ? true : r.declared === false ? false : null,
+    // The broker's list sends the tier as `tier: "declared" | "implicit"`;
+    // a boolean `declared` is still read for any payload that carries one.
+    declared: r.tier === 'declared' || r.declared === true ? true
+      : r.tier === 'implicit' || r.declared === false ? false
+      : null,
     depth: toNum(r.depth ?? r.length),
     bytes: toNum(r.bytes ?? r.sizeBytes),
     head,
@@ -153,6 +157,9 @@ export function normalizeEphemeralQueue(raw, fallbackName = null) {
  */
 function verdictFor(err) {
   if (!err) return null
+  // One queue that is not there (deleted, collected, never pushed): the
+  // family is served; only that queue is gone.
+  if (err.code === 'ephemeral_queue_not_found') return null
   if (err.status === 404) return 'absent'
   if (err.code === 'not_an_api_response') return 'absent'
   if (err.status === 403 && err.code === 'feature_gated') return 'gated'
