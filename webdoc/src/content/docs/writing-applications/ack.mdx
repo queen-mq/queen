@@ -44,6 +44,10 @@ verifiedBy:
 # empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
 # lease names a partition its group has no row on, or one that is gone (bad_lease); auth.rs makes
 # POST /streams/v1/state/partitions read-only (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (JS and Python consumers wait out a broker that cannot answer):
+# ConsumerManager.js and consumer_manager.py poll again after a 408, 429 or 5xx, a timeout or a lost
+# connection instead of stopping (said on writing-applications/pop). The acks they send are
+# unchanged. Nothing this page states changes.
 ---
 
 An ack tells the broker what happened to a message. A `completed` ack moves the consumer group's cursor past it, and that is all: the message stays in its partition until retention removes it.

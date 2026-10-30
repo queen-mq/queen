@@ -10,10 +10,24 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// The broker's admission of a request ([`Broker::admit`]): its bytes go back
+/// to the budget when this drops.
+pub type Permit = Box<dyn std::any::Any + Send + Sync>;
+
+/// What one Queen transaction may set at once (`POST /api/v1/transaction`).
+pub const MAX_POSITION_WRITES: usize = 16_384;
+/// What one positions read may name (`POST /api/v1/consumer-groups/positions`).
+pub const MAX_POSITION_READS: usize = 65_536;
+/// What one time lookup may name (`POST /api/v1/fetch/offsets`).
+pub const MAX_TIME_LOOKUPS: usize = 1_024;
+/// What one typed fetch may name ([`Broker::fetch`]).
+pub const MAX_FETCH_ENTRIES: usize = 1_024;
 
 /// One record to push: queue, partition NAME, one JSON document, and the
 /// transaction id that makes a retry of it a duplicate (`None`: the broker
@@ -142,8 +156,23 @@ pub trait Broker: Send + Sync + 'static {
     /// One of the broker's JSON routes, through its router.
     fn call(&self, req: LocalRequest) -> BoxFuture<'static, Result<LocalResponse, String>>;
 
-    /// Push records, ordered (see [`OrderedLocal`]).
-    fn push(&self, bearer: Option<String>, items: Vec<RawPush>) -> OrderedLocal;
+    /// Push records, ordered (see [`OrderedLocal`]). `admitted` is the
+    /// request's admission taken by [`Broker::admit`] before it was decoded:
+    /// the push holds it until it answers and takes none of its own.
+    fn push(
+        &self,
+        bearer: Option<String>,
+        items: Vec<RawPush>,
+        admitted: Option<Permit>,
+    ) -> OrderedLocal;
+
+    /// Admission for a request of `bytes` (its frame), BEFORE it is decoded:
+    /// the HTTP edge's rule, which sizes a push by its `Content-Length` before
+    /// it reads the body. `Err(retry_after_s)` when the broker stayed saturated
+    /// for its whole hold. The default admits everything.
+    fn admit(&self, _bytes: usize) -> BoxFuture<'static, Result<Option<Permit>, u64>> {
+        Box::pin(async { Ok(None) })
+    }
 
     /// Read partitions from offsets, long poll included.
     fn fetch(
@@ -217,7 +246,11 @@ pub enum KvOp {
         ns: String,
         key: String,
         value: Value,
+        /// Exactly one of `forever` and `ttlSeconds` is sent.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
         forever: bool,
+        #[serde(rename = "ttlSeconds", skip_serializing_if = "Option::is_none")]
+        ttl_seconds: Option<i64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         expect: Option<i64>,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -245,6 +278,7 @@ impl KvOp {
             key: key.to_string(),
             value,
             forever: true,
+            ttl_seconds: None,
             expect: None,
             required: false,
         }
@@ -257,6 +291,7 @@ impl KvOp {
             key: key.to_string(),
             value,
             forever: true,
+            ttl_seconds: None,
             expect: Some(expect),
             required: false,
         }
@@ -269,9 +304,25 @@ impl KvOp {
             key: key.to_string(),
             value,
             forever: true,
+            ttl_seconds: None,
             expect: Some(expect),
             required: true,
         }
+    }
+
+    /// The same write, expiring `seconds` after it lands instead of never:
+    /// a row nobody writes again goes by itself.
+    pub fn expiring(mut self, seconds: i64) -> KvOp {
+        if let KvOp::Put {
+            forever,
+            ttl_seconds,
+            ..
+        } = &mut self
+        {
+            *forever = false;
+            *ttl_seconds = Some(seconds.max(1));
+        }
+        self
     }
 }
 
@@ -358,6 +409,37 @@ impl Queen {
         bearer: Option<&str>,
         body: Option<Value>,
     ) -> Result<Value, CallError> {
+        let text = self
+            .call_text(method, path, bearer, body.map(|b| b.to_string()))
+            .await?;
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|e| CallError::Body(e.to_string()))
+    }
+
+    /// A route call whose 2xx body is read straight into `T`, never through a
+    /// `Value` tree; `body` is already JSON text (a typed struct serialized).
+    async fn call_typed<T: DeserializeOwned>(
+        &self,
+        method: &'static str,
+        path: String,
+        bearer: Option<&str>,
+        body: Option<String>,
+    ) -> Result<T, CallError> {
+        let text = self.call_text(method, path, bearer, body).await?;
+        let text = if text.trim().is_empty() { "null" } else { &text };
+        serde_json::from_str(text).map_err(|e| CallError::Body(e.to_string()))
+    }
+
+    /// A route call: the body of a 2xx answer, or the refusal.
+    async fn call_text(
+        &self,
+        method: &'static str,
+        path: String,
+        bearer: Option<&str>,
+        body: Option<String>,
+    ) -> Result<String, CallError> {
         let resp = self
             .broker
             .call(LocalRequest {
@@ -365,7 +447,7 @@ impl Queen {
                 path,
                 host: None,
                 bearer: bearer.map(str::to_string),
-                body: body.map(|b| b.to_string()),
+                body,
             })
             .await
             .map_err(CallError::Transport)?;
@@ -375,10 +457,20 @@ impl Queen {
                 body: resp.body,
             });
         }
-        if resp.body.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&resp.body).map_err(|e| CallError::Body(e.to_string()))
+        Ok(resp.body)
+    }
+
+    /// Whether the broker takes `token` (SASL): a call every token must be
+    /// allowed to make, its answer read for the status alone.
+    pub async fn check_token(&self, token: &str) -> Result<(), CallError> {
+        self.call_text(
+            "GET",
+            "/api/v1/resources/queues".into(),
+            Some(token),
+            None,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Every queue of the caller's tenant.
@@ -388,17 +480,15 @@ impl Queen {
             #[serde(default)]
             queues: Vec<QueueRow>,
         }
-        let v = self
-            .call(
+        let b: Body = self
+            .call_typed(
                 "GET",
                 "/api/v1/resources/queues?stats=lanes".into(),
                 bearer,
                 None,
             )
             .await?;
-        serde_json::from_value::<Body>(v)
-            .map(|b| b.queues)
-            .map_err(|e| CallError::Body(e.to_string()))
+        Ok(b.queues)
     }
 
     /// Create a queue for a Kafka topic: Queen's own defaults, but the
@@ -501,15 +591,15 @@ impl Queen {
             #[serde(default)]
             results: Vec<KvAnswer>,
         }
-        let v = self
-            .call(
-                "POST",
-                "/api/v1/kv".into(),
-                bearer,
-                Some(json!({ "operations": ops })),
-            )
+        #[derive(Serialize)]
+        struct Request<'a> {
+            operations: &'a [KvOp],
+        }
+        let request = serde_json::to_string(&Request { operations: ops })
+            .map_err(|e| CallError::Body(e.to_string()))?;
+        let b: Body = self
+            .call_typed("POST", "/api/v1/kv".into(), bearer, Some(request))
             .await?;
-        let b: Body = serde_json::from_value(v).map_err(|e| CallError::Body(e.to_string()))?;
         if !b.ok {
             return Err(CallError::Body(format!(
                 "kv answered ok=false: {}",
@@ -533,38 +623,72 @@ impl Queen {
             #[serde(default)]
             entries: Vec<Position>,
         }
-        let body = match entries {
-            Some(e) => json!({
-                "consumerGroup": group,
-                "entries": e.iter().map(|(q, p)| json!({"queue": q, "partition": p})).collect::<Vec<_>>(),
+        #[derive(Serialize)]
+        struct Entry<'a> {
+            queue: &'a str,
+            partition: &'a str,
+        }
+        #[derive(Serialize)]
+        struct Request<'a> {
+            #[serde(rename = "consumerGroup")]
+            group: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            entries: Option<Vec<Entry<'a>>>,
+        }
+        if entries.is_some_and(|e| e.len() > MAX_POSITION_READS) {
+            return Err(CallError::Status {
+                code: 400,
+                body: format!("more than {MAX_POSITION_READS} positions in one read"),
+            });
+        }
+        let request = Request {
+            group,
+            entries: entries.map(|e| {
+                e.iter()
+                    .map(|(queue, partition)| Entry { queue, partition })
+                    .collect()
             }),
-            None => json!({ "consumerGroup": group }),
         };
-        let v = self
-            .call(
+        let request =
+            serde_json::to_string(&request).map_err(|e| CallError::Body(e.to_string()))?;
+        let b: Body = self
+            .call_typed(
                 "POST",
                 "/api/v1/consumer-groups/positions".into(),
                 bearer,
-                Some(body),
+                Some(request),
             )
             .await?;
-        serde_json::from_value::<Body>(v)
-            .map(|b| b.entries)
-            .map_err(|e| CallError::Body(e.to_string()))
+        Ok(b.entries)
     }
 
     /// Write positions: one transaction, one raft entry.
     pub async fn commit(&self, bearer: Option<&str>, ops: &[PositionOp]) -> Result<(), CallError> {
-        let v = self
-            .call(
-                "POST",
-                "/api/v1/transaction".into(),
-                bearer,
-                Some(json!({ "operations": [], "kv": [], "positions": ops })),
-            )
+        if ops.len() > MAX_POSITION_WRITES {
+            return Err(CallError::Status {
+                code: 400,
+                body: format!("more than {MAX_POSITION_WRITES} positions in one commit"),
+            });
+        }
+        let request = serde_json::to_string(&TxnRequest {
+            operations: &[],
+            kv: &[],
+            positions: ops,
+        })
+        .map_err(|e| CallError::Body(e.to_string()))?;
+        let text = self
+            .call_text("POST", "/api/v1/transaction".into(), bearer, Some(request))
             .await?;
-        if v.get("success").and_then(Value::as_bool) == Some(false) {
-            return Err(CallError::Body(format!("the commit rolled back: {v}")));
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        let v: TxnAnswer =
+            serde_json::from_str(&text).map_err(|e| CallError::Body(e.to_string()))?;
+        if v.success == Some(false) {
+            return Err(CallError::Body(format!(
+                "the commit rolled back: {}",
+                clip(&text, 300)
+            )));
         }
         Ok(())
     }
@@ -579,32 +703,35 @@ impl Queen {
         positions: &[PositionOp],
     ) -> Result<crate::txn::Committed, CallError> {
         use crate::txn::Committed;
+        // Typed and borrowed: each payload is written as the JSON it already
+        // is, never parsed into a tree and written again.
         let mut items = Vec::with_capacity(records.len());
         for r in records {
-            let payload = String::from_utf8(r.payload.clone())
+            let payload: &serde_json::value::RawValue = std::str::from_utf8(&r.payload)
                 .ok()
-                .and_then(|p| serde_json::value::RawValue::from_string(p).ok())
+                .and_then(|p| serde_json::from_str(p).ok())
                 .ok_or_else(|| {
                     CallError::Body("a staged record is not one JSON document".into())
                 })?;
-            let mut item = serde_json::Map::new();
-            item.insert("queue".into(), Value::String(r.queue.clone()));
-            item.insert("partition".into(), Value::String(r.partition.clone()));
-            item.insert(
-                "payload".into(),
-                serde_json::to_value(&payload).map_err(|e| CallError::Body(e.to_string()))?,
-            );
-            if let Some(t) = &r.txn {
-                item.insert("transactionId".into(), Value::String(t.clone()));
-            }
-            items.push(Value::Object(item));
+            items.push(PushItem {
+                queue: &r.queue,
+                partition: &r.partition,
+                payload,
+                transaction_id: r.txn.as_deref(),
+            });
         }
-        let operations = if items.is_empty() {
-            json!([])
-        } else {
-            json!([{ "type": "push", "items": items }])
+        let pushes = !items.is_empty();
+        let push = [PushOperation {
+            kind: "push",
+            items,
+        }];
+        let operations: &[PushOperation<'_>] = if pushes { &push } else { &[] };
+        let body = TxnRequest {
+            operations,
+            kv,
+            positions,
         };
-        let body = json!({ "operations": operations, "kv": kv, "positions": positions });
+        let body = serde_json::to_string(&body).map_err(|e| CallError::Body(e.to_string()))?;
         let resp = self
             .broker
             .call(LocalRequest {
@@ -612,7 +739,7 @@ impl Queen {
                 path: "/api/v1/transaction".into(),
                 host: None,
                 bearer: bearer.map(str::to_string),
-                body: Some(body.to_string()),
+                body: Some(body),
             })
             .await
             .map_err(CallError::Transport)?;
@@ -629,21 +756,21 @@ impl Queen {
                 body: resp.body,
             });
         }
-        let v: Value =
+        let v: TxnAnswer =
             serde_json::from_str(&resp.body).map_err(|e| CallError::Body(e.to_string()))?;
-        if v.get("success").and_then(Value::as_bool) == Some(false) {
-            let reason = v.get("reason").and_then(Value::as_str).unwrap_or_default();
+        if v.success == Some(false) {
+            let reason = v.reason.as_deref().unwrap_or_default();
             return Ok(if reason == "kv_precondition" {
                 Committed::Fenced
             } else {
                 Committed::Refused(format!("{reason}: {}", clip(&resp.body, 300)))
             });
         }
-        let fence_version = v.get("results").and_then(Value::as_array).and_then(|rs| {
-            rs.iter()
-                .filter(|r| r.get("type").and_then(Value::as_str) == Some("kv"))
-                .find_map(|r| r.get("version").and_then(Value::as_i64))
-        });
+        let fence_version = v
+            .results
+            .iter()
+            .filter(|r| r.kind.as_deref() == Some("kv"))
+            .find_map(|r| r.version);
         Ok(Committed::Done { fence_version })
     }
 
@@ -685,15 +812,26 @@ impl Queen {
             #[serde(default)]
             entries: Vec<Wire>,
         }
-        let v = self
-            .call(
+        #[derive(Serialize)]
+        struct Request<'a> {
+            entries: &'a [TimeLookup],
+        }
+        if lookups.len() > MAX_TIME_LOOKUPS {
+            return Err(CallError::Status {
+                code: 400,
+                body: format!("more than {MAX_TIME_LOOKUPS} time lookups in one call"),
+            });
+        }
+        let request = serde_json::to_string(&Request { entries: lookups })
+            .map_err(|e| CallError::Body(e.to_string()))?;
+        let b: Body = self
+            .call_typed(
                 "POST",
                 "/api/v1/fetch/offsets".into(),
                 bearer,
-                Some(json!({ "entries": lookups })),
+                Some(request),
             )
             .await?;
-        let b: Body = serde_json::from_value(v).map_err(|e| CallError::Body(e.to_string()))?;
         if b.entries.len() != lookups.len() {
             return Err(CallError::Body(format!(
                 "{} time lookups answered for {} asked",
@@ -714,6 +852,49 @@ impl Queen {
 
 fn yes() -> bool {
     true
+}
+
+/// `POST /api/v1/transaction`, typed: nothing of it is built as a `Value`.
+#[derive(Serialize)]
+struct TxnRequest<'a> {
+    operations: &'a [PushOperation<'a>],
+    kv: &'a [KvOp],
+    positions: &'a [PositionOp],
+}
+
+#[derive(Serialize)]
+struct PushOperation<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    items: Vec<PushItem<'a>>,
+}
+
+#[derive(Serialize)]
+struct PushItem<'a> {
+    queue: &'a str,
+    partition: &'a str,
+    payload: &'a serde_json::value::RawValue,
+    #[serde(rename = "transactionId", skip_serializing_if = "Option::is_none")]
+    transaction_id: Option<&'a str>,
+}
+
+/// The part of a transaction's answer the facade reads.
+#[derive(Deserialize)]
+struct TxnAnswer {
+    #[serde(default)]
+    success: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    results: Vec<TxnResult>,
+}
+
+#[derive(Deserialize)]
+struct TxnResult {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    version: Option<i64>,
 }
 
 /// Percent-encode everything but RFC 3986's unreserved set.

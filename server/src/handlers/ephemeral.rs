@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -102,6 +102,13 @@ fn refusal(r: Refusal) -> Response {
             StatusCode::SERVICE_UNAVAILABLE,
             "ephemeral_unavailable",
             "this broker is at QUEEN_EPHEMERAL_MAX_BYTES",
+        ),
+        // Also a cell condition: idle inboxes are collected and room comes
+        // back, so 503 and not a 4xx.
+        Refusal::TooManyQueues => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ephemeral_queue_limit",
+            "this broker is at QUEEN_EPHEMERAL_MAX_QUEUES live ephemeral queues",
         ),
         // Rung 2's occupancy half (§1.6): the tenant's own byte or object
         // allowance, from its grant row. 403 and never 429, for the reason
@@ -310,7 +317,18 @@ async fn relay_once(
     if r.status == StatusCode::SERVICE_UNAVAILABLE && body_code(&r.body) == Some("owner_moved") {
         return Ok(None);
     }
-    let mut resp = json(r.status, String::from_utf8_lossy(&r.body).into_owned());
+    // The owner's answer relayed VERBATIM: the bytes as read, with no UTF-8
+    // pass and no second copy (a 16 MiB pop answer was copied once more here).
+    let mut resp = if r.status == StatusCode::NO_CONTENT {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            r.status,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            r.body,
+        )
+            .into_response()
+    };
     // The one header worth carrying back: a 429 from the owner's rate bucket
     // without its `Retry-After` would be a refusal the client cannot pace
     // against, which is the exact thing `quota.rs` renders it for.
@@ -715,6 +733,8 @@ pub async fn handle_ephemeral_pop(
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(0) as u64);
     let mut held: Vec<ephemeral::Delivered> = Vec::new();
+    let max_bytes = ephemeral::pop_max_bytes();
+    let mut held_bytes = 0usize;
     let mut first_at: Option<Instant> = None;
     // Held OUTSIDE the loop so the gauge covers the whole park, including the
     // window-fattening legs — a gauge that only counted the first wait would
@@ -731,7 +751,10 @@ pub async fn handle_ephemeral_pop(
         // reply in 950 with an inbox per request, 2.5.0).
         let armed = waiter.as_ref().map(|w| w.arm());
         let now = crate::util::now_epoch_ms();
-        let got = st.ephemeral.pop(
+        // One byte budget for the whole answer, window legs included: each
+        // leg gets what the earlier ones left, and only an answer that has
+        // nothing yet takes a message over it.
+        let got = st.ephemeral.pop_bounded(
             tenant.as_str(),
             queue,
             partition,
@@ -739,16 +762,19 @@ pub async fn handle_ephemeral_pop(
             batch - held.len(),
             commit_on_delivery,
             now,
+            max_bytes.saturating_sub(held_bytes),
+            held.is_empty(),
         );
         if !got.is_empty() {
             if first_at.is_none() {
                 first_at = Some(Instant::now());
             }
+            held_bytes += got.iter().map(|d| d.payload.len()).sum::<usize>();
             held.extend(got);
         }
 
         let waited_ms = first_at.map_or(0, |t| t.elapsed().as_millis() as i64);
-        if ephemeral::window_ready(held.len(), batch, waited_ms, window) {
+        if ephemeral::window_ready(held.len(), batch, waited_ms, window) || held_bytes >= max_bytes {
             break;
         }
         // Only a waiting pop armed a wake.
@@ -847,7 +873,42 @@ struct AckOne {
 struct AckBody {
     queue: String,
     group: Option<String>,
+    #[serde(deserialize_with = "bounded_acks")]
     acks: Vec<AckOne>,
+}
+
+/// The refusal text of an ack batch over `MAX_ITEMS_PER_CALL`, also the
+/// marker the handler recognises in the parse error.
+const TOO_MANY_ACKS: &str = "too many acks per call";
+
+/// `acks`, counted WHILE it is parsed: past `MAX_ITEMS_PER_CALL` the parse
+/// stops with an error instead of building every element first and checking
+/// the length after (a 16 MiB body of tiny ids was a million `AckOne`s).
+fn bounded_acks<'de, D>(d: D) -> Result<Vec<AckOne>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Bounded;
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = Vec<AckOne>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an array of acks")
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Vec<AckOne>, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(1024));
+            while let Some(a) = seq.next_element::<AckOne>()? {
+                if out.len() >= MAX_ITEMS_PER_CALL {
+                    return Err(serde::de::Error::custom(TOO_MANY_ACKS));
+                }
+                out.push(a);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_seq(Bounded)
 }
 
 /// `POST /api/v1/ephemeral/ack` — 200 `{results:[{id, outcome}]}`.
@@ -871,6 +932,9 @@ pub async fn handle_ephemeral_ack(
     }
     let parsed: AckBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
+        Err(e) if e.to_string().starts_with(TOO_MANY_ACKS) => {
+            return bad_request(&format!("at most {MAX_ITEMS_PER_CALL} acks per call"));
+        }
         Err(e) => return bad_request(&format!("bad body: {e}")),
     };
     if let Err(r) = check_name("queue", &parsed.queue) {

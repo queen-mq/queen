@@ -56,11 +56,14 @@ pub async fn join(
                 req.session_timeout_ms
             },
             protocol_type: req.protocol_type.to_string(),
+            // Copied: the decoded metadata is a slice of the request frame,
+            // and the member keeps it for as long as it is a member.
             protocols: req
                 .protocols
                 .into_iter()
-                .map(|p| (p.name.to_string(), p.metadata))
+                .map(|p| (p.name.to_string(), bytes::Bytes::copy_from_slice(&p.metadata)))
                 .collect(),
+            require_known_member: version >= 4,
         };
         let group = args.group.clone();
         let out = match ctx.groups.join(args, Instant::now()) {
@@ -97,7 +100,13 @@ pub async fn sync(ctx: &Arc<Ctx>, req: SyncGroupRequest) -> SyncGroupResponse {
         let assignments = req
             .assignments
             .into_iter()
-            .map(|a| (a.member_id.to_string(), a.assignment))
+            // Copied out of the frame, as a join's metadata is.
+            .map(|a| {
+                (
+                    a.member_id.to_string(),
+                    bytes::Bytes::copy_from_slice(&a.assignment),
+                )
+            })
             .collect();
         match ctx.groups.sync(
             req.group_id.0.as_str(),
@@ -169,9 +178,13 @@ pub fn list(ctx: &Arc<Ctx>, req: ListGroupsRequest) -> ListGroupsResponse {
 
 pub fn describe(ctx: &Arc<Ctx>, req: DescribeGroupsRequest) -> DescribeGroupsResponse {
     let leads = coordinates(ctx);
+    // A group named twice is described once: each description copies every
+    // member's metadata.
+    let mut seen = std::collections::HashSet::new();
     let groups = req
         .groups
         .into_iter()
+        .filter(|g| seen.insert(g.0.clone()))
         .map(|g| {
             let base = DescribedGroup::default().with_group_id(g.clone());
             if !leads {

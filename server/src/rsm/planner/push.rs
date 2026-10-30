@@ -39,6 +39,22 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             // Nothing to do and nothing to answer beyond an empty verdict list.
             return Ok(Plan::Empty(Outcome::Push(PushOutcome::default())));
         }
+        // The partition's keys (and the queue's, on first contact) must fit
+        // the store: in apply a longer key stops every node (keycheck). The
+        // receiver budgets the names; this also catches a name whose 0x00
+        // bytes the store writes twice, and a command a follower prepared.
+        let max = self.reads().max_key_len();
+        let len = super::keycheck::partition_keys_len(&cmd.tenant, &cmd.queue, &cmd.partition);
+        if len > max {
+            return Err(super::Refusal::client(
+                "name_too_long",
+                format!(
+                    "queue {} B with partition {} B makes a {len} B store key, the limit is {max} B",
+                    cmd.queue.len(),
+                    cmd.partition.len()
+                ),
+            ));
+        }
 
         // Resolve the queue, remembering whether it must be created (003 first
         // contact provisions the queue and the partition).

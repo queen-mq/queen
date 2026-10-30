@@ -71,6 +71,9 @@ const XERIAL_MAGIC: &[u8; 16] = b"\x82SNAPPY\x00\x00\x00\x00\x01\x00\x00\x00\x01
 pub struct Budget {
     left: std::cell::Cell<usize>,
     records_left: std::cell::Cell<usize>,
+    /// Headers the records declare: each is a map entry the decoder reserves
+    /// before reading it, and a copy in [`crate::wire::header_lists`].
+    headers_left: std::cell::Cell<usize>,
     /// Set by the take that ran out, so the caller can tell "this batch expands
     /// past the ceiling" from "this batch is corrupt" — two different answers to
     /// a producer. Armed (cleared) at the top of every [`decode_all`], so it
@@ -94,6 +97,9 @@ impl Budget {
         Budget {
             left: std::cell::Cell::new(bytes),
             records_left: std::cell::Cell::new(records),
+            // Two headers per record on average at the record ceiling: far
+            // more than a producer sends, far less than a frame can declare.
+            headers_left: std::cell::Cell::new(records.saturating_mul(2)),
             exhausted: std::cell::Cell::new(false),
         }
     }
@@ -109,11 +115,31 @@ impl Budget {
                 self.records_left.set(left);
                 Ok(())
             }
-            None => Err(format!(
-                "the batch headers declare {n} more records with room for {} in this request; \
-                 a declared count is memory reserved before a record is read",
-                self.records_left.get()
-            )),
+            None => {
+                self.exhausted.set(true);
+                Err(format!(
+                    "the batch headers declare {n} more records with room for {} in this request; \
+                     a declared count is memory reserved before a record is read",
+                    self.records_left.get()
+                ))
+            }
+        }
+    }
+
+    /// Charge `n` record headers the records declare, or refuse.
+    pub fn declare_headers(&self, n: usize) -> Result<(), String> {
+        match self.headers_left.get().checked_sub(n) {
+            Some(left) => {
+                self.headers_left.set(left);
+                Ok(())
+            }
+            None => {
+                self.exhausted.set(true);
+                Err(format!(
+                    "the records declare {n} more headers with room for {} in this request",
+                    self.headers_left.get()
+                ))
+            }
         }
     }
 
@@ -162,11 +188,17 @@ pub fn decode_all(raw: &mut Bytes, budget: &Budget) -> Result<Vec<Batch>, Refusa
     // Filled by the decompression seam below, which the decoder calls exactly
     // once per batch — the same seam the budget is charged through.
     let section: std::cell::Cell<Option<Bytes>> = std::cell::Cell::new(None);
+    // The record count the batch being decoded declares, read off its header
+    // before the decoder sees it: the seam checks it against the records it
+    // decompressed, which is the last moment before the decoder reserves
+    // memory for that count.
+    let declared: std::cell::Cell<Option<i32>> = std::cell::Cell::new(None);
     while raw.has_remaining() {
+        declared.set(crate::wire::declared_records(raw));
         let set = RecordBatchDecoder::decode_with_custom_compression(
             raw,
             Some(|records: &mut Bytes, codec: Compression| {
-                decompress(records, codec, budget)
+                checked(records, codec, budget, declared.get())
                     .inspect(|out| section.set(Some(out.clone())))
                     .map_err(Into::into)
             }),
@@ -185,6 +217,26 @@ pub fn decode_all(raw: &mut Bytes, budget: &Budget) -> Result<Vec<Batch>, Refusa
         });
     }
     Ok(batches)
+}
+
+/// One batch's records, decompressed, with the counts its header and its
+/// records declare checked against those bytes and charged to the budget
+/// ([`crate::wire::prescan`]): what the decoder is handed next is safe to
+/// reserve for.
+fn checked(
+    raw: &mut Bytes,
+    codec: Compression,
+    budget: &Budget,
+    declared: Option<i32>,
+) -> io::Result<Bytes> {
+    let out = decompress(raw, codec, budget)?;
+    let count = declared.ok_or_else(|| io::Error::other("a batch header with no record count"))?;
+    let headers = crate::wire::prescan(&out, count).map_err(io::Error::other)?;
+    budget
+        .declare_records(count.max(0) as usize)
+        .map_err(io::Error::other)?;
+    budget.declare_headers(headers).map_err(io::Error::other)?;
+    Ok(out)
 }
 
 /// One batch's records, decompressed into at most what is left of the budget.
@@ -502,5 +554,99 @@ mod tests {
             let sets = decode_all(&mut raw, &budget).unwrap_or_else(|e| panic!("{codec:?}: {e:?}"));
             assert!(values(&sets).is_empty(), "{codec:?}");
         }
+    }
+    /// CRC-32C, the checksum a v2 batch carries over everything after it.
+    fn crc32c(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0x82F6_3B78
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// A v2 batch written by hand around `section`, uncompressed, declaring
+    /// `count` records, with a CRC the decoder accepts: the counts in it are
+    /// whatever the test says, as a hostile client's would be.
+    fn raw_batch(count: i32, section: &[u8]) -> Bytes {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0i16.to_be_bytes()); // attributes: no codec
+        body.extend_from_slice(&0i32.to_be_bytes()); // last offset delta
+        body.extend_from_slice(&0i64.to_be_bytes()); // first timestamp
+        body.extend_from_slice(&0i64.to_be_bytes()); // max timestamp
+        body.extend_from_slice(&(-1i64).to_be_bytes()); // producer id
+        body.extend_from_slice(&(-1i16).to_be_bytes()); // producer epoch
+        body.extend_from_slice(&(-1i32).to_be_bytes()); // base sequence
+        body.extend_from_slice(&count.to_be_bytes());
+        body.extend_from_slice(section);
+        let mut out = Vec::new();
+        out.extend_from_slice(&0i64.to_be_bytes()); // base offset
+        out.extend_from_slice(&((4 + 1 + 4 + body.len()) as i32).to_be_bytes());
+        out.extend_from_slice(&(-1i32).to_be_bytes()); // partition leader epoch
+        out.push(2); // magic
+        out.extend_from_slice(&crc32c(&body).to_be_bytes());
+        out.extend_from_slice(&body);
+        Bytes::from(out)
+    }
+
+    /// The smallest record: length 6, then attributes, timestamp delta,
+    /// offset delta, null key, null value, no headers.
+    const SMALLEST: [u8; 7] = [0x0C, 0, 0, 0, 0x01, 0x01, 0x00];
+
+    /// The hand-written batch is one the decoder reads, so the refusals below
+    /// are about the counts and nothing else.
+    #[test]
+    fn a_hand_written_batch_with_honest_counts_decodes() {
+        let mut raw = raw_batch(1, &SMALLEST);
+        let budget = Budget::new(1024 * 1024, 1024);
+        let sets = decode_all(&mut raw, &budget).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].set.records.len(), 1);
+    }
+
+    /// A batch of one small record declaring 2^31-1 of them: the decoder
+    /// would reserve hundreds of gigabytes for it (an abort, not an error),
+    /// so it never sees the batch. Reaching the assert is the proof.
+    #[test]
+    fn a_batch_declaring_two_billion_records_is_refused_before_any_allocation() {
+        let mut raw = raw_batch(i32::MAX, &SMALLEST);
+        let budget = Budget::new(256 << 20, usize::MAX);
+        match decode_all(&mut raw, &budget) {
+            Err(Refusal::Corrupt(why)) => assert!(why.contains("declares"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A record declaring 2^31-1 headers in no bytes: the decoder would
+    /// reserve a map of that capacity first.
+    #[test]
+    fn a_record_declaring_two_billion_headers_is_refused_before_any_allocation() {
+        let record = [0x14, 0, 0, 0, 0x01, 0x01, 0xFE, 0xFF, 0xFF, 0xFF, 0x0F];
+        let mut raw = raw_batch(1, &record);
+        let budget = Budget::new(256 << 20, usize::MAX);
+        match decode_all(&mut raw, &budget) {
+            Err(Refusal::Corrupt(why)) => assert!(why.contains("headers"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Honest counts still spend the request's record budget: past it the
+    /// batch is too large, not corrupt.
+    #[test]
+    fn declared_records_are_charged_to_the_request() {
+        let mut two = SMALLEST.to_vec();
+        two.extend_from_slice(&SMALLEST);
+        let mut raw = raw_batch(2, &two);
+        let budget = Budget::new(1024 * 1024, 1);
+        assert!(matches!(
+            decode_all(&mut raw, &budget),
+            Err(Refusal::TooLarge(_))
+        ));
     }
 }

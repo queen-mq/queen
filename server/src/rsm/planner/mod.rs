@@ -86,6 +86,8 @@ use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
 /// KEEP_OVERLAY: the overlay kept between cycles on the planner thread.
 pub(crate) mod kept;
+/// The store keys an effect derives, measured before it is logged.
+pub(crate) mod keycheck;
 /// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,
 /// `required`, and the leader's expiry sweep. WP-2.2.
 pub mod kv;
@@ -1368,14 +1370,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         if c.effects.is_empty() {
             return Ok(Plan::Empty(Outcome::Empty));
         }
-        // A trace whose key would pass the store's limit is refused here: in
-        // apply it is `KeyTooLong`, which stops every node on the entry.
-        for e in &c.effects {
-            if let Effect::TraceAppend { event } | Effect::TraceRecord { event } = e {
-                crate::rsm::traces::check_keys(event, self.reads().max_key_len())
-                    .map_err(|why| Refusal::client("name_too_long", why))?;
-            }
-        }
+        // A key that would pass the store's limit is refused here: in apply it
+        // is `KeyTooLong`, which stops every node on the entry. So is a command
+        // too large for one entry (admin routes carry one effect per row).
+        self.check_effect_keys(ov, &c.effects)?;
+        self.check_planned_size(&c.effects)?;
         self.check_partition_rows(ov, &c.effects)?;
         let mut effects = c.effects.clone();
         self.cover_dropped_partitions(ov, &mut effects)?;
@@ -1404,6 +1403,87 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// outlive the partition it names. Refused whole and retryable: the retry
     /// reads the partitions again (the engine drops the rows of a partition
     /// that is gone and sends the rest).
+    /// Every store key `effects` make apply write or delete must fit the
+    /// store: apply refuses a longer one DETERMINISTICALLY, and that stops
+    /// every node on the entry, again after a restart ([`keycheck`]). Refused
+    /// here as the client's error instead, before anything folds.
+    ///
+    /// A cursor's group counter also holds its partition's tenant and queue.
+    /// Every queue's tenant and queue were budgeted when it was created
+    /// (`check_message_key_names`, at most `NAME_BUDGET_BYTES` together), so
+    /// the names are read only for a group long enough to overflow even then:
+    /// an ordinary ack, and a seek of an ordinary group, pay no read.
+    pub(crate) fn check_effect_keys(&self, ov: &Overlay, effects: &[Effect]) -> Result<(), Refusal> {
+        let max = self.reads().max_key_len();
+        // counter_group = 1 + tenant+2 + queue+2 + group+2 + 2.
+        let group_safe = |g: &str| {
+            keycheck::name_len(g) + 3 + crate::rsm::facade::NAME_BUDGET_BYTES + 4 <= max
+        };
+        for e in effects {
+            match e {
+                Effect::TraceAppend { event } | Effect::TraceRecord { event } => {
+                    crate::rsm::traces::check_keys(event, max)
+                        .map_err(|why| Refusal::client("name_too_long", why))?;
+                }
+                Effect::CursorSet { pid, group, .. } if !group_safe(group) => {
+                    if let Some((tenant, queue)) = self.partition_names(ov, *pid)? {
+                        let len = keycheck::counter_group_len(&tenant, &queue, group);
+                        if len > max {
+                            return Err(Refusal::client(
+                                "name_too_long",
+                                keycheck::Overlong {
+                                    key_len: len,
+                                    field: "consumerGroup",
+                                    field_len: group.len(),
+                                }
+                                .message(max),
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if let Some(o) = keycheck::overlong(e, max) {
+                return Err(Refusal::client("name_too_long", o.message(max)));
+            }
+        }
+        Ok(())
+    }
+
+    /// A command must fit one entry. The push, KV, positions and timers
+    /// planners measure theirs; an Effects command (an admin delete, a seek, a
+    /// streams reset) carries one effect per row and is measured here: an
+    /// entry over a follower's frame limit never replicates, and one over the
+    /// codec limit stops the leader's log writer. The routes that make many
+    /// effects send them in chunks well under this.
+    pub(crate) fn check_planned_size(&self, effects: &[Effect]) -> Result<(), Refusal> {
+        let planned = keycheck::planned_bytes(effects);
+        if planned > self.cfg.entry_max_bytes {
+            return Err(Refusal::client(
+                "too_large",
+                format!(
+                    "planned command of {planned} B ({} effects) exceeds \
+                     QUEEN_RAFT_ENTRY_MAX_BYTES ({})",
+                    effects.len(),
+                    self.cfg.entry_max_bytes
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The tenant and queue of `pid`, from the overlay when it is created in
+    /// flight, else from committed state. `None` when the partition is unknown
+    /// (the caller's other checks refuse that case).
+    fn partition_names(&self, ov: &Overlay, pid: Pid) -> Result<Option<(String, String)>, Refusal> {
+        if let Some(c) = ov.parts.get(&pid).and_then(|o| o.created.as_ref()) {
+            return Ok(Some((c.v.tenant.clone(), c.v.queue.clone())));
+        }
+        self.reads()
+            .partition_with(pid, |p| (p.tenant.to_string(), p.queue.to_string()))
+            .map_err(store_err)
+    }
+
     pub(crate) fn check_partition_rows(
         &self,
         ov: &Overlay,

@@ -72,7 +72,11 @@ impl RaftFacade {
         if effects.is_empty() {
             effects.push(Effect::Noop)
         }
-        self.submit_effects(&ctx, effects).await?;
+        // One delete per cursor, sent in chunks: the cursors first and the
+        // group rows last, so a run cut short leaves the group visible and a
+        // retry (which reads what is left) finishes it.
+        effects.sort_by_key(|e| matches!(e, Effect::GroupDelete { .. }));
+        self.submit_effects_chunked(&ctx, effects).await?;
         Ok(ApiOut::json(200,json!({"success":true,"consumerGroup":group,"queueName":queue,"deletedPartitions":count,"metadataDeleted":delete_meta,"queues":queues}).to_string()))
     }
 
@@ -138,6 +142,10 @@ impl RaftFacade {
         partition: Option<&str>,
         body: &[u8],
     ) -> Result<ApiOut, RsmError> {
+        // The group is the client's (a path segment): its cursor and counter
+        // keys hold it with the tenant and queue, and a key over the store's
+        // limit stops every node in apply. Budgeted as pops and acks are.
+        crate::rsm::facade::check_message_key_names(&ctx.tenant, queue, Some(group), partition)?;
         let v: Value = if body.is_empty() {
             json!({"toEnd":true})
         } else {
@@ -219,7 +227,8 @@ impl RaftFacade {
         .await
         .map_err(|e| RsmError::Internal(format!("seek task: {e}")))??;
         let count = effects.len();
-        self.submit_effects(&ctx, effects).await?;
+        // One cursor per partition: chunked, each chunk a valid seek of its own.
+        self.submit_effects_chunked(&ctx, effects).await?;
         Ok(ApiOut::json(200,json!({"success":true,"consumerGroup":group,"queueName":queue,"partitionName":partition,"seekToEnd":to_end,"targetTimestamp":ts.map(crate::rsm::planner::timers::iso_us),"partitionsUpdated":count,"updated":true}).to_string()))
     }
 
@@ -256,7 +265,8 @@ impl RaftFacade {
         .map_err(read_error)?;
         let n = effects.len();
         if !effects.is_empty() {
-            self.submit_effects(&ctx, effects).await?;
+            // One delete per dead letter: chunked; a retry deletes what is left.
+            self.submit_effects_chunked(&ctx, effects).await?;
         }
         Ok(ApiOut::json(
             200,
@@ -804,7 +814,13 @@ impl RaftFacade {
             sizes_max()
         };
         match self.queue_resource_detail(&ctx.tenant, queue, max).await? {
-            Some(v) => {
+            Some(mut v) => {
+                // The partition list is moved out, not deep-cloned (up to
+                // 100k partition objects per call).
+                let partitions = v
+                    .as_object_mut()
+                    .and_then(|o| o.remove("partitions"))
+                    .unwrap_or_else(|| json!([]));
                 let totals = v.get("totals").cloned().unwrap_or_else(|| json!({}));
                 let options = v.get("options").cloned().unwrap_or_else(|| json!({}));
                 let queue_info = json!({
@@ -817,7 +833,7 @@ impl RaftFacade {
                     200,
                     json!({
                         "queue":queue_info,
-                        "partitions":v.get("partitions").cloned().unwrap_or_else(|| json!([])),
+                        "partitions":partitions,
                         "totals":{"messages":totals,"partitions":v.get("partitionCount"),"consumed":v.get("totalConsumed")},
                         "partitionsTruncated":v.get("partitionsTruncated").and_then(Value::as_bool).unwrap_or(false),
                         "statsAge":v.get("statsAge")

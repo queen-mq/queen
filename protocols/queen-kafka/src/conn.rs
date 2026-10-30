@@ -7,6 +7,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use kafka_protocol::messages::*;
@@ -14,8 +15,9 @@ use kafka_protocol::protocol::{Decodable, Encodable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore, SemaphorePermit};
 
+use crate::config;
 use crate::core::BoxFuture;
 use crate::handlers;
 use crate::server::Ctx;
@@ -61,15 +63,27 @@ pub async fn serve(ctx: Arc<Ctx>, stream: TcpStream, peer: SocketAddr) {
         client_id: String::new(),
         client_host: format!("/{}", peer.ip()),
     };
+    let (idle, frame_timeout) = (config::idle_timeout(), config::frame_read_timeout());
     loop {
-        let frame = match read_frame(&mut rd, ctx.cfg.max_request_bytes).await {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(e) => {
-                tracing::debug!(target: "kafka", %peer, error = %e, "connection closed");
-                break;
-            }
+        // Until the login, a frame is a login's size: nobody known yet makes
+        // the broker allocate `max_request_bytes`.
+        let max = if ctx.cfg.sasl_required && !conn.authenticated {
+            config::PRE_AUTH_MAX_FRAME_BYTES.min(ctx.cfg.max_request_bytes)
+        } else {
+            ctx.cfg.max_request_bytes
         };
+        let (frame, _room) =
+            match read_frame(&mut rd, max, &ctx.frame_bytes, idle, frame_timeout).await {
+                Ok(Some(f)) => f,
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::debug!(target: "kafka", %peer, error = %e, "connection closed");
+                    break;
+                }
+            };
+        // `_room` (the frame's share of QUEEN_KAFKA_INFLIGHT_BYTES) is held
+        // until the request is handled: an answer still in flight after this
+        // holds the broker's own admission instead (Produce).
         match handle(&ctx, &mut conn, frame).await {
             Step::Reply(r) => {
                 if tx.send(r).await.is_err() {
@@ -102,23 +116,54 @@ async fn write_loop(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<Reply>) {
     let _ = wr.shutdown().await;
 }
 
-async fn read_frame(
+/// One request frame, and its room in the in-flight frame budget.
+///
+/// The connection may sit idle for `idle` before a frame starts; once its
+/// first byte is in, the rest of the length must follow within
+/// `frame_timeout`, and so must the body once it has room. The room is taken
+/// BEFORE the buffer is allocated, sized by the announced length: when every
+/// connection together holds `QUEEN_KAFKA_INFLIGHT_BYTES` of frames, the next
+/// one waits with its bytes in the socket, and TCP slows its sender down.
+async fn read_frame<'a>(
     rd: &mut tokio::net::tcp::OwnedReadHalf,
     max: usize,
-) -> std::io::Result<Option<Bytes>> {
+    room: &'a Semaphore,
+    idle: Duration,
+    frame_timeout: Duration,
+) -> std::io::Result<Option<(Bytes, SemaphorePermit<'a>)>> {
+    let timed_out = |what: &str| std::io::Error::new(std::io::ErrorKind::TimedOut, what.to_string());
     let mut len = [0u8; 4];
-    match rd.read_exact(&mut len).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e),
+    let first = match tokio::time::timeout(idle, rd.read(&mut len)).await {
+        Err(_) => return Err(timed_out("idle past QUEEN_KAFKA_IDLE_TIMEOUT_MS")),
+        Ok(Ok(0)) => return Ok(None),
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => return Err(e),
+    };
+    match tokio::time::timeout(frame_timeout, rd.read_exact(&mut len[first..])).await {
+        Err(_) => return Err(timed_out("a frame slower than QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS")),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Ok(Err(e)) => return Err(e),
+        Ok(Ok(_)) => {}
     }
     let n = i32::from_be_bytes(len);
     if n < 8 || n as usize > max {
-        return Err(std::io::Error::other(format!("a request of {n} bytes")));
+        return Err(std::io::Error::other(format!(
+            "a request of {n} bytes (at most {max} now)"
+        )));
     }
-    let mut buf = vec![0u8; n as usize];
-    rd.read_exact(&mut buf).await?;
-    Ok(Some(Bytes::from(buf)))
+    let n = n as usize;
+    // A frame larger than the whole budget takes all of it and runs alone.
+    let want = n.min(config::inflight_bytes()).min(u32::MAX as usize) as u32;
+    let permit = room
+        .acquire_many(want)
+        .await
+        .map_err(|_| std::io::Error::other("the frame budget is closed"))?;
+    let mut buf = vec![0u8; n];
+    match tokio::time::timeout(frame_timeout, rd.read_exact(&mut buf)).await {
+        Err(_) => Err(timed_out("a frame slower than QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS")),
+        Ok(Err(e)) => Err(e),
+        Ok(Ok(_)) => Ok(Some((Bytes::from(buf), permit))),
+    }
 }
 
 /// Header and body of one answer, length-prefixed.
@@ -157,6 +202,7 @@ macro_rules! decode {
 }
 
 async fn handle(ctx: &Arc<Ctx>, conn: &mut Conn, frame: Bytes) -> Step {
+    let frame_len = frame.len();
     let key_raw = i16::from_be_bytes([frame[0], frame[1]]);
     let version = i16::from_be_bytes([frame[2], frame[3]]);
     let correlation = i32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
@@ -198,7 +244,7 @@ async fn handle(ctx: &Arc<Ctx>, conn: &mut Conn, frame: Bytes) -> Step {
     match key {
         ApiKey::Produce => {
             let req = decode!(ProduceRequest, buf, version, key);
-            produce::produce(ctx, conn, req, version, correlation).await
+            produce::produce(ctx, conn, req, version, correlation, frame_len).await
         }
         ApiKey::Fetch => {
             let req = decode!(FetchRequest, buf, version, key);

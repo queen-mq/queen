@@ -488,8 +488,30 @@ pub fn parse_timer_ops(ops: &[Value], producer_sub: Option<&str>) -> Result<Vec<
         let encrypted = jbool(o, "encrypted", i)?;
         // A flagged payload is decompressed before packing, a malformed one
         // to nothing.
+        //
+        // The inflated size is bounded by the same ceiling the route puts on
+        // a payload (`QUEEN_TIMERS_MAX_PAYLOAD_BYTES`, default 1 MiB): the
+        // route only sees the compressed bytes, and an unbounded decode of
+        // one 1 MiB frame can take gigabytes.
         let payload = if zstd {
-            crate::frames::zstd_decompress(&raw)
+            static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+            let cap = *CAP.get_or_init(|| {
+                std::env::var("QUEEN_TIMERS_MAX_PAYLOAD_BYTES")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or(1024 * 1024)
+            });
+            match crate::frames::zstd_decompress_bounded(&raw, cap) {
+                Ok(p) => p,
+                Err(crate::frames::ZstdBound::Invalid) => Vec::new(),
+                Err(crate::frames::ZstdBound::TooLarge) => {
+                    return Err(OpError::new(format!(
+                        "QTIMER op {i}: payload decompresses past {cap} bytes \
+                         (QUEEN_TIMERS_MAX_PAYLOAD_BYTES)"
+                    )))
+                }
+            }
         } else {
             raw
         };
@@ -699,6 +721,38 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     "timers_bad_request",
                     "QTIMER a (queue, timerKey) appears more than once in one call",
                 ));
+            }
+        }
+        // Apply also writes the due index, 8 bytes longer than the timer key
+        // read below, and the schedule's partition becomes a key at the fire.
+        // Both must fit now: a key over the store's limit stops every node in
+        // apply (keycheck). The HTTP receiver checks the names with slack; a
+        // transaction's timers reach this with no other check.
+        let max = self.reads().max_key_len();
+        for op in ops {
+            let due = super::keycheck::timers_due_len(tenant, op.queue(), op.key());
+            if due > max {
+                return Err(Refusal::client(
+                    "name_too_long",
+                    format!(
+                        "QTIMER timerKey {} B with queue {} B makes a {due} B store key, the \
+                         limit is {max} B",
+                        op.key().len(),
+                        op.queue().len()
+                    ),
+                ));
+            }
+            if let TimerOp::Schedule(s) = op {
+                let part = super::keycheck::partitions_by_key_len(tenant, &s.queue, &s.partition);
+                if part > max {
+                    return Err(Refusal::client(
+                        "name_too_long",
+                        format!(
+                            "QTIMER partition {} B makes a {part} B store key, the limit is {max} B",
+                            s.partition.len()
+                        ),
+                    ));
+                }
             }
         }
         // Every read first: nothing below may fail once the overlay moves.

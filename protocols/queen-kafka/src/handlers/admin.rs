@@ -23,7 +23,9 @@ use crate::errors::*;
 use crate::server::Ctx;
 use crate::topics::valid_topic_name;
 
-const MAX_PARTITIONS: i32 = 100_000;
+/// The width a topic may be created with or grown to: every partition is a
+/// line of every Metadata answer that names the topic.
+const MAX_PARTITIONS: i32 = 10_000;
 const TOPIC: i8 = 2;
 const BROKER: i8 = 4;
 

@@ -3,9 +3,13 @@ Consumer manager for handling concurrent workers
 """
 
 import asyncio
+import math
+import random
 import time
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlencode
+
+import httpx
 
 from .supervision import Supervision
 from ..errors import ConflationUnsupportedError
@@ -18,6 +22,77 @@ from ..utils.autopilot import (
 from ..utils.conflation import check_pop_response as check_conflation
 from ..utils.conflation import scope_of as conflation_scope
 from ..utils.defaults import CONSUME_DEFAULTS
+
+# After a pop that failed for a reason waiting can fix, the next one waits: the
+# broker's Retry-After when it sent one (1 s on its 503s), else 1 s doubling
+# with each failure in a row. Never more than 30 s, so a consumer resumes
+# within 30 s of the broker answering again; +-20 % so a fleet of workers does
+# not come back in step.
+_TRANSIENT_BASE_SECONDS = 1.0
+_TRANSIENT_CAP_SECONDS = 30.0
+
+
+def is_transient_pop_error(error: BaseException) -> bool:
+    """Whether a failed pop is worth polling again.
+
+    True when the broker, or the way to it, could not answer for a while and
+    waiting changes that:
+
+    - HTTP 408, 429 or any 5xx. The broker's own retryable answers are all a
+      503 with Retry-After: no leader (``no_leader``, ``retry``), an elapsed
+      deadline (``timeout``, "the request deadline elapsed"), a leader change
+      mid-commit (``outcome_unknown``), a standby cluster (``standby``). A 500
+      on a pop comes from a node shutting down or a roll between versions; a
+      502 or 504 from a gateway in front of a node that is restarting.
+    - No HTTP answer at all: a timeout, a connection that could not be made,
+      or one the server dropped before or while it answered.
+
+    False, and the consumer stops as before, for a 503
+    ``raft_phase1_unsupported`` (the broker cannot serve the route at all),
+    every other 4xx (a request or a credential refused the same way next time)
+    and any other error (a bug, a URL httpx cannot use).
+    """
+    if isinstance(error, httpx.HTTPStatusError):
+        if getattr(error, "code", None) == "raft_phase1_unsupported":
+            return False
+        status = error.response.status_code
+        return status in (408, 429) or status >= 500
+    return isinstance(
+        error,
+        (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, ConnectionError),
+    )
+
+
+def transient_delay_seconds(
+    failures: int,
+    retry_after_seconds: Optional[float],
+    rand: Callable[[], float] = random.random,
+) -> float:
+    """The wait before the next pop, after ``failures`` transient failures in a row."""
+    if (
+        isinstance(retry_after_seconds, (int, float))
+        and not isinstance(retry_after_seconds, bool)
+        and math.isfinite(retry_after_seconds)
+        and retry_after_seconds >= 0
+    ):
+        base = float(retry_after_seconds)
+    else:
+        # The exponent is bounded only so the float stays finite: 2**16 s is
+        # past the cap already.
+        base = _TRANSIENT_BASE_SECONDS * 2 ** min(max(0, failures - 1), 16)
+    jittered = min(base, _TRANSIENT_CAP_SECONDS) * (0.8 + 0.4 * rand())
+    return min(jittered, _TRANSIENT_CAP_SECONDS)
+
+
+async def _pause(seconds: float, signal: Optional[Any]) -> None:
+    """Wait ``seconds``, or less if the consumer is stopped meanwhile."""
+    if isinstance(signal, asyncio.Event):
+        try:
+            await asyncio.wait_for(signal.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
+        return
+    await asyncio.sleep(seconds)
 
 
 class ConsumerManager:
@@ -171,6 +246,9 @@ class ConsumerManager:
 
         processed_count = 0
         last_message_time = time.time() if idle_millis else None
+        # Pops that failed in a row for a reason waiting can fix, and since when.
+        transient_failures = 0
+        failing_since: Optional[float] = None
 
         while True:
             # True while a handler runs under auto_ack(False): then nothing in
@@ -224,6 +302,19 @@ class ConsumerManager:
                     f"{path}?{base_params}", client_timeout, affinity_key,
                     retry_kind="pop" if wait else None,
                 )
+
+                if transient_failures > 0:
+                    logger.warn(
+                        "ConsumerManager.worker",
+                        {
+                            "worker_id": worker_id,
+                            "status": "pop-recovered",
+                            "failed_pops": transient_failures,
+                            "failing_seconds": round(time.monotonic() - (failing_since or time.monotonic()), 3),
+                        },
+                    )
+                    transient_failures = 0
+                    failing_since = None
 
                 # PLAN_CONFLATION §4: prove the broker applied the policy this
                 # consumer declared, BEFORE the empty-response branch below --
@@ -357,51 +448,42 @@ class ConsumerManager:
                 if handler_owns_errors:
                     raise
 
-                # Check if this is a timeout error (expected for long polling)
-                error_str = str(error)
-                is_timeout_error = "timeout" in error_str.lower() or "timed out" in error_str.lower()
-
-                if is_timeout_error and wait:
-                    continue  # Retry on timeout
-
                 status_code = getattr(getattr(error, "response", None), "status_code", None)
 
-                # 429 (rate limited): HttpClient already retries this
-                # internally with backoff (unbounded for wait=True pop, per
-                # the retry_429 policy) -- this branch is a defensive
-                # fallback for the case where an explicit
-                # retry_429["max_attempts"] override got exhausted. Back off
-                # and keep polling instead of hot-looping.
-                if status_code == 429:
-                    retry_after = getattr(error, "retry_after_seconds", None)
-                    delay = retry_after if isinstance(retry_after, (int, float)) and retry_after >= 0 else 1.0
+                # This client's own timeout on a long poll: the poll already
+                # waited its whole time, so poll again at once. Checked on the
+                # error's type, not its text: a 4xx whose message says
+                # "timeout" is a refusal, and an httpx timeout can carry no
+                # text at all.
+                if wait and isinstance(error, httpx.TimeoutException):
+                    continue
+
+                # The broker, or the way to it, could not answer for a while:
+                # a leader election, a node restarting, a gateway timing out,
+                # a lost connection, a 429 the HttpClient stopped retrying.
+                # Wait, then poll again, for as long as it takes (see
+                # is_transient_pop_error). Before this only a 429 and errors
+                # whose text said "connection" were retried here: on 2026-10-29
+                # the 503s of a leader election stopped consumers whose
+                # process stayed up, and nothing restarted them.
+                if is_transient_pop_error(error):
+                    transient_failures += 1
+                    if failing_since is None:
+                        failing_since = time.monotonic()
+                    delay = transient_delay_seconds(transient_failures, getattr(error, "retry_after_seconds", None))
                     logger.warn(
                         "ConsumerManager.worker",
                         {
                             "worker_id": worker_id,
-                            "status": "rate-limited",
+                            "status": "pop-failed-retrying",
+                            "http_status": status_code,
                             "code": getattr(error, "code", None),
-                            "retry_delay_s": delay,
+                            "error": str(error) or type(error).__name__,
+                            "failed_pops": transient_failures,
+                            "retry_in_seconds": round(delay, 3),
                         },
                     )
-                    await asyncio.sleep(delay)
-                    continue
-
-                # Check if network error
-                is_network_error = (
-                    "fetch failed" in error_str
-                    or "ECONNREFUSED" in error_str
-                    or "connection" in error_str.lower()
-                )
-
-                if is_network_error:
-                    logger.warn(
-                        "ConsumerManager.worker",
-                        {"worker_id": worker_id, "error": "network", "message": str(error)},
-                    )
-                    print(f"Worker {worker_id}: Network error - {error}")
-                    # Wait before retry
-                    await asyncio.sleep(1)
+                    await _pause(delay, signal)
                     continue
 
                 # 403 (forbidden): terminal. cluster_suspended in particular
@@ -417,8 +499,14 @@ class ConsumerManager:
                     )
                     raise
 
-                # Other errors - rethrow
-                logger.error("ConsumerManager.worker", {"worker_id": worker_id, "error": str(error)})
+                # Anything else stops this worker and fails consume(): another
+                # 4xx (refused the same way next time), a 503
+                # raft_phase1_unsupported, or an error that is not a transport
+                # fault.
+                logger.error(
+                    "ConsumerManager.worker",
+                    {"worker_id": worker_id, "error": str(error), "http_status": status_code, "code": getattr(error, "code", None)},
+                )
                 raise
 
         logger.log(

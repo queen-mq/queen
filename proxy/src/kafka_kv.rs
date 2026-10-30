@@ -43,6 +43,7 @@
 //! comparable, and the asymmetry is the whole design of the predicate.
 
 use crate::routes::{Feature, GatedOp, RouteClass};
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 /// The namespace the facade writes under. Fixed in
 /// `protocols/queen-kafka/src/offsets.rs` (`NAMESPACE`), never client-chosen — which is
@@ -122,87 +123,383 @@ pub fn effective_class(class: RouteClass, body: &[u8]) -> RouteClass {
 /// batch", or an empty array would be a way to reach `Consume` on a route the
 /// tenant's plan does not grant.
 pub fn is_kafka_only_batch(body: &[u8]) -> bool {
-    let root: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    // Both roots the route accepts, and the two `mixed_batch_grows` already
-    // reads: a bare array, or `{"operations":[...]}`. The facade always sends
-    // the object form (`queen.rs`'s `KvBody`), but the sniffer must agree with
-    // the route rather than with one of its clients.
-    let ops = match &root {
-        serde_json::Value::Array(a) => a,
-        serde_json::Value::Object(o) => match o.get("operations") {
-            Some(serde_json::Value::Array(a)) => a,
-            _ => return false,
-        },
-        _ => return false,
-    };
-    !ops.is_empty() && ops.iter().all(is_kafka_op)
+    // A TYPED SCAN, not a `serde_json::Value` tree. On a non-shielded
+    // listener this runs before authentication, and a 16 MiB body of small
+    // values built a ~300-400 MB tree before the 401. The scan keeps a few
+    // flags per op and drops every value as it is read.
+    //
+    // It answers exactly what the tree did. Every value goes through
+    // `deserialize_any`, the path `Value` itself takes, so the depth limit,
+    // the number range and the string checks are the same; a duplicate key
+    // takes its LAST value, as `Value`'s map insert does; and the whole body
+    // must parse with nothing after it, as `from_slice` requires.
+    let mut de = serde_json::Deserializer::from_slice(body);
+    match RootSeed.deserialize(&mut de) {
+        Ok(verdict) => de.end().is_ok() && verdict,
+        Err(_) => false,
+    }
+}
+
+/// The key of an object, sorted into the few names the scan reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Ns,
+    Op,
+    Key,
+    Keys,
+    Prefix,
+    Operations,
+    Other,
+}
+
+struct FieldSeed;
+
+impl<'de> DeserializeSeed<'de> for FieldSeed {
+    type Value = Field;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Field, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for FieldSeed {
+    type Value = Field;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an object key")
+    }
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<Field, E> {
+        Ok(match s {
+            "ns" => Field::Ns,
+            "op" => Field::Op,
+            "key" => Field::Key,
+            "keys" => Field::Keys,
+            "prefix" => Field::Prefix,
+            "operations" => Field::Operations,
+            _ => Field::Other,
+        })
+    }
+}
+
+/// Any value, checked as `Value` would accept it and dropped as it is read.
+struct Skip;
+
+impl<'de> DeserializeSeed<'de> for Skip {
+    type Value = ();
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Skip {
+    type Value = ();
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<(), A::Error> {
+        while s.next_element_seed(Skip)?.is_some() {}
+        Ok(())
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<(), A::Error> {
+        while m.next_key_seed(Skip)?.is_some() {
+            m.next_value_seed(Skip)?;
+        }
+        Ok(())
+    }
+}
+
+/// A value that passes when it is a string `.0` accepts; anything else is
+/// read through and fails (`Value::as_str` is `None` for it).
+#[derive(Clone, Copy)]
+struct StrIs(fn(&str) -> bool);
+
+impl<'de> DeserializeSeed<'de> for StrIs {
+    type Value = bool;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for StrIs {
+    type Value = bool;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<bool, E> {
+        Ok((self.0)(s))
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, s: A) -> Result<bool, A::Error> {
+        Skip.visit_seq(s).map(|_| false)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, m: A) -> Result<bool, A::Error> {
+        Skip.visit_map(m).map(|_| false)
+    }
+}
+
+fn is_kafka_ns(s: &str) -> bool {
+    s == KAFKA_NS
+}
+
+fn is_kafka_op_name(s: &str) -> bool {
+    KAFKA_OPS.contains(&s)
+}
+
+fn is_kafka_key(s: &str) -> bool {
+    // A prefix SHORTER than `qk:` (`q`, or `""`) would range over the
+    // reserved space AND over foreign keys, so it is not a read of the
+    // facade's own space and does not qualify. `starts_with` says exactly
+    // that: `"q"` does not start with `"qk:"`. The same test serves `key`,
+    // each entry of `keys`, and `prefix`.
+    s.starts_with(KAFKA_PREFIX)
+}
+
+/// `keys`: a NON-EMPTY array whose every entry is a facade key. An empty list
+/// addresses nothing, so it cannot be evidence that this is a Kafka batch —
+/// the same reason an empty batch is `false`.
+struct KeyList;
+
+impl<'de> DeserializeSeed<'de> for KeyList {
+    type Value = bool;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for KeyList {
+    type Value = bool;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<bool, A::Error> {
+        let mut n = 0usize;
+        let mut all = true;
+        while let Some(ok) = s.next_element_seed(StrIs(is_kafka_key))? {
+            n += 1;
+            all &= ok;
+        }
+        Ok(n > 0 && all)
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, m: A) -> Result<bool, A::Error> {
+        Skip.visit_map(m).map(|_| false)
+    }
 }
 
 /// One op, all three field shapes.
-fn is_kafka_op(op: &serde_json::Value) -> bool {
-    let Some(o) = op.as_object() else {
-        return false;
-    };
-    // The namespace is half the identity of the key space and it is checked
-    // first: `qk:group:g:orders:0` in SOMEBODY ELSE'S namespace is a different
-    // row in `queen.kv` (the PK is `(tenant_id, namespace, key)`) and is not
-    // the facade's bookkeeping in any sense.
-    if o.get("ns").and_then(|v| v.as_str()) != Some(KAFKA_NS) {
-        return false;
+///
+/// The namespace is half the identity of the key space and must be the
+/// facade's: `qk:group:g:orders:0` in SOMEBODY ELSE'S namespace is a different
+/// row in `queen.kv` (the PK is `(tenant_id, namespace, key)`) and is not the
+/// facade's bookkeeping in any sense. Then the op name, then "every recognised
+/// key field that IS present is ours, and at least one was" rather than a match
+/// on the op name: an op carrying two key fields has both read, and an op
+/// carrying none is foreign — which closes the gap against a body that names a
+/// known op and then addresses its keys some other way.
+struct OpSeed;
+
+impl<'de> DeserializeSeed<'de> for OpSeed {
+    type Value = bool;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+        d.deserialize_any(self)
     }
-    if !o
-        .get("op")
-        .and_then(|v| v.as_str())
-        .is_some_and(|op| KAFKA_OPS.contains(&op))
-    {
-        return false;
+}
+
+impl<'de> Visitor<'de> for OpSeed {
+    type Value = bool;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
     }
-    // Exactly one of these is present on each of the four ops, but the check is
-    // written as "every recognised field that IS present is ours, and at least
-    // one was" rather than as a match on the op name. An op carrying two key
-    // fields therefore has both read, and an op carrying none is foreign —
-    // which is what closes the gap against a body that names a known op and
-    // then addresses its keys some other way.
-    let mut addressed = false;
-    if let Some(v) = o.get("key") {
-        let Some(s) = v.as_str() else { return false };
-        if !s.starts_with(KAFKA_PREFIX) {
-            return false;
-        }
-        addressed = true;
-    }
-    if let Some(v) = o.get("keys") {
-        let Some(list) = v.as_array() else {
-            return false;
-        };
-        // An empty list addresses nothing, so it cannot be evidence that this
-        // is a Kafka batch — the same reason an empty batch is `false`.
-        if list.is_empty() {
-            return false;
-        }
-        for e in list {
-            let Some(s) = e.as_str() else { return false };
-            if !s.starts_with(KAFKA_PREFIX) {
-                return false;
+    fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<bool, A::Error> {
+        // Last value wins per field, like the map `Value` would have built.
+        let (mut ns, mut op, mut key, mut keys, mut prefix) = (None, None, None, None, None);
+        while let Some(f) = m.next_key_seed(FieldSeed)? {
+            match f {
+                Field::Ns => ns = Some(m.next_value_seed(StrIs(is_kafka_ns))?),
+                Field::Op => op = Some(m.next_value_seed(StrIs(is_kafka_op_name))?),
+                Field::Key => key = Some(m.next_value_seed(StrIs(is_kafka_key))?),
+                Field::Keys => keys = Some(m.next_value_seed(KeyList)?),
+                Field::Prefix => prefix = Some(m.next_value_seed(StrIs(is_kafka_key))?),
+                Field::Operations | Field::Other => m.next_value_seed(Skip)?,
             }
         }
-        addressed = true;
+        let addressed = key.is_some() || keys.is_some() || prefix.is_some();
+        Ok(ns == Some(true)
+            && op == Some(true)
+            && key != Some(false)
+            && keys != Some(false)
+            && prefix != Some(false)
+            && addressed)
     }
-    if let Some(v) = o.get("prefix") {
-        let Some(s) = v.as_str() else { return false };
-        // A prefix SHORTER than `qk:` (`q`, or `""`) would range over the
-        // reserved space AND over foreign keys, so it is not a read of the
-        // facade's own space and does not qualify. `starts_with` says exactly
-        // that: `"q"` does not start with `"qk:"`.
-        if !s.starts_with(KAFKA_PREFIX) {
-            return false;
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, s: A) -> Result<bool, A::Error> {
+        Skip.visit_seq(s).map(|_| false)
+    }
+}
+
+/// The ops array: non-empty, and every op the facade's. Any other value (the
+/// `operations` key holding a non-array) is `false`.
+struct OpsSeed;
+
+impl<'de> DeserializeSeed<'de> for OpsSeed {
+    type Value = bool;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for OpsSeed {
+    type Value = bool;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<bool, A::Error> {
+        let mut n = 0usize;
+        let mut all = true;
+        while let Some(ok) = s.next_element_seed(OpSeed)? {
+            n += 1;
+            all &= ok;
         }
-        addressed = true;
+        Ok(n > 0 && all)
     }
-    addressed
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, m: A) -> Result<bool, A::Error> {
+        Skip.visit_map(m).map(|_| false)
+    }
+}
+
+/// Both roots the route accepts, and the two `mixed_batch_grows` already
+/// reads: a bare array, or `{"operations":[...]}` (the last `operations` key
+/// wins; absent is `false`). The facade always sends the object form
+/// (`queen.rs`'s `KvBody`), but the sniffer must agree with the route rather
+/// than with one of its clients.
+struct RootSeed;
+
+impl<'de> DeserializeSeed<'de> for RootSeed {
+    type Value = bool;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for RootSeed {
+    type Value = bool;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, s: A) -> Result<bool, A::Error> {
+        OpsSeed.visit_seq(s)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<bool, A::Error> {
+        let mut verdict = false;
+        while let Some(f) = m.next_key_seed(FieldSeed)? {
+            if f == Field::Operations {
+                verdict = m.next_value_seed(OpsSeed)?;
+            } else {
+                m.next_value_seed(Skip)?;
+            }
+        }
+        Ok(verdict)
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<bool, E> {
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
@@ -420,5 +717,137 @@ mod tests {
         ] {
             assert!(!is_kv_batch(crate::routes::classify(&m, p)), "{m} {p}");
         }
+    }
+
+    // The `serde_json::Value` version this scan replaced, kept as the oracle:
+    // the scan must answer exactly what it answered.
+    fn reference_tree_verdict(body: &[u8]) -> bool {
+        let root: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        // Both roots the route accepts, and the two `mixed_batch_grows` already
+        // reads: a bare array, or `{"operations":[...]}`. The facade always sends
+        // the object form (`queen.rs`'s `KvBody`), but the sniffer must agree with
+        // the route rather than with one of its clients.
+        let ops = match &root {
+            serde_json::Value::Array(a) => a,
+            serde_json::Value::Object(o) => match o.get("operations") {
+                Some(serde_json::Value::Array(a)) => a,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        !ops.is_empty() && ops.iter().all(reference_op)
+    }
+
+    fn reference_op(op: &serde_json::Value) -> bool {
+        let Some(o) = op.as_object() else {
+            return false;
+        };
+        // The namespace is half the identity of the key space and it is checked
+        // first: `qk:group:g:orders:0` in SOMEBODY ELSE'S namespace is a different
+        // row in `queen.kv` (the PK is `(tenant_id, namespace, key)`) and is not
+        // the facade's bookkeeping in any sense.
+        if o.get("ns").and_then(|v| v.as_str()) != Some(KAFKA_NS) {
+            return false;
+        }
+        if !o
+            .get("op")
+            .and_then(|v| v.as_str())
+            .is_some_and(|op| KAFKA_OPS.contains(&op))
+        {
+            return false;
+        }
+        // Exactly one of these is present on each of the four ops, but the check is
+        // written as "every recognised field that IS present is ours, and at least
+        // one was" rather than as a match on the op name. An op carrying two key
+        // fields therefore has both read, and an op carrying none is foreign —
+        // which is what closes the gap against a body that names a known op and
+        // then addresses its keys some other way.
+        let mut addressed = false;
+        if let Some(v) = o.get("key") {
+            let Some(s) = v.as_str() else { return false };
+            if !s.starts_with(KAFKA_PREFIX) {
+                return false;
+            }
+            addressed = true;
+        }
+        if let Some(v) = o.get("keys") {
+            let Some(list) = v.as_array() else {
+                return false;
+            };
+            // An empty list addresses nothing, so it cannot be evidence that this
+            // is a Kafka batch — the same reason an empty batch is `false`.
+            if list.is_empty() {
+                return false;
+            }
+            for e in list {
+                let Some(s) = e.as_str() else { return false };
+                if !s.starts_with(KAFKA_PREFIX) {
+                    return false;
+                }
+            }
+            addressed = true;
+        }
+        if let Some(v) = o.get("prefix") {
+            let Some(s) = v.as_str() else { return false };
+            // A prefix SHORTER than `qk:` (`q`, or `""`) would range over the
+            // reserved space AND over foreign keys, so it is not a read of the
+            // facade's own space and does not qualify. `starts_with` says exactly
+            // that: `"q"` does not start with `"qk:"`.
+            if !s.starts_with(KAFKA_PREFIX) {
+                return false;
+            }
+            addressed = true;
+        }
+        addressed
+    }
+
+    #[test]
+    fn the_scan_answers_exactly_what_the_tree_did() {
+        let deep = format!(
+            r#"{{"operations":[{{"op":"put","ns":"queen-kafka","key":"qk:x","value":{}1{}}}]}}"#,
+            "[".repeat(200),
+            "]".repeat(200)
+        );
+        let bodies: Vec<String> = vec![
+            r#"{"operations":[{"op":"put","ns":"queen-kafka","key":"qk:a","value":{"o":1}}]}"#.into(),
+            r#"[{"op":"getMany","ns":"queen-kafka","keys":["qk:a","qk:b"]}]"#.into(),
+            r#"{"operations":[]}"#.into(),
+            r#"[]"#.into(),
+            r#"{}"#.into(),
+            r#"null"#.into(),
+            r#"{"operations":{"op":"put"}}"#.into(),
+            r#"{"operations":[{"op":"put","ns":"queen-kafka","key":"qk:a"}],"operations":[{"op":"put","ns":"other","key":"qk:a"}]}"#.into(),
+            r#"{"operations":[{"op":"put","ns":"other","key":"qk:a"}],"operations":[{"op":"put","ns":"queen-kafka","key":"qk:a"}]}"#.into(),
+            r#"[{"op":"put","ns":"other","ns":"queen-kafka","key":"qk:a"}]"#.into(),
+            r#"[{"op":"put","ns":"queen-kafka","key":"x","key":"qk:a"}]"#.into(),
+            r#"[{"op":"put","ns":"queen-kafka","key":null}]"#.into(),
+            r#"[{"op":"getMany","ns":"queen-kafka","keys":[]}]"#.into(),
+            r#"[{"op":"getMany","ns":"queen-kafka","keys":["qk:a",1]}]"#.into(),
+            r#"[{"op":"getPrefix","ns":"queen-kafka","prefix":"q"}]"#.into(),
+            r#"[{"op":"getPrefix","ns":"queen-kafka","prefix":"qk:"}]"#.into(),
+            r#"[{"op":"put","ns":"queen-kafka"}]"#.into(),
+            r#"[{"op":"drop","ns":"queen-kafka","key":"qk:a"}]"#.into(),
+            r#"[{"op":"put","n\u0073":"queen-kafka","key":"qk:\u0061"}]"#.into(),
+            r#"[{"op":"put","ns":"queen-kafka","key":"qk:a","value":1e400}]"#.into(),
+            r#"[{"op":"put","ns":"queen-kafka","key":"qk:a"}] x"#.into(),
+            r#"[{"op":"put","ns":"queen-kafka","key":"qk:a"},]"#.into(),
+            r#"[{"op":"put","ns":"queen-kafka","key":"qk:a","value":"\ud800"}]"#.into(),
+            deep,
+        ];
+        for b in &bodies {
+            assert_eq!(
+                is_kafka_only_batch(b.as_bytes()),
+                reference_tree_verdict(b.as_bytes()),
+                "{b}"
+            );
+        }
+        // Raw invalid UTF-8 inside a value the scan only skips.
+        let mut raw = br#"[{"op":"put","ns":"queen-kafka","key":"qk:a","value":""#.to_vec();
+        raw.extend_from_slice(&[0xff, 0xfe]);
+        raw.extend_from_slice(br#""}]"#);
+        assert_eq!(is_kafka_only_batch(&raw), reference_tree_verdict(&raw));
     }
 }

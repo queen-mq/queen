@@ -216,6 +216,14 @@ Why: a claimed partition waits for its lease to end if the runner that claimed i
 is short; and a query with a large state answers in pages instead of one long read. Applied in
 `server/src/rsm/facade/real/phase2.rs`.
 
+| Limit | `POST /streams/v1/cycle` | Setting |
+|---|---|---|
+| One state value | 16 MiB of JSON. A cycle with a larger one answers 413 `state_too_large` and stores nothing | `QUEEN_STREAMS_MAX_STATE_BYTES` |
+
+Why: a window's state is read and written whole on every cycle of its partition, so its size is
+paid on every event. Keep large data out of the state: put it in a message or your own storage, and
+keep a reference. Applied in `server/src/rsm/facade/real/phase2/streams.rs`.
+
 ## Locks
 
 A lock is a KV row in the namespace `queen-locks`, so the KV value, rate and quota limits above

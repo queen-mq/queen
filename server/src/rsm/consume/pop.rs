@@ -81,8 +81,9 @@ pub(crate) fn arm(sh: &mut Shard, gid: Gid, pid: Pid, now_us: i64, grace_us: i64
 
 /// What one claim attempt did.
 pub(crate) enum Claimed {
-    /// Delivered: the claim, and the frames it took.
-    Took(PopClaim, i64),
+    /// Delivered: the claim, the frames it took, the bytes their rows say
+    /// they weigh, and whether the pop's byte budget is spent with them.
+    Took(PopClaim, i64, u64, bool),
     /// Nothing now; claimable again from this instant (a delay, a window).
     Hold(i64),
     /// Nothing (caught up, leased, or a seal that moved the cursor).
@@ -103,6 +104,13 @@ pub(crate) struct ClaimReq<'a> {
     pub skip_window: bool,
 }
 
+/// A pop command's message budget, at least one and at most
+/// `QUEEN_POP_MAX_BATCH`: the leader also plans commands a follower (maybe an
+/// older build) forwarded, so the route's clamp is not the only one.
+fn budget_of(b: i32) -> i64 {
+    (b.max(1) as i64).min(crate::frames::pop_max_batch() as i64)
+}
+
 /// Claim frames of ONE part for one group — the claim core (004
 /// `log_pop_v1`, the planner's `claim_one`). Mutates the part in place and
 /// marks it changed when it delivered (or sealed).
@@ -115,6 +123,7 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
     cfg: &GroupCfg,
     req: &ClaimReq<'_>,
     budget: i64,
+    bytes_used: u64,
     now: i64,
     grace: i64,
 ) -> Result<Claimed> {
@@ -179,6 +188,30 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
     let mut last: i64 = -1;
     let mut hold: Option<i64> = None;
     let mut run: Vec<(u64, [u8; 16])> = Vec::new();
+    // The pop answer's byte budget (`QUEEN_POP_MAX_BYTES`), shared by every
+    // claim of the pop: an append's `txns` row says what it retains, and its
+    // messages weigh the append's average. An append whose row does not say
+    // (an older row, one read from the queue log) is not weighed here; the
+    // render stops at the same budget for those.
+    let max_bytes = crate::frames::pop_max_bytes() as u64;
+    let mut bytes: u64 = 0;
+    let mut full = false;
+    // Of `avail` messages weighing `w` each, how many fit in what is left,
+    // and whether that spends the budget. A claim always takes its first
+    // message, whatever it weighs: a part handed to a claim that takes
+    // nothing would leave the ready ring with its messages waiting. So a pop
+    // goes past the budget by one message at most, and stops there.
+    let fit = |avail: i64, w: Option<u64>, bytes: u64, taken: i64| -> (i64, bool) {
+        let Some(w) = w.filter(|w| *w > 0) else {
+            return (avail, false);
+        };
+        let left = max_bytes.saturating_sub(bytes_used.saturating_add(bytes));
+        let k = (left / w).min(i64::MAX as u64) as i64;
+        let spent = k <= avail;
+        let k = if taken == 0 { k.max(1) } else { k };
+        (avail.min(k), spent)
+    };
+    let weight = |s: &super::frames::Seg| s.bytes.map(|b| b / (s.end - s.base + 1).max(1));
 
     if has_live && tail >= wanted {
         let from = wanted.max(log_start as i64).max(0) as u64;
@@ -233,16 +266,20 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
                 if h.end as i64 >= wanted {
                     if fresh(h.created_at_us) {
                         let avail = h.end as i64 - wanted + 1;
-                        let take = avail.min(budget);
+                        let (take, over) = fit(avail.min(budget), weight(h), bytes, taken);
+                        full |= over;
+                        bytes += take as u64 * weight(h).unwrap_or(0);
                         taken = take;
-                        start = Some(wanted);
-                        last = wanted + take - 1;
+                        if take > 0 {
+                            start = Some(wanted);
+                            last = wanted + take - 1;
+                        }
                     } else {
                         hold = Some(h.created_at_us + q.delayed_processing as i64 * SEC_US);
                     }
                 }
             }
-            if taken < budget && hold.is_none() {
+            if taken < budget && hold.is_none() && !full {
                 for s in segs.iter().filter(|s| s.base as i64 > wanted) {
                     if !fresh(s.created_at_us) {
                         if taken == 0 {
@@ -251,7 +288,8 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
                         break; // created_at monotone: everything after is deferred too
                     }
                     let avail = s.end as i64 - s.base as i64 + 1;
-                    let take = avail.min(budget - taken);
+                    let (take, over) = fit(avail.min(budget - taken), weight(s), bytes, taken);
+                    full |= over;
                     if take <= 0 {
                         break;
                     }
@@ -259,8 +297,9 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
                         start = Some(s.base as i64); // retention gap: the batch starts here
                     }
                     taken += take;
+                    bytes += take as u64 * weight(s).unwrap_or(0);
                     last = s.base as i64 + take - 1;
-                    if taken >= budget {
+                    if taken >= budget || full {
                         break;
                     }
                 }
@@ -385,6 +424,8 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
             conflated: conflate,
         },
         taken,
+        bytes,
+        full,
     ))
 }
 
@@ -481,6 +522,11 @@ pub(crate) struct Walk {
     /// Such parts were left after the last round: the pop is not parked on
     /// them (nothing would wake it), it is answered `Retry`.
     pub cold_left: bool,
+    /// What the claims took, in stored bytes, as far as the rows say
+    /// (`QUEEN_POP_MAX_BYTES`).
+    pub bytes: u64,
+    /// The pop's byte budget is spent: no further claim.
+    pub bytes_full: bool,
 }
 
 /// How many times one pop reads cold frames and claims again before it
@@ -639,7 +685,7 @@ impl Engine {
             deps,
             ..Walk::default()
         };
-        let budget = c.budget.max(1) as i64;
+        let budget = budget_of(c.budget);
         let max_parts = width(c, &g);
         self.walk_group(fr, &g, c, now, budget, max_parts, &mut walk)?;
         Ok(PopStep::Walked(walk, Some(g), None))
@@ -815,9 +861,17 @@ impl Engine {
             .get(&gid)
             .and_then(|gs| gs.parts.get(&pid))
             .map(|p| p.ver);
-        match claim_one(fr, sh, gid, pid, cfg, req, *budget, now, grace)? {
-            Claimed::Took(claim, taken) => {
+        match claim_one(fr, sh, gid, pid, cfg, req, *budget, walk.bytes, now, grace)? {
+            Claimed::Took(claim, taken, bytes, full) => {
                 *budget -= taken;
+                walk.bytes = walk.bytes.saturating_add(bytes);
+                if full {
+                    // The answer's byte budget is spent: the pop stops
+                    // claiming as on a spent count, and every part it did
+                    // not reach stays ready.
+                    *budget = 0;
+                    walk.bytes_full = true;
+                }
                 let Shard { groups, timers, .. } = &mut *sh;
                 let part = groups
                     .get_mut(&gid)
@@ -1006,7 +1060,7 @@ impl Engine {
             deps,
             ..Walk::default()
         };
-        let mut budget = c.budget.max(1) as i64;
+        let mut budget = budget_of(c.budget);
         {
             let mut sh = lock(&self.shards[shard_of(pid)]);
             self.claim_into(
@@ -1108,13 +1162,13 @@ impl Engine {
             deps,
             ..Walk::default()
         };
-        let mut budget = c.budget.max(1) as i64;
+        let mut budget = budget_of(c.budget);
         let mut max_parts = match c.max_parts {
             MAX_PARTS_AUTO => groups.iter().map(|g| width(c, g)).max().unwrap_or(1),
             _ => groups.first().map_or(usize::MAX, |g| width(c, g)),
         };
         for g in &groups {
-            if budget <= 0 || max_parts == 0 {
+            if budget <= 0 || max_parts == 0 || walk.bytes_full {
                 break;
             }
             self.attach_late(r, fr, g, now)?;
@@ -1172,7 +1226,7 @@ impl Engine {
                     conflate: w.cmd.conflate,
                     skip_window: w.cmd.skip_window_debounce,
                 };
-                let mut budget = w.cmd.budget.max(1) as i64;
+                let mut budget = budget_of(w.cmd.budget);
                 {
                     let mut sh = lock(&self.shards[shard_of(pid)]);
                     self.claim_into(
@@ -1209,7 +1263,7 @@ impl Engine {
                     g,
                     &w.cmd,
                     now,
-                    w.cmd.budget.max(1) as i64,
+                    budget_of(w.cmd.budget),
                     max_parts,
                     &mut walk,
                 )?;

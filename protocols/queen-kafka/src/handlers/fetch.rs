@@ -21,7 +21,10 @@ use kafka_protocol::messages::{
 use kafka_protocol::records::{Record, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID};
 
 use crate::conn::Conn;
-use crate::core::{FetchEntry, FetchedFrom, LocalAnswer, RawFetched, RawRecord, TimeLookup};
+use crate::core::{
+    FetchEntry, FetchedFrom, LocalAnswer, RawFetched, RawRecord, TimeLookup, MAX_FETCH_ENTRIES,
+    MAX_TIME_LOOKUPS,
+};
 use crate::errors::*;
 use crate::records;
 use crate::server::Ctx;
@@ -88,32 +91,26 @@ pub async fn fetch(ctx: &Arc<Ctx>, conn: &Conn, req: FetchRequest, _version: i16
         } else {
             i64::from(req.max_wait_ms.max(0))
         };
-        let max_bytes = (req.max_bytes > 0).then_some(i64::from(req.max_bytes));
-        match ctx
-            .broker
-            .fetch(
-                bearer.clone(),
-                entries,
-                wait,
-                i64::from(req.min_bytes.max(0)),
-                max_bytes,
-            )
-            .await
-        {
-            Ok(LocalAnswer::Done(v)) if v.len() == asked => Ok(v),
-            Ok(LocalAnswer::Done(_)) => Err(UNKNOWN_SERVER_ERROR),
-            Ok(LocalAnswer::Refused(r)) => {
-                tracing::debug!(target: "kafka", status = r.status, body = %r.body, "fetch refused");
-                Err(match r.status {
-                    401 | 403 => TOPIC_AUTHORIZATION_FAILED,
-                    _ => NOT_LEADER_OR_FOLLOWER,
-                })
-            }
-            Err(e) => {
-                tracing::warn!(target: "kafka", error = %e, "fetch failed");
-                Err(NOT_LEADER_OR_FOLLOWER)
-            }
+        // Never unlimited: 0 or less is the ceiling, and nothing asks past it.
+        let ceiling = crate::config::fetch_max_bytes();
+        let max_bytes = if req.max_bytes > 0 {
+            i64::from(req.max_bytes).min(ceiling)
+        } else {
+            ceiling
+        };
+        let min_bytes = i64::from(req.min_bytes.max(0));
+        if entries.len() <= MAX_FETCH_ENTRIES {
+            read_once(ctx, &bearer, entries, wait, min_bytes, max_bytes).await
+        } else {
+            read_split(ctx, &bearer, entries, wait, min_bytes, max_bytes).await
         }
+        .and_then(|v| {
+            if v.len() == asked {
+                Ok(v)
+            } else {
+                Err(UNKNOWN_SERVER_ERROR)
+            }
+        })
     };
 
     let mut counts: HashMap<String, FetchedFrom> = HashMap::new();
@@ -191,6 +188,120 @@ pub async fn fetch(ctx: &Arc<Ctx>, conn: &Conn, req: FetchRequest, _version: i16
     FetchResponse::default().with_responses(responses)
 }
 
+/// One read of the broker, at most [`MAX_FETCH_ENTRIES`] partitions.
+async fn read_once(
+    ctx: &Arc<Ctx>,
+    bearer: &Option<String>,
+    entries: Vec<FetchEntry>,
+    wait: i64,
+    min_bytes: i64,
+    max_bytes: i64,
+) -> Result<Vec<RawFetched>, i16> {
+    let asked = entries.len();
+    match ctx
+        .broker
+        .fetch(bearer.clone(), entries, wait, min_bytes, Some(max_bytes))
+        .await
+    {
+        Ok(LocalAnswer::Done(v)) if v.len() == asked => Ok(v),
+        Ok(LocalAnswer::Done(_)) => Err(UNKNOWN_SERVER_ERROR),
+        Ok(LocalAnswer::Refused(r)) => Err(fetch_refusal(&r)),
+        Err(e) => {
+            tracing::warn!(target: "kafka", error = %e, "fetch failed");
+            Err(NOT_LEADER_OR_FOLLOWER)
+        }
+    }
+}
+
+fn fetch_refusal(r: &crate::core::LocalResponse) -> i16 {
+    tracing::debug!(target: "kafka", status = r.status, body = %r.body, "fetch refused");
+    match r.status {
+        401 | 403 => TOPIC_AUTHORIZATION_FAILED,
+        _ => NOT_LEADER_OR_FOLLOWER,
+    }
+}
+
+/// A fetch of more partitions than one broker read takes (a consumer of two
+/// topics of the default width already asks for 2,048): read in slices of
+/// [`MAX_FETCH_ENTRIES`], one after the other, sharing the answer's
+/// `max_bytes`. When none of them has anything to answer, every slice parks
+/// at once, and the first that wakes answers for all: the others keep what
+/// the first round read (their bounds, no records) and stop parking.
+async fn read_split(
+    ctx: &Arc<Ctx>,
+    bearer: &Option<String>,
+    entries: Vec<FetchEntry>,
+    wait: i64,
+    min_bytes: i64,
+    max_bytes: i64,
+) -> Result<Vec<RawFetched>, i16> {
+    let slices: Vec<Vec<FetchEntry>> = entries
+        .chunks(MAX_FETCH_ENTRIES)
+        .map(<[FetchEntry]>::to_vec)
+        .collect();
+    drop(entries);
+    let mut out: Vec<RawFetched> = Vec::new();
+    let mut left = max_bytes;
+    for slice in &slices {
+        if left <= 0 {
+            // Nothing left to carry: the rest answer their bounds only, as
+            // the broker answers an entry reached with its budget spent.
+            let bounds = slice
+                .iter()
+                .map(|e| FetchEntry {
+                    max_bytes: 1,
+                    ..e.clone()
+                })
+                .collect();
+            let mut got = read_once(ctx, bearer, bounds, 0, 0, 1).await?;
+            for f in &mut got {
+                f.records.clear();
+            }
+            out.extend(got);
+            continue;
+        }
+        let got = read_once(ctx, bearer, slice.clone(), 0, 0, left).await?;
+        left -= got
+            .iter()
+            .flat_map(|f| f.records.iter())
+            .map(|r| r.payload.len().max(1) as i64)
+            .sum::<i64>();
+        out.extend(got);
+    }
+    let news = out
+        .iter()
+        .any(|f| !f.records.is_empty() || f.error.is_some());
+    if news || wait <= 0 || min_bytes <= 0 {
+        return Ok(out);
+    }
+    let mut parked = tokio::task::JoinSet::new();
+    for (i, slice) in slices.into_iter().enumerate() {
+        let read = ctx
+            .broker
+            .fetch(bearer.clone(), slice, wait, min_bytes, Some(max_bytes));
+        parked.spawn(async move { (i, read.await) });
+    }
+    // The first slice to answer; dropping the set stops the others.
+    if let Some(Ok((i, got))) = parked.join_next().await {
+        match got {
+            Ok(LocalAnswer::Done(v)) => {
+                let at = i * MAX_FETCH_ENTRIES;
+                if at + v.len() <= out.len() {
+                    for (k, f) in v.into_iter().enumerate() {
+                        out[at + k] = f;
+                    }
+                }
+            }
+            Ok(LocalAnswer::Refused(r)) => return Err(fetch_refusal(&r)),
+            Err(e) => {
+                tracing::warn!(target: "kafka", error = %e, "fetch failed");
+                return Err(NOT_LEADER_OR_FOLLOWER);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The records as one v2 batch. Offsets may have holes (the batch carries
 /// per-record deltas); the `sequence` is set so the encoder keeps one batch.
 fn batch(read: &[RawRecord]) -> (Bytes, usize) {
@@ -233,12 +344,43 @@ fn batch(read: &[RawRecord]) -> (Bytes, usize) {
 const LATEST: i64 = -1;
 const EARLIEST: i64 = -2;
 
+/// The partitions one ListOffsets may name; it is read in slices of the
+/// broker's own ceilings ([`MAX_FETCH_ENTRIES`], [`MAX_TIME_LOOKUPS`]).
+const MAX_LIST_OFFSETS: usize = 65_536;
+
 pub async fn list_offsets(
     ctx: &Arc<Ctx>,
     conn: &Conn,
     req: ListOffsetsRequest,
     _version: i16,
 ) -> ListOffsetsResponse {
+    // Counted before anything is built: past the ceiling every partition is
+    // refused as asked, and no lookup is made.
+    let total: usize = req.topics.iter().map(|t| t.partitions.len()).sum();
+    if total > MAX_LIST_OFFSETS {
+        tracing::debug!(target: "kafka", total, "ListOffsets over its ceiling");
+        let topics = req
+            .topics
+            .into_iter()
+            .map(|t| {
+                ListOffsetsTopicResponse::default()
+                    .with_name(t.name)
+                    .with_partitions(
+                        t.partitions
+                            .into_iter()
+                            .map(|p| {
+                                ListOffsetsPartitionResponse::default()
+                                    .with_partition_index(p.partition_index)
+                                    .with_timestamp(-1)
+                                    .with_offset(-1)
+                                    .with_error_code(INVALID_REQUEST)
+                            })
+                            .collect(),
+                    )
+            })
+            .collect();
+        return ListOffsetsResponse::default().with_topics(topics);
+    }
     let bearer = conn.bearer.clone();
     let leads = ctx.broker.cluster().leads();
     let snap = if leads {
@@ -273,7 +415,9 @@ pub async fn list_offsets(
         .filter(|&i| asks[i].3 == NONE && (asks[i].2 == LATEST || asks[i].2 == EARLIEST))
         .collect();
     let mut bounds: HashMap<usize, Result<(i64, i64), i16>> = HashMap::new();
-    if !bounds_of.is_empty() {
+    // One broker read takes MAX_FETCH_ENTRIES partitions: a consumer starting
+    // on two topics of the default width asks for more.
+    for bounds_of in bounds_of.chunks(MAX_FETCH_ENTRIES) {
         let entries: Vec<FetchEntry> = bounds_of
             .iter()
             .map(|&i| FetchEntry {
@@ -308,7 +452,7 @@ pub async fn list_offsets(
         .filter(|&i| asks[i].3 == NONE && asks[i].2 >= 0)
         .collect();
     let mut times: HashMap<usize, Result<(i64, i64), i16>> = HashMap::new();
-    if !times_of.is_empty() {
+    for times_of in times_of.chunks(MAX_TIME_LOOKUPS) {
         let lookups: Vec<TimeLookup> = times_of
             .iter()
             .map(|&i| TimeLookup {

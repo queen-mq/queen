@@ -572,6 +572,24 @@ pub async fn rate_limit_mw(
     }
 }
 
+/// [`rate_limit_mw`] for requests that carry no credential at all (no
+/// `Authorization`, no API key header, no cookie): those are refused 401
+/// after the gates, so they get their own small per-address budget.
+pub async fn anon_rate_limit_mw(
+    State(l): State<Arc<IpRateLimiter>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let h = req.headers();
+    let credentialed = h.contains_key(axum::http::header::AUTHORIZATION)
+        || h.contains_key(axum::http::header::COOKIE)
+        || h.contains_key("x-api-key");
+    if credentialed {
+        return next.run(req).await;
+    }
+    rate_limit_mw(State(l), req, next).await
+}
+
 // ---------------------------------------------------------------------------
 // Request limits
 // ---------------------------------------------------------------------------
@@ -1145,6 +1163,13 @@ pub struct Edge {
     pub limiter: Arc<IpRateLimiter>,
     /// Web plane: `QUEEN_EDGE_WEB_RPS_PER_IP` (default 20, burst 60).
     pub web_limiter: Arc<IpRateLimiter>,
+    /// Data-plane requests that carry NO credential:
+    /// `QUEEN_EDGE_ANON_RPS_PER_IP` (default 20, burst 60). They are refused
+    /// 401 anyway, but each one reaches the gates first (a body is read for
+    /// the KV sniff): an unauthenticated flood must not cost the broker
+    /// memory. Authenticated traffic is limited only by the data-plane
+    /// limiter above.
+    pub anon_limiter: Arc<IpRateLimiter>,
     pub limits: Arc<RequestLimits>,
     pub web: Arc<WebRules>,
     /// `QUEEN_EDGE_MAX_BODY_BYTES` (default 64 MiB, the broker's own cap).
@@ -1167,6 +1192,11 @@ impl Edge {
                 20.0,
                 60.0,
             )?)),
+            anon_limiter: Arc::new(IpRateLimiter::new(RateLimitConfig::from_env(
+                "QUEEN_EDGE_ANON",
+                20.0,
+                60.0,
+            )?)),
             limits: Arc::new(RequestLimits::from_env()?),
             web: Arc::new(WebRules::from_env()?),
             max_body_bytes: env_num("QUEEN_EDGE_MAX_BODY_BYTES", 64usize * 1024 * 1024)?,
@@ -1183,6 +1213,7 @@ impl Edge {
             .layer(from_fn_with_state(self.limits.clone(), timeout_mw))
             .layer(from_fn_with_state(self.web.clone(), csrf_cookie_mw))
             .layer(from_fn_with_state(self.limiter.clone(), rate_limit_mw))
+            .layer(from_fn_with_state(self.anon_limiter.clone(), anon_rate_limit_mw))
             .layer(from_fn_with_state(self.resolver.clone(), client_ip_mw))
             .layer(from_fn_with_state(self.limits.clone(), header_limits_mw))
             .layer(from_fn_with_state(self.web.clone(), security_headers_mw))
@@ -2184,6 +2215,7 @@ mod tests {
             ),
             limiter: Arc::new(limiter(rps, burst, 1000)),
             web_limiter: Arc::new(limiter(rps, burst, 1000)),
+            anon_limiter: Arc::new(limiter(rps, burst, 1000)),
             limits: Arc::new(RequestLimits {
                 timeout: Some(Duration::from_millis(50)),
                 ..RequestLimits::default()

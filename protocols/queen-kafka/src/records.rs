@@ -284,23 +284,74 @@ fn b64_or_null_into(out: &mut Vec<u8>, bytes: Option<&Bytes>) {
 }
 
 /// [`decode`] of a stored payload's bytes: the envelope's own shape is read
-/// in one pass; anything else is parsed and handed to [`decode`]. An empty
-/// payload reads as `null` and one that is not JSON as the JSON string of its
-/// text, which is how `POST /api/v1/fetch` renders both.
-pub fn decode_bytes(payload: &[u8], stored_timestamp: Option<i64>) -> Decoded {
-    if let Some(mut decoded) = Fast::new(payload).envelope() {
+/// in one pass, and the envelope in another spelling (whitespace, an escaped
+/// header name) through a tree. Anything else is not ours and is served as
+/// the stored bytes themselves, never parsed into a tree and written again:
+/// a native payload of 10 MB would otherwise cost several times that per
+/// read. An empty payload reads as `null` and one that is not JSON as the
+/// JSON string of its text, which is how `POST /api/v1/fetch` renders both.
+pub fn decode_bytes(payload: &Bytes, stored_timestamp: Option<i64>) -> Decoded {
+    let stamped = |mut decoded: Decoded| {
         if decoded.timestamp == NO_TIMESTAMP {
             decoded.timestamp = stored_timestamp.unwrap_or(NO_TIMESTAMP);
         }
-        return decoded;
+        decoded
+    };
+    if let Some(decoded) = Fast::new(payload).envelope() {
+        return stamped(decoded);
+    }
+    if maybe_envelope(payload) {
+        let tree: Option<Value> = serde_json::from_slice(payload).ok();
+        if let Some(decoded) = tree.as_ref().and_then(as_envelope) {
+            return stamped(decoded);
+        }
     }
     let value = if payload.is_empty() {
-        Value::Null
+        Bytes::from_static(b"null")
+    } else if serde_json::from_slice::<serde::de::IgnoredAny>(payload).is_ok() {
+        payload.clone()
     } else {
-        serde_json::from_slice(payload)
-            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(payload).into_owned()))
+        Bytes::from(serde_json::to_vec(&String::from_utf8_lossy(payload)).unwrap_or_default())
     };
-    decode(&value, stored_timestamp)
+    Decoded {
+        key: None,
+        value: Some(value),
+        headers: Vec::new(),
+        timestamp: stored_timestamp.unwrap_or(NO_TIMESTAMP),
+    }
+}
+
+/// Whether `payload` is an object whose keys are envelope keys, `k` and `v`
+/// among them: the only payloads [`as_envelope`] can accept. Read without
+/// building anything, and stopped at the first key that is not one.
+fn maybe_envelope(payload: &[u8]) -> bool {
+    use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+    struct Keys;
+    impl<'de> Visitor<'de> for Keys {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an object of envelope keys")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let (mut k, mut v) = (false, false);
+            while let Some(key) = map.next_key::<&'de str>()? {
+                match key {
+                    K_KEY => k = true,
+                    K_VALUE => v = true,
+                    K_HEADERS | K_TIMESTAMP => {}
+                    _ => return Err(A::Error::custom("not an envelope key")),
+                }
+                map.next_value::<IgnoredAny>()?;
+            }
+            if k && v {
+                Ok(())
+            } else {
+                Err(A::Error::custom("not an envelope"))
+            }
+        }
+    }
+    let mut de = serde_json::Deserializer::from_slice(payload);
+    serde::Deserializer::deserialize_map(&mut de, Keys).is_ok() && de.end().is_ok()
 }
 
 /// The one-pass reader of [`encode_bytes`]'s shape. Every method answers
@@ -812,7 +863,7 @@ mod tests {
             let bytes = encode_bytes(r, None);
             let value: Value = serde_json::from_slice(&bytes).unwrap();
             for ts in [None, Some(42)] {
-                assert_eq!(decode_bytes(&bytes, ts), decode(&value, ts));
+                assert_eq!(decode_bytes(&Bytes::from(bytes.clone()), ts), decode(&value, ts));
             }
             // Only an escaped header name leaves the one-pass reader.
             assert_eq!(
@@ -846,11 +897,23 @@ mod tests {
             } else {
                 serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
             };
+            let got = decode_bytes(&Bytes::copy_from_slice(text.as_bytes()), Some(9));
+            let want = decode(&value, Some(9));
             assert_eq!(
-                decode_bytes(text.as_bytes(), Some(9)),
-                decode(&value, Some(9)),
+                (&got.key, &got.headers, got.timestamp),
+                (&want.key, &want.headers, want.timestamp),
                 "{text}"
             );
+            // A payload that is not an envelope is served as stored now, not
+            // written again: the same JSON, not always the same bytes
+            // (`-0` stays `-0`).
+            if got.value != want.value {
+                let json = |v: &Option<Bytes>| {
+                    v.as_ref()
+                        .map(|b| serde_json::from_slice::<Value>(b).expect("JSON"))
+                };
+                assert_eq!(json(&got.value), json(&want.value), "{text}");
+            }
         }
     }
 }

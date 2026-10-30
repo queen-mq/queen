@@ -238,30 +238,12 @@ impl Engine {
                 }
             }
             Effect::PartitionDelete { pid } => self.drop_pid(*pid, None),
-            Effect::GarbageAdd { pids, scope, .. } => match scope {
-                GarbageScope::Group { group } => {
-                    for pid in pids {
-                        self.drop_pid(*pid, Some(group));
-                    }
+            Effect::GarbageAdd { pids, scope, .. } | Effect::DeleteChunk { pids, scope, .. } => {
+                match scope {
+                    GarbageScope::Group { group } => self.drop_pids(pids, Some(group)),
+                    _ => self.drop_pids(pids, None),
                 }
-                _ => {
-                    for pid in pids {
-                        self.drop_pid(*pid, None);
-                    }
-                }
-            },
-            Effect::DeleteChunk { pids, scope, .. } => match scope {
-                GarbageScope::Group { group } => {
-                    for pid in pids {
-                        self.drop_pid(*pid, Some(group));
-                    }
-                }
-                _ => {
-                    for pid in pids {
-                        self.drop_pid(*pid, None);
-                    }
-                }
-            },
+            }
             Effect::QueueDelete { tenant, queue } => {
                 let groups = read(&self.reg).of_queue(tenant, queue);
                 for g in groups {
@@ -461,6 +443,58 @@ impl Engine {
         }
     }
 
+    /// [`Self::drop_pid`] for many pids at once (a queue, tenant or group
+    /// delete names every partition): one lock per shard, and each group's
+    /// ready list filtered once for all of them. One `retain` per pid was
+    /// quadratic in the partitions of a group, on the apply thread.
+    pub(crate) fn drop_pids(&self, pids: &[Pid], group: Option<&str>) {
+        if pids.len() <= 1 {
+            for pid in pids {
+                self.drop_pid(*pid, group);
+            }
+            return;
+        }
+        let mut by_shard: std::collections::HashMap<usize, Vec<Pid>> =
+            std::collections::HashMap::new();
+        for pid in pids {
+            by_shard.entry(shard_of(*pid)).or_default().push(*pid);
+        }
+        let mut settled = Vec::new();
+        for (s, list) in by_shard {
+            let mut sh = lock(&self.shards[s]);
+            let sh = &mut *sh;
+            let mut unready: std::collections::HashMap<Gid, std::collections::HashSet<Pid>> =
+                std::collections::HashMap::new();
+            for pid in list {
+                let Some(pi) = sh.pids.get(&pid) else {
+                    continue;
+                };
+                let gids: Vec<Gid> = pi
+                    .watchers
+                    .iter()
+                    .copied()
+                    .filter(|gid| {
+                        group.is_none_or(|n| sh.groups.get(gid).is_some_and(|gs| gs.g.name == n))
+                    })
+                    .collect();
+                for gid in gids {
+                    settled.extend(remove_part_with(sh, gid, pid, Some(&mut unready)));
+                }
+                if group.is_none() {
+                    sh.pids.remove(&pid);
+                }
+            }
+            for (gid, gone) in unready {
+                if let Some(gs) = sh.groups.get_mut(&gid) {
+                    gs.ready.retain(|x| !gone.contains(x));
+                }
+            }
+        }
+        for a in settled {
+            self.settle(a, 1);
+        }
+    }
+
     /// Forget a group: its parts, its waiters (answered empty), what it holds.
     pub(crate) fn drop_group(&self, g: &Arc<Group>) {
         g.dead.store(true, Ordering::Release);
@@ -515,12 +549,28 @@ impl Engine {
 /// Remove one part from its shard: the answers that waited on it (settled:
 /// nothing of it can become durable any more).
 fn remove_part(sh: &mut super::state::Shard, gid: Gid, pid: Pid) -> Vec<u64> {
+    remove_part_with(sh, gid, pid, None)
+}
+
+/// [`remove_part`], with the ready-list filtering deferred into `unready` when
+/// the caller removes many parts and filters each list once ([`Engine::drop_pids`]).
+fn remove_part_with(
+    sh: &mut super::state::Shard,
+    gid: Gid,
+    pid: Pid,
+    unready: Option<&mut std::collections::HashMap<Gid, std::collections::HashSet<Pid>>>,
+) -> Vec<u64> {
     let mut settled = Vec::new();
     if let Some(gs) = sh.groups.get_mut(&gid) {
         if let Some(p) = gs.parts.remove(&pid) {
             settled.extend(p.waiters.iter().map(|(a, _)| *a));
             if p.queued {
-                gs.ready.retain(|x| *x != pid);
+                match unready {
+                    Some(m) => {
+                        m.entry(gid).or_default().insert(pid);
+                    }
+                    None => gs.ready.retain(|x| *x != pid),
+                }
                 gs.g.unready();
             }
             if let Some(w) = p.cur.worker() {

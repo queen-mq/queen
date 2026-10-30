@@ -6,6 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::json_out::{push_object, Field};
 use super::{query_map, read_error, ApiOut, ApiReq, Effect, RaftFacade, ReqCtx, RsmError};
 use crate::frames::{unpack_frames_ref, uuid_bytes_to_string, uuid_string_to_bytes};
 use crate::rsm::effect::{Pid, TraceEvent};
@@ -49,6 +50,10 @@ pub(super) struct Record {
 fn newest_stamp(p: &PartitionRow) -> i64 {
     p.last_created_at_us.max(p.last_write_at_us)
 }
+
+/// The most partition rows a lookup by partition uuid reads
+/// ([`RaftFacade::resolve_pid`]).
+const UUID_SCAN_MAX_ROWS: usize = 2_000_000;
 
 /// Offsets read per backward step of the message list.
 const MESSAGE_CHUNK: u64 = 256;
@@ -298,47 +303,48 @@ impl RaftFacade {
         }
         let max_wait = request.max_wait_ms.unwrap_or(0).min(30_000);
         let min_bytes = request.min_bytes.unwrap_or(1).max(0) as usize;
-        // The call's own ceiling ([`Self::fetch_once`]).
+        // The call's own ceiling ([`Self::fetch_once`]); without one, the
+        // default total (`QUEEN_FETCH_MAX_BYTES`, 50 MiB, Kafka's
+        // `fetch.max.bytes` ballpark): 1,024 entries of 8 MiB each were 8 GiB
+        // in one answer.
         let ctx = ReqCtx {
-            fetch_max_bytes: request.max_bytes.map(|b| b.max(1) as usize),
+            fetch_max_bytes: Some(
+                request
+                    .max_bytes
+                    .map(|b| b.max(1) as usize)
+                    .unwrap_or_else(fetch_default_max_bytes),
+            ),
             ..ctx
         };
-        let asks: Vec<crate::rsm::facade::RecordFetch> = request
-            .entries
-            .into_iter()
-            .map(|e| crate::rsm::facade::RecordFetch {
+        // The same (queue, partition, offset) asked twice is read once: the
+        // first entry stays, with the larger of the two per-entry ceilings.
+        let mut asks: Vec<crate::rsm::facade::RecordFetch> = Vec::with_capacity(request.entries.len());
+        let mut seen: HashMap<(String, String, u64), usize> = HashMap::new();
+        for e in request.entries {
+            let ask = crate::rsm::facade::RecordFetch {
                 partition: fetch_partition_name(e.partition.as_ref()),
                 queue: e.queue,
                 offset: e.offset as u64,
                 max_bytes: e.max_bytes.unwrap_or(1 << 20).clamp(1, 8 << 20) as usize,
-            })
-            .collect();
+            };
+            let key = (ask.queue.clone(), ask.partition.clone(), ask.offset);
+            match seen.get(&key) {
+                Some(&i) => asks[i].max_bytes = asks[i].max_bytes.max(ask.max_bytes),
+                None => {
+                    seen.insert(key, asks.len());
+                    asks.push(ask);
+                }
+            }
+        }
         let answers = self
             .fetch_wait(&ctx, &asks, max_wait, min_bytes, true)
             .await?;
-        let entries: Vec<Value> = asks
-            .into_iter()
-            .zip(answers)
-            .map(|(ask, a)| {
-                let mut entry = json!({
-                    "queue": ask.queue,
-                    "partition": ask.partition,
-                    "records": a.records.into_iter().map(|rec| json!({
-                        "offset": rec.offset,
-                        "transactionId": rec.txn.unwrap_or_default(),
-                        "payload": payload_json(&rec.payload),
-                        "ts": crate::rsm::planner::timers::iso_us(rec.created_at_us),
-                    })).collect::<Vec<_>>(),
-                    "highWatermark": a.high_watermark,
-                    "logStartOffset": a.log_start_offset,
-                });
-                if let Some(error) = a.error {
-                    entry["error"] = Value::from(error);
-                }
-                entry
-            })
-            .collect();
-        Ok(ApiOut::json(200, json!({"entries":entries}).to_string()))
+        // Each payload written as it is stored (json_out): a tree of an
+        // 8 MiB answer took about 19 times that.
+        Ok(ApiOut::json(
+            200,
+            super::json_out::fetch_answer(&asks, &answers),
+        ))
     }
 
     /// [`crate::rsm::facade::Rsm::fetch_records`]: the read of `POST
@@ -718,6 +724,17 @@ impl RaftFacade {
                     }),
             });
         }
+        // The rows one call may answer, every entry together: 1,024 entries
+        // of 1,000 rows (repeats allowed) made a million rows in one answer.
+        // Past the total each entry's limit shrinks to its share; an entry
+        // pages on with its own cursor as before.
+        let asked: usize = asks.iter().map(|a| a.limit).sum();
+        if asked > CHANGED_MAX_TOTAL_ROWS {
+            let share = (CHANGED_MAX_TOTAL_ROWS / asks.len().max(1)).max(1);
+            for a in &mut asks {
+                a.limit = a.limit.min(share);
+            }
+        }
         let queues: Vec<String> = asks.iter().map(|a| a.queue.clone()).collect();
         let answer = self.changed_read(&ctx, asks).await?;
         let entries: Vec<Value> = queues
@@ -869,6 +886,21 @@ impl RaftFacade {
             .unwrap_or(200usize)
             .clamp(1, 1000);
         let offset = get("offset").and_then(|s| s.parse().ok()).unwrap_or(0usize);
+        // Every page ranks `offset + limit` messages before it skips
+        // `offset`: deep pages cost as much as reading all of them.
+        if offset > messages_max_offset() {
+            return Ok(ApiOut::json(
+                400,
+                json!({
+                    "error": format!(
+                        "offset {offset} is past the ceiling {} (QUEEN_MESSAGES_MAX_OFFSET): narrow the window with from/to",
+                        messages_max_offset()
+                    ),
+                    "code": "bad_request",
+                })
+                .to_string(),
+            ));
+        }
         let now = super::super::wall_micros();
         let from_us = get("from")
             .and_then(|s| parse_ts_us(&s))
@@ -1071,44 +1103,64 @@ impl RaftFacade {
         .await
         .map_err(|e| RsmError::Internal(format!("message list walk: {e}")))??;
 
-        let rows: Vec<Value> = picked
-            .into_iter()
-            .map(|mut p| {
-                decrypt_record(&self.encryption, &mut p.record);
-                let c = &cands[p.cand];
-                let lease = c
-                    .cursors
-                    .iter()
-                    .find(|(g, _)| g == "__QUEUE_MODE__")
-                    .and_then(|(_, cur)| cur.lease_expires_at_us);
-                let mut v = message_json(p.record);
-                if let Some(o) = v.as_object_mut() {
-                    o.insert("status".into(), json!(p.status));
-                    o.insert("queueStatus".into(), json!(p.status));
-                    o.insert(
-                        "busStatus".into(),
-                        json!({"consumedBy":p.consumed_by,"totalGroups":p.total_groups}),
-                    );
-                    o.insert(
-                        "queuePath".into(),
-                        json!(format!("{}/{}", c.part.row.queue, c.part.row.partition)),
-                    );
-                    o.insert("namespace".into(), json!(c.namespace));
-                    o.insert("task".into(), json!(c.task));
-                    o.insert("queuePriority".into(), json!(c.priority));
-                    o.insert("payloadAvailable".into(), json!(true));
-                    o.insert("createdAt".into(), json!(iso_ms(p.created_at_us)));
-                    o.insert("leaseExpiresAt".into(), json!(lease.map(iso_ms)));
-                }
-                v
-            })
-            .collect();
-        let total = rows.len();
-        Ok(ApiOut::json(
-            200,
-            json!({"messages":rows,"total":total,"pagination":{"limit":limit,"offset":offset},"mode":mode})
-                .to_string(),
-        ))
+        // Each row written as the tree printed it, its payload copied in as
+        // stored (twice: `data` and `payload`), and the page cut at
+        // `QUEEN_READ_PAGE_MAX_BYTES`: a cut page says where the next one
+        // starts (`pagination.nextOffset`, `hasMore`).
+        let budget = read_page_max_bytes();
+        let mut out = String::from("{\"messages\":[");
+        let mut total = 0usize;
+        let mut cut = false;
+        for mut p in picked {
+            if total > 0 && out.len() >= budget {
+                cut = true;
+                break;
+            }
+            decrypt_record(&self.encryption, &mut p.record);
+            let c = &cands[p.cand];
+            let lease = c
+                .cursors
+                .iter()
+                .find(|(g, _)| g == "__QUEUE_MODE__")
+                .and_then(|(_, cur)| cur.lease_expires_at_us);
+            if total > 0 {
+                out.push(',');
+            }
+            let mut fields = message_fields(&p.record);
+            fields.extend([
+                ("status", Field::Json(json!(p.status))),
+                ("queueStatus", Field::Json(json!(p.status))),
+                (
+                    "busStatus",
+                    Field::Json(json!({"consumedBy":p.consumed_by,"totalGroups":p.total_groups})),
+                ),
+                (
+                    "queuePath",
+                    Field::Json(json!(format!("{}/{}", c.part.row.queue, c.part.row.partition))),
+                ),
+                ("namespace", Field::Json(json!(c.namespace))),
+                ("task", Field::Json(json!(c.task))),
+                ("queuePriority", Field::Json(json!(c.priority))),
+                ("payloadAvailable", Field::Json(json!(true))),
+                ("createdAt", Field::Json(json!(iso_ms(p.created_at_us)))),
+                ("leaseExpiresAt", Field::Json(json!(lease.map(iso_ms)))),
+            ]);
+            push_object(&mut out, fields);
+            total += 1;
+        }
+        out.push_str("],\"mode\":");
+        out.push_str(&mode.to_string());
+        let pagination = if cut {
+            json!({"limit":limit,"offset":offset,"nextOffset":offset + total,"hasMore":true})
+        } else {
+            json!({"limit":limit,"offset":offset})
+        };
+        out.push_str(",\"pagination\":");
+        out.push_str(&pagination.to_string());
+        out.push_str(",\"total\":");
+        out.push_str(&total.to_string());
+        out.push('}');
+        Ok(ApiOut::json(200, out))
     }
 
     pub(super) async fn api_message(
@@ -1128,11 +1180,11 @@ impl RaftFacade {
         let txn2 = txn.to_string();
         let pid = part.pid;
         let queue = part.row.queue.clone();
-        let rec_for_detail = rec.clone();
+        let rec_offset = rec.offset;
         let detail=tokio::task::spawn_blocking(move || store.read(|r| {
             let cfg=r.queue(&tenant,&queue)?;
             let mut groups=Vec::new(); let mut cursors=Vec::new(); let mut dlq=None;
-            r.scan_cursors(pid,usize::MAX,&mut |g,c| { let consumed=rec_for_detail.offset as i64<=c.committed; groups.push(json!({"name":g,"committed":c.committed,"consumed":consumed,"leaseExpiresAt":c.lease_expires_at_us.map(crate::rsm::planner::timers::iso_us)})); cursors.push((g.to_string(),c)); true })?;
+            r.scan_cursors(pid,usize::MAX,&mut |g,c| { let consumed=rec_offset as i64<=c.committed; groups.push(json!({"name":g,"committed":c.committed,"consumed":consumed,"leaseExpiresAt":c.lease_expires_at_us.map(crate::rsm::planner::timers::iso_us)})); cursors.push((g.to_string(),c)); true })?;
             let pref=keys::dlq_by_pos_pid_prefix(pid); r.scan_raw(Keyspace::DlqByPos,&pref,&pref,usize::MAX,&mut |_k,v| { if let Ok(ids)=rows::dlq_ids_decode(v) { for id in ids { if let Ok(Some(row))=r.dlq(&tenant,&queue,&id) { if row.txn==txn2 { dlq=Some(row); return false; } } } } true })?;
             Ok((cfg,groups,cursors,dlq))
         })).await.map_err(|e|RsmError::Internal(format!("message detail: {e}")))?.map_err(read_error)?;
@@ -1155,7 +1207,42 @@ impl RaftFacade {
             .iter()
             .filter(|g| g.get("name").and_then(Value::as_str) != Some("__QUEUE_MODE__"))
             .count();
-        Ok(ApiOut::json(200,json!({"id":uuid_bytes_to_string(&rec.id),"transactionId":rec.txn,"data":payload_json(&rec.payload),"payload":payload_json(&rec.payload),"traceId":rec.trace_id.map(|x|uuid_bytes_to_string(&x)),"producerSub":rec.producer_sub,"createdAt":crate::rsm::planner::timers::iso_us(rec.created_at_us),"partitionId":uuid_bytes_to_string(&part.row.uuid),"partition":part.row.partition,"queue":part.row.queue,"queuePath":format!("{}/{}",part.row.queue,part.row.partition),"namespace":cfg.as_ref().and_then(|x|x.namespace.clone()),"task":cfg.as_ref().and_then(|x|x.task.clone()),"status":status,"errorMessage":dlq.as_ref().map(|x|x.error.clone()),"retryCount":dlq.as_ref().map(|x|x.retry_count).unwrap_or(0),"isEncrypted":rec.encrypted,"queueConfig":cfg.as_ref().map(super::config_options),"mode":{"hasQueueMode":has_queue_mode,"busGroupsCount":bus_groups,"type":match (has_queue_mode, bus_groups > 0) {(false,false)=>"none",(true,false)=>"queue",(false,true)=>"bus",(true,true)=>"hybrid"}},"consumerGroups":groups}).to_string()))
+        // The payload copied in as stored, not parsed (a 64 MiB message
+        // was a 2.5 GB tree).
+        let mut fields: Vec<(&str, Field<'_>)> = vec![
+            ("id", Field::Json(json!(uuid_bytes_to_string(&rec.id)))),
+            ("transactionId", Field::Json(json!(rec.txn))),
+            ("data", Field::Payload(&rec.payload)),
+            ("payload", Field::Payload(&rec.payload)),
+            ("traceId", Field::Json(json!(rec.trace_id.map(|x| uuid_bytes_to_string(&x))))),
+            ("producerSub", Field::Json(json!(rec.producer_sub))),
+            ("createdAt", Field::Json(json!(crate::rsm::planner::timers::iso_us(rec.created_at_us)))),
+            ("partitionId", Field::Json(json!(uuid_bytes_to_string(&part.row.uuid)))),
+            ("partition", Field::Json(json!(part.row.partition))),
+            ("queue", Field::Json(json!(part.row.queue))),
+            ("queuePath", Field::Json(json!(format!("{}/{}", part.row.queue, part.row.partition)))),
+            ("namespace", Field::Json(json!(cfg.as_ref().and_then(|x| x.namespace.clone())))),
+            ("task", Field::Json(json!(cfg.as_ref().and_then(|x| x.task.clone())))),
+            ("status", Field::Json(json!(status))),
+            ("errorMessage", Field::Json(json!(dlq.as_ref().map(|x| x.error.clone())))),
+            ("retryCount", Field::Json(json!(dlq.as_ref().map(|x| x.retry_count).unwrap_or(0)))),
+            ("isEncrypted", Field::Json(json!(rec.encrypted))),
+            ("queueConfig", Field::Json(json!(cfg.as_ref().map(super::config_options)))),
+        ];
+        let ty = match (has_queue_mode, bus_groups > 0) {
+            (false, false) => "none",
+            (true, false) => "queue",
+            (false, true) => "bus",
+            (true, true) => "hybrid",
+        };
+        fields.push((
+            "mode",
+            Field::Json(json!({"hasQueueMode":has_queue_mode,"busGroupsCount":bus_groups,"type":ty})),
+        ));
+        fields.push(("consumerGroups", Field::Json(Value::Array(groups))));
+        let mut out = String::with_capacity(2 * rec.payload.len() + 1024);
+        push_object(&mut out, fields);
+        Ok(ApiOut::json(200, out))
     }
 
     pub(super) async fn api_dlq(
@@ -1177,40 +1264,95 @@ impl RaftFacade {
             .unwrap_or(0usize);
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
-        let (mut rows, partitions) = tokio::task::spawn_blocking(move || {
+        let budget = read_page_max_bytes();
+        let encryption = self.encryption.clone();
+        // Ranked without payloads (the whole DLQ with its payloads was
+        // copied on every call), then only the page's rows are read whole,
+        // one at a time, until the page's byte budget.
+        let (total, out) = tokio::task::spawn_blocking(move || {
             store.read(|r| {
-                let rows = scan_dlq_rows(r, &tenant, queue.as_deref(), group.as_deref())?;
-                let mut partitions = HashMap::new();
-                for (_, _, _, row) in &rows {
-                    if let Some(part) = r.partition(row.pid)? {
-                        partitions.insert(row.pid, (part.partition, part.uuid));
+                // The newest `offset + limit`, newest first, ties in scan
+                // order (the stable sort this replaces): a bounded heap, not
+                // every head of the DLQ.
+                let need = offset.saturating_add(limit);
+                let mut heap: std::collections::BinaryHeap<
+                    std::cmp::Reverse<(i64, std::cmp::Reverse<usize>, DlqSlot)>,
+                > = std::collections::BinaryHeap::new();
+                let mut total = 0usize;
+                each_dlq_head(
+                    r,
+                    &tenant,
+                    queue.as_deref(),
+                    group.as_deref(),
+                    usize::MAX,
+                    &mut |e| {
+                        let key = (e.3.failed_at_us, std::cmp::Reverse(total), DlqSlot(e));
+                        total += 1;
+                        if heap.len() < need {
+                            heap.push(std::cmp::Reverse(key));
+                        } else if heap
+                            .peek()
+                            .is_some_and(|m| (key.0, key.1) > (m.0 .0, m.0 .1))
+                        {
+                            heap.pop();
+                            heap.push(std::cmp::Reverse(key));
+                        }
+                    },
+                )?;
+                let mut rows: Vec<DlqEntry> = heap
+                    .into_sorted_vec()
+                    .into_iter()
+                    .map(|std::cmp::Reverse((_, _, DlqSlot(e)))| e)
+                    .collect();
+                // `into_sorted_vec` of `Reverse` keys is newest first already.
+                rows.truncate(need);
+                let mut partitions: HashMap<Pid, (String, [u8; 16])> = HashMap::new();
+                let mut out = String::from("{\"messages\":[");
+                let mut n = 0usize;
+                let mut cut = false;
+                for (t, q, id, head) in rows.into_iter().skip(offset).take(limit) {
+                    if n > 0 && out.len() >= budget {
+                        cut = true;
+                        break;
                     }
+                    let Some(mut row) = r.dlq(&t, &q, &id)? else {
+                        continue; // deleted since the scan
+                    };
+                    if let Some(payload) = encryption.decrypt_payload_bytes(&row.payload) {
+                        row.payload = payload;
+                    }
+                    if !partitions.contains_key(&head.pid) {
+                        if let Some(part) = r.partition(head.pid)? {
+                            partitions.insert(head.pid, (part.partition, part.uuid));
+                        }
+                    }
+                    if n > 0 {
+                        out.push(',');
+                    }
+                    push_object(
+                        &mut out,
+                        dlq_fields(&q, &id, &row, partitions.get(&head.pid)),
+                    );
+                    n += 1;
                 }
-                Ok((rows, partitions))
+                let pagination = if cut {
+                    json!({"limit":limit,"offset":offset,"nextOffset":offset + n,"hasMore":true})
+                } else {
+                    json!({"limit":limit,"offset":offset})
+                };
+                out.push_str("],\"pagination\":");
+                out.push_str(&pagination.to_string());
+                out.push_str(",\"total\":");
+                out.push_str(&total.to_string());
+                out.push('}');
+                Ok((total, out))
             })
         })
         .await
         .map_err(|e| RsmError::Internal(format!("dlq read: {e}")))?
         .map_err(read_error)?;
-        rows.sort_by(|a, b| b.3.failed_at_us.cmp(&a.3.failed_at_us));
-        let total = rows.len();
-        let messages: Vec<Value> = rows
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|mut row| {
-                if let Some(payload) = self.encryption.decrypt_payload_bytes(&row.3.payload) {
-                    row.3.payload = payload;
-                }
-                let partition = partitions.get(&row.3.pid);
-                dlq_json(row, partition)
-            })
-            .collect();
-        Ok(ApiOut::json(
-            200,
-            json!({"messages":messages,"total":total,"pagination":{"limit":limit,"offset":offset}})
-                .to_string(),
-        ))
+        let _ = total;
+        Ok(ApiOut::json(200, out))
     }
 
     pub(super) async fn api_groups(
@@ -1249,17 +1391,26 @@ impl RaftFacade {
         ctx: ReqCtx,
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
-        let min = query_map(query)
+        let q = query_map(query);
+        let min = q
             .get("minLagSeconds")
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(3600);
+        // The most lagging first, at most `limit` rows (default 1,000, at
+        // most 10,000): a group stuck on a million partitions answered a
+        // million objects.
+        let limit = q
+            .get("limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1000)
+            .clamp(1, 10_000);
         let now = super::super::wall_micros();
         let store = self.store.clone();
         let qlog = self.qlog_reader.clone();
         let reader = self.reader.clone();
         let tenant = ctx.tenant.clone();
         let rows = tokio::task::spawn_blocking(move || {
-            store.read(|r| lagging_partitions(r, qlog.as_ref(), &reader, &tenant, min, now))
+            store.read(|r| lagging_partitions(r, qlog.as_ref(), &reader, &tenant, min, now, limit))
         })
         .await
         .map_err(|e| RsmError::Internal(format!("lag read: {e}")))?
@@ -1272,24 +1423,52 @@ impl RaftFacade {
         ctx: ReqCtx,
         body: &[u8],
     ) -> Result<ApiOut, RsmError> {
-        let v: Value = serde_json::from_slice(body).map_err(|e| super::rejected("bad_body", e))?;
-        let txn = v
-            .get("transactionId")
-            .or_else(|| v.get("transaction_id"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        // Typed: the small fields as values, `data` borrowed as its raw text
+        // (the whole body as a tree took 20 times its size).
+        let v: TraceBody<'_> =
+            serde_json::from_slice(body).map_err(|e| super::rejected("bad_body", e))?;
+        let s = |a: &Option<Value>, b: &Option<Value>| -> Option<String> {
+            a.as_ref()
+                .or(b.as_ref())
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        let txn = s(&v.transaction_id, &v.transaction_id_snake).unwrap_or_default();
         if txn.is_empty() {
             return Ok(ApiOut::json(
                 400,
                 json!({"error":"transactionId is required"}).to_string(),
             ));
         }
-        let pid_s = v
-            .get("partitionId")
-            .or_else(|| v.get("partition_id"))
-            .and_then(Value::as_str);
-        let pid = self.resolve_pid(&ctx.tenant, pid_s).await?;
+        let data: &[u8] = match v.data {
+            Some(raw) => raw.get().as_bytes(),
+            None => b"null",
+        };
+        if data.len() > trace_max_bytes() {
+            return Ok(ApiOut::json(
+                413,
+                json!({
+                    "success": false,
+                    "error": format!(
+                        "trace data is {} bytes, the ceiling is {} (QUEEN_TRACE_MAX_BYTES)",
+                        data.len(),
+                        trace_max_bytes()
+                    ),
+                    "code": "payload_too_large",
+                })
+                .to_string(),
+            ));
+        }
+        // What `Value` would not parse is refused, as the whole-body tree
+        // refused it.
+        let Some(data) = super::json_out::checked(data) else {
+            return Ok(ApiOut::json(
+                400,
+                json!({"error":"data is not a JSON value","code":"bad_body"}).to_string(),
+            ));
+        };
+        let pid_s = s(&v.partition_id, &v.partition_id_snake);
+        let pid = self.resolve_pid(&ctx.tenant, pid_s.as_deref()).await?;
         if pid_s.is_some() && pid.is_none() {
             // A pid outside the tenant answers with 404.
             return Ok(ApiOut::json(
@@ -1298,8 +1477,9 @@ impl RaftFacade {
             ));
         }
         let names = v
-            .get("traceNames")
-            .or_else(|| v.get("names"))
+            .trace_names
+            .as_ref()
+            .or(v.names.as_ref())
             .and_then(Value::as_array)
             .map(|a| {
                 a.iter()
@@ -1310,29 +1490,27 @@ impl RaftFacade {
             .unwrap_or_default();
         let event = TraceEvent {
             trace_id: v
-                .get("traceId")
+                .trace_id
+                .as_ref()
                 .and_then(Value::as_str)
                 .and_then(uuid_string_to_bytes)
                 .unwrap_or_else(crate::util::uuidv7_bytes),
             tenant: ctx.tenant.clone(),
             pid,
             message_id: v
-                .get("messageId")
+                .message_id
+                .as_ref()
                 .and_then(Value::as_str)
                 .and_then(uuid_string_to_bytes),
             txn,
             consumer_group: v
-                .get("consumerGroup")
+                .consumer_group
+                .as_ref()
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            event_type: v
-                .get("eventType")
-                .or_else(|| v.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("event")
-                .to_string(),
-            data: serde_json::to_vec(v.get("data").unwrap_or(&Value::Null)).unwrap(),
-            worker: v.get("worker").and_then(Value::as_str).map(str::to_string),
+            event_type: s(&v.event_type, &v.type_).unwrap_or_else(|| "event".to_string()),
+            data: data.as_bytes().to_vec(),
+            worker: v.worker.as_ref().and_then(Value::as_str).map(str::to_string),
             names,
             created_at_us: super::super::wall_micros(),
         };
@@ -1449,7 +1627,7 @@ impl RaftFacade {
         let name = name.map(str::to_string);
         let store = self.store.clone();
         let traces = self.traces.clone();
-        let (total, events) = tokio::task::spawn_blocking(move || {
+        let (total, events, cut) = tokio::task::spawn_blocking(move || {
             // Newest first; traces of one instant in the order the legacy read
             // gave them (its stable sort over the primary key order). Only the
             // page is kept: every other match is counted from the index.
@@ -1505,28 +1683,51 @@ impl RaftFacade {
                 }
                 Ok((total, page))
             })?;
-            let events = store.read(|r| {
-                Ok(page
-                    .into_iter()
-                    .map(|e| {
-                        let location = e
-                            .pid
-                            .and_then(|pid| r.partition(pid).ok().flatten())
-                            .map(|p| (p.queue, p.partition));
-                        trace_json(e, location)
-                    })
-                    .collect::<Vec<Value>>())
+            // Each event written once, its `data` as stored, and the page
+            // cut at `QUEEN_READ_PAGE_MAX_BYTES` (the answer carries the list
+            // twice, `traces` and `events`).
+            let budget = read_page_max_bytes();
+            let (events, cut) = store.read(|r| {
+                let mut list = String::new();
+                let mut n = 0usize;
+                let mut cut = false;
+                for e in page {
+                    if n > 0 && 2 * list.len() >= budget {
+                        cut = true;
+                        break;
+                    }
+                    let location = e
+                        .pid
+                        .and_then(|pid| r.partition(pid).ok().flatten())
+                        .map(|p| (p.queue, p.partition));
+                    if n > 0 {
+                        list.push(',');
+                    }
+                    push_object(&mut list, trace_fields(&e, location));
+                    n += 1;
+                }
+                Ok((list, if cut { Some(n) } else { None }))
             })?;
-            Ok::<_, crate::rsm::store::StoreError>((total, events))
+            Ok::<_, crate::rsm::store::StoreError>((total, events, cut))
         })
         .await
         .map_err(|e| RsmError::Internal(format!("traces: {e}")))?
         .map_err(read_error)?;
-        let events2 = events.clone();
-        Ok(ApiOut::json(
-            200,
-            json!({"traces":events,"events":events2,"total":total,"pagination":{"limit":limit,"offset":offset}}).to_string(),
-        ))
+        let pagination = match cut {
+            Some(n) => json!({"limit":limit,"offset":offset,"nextOffset":offset + n,"hasMore":true}),
+            None => json!({"limit":limit,"offset":offset}),
+        };
+        let mut out = String::with_capacity(2 * events.len() + 128);
+        out.push_str("{\"events\":[");
+        out.push_str(&events);
+        out.push_str("],\"pagination\":");
+        out.push_str(&pagination.to_string());
+        out.push_str(",\"total\":");
+        out.push_str(&total.to_string());
+        out.push_str(",\"traces\":[");
+        out.push_str(&events);
+        out.push_str("]}");
+        Ok(ApiOut::json(200, out))
     }
 
     pub(super) async fn resolve_pid(
@@ -1553,18 +1754,29 @@ impl RaftFacade {
         let uuid = uuid_string_to_bytes(id);
         let store = self.store.clone();
         let tenant = tenant.to_string();
+        // No index maps a partition's uuid to its pid: the rows are scanned,
+        // read in place (no copy per row), and at most
+        // `UUID_SCAN_MAX_ROWS` of them; past that the id is not found (a
+        // 404), and a numeric id always works.
+        let Some(uuid) = uuid else { return Ok(None) };
         tokio::task::spawn_blocking(move || {
             store.read(|r| {
                 let mut found = None;
-                r.scan_raw(Keyspace::Partitions, &[], &[], usize::MAX, &mut |k, v| {
-                    if let (Some(pid), Ok(p)) = (keys::pid_of(k), rows::partition_decode(v)) {
-                        if p.tenant == tenant && Some(p.uuid) == uuid {
-                            found = Some(pid);
-                            return false;
+                r.scan_raw(
+                    Keyspace::Partitions,
+                    &[],
+                    &[],
+                    UUID_SCAN_MAX_ROWS,
+                    &mut |k, v| {
+                        if let (Some(pid), Ok(p)) = (keys::pid_of(k), rows::partition_ref_decode(v)) {
+                            if p.head.uuid == uuid && p.tenant == tenant {
+                                found = Some(pid);
+                                return false;
+                            }
                         }
-                    }
-                    true
-                })?;
+                        true
+                    },
+                )?;
                 Ok(found)
             })
         })
@@ -1668,8 +1880,27 @@ impl RaftFacade {
     ) -> Result<Option<(Part, Record)>, RsmError> {
         let pid = self.resolve_pid(tenant, Some(partition)).await?;
         let Some(pid) = pid else { return Ok(None) };
-        let mut parts = self.parts(tenant, None, None).await?;
-        let Some(part) = parts.drain(..).find(|p| p.pid == pid) else {
+        // That one partition's row and files, not every partition of the
+        // tenant with its file list.
+        let store = self.store.clone();
+        let t = tenant.to_string();
+        let part = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                let Some(row) = r.partition(pid)?.filter(|row| row.tenant == t) else {
+                    return Ok(None);
+                };
+                let mut sealed = Vec::new();
+                r.scan_partition_files(pid, usize::MAX, &mut |f| {
+                    sealed.push(f);
+                    true
+                })?;
+                Ok(Some(Part { pid, row, sealed }))
+            })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("partition read: {e}")))?
+        .map_err(read_error)?;
+        let Some(part) = part else {
             return Ok(None);
         };
         let qlog = self.qlog_reader.clone();
@@ -1851,6 +2082,35 @@ pub(super) fn walk_payloads(
     Ok(())
 }
 
+fn env_limit(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
+/// `POST /api/v1/fetch`'s call total when the body names none
+/// (`QUEEN_FETCH_MAX_BYTES`, default 50 MiB).
+fn fetch_default_max_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_limit("QUEEN_FETCH_MAX_BYTES", 50 << 20))
+}
+
+/// The bytes one page of messages, dead letters or traces may carry
+/// (`QUEEN_READ_PAGE_MAX_BYTES`, default 16 MiB). A page past it stops early
+/// and says so in its paging; the first row always goes out.
+pub(super) fn read_page_max_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_limit("QUEEN_READ_PAGE_MAX_BYTES", 16 << 20))
+}
+
+/// One trace's `data` at most (`QUEEN_TRACE_MAX_BYTES`, default 1 MiB).
+fn trace_max_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_limit("QUEEN_TRACE_MAX_BYTES", 1 << 20))
+}
+
 pub(super) fn payload_json(b: &[u8]) -> Value {
     if b.is_empty() {
         Value::Null
@@ -1858,6 +2118,39 @@ pub(super) fn payload_json(b: &[u8]) -> Value {
         serde_json::from_slice(b)
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(b).into_owned()))
     }
+}
+
+/// `POST /api/v1/traces`, read field by field: `data` stays the body's own
+/// text. A small field of the wrong type reads as absent, as it did from the
+/// tree.
+#[derive(Deserialize)]
+struct TraceBody<'a> {
+    #[serde(rename = "transactionId", default)]
+    transaction_id: Option<Value>,
+    #[serde(rename = "transaction_id", default)]
+    transaction_id_snake: Option<Value>,
+    #[serde(rename = "partitionId", default)]
+    partition_id: Option<Value>,
+    #[serde(rename = "partition_id", default)]
+    partition_id_snake: Option<Value>,
+    #[serde(rename = "traceNames", default)]
+    trace_names: Option<Value>,
+    #[serde(default)]
+    names: Option<Value>,
+    #[serde(rename = "traceId", default)]
+    trace_id: Option<Value>,
+    #[serde(rename = "messageId", default)]
+    message_id: Option<Value>,
+    #[serde(rename = "consumerGroup", default)]
+    consumer_group: Option<Value>,
+    #[serde(rename = "eventType", default)]
+    event_type: Option<Value>,
+    #[serde(rename = "type", default)]
+    type_: Option<Value>,
+    #[serde(borrow, default)]
+    data: Option<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    worker: Option<Value>,
 }
 
 /// One DLQ row with the queue, group and id it is filed under.
@@ -1870,9 +2163,46 @@ fn decrypt_record(encryption: &crate::encryption::Encryption, record: &mut Recor
         }
     }
 }
-fn message_json(r: Record) -> Value {
+/// A message row's own fields (`message_json` before 2.6.1): the payload
+/// borrowed, never parsed.
+fn message_fields(r: &Record) -> Vec<(&'static str, Field<'_>)> {
     let txn_hash = hex::encode(crate::util::txn_hash128(&r.txn));
-    json!({"id":uuid_bytes_to_string(&r.id),"transactionId":r.txn,"txnHash":txn_hash,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"traceId":r.trace_id.map(|x|uuid_bytes_to_string(&x)),"producerSub":r.producer_sub,"createdAt":crate::rsm::planner::timers::iso_us(r.created_at_us),"offset":r.offset,"queue":r.queue,"partition":r.partition,"partitionId":uuid_bytes_to_string(&r.partition_id),"status":"pending","segment":{"seq":r.segment_base,"frameIdx":r.frame_idx},"isEncrypted":r.encrypted})
+    vec![
+        ("id", Field::Json(json!(uuid_bytes_to_string(&r.id)))),
+        ("transactionId", Field::Json(json!(r.txn))),
+        ("txnHash", Field::Json(json!(txn_hash))),
+        ("data", Field::Payload(&r.payload)),
+        ("payload", Field::Payload(&r.payload)),
+        (
+            "traceId",
+            Field::Json(json!(r.trace_id.map(|x| uuid_bytes_to_string(&x)))),
+        ),
+        ("producerSub", Field::Json(json!(r.producer_sub))),
+        (
+            "createdAt",
+            Field::Json(json!(crate::rsm::planner::timers::iso_us(r.created_at_us))),
+        ),
+        ("offset", Field::Json(json!(r.offset))),
+        ("queue", Field::Json(json!(r.queue))),
+        ("partition", Field::Json(json!(r.partition))),
+        (
+            "partitionId",
+            Field::Json(json!(uuid_bytes_to_string(&r.partition_id))),
+        ),
+        ("status", Field::Json(json!("pending"))),
+        (
+            "segment",
+            Field::Json(json!({"seq":r.segment_base,"frameIdx":r.frame_idx})),
+        ),
+        ("isEncrypted", Field::Json(json!(r.encrypted))),
+    ]
+}
+
+/// The deepest `offset` `GET /api/v1/messages` serves
+/// (`QUEEN_MESSAGES_MAX_OFFSET`, default 10,000).
+fn messages_max_offset() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_limit("QUEEN_MESSAGES_MAX_OFFSET", 10_000))
 }
 
 pub(super) fn scan_dlq_rows<R: Reads + ?Sized>(
@@ -1911,11 +2241,154 @@ pub(super) fn scan_dlq_rows<R: Reads + ?Sized>(
         None => Ok(out),
     }
 }
-fn dlq_json(
-    (_t, q, id, r): (String, String, [u8; 16], DlqRow),
+/// A dead letter without its payload: every field but the payload, which is
+/// skipped in place (never copied). `None` for a row that does not decode.
+fn dlq_head_decode(b: &[u8]) -> Option<DlqRow> {
+    use crate::rsm::effect::Reader;
+    let mut r = Reader::new(b);
+    if r.u8("v").ok()? != rows::ROW_V1 {
+        return None;
+    }
+    let pid = r.u64("pid").ok()?;
+    let group = r.str("group").ok()?;
+    let offset = r.i64("offset").ok()?;
+    let message_id = r.opt_bytes16("message_id").ok()?;
+    let txn = r.str("txn").ok()?;
+    let n = r.u32("payload").ok()? as usize;
+    let at = b.len() - r.remaining();
+    let rest = b.get(at.checked_add(n)?..)?;
+    let mut r = Reader::new(rest);
+    Some(DlqRow {
+        pid,
+        group,
+        offset,
+        message_id,
+        txn,
+        payload: Vec::new(),
+        error: r.str("error").ok()?,
+        retry_count: r.u32("retry_count").ok()?,
+        failed_at_us: r.i64("failed_at_us").ok()?,
+    })
+}
+
+/// [`scan_dlq_rows`] without the payloads, and at most `max_rows` of them:
+/// what a count, an error bucket or the ranking of a page needs. The second
+/// value says the scan stopped at `max_rows`.
+pub(super) fn scan_dlq_heads<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    queue: Option<&str>,
+    group: Option<&str>,
+    max_rows: usize,
+) -> crate::rsm::store::Result<(Vec<DlqEntry>, bool)> {
+    let mut out = Vec::new();
+    let capped = each_dlq_head(r, tenant, queue, group, max_rows, &mut |e| out.push(e))?;
+    Ok((out, capped))
+}
+
+/// [`scan_dlq_heads`], each row handed over as it is read.
+pub(super) fn each_dlq_head<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    queue: Option<&str>,
+    group: Option<&str>,
+    max_rows: usize,
+    each: &mut dyn FnMut(DlqEntry),
+) -> crate::rsm::store::Result<bool> {
+    let prefix = keys::queues_prefix(tenant);
+    let mut err = None;
+    let mut seen = 0usize;
+    let mut capped = false;
+    r.scan_raw(
+        Keyspace::Dlq,
+        &prefix,
+        &prefix,
+        usize::MAX,
+        &mut |k, v| {
+            if seen >= max_rows {
+                capped = true;
+                return false;
+            }
+            seen += 1;
+            match (keys::dlq_parts(k), dlq_head_decode(v)) {
+                (Some((t, q, id)), Some(row))
+                    if queue.is_none_or(|x| x == q) && group.is_none_or(|x| x == row.group) =>
+                {
+                    each((t, q, id, row));
+                    true
+                }
+                (Some(_), Some(_)) => true,
+                _ => {
+                    err = Some(crate::rsm::store::StoreError::corrupt(
+                        Keyspace::Dlq,
+                        "dlq row",
+                    ));
+                    false
+                }
+            }
+        },
+    )?;
+    match err {
+        Some(e) => Err(e),
+        None => Ok(capped),
+    }
+}
+
+/// A dead letter in the page heap: ordered by the heap's key alone.
+struct DlqSlot(DlqEntry);
+
+impl PartialEq for DlqSlot {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for DlqSlot {}
+impl PartialOrd for DlqSlot {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for DlqSlot {
+    fn cmp(&self, _: &Self) -> std::cmp::Ordering {
+        std::cmp::Ordering::Equal
+    }
+}
+
+/// The most dead letters a DLQ page or a status count reads.
+pub(super) const DLQ_SCAN_MAX_ROWS: usize = 10_000;
+
+/// One dead letter's fields, its payload borrowed (`dlq_json` before 2.6.1).
+fn dlq_fields<'a>(
+    q: &'a str,
+    id: &[u8; 16],
+    r: &'a DlqRow,
     partition: Option<&(String, [u8; 16])>,
-) -> Value {
-    json!({"id":uuid_bytes_to_string(&id),"queue":q,"partition":partition.map(|p|p.0.clone()),"partitionId":r.pid.to_string(),"createdAt":crate::rsm::planner::timers::iso_us(r.failed_at_us),"consumerGroup":r.group,"offset":r.offset,"messageId":r.message_id.map(|x|uuid_bytes_to_string(&x)),"transactionId":r.txn,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"errorMessage":r.error,"retryCount":r.retry_count,"failedAt":crate::rsm::planner::timers::iso_us(r.failed_at_us)})
+) -> Vec<(&'static str, Field<'a>)> {
+    vec![
+        ("id", Field::Json(json!(uuid_bytes_to_string(id)))),
+        ("queue", Field::Json(json!(q))),
+        ("partition", Field::Json(json!(partition.map(|p| p.0.clone())))),
+        ("partitionId", Field::Json(json!(r.pid.to_string()))),
+        (
+            "createdAt",
+            Field::Json(json!(crate::rsm::planner::timers::iso_us(r.failed_at_us))),
+        ),
+        ("consumerGroup", Field::Json(json!(r.group))),
+        ("offset", Field::Json(json!(r.offset))),
+        (
+            "messageId",
+            Field::Json(json!(r.message_id.map(|x| uuid_bytes_to_string(&x)))),
+        ),
+        ("transactionId", Field::Json(json!(r.txn))),
+        ("data", Field::Payload(&r.payload)),
+        ("payload", Field::Payload(&r.payload)),
+        ("errorMessage", Field::Json(json!(r.error))),
+        ("retryCount", Field::Json(json!(r.retry_count))),
+        (
+            "failedAt",
+            Field::Json(json!(crate::rsm::planner::timers::iso_us(r.failed_at_us))),
+        ),
+    ]
 }
 
 /// One `(partition, group)` cursor with its lag inputs. `pending` is the §9
@@ -2135,11 +2608,19 @@ fn lagging_partitions<R: Reads + ?Sized>(
     tenant: &str,
     min_lag_seconds: i64,
     now: i64,
+    limit: usize,
 ) -> crate::rsm::store::Result<Vec<Value>> {
-    let lagging: Vec<CursorLag> = cursor_lags(r, qlog, reader, tenant, None, now)?
+    let mut lagging: Vec<(i64, CursorLag)> = cursor_lags(r, qlog, reader, tenant, None, now)?
         .into_iter()
-        .filter(|l| l.lag_seconds(now).is_some_and(|lag| lag > min_lag_seconds))
+        .filter_map(|l| {
+            let lag = l.lag_seconds(now)?;
+            (lag > min_lag_seconds && l.oldest_unconsumed_us.is_some()).then_some((lag, l))
+        })
         .collect();
+    // Sorted and cut on the small rows, before any JSON is built.
+    lagging.sort_by(|a, b| b.0.cmp(&a.0));
+    lagging.truncate(limit);
+    let lagging: Vec<CursorLag> = lagging.into_iter().map(|(_, l)| l).collect();
     let kafka =
         kafka_groups::kafka_groups(r, tenant, lagging.iter().map(|l| l.group.as_str()), now)?;
     let mut rows: Vec<(i64, Value)> = lagging
@@ -2362,44 +2843,48 @@ fn legacy_traces<R: Reads + ?Sized>(
     }
 }
 
-fn trace_json(e: TraceEvent, location: Option<(String, String)>) -> Value {
-    let partition_id = e.pid.map(|p| p.to_string());
-    let message_id = e.message_id.map(|x| uuid_bytes_to_string(&x));
-    let created_at = crate::rsm::planner::timers::iso_us(e.created_at_us);
-    let data = serde_json::from_slice::<Value>(&e.data).unwrap_or(Value::Null);
+/// One trace event's fields, its `data` copied in as stored
+/// (`trace_json` before 2.6.1 parsed it into a tree).
+fn trace_fields(e: &TraceEvent, location: Option<(String, String)>) -> Vec<(&'static str, Field<'_>)> {
+    let trace_id = json!(uuid_bytes_to_string(&e.trace_id));
+    let partition_id = json!(e.pid.map(|p| p.to_string()));
+    let message_id = json!(e.message_id.map(|x| uuid_bytes_to_string(&x)));
+    let created_at = json!(crate::rsm::planner::timers::iso_us(e.created_at_us));
     let (queue_name, partition_name) = location
         .map(|(q, p)| (Some(q), Some(p)))
         .unwrap_or((None, None));
-    json!({
-        "traceId":uuid_bytes_to_string(&e.trace_id),
-        "trace_id":uuid_bytes_to_string(&e.trace_id),
-        "partitionId":partition_id,
-        "partition_id":partition_id,
-        "messageId":message_id,
-        "message_id":message_id,
-        "transactionId":e.txn,
-        "transaction_id":e.txn,
-        "consumerGroup":e.consumer_group,
-        "consumer_group":e.consumer_group,
-        "eventType":e.event_type,
-        "event_type":e.event_type,
-        "data":data,
-        "worker":e.worker,
-        "worker_id":e.worker,
-        "names":e.names,
-        "trace_names":e.names,
-        "createdAt":created_at,
-        "created_at":created_at,
-        "queue_name":queue_name,
-        "partition_name":partition_name,
-        "message_payload":Value::Null
-    })
+    vec![
+        ("traceId", Field::Json(trace_id.clone())),
+        ("trace_id", Field::Json(trace_id)),
+        ("partitionId", Field::Json(partition_id.clone())),
+        ("partition_id", Field::Json(partition_id)),
+        ("messageId", Field::Json(message_id.clone())),
+        ("message_id", Field::Json(message_id)),
+        ("transactionId", Field::Json(json!(e.txn))),
+        ("transaction_id", Field::Json(json!(e.txn))),
+        ("consumerGroup", Field::Json(json!(e.consumer_group))),
+        ("consumer_group", Field::Json(json!(e.consumer_group))),
+        ("eventType", Field::Json(json!(e.event_type))),
+        ("event_type", Field::Json(json!(e.event_type))),
+        ("data", Field::Doc(&e.data)),
+        ("worker", Field::Json(json!(e.worker))),
+        ("worker_id", Field::Json(json!(e.worker))),
+        ("names", Field::Json(json!(e.names))),
+        ("trace_names", Field::Json(json!(e.names))),
+        ("createdAt", Field::Json(created_at.clone())),
+        ("created_at", Field::Json(created_at)),
+        ("queue_name", Field::Json(json!(queue_name))),
+        ("partition_name", Field::Json(json!(partition_name))),
+        ("message_payload", Field::Json(Value::Null)),
+    ]
 }
 
 /// Queues per discovery call. Above it the whole call is refused rather than
 /// cut short: a dropped entry would leave its caller waiting on a queue
 /// nobody looked at.
 const CHANGED_MAX_ENTRIES: usize = 1024;
+/// The rows all entries of one `POST /partitions/changed` may ask for.
+const CHANGED_MAX_TOTAL_ROWS: usize = 100_000;
 
 /// Partitions per discovery page: the default, and the ceiling `limit` is
 /// clamped to (never refused).

@@ -1027,6 +1027,20 @@ struct CounterCache {
     stamps: HashMap<Box<[u8]>, i64, crate::rsm::fasthash::FxBuild>,
 }
 
+/// A counter key the store would refuse, refused when it is made (see
+/// [`CounterCache::add`]): the same `KeyTooLong` the store's own write returns.
+fn check_counter_key<W: Writes + ?Sized>(writes: &W, key: &[u8]) -> crate::rsm::store::Result<()> {
+    let max = writes.max_key_len();
+    if key.len() > max {
+        return Err(crate::rsm::store::StoreError::KeyTooLong {
+            keyspace: crate::rsm::store::Keyspace::Counters.name(),
+            len: key.len(),
+            max,
+        });
+    }
+    Ok(())
+}
+
 impl CounterCache {
     fn new(enabled: bool) -> CounterCache {
         CounterCache {
@@ -1048,6 +1062,10 @@ impl CounterCache {
             return Ok(());
         }
         if self.enabled {
+            // The flush writes this key at the commit, where a key the store
+            // refuses would fail with no entry to name: checked here, inside
+            // the effect that made it, so the failure reports its entry.
+            check_counter_key(writes, key)?;
             // Look up by the borrowed key first: a key bumped again in the
             // same window (the common case) costs no allocation.
             match self.adds.get_mut(key) {
@@ -1071,6 +1089,7 @@ impl CounterCache {
         at: i64,
     ) -> crate::rsm::store::Result<()> {
         if self.enabled {
+            check_counter_key(writes, key)?;
             match self.stamps.get_mut(key) {
                 Some(e) => {
                     if at > *e {

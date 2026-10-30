@@ -127,16 +127,18 @@ fn budget_refund_saturates_at_zero() {
 /// untouched (the refund path of §1.6).
 #[test]
 fn a_refused_push_refunds_every_rung() {
+    // The cell pays the queue's own overhead and each message's: room for
+    // the queue, one 10-byte message, and 40 bytes more.
     let e = engine(Knobs {
-        global_max_bytes: 40,
+        global_max_bytes: QUEUE_OVERHEAD + 10 + MSG_OVERHEAD + 40,
         ..small()
     });
     assert!(e
         .push(T, "q", "Default", vec![body("0123456789")], 0)
         .is_ok());
     let after_one = e.global_bytes();
-    assert_eq!(after_one, 10);
-    // 5 x 7 bytes = 35, against a 40-byte cell that already holds 10.
+    assert_eq!(after_one, QUEUE_OVERHEAD + 10 + MSG_OVERHEAD);
+    // 5 x (7 + overhead) bytes, against the 40 left.
     let r = e.push(T, "q", "Default", bodies(5), 0);
     assert_eq!(r, Err(Refusal::NoRoom));
     assert_eq!(
@@ -618,7 +620,7 @@ fn ttl_returns_the_bytes_to_every_budget() {
     assert!(e.global_bytes() > 0);
     // Any touch past the deadline runs the drop.
     e.pop(T, "q", Some("Default"), Some("g"), 1, true, 5_000);
-    assert_eq!(e.global_bytes(), 0);
+    assert_eq!(e.global_bytes(), QUEUE_OVERHEAD, "only the queue itself is left");
     assert_eq!(e.depth(T, "q"), Some((0, 0)));
 }
 
@@ -850,7 +852,11 @@ fn a_handed_over_ring_resumes_every_group_where_it_was() {
     a.set_placement(Some(placement("A", &["A", "B"])));
     a.set_leaving();
     assert_eq!(a.reap_foreign(), 1);
-    assert_eq!(a.global_bytes(), 0, "the detached ring is refunded here");
+    assert_eq!(
+        a.global_bytes(),
+        QUEUE_OVERHEAD,
+        "the detached ring is refunded here; the queue itself stays"
+    );
     let out = a.take_outbox();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].owner, "B");
@@ -1186,4 +1192,98 @@ fn a_requeued_hand_over_ships_again_and_in_flight_rings_are_counted() {
     a.shipping_done(5);
     assert_eq!(a.shipping(), 0, "never below zero");
     assert_eq!(a.take_handover(T, "q", Some("Default")).len(), 1);
+}
+
+// ===========================================================================
+// Bounded inboxes (broker hardening, 2026-10-30)
+// ===========================================================================
+
+/// An implicit queue nobody touched for `QUEEN_EPHEMERAL_IMPLICIT_TTL_S` goes
+/// even with messages in it, and gives every byte back, its own included.
+#[test]
+fn an_idle_implicit_queue_past_its_ttl_goes_with_its_messages() {
+    let e = engine(small());
+    e.implicit_ttl_ms.store(5_000, Ordering::Relaxed);
+    e.push(T, "q", "Default", bodies(3), 0).unwrap();
+    assert_eq!(e.sweep(4_000).gc_queues, 0, "not idle long enough yet");
+    let s = e.sweep(6_000);
+    assert_eq!((s.gc_queues, s.gc_dropped), (1, 3));
+    assert_eq!(e.queue_count(), 0);
+    assert_eq!(e.global_bytes(), 0);
+}
+
+/// `QUEEN_EPHEMERAL_MAX_QUEUES`: a new queue past the cap is refused, an
+/// existing one keeps working.
+#[test]
+fn the_queue_count_is_capped() {
+    let e = engine(small());
+    e.max_queues.store(2, Ordering::Relaxed);
+    e.push(T, "a", "Default", bodies(1), 0).unwrap();
+    e.push(T, "b", "Default", bodies(1), 0).unwrap();
+    assert_eq!(
+        e.push(T, "c", "Default", bodies(1), 0),
+        Err(Refusal::TooManyQueues)
+    );
+    assert!(e.push(T, "a", "Default", bodies(1), 0).is_ok());
+}
+
+/// Group names come from clients: a ring keeps at most `RING_GROUPS_CAP`
+/// cursors, and the backstop frees the slots of idle ones.
+#[test]
+fn groups_are_capped_per_ring_and_idle_ones_expire() {
+    let e = engine(small()); // implicit_idle_ms = 1000
+    for i in 0..RING_GROUPS_CAP {
+        e.pop(T, "q", Some("Default"), Some(&format!("g{i}")), 1, true, 0);
+    }
+    e.push(T, "q", "Default", bodies(1), 0).unwrap();
+    assert!(
+        e.pop(T, "q", Some("Default"), Some("late"), 1, true, 0)
+            .is_empty(),
+        "past the cap a new group is served nothing"
+    );
+    assert_eq!(e.pop(T, "q", Some("Default"), Some("g0"), 1, true, 0).len(), 1);
+    let s = e.sweep(5_000);
+    assert_eq!(s.gc_groups, RING_GROUPS_CAP as u64);
+    assert_eq!(
+        e.pop(T, "q", Some("Default"), Some("late"), 1, true, 5_000)
+            .len(),
+        1,
+        "an expired group's slot is free again, and the message is still there"
+    );
+}
+
+/// Empty idle rings inside a queue that stays busy are collected: a queue
+/// that rotates partition names must not keep one ring per name.
+#[test]
+fn idle_empty_rings_go_inside_a_live_queue() {
+    let e = engine(small());
+    for i in 0..10 {
+        e.push(T, "q", &format!("p{i}"), bodies(1), 0).unwrap();
+    }
+    assert_eq!(e.pop(T, "q", None, Some("g"), 100, true, 0).len(), 10);
+    e.push(T, "q", "live", bodies(1), 4_000).unwrap();
+    let s = e.sweep(5_000);
+    assert_eq!(s.gc_rings, 10);
+    assert_eq!(e.queue_count(), 1);
+    assert_eq!(e.pop(T, "q", None, Some("g"), 10, true, 5_000).len(), 1);
+}
+
+/// `QUEEN_EPHEMERAL_POP_MAX_BYTES`: an answer stops at its byte budget, an
+/// answer with nothing yet still takes one message, and nothing is skipped.
+#[test]
+fn a_pop_answer_stops_at_its_byte_budget_but_always_takes_one() {
+    let e = engine(small());
+    e.push(T, "q", "Default", vec![body("0123456789"); 5], 0)
+        .unwrap();
+    let got = e.pop_bounded(T, "q", None, Some("g"), 10, true, 0, 25, true);
+    assert_eq!(got.len(), 2, "two 10-byte messages fit in 25 bytes");
+    let got = e.pop_bounded(T, "q", None, Some("g"), 10, true, 0, 5, true);
+    assert_eq!(got.len(), 1, "the first message goes whatever its size");
+    let got = e.pop_bounded(T, "q", None, Some("g"), 10, true, 0, 5, false);
+    assert!(got.is_empty(), "a later window leg does not take one over");
+    assert_eq!(
+        e.pop(T, "q", None, Some("g"), 10, true, 0).len(),
+        2,
+        "the messages left behind were not skipped"
+    );
 }

@@ -80,8 +80,11 @@ pub fn check_message_key_names(
 ) -> Result<(), RsmError> {
     let g = group.unwrap_or("");
     let p = partition.unwrap_or("");
-    let third = g.len().max(p.len());
-    if tenant.len() + queue.len() + third <= NAME_BUDGET_BYTES {
+    // Counted as the store writes them: a 0x00 byte is escaped to two bytes,
+    // so a name full of them would pass a raw count and overflow the key.
+    let esc = |s: &str| s.len() + s.bytes().filter(|&b| b == 0).count();
+    let third = esc(g).max(esc(p));
+    if esc(tenant) + esc(queue) + third <= NAME_BUDGET_BYTES {
         return Ok(());
     }
     // Report the largest user-controlled name (never the tenant, which the proxy
@@ -98,6 +101,69 @@ pub fn check_message_key_names(
         len,
         limit: NAME_BUDGET_BYTES,
     })
+}
+
+/// [`streams_max_state_bytes`]'s default: 16 MiB.
+pub const STREAMS_MAX_STATE_BYTES_DEFAULT: usize = 16 * 1024 * 1024;
+
+/// The largest value a Streams cycle may store in one state cell, in bytes of
+/// its JSON: `QUEEN_STREAMS_MAX_STATE_BYTES`, else
+/// [`STREAMS_MAX_STATE_BYTES_DEFAULT`], read once per process. A larger value
+/// is refused `state_too_large` (413) when the cycle is received, before
+/// anything is planned, as the KV value ceiling is
+/// (`planner::kv::max_value_bytes`).
+///
+/// A window's state is read whole on every cycle of its partition and on every
+/// idle flush, and written whole on every cycle, through the leader and the
+/// replicated log. On 2026-10-29 states of 20 to 65 MB took the leader past its
+/// memory limit, and each new leader after it.
+pub fn streams_max_state_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let raw = std::env::var("QUEEN_STREAMS_MAX_STATE_BYTES").ok();
+        let n = streams_state_ceiling(raw.as_deref());
+        if raw
+            .as_deref()
+            .is_some_and(|r| r.trim().parse::<usize>().ok() != Some(n))
+        {
+            tracing::warn!(
+                target: "boot",
+                value = raw.as_deref().unwrap_or(""),
+                ceiling = n,
+                "QUEEN_STREAMS_MAX_STATE_BYTES is not a positive byte count; using the default"
+            );
+        }
+        n
+    })
+}
+
+/// [`streams_max_state_bytes`]'s parse: a positive byte count, anything else
+/// the default.
+pub fn streams_state_ceiling(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(STREAMS_MAX_STATE_BYTES_DEFAULT)
+}
+
+/// The most state ops (upserts and deletes) one Streams cycle may carry:
+/// `QUEEN_STREAMS_MAX_STATE_OPS`, default 10,000. Every op is one effect of one
+/// entry, applied on every node in one step: a cycle of a million tiny ops in
+/// a 64 MiB body would hold apply for seconds.
+pub fn streams_max_state_ops() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_STREAMS_MAX_STATE_OPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(10_000)
+    })
+}
+
+/// The longest stream state key a cycle may write: its store key (query id,
+/// partition id, escaped key) must fit [`MAX_STORE_KEY_BYTES`].
+pub fn streams_state_key_fits(key: &str) -> bool {
+    crate::rsm::planner::keycheck::streams_state_len(key) <= MAX_STORE_KEY_BYTES
 }
 
 // ---------------------------------------------------------------------------

@@ -2021,8 +2021,76 @@ impl Metrics {
             "",
             self.eph_queues.load(Ordering::Relaxed).to_string(),
         );
+        render_guard_families(&mut s);
         s
     }
+}
+
+/// Long-poll pops parked on this node's consumption engine, as its last
+/// recount found them (`rsm/consume/wait.rs`, once a second while leading).
+static PARKED_POPS: AtomicU64 = AtomicU64::new(0);
+
+/// Publish the parked long-poll count (`queen_parked_pops`).
+pub fn set_parked_pops(n: u64) {
+    PARKED_POPS.store(n, Ordering::Relaxed);
+}
+
+/// The memory guard's and the long polls' families (`memguard.rs`,
+/// `rsm/consume/wait.rs`): process-wide values, rendered at the end of the
+/// exposition.
+fn render_guard_families(s: &mut String) {
+    let mut fam = |name: &str, help: &str, typ: &str, rows: &[(&str, u64)]| {
+        s.push_str("# HELP ");
+        s.push_str(name);
+        s.push(' ');
+        s.push_str(help);
+        s.push_str("\n# TYPE ");
+        s.push_str(name);
+        s.push(' ');
+        s.push_str(typ);
+        s.push('\n');
+        for (labels, v) in rows {
+            s.push_str(name);
+            s.push_str(labels);
+            s.push(' ');
+            s.push_str(&v.to_string());
+            s.push('\n');
+        }
+    };
+    fam(
+        "queen_memguard_level",
+        "Memory guard level: 0 ok, 1 soft (heavy reads refused), 2 hard (storage-growing writes refused too)",
+        "gauge",
+        &[("", u64::from(crate::memguard::level()))],
+    );
+    fam(
+        "queen_memguard_limit_bytes",
+        "Memory limit the guard works against (cgroup memory.max or QUEEN_MEMORY_LIMIT_BYTES); 0 = guard off",
+        "gauge",
+        &[("", crate::memguard::limit_bytes())],
+    );
+    fam(
+        "queen_memguard_rss_anon_bytes",
+        "Anonymous resident memory of this process at the guard's last tick",
+        "gauge",
+        &[("", crate::memguard::rss_bytes())],
+    );
+    let (pressure, busy) = crate::memguard::refused_totals();
+    fam(
+        "queen_memguard_refused_total",
+        "Requests refused by the memory guard: memory_pressure, or busy (no heavy-read slot)",
+        "counter",
+        &[
+            ("{reason=\"memory_pressure\"}", pressure),
+            ("{reason=\"busy\"}", busy),
+        ],
+    );
+    fam(
+        "queen_parked_pops",
+        "Long-poll pops parked on this node's consumption engine (capped by QUEEN_MAX_PARKED_POPS)",
+        "gauge",
+        &[("", PARKED_POPS.load(Ordering::Relaxed))],
+    );
 }
 
 /// Spawn the background samplers feeding the dashboard-facing gauges:

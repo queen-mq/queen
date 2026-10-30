@@ -3,6 +3,7 @@ HTTP client with retry, load balancing, and failover support
 """
 
 import asyncio
+import math
 import random
 from typing import Any, Dict, Optional, Tuple, Union
 import httpx
@@ -372,14 +373,20 @@ class HttpClient:
                 # set (code may be None) so callers can branch without
                 # string-matching the message.
                 error.code = code  # type: ignore[attr-defined]
+                # Retry-After is read on every error, not only a 429: the
+                # broker also sends it (1 s) with each 503 it means to be
+                # retried (no leader, a leader change, an elapsed deadline),
+                # and consume() waits that long before its next pop. None when
+                # absent or not a finite number of seconds.
                 error.retry_after_seconds = None  # type: ignore[attr-defined]
-                if response.status_code == 429:
-                    retry_after = response.headers.get("retry-after")
-                    if retry_after is not None:
-                        try:
-                            error.retry_after_seconds = float(retry_after)  # type: ignore[attr-defined]
-                        except (TypeError, ValueError):
-                            error.retry_after_seconds = None  # type: ignore[attr-defined]
+                retry_after = response.headers.get("retry-after")
+                if retry_after is not None:
+                    try:
+                        seconds = float(retry_after)
+                        if math.isfinite(seconds):
+                            error.retry_after_seconds = seconds  # type: ignore[attr-defined]
+                    except (TypeError, ValueError):
+                        pass
                 raise error
 
             # Parse successful response

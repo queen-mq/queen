@@ -25,6 +25,10 @@ use crate::obs::panic_policy::{LockExt, RwLockExt};
 /// faster than any parked pop consumes them.
 const HINT_CAP: usize = 64;
 
+/// Seconds between idle-gate sweeps. With the second chance a gate unused for
+/// one to two periods goes; the next parking pop recreates it.
+const GATE_SWEEP_S: u64 = 30;
+
 /// A queue's wake gate plus its partition-hint mailbox. Created lazily by a
 /// parking pop; a push only touches an EXISTING gate, so queues nobody polls
 /// allocate neither a gate nor a mailbox.
@@ -86,13 +90,43 @@ pub struct Notifier {
 
 impl Notifier {
     pub fn new(tenancy: bool) -> Arc<Notifier> {
-        Arc::new(Notifier {
+        let n = Arc::new(Notifier {
             gates: Mutex::new(HashMap::new()),
             by_queue: Mutex::new(HashMap::new()),
             any: std::sync::RwLock::new(HashMap::new()),
             tenancy,
             partition_watches: std::sync::atomic::AtomicUsize::new(0),
-        })
+        });
+        // The idle-gate sweep. `evict_idle` lost its only production caller
+        // with the Postgres removal (ec9d88c4f), so every queue name a long
+        // poll ever parked on kept its gate for the life of the process: one
+        // per request/reply inbox. Spawned HERE, where every notifier is
+        // built, so no boot path can forget it. It holds a `Weak` and ends
+        // with the notifier; outside a runtime (sync unit tests) there is
+        // nothing to spawn on and nothing to sweep for.
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let weak = Arc::downgrade(&n);
+            rt.spawn(async move {
+                let period = std::time::Duration::from_secs(GATE_SWEEP_S);
+                let mut iv =
+                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    iv.tick().await;
+                    let Some(n) = weak.upgrade() else { break };
+                    let evicted = n.evict_idle();
+                    if evicted > 0 {
+                        tracing::debug!(
+                            target: "notify",
+                            evicted,
+                            gates = n.gate_count(),
+                            "idle wake gates evicted"
+                        );
+                    }
+                }
+            });
+        }
+        n
     }
 
     /// The gate a queue-scoped pop parks on. get-or-create. The returned `Arc` is the

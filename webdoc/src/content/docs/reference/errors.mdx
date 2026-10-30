@@ -86,6 +86,9 @@ sourceOfTruth:
 # its group never read, or one that is gone, now answers bad_lease (ack.rs, txn.rs); auth.rs makes
 # POST /streams/v1/state/partitions read-only; phase2.rs adds it and POST /streams/v1/claim with the
 # usual 400 and 404 answers (baa27c5c0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (JS and Python consumers wait out a broker that cannot answer):
+# HttpClient.js reads Retry-After on every error answer, not only a 429, so consume() can wait it
+# after a 503. The JS client list gains the consume() line; the codes and statuses are unchanged.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -267,6 +270,10 @@ See [cluster](/manage/docker/).
   `outcome_unknown` included.
 - It retries a 429 in place after `Retry-After`, up to 10 attempts, and without limit for a
   long-poll pop.
+- `consume()` goes on when a pop still fails after those retries with a 408, a 429, any 5xx but a
+  503 `raft_phase1_unsupported`, a timeout or a lost connection: it waits `Retry-After`, or 1 s
+  doubling up to 30 s when there is none, and polls again, for as long as it takes. Any other error
+  stops it, and `consume()` rejects with that error.
 - A request its caller aborted (a `consume()` being stopped) is neither retried nor sent to another
   URL, and does not mark its node unhealthy: it rejects with `error.aborted` set, and a wait between
   attempts ends there.

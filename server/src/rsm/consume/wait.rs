@@ -12,7 +12,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet, VecDeque};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,11 +25,61 @@ use super::Engine;
 /// may have left).
 const NO_DEADLINE_RECHECK_US: i64 = 1_000_000;
 
+/// `QUEEN_MAX_PARKED_POPS` (default 50,000): long-poll pops parked on this
+/// node at once. Past it a pop that finds nothing is answered empty at once
+/// instead of parking: every parked pop holds its command and its answer
+/// channel, and nothing else bounded how many clients could park.
+pub(crate) fn max_parked_pops() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_MAX_PARKED_POPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(50_000)
+    })
+}
+
+/// How often the parked count is taken again from the groups themselves
+/// ([`Waking::parked`]).
+const PARKED_RECOUNT_US: i64 = 1_000_000;
+
 /// The serve thread's queue and the condition it waits on.
 #[derive(Default)]
 pub(crate) struct Waking {
     pub q: std::sync::Mutex<WakeQ>,
     pub cv: std::sync::Condvar,
+    /// Pops parked in this engine's groups ([`max_parked_pops`]): counted at
+    /// the park and when a waiter leaves through this file, and taken again
+    /// from the groups' own counts every [`PARKED_RECOUNT_US`], since a
+    /// dropped group or a step-down also lets waiters go.
+    pub parked: AtomicUsize,
+    /// When the parked count was last taken from the groups (µs).
+    pub parked_recount_at: AtomicI64,
+    /// When a pop was last answered empty for the cap (µs; the log line's
+    /// pace).
+    pub parked_capped_log_at: AtomicI64,
+}
+
+impl Waking {
+    fn parked_sub(&self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        // A saturating decrement: a compare-exchange loop (the counter is
+        // only a cap, so a racing increment is fine either way).
+        let mut cur = self.parked.load(Ordering::Acquire);
+        loop {
+            let next = cur.saturating_sub(n);
+            match self
+                .parked
+                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
 }
 
 /// The serve thread's queue: groups to look at again.
@@ -68,6 +118,25 @@ impl Engine {
         sink: tokio::sync::oneshot::Sender<crate::rsm::batcher::Reply>,
         now: i64,
     ) {
+        // Past the node's cap the pop is answered empty now, as if its wait
+        // had run out: the client polls again, and nothing more is held.
+        let cap = max_parked_pops();
+        if self.waking.parked.load(Ordering::Acquire) >= cap {
+            let last = self.waking.parked_capped_log_at.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= 10_000_000 {
+                self.waking
+                    .parked_capped_log_at
+                    .store(now, Ordering::Relaxed);
+                tracing::warn!(
+                    target: "rsm",
+                    max_parked_pops = cap,
+                    "long-poll pops: the node's parked cap is reached; pops that find nothing \
+                     are answered empty at once (QUEEN_MAX_PARKED_POPS)"
+                );
+            }
+            let _ = sink.send(Engine::empty_pop());
+            return;
+        }
         let seq = g.wake_seq.load(Ordering::Acquire);
         let due = self.due_at(&cmd, now);
         {
@@ -80,6 +149,7 @@ impl Engine {
             st.waiters.push_back(Waiter { cmd, pinned, sink });
             g.waiting.fetch_add(1, Ordering::AcqRel);
         }
+        self.waking.parked.fetch_add(1, Ordering::AcqRel);
         lock(&self.waking.q).due.push(Reverse((due, g.id)));
         // Something became claimable between the empty walk and the park.
         if g.wake_seq.load(Ordering::Acquire) != seq {
@@ -141,6 +211,7 @@ impl Engine {
                     None => return,
                 }
             };
+            self.waking.parked_sub(1);
             let now = self.now_us();
             match self.retry_waiter(g, w, now) {
                 None => continue, // answered: the next one
@@ -154,6 +225,7 @@ impl Engine {
                     st.waiters.push_front(w);
                     g.waiting.fetch_add(1, Ordering::AcqRel);
                     drop(st);
+                    self.waking.parked.fetch_add(1, Ordering::AcqRel);
                     if g.wake_seq.load(Ordering::Acquire) == seq {
                         return;
                     }
@@ -219,6 +291,7 @@ impl Engine {
                 g.waiting.store(st.waiters.len(), Ordering::Release);
                 out
             };
+            self.waking.parked_sub(expired.len());
             for w in expired {
                 let _ = w.sink.send(Engine::empty_pop());
             }
@@ -280,6 +353,7 @@ impl Engine {
     pub(crate) fn tick_inner(&self, now: i64) {
         self.run_timers(now);
         self.sweep_deadlines(now);
+        self.recount_parked(now);
         self.expire_txns(now);
         self.unload_idle(now);
         if now >= self.serve_after_us.load(Ordering::Acquire) {
@@ -288,6 +362,23 @@ impl Engine {
                 self.run_held(h, now);
             }
         }
+    }
+
+    /// Take the parked count again from the groups ([`Waking::parked`]),
+    /// once every [`PARKED_RECOUNT_US`], and publish it as a gauge.
+    fn recount_parked(&self, now: i64) {
+        let at = self.waking.parked_recount_at.load(Ordering::Relaxed);
+        if now.saturating_sub(at) < PARKED_RECOUNT_US {
+            return;
+        }
+        self.waking.parked_recount_at.store(now, Ordering::Relaxed);
+        let n: usize = read(&self.reg)
+            .by_id
+            .values()
+            .map(|g| g.waiting.load(Ordering::Acquire))
+            .sum();
+        self.waking.parked.store(n, Ordering::Release);
+        crate::metrics::set_parked_pops(n as u64);
     }
 
     fn thread_slot(&self) -> &std::sync::Mutex<Option<std::thread::JoinHandle<()>>> {

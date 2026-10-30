@@ -102,6 +102,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): Supervisors.vue sets the
 # next-step label at 11px instead of 10px (c81143582, the contrast pass). Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-30 (JS and Python consumers wait out a broker that cannot answer):
+# ConsumerManager.js and consumer_manager.py poll again after a 408, 429 or 5xx, a timeout or a lost
+# connection instead of stopping; the status document they publish is unchanged. Nothing this page
+# states changes.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.

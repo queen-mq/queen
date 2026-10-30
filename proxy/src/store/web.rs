@@ -372,9 +372,17 @@ impl Tx {
             meta: if a.meta.is_null() { json!({}) } else { a.meta.clone() },
             at_us,
         };
-        self.put(ns::OPS, ops_key(a.tenant_id, at_us, id), &doc);
+        // Audit rows expire (`AUDIT_TTL_S`): written on every login and
+        // admin action, kept forever they were a store that only grew.
+        self.push(
+            kv::put_op(ns::OPS, &ops_key(a.tenant_id, at_us, id), &doc, Expect::Any, Ttl::Seconds(AUDIT_TTL_S), false),
+            None,
+        );
         if let Some(c) = a.cluster_id {
-            self.put(ns::OPS_CLUSTER, ops_key(c, at_us, id), &ENTRY);
+            self.push(
+                kv::put_op(ns::OPS_CLUSTER, &ops_key(c, at_us, id), &ENTRY, Expect::Any, Ttl::Seconds(AUDIT_TTL_S), false),
+                None,
+            );
         }
         Ok(id)
     }
@@ -586,6 +594,10 @@ pub struct Audit<'a> {
 // ===========================================================================
 // operations (audit)
 // ===========================================================================
+
+/// How long an audit row (`px.ops` and its `px.ops.cluster` entry) is kept:
+/// 90 days.
+const AUDIT_TTL_S: u64 = 90 * 24 * 3600;
 
 /// `record_operation(...)`: append one audit row.
 pub async fn record_operation(store: &Store, a: &Audit<'_>) -> Result<(), WebError> {

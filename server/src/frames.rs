@@ -337,13 +337,81 @@ pub fn zstd_compress(raw: &[u8], level: i32) -> Vec<u8> {
     zstd::stream::encode_all(raw, level).unwrap_or_default()
 }
 
-pub fn zstd_decompress(blob: &[u8]) -> Vec<u8> {
-    zstd::stream::decode_all(blob).unwrap_or_default()
+
+/// Why [`zstd_decompress_bounded`] gave nothing back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZstdBound {
+    /// Not a zstd stream (or a broken one).
+    Invalid,
+    /// It inflates past the limit.
+    TooLarge,
+}
+
+/// A zstd payload a client sent, decompressed only while it stays within
+/// `limit` bytes. A 1 MiB frame of zeros inflates to gigabytes, and
+/// `decode_all` would hold all of it before any ceiling looked at the size;
+/// here the stream stops one byte past the limit.
+pub fn zstd_decompress_bounded(blob: &[u8], limit: usize) -> Result<Vec<u8>, ZstdBound> {
+    use std::io::Read;
+    let decoder = zstd::stream::read::Decoder::new(blob).map_err(|_| ZstdBound::Invalid)?;
+    let mut out = Vec::new();
+    // One byte more than the limit: reading it says the payload is over.
+    decoder
+        .take(limit as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|_| ZstdBound::Invalid)?;
+    if out.len() > limit {
+        return Err(ZstdBound::TooLarge);
+    }
+    Ok(out)
+}
+
+fn env_limit(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
+/// The most messages one pop may ask for (`QUEEN_POP_MAX_BATCH`, default
+/// 10,000). A larger `batch` is clamped, never refused: the client gets a
+/// full batch and pops again.
+pub fn pop_max_batch() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_limit("QUEEN_POP_MAX_BATCH", 10_000))
+}
+
+/// The payload bytes one pop answer may carry (`QUEEN_POP_MAX_BYTES`,
+/// default 64 MiB). The claim stops taking messages once its stored sizes
+/// reach it (at least one message always goes out), so a batch of 10,000
+/// one-megabyte messages is not rendered into one 10 GB string.
+pub fn pop_max_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_limit("QUEEN_POP_MAX_BYTES", 64 << 20))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_zstd_stops_past_the_limit() {
+        let raw = vec![0u8; 1 << 20];
+        let blob = zstd_compress(&raw, 3);
+        assert_eq!(
+            zstd_decompress_bounded(&blob, 1 << 20).map(|v| v.len()),
+            Ok(1 << 20)
+        );
+        assert_eq!(
+            zstd_decompress_bounded(&blob, (1 << 20) - 1),
+            Err(ZstdBound::TooLarge)
+        );
+        assert_eq!(
+            zstd_decompress_bounded(b"not zstd", 1 << 20),
+            Err(ZstdBound::Invalid)
+        );
+    }
 
     #[test]
     fn pack_unpack_ref_round_trip() {

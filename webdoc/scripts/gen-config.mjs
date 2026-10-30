@@ -136,7 +136,8 @@ const GROUPS = [
   // names, but an operator looks for them next to the rest of KV and timers.
   ["Key/value state, timers and the sweeper", (n) =>
     n.startsWith("QUEEN_KV_") || n.startsWith("QUEEN_TIMERS_") || n.startsWith("QUEEN_SWEEPER_") ||
-    n.startsWith("QUEEN_RAFT_TIMER_") || n.startsWith("QUEEN_RAFT_KV_SWEEP") || n === "QUEEN_STMT_TIMEOUT_MS"],
+    n.startsWith("QUEEN_RAFT_TIMER_") || n.startsWith("QUEEN_RAFT_KV_SWEEP") || n === "QUEEN_STMT_TIMEOUT_MS" ||
+    n === "QUEEN_STREAMS_MAX_STATE_BYTES"],
   ["Retention and background jobs", (n) =>
     n.startsWith("RETENTION") || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" ||
     n === "QUEEN_RAFT_RETENTION_VISIT" || n === "QUEEN_RAFT_TXN_WINDOW_MIN_S" || n === "QUEEN_RAFT_TRACE_RETENTION_S" ||
@@ -482,6 +483,13 @@ const EXTRA_VARS = [
     def: "65536 (64 KiB)",
     aliases: [],
     source: "server/src/rsm/planner/kv.rs", // max_value_bytes; the HTTP edge reads the same
+  },
+  {
+    name: "QUEEN_STREAMS_MAX_STATE_BYTES",
+    type: "integer",
+    def: "16777216 (16 MiB)",
+    aliases: [],
+    source: "server/src/rsm/facade/mod.rs", // streams_max_state_bytes; checked when a cycle is received
   },
   {
     name: "QUEEN_KV_MAX_OPS_PER_CALL",
