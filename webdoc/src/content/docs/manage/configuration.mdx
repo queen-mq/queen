@@ -196,7 +196,9 @@ Retention removes a message once it is a minute old and every group has acked it
 
 <Why>a partition holds the dedup records of its messages. Deleted too early, a producer that retries would store a message twice. So a partition is never deleted inside its queue's dedup window, nor before `QUEEN_RAFT_TXN_WINDOW_MIN_S` (15 minutes by default): a short cleanup needs both to be short too.</Why>
 
-On 2.6.0 the third setting matters when partitions come and go fast: we saw the problem from 200 new partitions a second. By default the retention scan paces each round from the size of the previous one. When new partitions arrive faster than that, a round never ends, and nothing is deleted: in a test with 1,000 new partitions a second, 594,000 of 595,000 partitions were still there after ten minutes. `40000` turns that pacing off. With it, 1,000 and 2,000 new partitions a second stayed flat, at about 70,000 and 150,000 partitions.
+On 2.6.0 the third setting matters when partitions come and go fast: we saw the problem from 200 new partitions a second. The retention scan paces each round from the size of the previous one, so when new partitions arrive faster than that, a round never ends, and nothing is deleted: in a test with 1,000 new partitions a second, 594,000 of 595,000 partitions were still there after ten minutes. `40000` turns that pacing off. With it, 1,000 and 2,000 new partitions a second stayed flat, at about 70,000 and 150,000 partitions.
+
+2.7.0 does not need the setting: a round is paced from the larger of the previous round and what it has visited so far, so it ends while partitions grow. On one node (an Apple laptop) with the three settings at 60 s and one message to each new partition, 1,000 new partitions a second for ten minutes stayed between 63,000 and 69,000 partitions, and every one was deleted within 60 seconds of the end. Memory went from about 550 MB under the load back to 105 MB.
 
 ## Kafka clients
 

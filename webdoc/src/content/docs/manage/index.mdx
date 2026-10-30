@@ -42,7 +42,7 @@ A broker starts with no settings at all, and most installations change very few.
 | --- | --- | --- |
 | `PARTITION_CLEANUP_SECONDS` | 30 days | An empty partition is deleted after this long without a write. At least 60. |
 | `QUEEN_RAFT_TXN_WINDOW_MIN_S` | 900 | The least time a message's dedup record is kept. Nothing is deleted sooner, partitions included. |
-| `QUEEN_RAFT_RETENTION_SCAN_PER_S` | 50000 | Partitions the retention scan visits a second. On 2.6.0, set `40000` when partitions come and go fast (see [Many short-lived partitions](/manage/configuration/#many-short-lived-partitions)). |
+| `QUEEN_RAFT_RETENTION_SCAN_PER_S` | 50000 | Partitions the retention scan visits a second. On 2.6.0, set `40000` when partitions come and go fast; 2.7.0 keeps up without it (see [Many short-lived partitions](/manage/configuration/#many-short-lived-partitions)). |
 | `QUEEN_RAFT_TRACE_RETENTION_S` | 7 days | How long message traces are kept. |
 
 **Limits**

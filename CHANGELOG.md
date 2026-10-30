@@ -84,7 +84,10 @@ first.
 by default). KV operations inside a transaction (a `once()` gate, a `kv` rider) take the tenant's
 KV quota as `POST /api/v1/kv` does, and their own rate, `QUEEN_KV_TXN_WRITE_RATE` (10,000 a second,
 burst `QUEEN_KV_TXN_WRITE_BURST` 20,000); the Kafka facade's own commit row takes neither. The Raft log cache counts each entry's real size, and the
-retention scan finishes its rounds while partitions grow fast. Why: every row lives in memory on every node and is reloaded at
+retention scan finishes its rounds while partitions grow fast: a round is paced from the larger of
+the previous round and what it has visited so far. At 1,000 new partitions a second for ten minutes,
+one node held 63,000 to 69,000 partitions and deleted every one within 60 seconds of the end, where
+2.6.0 kept 594,000 of 595,000 unless `QUEEN_RAFT_RETENTION_SCAN_PER_S=40000` was set. Why: every row lives in memory on every node and is reloaded at
 start, so state that only grows ends in a node that cannot start.
 
 **Kafka facade: bounded requests.** Before a client authenticates its frames are at most 512 KiB,
