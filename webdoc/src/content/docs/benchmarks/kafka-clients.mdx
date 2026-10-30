@@ -156,7 +156,7 @@ all in `b51e4419`, took that to 44 / 108 ms:
 
 The last two are gone in 2.6: an idempotent record's producer id, epoch and sequence are its Queen
 transaction id, so a topic created through Kafka gets a dedup window of 900 seconds, and each
-produce request is its own ordered push ([how it works](/guides/kafka/#how-it-works)).
+produce request is its own ordered push ([how it works](/integrations/kafka/)).
 
 On the final build, Kafka Streams (`WordCountDemo`) and Kafka Connect in distributed mode, with a
 file source into a topic and a file sink out of it, passed four runs out of four on fresh
@@ -184,4 +184,4 @@ The facade is also outside the [Jepsen](/benchmarks/jepsen/) tests, which drive 
 API; it has a compatibility suite of its own.
 
 How to point a Kafka client at Queen, and what the facade supports, is in the
-[Kafka guide](/guides/kafka/).
+[Kafka guide](/integrations/kafka/).

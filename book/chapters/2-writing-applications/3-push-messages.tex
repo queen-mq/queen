@@ -1,0 +1,91 @@
+% Chapter 2, section 3: Push messages
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Push messages}
+
+In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up
+every customer that shares its partition. Here a partition is one entity: a customer, an order, a
+conversation. The push that names it creates it, order holds inside it, and one queue has held ten
+million.
+
+The \texttt{transactionId} makes a retry safe: the same id within the dedup window (an hour by default) is
+not written twice.
+
+\guide{push}
+
+\why{order matters per entity (an order's events must be handled in sequence), not across the
+whole queue. One partition per entity keeps that order without one slow entity holding up the
+others. A push with no partition goes to a partition called \texttt{Default}.}
+
+\subsection{Every message gets its own answer}
+
+One push can carry many messages, and the broker answers each one: \texttt{queued} (stored, with
+its offset), \texttt{duplicate} (that \texttt{transactionId} is already there, nothing was written)
+or \texttt{error} (refused, nothing written). The JavaScript client throws when any message is
+refused, unless you handle it yourself, and never throws for a duplicate.
+
+\queenfig{push-verdicts}{One push, one answer per message.}
+
+\guide{push-callbacks}
+
+\why{a duplicate is usually good news: it means an earlier attempt already got through. A refusal
+is not. Telling them apart per message lets one bad item in a batch of a hundred be retried alone,
+and lets a producer that retried after a timeout know that its first attempt worked.}
+
+\subsection{Buffering, for many small messages}
+
+Each push is one HTTP request. A producer that pushes thousands of small messages a second can
+let the client collect them and send them in batches instead.
+
+\guide{push-buffer}
+
+A buffer is sent when it holds \texttt{messageCount} messages or when \texttt{timeMillis} has
+passed, whichever comes first. If the producer gets far ahead of the network (four times
+\texttt{messageCount} waiting), a buffered push waits instead of letting memory grow.
+
+\queenfig{push-buffer}{Client buffering: many small pushes, a few requests.}
+
+\why{one request per message spends most of its time on the round trip, not on the message.
+Batching gets far more messages through the same connection. The price: a message is stored only
+when its batch is sent, so a process that crashes loses what was still in its buffer. Call
+\texttt{flushAllBuffers()} before you exit, and do not buffer messages you cannot afford to lose.}
+
+\subsection{When several messages must land together}
+
+A push of several messages is not all-or-nothing: each message gets its own answer, so some can be
+stored while others are refused. When messages must be stored together or not at all (an order and
+its payment request, say), push them in a transaction (see Advanced transactional usage).
+
+\subsection{Binary push, compression and framed pop}
+
+By default the client and the broker speak JSON. Three options of the client change how messages
+travel, and nothing else: the calls, their results, deduplication and the guarantees stay the
+same.
+
+\begin{options}{Option}{Default}{What it does}
+binaryPush & false & A push, direct or buffered, goes as one binary body instead of a JSON document. A transaction that pushes sends its pushes the same way. \\
+pushCompression & false & Needs \texttt{binaryPush}. The client packs each partition's batch the way the broker stores it, and compresses it with zstd once. The broker keeps those bytes as they are. \\
+framedPop & false & \texttt{pop()} and \texttt{consume()} get the records as they are stored, and the client unpacks them into the same messages. \\
+\end{options}
+
+Turn them on when you create the client:
+
+\guide{wire-forms}
+
+zstd comes with Node.js, so there is nothing to install. Some requests stay JSON by themselves: a
+push with a \texttt{traceId}, a pop of a conflating group, and a pop of an encrypted queue. Acks,
+KV, timers and locks do not change.
+
+\why{at a high message rate, the broker spends CPU turning JSON into stored records
+and back, and the network carries every message uncompressed. These options move that work into
+the clients, where many processes share it, and send the batches compressed. When neither the
+broker's CPU nor the network is the limit, leave them off: JSON is easier to read when you debug.}
+
+One trap: \texttt{binaryPush} and \texttt{pushCompression} need broker 2.3.0 or later on every node.
+An older broker answers 400, and the client does not fall back to JSON, so turn them on after the
+last node is upgraded. \texttt{framedPop} is safe with any broker: an older one ignores it and
+answers JSON.
+
+On the site, with the code in all six SDK languages: \href{https://queenmq.com/writing-applications/push/}{queenmq.com/writing-applications/push}. More there: \href{https://queenmq.com/writing-applications/clients/}{the binary forms in every SDK}.

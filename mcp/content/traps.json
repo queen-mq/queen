@@ -17,8 +17,8 @@
       "http": "GET /api/v1/pop/queue/orders?consumerGroup=audit&subscriptionMode=all&wait=true&timeout=30000"
     },
     "source": [
-      "https://queenmq.com/concepts/consuming/",
-      "https://queenmq.com/guides/streams/",
+      "https://queenmq.com/writing-applications/pop/",
+      "https://queenmq.com/writing-applications/streams/",
       "server/src/config.rs:688",
       "server/src/handlers/data.rs:47",
       "clients/client-js/client-v2/streams/runtime/Runner.js:76"
@@ -42,7 +42,7 @@
     },
     "source": [
       "https://queenmq.com/reference/transaction/",
-      "https://queenmq.com/concepts/transactions/",
+      "https://queenmq.com/writing-applications/transactions/",
       "server/src/handlers/raft.rs:382",
       "server/src/rsm/consume/ack.rs:622",
       "clients/client-go/queen.go:135",
@@ -66,7 +66,7 @@
       "python": "results = await queen.queue('orders').partition('customer-42').push(\n    [{'transactionId': 'order-9137-created', 'data': {'orderId': 9137}}])\nrefused = [r for r in results if r.get('status') == 'error']"
     },
     "source": [
-      "https://queenmq.com/concepts/partitions/",
+      "https://queenmq.com/writing-applications/queues/",
       "https://queenmq.com/reference/limits/",
       "clients/client-go/push_builder.go:187",
       "clients/client-py/queen/builders/push_builder.py:134"
@@ -90,7 +90,7 @@
     "source": [
       "https://queenmq.com/reference/transaction/",
       "https://queenmq.com/reference/errors/",
-      "https://queenmq.com/concepts/dedup/",
+      "https://queenmq.com/writing-applications/push/",
       "clients/client-js/client-v2/builders/TransactionBuilder.js:307",
       "clients/client-go/transaction_builder.go:182",
       "clients/client-py/queen/builders/transaction_builder.py:257"
@@ -108,7 +108,7 @@
     "fix": "Commit one transaction per pop (ack only the messages of that pop's lease), or put leaseId on every ack operation. Over HTTP, always put leaseId on each ack.",
     "source": [
       "https://queenmq.com/reference/transaction/",
-      "https://queenmq.com/guides/exactly-once/",
+      "https://queenmq.com/patterns/workflows/",
       "server/src/rsm/facade/real.rs:2052"
     ]
   },
@@ -127,7 +127,7 @@
       "python": "await queen.queue('invoices').partition(customer_id).push(\n    [{'transactionId': f\"invoice-{message['transactionId']}\", 'data': invoice}])"
     },
     "source": [
-      "https://queenmq.com/concepts/dedup/",
+      "https://queenmq.com/writing-applications/push/",
       "https://queenmq.com/reference/errors/",
       "https://queenmq.com/reference/transaction/"
     ]
@@ -148,9 +148,9 @@
       "http": "POST /api/v1/ack\n{\"transactionId\":\"...\",\"partitionId\":\"4\",\"consumerGroup\":\"workers\",\"leaseId\":\"...\",\n \"status\":\"dlq\",\"error\":\"gave up after 5 deliveries\"}"
     },
     "source": [
-      "https://queenmq.com/concepts/consuming/",
-      "https://queenmq.com/guides/webhooks/",
-      "https://queenmq.com/concepts/partitions/"
+      "https://queenmq.com/writing-applications/pop/",
+      "https://queenmq.com/patterns/retries-dead-letters/",
+      "https://queenmq.com/writing-applications/queues/"
     ]
   },
   {
@@ -169,9 +169,9 @@
       "go": "err := client.Queue(\"reports\").Group(\"builders\").RenewLease(true, 10000).\n\tConsume(ctx, buildReport).Execute(ctx)"
     },
     "source": [
-      "https://queenmq.com/concepts/consuming/",
+      "https://queenmq.com/writing-applications/pop/",
       "https://queenmq.com/reference/limits/",
-      "https://queenmq.com/start/clients/",
+      "https://queenmq.com/writing-applications/clients/",
       "clients/client-js/client-v2/consumer/ConsumerManager.js:207",
       "clients/client-py/queen/consumer/consumer_manager.py:251",
       "clients/client-cpp/queen_client.hpp:4401"
@@ -197,7 +197,7 @@
       "http": "POST /api/v1/lease/<leaseId>/extend {\"seconds\": 60}\n-> 200 {\"leaseId\":\"...\",\"success\":false,\"renewed\":0,\"newExpiresAt\":null, ...}"
     },
     "source": [
-      "https://queenmq.com/concepts/consuming/",
+      "https://queenmq.com/writing-applications/pop/",
       "server/src/rsm/facade/real.rs:4580",
       "server/src/rsm/consume/ack.rs:1078",
       "clients/client-go/queen.go:308",
@@ -222,8 +222,8 @@
       "python": "async def handler(message):\n    try:\n        await commit_step(message)\n    except Exception as err:\n        await queen.ack(message, False, {'group': 'billing', 'error': str(err)})\n\nawait queen.queue('payments').group('billing').auto_ack(False).each().consume(handler)"
     },
     "source": [
-      "https://queenmq.com/concepts/consuming/",
-      "https://queenmq.com/concepts/transactions/",
+      "https://queenmq.com/writing-applications/pop/",
+      "https://queenmq.com/writing-applications/transactions/",
       "clients/client-go/consumer_manager.go:367",
       "clients/client-py/queen/consumer/consumer_manager.py:453"
     ]
@@ -245,7 +245,7 @@
       "http": "POST /api/v1/kv\n{\"operations\":[{\"op\":\"put\",\"ns\":\"orders\",\"key\":\"9137\",\"value\":{\"status\":\"paid\"},\"ttlSeconds\":2592000}]}"
     },
     "source": [
-      "https://queenmq.com/concepts/kv/",
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
       "https://queenmq.com/reference/errors/",
       "https://queenmq.com/reference/limits/",
       "clients/client-js/client-v2/kv/expiry.js",
@@ -266,8 +266,8 @@
       "js": "const row = await queen.kv.get('bookings', bookingId)\nawait queen.transaction()\n  .ack(message, 'completed', { consumerGroup: 'bookings' })\n  .kv.put('bookings', bookingId, { ...row.value, state: 'held' },\n    { ttl: '7d', expect: row.version, required: true })\n  .commit()"
     },
     "source": [
-      "https://queenmq.com/concepts/transactions/",
-      "https://queenmq.com/concepts/kv/",
+      "https://queenmq.com/writing-applications/transactions/",
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
       "https://queenmq.com/reference/transaction/",
       "clients/client-js/client-v2/kv/Kv.js:116"
     ]
@@ -283,7 +283,7 @@
     "cause": "Per tenant and per node, /api/v1/kv takes 100 write calls a second (burst 200) and 200 read calls a second (burst 400) by default (QUEEN_KV_WRITE_RATE, QUEEN_KV_READ_RATE). A call with any write in it counts as a write, and each POST /api/v1/timers call spends a write token too. KV operations and timers inside a transaction are not counted.",
     "fix": "Write state in the step's transaction instead of separate KV calls, batch operations into one /api/v1/kv call (up to 256 operations and 1,024 keys), and keep standalone reads off the per-message path.",
     "source": [
-      "https://queenmq.com/concepts/kv/",
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
       "https://queenmq.com/reference/limits/",
       "https://queenmq.com/reference/errors/",
       "server/src/config.rs:704"
@@ -303,9 +303,9 @@
       "js": "await queen.queue('webhooks').group('senders').partitions(1).concurrency(20).each()\n  .consume(deliver)"
     },
     "source": [
-      "https://queenmq.com/concepts/partitions/",
-      "https://queenmq.com/concepts/consuming/",
-      "https://queenmq.com/examples/chat/",
+      "https://queenmq.com/writing-applications/queues/",
+      "https://queenmq.com/writing-applications/pop/",
+      "https://queenmq.com/patterns/ordering-batching/",
       "server/src/handlers/data.rs:180"
     ]
   },
@@ -320,7 +320,7 @@
     "cause": "POST /api/v1/configure stores these options and the 2.0 broker never reads them.",
     "fix": "To drop old messages use maxWaitTimeSeconds, or retentionEnabled with retentionSeconds or completedRetentionSeconds. For the same delay on every message use delayedProcessing (seconds).",
     "source": [
-      "https://queenmq.com/concepts/partitions/",
+      "https://queenmq.com/writing-applications/queues/",
       "server/src/rsm/facade/real/phase2.rs:1256"
     ]
   },
@@ -339,8 +339,8 @@
       "js": "await queen.transaction()\n  .ack(message, 'completed', { consumerGroup: 'senders' })\n  .timer('webhooks').key(`retry-${message.transactionId}`).partition(message.partition)\n    .delay('30s').payload(message.data).schedule()\n  .commit()"
     },
     "source": [
-      "https://queenmq.com/concepts/partitions/",
-      "https://queenmq.com/guides/webhooks/",
+      "https://queenmq.com/writing-applications/queues/",
+      "https://queenmq.com/patterns/retries-dead-letters/",
       "server/src/rsm/consume/ack.rs:53"
     ]
   },
@@ -358,8 +358,8 @@
       "js": "await queen.queue('orders')\n  .config({ dedupWindowSeconds: 900, retentionEnabled: true, retentionSeconds: 604800 })\n  .create()"
     },
     "source": [
-      "https://queenmq.com/concepts/partitions/",
-      "https://queenmq.com/internals/storage/",
+      "https://queenmq.com/writing-applications/queues/",
+      "https://queenmq.com/architecture/storage/",
       "server/src/rsm/maintenance.rs:516"
     ]
   },
@@ -377,7 +377,7 @@
       "js": "await queen.transaction()\n  .ack(message, 'completed', { consumerGroup: 'bookings' })\n  .kv.put('bookings', bookingId, { state: 'held' }, { ttl: '7d' })\n  .timer('bookings').key(bookingId).partition(bookingId).delay('15m')\n    .payload({ type: 'hold-expired', bookingId }).schedule()\n  .commit()"
     },
     "source": [
-      "https://queenmq.com/concepts/timers/",
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
       "https://queenmq.com/reference/limits/",
       "https://queenmq.com/reference/transaction/"
     ]
@@ -397,9 +397,9 @@
     },
     "source": [
       "https://queenmq.com/reference/transaction/",
-      "https://queenmq.com/concepts/consuming/",
-      "https://queenmq.com/concepts/timers/",
-      "https://queenmq.com/start/quickstart/"
+      "https://queenmq.com/writing-applications/pop/",
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
+      "https://queenmq.com/writing-applications/"
     ]
   },
   {
@@ -456,7 +456,7 @@
       "http": "POST /api/v1/configure {\"queue\":\"orders\",\"options\":{\"leaseTime\":120}}"
     },
     "source": [
-      "https://queenmq.com/concepts/partitions/",
+      "https://queenmq.com/writing-applications/queues/",
       "clients/client-js/client-v2/builders/QueueBuilder.js:116",
       "clients/client-js/client-v2/utils/defaults.js:42"
     ]
@@ -492,7 +492,7 @@
     "cause": "These clients log the failure and return an empty result from pop() instead of raising. The Go, Rust and PHP clients surface the error from pop().",
     "fix": "When a pop-based worker gets nothing, check the client's error log (or the queue's backlog) before assuming the queue is empty. The JS and Python consume() loops stop on a terminal 403 instead of looping.",
     "source": [
-      "https://queenmq.com/start/clients/",
+      "https://queenmq.com/writing-applications/clients/",
       "clients/client-js/client-v2/builders/QueueBuilder.js:526",
       "clients/client-py/queen/builders/queue_builder.py:550"
     ]
@@ -511,7 +511,7 @@
       "js": "const inbox = `rpc-inbox-${randomUUID()}`\nawait queen.ephemeral.push('rpc-requests', [{ n: 7, replyTo: inbox }])\nconst reply = await queen.ephemeral.pop(inbox, { wait: true, timeout: 5000, autoAck: true })\nif (reply.messages.length === 0) throw new Error('no reply within 5 s')\nconst answer = reply.messages[0].payload"
     },
     "source": [
-      "https://queenmq.com/guides/ephemeral/",
+      "https://queenmq.com/writing-applications/ephemeral/",
       "https://queenmq.com/reference/limits/",
       "clients/client-js/client-v2/ephemeral/Ephemeral.js:409"
     ]
@@ -533,7 +533,7 @@
       "js": "const handle = await Stream\n  .from(queen.queue('sales'))\n  .filter((m) => m.data.amount > 0)\n  .windowTumbling({ seconds: 60 })\n  .aggregate({ count: () => 1, sum: (s) => s.amount })\n  .to(queen.queue('sales-per-minute'))\n  .run({ queryId: 'sales-per-minute', url, subscriptionMode: 'all' })"
     },
     "source": [
-      "https://queenmq.com/guides/streams/",
+      "https://queenmq.com/writing-applications/streams/",
       "clients/client-js/client-v2/streams/Stream.js:263"
     ]
   },
@@ -551,7 +551,7 @@
     "cause": "A stream cycle has no retry budget and no dead-letter queue: a message that makes the operator chain throw (an extractor reading a field the event lacks) returns after every lease expiry and holds up its partition. A changed operator chain under an existing queryId answers 409 unless run() passes reset: true, which deletes every state row of the query while the group keeps its position. Window state is per source partition, so .keyBy() over several partitions yields one partial result per partition. windowCron takes `every`, not cron syntax.",
     "fix": "Filter out events the chain cannot handle before the window and guard extractors against missing fields. Give a changed chain a new queryId (a new group: pass subscriptionMode: 'all' to replay the retained history) rather than reset: true when you need the old results. To aggregate across partitions, push to a queue partitioned by the new key and aggregate there.",
     "source": [
-      "https://queenmq.com/guides/streams/",
+      "https://queenmq.com/writing-applications/streams/",
       "clients/client-js/client-v2/streams/Stream.js:271"
     ]
   },
@@ -566,7 +566,7 @@
     "cause": "A Kafka fetch is a read at an offset, like POST /api/v1/fetch, not a pop, so Queen's leases, redelivery, retry budget and dead-letter queue do not apply. A Kafka group is the Queen consumer group of the same name: a Kafka commit sets its position like a seek and releases any lease a Queen consumer holds on that partition. Committed offsets never expire, and deleting a group with no members from a Kafka tool deletes the Queen group's position on every queue. Membership lives in the raft leader's memory: a leader change makes members rejoin, and a group with no members leaves that memory ten minutes after its last member left.",
     "fix": "Do not run Kafka and Queen consumers in one group at the same time: hand a group from one kind to the other, or use separate group names. Handle failures in the Kafka consumer as you would on Kafka, or consume with a Queen SDK to get leases, retries and the DLQ.",
     "source": [
-      "https://queenmq.com/guides/kafka/",
+      "https://queenmq.com/integrations/kafka/",
       "https://queenmq.com/reference/kafka/",
       "server/src/kafka_inproc.rs:233",
       "protocols/queen-kafka/src/handlers/offsets.rs:28",
@@ -588,7 +588,7 @@
     },
     "source": [
       "https://queenmq.com/reference/kafka/",
-      "https://queenmq.com/guides/kafka/",
+      "https://queenmq.com/integrations/kafka/",
       "protocols/queen-kafka/compat/kafka-go/produce_test.go:147",
       "protocols/queen-kafka/compat/sarama/main.go:44"
     ]
@@ -604,9 +604,9 @@
     "cause": "Kafka partition n is the Queen partition named \"n\", and a Kafka client cannot address a partition named customer-123. A Kafka record reaches Queen clients as one message {k, v, t, h} with key and value base64-encoded; a Queen push reaches Kafka consumers as a record with no key whose value is the JSON. A topic created through Kafka gets a dedup window of 900 seconds (QUEEN_KAFKA_DEDUP_WINDOW_SECONDS), the window its idempotent producers need, where a queue a Queen push creates gets 3600. A listing (kcat -L, a subscription by pattern) can miss a queue created in the last second.",
     "fix": "Use numeric partition names (or let Kafka producers hash keys) on queues Kafka consumers read; decode k and v from base64 in Queen consumers; set dedupWindowSeconds on a Kafka-created queue if Queen producers count on a window longer than 15 minutes.",
     "source": [
-      "https://queenmq.com/guides/kafka/",
-      "https://queenmq.com/examples/kafka-bridge/",
-      "https://queenmq.com/concepts/dedup/"
+      "https://queenmq.com/integrations/kafka/",
+      "https://queenmq.com/integrations/kafka/",
+      "https://queenmq.com/writing-applications/push/"
     ]
   },
   {
@@ -620,7 +620,7 @@
     "cause": "cleanup.policy=compact switches retention off and keeps every record, tombstones included. DeleteRecords, AlterConfigs, IncrementalAlterConfigs, OffsetDelete and the ACL calls are not offered, and of a topic's configs only retention.ms and cleanup.policy are applied, at creation. Records are stored decoded and fetched as uncompressed batches, so producer compression saves only inbound bandwidth; librdkafka-based producers send zstd uncompressed, and librdkafka 2.11.0 and older send gzip, snappy and lz4 uncompressed too. A transaction's records wait in the raft leader's memory until its commit writes them as one raft entry: at most 8 MiB, 50,000 records and 1,000 partitions per transaction, 256 MiB across the leader's open transactions, and a timeout of at most one hour. A leader change loses the open transactions, which the new leader lets only abort. There is no TLS listener.",
     "fix": "Plan disk for compacted topics, delete and recreate a topic instead of truncating it, and set retention at creation or later through Queen's queue options. Keep transactions inside the limits, and abort and rerun one that a leader change interrupted. Keep the Kafka port on a private network, or terminate TLS in front of it.",
     "source": [
-      "https://queenmq.com/guides/kafka/",
+      "https://queenmq.com/integrations/kafka/",
       "https://queenmq.com/reference/kafka/",
       "https://queenmq.com/reference/kafka/#ceilings"
     ]
@@ -660,7 +660,7 @@
     "source": [
       "clients/client-js/client-v2/Queen.js:660",
       "clients/client-js/client-v2/stream/StreamConsumer.js:59",
-      "https://queenmq.com/guides/streams/"
+      "https://queenmq.com/writing-applications/streams/"
     ]
   },
   {
@@ -676,7 +676,7 @@
     "source": [
       "clients/client-py/queen/streams/stream.py:158",
       "clients/client-py/queen/streams/runtime/runner.py:247",
-      "https://queenmq.com/concepts/consuming/"
+      "https://queenmq.com/writing-applications/pop/"
     ]
   },
   {
@@ -716,7 +716,7 @@
       "http": "POST /api/v1/transaction\n{\"operations\":[{\"type\":\"push\",\"items\":[{\"queue\":\"reports\",\"payload\":{\"day\":\"2026-10-09\"}}]}],\n \"kv\":[{\"op\":\"check\",\"ns\":\"queen-locks\",\"key\":\"daily-report#0\",\"expect\":90101,\"required\":true}]}"
     },
     "source": [
-      "https://queenmq.com/concepts/locks/",
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
       "clients/client-js/client-v2/builders/TransactionBuilder.js:272",
       "server/src/locks.rs"
     ]
@@ -736,7 +736,7 @@
       "http": "POST /api/v1/locks\n{\"operations\":[{\"op\":\"renew\",\"name\":\"daily-report\",\"token\":90101,\"ttlSeconds\":30,\"owner\":\"cron-7\"}]}\n-> {\"results\":[{\"renewed\":true,\"token\":90117,\"guard\":{\"op\":\"check\",\"ns\":\"queen-locks\",\"key\":\"daily-report#0\",\"expect\":90117,\"required\":true}}]}"
     },
     "source": [
-      "https://queenmq.com/concepts/locks/",
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
       "clients/client-js/client-v2/locks/Locks.js:320"
     ]
   },
@@ -756,7 +756,7 @@
       "cpp": "for (const auto& page : pages) {\n    if (!lock.keep_alive()) break;   // lost: stop\n    import_page(page);\n}"
     },
     "source": [
-      "https://queenmq.com/concepts/locks/",
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
       "clients/client-php/src/Lock.php:234",
       "clients/client-cpp/queen_client.hpp:3204"
     ]
@@ -772,7 +772,7 @@
     "cause": "The lock route and the KV check operation exist from broker 2.1.0. A guard is a check, and a check needs the cluster at format version 5, which the cluster reaches by itself once every node runs 2.1.0. Until then acquire, renew and release work, and a call that carries a check answers 503.",
     "fix": "Run broker 2.1.0 or later on every node before the code that takes locks goes out (GET /health shows version and raft.clusterVersion). Treat the 503 as a retry: it stops once the last node is upgraded. Use an SDK that has locks: 2.1.0 for JavaScript, Python, Go, Rust and C++, 2.4.0 for PHP.",
     "source": [
-      "https://queenmq.com/concepts/locks/",
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
       "https://queenmq.com/reference/errors/",
       "clients/client-js/client-v2/kv/Kv.js:448"
     ]
@@ -788,8 +788,8 @@
     "cause": "A partition is leased to one worker of a group at a time, and the ack fences a worker that lost the lease, so one entity's events are already processed one step at a time. A lock on top of that repeats the guarantee and adds two calls per step.",
     "fix": "Key the partition by the entity and commit the step as one transaction: that is the mutual exclusion. Keep locks for work that has no message to hang on: a cron job, a singleton, a migration, a pool of N holders (a semaphore).",
     "source": [
-      "https://queenmq.com/concepts/locks/",
-      "https://queenmq.com/guides/state-machines/"
+      "https://queenmq.com/writing-applications/kv-locks-timers/",
+      "https://queenmq.com/patterns/workflows/"
     ]
   },
   {
@@ -803,7 +803,7 @@
     "cause": "The binary push and transaction bodies exist from broker 2.3.0. A broker up to 2.2.0 reads the body as JSON and answers 400, and no SDK retries the request as JSON. During a roll from 2.2.0 the nodes that are not upgraded yet answer 400 while the others accept.",
     "fix": "Leave binaryPush and pushCompression off until GET /health reports version 2.3.0 or later on every node, then turn them on. framedPop needs no such care: an older broker ignores frames=true and answers JSON. The options are in the 2.3.0 SDKs (PHP client 2.5.0).",
     "source": [
-      "https://queenmq.com/start/clients/",
+      "https://queenmq.com/writing-applications/clients/",
       "https://queenmq.com/reference/http/"
     ]
   },
@@ -820,8 +820,8 @@
     "cause": "Push compression compresses each batch with zstd in the client and framed pop unpacks zstd records there. Node.js, Go and Rust ship or depend on zstd by themselves. PHP needs the zstd extension, C++ needs libzstd and the build flag, and Python has it in the standard library only from 3.14.",
     "fix": "PHP: pecl install zstd, in the workers and in every process that dispatches. C++: compile with -DQUEEN_CLIENT_ZSTD and link -lzstd. Python before 3.14: pip install \"queen-mq[zstd]\". binaryPush alone needs no zstd.",
     "source": [
-      "https://queenmq.com/start/clients/",
-      "https://queenmq.com/guides/laravel/configuration/"
+      "https://queenmq.com/writing-applications/clients/",
+      "https://queenmq.com/integrations/laravel/configuration/"
     ]
   }
 ]

@@ -559,7 +559,7 @@ reload()
   gap: 8px; margin-top: 14px;
 }
 .locks-note { font-size: 12.5px; color: var(--text-mid); line-height: 1.5; }
-.locks-copy { padding: 1px 6px; font-size: 10.5px; }
+.locks-copy { padding: 1px 6px; font-size: 11px; }
 
 /* The drawer's footer is `justify-content: flex-end`; the link belongs on the
    other side of it. */

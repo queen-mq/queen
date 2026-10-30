@@ -6,4 +6,7 @@ require github.com/smartpricing/queen/clients/client-go/v2 v2.0.0
 
 replace github.com/smartpricing/queen/clients/client-go/v2 => ../../../clients/client-go
 
-require github.com/google/uuid v1.6.0 // indirect
+require (
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/klauspost/compress v1.19.2 // indirect
+)

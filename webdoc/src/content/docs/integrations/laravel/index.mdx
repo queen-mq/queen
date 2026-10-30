@@ -1,0 +1,353 @@
+---
+title: "Laravel queue driver: install and run your jobs"
+description: "Run your Laravel jobs on Queen: install the queue connection, keep your job classes and workers, order jobs per entity, pick a delivery profile, and choose who runs the workers."
+type: how-to
+tier: use
+sidebar:
+  group:
+    label: "Laravel"
+  order: 8
+sourceOfTruth:
+  - clients/client-php/src/Laravel/Contracts/QueenPartitionable.php
+  - clients/client-php/src/Laravel/Queue/SyncedFailedJobProvider.php
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/planner/push.rs
+  - proxy/src/routes.rs
+  - clients/client-php/composer.json
+  - clients/client-php/config/queen.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenConnector.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Queue/QueenJob.php
+  - clients/client-php/src/Laravel/Queue/ProcessLeaseRenewer.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinary.php
+  - clients/client-php/src/Laravel/Commands/ConsumeCommand.php
+# Describes clients/client-php and supervisor/ as they are on master (PHP client 2.0.0, which pins
+# supervisor 0.6.0, both tagged).
+# sourceOfTruth re-read 2026-10-06 (prefork per pool): the Versions section describes 2.3.0, not released
+# yet, which pins supervisor 0.8.0, with a row for a pool's own prefork.
+# sourceOfTruth re-read 2026-10-06 (2.2.0 tagged): the Versions section says 2.2.0 is on Packagist.
+# sourceOfTruth re-read 2026-10-05 (auto v3): AdaptiveBatch doubles a batch only after two full pops in a row; the profile table and the fast paragraph take the v3 medians, and the balanced and fast snippets add block_for 1 with the pool's sleep 0 (config/queen.php defaults block_for 0 and sleep 1; a pool with balance off gets block_for 0).
+# sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, so install step 3 drops QUEEN_RETRY_AFTER, the lease paragraph and both delivery profiles name the keys of config/queen.php (prefetch, ack_batch, lease_renewal, ack_async, pop_ahead, sync_failed_jobs) instead of variables, the Versions section adds a 2.1.0 row (20 variables, supervisor.lease_service, the queue:restart and fork-safety changes of prefork) and the configuration reference link names the 20 variables.
+# sourceOfTruth re-read 2026-10-05 (docs restore): master carries clients/client-php and supervisor/, so the client files this page describes join the list; the page now describes PHP client 2.0.0 (a Versions row: each transaction ACK names its lease, the Jobs page reads with a read-only token; SupervisorBinary pins 0.6.0); restored, as QueenQueue does them, the prefetch=1 limit of ack_async, the pop_ahead safety rules (lease tracked when the job ends, batch handed back once half the new lease has passed, no long-poll), the queue:work --timeout gap (assertJobTimeoutIsSafe checks only a job's own $timeout; SupervisorConfiguration refuses timeout >= retry_after), the diagnostic caveat and the links to Kubernetes, monitoring and the production checks.
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /integrations/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (queen:consume): ConsumeCommand joins the list; one sentence before Read next points at the new Consume Queen messages page. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-06 (queen:consume fixes): the 2.3.0 row adds the queen:consume
+# fixes (a nack when the handler throws, --lease and its renewal, --idle-timeout); QueenConnector
+# builds its renewer through LeaseRenewerFactory and QueenServiceProvider its client through
+# clientConfig(), which changes nothing else this page states.
+# sourceOfTruth re-read 2026-10-06 (queen:consume idle clock): ConsumeCommand measures --idle-timeout in
+# nanoseconds and never stops before it has passed; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (helper autoload): ProcessLeaseRenewer asks Composer for the autoloader
+# that loaded the package before it walks up from Queen.php; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (connection defaults): SupervisorConfiguration and ApplicationSettings start
+# every queen connection from config/queen.php, as QueenConnector does and as the configuration page
+# already says; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (broker supervisor dashboard): config/queen.php documents supervisor publication groups; connection defaults, delivery profiles and installation steps are unchanged.
+# sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
+# delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (PHP client 2.3.1): 2.3.0 is on Packagist, and 2.3.1 adds the opt-in
+# supervision of a fluent consumer with the same supervisor pin (0.8.0). The Versions section says so.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the facade can open a node as a member of a standby cluster, which answers 503 `standby` until it is promoted; the queue connection is as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): facade/real.rs refuses a transaction's KV `check` below cluster
+# version 5; proxy/src/routes.rs puts POST /api/v1/locks behind the KV plan flag, never quota-blocked. Nothing
+# this page states changes.
+# sourceOfTruth re-read 2026-10-08 (composer description): composer.json's description names the Laravel
+# queue driver and Horizon; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (PHP client 2.4.0): 2.4.0 adds locks, semaphores, the transaction guard and
+# the KV check to the client and pins supervisor 0.8.0, as 2.3.1 does. The Versions section says so.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
+# messages whose rows are gone from the queue log; facade/real.rs exports two metric families.
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): config/queen.php reads every
+# switch variable through filter_var; the failed-job provider leaves other drivers' records to
+# Laravel, and failed_jobs with its commands stay unchanged for a Queen job, as the table says; a
+# pool takes its connection's queue and consumer_group; the connector scopes the pool's
+# environment to the worked connection. Nothing this page states changes; the versions table gains
+# 2.4.1 at its release.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/real.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
+# registers WorkerPopGuard and QueenQueue::pop reports to it, under a supervisor only. Nothing this
+# page states changes.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
+# delivery that carries no Laravel job in the dead-letter queue at once. Nothing this page states
+# changes.
+# sourceOfTruth re-read 2026-10-10 (installation owner, PHP client 2.4.2): SupervisorBinary explains
+# a refused installation and the installer takes --owner; the pin (0.8.0) and the targets are
+# unchanged. Nothing this page states changes; the versions table gains 2.4.2 at its release.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider changes only the job-metrics listeners (timed-out attempts and $this->fail() count as failed). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): QueenConnector, QueenQueue,
+# SupervisorConfiguration: a job whose timeout its lease cannot cover fails alone (migrate-from-
+# horizon says so), and the budget refusal names its parts. The lease and timeout rules here are
+# unchanged; the version table gains its row at the release.
+# sourceOfTruth re-read 2026-10-13 (2.3.0, PHP client 2.5.0): config/queen.php gains three keys,
+# binary_push, push_compression and framed_pop, all false by default and read from no environment
+# variable; QueenConnector validates them as booleans and gives them to the driver's client,
+# QueenServiceProvider to the container's client; composer.json suggests ext-zstd. The requirements
+# sentence names the extension and the Versions section has the 2.5.0 row. On the broker,
+# facade/real.rs reads the binary bodies and renders framed pops only for a client that asks,
+# planner/timers.rs only converts a frame's type, and phase2.rs and phase2/reads.rs give a fetch
+# call a ceiling for the whole call. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-16 (2.4.0): planner/push.rs and planner/txn.rs write a push's
+# outcome as runs (catalogue version 7) where the cluster reads 7; facade/real.rs keeps the framed
+# forms on for the queues that do not encrypt (c42ea1992) and tells the store whether the queue logs
+# hold the txns hashes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-16 (windowBuffer cap): consume/pop.rs ends a windowBuffer hold one
+# window after the oldest message waiting for the group instead of one window after the newest
+# write. This page does not describe windowBuffer, and nothing it states changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-19 (retryDelay enforced): the consumption engine (consume/ack.rs,
+# txn.rs, pop.rs, state.rs, hooks.rs) holds a partition that a failed ack released, for that group
+# and a pop naming it too, until the queue's retryDelay ends; a transaction's failed ack holds it
+# from the commit. The Laravel driver acks completed or dlq, never failed, so nothing this page
+# states changes.
+# sourceOfTruth re-read 2026-10-21: real.rs gives a Kafka record's push its transaction id (facade
+# 2's idempotent producer) and consume/txn.rs counts a moved position as consumption on the
+# dashboard (cd737c40a). Nothing this page states changes.
+---
+
+QueenMQ can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and running the workers, which Horizon's master does. Your job classes stay ordinary Laravel jobs, and `queue:work` stays the worker.
+
+<Why>a job in Redis can be lost with the Redis process, and a Horizon master boots Laravel in every worker. With QueenMQ the backlog is on disk (in a cluster, on a majority of nodes) before `dispatch()` returns, an entity can have its own ordered lane, and forked workers share one booted framework. In our runs on one 16-vCPU server, 32 workers completed 2,753 jobs a second of 10 ms jobs against Horizon's 1,124, and 64 forked workers fit in 183 MiB against 1,892 ([benchmark](/benchmarks/laravel/)).</Why>
+
+If you run Horizon today, [Queen or Horizon](/integrations/laravel/queen-vs-horizon/) compares the two, and [migrate from Horizon](/integrations/laravel/migrate-from-horizon/) moves a running application step by step.
+
+## Install
+
+<Steps>
+
+1. **Start a broker** if you have none yet. One container is enough to try it
+   ([quickstart](/writing-applications/)):
+
+   ```bash
+   docker run -d --name queen -p 6632:6632 \
+     -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.6.0
+   ```
+
+2. **Install the package and publish its configuration.** Package discovery registers the service
+   provider, the `Queen` facade and a `queen` queue connection, so `config/queue.php` needs no
+   entry unless you want to override it.
+
+   ```bash
+   composer require queen-mq/php-client
+   php artisan vendor:publish --tag=queen-config
+   ```
+
+3. **Point Laravel at Queen.**
+
+   ```dotenv
+   QUEUE_CONNECTION=queen
+   QUEEN_URL=http://127.0.0.1:6632
+   QUEEN_QUEUE=default
+   QUEEN_CONSUMER_GROUP=laravel
+   ```
+
+4. **Dispatch a job you already have.** Nothing changes at the call site.
+
+   ```php
+   GenerateInvoice::dispatch($invoiceId);
+   ```
+
+5. **Run a worker.**
+
+   ```bash
+   php artisan queue:work queen --queue=default --timeout=60 --tries=3
+   ```
+
+</Steps>
+
+That is a working integration, with no supervisor. Keep your current systemd, Kubernetes or
+Supervisor definition if a fixed number of workers is all you need, and stop a worker with the
+signal you already use.
+
+`retry_after` in `config/queen.php`, 90 seconds by default, is the Queen lease: how long a worker
+holds a job before the broker gives it to someone else. It must be longer than the worker's
+`--timeout` and than the slowest job, unless you turn on
+[lease renewal](/integrations/laravel/concepts/#lease-renewal-and-fencing). Laravel does not pass
+`queue:work --timeout` to the connection, so without lease renewal the driver checks only a job's
+own `$timeout` against the lease. A Queen supervisor refuses a pool whose `timeout` is not shorter
+than `retry_after`; under any other process manager, keep `--timeout` below `retry_after`
+yourself.
+
+The consumer group is the name under which your workers share the work: two applications in one
+group split the jobs between them, and two groups on one queue each get every job, because the
+driver subscribes each new group to everything the queue holds. Give each application and
+environment its own queue names (or its own broker) and its own group.
+
+When the broker requires a credential, set `QUEEN_BEARER_TOKEN`: a broker JWT with the
+`read-write` role, or, through the broker's [embedded proxy](/manage/security/), an API key with
+the `produce`, `consume` and `read` scopes. The proxy classifies the deletion of a dead-letter
+entry as queue administration, so with failed-job sync on (the default) that key needs the `admin`
+scope too, or `queue:retry` and `queue:forget` fail before they touch Laravel's row. Behind the
+proxy the cluster's plan also caps the partitions per queue (8 on `free`, 64 on `dedicated-s`, see
+[tenants](/manage/tenants/)), so keep `QUEEN_PARTITIONS` within it, and remember that every entity
+a `QueenPartitionable` job names is a partition too.
+
+You need PHP 8.3 or later. The queue connection needs no extension unless you turn on
+`push_compression` or `framed_pop`, which need `zstd`; the supervisors need `pcntl` and
+`posix` on Unix. Every key of `config/queen.php`, its default and the 20 environment variables the
+file reads are in the [configuration reference](/integrations/laravel/configuration/).
+
+That is a working integration, with no supervisor: keep your systemd, Kubernetes or Supervisor definition if a fixed number of workers is all you need.
+
+Three settings to know from the first day:
+
+- **`retry_after`** (90 seconds) is the lease: how long a worker holds a job before the broker gives it to someone else. Keep it longer than the worker's `--timeout` and the slowest job, or turn on [lease renewal](/integrations/laravel/concepts/#lease-renewal-and-fencing). Laravel does not pass `--timeout` to the connection, so keep the two in step yourself; a Queen supervisor refuses a pool whose `timeout` is not shorter than `retry_after`.
+- **The consumer group** is the name under which your workers share the work. Two applications in one group split the jobs; two groups on one queue each get every job. Give each application and environment its own queues and its own group.
+- **`QUEEN_BEARER_TOKEN`**, when the broker asks for a credential: a JWT with the `read-write` role, or a [proxy](/manage/tenants/) API key with `produce`, `consume`, `read`, and `admin` for `queue:retry` and `queue:forget`.
+
+You need PHP 8.3 or later; the supervisors need `pcntl` and `posix`, and the binary forms need `zstd`. Every setting is in the [configuration reference](/integrations/laravel/configuration/).
+
+## Order jobs per entity
+
+By default the driver spreads jobs over 64 partitions of the queue (`laravel-0000` to `laravel-0063`), by a hash of each job's id. A job that implements `QueenPartitionable` names its own partition:
+
+```php
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Queen\Laravel\Contracts\QueenPartitionable;
+
+final class RebuildCustomer implements ShouldQueue, QueenPartitionable
+{
+    public function __construct(public string $customerId) {}
+
+    public function queenPartition(): string
+    {
+        return 'customer:'.$this->customerId;
+    }
+}
+```
+
+Every `RebuildCustomer` of one customer now runs in dispatch order, one at a time, and customers never wait for each other. The [ordering example](/integrations/laravel/examples/ordering/) runs it on four workers and checks the order.
+
+<Why>"the jobs of one customer, in order" usually means a lock or a version column. Here the broker leases a partition to one worker at a time, so the order is the queue's own, and the partition is created by the first job that names it.</Why>
+
+## Choose a delivery profile
+
+Three profiles cover most applications. They differ in how many round trips to the broker a worker waits for: every write a worker waits for is an fsync on the broker.
+
+| | Safe | Balanced | Fast |
+| --- | --- | --- | --- |
+| Settings | `prefetch` 1 | `prefetch` `'auto'`, `lease_renewal` | as balanced, plus `ack_async` and `pop_ahead` |
+| Empty jobs, 32 workers | 3,131 jobs/s | 5,681 jobs/s | 5,994 jobs/s |
+| 10 ms jobs, 32 workers | 1,548 jobs/s | 2,003 jobs/s | 2,867 jobs/s |
+| 200 ms jobs, 32 workers | 139 jobs/s | 139 jobs/s | 147 jobs/s |
+| p99 at a steady 500 jobs/s | 29 ms | 30 ms, with `sleep` 0 | 29 ms |
+| Use it for | a migration, strict one-job-at-a-time | most queues | short jobs, high volume |
+
+Medians of three runs on the Linux server, with the Rust supervisor and prefork ([benchmark](/benchmarks/laravel/#delivery-profiles-and-prefetch-auto)).
+
+### Safe
+
+One acknowledgement per job: the worker asks for a job, runs it, and waits until the broker stored its ack. Start here while you validate a migration.
+
+```php
+// config/queen.php
+'prefetch' => 1,
+'ack_batch' => 1,
+```
+
+### Balanced
+
+`prefetch` `'auto'` sizes each pop from how long the jobs take: about 250 ms of work per batch, up to 16 short jobs, one long job. With short jobs a worker pops about once every 15 jobs; with jobs of 200 ms or more it keeps one per pop, so it never holds work another worker could run.
+
+```php
+// config/queen.php
+'block_for' => 1,
+'prefetch' => 'auto',
+'lease_renewal' => true,
+// in each pool under supervisor.supervisors
+'sleep' => 0,
+```
+
+With `sleep` 0 an idle worker waits on the broker (`block_for`) instead of sleeping, so it takes a job the moment one arrives: Laravel's `sleep` 1 left a burst to the few awake workers, at a p99 of 338 ms in one run. A crash the lease renewer cannot hand back delivers the rest of the batch again, so keep `tries` at 2 or more.
+
+### Fast
+
+Balanced, plus the two settings that take the last round trips off the worker's path: `ack_async` sends the ack and starts the next job without waiting for the answer, and `pop_ahead` sends the next pop while the last job of a full batch runs.
+
+```php
+// config/queen.php
+'block_for' => 1,
+'prefetch' => 'auto',
+'lease_renewal' => true,
+'ack_async' => true,
+'pop_ahead' => true,
+// in each pool under supervisor.supervisors
+'sleep' => 0,
+```
+
+The price is a wider at-least-once window. The connector refuses `prefetch` above 1 and `pop_ahead` without `lease_renewal`, and `ack_async` needs `ack_batch` 1. A refused asynchronous ack is learned one job later, reported through Laravel's exception handler, and that job runs again after its lease. Details are in [prefetch, ack_async and pop_ahead](/integrations/laravel/concepts/#prefetch-ack_async-and-pop_ahead).
+
+<Why>a worker that waits for the broker after every job spends most of a short job's time waiting. Batching and sending ahead remove the waits; the lease renewer is what keeps a crash from holding the batch hostage.</Why>
+
+## What Laravel keeps
+
+| Laravel | With Queen |
+| --- | --- |
+| `dispatch()`, middleware, `timeout`, `tries`, `backoff` | unchanged |
+| Delayed dispatch | a Queen [timer](/writing-applications/kv-locks-timers/) holds the job until it is due |
+| `release()` | ACK and re-push, or ACK and timer, in one [transaction](/writing-applications/transactions/) |
+| `failed_jobs` and its commands | unchanged; the broker keeps a dead-letter copy in step (`sync_failed_jobs`) |
+| `Queue::size()`, `pendingSize()`, `reservedSize()` | the consumer group's depth in the broker, plus pending timers |
+| Ordering | queue names, plus `QueenPartitionable` for an ordered lane per entity |
+| Delivery | at-least-once, as on Redis: a lease expiry or a crash can run a job again |
+| `queue:clear` | not supported: the command fails and the jobs stay |
+
+All 32 Laravel queue features we checked (chains, batches, unique jobs, rate limits, middleware, encrypted jobs, queued listeners and notifications, the failed-job commands) behave as the Laravel documentation says ([the list](/benchmarks/laravel/#laravel-queue-features)).
+
+## Who runs the workers
+
+| Choice | Use it when | Master process |
+| --- | --- | --- |
+| Your process manager | a fixed number of `queue:work` processes is enough | whatever you run today |
+| Queen PHP supervisor | you want Horizon-like pools and no native binary | Laravel stays loaded in one PHP master |
+| Queen Rust supervisor | you want the smallest master | Rust, after one temporary Artisan run |
+
+Both supervisors read the same `supervisor` section of `config/queen.php`, publish the same status and obey the same commands, and both offer, beyond Horizon's pools, [coordinated replicas](/integrations/laravel/supervisors/#several-replicas), [prefork workers](/integrations/laravel/supervisors/#prefork-workers) and [event-driven scaling](/integrations/laravel/supervisors/#event-driven-scaling). Start with [worker supervisors](/integrations/laravel/supervisors/), then the [dashboard](/integrations/laravel/dashboard/), [Kubernetes](/integrations/laravel/kubernetes/) and [monitoring](/integrations/laravel/monitoring/). Read the [production checks](/integrations/laravel/supervisors/#before-production) before you replace Horizon.
+
+## Versions
+
+The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary whose version each client release pins. These pages describe PHP client 2.5.0, which pins supervisor 0.8.1, published for Linux (amd64, arm64) and macOS with a signed manifest. Everything not listed works from 1.6.0.
+
+| PHP client | Supervisor | Brings |
+| --- | --- | --- |
+| 1.7.0 | 0.4.0 | coordinated replicas, prefork, per-queue minimum, fast scale-up, job metrics, monitored tags, long-wait alerts, the Prometheus endpoint |
+| 1.8.0 | 0.5.0 | event-driven scaling |
+| 1.9.0 | 0.6.0 | lease renewal in the Rust master, `ack_async`, `pop_ahead`, the cURL transport, unstarted and crashed batches handed back without an attempt, job timeouts no longer counted as crashes, the dashboard's Retry now, In the queue now and tuning advice |
+| 2.0.0 | 0.6.0 | every transaction ACK names its own lease; the dashboard's Jobs page works with a read-only token |
+| 2.1.0 | 0.7.0 | `config/queen.php` reads 20 environment variables instead of 95 ([upgrading](/integrations/laravel/configuration/#upgrading-from-200)); `supervisor.lease_service` replaces `QUEEN_SUPERVISOR_LEASE_SERVICE`; with prefork, `queue:restart` runs the deployed code, and a fork server that is not safe to fork is not used |
+| 2.2.0 | 0.7.0 | `prefetch` `'auto'` sizes each pop from the jobs' runtime; the safe, balanced and fast profiles |
+| 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/integrations/laravel/supervisors/#prefork-for-some-pools-only)); `queen:consume` sets and renews its lease, stops on `--idle-timeout`, and reports refused acks ([consume Queen messages](/integrations/laravel/consume/)) |
+| 2.3.1 | 0.8.0 | `->supervision([...])` on a fluent `consume()->execute()` reports that consumer to the dashboard, off by default ([consumer status](/reference/supervisor-status/#optional-sdk-consumer-supervision)) |
+| 2.4.0 | 0.8.0 | `$queen->lock()` and `$queen->semaphore()`, `->guard($lock)` on a transaction and `kv()->check()` ([locks](/writing-applications/kv-locks-timers/)); they need a 2.1 broker |
+| 2.4.1 | 0.8.0 | a forked worker works its pool's connection; a pool's settings reach the worked connection alone, and a pool takes its connection's queue and consumer group; a worker forked after `queue:restart` leaves at once; failed jobs of other drivers stay Laravel's; the switch variables take `1` |
+| 2.4.2 | 0.8.0 | a supervised worker that cannot consume leaves, or `queen:supervisor status` reports it after a minute ([inspect and control](/integrations/laravel/supervisors/#inspect-and-control-either-engine)); a delivery that carries no Laravel job goes to the dead-letter queue at once; refused installations and states name their owner, and `queen:supervisor-install --owner`; job metrics count timed-out attempts and `fail()` as failed |
+| 2.4.3 | 0.8.1 | a worker that has not consumed counts from the start of its first failed pop, so a broker that stops answering shows once that pop times out; supervisor 0.8.1 stops stray workers, tries prefork again at `queue:restart`, reaps a dead fork server's workers and closes a circuit only with the probe |
+| 2.5.0 | 0.8.1 | `binary_push`, `push_compression` and `framed_pop`, off by default ([the queue driver's settings](/integrations/laravel/configuration/#queue-driver)); the first two need a 2.3 broker on every node, and compression and framed pops need the zstd extension |
+
+## Limits
+
+- **Delivery is at least once**, as on Redis: a lease expiry or a crash can run a job twice, so a job with an external effect needs an idempotency key.
+- **A job waits for the job ahead of it in its partition.** A long job delays the short jobs that hashed to its partition, even while other workers are idle: give long jobs a queue of their own. A released job goes to the back of its partition.
+- **One supervisor master per application and consumer group**, unless every replica runs with coordination.
+- **The supervisors and the dashboard are previews**, on Unix only.
+- **Horizon still does things QueenMQ does not:** silenced jobs, job lists, batches in its dashboard, Slack and SMS alerts, per-supervisor controls, clearing a queue (`queue:clear` fails and the jobs stay).
+
+Messages other services push to QueenMQ, which are not Laravel jobs, go to a class of yours with [`php artisan queen:consume`](/integrations/laravel/consume/).

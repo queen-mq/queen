@@ -1,0 +1,22 @@
+% Chapter 6, section 1: Leader and followers
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Leader and followers}
+
+A raft group has one leader. The other nodes are followers, and every node has a full copy of the
+data.
+
+The leader orders all the writes. A follower is not idle: it reads the requests of its own
+clients, prepares each one, and sends the leader only the prepared command. When the write is
+committed, the follower answers its client from its own copy. So the leader spends its time
+ordering and writing, not parsing JSON.
+
+\queenfig{follower-offload}{A follower does the work of its own clients.}
+
+A client can talk to any node. A read waits until that node has applied everything that was
+committed when the read started, so nobody reads behind a write they were already told about.
+
+If the leader stops with SIGTERM, it hands its role to the most up-to-date follower, in a fraction
+of a second. If it crashes, the others wait one to two seconds and elect a new leader.

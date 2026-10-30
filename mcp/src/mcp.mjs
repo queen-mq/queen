@@ -33,7 +33,7 @@ Add it to your agent:
 
   claude mcp add --transport http queen https://queenmq.com/mcp
 
-Every other agent: https://queenmq.com/start/ai-agents/
+Every other agent: https://queenmq.com/writing-applications/ai-agents/
 `;
 
 const text = (status, body, headers = {}) =>

@@ -1,0 +1,39 @@
+% Chapter 5: Manage clusters
+% The chapter's own opening text goes after \chapter; its sections are the files below,
+% in chapters/5-manage-clusters/, in the order they appear in the book.
+
+\chapter{Manage clusters}
+
+A broker starts with no settings at all, and most installations change very few. These are the
+ones that matter most. Some are read only once, when a node creates its data directory, so choose
+them before the first start. The sections of this chapter explain each one where it is used.
+
+% Draft by Claude, 2026-10-24. Defaults checked in server/src (config.rs, rsm/batcher.rs,
+% rsm/maintenance.rs, rsm/retention_scan.rs) and reference/configuration.mdx.
+\begin{options}{Setting}{Default}{What it does}
+\multicolumn{3}{@{}l}{\itshape Read only at the first start} \\
+QUEEN\_QLOG\_SHARDS & 0 & \texttt{0}: each queue has its own log files. \texttt{K}: all queues share K logs, so a write syncs at most K files. For thousands of queues. \\
+QUEEN\_RAFT\_PEERS & unset & The nodes of a cluster (see Run a cluster with Docker). After the first start, members change only through the membership API. \\
+QUEEN\_RAFT\_DIR & /var/lib/\allowbreak queen/raft & The data directory, one per node. \\
+\multicolumn{3}{@{}l}{\itshape How fast old data leaves} \\
+PARTITION\_CLEANUP\_SECONDS & 30 days & An empty partition is deleted after this long without a write. At least 60. \\
+QUEEN\_RAFT\_TXN\_WINDOW\_MIN\_S & 900 & The least time a message's dedup record is kept. Nothing is deleted sooner, partitions included. \\
+QUEEN\_RAFT\_RETENTION\_SCAN\_PER\_S & 50000 & Partitions the retention scan visits a second. On 2.6.0, set \texttt{40000} when partitions come and go fast (see Many short-lived partitions). \\
+QUEEN\_RAFT\_TRACE\_RETENTION\_S & 7 days & How long message traces are kept. \\
+\multicolumn{3}{@{}l}{\itshape Limits} \\
+QUEEN\_RAFT\_DISK\_HIGH\_PCT & 85 & Above this share of the disk, writes that would grow it answer 507. \\
+QUEEN\_EPHEMERAL\_MAX\_BYTES & 256 MiB & The memory for ephemeral queues. Above it, their pushes answer 503. \\
+\multicolumn{3}{@{}l}{\itshape Security} \\
+QUEEN\_RAFT\_TOKEN & unset & The secret the nodes of a cluster share. \\
+JWT\_ENABLED & false & Check a token on every request. \\
+QUEEN\_ENCRYPTION\_KEY & unset & The key of encrypted queues: 64 hex characters, the same on every node. \\
+\multicolumn{3}{@{}l}{\itshape Upgrades and logs} \\
+QUEEN\_RAFT\_CLUSTER\_VERSION\_MS & 1000 & \texttt{0} keeps the way back to the previous release open. \\
+LOG\_LEVEL, QUEEN\_LOG\_JSON & info, false & How much the node logs, and whether each line is a JSON object for a log collector. \\
+\end{options}
+
+\input{chapters/5-manage-clusters/1-run-a-cluster-with-docker}
+\input{chapters/5-manage-clusters/2-run-a-cluster-inside-kubernetes}
+\input{chapters/5-manage-clusters/3-configuration-for-different-use-cases}
+\input{chapters/5-manage-clusters/4-upgrading-and-monitoring}
+\input{chapters/5-manage-clusters/5-recovery}

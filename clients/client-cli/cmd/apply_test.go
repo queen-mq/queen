@@ -122,21 +122,25 @@ name: orders
 config:
   leaseTime: 60
   retryLimit: 5
+  retryDelay: 2500
   priority: 7
   delayedProcessing: 30
   windowBuffer: 15
   maxSize: 100000
   retentionSeconds: 86400
   completedRetentionSeconds: 3600
+  maxWaitTimeSeconds: 604800
+  dedupWindowSeconds: 600
   retentionEnabled: true
   deadLetterQueue: true
   dlqAfterMaxRetries: true
   encryptionEnabled: true
 `)
 	assertOptions(t, got, map[string]interface{}{
-		"leaseTime": 60, "retryLimit": 5, "priority": 7, "delayedProcessing": 30,
-		"windowBuffer": 15, "maxSize": 100000, "retentionSeconds": 86400,
-		"completedRetentionSeconds": 3600, "retentionEnabled": true,
+		"leaseTime": 60, "retryLimit": 5, "retryDelay": 2500, "priority": 7,
+		"delayedProcessing": 30, "windowBuffer": 15, "maxSize": 100000,
+		"retentionSeconds": 86400, "completedRetentionSeconds": 3600,
+		"maxWaitTimeSeconds": 604800, "dedupWindowSeconds": 600, "retentionEnabled": true,
 		"deadLetterQueue": true, "dlqAfterMaxRetries": true, "encryptionEnabled": true,
 	})
 	if n := len(queueConfigKeys()); n != len(got) {

@@ -804,7 +804,7 @@ reload()
   display: flex; align-items: baseline; justify-content: space-between;
   gap: 8px; margin-bottom: 6px;
 }
-.kv-copy { padding: 1px 6px; font-size: 10.5px; }
+.kv-copy { padding: 1px 6px; font-size: 11px; }
 
 /* The drawer's footer is `justify-content: flex-end`; the note belongs on the
    other side of it, where a write button would have been. */

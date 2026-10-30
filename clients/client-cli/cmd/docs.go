@@ -29,7 +29,7 @@ const (
 // The curated front page: one entry per thing somebody who has just typed
 // queenctl is likely to want next.
 var docsLinks = []struct{ Title, URL string }{
-	{"Quickstart", docsSite + "/start/quickstart/"},
+	{"Quickstart", docsSite + "/writing-applications/"},
 	{"Data model", docsSite + "/use/model/"},
 	{"Clients", docsSite + "/use/"},
 	{"HTTP API", docsSite + "/reference/http/"},
@@ -38,7 +38,7 @@ var docsLinks = []struct{ Title, URL string }{
 	{"Operations", docsSite + "/deploy/operations/"},
 	{"Dashboard", docsSite + "/deploy/dashboard/"},
 	{"High availability", docsSite + "/deploy/ha/"},
-	{"Internals", docsSite + "/internals/"},
+	{"Internals", docsSite + "/architecture/"},
 	{"Benchmarks", docsSite + "/benchmarks/"},
 }
 
@@ -47,22 +47,22 @@ var docsLinks = []struct{ Title, URL string }{
 // to. Anything not listed here is treated as a site path, which keeps the
 // hundred-odd pages this table does not enumerate reachable.
 var docsTopics = map[string]string{
-	"architecture": "/internals/",
+	"architecture": "/architecture/",
 	"benchmarks":   "/benchmarks/",
 	"cli":          "/reference/queenctl/",
 	"clients":      "/use/",
-	"compare":      "/start/compare/",
+	"compare":      "/introduction/compare/",
 	"concepts":     "/use/model/",
 	"dashboard":    "/deploy/dashboard/",
 	"deploy":       "/deploy/",
 	"http-api":     "/reference/http/",
-	"internals":    "/internals/",
+	"internals":    "/architecture/",
 	"kv":           "/use/kv/",
 	"limits":       "/reference/limits/",
 	"model":        "/use/model/",
 	"operations":   "/deploy/operations/",
 	"queenctl":     "/reference/queenctl/",
-	"quickstart":   "/start/quickstart/",
+	"quickstart":   "/writing-applications/",
 	"reference":    "/reference/",
 	"server":       "/deploy/",
 	"sizing":       "/deploy/",

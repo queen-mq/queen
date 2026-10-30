@@ -80,6 +80,6 @@ const tip = (row, ci, cell) => {
 .hm-cell.na { background: transparent; box-shadow: inset 0 0 0 1px var(--bd); }
 .hm-total { font-size: 11px; color: var(--text-mid); text-align: right; }
 .hm-axis { display: grid; grid-template-columns: 150px 1fr 72px; gap: 8px; margin-top: 4px; }
-.hm-axis .ax { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-low); }
+.hm-axis .ax { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-low); }
 .hm-axis-end { justify-content: flex-end; }
 </style>

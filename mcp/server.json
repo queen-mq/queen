@@ -4,7 +4,7 @@
   "title": "Queen MQ",
   "description": "Helps coding agents build apps on Queen MQ 2.0 with its SDKs or with Kafka clients.",
   "version": "2.0.0",
-  "websiteUrl": "https://queenmq.com/start/ai-agents/",
+  "websiteUrl": "https://queenmq.com/writing-applications/ai-agents/",
   "repository": {
     "url": "https://github.com/queen-mq/queen",
     "source": "github",

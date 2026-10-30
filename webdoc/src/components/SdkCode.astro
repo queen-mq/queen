@@ -1,0 +1,125 @@
+---
+/**
+ * One step's code in the six SDK languages: `<SdkCode id="push" />`.
+ *
+ * The code is the step's region in each language's programs under
+ * `examples/tutorials/` (src/lib/book-code.ts says which, and why). The tabs switch
+ * together: picking Python shows Python in every block of every page, and the choice
+ * is remembered (`localStorage`, key `ui-synced-tabs__queen-sdk`).
+ *
+ * `title` names the block on the left of its tab bar. The markdown copy of the page
+ * shows every language as its own fenced block (src/lib/markdown-partials.ts).
+ */
+import { Icon } from "astro-icon/components";
+import { Code } from "./ui/code";
+import { LayerCard, LayerCardHeader } from "./ui/layer-card";
+import { sdkCode } from "@/lib/book-code";
+
+interface Props {
+  /** The step id: `guide:start(<id>)` in the programs. */
+  id: string;
+  /** A short name for the block. */
+  title?: string;
+}
+
+const { id, title } = Astro.props;
+const variants = sdkCode(id, Astro.url.pathname);
+const uid = `sdk-${id}-${Math.random().toString(36).slice(2, 8)}`;
+---
+
+<div data-sdk class="my-5 w-full">
+  <template data-sdk-icon-copy><Icon name="ph:copy" class="w-[18px] h-[18px]" is:inline /></template>
+  <template data-sdk-icon-check><Icon name="ph:check" class="w-[18px] h-[18px]" is:inline /></template>
+  <LayerCard>
+    <LayerCardHeader class="flex-wrap gap-y-1">
+      {title && <span class="mr-2 text-foreground">{title}</span>}
+      <div role="tablist" aria-label="SDK language" class="flex flex-wrap gap-1">
+        {
+          variants.map((v, i) => (
+            <button
+              type="button"
+              role="tab"
+              id={`${uid}-tab-${i}`}
+              aria-controls={`${uid}-panel-${i}`}
+              aria-selected={i === 0 ? "true" : "false"}
+              data-sdk-tab
+              class="m-0 cursor-pointer rounded-md border-0 bg-transparent px-2 py-0.5 text-xs leading-5 font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground aria-selected:bg-selected aria-selected:text-foreground"
+            >
+              {v.lang.label}
+            </button>
+          ))
+        }
+      </div>
+    </LayerCardHeader>
+    {
+      variants.map((v, i) => (
+        <div
+          role="tabpanel"
+          id={`${uid}-panel-${i}`}
+          aria-labelledby={`${uid}-tab-${i}`}
+          data-sdk-panel
+          hidden={i !== 0}
+          class="relative overflow-hidden rounded-lg bg-card ring ring-border"
+        >
+          {v.code !== null ? (
+            <div class="sdk-row">
+              <div class="sdk-code">
+                <Code code={v.code} lang={v.lang.lang as any} />
+              </div>
+              <button type="button" data-sdk-copy data-code={v.code} aria-label="Copy to clipboard">
+                <Icon name="ph:copy" class="w-[18px] h-[18px]" />
+              </button>
+            </div>
+          ) : (
+            <p class="m-0 px-4 py-3 text-[0.875rem] leading-relaxed text-muted-foreground">{v.note}</p>
+          )}
+        </div>
+      ))
+    }
+  </LayerCard>
+</div>
+
+<script>
+  import "./sdk-code.client";
+</script>
+
+<style is:global>
+  [data-sdk] .sdk-row {
+    display: flex;
+    align-items: stretch;
+  }
+  [data-sdk] .sdk-code {
+    flex: 1 1 0%;
+    min-width: 0;
+  }
+  [data-sdk] .sdk-code pre.astro-code {
+    margin: 0;
+    padding: 0.75rem 1rem;
+    border: 0;
+    border-radius: 0;
+    overflow-x: auto;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    background: transparent;
+  }
+  [data-sdk] .sdk-code pre.astro-code::before,
+  [data-sdk] .nb-code-copy {
+    display: none;
+  }
+  [data-sdk-copy] {
+    display: flex;
+    flex-shrink: 0;
+    align-items: flex-start;
+    justify-content: center;
+    margin: 0;
+    padding: 0.85rem 0.75rem 0;
+    border: 0;
+    border-left: 1px solid var(--nb-border);
+    background: transparent;
+    cursor: pointer;
+    color: var(--nb-muted-foreground);
+  }
+  [data-sdk-copy]:hover {
+    color: var(--nb-foreground);
+  }
+</style>

@@ -1,0 +1,31 @@
+% Chapter 3, section 10: Retries and dead letters
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Retries and dead letters}
+
+When a booking is confirmed, send \texttt{booking.confirmed} to the customer's URL. Their server
+fails sometimes, and a crash at the wrong moment can make you call it twice.
+
+One message per call, in a queue with retries (\texttt{retryLimit: 5} and a \texttt{retryDelay}).
+The handler throws when the call fails: the message comes back after the delay, and goes to the
+dead-letter queue after the last try. The message's \texttt{transactionId} travels as the
+\texttt{Idempotency-Key}, so the receiver can drop a second call.
+
+\queenfig{webhook-retries}{A failed call comes back after the delay; the key makes it count once.}
+
+\guide{uc-webhook}
+
+The receiver failed the first call. The message came back after the delay, the second call worked,
+and the receiver kept the event once, under \texttt{evt-9001}.
+
+\why{the call happens outside any commit, so it can happen twice: a crash after the call and before
+the ack sends it again. The receiver dropping the second call by its key is what makes it count
+once. Queen gives the stable key, the retries and the dead-letter queue.}
+
+One thing to know: a failed message holds its partition for the delay. Use one partition per
+customer, so a customer whose server is down waits on its own retries alone.

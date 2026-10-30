@@ -1,0 +1,80 @@
+---
+/**
+ * A drawing shared with the little book of QueenMQ: `<Fig id="lease-cycle" caption="…" />`.
+ *
+ * The figure's source is `figures/src/<chapter>/<id>.mjs` at the repository root, the
+ * same one the book prints. `node ../figures/build.mjs --site public/figures` (run by
+ * `pnpm build` and `pnpm dev`) writes a light and a dark SVG per figure and an
+ * `index.json` with each one's alt text and height. The page shows one `<img>` per
+ * theme and swaps them with the theme toggle, as the benchmark charts do.
+ *
+ * The alt text lives with the drawing, so the markdown copy of a page carries the
+ * same words (`Fig` in src/lib/markdown-partials.ts).
+ */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+interface Props {
+  /** The figure's id, as in `\queenfig{id}` in the book. */
+  id: string;
+  /** One sentence under the figure. */
+  caption?: string;
+}
+
+const { id, caption } = Astro.props;
+// process.cwd() is the project root under both `astro dev` and `astro build`;
+// import.meta.url points at a bundled chunk during a build (see Screenshot.astro).
+let index: Record<string, { alt: string; height: number }>;
+try {
+  index = JSON.parse(readFileSync(join(process.cwd(), "public", "figures", "index.json"), "utf8"));
+} catch {
+  throw new Error("<Fig>: public/figures/index.json is missing. Run node ../figures/build.mjs --site public/figures");
+}
+const fig = index[id];
+if (!fig) throw new Error(`<Fig id="${id}">: no such figure in figures/src`);
+---
+
+<figure class="qfig">
+  <div class="qfig-scroll">
+    <a class="nb-chart-light" href={`/figures/${id}.svg`} target="_blank" rel="noopener" aria-label="Open the figure at full size">
+      <img src={`/figures/${id}.svg`} alt={fig.alt} width="1000" height={fig.height} loading="lazy" decoding="async" />
+    </a>
+    <a class="nb-chart-dark" href={`/figures/${id}.dark.svg`} target="_blank" rel="noopener" aria-label="Open the figure at full size">
+      <img src={`/figures/${id}.dark.svg`} alt={fig.alt} width="1000" height={fig.height} loading="lazy" decoding="async" />
+    </a>
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+  .qfig {
+    margin: 1.75rem 0;
+  }
+  .qfig img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .qfig a {
+    cursor: zoom-in;
+  }
+  /* Every figure is drawn 1000 units wide, for the book's page. On a phone that
+     makes its labels a few pixels tall, so below 640px the figure keeps a
+     readable width and scrolls sideways instead. */
+  .qfig-scroll {
+    overflow-x: auto;
+  }
+  @media (max-width: 640px) {
+    .qfig-scroll img {
+      width: 620px;
+      max-width: none;
+    }
+  }
+  .qfig figcaption {
+    margin-top: 0.5rem;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    color: var(--nb-muted-foreground);
+    text-align: center;
+  }
+</style>

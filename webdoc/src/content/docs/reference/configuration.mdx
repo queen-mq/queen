@@ -93,7 +93,7 @@ A node reads its whole configuration from environment variables when it starts. 
 configuration file and nothing to keep in sync between a file and the process: change a variable and
 restart the node. A single node needs none of them to run, and a cluster needs a handful
 (`QUEEN_RAFT_REPLICATOR=openraft`, `QUEEN_RAFT_NODE_ID`, `QUEEN_RAFT_PEERS`), which
-[cluster](/operate/cluster/) walks through. Everything else is here for when you want to change a
+[cluster](/manage/docker/) walks through. Everything else is here for when you want to change a
 default, with the value the code applies when you don't.
 
 ```bash
@@ -180,7 +180,7 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 ### Standby cluster
 
 The nine `QUEEN_LINK_*` variables in the table above set up a
-[standby cluster](/operate/standby/#settings) and what its source keeps for it. That page says
+[standby cluster](/manage/standby/) and what its source keeps for it. That page says
 what each one does. A cluster with none of them set is neither a standby nor read by one.
 
 ### Apply and storage
@@ -192,7 +192,7 @@ what each one does. A cluster with none of them set is neither a standby nor rea
 | `QUEEN_RAFT_DURABLE_EVERY_BYTES` | `268435456` (256 MiB) | ...or after this many bytes, whichever comes first. |
 | `QUEEN_RAFT_DURABLE_PHASE_MS` | from the node's raft id | Where in that period a node of a cluster writes its checkpoint, so that the nodes do not all write theirs at the same instant. A number of milliseconds sets it; `off` leaves the node on its own timer. |
 | `QUEEN_RAFT_CHECKPOINT_FLUSH_STEP_MB` | `8` | The megabytes of the store file a checkpoint hands to the disk at a time before its sync, so that the raft log's own sync does not wait behind the whole checkpoint. `0` hands it over in one go. Linux only. |
-| `QUEEN_RAFT_CHECKPOINT_TXNS` | unset | From cluster version 7, a checkpoint writes a push's index row without the 16-byte hashes of its `transactionId`s: they are in the push's message record in the queue log, which is kept as long as the row, and a boot puts them back from there before it replays ([storage](/internals/storage/#when-a-write-is-durable)). `whole` writes them into the checkpoint, as before 2.4.0. With the `txns` dedup index and the queue logs on only. |
+| `QUEEN_RAFT_CHECKPOINT_TXNS` | unset | From cluster version 7, a checkpoint writes a push's index row without the 16-byte hashes of its `transactionId`s: they are in the push's message record in the queue log, which is kept as long as the row, and a boot puts them back from there before it replays ([storage](/architecture/storage/)). `whole` writes them into the checkpoint, as before 2.4.0. With the `txns` dedup index and the queue logs on only. |
 | `QUEEN_RAFT_SEGMENT_BYTES` | `67108864` (64 MiB) | The size at which a queue-log file rolls. |
 | `QUEEN_RAFT_QLOG_ZSTD_LEVEL` | `1` | zstd level for queue-log payloads; `0` stores them raw. |
 | `QUEEN_QLOG_LANES` | `1` (1 to 64) | Queue-log lanes per queue. Read only when the data directory is created. |
@@ -201,7 +201,7 @@ what each one does. A cluster with none of them set is neither a standby nor rea
 | `QUEEN_QLOG_RECLAIM_BOOST` | `4` | How many times bigger a reclaim pass is, in files judged, partitions looked up, time and rewrites, while the last pass left work (it ran out of its budget, or rewrote a file). 1 to 64; `1` keeps every pass at 256 files, 200 ms and one rewrite. |
 | `QUEEN_QLOG_SEAL_AGE_S` | `600` | An active file holding data this old is sealed so retention can reclaim it, once retention has a dead message in it or it holds an eighth of a full file; `0` never seals by age. |
 | `QUEEN_QLOG_READ_AHEAD_MB` | `1` | When a fetch finds a record out of the page cache, the kernel is asked for that record and for this many MiB of the partition's records after it. `0` turns it off. |
-| `QUEEN_QLOG_ENTRY_HASHES` | unset | From cluster version 7, an entry record leaves out the `transactionId` hashes of the appends whose message records are written with it, in the same log and the same write; a read puts them back from those records and checks the result against the entry record's checksum ([storage](/internals/storage/#the-queue-logs-are-the-write-ahead-log)). `keep` writes them in the entry record, as before 2.4.0. |
+| `QUEEN_QLOG_ENTRY_HASHES` | unset | From cluster version 7, an entry record leaves out the `transactionId` hashes of the appends whose message records are written with it, in the same log and the same write; a read puts them back from those records and checks the result against the entry record's checksum ([storage](/architecture/storage/)). `keep` writes them in the entry record, as before 2.4.0. |
 | `QUEEN_STORE_SCRUB_EVERY_S` | `21600` | How often the whole store is re-verified in the background; `0` turns the scrub off. |
 | `QUEEN_STORE_SCRUB_ROWS_PER_S` | `2000` | The scrub's pace. |
 | `QUEEN_RAFT_RETENTION_SCAN_PER_S` | `50000` | Partitions the leader's retention scanner walks per second. |
@@ -226,7 +226,7 @@ public port (`PORT`) and calls the broker router in process, with the broker's o
 tenancy header on, so the proxy is the only way in. With `QUEEN_PROXY_PORT` set to another port,
 the proxy serves that port and `PORT` serves the bare broker, for clients, scrapers and probes
 inside your network; that port must not face the internet. Plans and limits are on
-[tenants](/operate/tenants/), and how to expose a node safely is on [security](/operate/security/).
+[tenants](/manage/tenants/), and how to expose a node safely is on [security](/manage/security/).
 
 | Variable | Default | Effect |
 |---|---|---|

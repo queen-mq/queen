@@ -83,7 +83,7 @@ curl -s http://localhost:6632/health
 
 The broker's own listener is plain HTTP. TLS is served by the proxy built into the same binary
 (`QUEEN_PROXY_EMBEDDED=true`), from `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`, two PEM file paths that
-are set together or not at all. See [security](/operate/security/).
+are set together or not at all. See [security](/manage/security/).
 
 ## Which node to call
 
@@ -97,7 +97,7 @@ leader whole and relays the answer.
 Two families never go to the leader. `/api/v1/raft/*` describes the node you asked (its id, its
 role, its view of the members), so that node answers it. An ephemeral push, pop or ack lives in
 the memory of the node that owns its partition, so the node you called relays it there; see
-[ephemeral queues](/guides/ephemeral/). When no leader is known the answer is 503 `no_leader`,
+[ephemeral queues](/writing-applications/ephemeral/). When no leader is known the answer is 503 `no_leader`,
 and when a forwarded call cannot reach the leader it is 503 `retry`, both with `Retry-After: 1`.
 
 ## Requests and responses
@@ -150,7 +150,7 @@ request belongs to the default tenant.
 <Aside type="caution">
 The broker trusts `x-queen-tenant` as given. The embedded proxy sets it after it has authenticated
 the caller. Never let clients reach a broker that has `QUEEN_TENANCY_HEADER=true` directly: anyone
-could name any tenant. See [tenants](/operate/tenants/).
+could name any tenant. See [tenants](/manage/tenants/).
 </Aside>
 
 ## Status codes
@@ -166,7 +166,7 @@ read it there:
 | `204` from a pop | No message was available before the long-poll ended. |
 | `503` `outcome_unknown` | The leader changed while an ack, nack or DLQ move was being made durable. It may or may not have applied. |
 | `503` `retry`, `no_leader`, `timeout` | The call did not complete. Retry after `Retry-After` (1 s); a write may still have applied, so make it safe to repeat. |
-| `503` `standby` | The cluster is a [standby](/operate/standby/) and takes no writes until it is promoted. Nothing was applied. |
+| `503` `standby` | The cluster is a [standby](/manage/standby/) and takes no writes until it is promoted. Nothing was applied. |
 | `429` `overloaded` | The node's admission budget for writes (pushes, transactions, KV writes, timer schedules) stayed full for the whole hold. Retry after `Retry-After`. |
 | `507` `storage_full` | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Writes that grow storage are refused; acks and deletes still work. |
 
@@ -182,11 +182,11 @@ lag is within `QUEEN_RAFT_READY_LAG_MS` (2000 ms), and the leader it follows hea
 of the voters within `QUEEN_RAFT_READY_QUORUM_MS` (5000 ms). Otherwise it answers `503` with
 `"status": "settling"`. The body carries `engine`, `version` and a `raft` block (`role`, `leader`,
 `term`, `applied`, `commit`, `lag`, `quorumAckMs`, `storageReady`, `clusterVersion`, and `link` on
-a cluster that is part of a [standby](/operate/standby/) pair). Those three conditions are the
+a cluster that is part of a [standby](/manage/standby/) pair). Those three conditions are the
 whole check. The node contacts nobody to answer: it reads what replication already told it, so a
 probe sees what this node knows, and a node that lost its majority says so five seconds later. It
 does not prove that the cluster commits, which is why
-[monitoring](/operate/monitoring/#a-write-probe) pairs it with a write.
+[monitoring](/manage/upgrades-monitoring/) pairs it with a write.
 
 ## Routes
 
@@ -197,7 +197,7 @@ require the forward mark that only another node sets (and the cluster token when
 configured), and the proxy never lets a tenant reach them.
 
 `GET /api/v1/system/link` and `POST /api/v1/system/link/promote` are the two calls of a
-[standby cluster](/operate/standby/): where it is in its source's log, and the switch that makes
+[standby cluster](/manage/standby/): where it is in its source's log, and the switch that makes
 it an ordinary cluster. What a standby reads from its source is not on this port: it is served on
 the source's raft port, under `/link/v1/`, to the holder of the source's `QUEEN_LINK_TOKEN`.
 
@@ -223,7 +223,7 @@ facade consumes through them, and they are also the right tool for a replay, an 
 that keeps its own position. Each is served from the answering node's own state, with no read
 barrier: a follower answers from what it has applied. Every SDK wraps the first and the last as two
 queue methods, `fetch` and `changedSince`, which also follow the pages and the high watermark for
-you: see [reads by offset in the clients](/start/clients/#reads-by-offset).
+you: see [reads by offset in the clients](/writing-applications/clients/).
 
 ### `POST /api/v1/fetch`
 
@@ -289,7 +289,7 @@ full; `limit` defaults to 1000 and is capped there. A queue that does not exist 
 
 From 2.3.0 the push, ack, pop and transaction routes take compact forms next to the JSON ones.
 They are what the SDKs send when their
-[binary push, push compression and framed pop](/start/clients/#binary-push-push-compression-and-framed-pop)
+[binary push, push compression and framed pop](/writing-applications/clients/)
 options are on; a JSON request is answered as before, and a broker up to 2.2.0 answers a binary
 body with 400. Admission, commands and verdicts are those of the JSON forms. Every integer is
 little-endian, and a `len, text` pair is a length followed by that many bytes of UTF-8.

@@ -2,39 +2,39 @@
   {
     "feature": "kv",
     "title": "KV state",
-    "pages": ["concepts/kv"],
-    "related": ["concepts/transactions", "reference/limits"],
+    "pages": ["writing-applications/kv-locks-timers"],
+    "related": ["writing-applications/transactions", "reference/limits"],
     "card": "kv",
     "words": "kv key value state store versioned expect ttl"
   },
   {
     "feature": "timers",
     "title": "Timers",
-    "pages": ["concepts/timers"],
-    "related": ["concepts/transactions", "guides/state-machines"],
+    "pages": ["writing-applications/kv-locks-timers"],
+    "related": ["writing-applications/transactions", "patterns/workflows"],
     "card": "timers",
     "words": "timer timers delay schedule reminder timeout deadline cancel"
   },
   {
     "feature": "locks",
     "title": "Locks and semaphores",
-    "pages": ["concepts/locks"],
-    "related": ["concepts/kv", "concepts/transactions"],
+    "pages": ["writing-applications/kv-locks-timers"],
+    "related": ["writing-applications/kv-locks-timers", "writing-applications/transactions"],
     "card": "locks",
     "words": "lock locks semaphore mutex lease fencing token guard singleton cron exclusive permit"
   },
   {
     "feature": "streams",
     "title": "Stream processing",
-    "pages": ["guides/streams"],
-    "related": ["concepts/consuming", "concepts/transactions"],
+    "pages": ["writing-applications/streams"],
+    "related": ["writing-applications/pop", "writing-applications/transactions"],
     "card": "streams",
     "words": "stream streams window windowed aggregate cycle operator gate"
   },
   {
     "feature": "ephemeral",
     "title": "Ephemeral queues and request/reply",
-    "pages": ["guides/ephemeral"],
+    "pages": ["writing-applications/ephemeral"],
     "related": [],
     "card": "ephemeral",
     "words": "ephemeral request reply rpc"
@@ -42,7 +42,7 @@
   {
     "feature": "wire-forms",
     "title": "Binary push, push compression and framed pop",
-    "pages": ["start/clients"],
+    "pages": ["writing-applications/clients"],
     "skip": ["Install and connect", "curl is a client", "Consumer supervision", "Reads by offset", "What each SDK implements", "The broker inside a Rust program", "Next"],
     "related": ["reference/http", "benchmarks/queen-vs-kafka"],
     "card": "wire-forms",
@@ -51,7 +51,7 @@
   {
     "feature": "reads",
     "title": "Reads by offset: fetch and changedSince",
-    "pages": ["start/clients"],
+    "pages": ["writing-applications/clients"],
     "skip": ["Install and connect", "curl is a client", "Consumer supervision", "Binary push, push compression and framed pop", "What each SDK implements", "The broker inside a Rust program", "Next"],
     "related": ["reference/http"],
     "card": "reads",
@@ -60,16 +60,16 @@
   {
     "feature": "kafka",
     "title": "Kafka clients through the Kafka facade",
-    "pages": ["guides/kafka"],
-    "related": ["reference/kafka", "guides/kafka-frameworks"],
+    "pages": ["integrations/kafka"],
+    "related": ["reference/kafka", "integrations/kafka-frameworks"],
     "card": null,
     "words": "kafka facade topic offset bootstrap"
   },
   {
     "feature": "pg-source",
     "title": "Postgres source: tables into queues",
-    "pages": ["guides/postgres"],
-    "skip": ["How a message becomes a row"],
+    "pages": ["integrations/postgres"],
+    "skip": ["The sink"],
     "related": [],
     "card": null,
     "words": "postgres postgresql source cdc replication slot publication wal snapshot change events"
@@ -77,8 +77,8 @@
   {
     "feature": "pg-sink",
     "title": "Postgres sink: queues into tables",
-    "pages": ["guides/postgres"],
-    "skip": ["The change events"],
+    "pages": ["integrations/postgres"],
+    "skip": ["The source"],
     "related": [],
     "card": null,
     "words": "postgres postgresql sink upsert append table row columns"
@@ -86,7 +86,7 @@
   {
     "feature": "s3-sink",
     "title": "S3 sink: queues into object storage",
-    "pages": ["guides/s3"],
+    "pages": ["integrations/s3"],
     "related": [],
     "card": null,
     "words": "s3 sink bucket object storage jsonl parquet minio lake"

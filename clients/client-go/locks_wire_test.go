@@ -473,6 +473,80 @@ func TestAGuardThatLostToItsOwnRenewalIsSentAgainWithTheNewToken(t *testing.T) {
 	}
 }
 
+func TestAGuardThatLostToARenewWhoseAnswerWasLostRenewsAndIsSentAgain(t *testing.T) {
+	// The background renew gives up at its timeout (RenewEvery), and the
+	// broker applies it all the same: the row is at 101, the handle still has
+	// 100. Waiting for a renew in flight cannot help, none is. The handle
+	// renews with its stale token, which the broker carries through for this
+	// owner, and the step goes out again at 101.
+	var owner atomic.Value
+	var commits, renews atomic.Int64
+	srv, hits := answering(t, func(path string, op map[string]interface{}) string {
+		if strings.HasSuffix(path, "/transaction") {
+			if commits.Add(1) == 1 {
+				return lostToJSON(0, "version", fmt.Sprintf(`{"owner":%q}`, owner.Load()), 101).body
+			}
+			return committedJSON().body
+		}
+		switch op["op"] {
+		case "acquire":
+			owner.Store(op["owner"])
+			return grantedJSON("job", 0, 100).body
+		case "renew":
+			if renews.Add(1) == 1 {
+				time.Sleep(200 * time.Millisecond) // answered after the caller gave up
+			}
+			return renewedJSON("job", 0, 101).body
+		}
+		return releasedJSON("job").body
+	})
+	client := newWireClient(t, srv.URL)
+	ctx := context.Background()
+	lock := client.Lock("job", 30*time.Second, manual())
+	if ok, err := lock.TryAcquire(ctx); err != nil || !ok {
+		t.Fatal(err)
+	}
+	short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	if _, err := lock.Renew(short); err == nil {
+		t.Fatal("the first renew must time out here")
+	}
+	cancel()
+	if lock.Token() != 100 {
+		t.Fatalf("a renew with no answer leaves the token: %d", lock.Token())
+	}
+
+	resp, err := client.Transaction().
+		Guard(lock).
+		KV(KVPutOp("work", "state", 1, Forever())).
+		Commit(ctx)
+	if err != nil || !resp.Success {
+		t.Fatalf("the step commits on the second send: %+v %v", resp, err)
+	}
+	var expects, renewTokens []float64
+	for _, h := range hits() {
+		var body struct {
+			Operations []map[string]interface{} `json:"operations"`
+			KV         []map[string]interface{} `json:"kv"`
+		}
+		_ = json.Unmarshal(h.Body, &body)
+		switch {
+		case strings.HasSuffix(h.Path, "/transaction"):
+			expects = append(expects, body.KV[0]["expect"].(float64))
+		case len(body.Operations) > 0 && body.Operations[0]["op"] == "renew":
+			renewTokens = append(renewTokens, body.Operations[0]["token"].(float64))
+		}
+	}
+	if len(expects) != 2 || expects[0] != 100 || expects[1] != 101 {
+		t.Fatalf("guards sent: %v", expects)
+	}
+	if len(renewTokens) != 2 || renewTokens[1] != 100 {
+		t.Fatalf("the step's renew is sent with the stale token: %v", renewTokens)
+	}
+	if !lock.Held() || lock.Token() != 101 {
+		t.Fatalf("held %v at %d", lock.Held(), lock.Token())
+	}
+}
+
 func TestAGuardThatLostToAnotherHolderIsTheVerdictAndTheLockIsLost(t *testing.T) {
 	cs := newCaptureServer(t, grantedJSON("job", 0, 100), lostToJSON(0, "version", `{"owner":"somebody-else"}`, 250))
 	client := newWireClient(t, cs.URL)

@@ -1,0 +1,17 @@
+% Chapter 6, section 4: Memory state
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Memory state}
+
+Each node keeps its whole state in memory: queues, partitions, consumer positions, KV, timers,
+request ids, and the dedup records of recent pushes. It is loaded once, at boot.
+
+Messages are not in memory. They stay in the queue log files and are read from there. So memory
+grows with the number of partitions and keys, and with the pushes of the dedup window, not with how
+many messages a queue keeps.
+
+\queenfig{memory-disk}{What lives in memory, and what lives on disk.}
+
+Message traces are kept apart, in their own file, and are read from disk.

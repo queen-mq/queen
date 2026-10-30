@@ -1,0 +1,84 @@
+---
+title: "Retries and the dead-letter queue"
+description: "A failed message comes back after retryDelay, up to retryLimit times, then goes to the dead-letter queue and its partition moves on. Read the DLQ and replay what you fixed."
+type: how-to
+tier: use
+sidebar:
+  label: "Retries and DLQ"
+  order: 7
+sourceOfTruth:
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/consume/state.rs
+  - server/src/handlers/data.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/facade/autopilot.rs
+  - server/src/config.rs
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/consumer/Supervision.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+  - clients/client-py/queen/consumer/consumer_manager.py
+  - clients/client-py/queen/consumer/supervision.py
+  - clients/client-go/consumer_manager.go
+  - clients/client-go/supervision.go
+  - clients/client-rust/src/consumer.rs
+  - clients/client-rust/src/supervision.rs
+  - clients/client-cpp/queen_client.hpp
+  - clients/client-php/src/Consumer/ConsumerManager.php
+  - clients/client-php/src/Consumer/Supervision.php
+  - clients/client-cli/cmd/tail.go
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-client-guide.mjs
+  - examples/tutorials/py/book_client_guide.py
+  - examples/tutorials/go/book-client-guide/main.go
+  - examples/tutorials/rust/src/bin/book_client_guide.rs
+  - examples/tutorials/php/book-client-guide.php
+  - examples/tutorials/cpp/book-client-guide.cpp
+---
+
+Every `failed` ack spends one retry. The message comes back after the queue's `retryDelay`, and its partition waits with it, for that consumer group. After `retryLimit` failures, the message goes to the dead-letter queue and the group moves on. You set both on the queue (see [Create and configure queues](/writing-applications/queues/)).
+
+<Why>retrying is how temporary failures heal by themselves, and the limit is how a message that can never succeed stops blocking everything behind it in its partition.</Why>
+
+Two cases do not spend a retry: a `retry` ack, and a lease that runs out. So a message that crashes its worker's process every time comes back forever and never reaches the dead-letter queue. If some input can crash your worker, check for it before the work starts and ack such a message with `dlq`.
+
+<Fig id="retry-dlq" caption="The life of a message: four endings, and the replay." />
+
+## What a dead letter keeps
+
+A dead letter keeps the payload, the error the worker sent, the number of retries, and the consumer group that gave up on it. It stays until you replay it or delete it. Each group has its own: a message that failed for billing can be fine for analytics.
+
+<Why>a failure you cannot see is a failure you cannot fix. The dead-letter queue is where they wait for a person, or for a fix in the code.</Why>
+
+Some SDKs lose the error text on the way in 2.6.0: a Go or C++ transaction ack with `dlq`, and the automatic nack of PHP's consume loop, file the message as "Retries exhausted". Ack with `failed` or `dlq` and an `error` outside a transaction when the reason matters.
+
+## Read it
+
+<SdkCode id="dlq-read" />
+
+`limit()` and `offset()` page through it, newest first. The JavaScript client also has `from()` and `to()`, but the 2.6.0 broker ignores them.
+
+## Replay it
+
+Once the cause is fixed, put the messages back:
+
+<SdkCode id="dlq-replay" />
+
+A replay moves the dead letter back into its partition, at the end, as a new message with the `transactionId` `dlq:<id>`, and removes it from the dead-letter queue in the same step. Doing it twice cannot create a second copy. Every group that reads that partition sees the replayed message, not only the group that gave up on it. Over HTTP the same thing is `POST /api/v1/dlq/:id/replay`.
+
+<Why>the fix usually comes after the failure: a bug deployed, a provider back up. Replay lets the same messages go through again without anyone pushing them by hand.</Why>
+
+## Skip it, or turn it off
+
+An ack with `dlq` files a message straight away, without spending its retries. Setting `deadLetterQueue` and `dlqAfterMaxRetries` to false on the queue drops a message that runs out of retries instead of keeping it.
+
+<Why>some messages are worth nothing once they fail (a typing indicator, a stale price), and keeping them would only fill a list nobody reads.</Why>
+
+## See also
+
+- [Acknowledge](/writing-applications/ack/): the four answers, and which of them spend a retry.
+- [Retries and dead letters](/patterns/retries-dead-letters/): a webhook sender built on them.
+- [HTTP API](/reference/http/): the dead-letter endpoints.

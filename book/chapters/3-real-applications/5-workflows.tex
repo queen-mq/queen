@@ -1,0 +1,29 @@
+% Chapter 3, section 5: Workflows: one step, one commit
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Workflows: one step, one commit}
+
+An order moves through states: paid, shipping, shipped. A redelivered event, two workers, or an
+event that arrives late must never move it twice or backwards, and a step must never be half done.
+
+The order's state lives in KV. Each step is one transaction: it acks the event, writes the new
+state only if the state is still the version the worker read (\texttt{expect}), and pushes the next
+event. If the version moved, the whole transaction rolls back, and nothing is written.
+
+\queenfig{order-workflow}{A state machine whose steps cannot race.}
+
+\guide{uc-order}
+
+The step moved \texttt{order-2001} to \texttt{shipping} and pushed one shipping event. The same
+step sent again from the old version rolled back: still one event.
+
+\why{the ack, the new state and the next event commit together or not at all. That replaces the
+outbox table, the idempotency table and the lock you would put around them.}
+
+One thing to know: \texttt{commit()} returns \texttt{success: false} for a rollback, it does not
+throw. Read it.

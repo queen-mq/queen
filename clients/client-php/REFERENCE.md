@@ -39,13 +39,13 @@ they apply.
 The same package is a Laravel queue driver, a worker supervisor and a dashboard. None of that is on
 this page.
 
-- Guide: <https://queenmq.com/guides/laravel/>
-- `config/queen.php` and its environment variables: <https://queenmq.com/guides/laravel/configuration/>
+- Guide: <https://queenmq.com/integrations/laravel/>
+- `config/queen.php` and its environment variables: <https://queenmq.com/integrations/laravel/configuration/>
 
 The `queen:consume` Artisan command is part of the Laravel integration
-(`src/Laravel/Commands/ConsumeCommand.php`); see the [Laravel guide](https://queenmq.com/guides/laravel/).
+(`src/Laravel/Commands/ConsumeCommand.php`); see the [Laravel guide](https://queenmq.com/integrations/laravel/).
 It runs the [KafkaConsumer-style consumer](#the-kafkaconsumer-style-consumer) below and passes each
-message to a handler class: [consume Queen messages](https://queenmq.com/guides/laravel/consume/).
+message to a handler class: [consume Queen messages](https://queenmq.com/integrations/laravel/consume/).
 
 ## Connect
 
@@ -196,7 +196,7 @@ no `mode`, so it always merges. Because the nine keys above always travel, `crea
 existing queue resets each of them that you do not name to the client default. For example, it
 turns encryption off on an encrypted queue. Other keys that you pass to `config()` are sent as
 they are. The options and their effects are on
-[queue options](https://queenmq.com/concepts/partitions/#queue-options).
+[queue options](https://queenmq.com/writing-applications/queues/).
 
 ## Push
 
@@ -382,7 +382,7 @@ again while it still runs.
   [Commit at delivery](#commit-at-delivery).
 
 The broker semantics of these parameters are on
-[pop options](https://queenmq.com/concepts/consuming/#pop-options).
+[pop options](https://queenmq.com/writing-applications/pop/).
 
 ### Commit at delivery
 
@@ -630,7 +630,7 @@ $queen->queue()
 `pop()`, `popResult()`, `consume()` and `getConsumer()` all accept this form. A queue gets its
 labels from `create()` with `namespace()` and `task()`, or, when a push created it, from the first
 two dotted parts of its name. Ack the messages with the same group, as for a queue pop. The broker
-behaviour of a discovery pop is on [pop options](https://queenmq.com/concepts/consuming/#pop-options).
+behaviour of a discovery pop is on [pop options](https://queenmq.com/writing-applications/pop/).
 
 ## Ack, nack and lease renewal
 
@@ -663,7 +663,7 @@ $queen->ack([
   that message.
 
 The statuses are described in
-[Ack, nack and the retry budget](https://queenmq.com/concepts/consuming/#ack-nack-and-the-retry-budget).
+[Ack, nack and the retry budget](https://queenmq.com/writing-applications/pop/).
 
 `ack()` never throws. A missing `partitionId`, a network failure or an HTTP error returns
 `['success' => false, 'error' => '...']`. An empty list returns `['processed' => 0, 'results' => []]`
@@ -877,7 +877,7 @@ $kv->batch([
 ]);
 ```
 
-The model, the limits and the error codes are on [KV](https://queenmq.com/concepts/kv/).
+The model, the limits and the error codes are on [KV](https://queenmq.com/writing-applications/kv-locks-timers/).
 
 ## Timers
 
@@ -927,7 +927,7 @@ $pending = $timers->count('payments.timeout', 'order-');
 - `Support\TimerOp::schedule()`, `reschedule()` and `cancel()` build the operations for `batch()`.
 
 The statuses are `scheduled`, `rescheduled`, `cancelled`, `absent` and `too_late`. The model is on
-[timers](https://queenmq.com/concepts/timers/).
+[timers](https://queenmq.com/writing-applications/kv-locks-timers/).
 
 ## Reads by offset
 
@@ -1054,7 +1054,7 @@ $eph->ack('presence', $batch['messages'], ['group' => 'dashboard']);
 - A 404 from a broker without the ephemeral routes throws `EphemeralUnsupportedException`. A 404
   `ephemeral_queue_not_found` from `depth()` throws `EphemeralQueueNotFoundException`.
 
-The model is on [ephemeral queues](https://queenmq.com/guides/ephemeral/).
+The model is on [ephemeral queues](https://queenmq.com/writing-applications/ephemeral/).
 
 ## Admin API
 
@@ -1228,7 +1228,7 @@ turn `binaryPush` and `pushCompression` on after every broker of the cluster is 
 `framedPop` is safe against any broker: an older one ignores the parameter and answers JSON.
 
 Under Laravel the same options are the `binary_push`, `push_compression` and `framed_pop` keys of
-`config/queen.php`: <https://queenmq.com/guides/laravel/configuration/#queue-driver>.
+`config/queen.php`: <https://queenmq.com/integrations/laravel/configuration/#queue-driver>.
 
 ## HTTP transports
 

@@ -1,0 +1,102 @@
+---
+title: "Stream processing: windows, reduce and gates"
+description: "Streams run in your process and read any queue: tumbling, sliding and session windows, reduce, and gates, with the source ack, the state and the output in one commit."
+type: how-to
+tier: use
+sidebar:
+  label: "Streams"
+  order: 11
+sourceOfTruth:
+  - clients/client-js/client-v2/streams/Stream.js
+  - clients/client-js/client-v2/streams/runtime/Runner.js
+  - clients/client-js/client-v2/streams/runtime/cycle.js
+  - clients/client-js/client-v2/streams/operators/WindowTumblingOperator.js
+  - clients/client-js/client-v2/streams/operators/AggregateOperator.js
+  - clients/client-js/client-v2/streams/operators/GateOperator.js
+  - server/src/rsm/facade/real/phase2/streams.rs
+  - server/src/rsm/planner/txn.rs
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/00-five-minutes.mjs
+  - examples/tutorials/py/00_five_minutes.py
+  - examples/tutorials/go/five-minutes/main.go
+  - examples/tutorials/rust/src/bin/00_five_minutes.rs
+  - examples/tutorials/js/book-client-guide.mjs
+  - examples/tutorials/py/book_client_guide.py
+  - examples/tutorials/go/book-client-guide/main.go
+  - examples/tutorials/rust/src/bin/book_client_guide.rs
+---
+
+A stream reads a queue and writes its results to another. The partition is the key, so each customer gets its own windows. Streams are in the JavaScript, Python, Go and Rust clients; PHP and C++ have none, and a stream reads any queue, whoever pushes to it. Like a new group it starts at the tail: push a few more orders and a result arrives a minute later.
+
+<SdkCode id="stream" />
+
+A stream reads its queue as a consumer group (`streams.<queryId>`) and keeps its state, the open windows, in the broker. Each time it closes windows, it writes the new state, pushes the results and acks the messages they came from in one transaction.
+
+<Fig id="stream-cycle" caption="One cycle of a stream is one transaction." />
+
+<Why>counting, summing and grouping events over time is a job most systems hand to a separate stream processor, with its own cluster and its own idea of what was processed. Here it runs in a normal process, its state lives next to the data, and one commit keeps the results and the inputs in step: a crash can neither lose a result nor count an event twice.</Why>
+
+## Four kinds of window
+
+| Window | Example | What it is, and when to use it |
+| --- | --- | --- |
+| `windowTumbling` | `seconds: 60` | Fixed windows, one after the other. Revenue per minute. |
+| `windowSliding` | `size: 600, slide: 60` | Overlapping windows: the last 10 minutes, every minute. Each event counts in several windows, so it keeps more state. |
+| `windowSession` | `gap: 1800` | One window per burst of activity, closed after a quiet gap. A visit, a conversation. |
+| `windowCron` | `every: 'hour'` | Windows aligned to the clock (`second`, `minute`, `hour`, `day`, `week`). Hourly and daily reports. |
+
+<Fig id="window-shapes" caption="The four kinds of window on one partition's events." />
+
+<SdkCode id="stream-sliding" />
+
+<SdkCode id="stream-session" />
+
+<Why>"in the last ten minutes", "per visit" and "per hour" are different questions, and each window shape answers one of them without code of your own.</Why>
+
+## When it happened, or when it arrived
+
+By default a window holds the events that arrived during it. Give `eventTime` a function that reads the time from the message, and windows hold the events that happened during it instead. It gets the whole message, so the event's own fields are under `data`; the aggregate's functions get the event itself. Go and Rust want the time as epoch milliseconds.
+
+<SdkCode id="stream-hourly" />
+
+`allowedLateness` says how far behind the newest event an event may be and still count. A later one is dropped, or with `onLate: 'include'` it opens a fresh window, so the window is sent a second time with only the late events. `gracePeriod` keeps a window open a little after its end, and `idleFlushMs` (5 seconds) closes the windows of partitions that went quiet. `subscriptionMode: 'all'` makes a new stream read what the queue already holds.
+
+<Why>events arrive late and out of order: a phone that was offline, a batch upload, a retry. An hourly report should count a sale in the hour it happened, not in the hour its message got through.</Why>
+
+## Shaping the data
+
+- `map(fn)` changes each message, `filter(fn)` drops the ones you do not want, and `flatMap(fn)` turns one message into several values.
+- `aggregate({ ... })` folds a window into named numbers. The name decides the fold: `count`, `sum`, `min`, `max` and `avg`; any other name adds up. `reduce(fn, initial)` is the general form, for anything else.
+- `keyBy(fn)` groups by something other than the partition (per page instead of per user). Several workers can then write the same key, which slows them down; when that matters, push to a queue partitioned by the new key first, and stream from it.
+
+<Why>most stream jobs are the same few steps: drop noise, reshape, group, fold. Having them as building blocks keeps a stream to a few readable lines.</Why>
+
+## Two ways to end a stream
+
+`.to(queue)` pushes each result to another queue, in the same commit as the state and the acks, into the partition of the same name unless you pass `{ partition }`. `.foreach(fn)` calls your function for each result, and acks only after it returns: a crash in the middle calls it again.
+
+<Why>a result that stays inside Queen can be exactly once. A call to the outside world (an email, an API) cannot, so `foreach` makes it at least once and says so. For an external effect that must happen once, send the result to a queue and let a worker do it with an idempotency key.</Why>
+
+## Rate limits with a gate
+
+`gate(fn)` decides, message by message, whether a message may go on now, with state kept per partition. Two ready-made gates are included: `tokenBucketGate` and `slidingWindowGate`. Rust has no ready-made gates yet, so its code writes the same token bucket as a function, with the same state.
+
+<SdkCode id="stream-gate" />
+
+A message the gate refuses stops its partition there: it and the ones after it are delivered again, in order, when the lease runs out.
+
+<Why>an SMS provider, a partner API or a rate-limited email service accepts only so many calls a second. A gate per customer keeps you inside those limits without losing order and without a queue of your own for the waiting messages.</Why>
+
+## Running a stream
+
+`run()` takes the stream's `queryId`, its identity: its state is stored under it, so a process restarted with the same id carries on with the same windows, and several processes with the same id share the partitions between them. `batchSize` (200) and `maxPartitions` (4) size each cycle, and `stop()` on the handle `run()` returns stops it cleanly.
+
+<Why>a stream is a long-running worker like any other: it has to survive restarts, scale out, and stop during a deploy without losing its place.</Why>
+
+Push, consume, ack, replay, fetch, transactions, KV, timers, locks, streams and ephemeral queues all combine. Build on them and Queen carries the logic you would otherwise write around a broker. [Patterns](/patterns/) shows them combined, one real case each.
+
+## See also
+
+- [Windowed aggregation](/patterns/windowed-aggregation/): a session window per trace.
+- [Rate limiting](/patterns/rate-limiting/): a token bucket gate per customer.

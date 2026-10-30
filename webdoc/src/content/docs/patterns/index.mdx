@@ -1,0 +1,42 @@
+---
+title: "Messaging patterns with runnable code"
+description: "Eleven common messaging patterns, each with a real case and the code that solves it in six languages: work queue, pub/sub, request/reply, workflows, windows, rate limits and more."
+type: overview
+tier: use
+sidebar:
+  label: "All patterns"
+  order: 0
+digest: >-
+  Queen MQ messaging patterns (2.6.0), each run and checked by one program per SDK language: a
+  work queue is a consumer with no consumer group, parallel across partitions (one partition per
+  user or customer); publish/subscribe is one consumer group per reader, and a group created later
+  reads history only with subscriptionMode 'all'; request/reply uses ephemeral queues, a private
+  inbox sent as replyTo and a timeout; ordering and batching use one partition per conversation and
+  the queue option windowBuffer, which holds a partition's new messages until the oldest is that
+  many seconds old; a workflow step is one transaction that acks, writes KV with expect and
+  required: true, and pushes the next event, and a lost condition rolls back the whole step;
+  windowed aggregation is a stream with a session window per partition; rate limiting is a stream
+  gate (tokenBucketGate), whose refused messages wait for their lease, so the most it lets through
+  is min(refillPerSec, capacity / lease seconds); last value is a consumer group with conflation;
+  delayed messages are timers keyed by queue and timerKey, replaced by scheduling again; webhook
+  retries use retryLimit, retryDelay, the dead-letter queue and the message's transactionId as the
+  receiver's idempotency key; one worker at a time is a lock with .guard(lock) on the transaction.
+---
+
+The common messaging patterns, one page each, with a real case for each one: the problem, the pattern that solves it with QueenMQ, and the code in the six languages of the SDKs. Every result quoted on these pages comes from programs that run the code and check it, one per language (`book-use-cases` under `examples/tutorials/`).
+
+| Pattern | The case |
+| --- | --- |
+| [Work queue](/patterns/work-queue/) | Photos resized by three workers, each photo once. |
+| [Publish/subscribe](/patterns/publish-subscribe/) | One order read by billing, shipping and analytics. |
+| [Request and reply](/patterns/request-reply/) | A price from the pricing service, or "ask us" after half a second. |
+| [Ordering and batching](/patterns/ordering-batching/) | A burst of chat messages handled in order, in one call. |
+| [Workflows](/patterns/workflows/) | An order moving from paid to shipped, one transaction per step. |
+| [Windowed aggregation](/patterns/windowed-aggregation/) | The spans of a trace merged into one record when the trace goes quiet. |
+| [Rate limiting](/patterns/rate-limiting/) | SMS sent at most five a second per customer, in order. |
+| [Last value](/patterns/last-value/) | Room availability, where only the newest update matters. |
+| [Delayed messages](/patterns/delayed-messages/) | A review request a day after checkout, moved or cancelled. |
+| [Retries and dead letters](/patterns/retries-dead-letters/) | Webhooks retried with a delay, and filed when they never succeed. |
+| [One worker at a time](/patterns/one-worker/) | A nightly report that runs once, on one of three replicas. |
+
+<Why>most applications are a few of these patterns put together. Seeing each one alone, with its trap, makes the combination easy to read.</Why>

@@ -39,6 +39,7 @@ on:
       - "README.md"
       - "CHANGELOG.md"
       - "examples/**"
+      - "figures/**"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
@@ -58,6 +59,7 @@ on:
       - "supervisor/**"
       - "README.md"
       - "CHANGELOG.md"
+      - "figures/**"
       - "examples/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -147,6 +149,12 @@ jobs:
       - name: Source-of-truth freshness
         run: pnpm check:sourceoftruth
 
+      # The README's condensed guide must equal the regions of the JavaScript
+      # guide program (examples/tutorials/js/00-five-minutes.mjs), the code
+      # the homepage shows and run.sh runs.
+      - name: README code
+        run: pnpm check:readme
+
       # Only a build of master that passed every gate above is published.
       - name: Keep the site for the deploy
         if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
@@ -200,7 +208,7 @@ jobs:
         run: npx --yes wrangler@4.145.0 deploy
       - name: The site answers
         run: |
-          for path in / /guides/laravel/supervisors/; do
+          for path in / /integrations/laravel/supervisors/; do
             for _ in 1 2 3 4 5; do
               code=$(curl -s -o /dev/null -w '%{http_code}' "https://queenmq.com${path}")
               [ "$code" = 200 ] && break

@@ -1,0 +1,77 @@
+---
+title: "Queen MQ vs Kafka, RabbitMQ, SQS and Temporal"
+description: "Where Queen MQ stands next to Kafka, RabbitMQ, SQS FIFO, Pulsar and Temporal: what each one is built for, and which features Queen has that they do not, and the reverse."
+type: concept
+tier: use
+sidebar:
+  label: "Compared with others"
+  order: 5
+sourceOfTruth:
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/facade/groups.rs
+  - protocols/queen-kafka/src/handlers/admin.rs
+---
+
+Two questions separate these systems more than any feature list: how you keep order per entity when there are millions of entities, and what one commit covers when a service handles an event. QueenMQ's answers are a partition per entity, created by its first message, and one transaction that writes the ack, the state, the next events and the timers as one entry. Every system below answers differently, and each one is better than QueenMQ at something. Laravel teams on Horizon have their own comparison: [Queen or Horizon](/integrations/laravel/queen-vs-horizon/).
+
+| | Order per entity from | Partition count to choose | One commit covers | You run |
+| --- | --- | --- | --- | --- |
+| **QueenMQ** | a partition per entity, created by its first message | none | the ack, KV state, pushes and timers, as one entry | one binary: one node, or a cluster of three or five |
+| **Kafka** | the key, hashed onto a partition | per topic, up front; it can only grow | records across partitions, and consumer offsets | Kafka brokers |
+| **Pulsar** | the key, with Key_Shared | per topic, up front | publishes and acks across topics | brokers, bookies and a metadata store |
+| **RabbitMQ** | a queue per entity, or a hash onto a fixed set of queues | the queues you declare | no atomic transaction | RabbitMQ nodes |
+| **SQS FIFO** | the message group ID | none | no transactions | nothing: a managed service |
+| **Temporal, Restate** | one workflow or object per entity key | none | a step of your code | their server, or their cloud |
+| **PostgreSQL and an outbox** | a sequence per entity, kept by the relay | none | the state and the outbox row; publish and ack commit apart | the database, a relay and a broker |
+
+## Kafka
+
+A topic has a number of partitions chosen when you create it. Each key is hashed onto one, so an entity shares its partition with every other entity that hashes there, and a slow one delays the rest: the head-of-line blocking that started QueenMQ. A Kafka transaction makes writes to several partitions and the consumer's offsets atomic; state in your database stays outside it, and there is no delayed delivery.
+
+**Better at:** latency and throughput up to about a thousand partitions, and the ecosystem (Connect, Streams, schema registries, log compaction). In our runs its p99 was 7.5 to 11 ms up to 1,000 partitions, against QueenMQ's 16.5 to 24, and one topic carried about 8,000,000 messages a second where one QueenMQ queue carried 5,000,000. Kafka answers once its replicas hold a write in memory, not on disk, which is most of that difference. QueenMQ's [Kafka port](/integrations/kafka/) lets existing Kafka clients connect.
+
+## Pulsar
+
+Key_Shared keeps per-key order without a partition per key, transactions cover publishes and acks across topics, and shared subscriptions can delay delivery. It answers after an fsync on two of three bookies, the same durability as QueenMQ, which made it the fairest comparison in our runs.
+
+**Better at:** latency and CPU at a few hundred and at ten thousand partitions, and transaction throughput: 14,400 transactions a second against QueenMQ's best of 8,900, in one raft group. Its transactions cover messages and acks, so your state still lives elsewhere, and at 50,000 partitions it could not keep up with the load QueenMQ carried.
+
+## RabbitMQ
+
+Producers publish to exchanges, and bindings route messages into queues. Competing consumers on one queue do not process in order, so order per entity needs a queue per entity, or a hash exchange over a fixed set of single-consumer queues. Channel transactions are not atomic, and AMQP 1.0 has none.
+
+**Better at:** routing. Exchanges, bindings, topic patterns and header matching have no QueenMQ equivalent: the producer names the queue and the partition. And more protocols: AMQP, MQTT, STOMP.
+
+## Amazon SQS
+
+FIFO queues keep order inside a message group, and a group needs no declaration: the closest idea to a QueenMQ partition. There is no transaction: deleting the input, sending the output and writing state are separate calls. Fan-out needs SNS, a deleted message cannot be read again, and a delay is at most 15 minutes, set on the queue.
+
+**Better at:** nothing to operate. No server to run, patch or back up, and you pay per request.
+
+## Temporal and Restate
+
+Durable execution engines: you write the workflow as code, they record each step and replay your code on recovery. Restate journals an object's state, calls and timers with each step, the idea closest to QueenMQ's. QueenMQ keeps the state machine as data instead: the partition is its input, KV its state, one transaction one transition. Any language that speaks HTTP can be the worker, nothing replays your code, and it is also a broker, with consumer groups, fan-out and replay.
+
+**Better at:** long workflows written as code, where loops, waits of days and compensations read as one function.
+
+## PostgreSQL and an outbox
+
+The stack most teams build: state and an outbox row in one database transaction, a relay that publishes the rows, an idempotency table on the consumer, and a jobs table for time. The database covers the state and the outbox row; the publish, the ack and the consumer's state are separate commits, and the idempotency table and the repair code stitch them together. QueenMQ 1.x itself ran on PostgreSQL.
+
+**Better at:** relational state. SQL, joins, constraints and ad hoc queries. QueenMQ's KV reads by key or by prefix.
+
+## Measured side by side
+
+We ran QueenMQ, Kafka, Pulsar and Redpanda on the same three machines with the same loaders, from 10 to 10,000,000 partitions. QueenMQ's cost stays flat as partitions grow, because a partition is a few rows of state: a p99 of 15 to 25 ms on 21 to 28 cores, from 10 partitions to ten million. Kafka pays per partition and did not carry 50,000; Redpanda read 782 ms at 10,000; Pulsar held 20 to 25 ms up to 50,000 and did not carry 100,000. The tables and every condition are in [Queen vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/).
+
+<Fig id="kafka-vs-queen" caption="Hashed partitions share one queue per partition; QueenMQ gives every entity its own." />
+
+## QueenMQ's limits
+
+- No routing: no exchanges, bindings or topic patterns.
+- Delivery is at least once. Effects inside QueenMQ are exactly once through transactions; a call to another system is outside any commit.
+- A transaction is one call, inside one tenant: there is no interactive BEGIN and COMMIT.
+- One leader orders every write of a raft group, which bounds one tenant's write rate. A hot partition is sequential by design.
+
+[When not to use it](/introduction/when-not-to-use/) lists the cases where another system fits better, with what to use instead.

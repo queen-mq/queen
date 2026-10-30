@@ -42,7 +42,7 @@ creates it ahead of that, or takes over one that exists.
 - The options are `lease_time`, `retry_limit`, `dead_letter_queue`, `dlq_after_max_retries`,
   `dedup_window_seconds`, `delayed_processing`, `window_buffer`, `retention_enabled`,
   `retention_seconds`, `completed_retention_seconds`, `max_wait_time_seconds` and
-  `encryption_enabled`, as [queue options](https://queenmq.com/concepts/partitions/#queue-options)
+  `encryption_enabled`, as [queue options](https://queenmq.com/writing-applications/queues/)
   describes them.
 - **Destroying the resource leaves the queue and its messages**, and only forgets it, unless
   `delete_on_destroy = true`. Deleting a queue deletes every message in it.
@@ -56,7 +56,7 @@ The S3 sink of one cluster, set through the proxy's control plane. The broker ha
 - `cluster`, `queues`, `endpoint`, `region`, `bucket` and `access_key` are required. The other
   settings (`prefix`, `path_style`, `sse`, `sse_kms_key_id`, `format`, `compression`,
   `parquet_codec`, `layout`, `align`, `start`, `target_mb`, `max_window_ms`, `sink`) are the
-  per-sink ones of the [S3 guide](https://queenmq.com/guides/s3/#reference), and one you leave out
+  per-sink ones of the [S3 guide](https://queenmq.com/integrations/s3/), and one you leave out
   takes the broker's default.
 - `secret_key` is write-only. It is sent to the broker, which seals it with its own encryption
   key, and it is never written to the plan or the state. It is sent when the sink is created, and

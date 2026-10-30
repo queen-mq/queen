@@ -14,6 +14,20 @@ a Traffic column, each node's last minute, with the channels on hover. The same 
 follower falling behind, a snapshot sent for minutes or a disk writing twice as much shows there
 before it shows as latency.
 
+**Docs: rebuilt from the little book of QueenMQ.** The site now follows the book, chapter by
+chapter: introduction, writing applications, patterns, integrations, managing clusters and
+architecture, with every example in JavaScript, Python, Go, Rust, PHP and C++, cut from programs
+that run against a broker and check their results (`examples/tutorials/run.sh`). The book is a free
+PDF at [queenmq.com/book](https://queenmq.com/book/). Every page of the old tree redirects to the
+page that now answers its question.
+
+**Go client: a guarded step no longer rolls back while its lock is held, after a slow renew.** The
+background renew gives up after `RenewEvery` (a third of the lifetime by default). A renew slower
+than that could still land on the broker: the lock's token moved and the handle kept the old one,
+so a step with `Guard(lock)` rolled back, `Success: false` with no error, until the next renew
+answered. The step now renews with the token it has, which the broker carries through for the same
+owner, and is sent again with the current token.
+
 Supervisor fixes made after supervisor 0.8.1, which PHP client 2.5.0 pins: they ship with the next
 supervisor release.
 
@@ -70,6 +84,28 @@ dropped.
 document that was expired, malformed or dated in the future by a clock step made the Rust master
 drain every worker and exit. It is now removed with one log line and supervision goes on, as in the
 PHP engine; one that cannot be removed still stops the master, as a fault of the state directory.
+
+## queenctl 2.6.1 and Go client 2.6.1 - 2026-10-24
+
+**queenctl: binaries for 2.6, on a release of their own.** queenctl 2.6.1 is built against Go
+client 2.6.1. Its archives for Linux and macOS (x86_64 and arm64) and Windows (x86_64) are on the
+GitHub release [queenctl 2.6.1](https://github.com/queen-mq/queen/releases/tag/clients/client-cli/v2.6.1);
+the last ones were attached to the 2.3.0 broker release. Each CLI version now has its own release
+on its own tag, `clients/client-cli/vX.Y.Z`, so a CLI release no longer creates a `vX.Y.Z` tag that
+belongs to the broker, or renames a broker release. With Go,
+`go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@latest` installs the
+same version: the module keeps its `smartpricing` path, and a path under `github.com/queen-mq/queen`
+resolves to the whole repository, which the Go proxy refuses as too large. `queenctl docs` opens the
+pages of the rebuilt site.
+
+**Go client: `QueueConfig` sets the dedup window, the retry delay and the max wait.**
+`QueueConfig{DedupWindowSeconds: 60}` now sends `dedupWindowSeconds`, as the JS, Python, PHP and
+Rust clients already could; until now a Go caller had to spell it with `Option()`.
+`RetryDelayMillis` sends `retryDelay` (milliseconds, enforced from broker 2.6.0) and
+`MaxWaitTimeSeconds` sends `maxWaitTimeSeconds`. A zero is omitted like every other field, so
+turning deduplication off or redelivering at once still goes through
+`Option("dedupWindowSeconds", 0)` and `Option("retryDelay", 0)`. queenctl 2.6.1 accepts the three
+keys in an `apply` manifest's `config:` block; 2.3.0 refused them as unknown fields.
 
 ## 2.6.0 - 2026-10-22
 
@@ -641,7 +677,7 @@ promotes every group; a group that could not be promoted is named in the answer 
 and the call is repeated. A promotion cuts each group at the entry its own replay had reached: no
 command spans two groups, so every tenant gets a state the source had for it, and tenants in
 different groups can be cut at slightly different moments. The Jepsen failover tests ran one
-group. See [standby cluster](https://queenmq.com/operate/standby/#several-raft-groups).
+group. See [standby cluster](https://queenmq.com/manage/standby/).
 
 **Server: a node added to a cluster of several raft groups can become a voter in every group.**
 With `QUEEN_RAFT_GROUPS` above 1 each group prefers one member as its leader, and a group's leader
@@ -1076,7 +1112,7 @@ restarts, and gives it up when its own disk fills (`QUEEN_LINK_HOLD_S`,
 `QUEEN_LINK_HOLD_DISK_PCT`). `GET /api/v1/system/link`, the `link` block of `/health` and the
 `queen_link_*` series say where a standby is. The source needs `QUEEN_LINK_TOKEN`, the standby
 `QUEEN_LINK_SOURCE` and `QUEEN_LINK_SOURCE_TOKEN`; a cluster with none of them behaves as before.
-See [Standby cluster](https://queenmq.com/operate/standby/).
+See [Standby cluster](https://queenmq.com/manage/standby/).
 
 **Server: the last node of a cluster to stop no longer hangs.** A node that led a cluster whose
 other nodes were already down, with an entry in its log that could no longer commit, waited for
@@ -1094,7 +1130,7 @@ again, and a leader that finds itself stopped while it leads starts again after 
 Jepsen on a five-node cluster with two slow disks. With the leader of five nodes cut off for
 2.4 s, the build before the fix took no write afterwards in 11 of the 12 trials where the leader
 kept its leadership, and this one took the next write in all 10. The log lines that say when it
-happens are on [Monitoring](https://queenmq.com/operate/monitoring/).
+happens are on [Monitoring](https://queenmq.com/manage/upgrades-monitoring/).
 
 **Server: locks and semaphores.** A lock is a lease: one holder at a time, for a lifetime the holder
 declares and renews, with a token that fences a holder that outlived it. A semaphore is the same
@@ -1718,8 +1754,8 @@ so a queue read to its end and idle lags by about the guard and one discovery in
 growing; a node exports a queue's gauges only while it runs the queue. The commit pointer's `tEnd` is now an
 ISO-8601 timestamp: 1.5.0 wrote integer microseconds, which the retention hold could not read,
 so `retentionSinkHold` always sat at its cap; it now follows the sink. Running it is
-[deploy/s3](https://queenmq.com/guides/s3/); what it writes is
-[reference/s3](https://queenmq.com/guides/s3/).
+[deploy/s3](https://queenmq.com/integrations/s3/); what it writes is
+[reference/s3](https://queenmq.com/integrations/s3/).
 
 **Every broker tenant can have an S3 sink and a bucket of its own.** The default tenant's sink is
 configured by `QUEEN_S3_*` and turned on by `QUEEN_S3_QUEUES`: without it the default tenant has no

@@ -94,7 +94,7 @@ Most of Queen's limits exist to keep one request from costing everyone else: a b
 on what one log entry may carry, a budget on how much a KV call may read. Few of them are about the
 data itself. The broker puts no cap on partitions per queue, on queues per tenant, or on how long a
 partition's history may grow: your disk and your memory bound those, and a proxy plan can cap them
-per tenant (see [tenants](/operate/tenants/)).
+per tenant (see [tenants](/manage/tenants/)).
 
 Each limit below comes with the setting that moves it, when there is one, and the file that
 applies it. The values are the defaults of server 2.0.1; the full list of settings is on
@@ -201,7 +201,7 @@ Applied in `server/src/rsm/facade/real/phase2/reads.rs` and `offsets.rs`.
 | Calls per tenant | reads 200/s (burst 400), writes 100/s (burst 200) | not counted | `QUEEN_KV_READ_RATE`, `QUEEN_KV_READ_BURST`, `QUEEN_KV_WRITE_RATE`, `QUEEN_KV_WRITE_BURST` |
 
 A call over a tenant's rate answers 429 `rate_limited`. A tenant's quota row can set its own rates
-and row and byte caps; see [tenants](/operate/tenants/).
+and row and byte caps; see [tenants](/manage/tenants/).
 
 ## Locks
 
@@ -268,4 +268,4 @@ The last three are constants in `server/src/handlers/ephemeral.rs`.
 | A trace whose `transactionId` or one of its names makes a store key over 511 bytes is answered `400` | 511 bytes | none |
 | Disk high-water mark: writes that grow storage answer 507 | 85% | `QUEEN_RAFT_DISK_HIGH_PCT` (released at `QUEEN_RAFT_DISK_LOW_PCT`, 80%) |
 | Sealed log files whose index is memory-mapped (one that fits a page, about 80 records, is read into memory and takes no map; so is one the kernel refuses to map) | 65,530 maps a process, about 4 TB of log at 64 MiB a file | the kernel's `vm.max_map_count`; `QUEEN_RAFT_SEGMENT_BYTES` |
-| A node stops keeping its log for a [standby cluster](/operate/standby/) that is behind | when its disk is 80% full, or the standby was silent for 3600 s | `QUEEN_LINK_HOLD_DISK_PCT`, `QUEEN_LINK_HOLD_S` |
+| A node stops keeping its log for a [standby cluster](/manage/standby/) that is behind | when its disk is 80% full, or the standby was silent for 3600 s | `QUEEN_LINK_HOLD_DISK_PCT`, `QUEEN_LINK_HOLD_S` |

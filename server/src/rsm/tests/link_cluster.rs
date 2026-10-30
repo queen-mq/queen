@@ -1431,9 +1431,21 @@ async fn a_source_refuses_a_standby_without_its_token() {
     let node = open_cluster(&dirs, &ports, Some(TOKEN), LinkSetup::default).await;
     leader_of(&node).await;
     push(&node[0], 1).await.expect("push");
-    match read(Some(TOKEN), ports[0]).await.expect("the token's holder reads") {
-        Answer::Entries { entries, .. } => assert!(!entries.is_empty()),
-        other => panic!("{other:?}"),
+    // A push is answered at commit and the source serves what it applied:
+    // read until the entry is there.
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        match read(Some(TOKEN), ports[0]).await.expect("the token's holder reads") {
+            Answer::Entries { entries, .. } if !entries.is_empty() => break,
+            Answer::Entries { .. } => {
+                assert!(
+                    Instant::now() < end,
+                    "the pushed entry was not served within 10 s"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            other => panic!("{other:?}"),
+        }
     }
     let wrong = read(Some("another-token"), ports[0]).await.unwrap_err();
     assert!(wrong.contains("QUEEN_LINK_SOURCE_TOKEN"), "{wrong}");
@@ -2275,12 +2287,19 @@ async fn a_source_group_answers_only_the_standby_group_placed_as_it_is() {
 
     // Its counterpart reads each group.
     for g in 0..GROUPS {
-        match read_as(g, placed(g, GROUPS, ""))
-            .await
-            .expect("its counterpart reads")
-        {
-            Answer::Entries { entries, .. } => assert!(!entries.is_empty(), "group {g}"),
-            other => panic!("group {g}: {other:?}"),
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            match read_as(g, placed(g, GROUPS, ""))
+                .await
+                .expect("its counterpart reads")
+            {
+                Answer::Entries { entries, .. } if !entries.is_empty() => break,
+                Answer::Entries { .. } => {
+                    assert!(Instant::now() < end, "group {g}: not served within 10 s");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                other => panic!("group {g}: {other:?}"),
+            }
         }
     }
     // Not a standby of one group (every standby there was before a standby

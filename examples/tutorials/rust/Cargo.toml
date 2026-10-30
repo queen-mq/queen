@@ -8,8 +8,16 @@ publish = false
 # always exercise the code in the tree they ship with.
 [dependencies]
 queen-mq = { path = "../../../clients/client-rust" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# `signal`: the book's long-running consumers stop on SIGTERM.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 serde_json = "1"
+# The book's webhook example calls a URL. The same reqwest the client uses,
+# without default features, so it adds no TLS stack of its own.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+[[bin]]
+name = "00_five_minutes"
+path = "src/bin/00_five_minutes.rs"
 
 [[bin]]
 name = "01_hello_world"

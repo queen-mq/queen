@@ -7,35 +7,37 @@ import { config } from "virtual:nimbus/config";
 import {
   HOME_TITLE,
   hero,
-  paradigm,
-  shifts,
-  step,
-  stepSection,
-  roles,
-  removeSection,
-  removals,
-  includedSection,
-  included,
+  guideSection,
+  guideRun,
+  guideSteps,
+  guideClosing,
   dashboardShot,
   proofSection,
   proof,
   provenSection,
   proven,
-  trySection,
+  nextSection,
   start,
+  book,
   closing,
 } from "../lib/home";
+import { GUIDE_LANGS, guideCode } from "../lib/home-guide";
+import edition from "../../public/book/edition.json";
 
 /**
  * The landing page. Every word on it comes from src/lib/home.ts, which the
  * markdown twin (index.md.ts) reads too. Elements marked `data-md` are the
  * ones scripts/check-markdown.mjs looks for in dist/index.md.
  *
- * The rhythm: a split hero, then sections that alternate between the page and
- * a card-coloured band, in the order of the README's top half: the old way and
- * the Queen way, the code, what you can remove, what is included, the numbers,
- * proof, how to try it, and the closing line.
+ * The rhythm: a split hero, then the five-minute guide, then sections that
+ * alternate between the page and a card-coloured band: the numbers, proof,
+ * where to go next, and the closing line.
+ *
+ * The guide renders every language's code for every step; the language picker
+ * sets `data-guide-lang` on the section and CSS shows the matching variant.
+ * Without JavaScript the page shows JavaScript, the first language.
  */
+const REPO_BLOB = "https://github.com/queen-mq/queen/blob/master/";
 
 // The same pair Nimbus configures for MDX code blocks, with defaultColor off:
 // each span carries the light colour plus a `--shiki-dark` custom property,
@@ -127,138 +129,171 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
         </div>
       </section>
 
-      {/* The old way and the Queen way */}
-      <section class="border-t border-border bg-card">
-        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
-          <p class={eyebrow}>{paradigm.eyebrow}</p>
-          <div class="grid grid-cols-1 gap-12 lg:grid-cols-2 lg:gap-16">
-            <div>
-              <h2 data-md class={h2}>{paradigm.oldTitle}</h2>
-              {paradigm.old.map((t) => <p data-md class="mt-4 text-base leading-relaxed text-muted-foreground">{t}</p>)}
-            </div>
-            <div>
-              <h2 data-md class={h2}>{paradigm.newTitle}</h2>
-              {
-                shifts.map((x) => (
-                  <p data-md class="mt-4 text-base leading-relaxed text-muted-foreground">
-                    <a href={x.href} class="font-medium text-foreground no-underline hover:underline">
-                      {x.title}
-                    </a>{" "}
-                    {x.body}
-                  </p>
-                ))
-              }
-            </div>
-          </div>
-          <div class="mx-auto mt-16 max-w-3xl">
-            <Figure id="concepts/four-systems" />
-          </div>
+      {/* The five-minute guide */}
+      <section id="guide" data-guide-lang="js" class="scroll-mt-14 border-t border-border">
+        <div class="mx-auto w-full max-w-5xl px-6 pt-20 lg:px-10 lg:pt-28">
+          <p class={eyebrow}>{guideSection.eyebrow}</p>
+          <h2 data-md class={h2}>{guideSection.title}</h2>
+          {guideSection.lead.map((t) => <p data-md class={lead}>{t}</p>)}
         </div>
-      </section>
 
-      {/* In code */}
-      <section class="border-t border-border">
-        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
-          <p class={eyebrow}>{stepSection.eyebrow}</p>
-          <h2 data-md class={h2}>{stepSection.title}</h2>
-          <p data-md class={lead}>{stepSection.lead}</p>
-
-          <div class="home-code mt-12 overflow-hidden rounded-xl border border-border bg-card">
-            <div class="flex items-center justify-between border-b border-border px-5 py-2.5 text-xs text-muted-foreground">
-              <span class="font-medium">Push, then consume</span>
-              <span>JavaScript</span>
-            </div>
-            <div class="overflow-x-auto px-5 py-4 text-[0.75rem]">
-              <Code code={step} lang="js" themes={SHIKI} defaultColor={false} />
-            </div>
-            <ol class="grid grid-cols-2 border-t border-border sm:grid-cols-3 lg:grid-cols-6">
-              {
-                roles.map((r) => (
-                  <li class="border-b border-r border-border px-5 py-4 lg:border-b-0">
-                    <a href={r.href} class="text-[0.875rem] font-medium text-foreground no-underline hover:underline">
-                      {r.role}
-                    </a>
-                    <p data-md class="mt-1 text-[0.8125rem] leading-snug text-muted-foreground">{r.primitive}</p>
-                  </li>
-                ))
-              }
-              <li class="bg-background px-5 py-4">
-                <span class="text-[0.875rem] font-medium text-foreground">One entry</span>
-                <p class="mt-1 text-[0.8125rem] leading-snug text-muted-foreground">committed whole, or not at all</p>
-              </li>
-            </ol>
-          </div>
-          <a href={stepSection.link.href} class="mt-6 inline-block text-[0.8125rem] font-medium">
-            {stepSection.link.label} →
-          </a>
-        </div>
-      </section>
-
-      {/* What you can remove: the titles are struck through because that is the claim */}
-      <section class="border-t border-border bg-card">
-        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
-          <p class={eyebrow}>{removeSection.eyebrow}</p>
-          <h2 data-md class={h2}>{removeSection.title}</h2>
-          <ul class="mt-12 grid grid-cols-1 gap-x-8 gap-y-8 sm:grid-cols-2 lg:grid-cols-5">
+        <div class="guide-bar sticky top-14 z-20 mt-10 border-y border-border">
+          <div
+            class="mx-auto flex w-full max-w-5xl items-center gap-1.5 overflow-x-auto px-6 py-2.5 lg:px-10"
+            role="group"
+            aria-label={guideSection.pick}
+          >
+            <span class="mr-2 hidden shrink-0 text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-muted-foreground sm:inline">
+              {guideSection.pick}
+            </span>
             {
-              removals.map((r) => (
-                <li class="border-t border-border pt-5">
-                  <h3 data-md class="text-[0.9375rem] font-medium text-foreground line-through decoration-muted-foreground decoration-1">
-                    {r.title}
-                  </h3>
-                  <p data-md class="mt-2 text-[0.875rem] leading-relaxed text-muted-foreground">{r.body}</p>
+              GUIDE_LANGS.map((l, i) => (
+                <button type="button" class="guide-pick" data-guide-pick={l.id} aria-pressed={i === 0 ? "true" : "false"}>
+                  {l.label}
+                </button>
+              ))
+            }
+          </div>
+        </div>
+
+        <div class="mx-auto w-full max-w-5xl px-6 pb-20 lg:px-10 lg:pb-28">
+          <ol class="mt-4">
+            <li class="guide-step">
+              <div class="guide-num" aria-hidden="true">1</div>
+              <div class="min-w-0">
+                <h3 data-md class="guide-title">{guideRun.title}</h3>
+                {guideRun.body.map((t) => <p data-md class="guide-text">{t}</p>)}
+                <div class="mt-5 rounded-lg border border-border bg-card px-4 py-3">
+                  <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
+                </div>
+                <p data-md class="guide-text mt-5">{guideRun.installNote}</p>
+                {
+                  GUIDE_LANGS.map((l) => (
+                    <div class="guide-variant mt-3 rounded-lg border border-border bg-card px-4 py-3" data-lang={l.id}>
+                      <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code>{l.install.split("\n").map((cmd, j) => <>{j > 0 && "\n"}<span class="select-none text-muted-foreground">$ </span>{cmd}</>)}</code></pre>
+                    </div>
+                  ))
+                }
+                <figure class="mt-6">
+                  <div class="overflow-hidden rounded-xl border border-border">
+                    {/* WebP at 2048 wide: twice the 1024px the frame reaches, so it stays
+                        sharp on a 2x screen. Only the visible one loads: a lazy image
+                        that is not rendered is not fetched. */}
+                    <img
+                      src={`/screenshots/${dashboardShot.image}-light.webp`}
+                      alt={dashboardShot.alt}
+                      width="2048"
+                      height="1280"
+                      loading="lazy"
+                      decoding="async"
+                      class="home-shot-light block h-auto w-full"
+                    />
+                    <img
+                      src={`/screenshots/${dashboardShot.image}-dark.webp`}
+                      alt={dashboardShot.alt}
+                      width="2048"
+                      height="1280"
+                      loading="lazy"
+                      decoding="async"
+                      class="home-shot-dark block h-auto w-full"
+                    />
+                  </div>
+                  <figcaption class="mt-3 text-[0.8125rem] text-muted-foreground">
+                    {dashboardShot.caption} <a href="/manage/upgrades-monitoring/">Monitoring →</a>
+                  </figcaption>
+                </figure>
+              </div>
+            </li>
+
+            {
+              guideSteps.map((step, n) => (
+                <li class="guide-step" id={`guide-${step.id}`}>
+                  <div class="guide-num" aria-hidden="true">{n + 2}</div>
+                  <div class="min-w-0">
+                    <h3 data-md class="guide-title">{step.title}</h3>
+                    {step.body.map((t) => <p data-md class="guide-text">{t}</p>)}
+                    {step.code.map((c, ci) => (
+                      <>
+                        {GUIDE_LANGS.map((l) => {
+                          const code = guideCode(l, c.id);
+                          return code === null ? (
+                            <div class="guide-variant mt-5 rounded-xl border border-dashed border-border px-5 py-4 text-[0.875rem] leading-relaxed text-muted-foreground" data-lang={l.id}>
+                              {l.missing?.[c.id]}
+                            </div>
+                          ) : (
+                            <div class="guide-variant home-code mt-5 overflow-hidden rounded-xl border border-border bg-card" data-lang={l.id}>
+                              <div class="flex items-center justify-between border-b border-border px-5 py-2.5 text-xs text-muted-foreground">
+                                <span class="font-medium">{c.caption}</span>
+                                <span>{l.label}</span>
+                              </div>
+                              <div class="overflow-x-auto px-5 py-4 text-[0.75rem]">
+                                <Code code={code} lang={l.lang as any} themes={SHIKI} defaultColor={false} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {step.between?.[ci] && <p data-md class="guide-text mt-6">{step.between[ci]}</p>}
+                      </>
+                    ))}
+                    <p class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-[0.8125rem] font-medium">
+                      {step.links.map((k) => (
+                        <a href={k.href}>{k.label} →</a>
+                      ))}
+                    </p>
+                  </div>
                 </li>
               ))
             }
-          </ul>
-        </div>
-      </section>
+          </ol>
 
-      {/* Also included */}
-      <section class="border-t border-border">
-        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
-          <p class={eyebrow}>{includedSection.eyebrow}</p>
-          <h2 data-md class={h2}>{includedSection.title}</h2>
-          <div class="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {
-              included.map((c, i) => (
-                <a href={c.href} class={i === included.length - 1 ? `${card} sm:col-span-2` : card}>
-                  <div class="text-[0.9375rem] font-medium text-foreground">{c.title}</div>
-                  <p data-md class="mt-1.5 text-[0.8125rem] leading-relaxed text-muted-foreground">{c.body}</p>
+          <p data-md class="mt-14 max-w-2xl text-[1.0625rem] leading-relaxed text-foreground/85">{guideClosing}</p>
+          {
+            GUIDE_LANGS.map((l) => (
+              <p class="guide-variant mt-4 text-[0.8125rem] text-muted-foreground" data-lang={l.id}>
+                {guideSection.programLabel}:{" "}
+                <a href={`${REPO_BLOB}${l.file}`} class="font-mono text-[0.75rem]">
+                  {l.file}
                 </a>
-              ))
-            }
-          </div>
-          <figure class="mt-12">
-            <div class="overflow-hidden rounded-xl border border-border">
-              {/* WebP at 2048 wide: twice the 1024px the frame reaches, so it stays
-                  sharp on a 2x screen at a quarter of the 2880px PNG's bytes. Only
-                  the visible one loads: a lazy image that is not rendered is not
-                  fetched. */}
-              <img
-                src={`/screenshots/${dashboardShot.image}-light.webp`}
-                alt={dashboardShot.alt}
-                width="2048"
-                height="1280"
-                loading="lazy"
-                decoding="async"
-                class="home-shot-light block h-auto w-full"
-              />
-              <img
-                src={`/screenshots/${dashboardShot.image}-dark.webp`}
-                alt={dashboardShot.alt}
-                width="2048"
-                height="1280"
-                loading="lazy"
-                decoding="async"
-                class="home-shot-dark block h-auto w-full"
-              />
-            </div>
-            <figcaption class="mt-3 text-[0.8125rem] text-muted-foreground">
-              {dashboardShot.caption} <a href="/operate/monitoring/">Monitoring →</a>
-            </figcaption>
-          </figure>
+              </p>
+            ))
+          }
         </div>
+
+        <script is:inline>
+          (function () {
+            var root = document.getElementById("guide");
+            if (!root) return;
+            var KEY = "queen-guide-lang";
+            var LANGS = ["js", "py", "go", "rust", "php", "cpp"];
+            function set(lang) {
+              root.setAttribute("data-guide-lang", lang);
+              root.querySelectorAll("[data-guide-pick]").forEach(function (b) {
+                b.setAttribute("aria-pressed", String(b.getAttribute("data-guide-pick") === lang));
+              });
+            }
+            try {
+              var saved = localStorage.getItem(KEY);
+              if (saved && LANGS.indexOf(saved) >= 0) set(saved);
+            } catch (e) {}
+            root.addEventListener("click", function (e) {
+              var b = e.target.closest && e.target.closest("[data-guide-pick]");
+              if (!b) return;
+              var lang = b.getAttribute("data-guide-pick");
+              // Code above the reader changes height with the language: keep the
+              // step they are reading where it is on screen.
+              var bar = root.querySelector(".guide-bar").getBoundingClientRect().bottom;
+              var anchor = Array.prototype.find.call(root.querySelectorAll(".guide-step"), function (s) {
+                return s.getBoundingClientRect().bottom > bar;
+              });
+              var before = anchor ? anchor.getBoundingClientRect().top : 0;
+              set(lang);
+              if (anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - before);
+              try {
+                localStorage.setItem(KEY, lang);
+              } catch (e) {}
+            });
+          })();
+        </script>
       </section>
 
       {/* Numbers */}
@@ -312,28 +347,20 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
         </div>
       </section>
 
-      {/* Try it */}
+      {/* Next */}
       <section class="border-t border-border bg-card">
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-24">
-          <p class={eyebrow}>{trySection.eyebrow}</p>
-          <h2 data-md class={h2}>{trySection.title}</h2>
-          <div class="mt-10 max-w-3xl space-y-4">
-            <div class="rounded-lg border border-border bg-background px-4 py-3">
-              <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
+          <p class={eyebrow}>{nextSection.eyebrow}</p>
+          <h2 data-md class={h2}>{nextSection.title}</h2>
+          <a href={book.href} class="mt-10 flex items-center gap-5 rounded-xl border border-border bg-background p-4 transition-colors hover:border-foreground/30">
+            <img src="/book/cover.webp" alt="" width={edition.cover[0]} height={edition.cover[1]} loading="lazy" decoding="async" class="w-16 shrink-0 rounded shadow-md sm:w-20" />
+            <div class="min-w-0">
+              <div class="text-[0.9375rem] font-medium text-foreground">{book.title}</div>
+              <p data-md class="mt-1 text-[0.875rem] leading-relaxed text-muted-foreground">{book.body}</p>
+              <p class="mt-2 text-[0.8125rem] font-medium text-foreground">Read it: PDF, {edition.pages} pages →</p>
             </div>
-            <p data-md class="pt-2 text-[0.9375rem] leading-relaxed text-muted-foreground">{trySection.pushNote}</p>
-            <div class="home-code overflow-hidden rounded-xl border border-border bg-background">
-              <div class="overflow-x-auto px-5 py-4 text-[0.75rem]">
-                <Code code={trySection.push} lang="bash" themes={SHIKI} defaultColor={false} />
-              </div>
-            </div>
-            <p data-md class="text-[0.9375rem] leading-relaxed text-muted-foreground">{trySection.after}</p>
-            <p data-md class="pt-2 text-[0.9375rem] leading-relaxed text-muted-foreground">{trySection.mcpNote}</p>
-            <div class="rounded-lg border border-border bg-background px-4 py-3">
-              <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{trySection.mcp}</code></pre>
-            </div>
-          </div>
-          <div class="mt-14 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          </a>
+          <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {
               start.map((s) => (
                 <a href={s.href} class={card}>
@@ -342,6 +369,10 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
                 </a>
               ))
             }
+          </div>
+          <p data-md class="mt-12 text-[0.9375rem] leading-relaxed text-muted-foreground">{nextSection.mcpNote}</p>
+          <div class="mt-3 max-w-3xl rounded-lg border border-border bg-background px-4 py-3">
+            <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{nextSection.mcp}</code></pre>
           </div>
         </div>
       </section>
@@ -367,7 +398,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
           <a href="/benchmarks/">Benchmarks</a>
           <a href="/reference/http/">HTTP API</a>
           <a href="/reference/changelog/">Changelog</a>
-          <a href="/start/about/" class="ml-auto">Built at Smartness.</a>
+          <a href="/introduction/about/" class="ml-auto">Built at Smartness.</a>
         </div>
       </footer>
     </main>
@@ -391,6 +422,85 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
   .hero-scene-dark,
   .home-shot-dark {
     display: none;
+  }
+
+  /* The guide: numbered steps, one language visible at a time. */
+  /* Opaque: the code scrolling under a translucent bar stayed readable through it. */
+  .guide-bar {
+    background: var(--nb-background);
+  }
+  .guide-pick {
+    flex-shrink: 0;
+    border-radius: 9999px;
+    border: 1px solid transparent;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--nb-muted-foreground, var(--muted-foreground));
+    transition: color 120ms, border-color 120ms, background-color 120ms;
+  }
+  .guide-pick:hover {
+    color: var(--nb-foreground, var(--foreground));
+  }
+  .guide-pick[aria-pressed="true"] {
+    color: var(--nb-foreground, var(--foreground));
+    border-color: var(--nb-border-strong, var(--border));
+    background: var(--nb-card, var(--card));
+  }
+  .guide-step {
+    display: grid;
+    grid-template-columns: 2rem minmax(0, 1fr);
+    gap: 1.25rem;
+    padding-top: 3.5rem;
+    scroll-margin-top: 7rem;
+  }
+  .guide-num {
+    display: flex;
+    height: 2rem;
+    width: 2rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    border: 1px solid var(--nb-border, var(--border));
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--nb-foreground, var(--foreground));
+  }
+  .guide-title {
+    margin-top: 0.25rem;
+    font-size: 1.25rem;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    color: var(--nb-foreground, var(--foreground));
+  }
+  .guide-text {
+    margin-top: 0.75rem;
+    max-width: 42rem;
+    font-size: 0.9375rem;
+    line-height: 1.65;
+    color: var(--nb-muted-foreground, var(--muted-foreground));
+  }
+  .guide-variant {
+    display: none;
+  }
+  #guide[data-guide-lang="js"] .guide-variant[data-lang="js"],
+  #guide[data-guide-lang="py"] .guide-variant[data-lang="py"],
+  #guide[data-guide-lang="go"] .guide-variant[data-lang="go"],
+  #guide[data-guide-lang="rust"] .guide-variant[data-lang="rust"],
+  #guide[data-guide-lang="php"] .guide-variant[data-lang="php"],
+  #guide[data-guide-lang="cpp"] .guide-variant[data-lang="cpp"] {
+    display: block;
+  }
+  @media (max-width: 639px) {
+    .guide-step {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.75rem;
+    }
+    /* Five languages fit a 375px phone without scrolling the bar. */
+    .guide-pick {
+      padding: 0.25rem 0.5rem;
+      font-size: 0.75rem;
+    }
   }
   :global(:root[data-mode="dark"]) .hero-scene-light,
   :global(:root[data-mode="dark"]) .home-shot-light {

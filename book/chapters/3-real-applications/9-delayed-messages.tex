@@ -1,0 +1,31 @@
+% Chapter 3, section 9: Delayed and scheduled messages
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-10-24. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.6.0 node.
+
+\section{Delayed and scheduled messages}
+
+A day after an order is delivered, ask for a review. If the delivery is late, move the reminder. If
+the guest already wrote a review, cancel it. The usual answer is a cron job that scans a table
+every minute.
+
+A timer is a message that waits. It is named by its queue and a key: scheduling the same key again
+moves it, and cancelling the key removes it. When it is due, it arrives in its queue as a normal
+message, through the log.
+
+\queenfig{timer-reminder}{A keyed timer: schedule, move, cancel.}
+
+\guide{uc-reminder}
+
+The first call answered \texttt{scheduled} and the second \texttt{rescheduled}; after the cancel, no
+reminder was left. A short timer of the same queue arrived as a message, with its payload as data.
+
+\why{the key makes a reminder easy to move or cancel, and a retried schedule is harmless. Put the
+timer in the transaction of the step that creates it (chapter 2), and it exists exactly when the
+step committed.}
+
+One thing to know: a cancel can arrive just after the timer fired. The consumer of the reminder
+should check the order's state before it sends anything.

@@ -148,7 +148,7 @@ function guide(args) {
     }
     return ok(`${p.url}\n\n${text}`);
   }
-  if (!topic) return fail('Pass `topic` (what you want to know, in plain words) or `page` (a slug such as "concepts/transactions").');
+  if (!topic) return fail('Pass `topic` (what you want to know, in plain words) or `page` (a slug such as "writing-applications/transactions").');
 
   const hits = sectionIndex().search(topic, 15);
   if (!hits.length) return ok(`Nothing in the docs matches "${topic}". Pages: ${bundle.pages.map((p) => p.slug).filter(Boolean).join(", ")}`);
@@ -393,7 +393,7 @@ function kafkaClient(args) {
   if (!q) return fail(`Pass the client library, e.g. "sarama", "kafkajs", "confluent-kafka-python". Tested: ${known}.`);
   const hits = kafkaIndex().search(q, 3);
   if (!hits.length) {
-    return ok(`"${q}" is not in Queen's Kafka client matrix. Tested: ${known}. How any client connects: guide(page: "guides/kafka").`);
+    return ok(`"${q}" is not in Queen's Kafka client matrix. Tested: ${known}. How any client connects: guide(page: "integrations/kafka").`);
   }
   const top = hits[0].score;
   const rows = hits.filter((h) => h.score >= top * 0.6).map(({ doc }) => doc);
@@ -403,8 +403,8 @@ function kafkaClient(args) {
   const version = str(args.version);
   if (version) parts.unshift(`Asked about version ${version}: compare it with the versions run and any version floor in what to set below.`);
 
-  const connect = bundle.sections.find((s) => s.slug === "guides/kafka" && /connect|point|bootstrap|listener|enable|start/i.test(s.heading));
-  if (connect) parts.push(`## Connecting (from ${connect.url})\n\n${cap(sectionText(connect), 2_500, `Read it all with guide(page: "guides/kafka").`)}`);
+  const connect = bundle.sections.find((s) => s.slug === "integrations/kafka" && /connect|point|bootstrap|listener|enable|start/i.test(s.heading));
+  if (connect) parts.push(`## Connecting (from ${connect.url})\n\n${cap(sectionText(connect), 2_500, `Read it all with guide(page: "integrations/kafka").`)}`);
   parts.push(
     (bundle.kafka.note ? `${bundle.kafka.note} ` : "") +
       `The facade's deliberate differences from Apache Kafka, which every client meets: guide(page: "reference/kafka"). Traps: check(language: "kafka").`,
@@ -416,7 +416,7 @@ function kafkaClient(args) {
 
 const FEATURES = bundle.setup.map((f) => f.feature);
 
-/** How to install, import and create the client in this language: start/clients plus the client card. */
+/** How to install, import and create the client in this language: writing-applications/clients plus the client card. */
 function clientLine(language) {
   const parts = [];
   const install = bundle.install?.[language];
@@ -499,12 +499,12 @@ const TOOLS = [
     name: "guide",
     title: "Queen docs",
     description:
-      "Answer a question about Queen MQ 2 from its documentation: concepts (partitions, consumer groups, subscription modes, transactions, timers, KV, locks, dedup, ephemeral queues), guides, limits, configuration and the HTTP API. Pass `topic` for the best-matching sections, or `page` (a slug like `concepts/transactions` from an earlier answer) to read a whole page, optionally narrowed to one `section`.",
+      "Answer a question about Queen MQ 2 from its documentation: concepts (partitions, consumer groups, subscription modes, transactions, timers, KV, locks, dedup, ephemeral queues), guides, limits, configuration and the HTTP API. Pass `topic` for the best-matching sections, or `page` (a slug like `writing-applications/transactions` from an earlier answer) to read a whole page, optionally narrowed to one `section`.",
     inputSchema: {
       type: "object",
       properties: {
         topic: { type: "string", description: "What you want to know, in plain words." },
-        page: { type: "string", description: "A page slug such as concepts/transactions, or its full URL." },
+        page: { type: "string", description: "A page slug such as writing-applications/transactions, or its full URL." },
         section: { type: "string", description: "With page: a heading on that page." },
       },
       additionalProperties: false,
@@ -665,7 +665,7 @@ export function agentsMd() {
 ## More
 - Every docs page, as markdown: ${SITE}/llms.txt
 - Error codes and what to do about each: ${SITE}/reference/errors/
-- Kafka clients pointed at Queen: ${SITE}/guides/kafka/
+- Kafka clients pointed at Queen: ${SITE}/integrations/kafka/
 - Tested code in every language and the full trap checklist: the MCP server at ${ENDPOINT} (${SITE}/start/ai-agents/)
 `;
 }

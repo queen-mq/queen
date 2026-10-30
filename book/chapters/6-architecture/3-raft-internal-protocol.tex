@@ -1,0 +1,23 @@
+% Chapter 6, section 3: Raft internal protocol
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Raft internal protocol}
+
+The nodes agree on the log with Raft, through the openraft library. Raft decides who leads and when
+an entry is committed. An entry is committed when a majority of the nodes has written it and
+synced it to disk (fsync).
+
+Queen has no separate Raft log: the queue log files are the log (see Storage). The nodes talk on
+port 7400, over plain HTTP, with a shared token. The leader sends a heartbeat every 100~ms. If the
+followers hear nothing for one to two seconds, they elect a new leader.
+
+A leader that hears from no majority for 1.5 seconds stops logging new writes and keeps them
+waiting, in order. After 3 seconds it hands leadership to another node.
+
+\queenfig{raft-timings}{The timings Raft runs on.}
+
+A node that was away gets the entries it missed from the leader, who keeps them for 6 hours while
+its disk has room. After that, the leader sends a snapshot instead: since 2.6, only the part the
+node is missing. The node exits with code 75 and loads the snapshot when it starts again.

@@ -1,0 +1,33 @@
+---
+title: "Workflow pattern: one step, one transaction"
+description: "An order moves from paid to shipped: each step acks its input, writes the order's state with a version check and pushes the next event, in one transaction."
+type: example
+tier: use
+sidebar:
+  label: "Workflows"
+  order: 5
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+  - examples/tutorials/php/book-use-cases.php
+  - examples/tutorials/cpp/book-use-cases.cpp
+---
+
+An order moves through states: paid, shipping, shipped. A redelivered event, two workers, or an event that arrives late must never move it twice or backwards, and a step must never be half done.
+
+The order's state lives in KV. Each step is one transaction: it acks the event, writes the new state only if the state is still the version the worker read (`expect`), and pushes the next event. If the version moved, the whole transaction rolls back, and nothing is written.
+
+<Fig id="order-workflow" caption="A state machine whose steps cannot race." />
+
+<SdkCode id="uc-order" />
+
+The step moved `order-2001` to `shipping` and pushed one shipping event. The same step sent again from the old version rolled back: still one event.
+
+<Why>the ack, the new state and the next event commit together or not at all. That replaces the outbox table, the idempotency table and the lock you would put around them.</Why>
+
+One thing to know: a rollback is an answer, not an error. `commit()` returns `success: false` (in Go, `IsKVPrecondition()` on the result) and does not throw. Read it.
+
+Built from: [Transactions](/writing-applications/transactions/), [KV, locks and timers](/writing-applications/kv-locks-timers/).

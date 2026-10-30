@@ -1,0 +1,138 @@
+% Chapter 4, section 3: Postgres Source and Sink
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Postgres Source and Sink}
+
+The broker can stream a PostgreSQL table into a queue, and a queue into a table, with no other
+process. The \textbf{source} reads committed changes through logical replication and turns each one
+into a message, in a partition named after the row's key, in commit order. The \textbf{sink} is a
+consumer group the broker runs for you, and it writes every message into a table. Each one is set
+up with one HTTP call, runs on every node of a cluster, and gives exactly-once effects.
+
+\why{getting changes out of a database usually means Debezium, a Kafka Connect cluster and Kafka.
+Here it is one call on the broker you already run. And the sink replaces the consumer you would
+write to keep a table up to date with a queue.}
+
+\subsection{The source}
+
+The broker needs \texttt{QUEEN\_ENCRYPTION\_KEY}, because it stores the database password sealed
+with that key. PostgreSQL needs version 17 or later and \texttt{wal\_level=logical}. Take a table
+with two rows:
+
+\begin{shell}
+docker exec -i pg psql -U postgres <<'SQL'
+CREATE TABLE orders (
+  id         bigint PRIMARY KEY,
+  customer   jsonb NOT NULL,
+  status     text NOT NULL,
+  total      numeric(12,2) NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO orders (id, customer, status, total) VALUES
+  (1, '{"name": "Ada", "tier": "gold"}', 'new', 42.00),
+  (2, '{"name": "Linus", "tier": "silver"}', 'new', 17.50);
+SQL
+\end{shell}
+
+Create the source:
+
+\begin{shell}
+curl -s -X PUT localhost:6632/api/v1/connectors/orders-src \
+  -H 'content-type: application/json' -d '{
+  "kind": "source",
+  "connection": {"host": "pg", "database": "postgres", "user": "postgres",
+                 "password": "secret", "sslMode": "disable"},
+  "source": {"tables": [{"table": "public.orders", "queue": "orders"}]}
+}' >/dev/null
+curl -s localhost:6632/api/v1/connectors/orders-src \
+  | jq -c '.status | {phase, pointerLsn, messages}'
+{"phase":"streaming","pointerLsn":"0/17F85F0","messages":2}
+\end{shell}
+
+Within a few seconds the source made a publication and a replication slot, copied the two rows
+already there, and started streaming. Each row is a message in the partition named after its key:
+
+\begin{shell}
+Q='batch=10&partitions=10&consumerGroup=reader&subscriptionMode=all'
+curl -s "localhost:6632/api/v1/pop/queue/orders?$Q" | jq -c '.messages[0].data'
+{"op":"r","table":"public.orders","key":{"id":1},
+ "after":{"id":1,"customer":{"name":"Ada","tier":"gold"},"status":"new","total":42.00,
+          "created_at":"2026-10-24T10:24:22.156265+00:00"},
+ "before":null,"lsn":"0/17F85F0","ts":"2026-10-24T10:24:22.823535Z","seq":0}
+\end{shell}
+
+\begin{options}{Field}{Example}{What it is}
+op & r & \texttt{c} insert, \texttt{u} update, \texttt{d} delete, \texttt{r} a row copied at the start. \\
+key, after, before & & The row's key, the new row (\texttt{null} for a delete), the old key for a delete. \\
+lsn, xid & 0/17F85F0 & The commit position in the WAL, and the PostgreSQL transaction. \\
+ts, seq & & The commit time, and the change's place inside its transaction. \\
+\end{options}
+
+Then we changed the table: one update, then an insert and a delete in one transaction. The insert
+and the delete arrived with the same \texttt{lsn} and \texttt{xid}, in one Queen transaction, so no
+consumer could see one without the other. Each message id is built from the change's place in the
+WAL (\texttt{pg:0a238c4b:00000000017F8830:0}), so it is the same however many times it is sent.
+
+\why{the source writes the messages and its WAL position in the same Queen transaction. After a
+crash the next owner restarts from that position and drops what is already in Queen. Only after
+Queen has committed does PostgreSQL get leave to recycle the WAL.}
+
+\queenfig{pg-source}{The source: the messages and the WAL position commit together.}
+
+\subsection{The sink}
+
+A sink in \texttt{cdc} mode applies the source's events to another table:
+
+\begin{shell}
+docker exec pg psql -U postgres -c 'CREATE TABLE orders_copy (LIKE orders INCLUDING ALL);'
+curl -s -X PUT localhost:6632/api/v1/connectors/orders-copy \
+  -H 'content-type: application/json' -d '{
+  "kind": "sink",
+  "connection": {"host": "pg", "database": "postgres", "user": "postgres",
+                 "password": "secret", "sslMode": "disable"},
+  "sink": {"queue": "orders", "table": "public.orders_copy", "mode": "cdc"}
+}' >/dev/null
+docker exec pg psql -U postgres \
+  -c 'SELECT id, customer, status, total FROM orders_copy ORDER BY id;'
+ id |             customer              | status | total
+----+-----------------------------------+--------+-------
+  1 | {"name": "Ada", "tier": "gold"}   | paid   | 42.00
+  3 | {"name": "Grace", "tier": "gold"} | new    | 99.90
+\end{shell}
+
+A sink also writes plain messages. In \texttt{upsert} mode each top-level key of the message goes to
+the column of the same name, keys with no column are ignored, and a column the message does not name
+keeps its value. We pushed a message with \texttt{id} 7, a customer, a total of \texttt{"12.50"} and
+a \texttt{note} with no column, then \texttt{\{"id":7,"total":15\}}. The row ended with the customer
+of the first message and a total of 15.00, and a generated column filled the city from the
+customer's address.
+
+\begin{pairs}[0.18]{Mode}{Each message}
+append & is inserted as a new row \\
+upsert & is inserted, or updates the row with its key, with the columns it names \\
+cdc & is a source event, applied: insert or update, delete, truncate \\
+sql & runs your statement, with parameters taken from the message \\
+\end{pairs}
+
+\why{each batch is one PostgreSQL transaction that also moves a progress row
+(\texttt{queen.sink\_progress}). A message that comes back after a lost ack finds its offset already
+there, and is skipped. So even a statement that is not idempotent runs exactly once per message.}
+
+\queenfig{pg-sink}{The sink: the offsets commit with the rows.}
+
+\subsection{Four things to know}
+
+\begin{itemize}
+\item \textbf{A replication slot keeps WAL while the source is down}, and can fill the database's
+disk. Set \texttt{max\_slot\_wal\_keep\_size}, and alert on \texttt{queen\_pg\_source\_slot\_lag\_bytes}.
+\item \textbf{Every source table needs a key} in the WAL: a primary key, or a unique index as
+replica identity. A table without one is refused.
+\item \textbf{A message PostgreSQL refuses} (a constraint, a wrong type) is tried a few times, then
+dead-lettered with the database's error, and its partition goes on.
+\item \textbf{Keep the table's key aligned with the partition} in \texttt{upsert} and \texttt{cdc}
+mode. Order holds inside a partition, so two partitions writing one row would race.
+\end{itemize}
+
+On the site: \href{https://queenmq.com/integrations/postgres/}{queenmq.com/integrations/postgres}.

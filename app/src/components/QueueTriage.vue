@@ -242,7 +242,7 @@ function nextCheck(row) {
 .triage-evidence small, .triage-stamp { color: var(--text-low); font-size: 11px; line-height: 1.5; }
 .triage-stamp { margin: 0; }
 .triage-check { margin-top: 24px; }
-.triage-kicker { color: var(--text-low); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.triage-kicker { color: var(--text-low); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
 .triage-check h4 { margin: 7px 0; font-size: 14px; }
 .triage-check p, .triage-explanation { color: var(--text-mid); font-size: 12px; line-height: 1.7; }
 .triage-check p { margin: 0; }

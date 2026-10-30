@@ -1,0 +1,116 @@
+% Chapter 2, section 10: Stream processing
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Stream processing}
+
+A stream reads a queue and writes its results to another. The partition is the key, so each
+customer gets its own windows. Like a new group it starts at the tail: push a few more orders and a
+result arrives a minute later.
+
+\guide{stream}
+
+A stream reads its queue as a consumer group (\texttt{streams.<queryId>}) and keeps its state, the
+open windows, in the broker. Each time it closes windows, it writes the new state, pushes the
+results and acks the messages they came from in one transaction.
+
+\queenfig{stream-cycle}{One cycle of a stream is one transaction.}
+
+\why{counting, summing and grouping events over time is a job most systems hand to a separate
+stream processor, with its own cluster and its own idea of what was processed. Here it runs in a
+normal process, its state lives next to the data, and one commit keeps the results and the inputs in
+step: a crash can neither lose a result nor count an event twice.}
+
+\subsection{Four kinds of window}
+
+\begin{options}{Window}{Example}{What it is, and when to use it}
+windowTumbling & \texttt{seconds: 60} & Fixed windows, one after the other. Revenue per minute. \\
+windowSliding & \texttt{size: 600, slide: 60} & Overlapping windows: the last 10 minutes, every minute. Each event counts in several windows, so it keeps more state. \\
+windowSession & \texttt{gap: 1800} & One window per burst of activity, closed after a quiet gap. A visit, a conversation. \\
+windowCron & \texttt{every: 'hour'} & Windows aligned to the clock (\texttt{second}, \texttt{minute}, \texttt{hour}, \texttt{day}, \texttt{week}). Hourly and daily reports. \\
+\end{options}
+
+\queenfig{window-shapes}{The four kinds of window on one partition's events.}
+
+\guide{stream-sliding}
+
+\guide{stream-session}
+
+\why{``in the last ten minutes'', ``per visit'' and ``per hour'' are different questions, and each
+window shape answers one of them without code of your own.}
+
+\subsection{When it happened, or when it arrived}
+
+By default a window holds the events that arrived during it. Give \texttt{eventTime} a function that
+reads the time from the message, and windows hold the events that happened during it instead. It
+gets the whole message, so the event's own fields are under \texttt{data}; the aggregate's functions
+get the event itself.
+
+\guide{stream-hourly}
+
+\texttt{allowedLateness} says how far behind the newest event an event may be and still count. A
+later one is dropped, or with \texttt{onLate: 'include'} it opens a fresh window, so the window is
+sent a second time with only the late events. \texttt{gracePeriod} keeps a window open a little
+after its end, and \texttt{idleFlushMs} (5 seconds) closes the windows of partitions that went quiet.
+\texttt{subscriptionMode: 'all'} makes a new stream read what the queue already holds.
+
+\why{events arrive late and out of order: a phone that was offline, a batch upload, a retry. An
+hourly report should count a sale in the hour it happened, not in the hour its message got through.}
+
+\subsection{Shaping the data}
+
+\begin{itemize}
+\item \texttt{map(fn)} changes each message, \texttt{filter(fn)} drops the ones you do not want,
+and \texttt{flatMap(fn)} turns one message into several values.
+\item \texttt{aggregate(\{ ... \})} folds a window into named numbers. The name decides the fold:
+\texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max} and \texttt{avg}; any other name adds up.
+\texttt{reduce(fn, initial)} is the general form, for anything else.
+\item \texttt{keyBy(fn)} groups by something other than the partition (per page instead of per user).
+Several workers can then write the same key, which slows them down; when that matters, push to a
+queue partitioned by the new key first, and stream from it.
+\end{itemize}
+
+\why{most stream jobs are the same few steps: drop noise, reshape, group, fold. Having them as
+building blocks keeps a stream to a few readable lines.}
+
+\subsection{Two ways to end a stream}
+
+\texttt{.to(queue)} pushes each result to another queue, in the same commit as the state and the
+acks, into the partition of the same name unless you pass \texttt{\{ partition \}}.
+\texttt{.foreach(fn)} calls your function for each result, and acks only after it returns: a crash
+in the middle calls it again.
+
+\why{a result that stays inside Queen can be exactly once. A call to the outside world (an email,
+an API) cannot, so \texttt{foreach} makes it at least once and says so. For an external effect that
+must happen once, send the result to a queue and let a worker do it with an idempotency key.}
+
+\subsection{Rate limits with a gate}
+
+\texttt{gate(fn)} decides, message by message, whether a message may go on now, with state kept per
+partition. Two ready-made gates are included: \texttt{tokenBucketGate} and
+\texttt{slidingWindowGate}.
+
+\guide{stream-gate}
+
+A message the gate refuses stops its partition there: it and the ones after it are delivered again,
+in order, when the lease runs out.
+
+\why{an SMS provider, a partner API or a rate-limited email service accepts only so many calls a
+second. A gate per customer keeps you inside those limits without losing order and without a queue
+of your own for the waiting messages.}
+
+\subsection{Running a stream}
+
+\texttt{run()} takes the stream's \texttt{queryId}, its identity: its state is stored under it, so a
+process restarted with the same id carries on with the same windows, and several processes with the
+same id share the partitions between them. \texttt{batchSize} (200) and \texttt{maxPartitions} (4)
+size each cycle, and \texttt{stop()} on the handle \texttt{run()} returns stops it cleanly.
+
+\why{a stream is a long-running worker like any other: it has to survive restarts, scale out, and
+stop during a deploy without losing its place.}
+
+On the site, with the code in all six SDK languages: \href{https://queenmq.com/writing-applications/streams/}{queenmq.com/writing-applications/streams}.
+
+Push, consume, ack, replay, fetch, transactions, KV, timers, locks, streams and ephemeral queues all
+combine. Build on them and Queen carries the logic you would otherwise write around a broker.

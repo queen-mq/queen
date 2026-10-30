@@ -21,12 +21,15 @@ var ClientDefaults = ClientConfig{
 var QueueDefaults = QueueConfig{
 	LeaseTime:                 300,   // 5 minutes (seconds)
 	RetryLimit:                3,     // Max 3 retries before DLQ
+	RetryDelayMillis:          1000,  // 1 second before a failed message comes back (milliseconds)
 	Priority:                  0,     // Default priority
 	DelayedProcessing:         0,     // No delay (seconds)
 	WindowBuffer:              0,     // No window buffering (seconds)
 	MaxSize:                   0,     // No limit on messages per queue
 	RetentionSeconds:          0,     // No retention (keep forever)
 	CompletedRetentionSeconds: 0,     // No retention for completed messages
+	MaxWaitTimeSeconds:        0,     // Messages are never deleted for age alone
+	DedupWindowSeconds:        3600,  // 1 hour dedup window per transactionId (seconds)
 	RetentionEnabled:          false, // Retention/cleanup disabled by default
 	DeadLetterQueue:           false, // Poison messages dropped (not dead-lettered) by default
 	DlqAfterMaxRetries:        false, // DLQ-after-max-retries trigger off by default

@@ -1,0 +1,116 @@
+---
+title: "S3 sink: mirror queues to JSONL or Parquet"
+description: "The broker writes the messages of chosen queues to an S3 bucket, as JSONL or Parquet, once each, on every node of a cluster, with no other process to run."
+type: how-to
+tier: use
+sidebar:
+  label: "S3 sink"
+  order: 3
+sourceOfTruth:
+  - connectors/queen-s3/src/config.rs
+  - connectors/queen-s3/src/layout.rs
+  - connectors/queen-s3/src/window.rs
+  - connectors/queen-s3/src/lease.rs
+  - connectors/queen-s3/src/placement.rs
+  - connectors/queen-s3/src/sink.rs
+  - connectors/queen-s3/src/driver.rs
+  - connectors/queen-s3/src/health.rs
+  - connectors/queen-s3/src/status.rs
+  - connectors/queen-s3/src/obs.rs
+  - connectors/queen-s3/src/writer/jsonl.rs
+  - connectors/queen-s3/src/writer/parquet.rs
+  - server/src/s3_inproc.rs
+  - server/src/config.rs
+  - server/src/rsm/maintenance.rs
+  - proxy/src/cp.rs
+  - proxy/src/s3.rs
+---
+
+The broker can copy its queues into an S3 bucket, as JSONL or Parquet files in folders that DuckDB, Spark or ClickHouse read directly. The sink runs inside the broker, on every node of a cluster, and it is exactly once: each record lands in one file, and a crash or a retried upload rewrites the same bytes under the same name instead of adding a copy.
+
+<Why>a queue is a log, and its history is worth keeping for analytics, audits and replays. Disk on the brokers is expensive for that; a bucket is cheap, and the tools that read it are already there. The sink needs no consumer to run and no code to write.</Why>
+
+## Turn it on
+
+Any S3-compatible service works. Our test used a versitygw gateway named `s3` on the same Docker network:
+
+```bash
+docker run -d --name queen --network lake -p 6632:6632 \
+  -v /var/lib/queen:/var/lib/queen/raft \
+  -e QUEEN_S3_EMBEDDED=true \
+  -e QUEEN_S3_QUEUES=orders \
+  -e QUEEN_S3_ENDPOINT=http://s3:7070 \
+  -e QUEEN_S3_REGION=us-east-1 \
+  -e QUEEN_S3_PATH_STYLE=true \
+  -e QUEEN_S3_BUCKET=lake \
+  -e QUEEN_S3_ACCESS_KEY=queen \
+  -e QUEEN_S3_SECRET_KEY=queen-secret-key \
+  -e QUEEN_S3_START=earliest \
+  -e QUEEN_S3_MAX_WINDOW_MS=10000 \
+  ghcr.io/queen-mq/queen:2.6.0
+```
+
+The last two lines are for the demo: `earliest` copies the queue from its first record, and a file closes after ten seconds instead of five minutes. Push three messages:
+
+```bash
+curl -s -X POST localhost:6632/api/v1/push -H 'content-type: application/json' -d '{"items":[
+  {"queue":"orders","partition":"cust-1","payload":{"order":1,"status":"new","total":42.00}},
+  {"queue":"orders","partition":"cust-2","payload":{"order":2,"status":"new","total":17.50}},
+  {"queue":"orders","partition":"cust-1","payload":{"order":1,"status":"paid","total":42.00}}
+]}' >/dev/null
+curl -s localhost:6632/status \
+  | jq -c '.s3.sinks[0].queues[0] | {state, k, windowsCommitted, records}'
+{"state":"filling","k":1,"windowsCommitted":1,"records":3}
+```
+
+About ten seconds later window 1 was in the bucket, as two files: the data and its manifest.
+
+```text
+queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/dt=2026-10-24/hour=10/
+  w-0000000001-1792836000000000-1792837437745538.jsonl.zst
+queen/_queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/windows/0000000001.json
+```
+
+The data file holds one line per record, sorted by partition and offset:
+
+```json
+{"partition":"cust-1","offset":0,"transactionId":"01a16d70-3e1e-7001-9fb4-299167829f1d",
+ "ts":"2026-10-24T10:23:54.910988Z","payload":{"order":1,"status":"new","total":42.00}}
+{"partition":"cust-1","offset":1,...,"payload":{"order":1,"status":"paid","total":42.00}}
+{"partition":"cust-2","offset":0,...,"payload":{"order":2,"status":"new","total":17.50}}
+```
+
+The payload is the producer's own text, byte for byte: `42.00` is still `42.00`.
+
+## How it works
+
+The sink cuts each queue into windows of time, on the broker's clock. A window closes when it holds `QUEEN_S3_TARGET_MB` of records, when it is `QUEEN_S3_MAX_WINDOW_MS` old, or at the next hour. Once a window is closed, no record can join it, so building it again gives the same records in the same order, the same bytes and the same file name. That is the whole exactly-once argument, and it asks nothing special of the bucket.
+
+<Fig id="s3-sink" caption="Windows on the broker's clock, and the three-step commit." />
+
+Every node runs the sink, but only one node writes a queue: the one that holds the queue's lease, a row in Queen's KV. A window is committed in three steps: its end is written in KV, the files go up, then a commit pointer moves in KV. A node that dies halfway leaves the next one enough to finish the same window. The queues spread over the nodes by themselves.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_S3_EMBEDDED` | false | Starts the sink on this node. |
+| `QUEEN_S3_QUEUES` | required | The queues to copy, comma-separated, or `*` for all. |
+| `QUEEN_S3_ENDPOINT`, `_REGION`, `_BUCKET` | required | Where the bucket is. |
+| `QUEEN_S3_ACCESS_KEY`, `_SECRET_KEY` | required | The credentials. The secret is never logged. |
+| `QUEEN_S3_PATH_STYLE` | false | `true` puts the bucket in the URL path, as most self-hosted services want. |
+| `QUEEN_S3_FORMAT` | jsonl | `jsonl` or `parquet`. |
+| `QUEEN_S3_START` | latest | Where a new queue starts: `latest`, or `earliest` for what retention still holds. |
+| `QUEEN_S3_TARGET_MB` | 128 | Uncompressed megabytes that close a window. |
+| `QUEEN_S3_MAX_WINDOW_MS` | 300000 | The longest a window stays open. |
+| `QUEEN_S3_SSE` | unset | `AES256` or `aws:kms`: encryption of the files in the bucket. |
+
+## Four things to know
+
+- **The bucket copies the log, not what consumers did.** A message a group nacked or sent to the dead-letter queue is in the bucket like any other.
+- **The bucket is plain text.** The sink decrypts encrypted queues before it writes them, so give the bucket encryption of its own (`QUEEN_S3_SSE`, or the bucket's default).
+- **Retention can delete records before the sink reads them.** The loss is never silent (the manifest lists the lost range), but you can rule it out: with `"retentionSinkHold":"default"` on the queue, retention waits for the sink, up to seven days.
+- **Watch `queen_s3_lag_seconds`**: how far behind the bucket is. It climbs to a little more than one window on a busy queue, then drops when the window commits.
+
+## See also
+
+- [Configuration reference](/reference/configuration/): every `QUEEN_S3_*` setting.
+- [Windowed aggregation](/patterns/windowed-aggregation/): finished traces copied to a bucket.

@@ -29,6 +29,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { guideRegions } from "../../webdoc/scripts/lib/guide-regions.mjs";
 
 const MCP = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO = join(MCP, "..");
@@ -230,6 +231,7 @@ const pageBySlug = new Map(pages.map((p) => [p.slug, p]));
 
 const docsSrc = join(CONTENT_SRC, "docs");
 const shownOn = new Map(); // snippet id -> [{ slug, heading }]
+const bookShownOn = new Map(); // book region id -> [{ slug, heading }]
 for (const file of walk(docsSrc, (name) => name.endsWith(".mdx"))) {
   const slug = posix(relative(docsSrc, file)).replace(/\.mdx$/, "").replace(/(^|\/)index$/, "");
   let heading = "";
@@ -239,6 +241,11 @@ for (const file of walk(docsSrc, (name) => name.endsWith(".mdx"))) {
       const list = shownOn.get(m[1]) ?? [];
       if (!list.some((u) => u.slug === slug && u.heading === heading)) list.push({ slug, heading });
       shownOn.set(m[1], list);
+    }
+    for (const m of line.matchAll(/<SdkCode id="([a-z0-9-]+)"/g)) {
+      const list = bookShownOn.get(m[1]) ?? [];
+      if (!list.some((u) => u.slug === slug && u.heading === heading)) list.push({ slug, heading });
+      bookShownOn.set(m[1], list);
     }
   }
 }
@@ -281,16 +288,53 @@ for (const name of readdirSync(snippetDir).filter((n) => n.endsWith(".mdx")).sor
   snippets.push({ id, ...kind, fenceLang: fence[1] || kind.language, source, code: fence[2], pages: pagesShown });
 }
 
+// ---------------------------------------------------------------- the book's programs
+// Every <SdkCode id="..." /> on the docs pages is a region of one of these
+// programs (webdoc/src/lib/book-code.ts), which examples/tutorials/run.sh runs
+// and checks. Each region is a tested snippet, labelled by the pages it is on.
+
+const BOOK_PROGRAMS = {
+  js: ["js/00-five-minutes.mjs", "js/book-client-guide.mjs", "js/book-use-cases.mjs"],
+  python: ["py/00_five_minutes.py", "py/book_client_guide.py", "py/book_use_cases.py"],
+  go: ["go/five-minutes/main.go", "go/book-client-guide/main.go", "go/book-use-cases/main.go"],
+  rust: ["rust/src/bin/00_five_minutes.rs", "rust/src/bin/book_client_guide.rs", "rust/src/bin/book_use_cases.rs"],
+  php: ["php/00-five-minutes.php", "php/book-client-guide.php", "php/book-use-cases.php"],
+  cpp: ["cpp/00-five-minutes.cpp", "cpp/book-client-guide.cpp", "cpp/book-use-cases.cpp"],
+};
+for (const [language, files] of Object.entries(BOOK_PROGRAMS)) {
+  for (const rel of files) {
+    const source = `examples/tutorials/${rel}`;
+    const abs = join(REPO, source);
+    if (!existsSync(abs)) {
+      warn(`book program ${source} missing`);
+      continue;
+    }
+    const text = readFileSync(abs, "utf8");
+    if (text.length <= PROGRAM_MAX_BYTES) programs[source] = text;
+    for (const [region, code] of guideRegions(text, source)) {
+      const pagesShown = (bookShownOn.get(region) ?? [])
+        .filter((u) => pageBySlug.has(u.slug))
+        .map((u) => {
+          const page = pageBySlug.get(u.slug);
+          return { title: page.title, heading: u.heading, url: page.url + (u.heading ? `#${slugify(u.heading.replace(/`/g, ""))}` : "") };
+        });
+      const task = region.replace(/^uc-/, "");
+      snippets.push({ id: `book-${language}-${region}`, kind: "book", language, task, fenceLang: language, source, code, pages: pagesShown });
+    }
+  }
+}
+const testedCode = new Set(snippets.map((x) => x.code.trim()));
+
 // ---------------------------------------------------------------- install and connect
-// Package names and import paths, per language, from start/clients: the page
+// Package names and import paths, per language, from writing-applications/clients: the page
 // that owns them. Every SDK answer carries its language's block, so an agent
 // never has to guess a module path.
 
 const INSTALL_HEADINGS = { JavaScript: "js", Python: "python", Go: "go", Rust: "rust", "C++": "cpp", "PHP and Laravel": "php" };
 const install = {};
 {
-  const page = pageBySlug.get("start/clients");
-  const sec = sections.find((x) => x.slug === "start/clients" && x.heading === "Install and connect");
+  const page = pageBySlug.get("writing-applications/clients");
+  const sec = sections.find((x) => x.slug === "writing-applications/clients" && x.heading === "Install and connect");
   if (page && sec) {
     for (const block of page.markdown.slice(sec.start, sec.end).split(/\n(?=### )/)) {
       const m = block.match(/^### (.+)\n([\s\S]*)$/);
@@ -299,7 +343,7 @@ const install = {};
     }
   }
   for (const language of Object.values(INSTALL_HEADINGS)) {
-    if (!install[language]) warn(`start/clients: no install block for ${language}`);
+    if (!install[language]) warn(`writing-applications/clients: no install block for ${language}`);
   }
 }
 
@@ -319,6 +363,8 @@ for (const s of sections) {
   for (const m of text.matchAll(/^```([A-Za-z+#-]*)([^\n]*)\n([\s\S]*?)\n```/gm)) {
     const [, fence, info, code] = m;
     if (/title=/.test(info)) continue;
+    // A fence <SdkCode /> put there is a region of a tested program, already a snippet.
+    if (testedCode.has(code.trim())) continue;
     const language = FENCE_LANG[fence.toLowerCase()];
     if (!language || code.split("\n").length < 2) continue;
     if (language === "http" && !/\bcurl\b/.test(code)) continue;

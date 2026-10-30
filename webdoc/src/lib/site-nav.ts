@@ -8,8 +8,8 @@
  * no sidebar drawer either, a phone reader had no way into the docs but the
  * hero buttons. A docs page has the sidebar, so its header carries none.
  *
- * Four doors and the hosted service: where to start, what to build, how it
- * compares, and the measurements. Everything else is one click away in the
+ * Five doors and the hosted service: where to start, what to build, how it
+ * compares, the book, and the measurements. Everything else is one click away in the
  * sidebar.
  */
 
@@ -20,9 +20,10 @@ export interface SiteLink {
 }
 
 export const SITE_NAV: readonly SiteLink[] = [
-  { label: "Docs", href: "/start/" },
-  { label: "Guides", href: "/guides/" },
-  { label: "Compare", href: "/start/compare/" },
+  { label: "Docs", href: "/introduction/" },
+  { label: "Patterns", href: "/patterns/" },
+  { label: "Compare", href: "/introduction/compare/" },
+  { label: "Book", href: "/book/" },
   { label: "Benchmarks", href: "/benchmarks/" },
 ];
 

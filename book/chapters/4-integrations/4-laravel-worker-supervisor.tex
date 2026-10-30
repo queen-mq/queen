@@ -1,0 +1,146 @@
+% Chapter 4, section 4: The Laravel worker supervisor
+% Draft by Claude, 2026-10-24. Run on QueenMQ 2.6.0 with PHP client 2.5.0 and Laravel 12, in a copy
+% of examples/apps/laravel: both engines (the PHP one, and the Rust one, supervisor 0.8.1 built
+% from supervisor/), the 300-job burst behind the figure, status, pause, continue, terminate and
+% status --check. queen:supervisor-install (which downloads the signed binary) was not run.
+
+\section{The Laravel Worker Supervisor}
+
+QueenMQ is also a queue driver for Laravel. Your jobs stay Laravel jobs, \texttt{dispatch()} does not
+change, and \texttt{php artisan queue:work} is still the worker. Install the package, then point
+Laravel at the broker in \texttt{.env}:
+
+\begin{shell}
+composer require queen-mq/php-client
+php artisan vendor:publish --tag=queen-config
+\end{shell}
+
+\begin{shell}
+QUEUE_CONNECTION=queen
+QUEEN_URL=http://127.0.0.1:6632
+\end{shell}
+
+The \textbf{supervisor} is what runs those workers. It is a master process that starts ordinary
+\texttt{queue:work} processes, keeps the right number of them on each queue, restarts the ones that
+exit, and stops them cleanly at a deploy. It does the job of Horizon's master, with no Redis.
+
+\why{a fixed number of workers is too many at night and too few in a burst. A master that reads the
+backlog sizes the pool for you, and a clean stop means a deploy never cuts a job in half.}
+
+\queenfig{supervisor-topology}{The supervisor starts the workers; the workers talk to QueenMQ.}
+
+\subsection{Two engines, one configuration}
+
+\begin{pairs}[0.12]{Engine}{What it is}
+PHP & Runs straight from the Composer package, with Laravel loaded in its master. Start it with
+\texttt{php artisan queen:supervise}. \\
+Rust & A small native master: 7.5~MiB of memory in our run. Install it once with
+\texttt{php artisan queen:supervisor-install}, then start \texttt{vendor/bin/queen-supervisor}. \\
+\end{pairs}
+
+Both read the same \texttt{supervisor} section of \texttt{config/queen.php}, write the same status and
+obey the same commands. Start with one and move to the other without touching a pool.
+
+\subsection{How to use it}
+
+The supervisor keeps its state (its status, its lock, the commands you send it) in a private
+directory, owned by the user that runs it. It refuses a directory others could write to:
+
+\begin{shell}
+install -d -m 0700 /srv/app/queen-supervisor
+echo "QUEEN_SUPERVISOR_STATE_DIRECTORY=/srv/app/queen-supervisor" >> .env
+\end{shell}
+
+Then describe a pool in \texttt{config/queen.php}. A pool is a set of workers with one configuration,
+like a Horizon supervisor. This one serves the queue \texttt{default} with one to eight workers:
+
+\begin{code}
+'supervisor' => [
+    'supervisors' => [
+        'default' => [
+            'connection' => 'queen',
+            'queues' => ['default'],
+            'balance' => 'auto',              // the pool follows the backlog
+            'min_processes' => 1,
+            'max_processes' => 8,
+            'target_jobs_per_process' => 10,  // one worker per 10 waiting jobs
+            'fast_scale_up' => true,          // close half the gap at each step
+            'timeout' => 60,                  // shorter than retry_after (90 s)
+            'tries' => 3,
+        ],
+    ],
+],
+\end{code}
+
+Start it, with either engine, under the process manager you already use (systemd, Supervisor,
+Kubernetes), and ask it how it is:
+
+\begin{shell}
+php artisan queen:supervise                               # the PHP engine
+vendor/bin/queen-supervisor --php php --artisan artisan   # or the Rust engine
+
+php artisan queen:supervisor status
++--------+---------+------+-------+---------------+-------+----------------------+
+| engine | state   | live | ready | full capacity | pid   | updated              |
++--------+---------+------+-------+---------------+-------+----------------------+
+| php    | running | yes  | yes   | yes           | 45516 | 2026-10-24T15:03:55Z |
++--------+---------+------+-------+---------------+-------+----------------------+
+\end{shell}
+
+\subsection{What it does with a burst}
+
+We dispatched 300 jobs of 200~ms each onto this pool. Three seconds later the supervisor had seen
+290 waiting jobs and grown the pool from one worker to five. It had eight at nine seconds, and the
+queue was empty at fifteen. Ten seconds after that it began to give the extra workers back, one at a
+time, until one was left. The Rust engine did the same, within a second.
+
+\queenfig{supervisor-run}{A burst of 300 jobs, as the supervisor followed it.}
+
+\begin{options}{Pool option}{Default}{What it does}
+balance & auto & \texttt{auto}: the pool follows the backlog. \texttt{simple}: a fixed number of
+workers. \texttt{off}: every worker serves the whole ordered list of queues. \\
+min\_processes, max\_processes & 1, 10 & The bounds of the pool. \\
+strategy & size & \texttt{size}: one worker per \texttt{target\_jobs\_per\_process} waiting jobs.
+\texttt{time}: enough workers to clear the backlog within \texttt{target\_clear\_seconds}. \\
+balance\_max\_shift, balance\_cooldown & 1, 3~s & How many workers one step adds or removes, and how
+often. \texttt{fast\_scale\_up} closes half the gap at each step instead. \\
+scale\_down\_delay & 10~s & How long a lower target must hold before workers are given back. \\
+timeout, retry\_after & 60~s, 90~s & A job's time limit, and its lease. The supervisor refuses to
+start when the timeout is not the shorter one. \\
+\end{options}
+
+\subsection{Control it}
+
+\begin{shell}
+php artisan queen:supervisor pause           # workers finish their job, take no new ones
+php artisan queen:supervisor continue        # and start again
+php artisan queen:supervisor terminate       # drain and exit, at every deploy
+php artisan queen:supervisor status --check  # a probe: fails unless every pool serves
+\end{shell}
+
+While we paused it, 20 new jobs waited in the queue and \texttt{status --check} failed; after
+\texttt{continue} they were done in a few seconds. \texttt{terminate} stopped the master and every
+worker in two seconds.
+
+\why{a deploy must not cut a job in half, and what runs after it must be the new code.
+The terminate command lets each worker finish its job and hands the jobs it had not started back
+to the broker. Your process manager then starts a fresh master, which loads the new code.}
+
+\subsection{Four things to know}
+
+\begin{itemize}
+\item \textbf{One master per application and consumer group.} A master sizes its pools from the
+whole backlog, so two of them would each run the full target. To run several replicas, turn on
+\texttt{QUEEN\_SUPERVISOR\_COORDINATION=true} in every one: they then share one target.
+\item \textbf{Prefork saves most of the memory.} With \texttt{QUEEN\_SUPERVISOR\_PREFORK=true},
+Laravel boots once and every worker is forked from it: in our benchmark, 64 forked workers fit in
+183~MiB, where Horizon's took 1,892.
+\item \textbf{It refuses an unsafe pool at the start}: a timeout that is not shorter than the lease,
+or pools whose maximums do not fit its process budget. A mistake shows at the deploy, not as a job
+that runs twice.
+\item \textbf{It runs on your worker hosts, never on the broker}, and on Unix only.
+\end{itemize}
+
+On the site: \href{https://queenmq.com/integrations/laravel/}{queenmq.com/integrations/laravel}. More
+there: \href{https://queenmq.com/integrations/laravel/supervisors/}{worker supervisors},
+\href{https://queenmq.com/integrations/laravel/migrate-from-horizon/}{migrate from Horizon}.

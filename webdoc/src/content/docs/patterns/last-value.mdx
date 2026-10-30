@@ -1,0 +1,33 @@
+---
+title: "Last value pattern: keep only the newest update"
+description: "Room availability changes many times a minute and only the latest matters: a conflating consumer group gets the newest message of each partition."
+type: example
+tier: use
+sidebar:
+  label: "Last value"
+  order: 8
+verifiedBy:
+  - examples/tutorials/run.sh
+  - examples/tutorials/js/book-use-cases.mjs
+  - examples/tutorials/py/book_use_cases.py
+  - examples/tutorials/go/book-use-cases/main.go
+  - examples/tutorials/rust/src/bin/book_use_cases.rs
+  - examples/tutorials/php/book-use-cases.php
+  - examples/tutorials/cpp/book-use-cases.cpp
+---
+
+The availability of a hotel changes many times a minute. A screen that shows it needs only the current value, and handling every old update on the way there is wasted work.
+
+A consumer group with `.conflation()` gets only the newest message of each partition, and its cursor moves past the older ones.
+
+<Fig id="last-value" caption="Conflation: the newest value of each partition, for this group only." />
+
+<SdkCode id="uc-latest" />
+
+Three updates were pushed (12, 11 and 9 rooms). The screen got 9, and the older two were never delivered to it.
+
+<Why>for a value that changes, only the last one matters. Conflation lets a slow consumer catch up in one step instead of replaying every update. Other groups of the same queue still get every message.</Why>
+
+One thing to know: use it only where an old message has no meaning of its own. For events that each count, such as payments, every message must be handled.
+
+Built from: [Pop and consume](/writing-applications/pop/#only-the-newest-message-conflation).

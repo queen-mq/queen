@@ -169,7 +169,7 @@ if (!index) {
   );
 }
 
-const someMarkdown = join(DIST, "start", "quickstart", "index.md");
+const someMarkdown = join(DIST, "writing-applications", "push", "index.md");
 const md = read(someMarkdown);
 if (!md) {
   fail(relative(WEBDOC, someMarkdown), "missing — run `pnpm build` first");
@@ -180,7 +180,7 @@ if (!md) {
   );
 }
 
-const someHtml = join(DIST, "start", "quickstart", "index.html");
+const someHtml = join(DIST, "writing-applications", "push", "index.html");
 const html = read(someHtml);
 if (!html) {
   fail(relative(WEBDOC, someHtml), "missing — run `pnpm build` first");

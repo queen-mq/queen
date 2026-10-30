@@ -1,0 +1,32 @@
+% Chapter 6, section 2: Admission, Batch, Plan, Apply
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+
+\section{Admission, Batch, Plan, Apply}
+
+A write goes through four steps.
+
+\queenfig{write-path}{The four steps of a write.}
+
+\paragraph{Admission.} Every node has a memory budget for the writes waiting to be planned (128 MiB
+by default). A push takes its share before its body is read. When the budget is full, the push
+waits, so a fast producer just slows down. After about 15 seconds it gets a 429, and the client
+tries again. Pops and acks never wait here. We added this after a broker filled 10 GB of memory
+with waiting requests and was killed.
+
+\paragraph{Batch.} The leader collects up to 4,096 commands (or 4 MiB) and plans them together, as
+one log entry. Up to eight entries are in flight at the same time. A retried request is found by
+its id and gets the answer it missed, so nothing is planned twice.
+
+\paragraph{Plan.} The planner decides what each command means right now, and writes the answer
+down as facts: ``append these messages to partition 17, at offsets 4,210 to 4,309, at this
+microsecond''. Ids, offsets and times are chosen here, once. To use more cores, eight lanes plan in
+parallel: each lane owns a share of the partitions, and one last step plans what touches more than
+one lane.
+
+\queenfig{lanes}{Eight lanes plan in parallel; one step plans what crosses lanes.}
+
+\paragraph{Apply.} Every node executes the committed entries, in order. Apply reads no clock and no
+random number, so every node ends with the same bytes. Four threads apply the work of different
+partitions at the same time.

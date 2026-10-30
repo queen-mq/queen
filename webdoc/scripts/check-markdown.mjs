@@ -91,6 +91,9 @@ const REGISTERED_COMPONENTS = (() => {
  */
 const HANDLED = new Map([
   ["Render", "src/lib/markdown-partials.ts (expanded to the partial's markdown)"],
+  ["SdkCode", "src/lib/markdown-partials.ts (expanded to one fence per SDK language)"],
+  ["Fig", "src/lib/markdown-partials.ts (componentMap: the figure's alt text, caption)"],
+  ["BookDownload", "src/lib/markdown-partials.ts (componentMap: the edition and its PDF link)"],
   ["Chart", "src/lib/markdown-partials.ts (componentMap: alt text, caption, source)"],
   ["Screenshot", "src/lib/markdown-partials.ts (componentMap: alt text, caption)"],
   ["Partition", "src/lib/markdown-partials.ts (componentMap: alt text, caption)"],
@@ -123,10 +126,11 @@ const ALLOWED_TO_VANISH = new Map([
 
 /** Explicit assertions for the pages the regression gutted completely. */
 const MUST_CARRY = [
-  // The guides that render complete applications: one whole program each, and
-  // the page is worthless without it.
-  { page: "guides/exactly-once", fences: 1, langs: ["js"] },
-  { page: "guides/webhooks", fences: 1, langs: ["js"] },
+  // Pages whose code is the point: one fence per SDK language from <SdkCode />,
+  // and the page is worthless without them.
+  { page: "patterns/workflows", fences: 6, langs: ["js", "python", "go", "rust", "php", "cpp"] },
+  { page: "patterns/retries-dead-letters", fences: 6, langs: ["js", "python", "go", "rust", "php", "cpp"] },
+  { page: "writing-applications/push", fences: 24, langs: ["js", "python", "go", "rust", "php", "cpp"] },
   { page: "reference/configuration", tableRows: 100 },
 ];
 
@@ -423,8 +427,11 @@ if (!existsSync(HOME_HTML)) {
   fail("dist/index.md", "missing — the landing page has no markdown alternate");
 } else {
   const html = readFileSync(HOME_HTML, "utf8");
-  const flatHome = flatten(readFileSync(HOME_MARKDOWN, "utf8").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"));
-  const flatCorpus = corpus ? flatten(corpus.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")) : null;
+  // Code fences are not prose, and C++'s `std::cout << x` would read as an
+  // unclosed tag to flatten() and swallow the text after it: drop them first.
+  const prose = (md) => md.replace(/^```[^\n]*\n[\s\S]*?^```[ \t]*$/gm, " ").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  const flatHome = flatten(prose(readFileSync(HOME_MARKDOWN, "utf8")));
+  const flatCorpus = corpus ? flatten(prose(corpus)) : null;
   const marked = [...html.matchAll(/<(h1|h2|h3|p|div)\b[^>]*\bdata-md\b[^>]*>([\s\S]*?)<\/\1>/g)];
   if (marked.length < 10) {
     fail("src/pages/index.astro", `only ${marked.length} elements marked data-md: the probe expects the page's copy to be marked`);

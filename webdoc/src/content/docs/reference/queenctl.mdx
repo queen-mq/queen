@@ -35,6 +35,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-13 (2.3.0): clients/client-go/consumer_manager.go asks for a pop's stored records (frames=true) only when the client's FramedPop option is on; queenctl turns none of the three wire options on, so tail and pop read the JSON answers this page describes. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-13 (status): status.go joins the list; the command reads the queue listing and the consumer-group listing, described below. consumer_manager.go changed on 10-12 (it can read framed pops, off by default, and the CLI does not turn them on): nothing on this page depends on it.
 # sourceOfTruth re-read 2026-10-13 (lag, queue list): lag.go and queue.go join the list; what lag prints with and without --min-seconds and where queue list applies its flags are described below.
+# sourceOfTruth re-read 2026-10-24 (queenctl 2.6.1): .goreleaser.yaml no longer publishes; it builds the same archives, and the release workflow publishes them as the release "queenctl X.Y.Z" on the clients/client-cli/vX.Y.Z tag. Install now names that release and the go install path.
 ---
 
 `queenctl` is a single static binary over the HTTP API, built on the Go SDK. It is what we reach
@@ -44,19 +45,37 @@ an HTTP call you could make with `curl`, so its output always tells you what the
 
 ## Install
 
-`queenctl` 2.0.0 is built for Queen 2.0, and its archives are attached to the
-[v2.0.0 release](https://github.com/queen-mq/queen/releases/tag/v2.0.0). To build it from a checkout
-of the repository instead, where the Go workspace (`go.work`, which declares Go 1.26) links the CLI
-to the SDK in the same tree:
+`queenctl` 2.6.1 is built for Queen 2.6. Its archives are on the release
+[queenctl 2.6.1](https://github.com/queen-mq/queen/releases/tag/clients/client-cli/v2.6.1), named
+`queenctl_<version>_<os>_<arch>`: `linux` and `macos` on `x86_64` and `arm64`, and `windows` on
+`x86_64` as a `.zip`. Each archive holds the binary, the README and shell completions. On a Mac with
+Apple silicon:
+
+```bash
+curl -sSL https://github.com/queen-mq/queen/releases/download/clients/client-cli/v2.6.1/queenctl_2.6.1_macos_arm64.tar.gz | tar -xz queenctl
+sudo mv queenctl /usr/local/bin/
+source <(queenctl completion zsh)    # completion for this shell
+```
+
+With Go 1.24 or later:
+
+```bash
+go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@latest
+```
+
+The module keeps the path it had before the repository moved to `queen-mq`. A path under
+`github.com/queen-mq/queen` resolves to the whole repository, and `go install` fails with
+`module source tree too large`.
+
+To build it from a checkout of the repository instead, where the Go workspace (`go.work`, which
+declares Go 1.26) links the CLI to the SDK in the same tree:
 
 ```bash
 cd clients/client-cli && make build    # ./bin/queenctl
 ```
 
-Releases are published from `clients/client-cli/vX.Y.Z` tags on the
-[queen-mq/queen GitHub Releases](https://github.com/queen-mq/queen/releases), as archives named
-`queenctl_<version>_<os>_<arch>`: `linux` and `macos` on `x86_64` and `arm64`, and `windows` on
-`x86_64` as a `.zip`.
+Each version is released from its `clients/client-cli/vX.Y.Z` tag, as the release `queenctl X.Y.Z`
+on that tag in the [queen-mq/queen GitHub Releases](https://github.com/queen-mq/queen/releases).
 
 ## Connect
 

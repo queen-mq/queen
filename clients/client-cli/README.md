@@ -28,7 +28,7 @@ go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@late
 ```
 
 This installs a `queenctl` binary into `$GOBIN` (defaults to `~/go/bin`).
-Requires Go 1.22+.
+Requires Go 1.24+.
 
 ### From source
 

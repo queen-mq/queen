@@ -282,6 +282,16 @@ func (tb *TransactionBuilder) Commit(ctx context.Context) (*TransactionResponse,
 		if attempt >= 3 || !lock.Held() {
 			return response, nil
 		}
+		// No renew moved the handle's token: one it gave up on (its timeout,
+		// a dropped connection) landed all the same, and the handle still has
+		// the token that just lost. Renew now: the broker carries a renew with
+		// a stale token through for the owner whose row it is, and answers the
+		// current token. A refused renew marks the lock lost.
+		if sent := kv[at].Expect; sent != nil && *sent == lock.Token() {
+			if ok, err := lock.Renew(ctx); err != nil || !ok {
+				return response, nil
+			}
+		}
 	}
 }
 

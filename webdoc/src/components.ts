@@ -7,12 +7,14 @@
 import { Accordion, AccordionContent, AccordionGroup, AccordionTrigger } from "./components/ui/accordion";
 import { Aside } from "./components/ui/aside";
 import { Badge } from "./components/ui/badge";
+import BookDownload from "./components/BookDownload.astro";
 import { Card } from "./components/ui/card";
 import { CardGrid } from "./components/ui/card-grid";
 import Chart from "./components/Chart.astro";
 import { Code } from "./components/ui/code";
 import { CodeGroup } from "./components/ui/code-group";
 import Expected from "./components/Expected.astro";
+import Fig from "./components/Fig.astro";
 import Figure from "./components/Figure.astro";
 import { FileTree } from "./components/ui/file-tree";
 import { Frame } from "./components/ui/frame";
@@ -26,11 +28,13 @@ import PreforkMemory from "./components/PreforkMemory.astro";
 import Render from "./components/Render.astro";
 import Result from "./components/Result.astro";
 import RollingUpdate from "./components/RollingUpdate.astro";
+import SdkCode from "./components/SdkCode.astro";
 import Screenshot from "./components/Screenshot.astro";
 import { Step, Steps } from "./components/ui/steps";
 import SupervisorTopology from "./components/SupervisorTopology.astro";
 import { Tabs, TabItem } from "./components/ui/tabs";
 import WorkerTimeline from "./components/WorkerTimeline.astro";
+import Why from "./components/Why.astro";
 
 export const components = {
   Accordion,
@@ -39,12 +43,14 @@ export const components = {
   AccordionTrigger,
   Aside,
   Badge,
+  BookDownload,
   Card,
   CardGrid,
   Chart,
   Code,
   CodeGroup,
   Expected,
+  Fig,
   Figure,
   FileTree,
   Frame,
@@ -59,10 +65,12 @@ export const components = {
   Result,
   RollingUpdate,
   Screenshot,
+  SdkCode,
   Step,
   Steps,
   SupervisorTopology,
   TabItem,
   Tabs,
   WorkerTimeline,
+  Why,
 };

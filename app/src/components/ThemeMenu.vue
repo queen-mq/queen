@@ -114,22 +114,3 @@ function onPointerDown(event) {
 onMounted(() => document.addEventListener('pointerdown', onPointerDown))
 onUnmounted(() => document.removeEventListener('pointerdown', onPointerDown))
 </script>
-
-<style scoped>
-.theme-picker { position: relative; flex: none; }
-.theme-trigger.active { color: var(--text-hi); background: var(--ink-4); }
-.theme-menu {
-  position: absolute; top: calc(100% + 6px); right: 0; z-index: 50;
-  min-width: 144px; padding: 4px; border: 1px solid var(--bd-hi);
-  border-radius: var(--r-card); background: var(--ink-3); box-shadow: var(--shadow-pop);
-}
-.theme-option {
-  display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  width: 100%; padding: 7px 10px; border: 0; border-radius: var(--r-control);
-  background: transparent; color: var(--text-mid); font: inherit; font-size: 13px;
-  text-align: left; cursor: pointer; transition: color .12s, background .12s;
-}
-.theme-option:hover, .theme-option:focus-visible { color: var(--text-hi); background: var(--ink-4); }
-.theme-option[aria-checked="true"] { color: var(--text-hi); }
-.theme-option svg { width: 15px; height: 15px; flex: none; color: var(--accent-text); }
-</style>

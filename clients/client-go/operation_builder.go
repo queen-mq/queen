@@ -166,6 +166,9 @@ func (ob *OperationBuilder) buildOptions() map[string]interface{} {
 	if config.RetryLimit > 0 {
 		opts["retryLimit"] = config.RetryLimit
 	}
+	if config.RetryDelayMillis > 0 {
+		opts["retryDelay"] = config.RetryDelayMillis
+	}
 	if config.Priority != 0 {
 		opts["priority"] = config.Priority
 	}
@@ -183,6 +186,12 @@ func (ob *OperationBuilder) buildOptions() map[string]interface{} {
 	}
 	if config.CompletedRetentionSeconds > 0 {
 		opts["completedRetentionSeconds"] = config.CompletedRetentionSeconds
+	}
+	if config.MaxWaitTimeSeconds > 0 {
+		opts["maxWaitTimeSeconds"] = config.MaxWaitTimeSeconds
+	}
+	if config.DedupWindowSeconds > 0 {
+		opts["dedupWindowSeconds"] = config.DedupWindowSeconds
 	}
 	if config.RetentionEnabled {
 		opts["retentionEnabled"] = config.RetentionEnabled

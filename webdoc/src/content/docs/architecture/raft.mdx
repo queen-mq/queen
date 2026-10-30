@@ -1,0 +1,34 @@
+---
+title: "Raft inside Queen: elections, timings, snapshots"
+description: "Openraft decides who leads and when an entry is committed. The queue log files are the Raft log, heartbeats run every 100 ms, and a node that was away catches up or loads a snapshot."
+type: concept
+tier: internals
+sidebar:
+  label: "Raft"
+  order: 3
+sourceOfTruth:
+  - server/src/rsm/mod.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/facade/intake.rs
+  - server/src/rsm/facade/remote.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/batcher_lanes.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/apply_shard.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/consume/hooks.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/stream.rs
+  - server/clippy.toml
+---
+
+The nodes agree on the log with Raft, through the openraft library. Raft decides who leads and when an entry is committed. An entry is committed when a majority of the nodes has written it and synced it to disk (fsync).
+
+Queen has no separate Raft log: the queue log files are the log (see [Storage](/architecture/storage/)). The nodes talk on port 7400, over plain HTTP, with a shared token. The leader sends a heartbeat every 100 ms. If the followers hear nothing for one to two seconds, they elect a new leader.
+
+A leader that hears from no majority for 1.5 seconds stops logging new writes and keeps them waiting, in order. After 3 seconds it hands leadership to another node.
+
+<Fig id="raft-timings" caption="The timings Raft runs on." />
+
+A node that was away gets the entries it missed from the leader, who keeps them for 6 hours while its disk has room. After that, the leader sends a snapshot instead: since 2.6, only the part the node is missing. The node exits with code 75 and loads the snapshot when it starts again.

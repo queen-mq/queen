@@ -14,77 +14,137 @@ second. Every customer, order or conversation gets its own ordered partition. Ev
 takes is saved as one commit, or not at all. One binary, no database, and Kafka clients work with
 it out of the box.
 
-[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.6
+**Live demo, Codemotion week:** [milan.queenmq.com](https://milan.queenmq.com): 50,000 cars in Milan, each car its own partition, 500,000 messages a second on one Queen node.
+
+[Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.6
 
 </div>
 
 ---
 
-## The old way
+## Queen in five minutes
 
-In Kafka, Pulsar or Redpanda, partitions are how you scale. You pick a number, say 64, and hash
-your keys onto it. Order is a side effect.
+The short version, in JavaScript. The [full guide](https://queenmq.com/#guide) has nine steps in
+JavaScript, Python, Go, Rust and PHP. Every snippet, here and on the site, is cut from
+[a program that runs them all](examples/tutorials/js/00-five-minutes.mjs) and checks each one.
 
-So one slow customer blocks every other customer on the same partition. When you need more
-partitions, keys move, and ordering is lost during the change.
+### 1. Run a node
 
-The work is spread out too. To handle one event you ack it on the broker, update the database,
-write to an outbox, schedule a job and save an idempotency key. Four systems, four commits. A crash
-in between leaves the step half done.
+```bash
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
+npm install queen-mq
+```
 
-## The Queen way
+The dashboard is at http://localhost:6632, served by the same process.
 
-**One partition per entity.** Push to `customer-123` and the partition exists. No count to choose.
-A partition uses about 1 KB of memory, so one queue can hold ten million. A slow customer only
-slows itself down.
+### 2. Connect, and configure a queue
 
-**One commit per step.** In one call, a worker acks the event, saves state, pushes the next events
-and sets a timer. Queen writes it all as one log entry. If any part fails, nothing is written. A
-retry with the same id is a no-op.
+Optional: the first push creates a queue with the defaults.
 
-**The queue is a log.** Messages stay after they are processed. You get leases, retries and a
-dead-letter queue, plus replay, fan-out to many groups and seek by time.
-
-## In code
-
+<!-- guide: configure -->
 ```js
-// Push: the first message for a customer creates its partition
-await queen.queue('orders').partition(customerId)
-  .push([{ transactionId: `order-${orderId}`, data: { orderId, customerId } }])
+import { Queen } from 'queen-mq'
 
-// Consume: each step is one commit
-await queen.queue('orders').group('billing').autoAck(false).each()
-  .consume(async (message) => {
-    const { orderId, customerId } = message.data
+const queen = new Queen({ url: 'http://localhost:6632' })
+
+await queen.queue('orders')
+  .namespace('shop')              // groups queues in the dashboard
+  .config({
+    leaseTime: 30,                // seconds a worker holds a message before it is redelivered
+    retryLimit: 3,                // failures before the message goes to the dead-letter queue
+    retentionEnabled: true,       // retention runs only when this is on
+    retentionSeconds: 86400,      // then messages older than a day are removed
+  })
+  .create()
+```
+
+### 3. Push to a partition
+
+In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up
+every customer that shares its partition. Here a partition is one entity: a customer, an order, a
+conversation. The push that names it creates it, order holds inside it, and one queue has held ten
+million.
+
+<!-- guide: push -->
+```js
+await queen.queue('orders')
+  .partition('customer-42')       // one ordered partition per customer, created by this push
+  .push([{
+    transactionId: 'order-1001',  // the dedup key: pushing the same id again is a no-op
+    data: { orderId: 1001, customer: 42, total: 59.9 },
+  }])
+```
+
+### 4. Consume
+
+Without a consumer group, each message goes to one worker. Consumer groups, leases and every pop
+option are in the [full guide](https://queenmq.com/#guide-consume).
+
+<!-- guide: consume -->
+```js
+await queen.queue('orders')
+  .each()                         // the handler gets one message at a time
+  .limit(1)                       // stop after one message; a worker leaves this out
+  .consume(async (msg) => {       // acked when the handler returns, retried if it throws
+    console.log(msg.data)
+  })
+```
+
+### 5. One step, one commit
+
+The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or
+none of them does. That one call replaces the outbox table, the idempotency table and the cron job.
+
+<!-- guide: transaction -->
+```js
+await queen.queue('orders')
+  .group('fulfillment')
+  .subscriptionMode('all')
+  .autoAck(false)
+  .each()
+  .limit(1)
+  .consume(async (msg) => {
+    const { orderId, customer } = msg.data
     await queen.transaction()
-      .ack(message, 'completed', { consumerGroup: 'billing' })
-      .kv.put('orders', `order-${orderId}`, { status: 'paid' })
-      .queue('receipts').partition(customerId)
-        .push([{ transactionId: `receipt-${orderId}`, data: { orderId } }])
-      .timer('reminders').key(`order-${orderId}`).delay('24h')
-        .payload({ orderId }).schedule()
+      .ack(msg, 'completed', { consumerGroup: 'fulfillment' })  // the input is done
+      .kv.put('orders', `order-${orderId}`, { status: 'paid' }, { ttl: '7d' })
+      .queue('shipments').partition(msg.partition)              // the next event
+      .push([{ transactionId: `ship-${orderId}`, data: { orderId } }])
+      .timer('reminders').key(`review-${orderId}`).delay('24h') // a message tomorrow
+      .payload({ orderId, customer }).schedule()
       .commit()
   })
 ```
 
-The ack, the new state, the receipt and the reminder are one log entry. Over HTTP:
-`POST /api/v1/transaction`. [Transactions](https://queenmq.com/concepts/transactions/)
+### 6. Read it again
 
-## What you can remove
+Consuming does not delete: the queue is a log, kept for its retention. A new group can start from
+a point in time and read the same orders again.
 
-- **The outbox table.** The next event is pushed in the same commit.
-- **The idempotency table.** A `transactionId` makes a retry a no-op.
-- **The cron job.** Timers fire as messages in the entity's partition.
-- **Partition planning.** Partitions create themselves.
-- **Consumer rebalances.** Workers just take the next entity that has work.
+<!-- guide: replay -->
+```js
+await queen.queue('orders')
+  .group('audit')                           // a new group, with its own cursor
+  .subscriptionFrom('2026-10-22T00:00:00Z') // everything pushed from this time on
+  .each()
+  .limit(1)
+  .consume(async (msg) => {
+    console.log('again:', msg.data)
+  })
+```
 
-## Also included
+Or read a partition by offset, with no group, lease or ack:
 
-- [KV store](https://queenmq.com/concepts/kv/) and [timers](https://queenmq.com/concepts/timers/), in the same commit
-- [Stream windows](https://queenmq.com/guides/streams/) and [in-memory queues](https://queenmq.com/guides/ephemeral/) for request/reply
-- [Kafka protocol](https://queenmq.com/guides/kafka/), [PostgreSQL](https://queenmq.com/guides/postgres/) in and out, [S3](https://queenmq.com/guides/s3/) export, all inside the broker
-- HTTP API, [SDKs](https://queenmq.com/start/clients/) for JS, Python, Go, Rust, C++ and PHP (with Laravel), an [MCP server](https://queenmq.com/start/ai-agents/) for coding agents
-- Dashboard, Prometheus metrics, auth, encryption, [multi-tenant proxy](https://queenmq.com/operate/tenants/), [Raft on 3 or 5 nodes](https://queenmq.com/operate/cluster/)
+<!-- guide: fetch -->
+```js
+const read = await queen.queue('orders').fetch(['customer-42']) // no group, lease or ack
+for (const record of read.get('customer-42').records) {
+  console.log(record.offset, record.payload)
+}
+```
+
+The [full guide](https://queenmq.com/#guide) goes on with locks, stream windows and request/reply
+over in-memory queues, in every language.
 
 ## Numbers
 
@@ -95,7 +155,7 @@ it to disk (fsync). Kafka, Pulsar and Redpanda ran on the same machines.
 - [**1M msg/s**](https://queenmq.com/benchmarks/queen-vs-kafka/#1000000-msgs-of-1-kb-messages) of 1 KB messages (about 1 GB/s), p99 16-22 ms.
 - [**5M msg/s**](https://queenmq.com/benchmarks/queen-vs-kafka/#the-ceiling-at-1000-partitions) on one queue at most.
 - **100 GB of lag drained in 32 seconds** (3.4 GB/s).
-- [**28 s**](https://queenmq.com/operate/recovery/#a-node-crashed-or-restarted) for a node away five minutes to rejoin a cluster holding 521 GB a node: it gets only what it missed, a 1.1 GB delta, and a restart reads hash sidecars instead of its logs (20 s where it took 171 to 201 s).
+- [**28 s**](https://queenmq.com/manage/recovery/) for a node away five minutes to rejoin a cluster holding 521 GB a node: it gets only what it missed, a 1.1 GB delta, and a restart reads hash sidecars instead of its logs (20 s where it took 171 to 201 s).
 - [**4 ms**](https://queenmq.com/benchmarks/transactions/) p99 for a 10-message transaction, at 6,000 transactions per second.
 
 <picture>
@@ -115,39 +175,22 @@ Full details: [queenmq.com/benchmarks](https://queenmq.com/benchmarks/)
 - [257 Jepsen tests](https://queenmq.com/benchmarks/jepsen/) on 2.6, all passed. No acknowledged message lost, no lease held twice.
 - Written in Rust. Apache-2.0.
 
-## Try it
+## Documentation
 
-```bash
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.6.0
-```
-
-Push your first message:
-
-```bash
-curl -X POST http://localhost:6632/api/v1/push -H 'content-type: application/json' -d '{
-  "items": [{ "queue": "orders", "partition": "customer-123",
-              "transactionId": "order-8891-created",
-              "payload": { "orderId": 8891 } }]
-}'
-```
-
-Open http://localhost:6632 to see it in the dashboard. The
-[Quickstart](https://queenmq.com/start/quickstart/) takes it from there.
+- [The little book of QueenMQ](https://queenmq.com/book/): the whole story in one free PDF, from what Queen is to the bytes on disk.
+- [The model](https://queenmq.com/introduction/model/): partitions, leases, transactions and a plain HTTP interface; [guarantees](https://queenmq.com/introduction/guarantees/).
+- [Writing applications](https://queenmq.com/writing-applications/): queues, push, pop, acks, retries, transactions, KV, locks, timers, ephemeral queues and streams, every example in six languages.
+- [Patterns](https://queenmq.com/patterns/): work queue, pub/sub, request/reply, workflows, windowed aggregation, rate limiting, delayed messages and more.
+- [Integrations](https://queenmq.com/integrations/): Kafka clients, S3, PostgreSQL, Laravel.
+- [Manage clusters](https://queenmq.com/manage/): [Docker](https://queenmq.com/manage/docker/), [Kubernetes](https://queenmq.com/manage/kubernetes/), [upgrades and monitoring](https://queenmq.com/manage/upgrades-monitoring/), [recovery](https://queenmq.com/manage/recovery/), [tenants](https://queenmq.com/manage/tenants/).
+- [Architecture](https://queenmq.com/architecture/): one leader per tenant, the write path, Raft, storage down to the bytes.
+- [Compared to Kafka, SQS and Temporal](https://queenmq.com/introduction/compare/).
 
 Using a coding agent? Add the MCP server:
 
 ```bash
 claude mcp add --transport http queen https://queenmq.com/mcp
 ```
-
-## Documentation
-
-- [The model](https://queenmq.com/concepts/): partitions, consumer groups, transactions, KV, timers, dedup, guarantees.
-- [Guides](https://queenmq.com/guides/) · [Examples](https://queenmq.com/examples/): exactly-once, state machines, streams, webhooks, Kafka, PostgreSQL, S3, Laravel.
-- [Operate](https://queenmq.com/operate/): a [cluster](https://queenmq.com/operate/cluster/), [Kubernetes](https://queenmq.com/operate/kubernetes/), [monitoring](https://queenmq.com/operate/monitoring/), [recovery](https://queenmq.com/operate/recovery/), [tenants](https://queenmq.com/operate/tenants/).
-- [Reference](https://queenmq.com/reference/): the HTTP API, configuration, errors, limits.
-- [Internals](https://queenmq.com/internals/): the replicated log, storage, the life of a step.
-- [Compared to Kafka, SQS and Temporal](https://queenmq.com/start/compare/).
 
 ## License
 
