@@ -37,6 +37,13 @@ verifiedBy:
   - examples/tutorials/rust/src/bin/book_client_guide.rs
   - examples/tutorials/php/book-client-guide.php
   - examples/tutorials/cpp/book-client-guide.cpp
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): admin.rs adds a `traffic`
+# block to each node of /api/v1/raft/status and /api/v1/raft/members (23cee6523). Nothing this page
+# states changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): consume/mod.rs declares consume/idle.rs, the
+# empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
+# lease names a partition its group has no row on, or one that is gone (bad_lease); auth.rs makes
+# POST /streams/v1/state/partitions read-only (baa27c5c0). Nothing this page states changes.
 ---
 
 Every `failed` ack spends one retry. The message comes back after the queue's `retryDelay`, and its partition waits with it, for that consumer group. After `retryLimit` failures, the message goes to the dead-letter queue and the group moves on. You set both on the queue (see [Create and configure queues](/writing-applications/queues/)).

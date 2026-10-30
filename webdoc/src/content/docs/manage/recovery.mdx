@@ -38,6 +38,9 @@ digest: >-
   `QUEEN_RAFT_FORCE_RECOVER=<survivor id>` on exactly one node, which can lose writes only the lost
   nodes held. A deterministic apply failure stops every node and is stepped over with the
   `QUEEN_RAFT_APPLY_SKIP=<index>:<digest>` value the log prints, set on every node.
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): raft/mod.rs declares
+# raft/traffic.rs, which counts the Raft port's bytes by channel (23cee6523). Nothing this page
+# states changes.
 ---
 
 Most failures need nothing from you. A node that crashes catches up from the leader when it starts again. A leader that gets SIGTERM hands its job to a peer before it stops. A node that was away too long gets a snapshot from the leader, exits with code 75, and loads it when it starts again. This section is for the rest: a lost disk, a lost majority, a full disk, a bad day.

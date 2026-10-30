@@ -21,6 +21,13 @@ sourceOfTruth:
   - server/src/rsm/replicator/raft/mod.rs
   - server/src/rsm/replicator/raft/stream.rs
   - server/clippy.toml
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): raft/mod.rs declares
+# raft/traffic.rs, and stream.rs counts the bytes a leader sends and reads on each append stream,
+# for the dashboard and /metrics/prometheus (23cee6523). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): consume/mod.rs declares consume/idle.rs, the
+# empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
+# lease names a partition its group has no row on, or one that is gone (bad_lease); auth.rs makes
+# POST /streams/v1/state/partitions read-only (baa27c5c0). Nothing this page states changes.
 ---
 
 Pops, acks and leases do not go through the planner. The leader keeps each consumer group's positions and leases in memory, and gives out the oldest ready partition first.

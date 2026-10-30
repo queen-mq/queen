@@ -43,6 +43,13 @@ verifiedBy:
   - examples/tutorials/rust/src/bin/book_client_guide.rs
   - examples/tutorials/php/book-client-guide.php
   - examples/tutorials/cpp/book-client-guide.cpp
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): admin.rs adds a `traffic`
+# block to each node of /api/v1/raft/status and /api/v1/raft/members (23cee6523). Nothing this page
+# states changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): consume/mod.rs declares consume/idle.rs, the
+# empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
+# lease names a partition its group has no row on, or one that is gone (bad_lease); auth.rs makes
+# POST /streams/v1/state/partitions read-only (baa27c5c0). Nothing this page states changes.
 ---
 
 There are two ways to read. `consume()` is a loop: it takes messages, calls your handler, acks them when the handler returns, and goes on. `pop()` is one call: it hands you the messages and leaves the ack to you.

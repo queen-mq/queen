@@ -21,6 +21,9 @@ verifiedBy:
   - examples/tutorials/rust/src/bin/00_five_minutes.rs
   - examples/tutorials/php/00-five-minutes.php
   - examples/tutorials/cpp/00-five-minutes.cpp
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): metrics.rs exports three
+# traffic families: the Raft port, the network, the disk (23cee6523); the ephemeral families this
+# page names are unchanged. Nothing this page states changes.
 ---
 
 Ephemeral queues live in memory, outside the log, for request/reply. The worker answers on whatever inbox a request names; the caller makes a private inbox and waits on it. There is no transaction or replay here, and a crash loses what is in flight.

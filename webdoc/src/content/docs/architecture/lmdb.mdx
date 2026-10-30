@@ -24,6 +24,9 @@ sourceOfTruth:
   - server/src/rsm/replicator/raft/mod.rs
   - server/src/rsm/replicator/raft/log_store.rs
   - server/src/rsm/replicator/raft/snapshot.rs
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): raft/mod.rs declares
+# raft/traffic.rs, which counts the Raft port's bytes by channel (23cee6523). Nothing this page
+# states changes.
 ---
 
 The state in memory is saved to an LMDB file, `store/data.mdb`, four times a second. This is a checkpoint, and no client waits for it: it only decides how much of the log a restart has to replay.

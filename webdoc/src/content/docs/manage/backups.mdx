@@ -13,6 +13,9 @@ sourceOfTruth:
   - server/src/rsm/store/integrity.rs
   - server/src/encryption.rs
   - test/recovery/README.md
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): raft/mod.rs declares
+# raft/traffic.rs, which counts the Raft port's bytes by channel (23cee6523). Nothing this page
+# states changes.
 ---
 
 Three nodes protect you from losing a machine, not from a mistake: a deleted queue or a retention that was too short reaches every node as faithfully as a good write. A backup is the copy that lives outside the cluster. [Recovery](/manage/recovery/#backups) says it in short; this page has every command.

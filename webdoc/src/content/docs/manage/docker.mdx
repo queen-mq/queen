@@ -25,6 +25,13 @@ sourceOfTruth:
   - server/src/handlers/ephemeral.rs
   - test/recovery/README.md
   - test/recovery/FINDINGS.md
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): raft/mod.rs declares
+# raft/traffic.rs, and forward.rs counts the bytes of a follower's forward streams (23cee6523).
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): consume/mod.rs declares consume/idle.rs, the
+# empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
+# lease names a partition its group has no row on, or one that is gone (bad_lease); auth.rs makes
+# POST /streams/v1/state/partitions read-only (baa27c5c0). Nothing this page states changes.
 ---
 
 A cluster is three copies of the same broker, each on its own machine, each told where the other two are. Together they keep one log. The leader puts every write in that log and sends it to the others, and a write is answered only when a majority of the nodes (two of three) has it on disk. Any node serves any client: it prepares the work of its own clients and sends the leader only the prepared command.

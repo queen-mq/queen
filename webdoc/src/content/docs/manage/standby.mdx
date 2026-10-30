@@ -16,6 +16,10 @@ sourceOfTruth:
   - server/src/rsm/replicator/raft/link.rs
   - server/src/rsm/facade/real/phase2/link.rs
   - server/src/rsm/facade/groups.rs
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): link/driver.rs and
+# link/seed.rs count a standby's reads and its seed as the `link` channel of
+# queen_raft_traffic_bytes_total (23cee6523); what a standby reads, and when, is unchanged. Nothing
+# this page states changes.
 ---
 
 Three nodes protect you from losing a machine, and a [backup](/manage/backups/) from a mistake. Neither helps on the day the whole cluster is gone: the zone, the Kubernetes cluster, or a majority of the disks. A standby is a second cluster, on other machines, that replays everything the first one commits, a moment behind it. When the first is lost, you promote the standby, point your clients at it, and they carry on with the messages, positions, leases and keys the first cluster had.

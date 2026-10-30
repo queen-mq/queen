@@ -24,6 +24,9 @@ sourceOfTruth:
   - server/src/rsm/replicator/raft/mod.rs
   - server/src/rsm/replicator/raft/log_store.rs
   - server/src/rsm/replicator/raft/snapshot.rs
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): raft/mod.rs declares
+# raft/traffic.rs, which counts the Raft port's bytes by channel (23cee6523). Nothing this page
+# states changes.
 ---
 
 A message is written once, in its queue's log files, and that write is what makes it durable: there is no second copy. We built it this way on purpose. An earlier design wrote every message twice, first in a consensus log and then in a segment file. Now the bytes that make a message durable are the bytes a pop reads back.

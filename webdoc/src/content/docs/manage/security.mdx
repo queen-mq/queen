@@ -22,6 +22,14 @@ sourceOfTruth:
   - protocols/queen-kafka/src/config.rs
   - protocols/queen-kafka/src/conn.rs
   - SECURITY.md
+# sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): network.rs counts the
+# bytes every Raft route reads and writes, in a layer outside the token guard; the token is still
+# checked before a body is read, and what the port serves is unchanged (23cee6523). Nothing this
+# page states changes.
+# sourceOfTruth re-read 2026-10-30 (stream claims): consume/mod.rs declares consume/idle.rs, the
+# empty-batch lease behind POST /streams/v1/claim; ack.rs and txn.rs refuse a positional ack whose
+# lease names a partition its group has no row on, or one that is gone (bad_lease); auth.rs makes
+# POST /streams/v1/state/partitions read-only (baa27c5c0). Nothing this page states changes.
 ---
 
 Out of the box a node authenticates nobody: its port is plain HTTP, and every route answers any caller that can reach it. That keeps the first run to one command, and it is the first thing to change. Put one of two front doors on it (the broker's own JWT for services, or the built-in proxy for API keys and people), keep the raft port private, and encrypt the queues whose payloads must not sit on disk in clear.
