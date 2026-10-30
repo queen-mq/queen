@@ -185,7 +185,12 @@ pub async fn handle_pop(
     Path(queue): Path<String>,
     Query(p): Query<PopParams>,
 ) -> Response {
-    let batch = p.batch.unwrap_or(200);
+    // Clamped, never refused (`QUEEN_POP_MAX_BATCH`): a batch without a
+    // ceiling let one pop lease and render millions of messages.
+    let batch = p
+        .batch
+        .unwrap_or(200)
+        .min(crate::frames::pop_max_batch().min(i32::MAX as usize) as i32);
     let commit = p.commits_on_delivery();
     if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), commit) {
         return r;
@@ -242,7 +247,12 @@ pub async fn handle_pop_partition(
     Path((queue, partition)): Path<(String, String)>,
     Query(p): Query<PopParams>,
 ) -> Response {
-    let batch = p.batch.unwrap_or(200);
+    // Clamped, never refused (`QUEEN_POP_MAX_BATCH`): a batch without a
+    // ceiling let one pop lease and render millions of messages.
+    let batch = p
+        .batch
+        .unwrap_or(200)
+        .min(crate::frames::pop_max_batch().min(i32::MAX as usize) as i32);
     let commit = p.commits_on_delivery();
     if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), commit) {
         return r;
@@ -343,7 +353,12 @@ pub async fn handle_pop_discover(
                 .to_string(),
         );
     }
-    let batch = p.batch.unwrap_or(200);
+    // Clamped, never refused (`QUEEN_POP_MAX_BATCH`): a batch without a
+    // ceiling let one pop lease and render millions of messages.
+    let batch = p
+        .batch
+        .unwrap_or(200)
+        .min(crate::frames::pop_max_batch().min(i32::MAX as usize) as i32);
     let commit = p.commits_on_delivery();
     if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), commit) {
         return r;

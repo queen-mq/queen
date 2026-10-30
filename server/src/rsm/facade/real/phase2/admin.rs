@@ -814,7 +814,13 @@ impl RaftFacade {
             sizes_max()
         };
         match self.queue_resource_detail(&ctx.tenant, queue, max).await? {
-            Some(v) => {
+            Some(mut v) => {
+                // The partition list is moved out, not deep-cloned (up to
+                // 100k partition objects per call).
+                let partitions = v
+                    .as_object_mut()
+                    .and_then(|o| o.remove("partitions"))
+                    .unwrap_or_else(|| json!([]));
                 let totals = v.get("totals").cloned().unwrap_or_else(|| json!({}));
                 let options = v.get("options").cloned().unwrap_or_else(|| json!({}));
                 let queue_info = json!({
@@ -827,7 +833,7 @@ impl RaftFacade {
                     200,
                     json!({
                         "queue":queue_info,
-                        "partitions":v.get("partitions").cloned().unwrap_or_else(|| json!([])),
+                        "partitions":partitions,
                         "totals":{"messages":totals,"partitions":v.get("partitionCount"),"consumed":v.get("totalConsumed")},
                         "partitionsTruncated":v.get("partitionsTruncated").and_then(Value::as_bool).unwrap_or(false),
                         "statsAge":v.get("statsAge")

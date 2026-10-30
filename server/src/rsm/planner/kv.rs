@@ -1939,14 +1939,34 @@ pub fn page_of<R: Reads + ?Sized>(
 /// EVERY row, expired ones included (they still occupy the namespace, §2.5
 /// D5) — in namespace byte order.
 pub fn namespaces_of<R: Reads + ?Sized>(r: &R, tenant: &str) -> crate::rsm::store::Result<Value> {
+    // Keys only: a value is never decoded (every row of the tenant was,
+    // payload and all, to count it).
     let mut out: Vec<(String, u64)> = Vec::new();
-    r.scan_kv_tenant(tenant, usize::MAX, &mut |ns, _key, _row| {
-        match out.last_mut() {
-            Some((last, n)) if last == ns => *n += 1,
-            _ => out.push((ns.to_string(), 1)),
-        }
-        true
-    })?;
+    let mut bad = false;
+    let prefix = crate::rsm::store::keys::kv_tenant_prefix(tenant);
+    r.scan_raw(
+        crate::rsm::store::Keyspace::Kv,
+        &[],
+        &prefix,
+        usize::MAX,
+        &mut |k, _v| {
+            let Some((_t, ns, _key)) = crate::rsm::store::keys::kv_parts(k) else {
+                bad = true;
+                return false;
+            };
+            match out.last_mut() {
+                Some((last, n)) if *last == ns => *n += 1,
+                _ => out.push((ns.to_string(), 1)),
+            }
+            true
+        },
+    )?;
+    if bad {
+        return Err(crate::rsm::store::StoreError::corrupt(
+            crate::rsm::store::Keyspace::Kv,
+            "kv key",
+        ));
+    }
     Ok(Value::Array(
         out.into_iter()
             .map(|(ns, n)| {

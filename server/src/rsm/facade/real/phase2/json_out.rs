@@ -92,6 +92,44 @@ pub(super) fn push_payload(out: &mut String, bytes: &[u8]) {
     }
 }
 
+/// One field of an object [`push_object`] writes.
+pub(super) enum Field<'a> {
+    /// A small value, printed as the tree prints it.
+    Json(Value),
+    /// A stored message payload, as [`push_payload`] writes it.
+    Payload(&'a [u8]),
+    /// A stored document, `null` when it is not one (trace `data`).
+    Doc(&'a [u8]),
+}
+
+/// An object as `json!` printed it, its keys sorted (serde_json's map is
+/// sorted without `preserve_order`) and a repeated key keeping its last
+/// value, with every stored payload copied in once instead of parsed into a
+/// tree first.
+pub(super) fn push_object(out: &mut String, mut fields: Vec<(&str, Field<'_>)>) {
+    // Stable: of two equal keys the later one stays last.
+    fields.sort_by(|a, b| a.0.cmp(b.0));
+    out.push('{');
+    let mut first = true;
+    for i in 0..fields.len() {
+        if fields.get(i + 1).is_some_and(|n| n.0 == fields[i].0) {
+            continue;
+        }
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        push_str(out, fields[i].0);
+        out.push(':');
+        match &fields[i].1 {
+            Field::Json(v) => out.push_str(&v.to_string()),
+            Field::Payload(b) => push_payload(out, b),
+            Field::Doc(b) => out.push_str(checked(b).unwrap_or("null")),
+        }
+    }
+    out.push('}');
+}
+
 /// A checked state document's top-level `windowEnd`, read as
 /// `Value::get("windowEnd").and_then(Value::as_i64)` reads it, without the
 /// tree.
@@ -251,6 +289,33 @@ pub(super) fn trace_state(steps: usize) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn push_object_prints_what_the_tree_printed() {
+        let payload = br#"{"b":1,"a":[true,null]}"#;
+        let mut out = String::new();
+        super::push_object(
+            &mut out,
+            vec![
+                ("status", super::Field::Json(serde_json::json!("pending"))),
+                ("data", super::Field::Payload(payload)),
+                ("id", super::Field::Json(serde_json::json!("x"))),
+                ("status", super::Field::Json(serde_json::json!("completed"))),
+                ("busStatus", super::Field::Json(serde_json::json!({"z":1,"a":2}))),
+            ],
+        );
+        let tree = serde_json::json!({
+            "status": "completed",
+            "data": serde_json::from_slice::<serde_json::Value>(payload).unwrap(),
+            "id": "x",
+            "busStatus": {"z":1,"a":2},
+        });
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+            tree
+        );
+        assert!(out.starts_with("{\"busStatus\":{\"a\":2,\"z\":1},\"data\":{\"b\":1"));
+    }
+
     use super::*;
     use serde_json::json;
 

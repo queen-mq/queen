@@ -55,6 +55,10 @@ pub(crate) struct Seg {
     pub created_at_us: i64,
     /// Per frame, in frame order (when asked for).
     pub hashes: Option<Vec<[u8; 16]>>,
+    /// The append's retained frame bytes, when its `txns` row carries them
+    /// (a v2 row): what a pop's byte budget weighs it by. `None` from the
+    /// queue log and the segment files, which do not say it without a read.
+    pub bytes: Option<u64>,
 }
 
 /// The segment-authority readers (`DEDUP_INDEX=segment`).
@@ -130,6 +134,9 @@ pub(crate) struct Frames<'a, R: Reads + ?Sized> {
     /// What the hash searches among the messages without rows have read
     /// ([`Frames::find_unrowed`]).
     scans: RefCell<Vec<UnrowedScan>>,
+    /// The retained bytes of the append the walk hands over right now, as
+    /// its `txns` row says ([`Seg::bytes`]); `None` for one read elsewhere.
+    seg_len: std::cell::Cell<Option<u32>>,
 }
 
 /// What a partition says of its rows and its log, read in one go.
@@ -191,6 +198,7 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
             defer_cold: false,
             cold: RefCell::new(ColdState::default()),
             scans: RefCell::new(Vec::new()),
+            seg_len: std::cell::Cell::new(None),
         }
     }
 
@@ -386,6 +394,8 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
                     }
                     expect = end.saturating_add(1);
                     delivered = true;
+                    self.seg_len
+                        .set(crate::rsm::dedup::TxnsRow::retained_len_of(v));
                     let keep = cb(base, end, created, want_hashes.then_some(hashes));
                     stopped = !keep;
                     keep
@@ -454,6 +464,7 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
                             None
                         };
                         next = s.end + 1;
+                        self.seg_len.set(None);
                         if !cb(s.base, s.end, s.created_at_us, hashes) {
                             return Ok(Unrowed::Stop);
                         }
@@ -478,6 +489,7 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
             want_hashes,
             &mut |base, end, created, hashes| {
                 next = end + 1;
+                self.seg_len.set(None);
                 let keep = cb(base, end, created, hashes.as_deref());
                 stopped = !keep;
                 keep
@@ -529,6 +541,7 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
             return Ok(());
         }
         let mut shim = |base: u64, end_incl: u64, created: i64, hashes: Option<Vec<u8>>| {
+            self.seg_len.set(None);
             cb(base, end_incl, created, hashes.as_deref())
         };
         if let Some(q) = &src.qlog {
@@ -579,6 +592,7 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
                     end,
                     created_at_us: created,
                     hashes: hashes.map(hashes_of),
+                    bytes: self.seg_len.get().map(u64::from),
                 });
                 !(deferred || avail >= budget)
             },
@@ -626,6 +640,7 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
                                 end,
                                 created_at_us: created,
                                 hashes: None,
+                                bytes: None,
                             });
                             return false;
                         }
@@ -662,6 +677,7 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
                 end: r.end - 1,
                 created_at_us: r.created_at_us,
                 hashes: None,
+                bytes: None,
             }));
         }
         let mut found: Option<Seg> = None;
@@ -675,6 +691,7 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
                     end,
                     created_at_us: created,
                     hashes: None,
+                    bytes: None,
                 });
             }
             true

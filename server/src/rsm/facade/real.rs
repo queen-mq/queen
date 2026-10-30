@@ -3045,6 +3045,12 @@ fn frame_groups<'a>(
         if zstd::zstd_safe::find_frame_compressed_size(z).ok() != Some(z.len()) {
             return Err("a group is not exactly one zstd frame".into());
         }
+        // The size the frame declares is checked before it is inflated.
+        if let Ok(Some(declared)) = zstd::zstd_safe::get_frame_content_size(z) {
+            if (weight as u64).saturating_add(declared) > PUSH_BINARY_MAX_RAW as u64 {
+                return Err("the uncompressed body is too large".into());
+            }
+        }
         let raw = codec::decompress(z).map_err(|e| format!("zstd: {e}"))?;
         weight = weight.saturating_add(raw.len());
         if weight > PUSH_BINARY_MAX_RAW {
@@ -3059,6 +3065,33 @@ fn frame_groups<'a>(
         blobs.push(bytes::Bytes::from(raw));
     }
     Ok((groups, blobs, weight))
+}
+
+/// What the groups of a framed body declare they inflate to (each zstd
+/// frame's content size, which the codec's decoder requires), read from
+/// `p` without inflating anything: what admission charges up front.
+fn frame_groups_declared(body: &[u8], mut p: usize) -> Result<usize, String> {
+    let p = &mut p;
+    let n_groups = wire_u32(body, p)?;
+    let mut total = 2usize;
+    for _ in 0..n_groups {
+        let n = wire_u16(body, p)?;
+        wire_take(body, p, n)?;
+        let n = wire_u16(body, p)?;
+        wire_take(body, p, n)?;
+        wire_u32(body, p)?;
+        let n = wire_u32(body, p)?;
+        let z = wire_take(body, p, n)?;
+        let declared = match zstd::zstd_safe::get_frame_content_size(z) {
+            Ok(Some(d)) => d.min(usize::MAX as u64) as usize,
+            _ => return Err("a group's zstd frame does not declare its size".into()),
+        };
+        total = total.saturating_add(declared);
+        if total > PUSH_BINARY_MAX_RAW {
+            return Err("the uncompressed body is too large".into());
+        }
+    }
+    Ok(total)
 }
 
 /// The `count` frames of one decompressed group, each checked: the storage
@@ -3146,6 +3179,19 @@ struct PushResolved {
     follower_of: Option<usize>,
     hash: [u8; 16],
     frame: bytes::Bytes,
+}
+
+/// The most items one push may carry (`QUEEN_PUSH_MAX_ITEMS`, default
+/// 10,000); more is refused `too_many_items` (400).
+fn push_max_items() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_PUSH_MAX_ITEMS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(10_000)
+    })
 }
 
 /// One push item as its parser left it: borrowed from the JSON body of the
@@ -3406,10 +3452,29 @@ impl RaftFacade {
             ));
         }
         let inflated;
+        // Admission for the inflated size, taken BEFORE inflating: the edge
+        // charged the compressed bytes it received (`pre_admitted`), so only
+        // what the body grows by is taken here; without an edge charge, all
+        // of it.
+        let mut inflate_admitted: Option<crate::rsm::admit::Admitted> = None;
         let body: &[u8] = if flags & PUSH_BINARY_ZSTD != 0 {
             let raw_len = u32le(raw, &mut p)?;
             if raw_len > PUSH_BINARY_MAX_RAW {
                 return Err(bad("the uncompressed body is too large"));
+            }
+            if let Some(gate) = self.admit {
+                let extra = if crate::rsm::admit::pre_admitted() {
+                    raw_len.saturating_sub(raw.len())
+                } else {
+                    raw_len
+                };
+                if extra > 0 {
+                    inflate_admitted = Some(gate.admit(extra).await.map_err(|o| {
+                        RsmError::Overloaded {
+                            retry_after_s: o.retry_after_s,
+                        }
+                    })?);
+                }
             }
             inflated = zstd::bulk::decompress(&raw[p..], raw_len)
                 .map_err(|e| bad(&format!("zstd: {e}")))?;
@@ -3420,7 +3485,11 @@ impl RaftFacade {
         if flags & PUSH_BINARY_FRAMES != 0 {
             return self.push_frames(ctx, body, flags).await;
         }
-        let _admitted = self.admit_push(body.len()).await?;
+        let _admitted = if inflate_admitted.is_some() {
+            None
+        } else {
+            self.admit_push(body.len()).await?
+        };
         let t_prep = crate::rsm::timing::stamp();
         let mut p = 0usize;
         let groups = u32le(body, &mut p)?;
@@ -3512,10 +3581,31 @@ impl RaftFacade {
                 message: format!("bad push body: {m}"),
             }
         }
+        // 0. Admission for what the groups say they inflate to, before any
+        // is inflated: the edge charged only the compressed body
+        // (`pre_admitted`), so the growth is taken here; without an edge
+        // charge, all of it.
+        let declared = frame_groups_declared(body, 0).map_err(|m| bad(&m))?;
+        let _admitted = match self.admit {
+            Some(gate) => {
+                let extra = if crate::rsm::admit::pre_admitted() {
+                    declared.saturating_sub(body.len())
+                } else {
+                    declared
+                };
+                if extra > 0 {
+                    Some(gate.admit(extra).await.map_err(|o| RsmError::Overloaded {
+                        retry_after_s: o.retry_after_s,
+                    })?)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
         // 1. The groups: names, counts, and each one's frames decompressed.
         let mut p = 0usize;
-        let (groups, blobs, weight) = frame_groups(body, &mut p).map_err(|m| bad(&m))?;
-        let _admitted = self.admit_push(weight).await?;
+        let (groups, blobs, _weight) = frame_groups(body, &mut p).map_err(|m| bad(&m))?;
         let t_prep = crate::rsm::timing::stamp();
         // 2. Every frame, checked.
         let mut inputs: Vec<PushInput<'_>> = Vec::new();
@@ -3670,6 +3760,16 @@ impl RaftFacade {
         // The inputs' encrypted queues, when the caller has read them already.
         known_encrypted: Option<std::collections::BTreeSet<String>>,
     ) -> Result<(Vec<PushResolved>, indexed_groups::Groups), RsmError> {
+        if inputs.len() > push_max_items() {
+            return Err(RsmError::Rejected {
+                code: "too_many_items".to_string(),
+                message: format!(
+                    "a push carries {} items, the ceiling is {} (QUEEN_PUSH_MAX_ITEMS)",
+                    inputs.len(),
+                    push_max_items()
+                ),
+            });
+        }
         if self.storage_pressure() {
             return Err(RsmError::StorageFull);
         }
@@ -3689,8 +3789,12 @@ impl RaftFacade {
             }
         };
         let mut resolved: Vec<PushResolved> = Vec::with_capacity(inputs.len());
-        // (queue, partition, txn) → the flat index of its leader.
-        let mut seen: std::collections::HashMap<(String, String, String), usize> =
+        // hash of (queue, partition, txn) → the flat indices of the leaders
+        // with that hash (one, but for a collision): the strings are compared
+        // on a hit, so the result is the exact map's, without three owned
+        // copies of the names per item.
+        let hasher = std::collections::hash_map::RandomState::new();
+        let mut seen: std::collections::HashMap<u64, Vec<usize>> =
             std::collections::HashMap::new();
         // (queue, partition) → the survivors' flat indices, in order.
         let mut groups: indexed_groups::Groups = indexed_groups::Groups::new();
@@ -3747,14 +3851,17 @@ impl RaftFacade {
             let follower_of = if !may_repeat {
                 None
             } else {
-                let key = (queue.to_string(), partition.to_string(), txn.clone());
-                match seen.get(&key) {
-                    Some(&leader) => Some(leader),
-                    None => {
-                        seen.insert(key, flat);
-                        None
-                    }
+                use std::hash::BuildHasher;
+                let key = hasher.hash_one((&*queue, &*partition, txn.as_str()));
+                let leaders = seen.entry(key).or_default();
+                let leader = leaders.iter().copied().find(|&l| {
+                    let r = &resolved[l];
+                    *r.queue == *queue && *r.partition == *partition && r.txn == txn
+                });
+                if leader.is_none() {
+                    leaders.push(flat);
                 }
+                leader
             };
             let hash = txn_hash128(&txn);
             let frame = if follower_of.is_none() {
@@ -4399,6 +4506,9 @@ impl RaftFacade {
             .max(1)
         };
         let worker = uuid_bytes_to_string(&uuidv7_bytes());
+        // Every way in (HTTP, the Kafka facade, an embedded caller) gets the
+        // same ceiling as the route (`QUEEN_POP_MAX_BATCH`).
+        let batch = batch.min(crate::frames::pop_max_batch().min(i32::MAX as usize) as u32);
         let budget = batch.min(i32::MAX as u32) as i32;
         let gate_key = (ctx.tenant.clone(), queue.clone(), group.clone());
         // POP AUTOPILOT (facade/autopilot.rs): a wildcard pop that delegated
@@ -4453,7 +4563,9 @@ impl RaftFacade {
                 );
                 last_plan = Some(plan);
                 (
-                    plan.batch.min(i32::MAX as u32) as i32,
+                    plan.batch
+                        .min(crate::frames::pop_max_batch().min(i32::MAX as usize) as u32)
+                        as i32,
                     if options.auto_parts {
                         crate::rsm::planner::MAX_PARTS_AUTO
                     } else {
@@ -4925,7 +5037,15 @@ fn render_pop_body(
     let now_ms = wall_micros() / 1000;
     let mut per_q: std::collections::HashMap<&str, (u64, u64, u64)> =
         std::collections::HashMap::new();
-    for claim in claims {
+    // The claim weighs messages by their `txns` rows and stops at
+    // `QUEEN_POP_MAX_BYTES`; messages it could not weigh (read from the
+    // queue log, older rows) are stopped here, at twice that, so an estimate
+    // that came out a little low does not cut a batch. What is not rendered
+    // stays under the lease and comes back when it expires, as a message
+    // missing on disk does; an ack names only what went out. An auto-ack
+    // claim has moved its cursor already: it is rendered whole.
+    let backstop = crate::frames::pop_max_bytes().saturating_mul(2);
+    'claims: for claim in claims {
         let Some(info) = infos.get(&claim.pid) else {
             continue;
         };
@@ -5048,6 +5168,10 @@ fn render_pop_body(
                     let msg_off = base + i as u64;
                     if msg_off < off || msg_off < claim.start_offset || msg_off > claim.end_offset {
                         continue;
+                    }
+                    if count > 0 && !auto_ack && out.len() >= backstop {
+                        crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.render_gap_truncated, 1);
+                        break 'claims;
                     }
                     if count > 0 {
                         out.push(',');
