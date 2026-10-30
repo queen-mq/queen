@@ -170,7 +170,13 @@ pub fn idle_timeout() -> Duration {
 /// buffer is allocated; its bytes stay in the socket meanwhile.
 pub fn inflight_bytes() -> usize {
     static V: OnceLock<i64> = OnceLock::new();
-    limit(&V, "QUEEN_KAFKA_INFLIGHT_BYTES", 256 << 20, 1 << 20, 64 << 30) as usize
+    limit(
+        &V,
+        "QUEEN_KAFKA_INFLIGHT_BYTES",
+        256 << 20,
+        1 << 20,
+        64 << 30,
+    ) as usize
 }
 
 /// `QUEEN_KAFKA_FETCH_MAX_BYTES`, default 50 MiB (Kafka's `fetch.max.bytes`):
@@ -178,7 +184,13 @@ pub fn inflight_bytes() -> usize {
 /// asking for 0 or less gets this, not an unlimited answer.
 pub fn fetch_max_bytes() -> i64 {
     static V: OnceLock<i64> = OnceLock::new();
-    limit(&V, "QUEEN_KAFKA_FETCH_MAX_BYTES", 50 << 20, 1 << 10, 1 << 30)
+    limit(
+        &V,
+        "QUEEN_KAFKA_FETCH_MAX_BYTES",
+        50 << 20,
+        1 << 10,
+        1 << 30,
+    )
 }
 
 /// `QUEEN_KAFKA_METADATA_MAX_PARTITIONS`, default 100000: the partitions one

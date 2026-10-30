@@ -61,7 +61,12 @@ pub async fn join(
             protocols: req
                 .protocols
                 .into_iter()
-                .map(|p| (p.name.to_string(), bytes::Bytes::copy_from_slice(&p.metadata)))
+                .map(|p| {
+                    (
+                        p.name.to_string(),
+                        bytes::Bytes::copy_from_slice(&p.metadata),
+                    )
+                })
                 .collect(),
             require_known_member: version >= 4,
         };

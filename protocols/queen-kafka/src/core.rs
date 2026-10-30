@@ -428,7 +428,11 @@ impl Queen {
         body: Option<String>,
     ) -> Result<T, CallError> {
         let text = self.call_text(method, path, bearer, body).await?;
-        let text = if text.trim().is_empty() { "null" } else { &text };
+        let text = if text.trim().is_empty() {
+            "null"
+        } else {
+            &text
+        };
         serde_json::from_str(text).map_err(|e| CallError::Body(e.to_string()))
     }
 
@@ -463,14 +467,9 @@ impl Queen {
     /// Whether the broker takes `token` (SASL): a call every token must be
     /// allowed to make, its answer read for the status alone.
     pub async fn check_token(&self, token: &str) -> Result<(), CallError> {
-        self.call_text(
-            "GET",
-            "/api/v1/resources/queues".into(),
-            Some(token),
-            None,
-        )
-        .await
-        .map(|_| ())
+        self.call_text("GET", "/api/v1/resources/queues".into(), Some(token), None)
+            .await
+            .map(|_| ())
     }
 
     /// Every queue of the caller's tenant.

@@ -131,7 +131,8 @@ async fn read_frame<'a>(
     idle: Duration,
     frame_timeout: Duration,
 ) -> std::io::Result<Option<(Bytes, SemaphorePermit<'a>)>> {
-    let timed_out = |what: &str| std::io::Error::new(std::io::ErrorKind::TimedOut, what.to_string());
+    let timed_out =
+        |what: &str| std::io::Error::new(std::io::ErrorKind::TimedOut, what.to_string());
     let mut len = [0u8; 4];
     let first = match tokio::time::timeout(idle, rd.read(&mut len)).await {
         Err(_) => return Err(timed_out("idle past QUEEN_KAFKA_IDLE_TIMEOUT_MS")),
@@ -140,7 +141,11 @@ async fn read_frame<'a>(
         Ok(Err(e)) => return Err(e),
     };
     match tokio::time::timeout(frame_timeout, rd.read_exact(&mut len[first..])).await {
-        Err(_) => return Err(timed_out("a frame slower than QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS")),
+        Err(_) => {
+            return Err(timed_out(
+                "a frame slower than QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS",
+            ))
+        }
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Ok(Err(e)) => return Err(e),
         Ok(Ok(_)) => {}
@@ -160,7 +165,9 @@ async fn read_frame<'a>(
         .map_err(|_| std::io::Error::other("the frame budget is closed"))?;
     let mut buf = vec![0u8; n];
     match tokio::time::timeout(frame_timeout, rd.read_exact(&mut buf)).await {
-        Err(_) => Err(timed_out("a frame slower than QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS")),
+        Err(_) => Err(timed_out(
+            "a frame slower than QUEEN_KAFKA_FRAME_READ_TIMEOUT_MS",
+        )),
         Ok(Err(e)) => Err(e),
         Ok(Ok(_)) => Ok(Some((Bytes::from(buf), permit))),
     }

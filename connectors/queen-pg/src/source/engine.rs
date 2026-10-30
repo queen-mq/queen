@@ -433,7 +433,11 @@ impl<'a> Engine<'a> {
         let bytes: usize = ans
             .rows
             .iter()
-            .map(|r| r.iter().map(|c| c.as_ref().map_or(1, |v| v.len() + 8)).sum::<usize>())
+            .map(|r| {
+                r.iter()
+                    .map(|c| c.as_ref().map_or(1, |v| v.len() + 8))
+                    .sum::<usize>()
+            })
             .sum();
         let budget = snapshot_chunk_max_bytes();
         if bytes > budget && !ans.rows.is_empty() {
@@ -451,15 +455,8 @@ impl<'a> Engine<'a> {
             hw = %ans.hw_end,
             "snapshot chunk read"
         );
-        self.pipe.install_chunk(Chunk::new(
-            n,
-            idx,
-            &t,
-            limit,
-            ans.rows,
-            ans.vis,
-            read_at,
-        ));
+        self.pipe
+            .install_chunk(Chunk::new(n, idx, &t, limit, ans.rows, ans.vis, read_at));
         Ok(())
     }
 

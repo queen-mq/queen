@@ -863,7 +863,10 @@ mod tests {
             let bytes = encode_bytes(r, None);
             let value: Value = serde_json::from_slice(&bytes).unwrap();
             for ts in [None, Some(42)] {
-                assert_eq!(decode_bytes(&Bytes::from(bytes.clone()), ts), decode(&value, ts));
+                assert_eq!(
+                    decode_bytes(&Bytes::from(bytes.clone()), ts),
+                    decode(&value, ts)
+                );
             }
             // Only an escaped header name leaves the one-pass reader.
             assert_eq!(

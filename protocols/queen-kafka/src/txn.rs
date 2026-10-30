@@ -740,7 +740,13 @@ impl Txns {
             _ => return,
         };
         // The epoch moves on: the timed-out producer is fenced.
-        let value = row_value(t.pid, t.epoch.saturating_add(1), "aborted", token, t.timeout);
+        let value = row_value(
+            t.pid,
+            t.epoch.saturating_add(1),
+            "aborted",
+            token,
+            t.timeout,
+        );
         let bearer = t.bearer.clone();
         if let Ok(Some(v)) = self
             .write_row(bearer.as_deref(), tid, t.version, value)

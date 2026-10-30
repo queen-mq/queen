@@ -325,7 +325,10 @@ impl Coordinator {
                 sync: None,
             },
         );
-        g.next_expiry = Some(g.next_expiry.map_or(now + session, |e| e.min(now + session)));
+        g.next_expiry = Some(
+            g.next_expiry
+                .map_or(now + session, |e| e.min(now + session)),
+        );
         if let Some(mut p) = previous {
             // A repeat join of a member still waiting: the newer request wins.
             if let Some(old) = p.join.take() {
@@ -597,7 +600,10 @@ impl Coordinator {
             if g.protocol_type.as_deref() == Some("consumer") {
                 subscriptions.push((
                     out.len(),
-                    g.members.values().map(|m| m.metadata_for(&protocol)).collect(),
+                    g.members
+                        .values()
+                        .map(|m| m.metadata_for(&protocol))
+                        .collect(),
                 ));
             }
             out.push(PresenceRow {
