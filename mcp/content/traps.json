@@ -274,19 +274,20 @@
   },
   {
     "id": "kv-standalone-rate-limit",
-    "title": "Standalone KV and timer calls are rate-limited per tenant and node; KV inside a transaction is not",
+    "title": "Standalone KV and timer calls are rate-limited per tenant and node; KV writes inside a transaction have their own, higher rate",
     "applies": [
       "all"
     ],
     "severity": "perf",
     "symptom": "429 rate_limited with Retry-After once a worker makes KV calls per message; the SDKs wait and retry, so the worker just slows down.",
-    "cause": "Per tenant and per node, /api/v1/kv takes 100 write calls a second (burst 200) and 200 read calls a second (burst 400) by default (QUEEN_KV_WRITE_RATE, QUEEN_KV_READ_RATE). A call with any write in it counts as a write, and each POST /api/v1/timers call spends a write token too. KV operations and timers inside a transaction are not counted.",
-    "fix": "Write state in the step's transaction instead of separate KV calls, batch operations into one /api/v1/kv call (up to 256 operations and 1,024 keys), and keep standalone reads off the per-message path.",
+    "cause": "Per tenant and per node, /api/v1/kv takes 100 write calls a second (burst 200) and 200 read calls a second (burst 400) by default (QUEEN_KV_WRITE_RATE, QUEEN_KV_READ_RATE). A call with any write in it counts as a write, and each POST /api/v1/timers call spends a write token too. From broker 2.7.0 the KV writes inside a transaction (a once() gate, a kv rider) spend their own bucket, 10,000 a second, burst 20,000 (QUEEN_KV_TXN_WRITE_RATE, QUEEN_KV_TXN_WRITE_BURST), and count against the tenant's KV quota; over either, the whole transaction answers 429 rate_limited or 403 kv_quota_exceeded before it runs. Timers inside a transaction are not counted.",
+    "fix": "Write state in the step's transaction instead of separate KV calls, batch operations into one /api/v1/kv call (up to 256 operations and 1,024 keys), and keep standalone reads off the per-message path. Above 10,000 gated steps a second per tenant, raise QUEEN_KV_TXN_WRITE_RATE.",
     "source": [
       "https://queenmq.com/writing-applications/kv-locks-timers/",
-      "https://queenmq.com/reference/limits/",
+      "https://queenmq.com/reference/limits/#kv",
       "https://queenmq.com/reference/errors/",
-      "server/src/config.rs:704"
+      "server/src/config.rs",
+      "server/src/quota.rs"
     ]
   },
   {
@@ -352,7 +353,7 @@
     ],
     "severity": "perf",
     "symptom": "Broker memory follows a queue's push rate and stays high; a queue given a dedup window of a day or a week \"to be safe\" holds tens of millions of rows on every node.",
-    "cause": "Each push leaves a row of about 200 bytes (16 more for each further message in it) in the memory of every node, for the queue's dedupWindowSeconds: 3600 by default, never less than 900. Since broker 2.2.0 that window alone sets it: retention does not, and messages older than the window are read from disk. Memory is the push rate times the window: 1,000 pushes a second is 3.6 million rows (about 0.7 GB a node) at the default hour and 86 million (about 17 GB) at a day.",
+    "cause": "Each push leaves a row of about 200 bytes (16 more for each further message in it) in the memory of every node, for the queue's dedupWindowSeconds: 3600 by default, never less than 900. Since broker 2.2.0 that window alone sets it: retention does not, and messages older than the window are read from disk. Memory is the push rate times the window: 1,000 pushes a second is 3.6 million rows (about 0.7 GB a node) at the default hour and 86 million (about 17 GB) at a day. From broker 2.7.0 a window is at most 7 days (QUEEN_MAX_DEDUP_WINDOW_S): a longer one is cut to it.",
     "fix": "Set dedupWindowSeconds to the longest time a producer may send the same transactionId again (minutes, as a rule), not to how long messages must be kept. Keeping is retentionSeconds and completedRetentionSeconds, which cost disk only. A row is per push, so messages of one partition sent in one push share one.",
     "code": {
       "js": "await queen.queue('orders')\n  .config({ dedupWindowSeconds: 900, retentionEnabled: true, retentionSeconds: 604800 })\n  .create()"
@@ -822,6 +823,55 @@
     "source": [
       "https://queenmq.com/writing-applications/clients/",
       "https://queenmq.com/integrations/laravel/configuration/"
+    ]
+  },
+  {
+    "id": "dead-letters-are-capped",
+    "title": "Dead letters are capped per queue: past 100,000, 1 GiB or 14 days the oldest are removed",
+    "applies": [
+      "all"
+    ],
+    "severity": "surprise",
+    "symptom": "Old dead letters disappear without anyone deleting them; a replay finds fewer messages than failed.",
+    "cause": "From broker 2.7.0 maintenance removes a queue's oldest dead letters past QUEEN_DLQ_MAX_ROWS_PER_QUEUE (100,000), QUEEN_DLQ_MAX_BYTES_PER_QUEUE (1 GiB, estimated) or QUEEN_DLQ_MAX_AGE_S (14 days). A dead letter is a full copy of its message in every node's memory, so without caps a consumer that failed every message filled the nodes.",
+    "fix": "Replay or export dead letters well inside the caps, alert on DLQ growth, or raise a cap (0 turns it off) when the memory is there.",
+    "source": [
+      "https://queenmq.com/reference/limits/#dead-letters",
+      "https://queenmq.com/writing-applications/retries/",
+      "server/src/rsm/maintenance.rs"
+    ]
+  },
+  {
+    "id": "pop-and-push-are-capped",
+    "title": "A pop answers at most 10,000 messages and 64 MiB, and a push of more than 10,000 messages is refused",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "A large push answers 400 too_many_items; a pop with a large batch returns fewer messages than asked.",
+    "cause": "From broker 2.7.0 a push carries at most QUEEN_PUSH_MAX_ITEMS (10,000) messages, and a pop takes at most QUEEN_POP_MAX_BATCH (10,000) messages and QUEEN_POP_MAX_BYTES (64 MiB) of payloads, always at least one message. One request could otherwise build many times its size in the broker's memory.",
+    "fix": "Split pushes into requests of up to 10,000 messages (most SDK batching already sends far fewer), and treat a pop's batch as an upper bound: loop until the queue answers empty.",
+    "source": [
+      "https://queenmq.com/reference/limits/#requests",
+      "https://queenmq.com/reference/errors/",
+      "server/src/frames.rs",
+      "server/src/rsm/facade/real.rs"
+    ]
+  },
+  {
+    "id": "memory-pressure-503",
+    "title": "503 memory_pressure or busy: the node is near its memory limit, not down",
+    "applies": [
+      "all"
+    ],
+    "severity": "surprise",
+    "symptom": "Page reads (messages, dead letters, traces, status) and then pushes answer 503 memory_pressure with Retry-After 1 to 5 s, while pops and acks keep working.",
+    "cause": "From broker 2.7.0 each node compares its anonymous memory with its cgroup memory.max (or QUEEN_MEMORY_LIMIT_BYTES): past 80 % it refuses large reads, past 90 % also writes that grow the stored state. At most 32 large reads run at once; one that waits 2 s answers 503 busy. Pops, acks, renewals, deletes and health are never refused, so consumers can drain the node.",
+    "fix": "Retry after Retry-After (the SDKs do). Find what holds the memory: dedup windows, dead letters, stream states, many partitions. Give the pod more memory or lower the load; QUEEN_MEMGUARD_SOFT_PCT and QUEEN_MEMGUARD_HARD_PCT move the levels.",
+    "source": [
+      "https://queenmq.com/reference/limits/#memory-and-connections",
+      "https://queenmq.com/reference/errors/",
+      "server/src/memguard.rs"
     ]
   }
 ]
