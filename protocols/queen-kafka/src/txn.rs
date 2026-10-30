@@ -14,7 +14,7 @@
 //! ```text
 //!   namespace  queen-kafka
 //!   key        qk:txn:<transactional.id>
-//!   value      {"pid":<i64>,"epoch":<i16>,"state":"ready"|"open"|"committed"|"aborted","token":<u64>}
+//!   value      {"pid":<i64>,"epoch":<i16>,"state":"ready"|"open"|"committed"|"aborted","token":<u64>,"timeoutMs":<i32>}
 //! ```
 //!
 //! Every step writes it with `expect` = the version this leader last saw, so a
@@ -25,13 +25,19 @@
 //! records were held by the old one and are lost: that transaction can only
 //! abort (`INVALID_TXN_STATE` to anything else). `token` names the transaction,
 //! so a commit whose answer was lost is recognized when the client retries it.
+//!
+//! The row expires a week after its last write, as Kafka forgets an id after
+//! `transactional.id.expiration.ms`. In memory each id has its own lock, so a
+//! commit waiting on raft holds back only its own producer, and an id no call
+//! used for ten minutes is dropped: its row brings it back.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use tokio::sync::OwnedMutexGuard;
 
 use crate::core::{CallError, PositionOp, Queen, RawPush};
 use crate::errors::*;
@@ -48,6 +54,13 @@ pub const MAX_TXN_PARTITIONS: usize = 1_000;
 pub const MAX_HELD_BYTES: usize = 256 << 20;
 /// `transaction.max.timeout.ms`: one hour, Flink's default ask.
 pub const MAX_TIMEOUT_MS: i32 = 3_600_000;
+/// `transactional.id.expiration.ms`, Kafka's default: a row no producer
+/// writes for a week expires, as Kafka forgets the id.
+pub const ROW_TTL_S: i64 = 7 * 24 * 3600;
+/// An id no call used for this long leaves memory; its row brings it back.
+const IDLE: Duration = Duration::from_secs(600);
+/// The timeout of an id whose row does not carry one (an older broker wrote it).
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const PRODUCER_FENCED: i16 = 90;
 pub const INVALID_PRODUCER_EPOCH: i16 = 47;
@@ -99,13 +112,71 @@ struct Txn {
     bearer: Option<String>,
 }
 
+/// One transactional id, behind its own lock: a call on one id never waits
+/// for a call on another.
+struct Entry {
+    tid: String,
+    txn: Option<Txn>,
+    /// Taken out of the map (cleared or evicted): a call that locks it late
+    /// looks the id up again.
+    dead: bool,
+    /// When a call last used it.
+    used: Instant,
+}
+
+type Slot = Arc<tokio::sync::Mutex<Entry>>;
+
+/// An id locked for one call. An id that holds nothing when the call ends
+/// (no row, or a commit that asked to read the row again) leaves the map.
+struct Locked<'a> {
+    txns: &'a Txns,
+    slot: Slot,
+    entry: OwnedMutexGuard<Entry>,
+}
+
+impl std::ops::Deref for Locked<'_> {
+    type Target = Entry;
+    fn deref(&self) -> &Entry {
+        &self.entry
+    }
+}
+
+impl std::ops::DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut Entry {
+        &mut self.entry
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        if self.entry.txn.is_none() && !self.entry.dead {
+            self.entry.dead = true;
+            self.txns.unmap(&self.entry.tid, &self.slot);
+        }
+    }
+}
+
+/// The ids a node held when it stopped leading, for [`Txns::release`].
+pub struct Cleared(Vec<Slot>);
+
+/// Clears a flag when dropped.
+struct Reset<'a>(&'a AtomicBool);
+
+impl Drop for Reset<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// The transaction coordinator of this node: meaningful only while it leads.
 pub struct Txns {
     queen: Queen,
-    inner: tokio::sync::Mutex<HashMap<String, Txn>>,
+    slots: Mutex<HashMap<String, Slot>>,
     held: AtomicU64,
     tokens: AtomicU64,
     node: Mutex<i64>,
+    /// One expiry sweep at a time.
+    sweeping: AtomicBool,
 }
 
 /// The row as stored.
@@ -116,16 +187,30 @@ struct Row {
     state: String,
     token: u64,
     version: i64,
+    /// The producer's transaction timeout, when the row carries it.
+    timeout: Option<Duration>,
+}
+
+/// The row's value.
+fn row_value(pid: i64, epoch: i16, state: &str, token: u64, timeout: Duration) -> Value {
+    json!({
+        "pid": pid,
+        "epoch": epoch,
+        "state": state,
+        "token": token,
+        "timeoutMs": timeout.as_millis() as u64,
+    })
 }
 
 impl Txns {
     pub fn new(queen: Queen) -> Txns {
         Txns {
             queen,
-            inner: tokio::sync::Mutex::new(HashMap::new()),
+            slots: Mutex::new(HashMap::new()),
             held: AtomicU64::new(0),
             tokens: AtomicU64::new(now_ms() as u64),
             node: Mutex::new(0),
+            sweeping: AtomicBool::new(false),
         }
     }
 
@@ -134,12 +219,63 @@ impl Txns {
     }
 
     /// This node stopped leading: what it held is lost, and the rows say so.
-    pub async fn clear(&self) {
-        let mut inner = self.inner.lock().await;
-        for (_, t) in inner.drain() {
-            if let Stage::Open(o) = t.stage {
+    /// The map is empty from here on; [`Txns::release`] drops what each id
+    /// held, after a call still running on it returns.
+    pub fn clear(&self) -> Cleared {
+        let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        Cleared(slots.drain().map(|(_, s)| s).collect())
+    }
+
+    pub async fn release(&self, cleared: Cleared) {
+        for slot in cleared.0 {
+            let mut e = slot.lock_owned().await;
+            e.dead = true;
+            if let Some(Txn {
+                stage: Stage::Open(o),
+                ..
+            }) = e.txn.take()
+            {
                 self.held.fetch_sub(o.bytes as u64, Ordering::Relaxed);
             }
+        }
+    }
+
+    /// The id locked for one call, created when absent.
+    async fn lock(&self, tid: &str) -> Locked<'_> {
+        loop {
+            let slot = {
+                let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+                match slots.get(tid) {
+                    Some(s) => Arc::clone(s),
+                    None => {
+                        let s: Slot = Arc::new(tokio::sync::Mutex::new(Entry {
+                            tid: tid.to_string(),
+                            txn: None,
+                            dead: false,
+                            used: Instant::now(),
+                        }));
+                        slots.insert(tid.to_string(), Arc::clone(&s));
+                        s
+                    }
+                }
+            };
+            let mut entry = Arc::clone(&slot).lock_owned().await;
+            if !entry.dead {
+                entry.used = Instant::now();
+                return Locked {
+                    txns: self,
+                    slot,
+                    entry,
+                };
+            }
+        }
+    }
+
+    /// Take `slot` out of the map, unless the id has a newer one there.
+    fn unmap(&self, tid: &str, slot: &Slot) {
+        let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        if slots.get(tid).is_some_and(|s| Arc::ptr_eq(s, slot)) {
+            slots.remove(tid);
         }
     }
 
@@ -174,6 +310,11 @@ impl Txns {
                 .to_string(),
             token: v.get("token").and_then(Value::as_u64).unwrap_or(0),
             version: row.version,
+            timeout: v
+                .get("timeoutMs")
+                .and_then(Value::as_u64)
+                .filter(|ms| (1..=MAX_TIMEOUT_MS as u64).contains(ms))
+                .map(Duration::from_millis),
         }))
     }
 
@@ -186,7 +327,7 @@ impl Txns {
         expect: i64,
         value: Value,
     ) -> Result<Option<i64>, CallError> {
-        let ops = [crate::core::KvOp::put_at(NS, &key(tid), value, expect)];
+        let ops = [crate::core::KvOp::put_at(NS, &key(tid), value, expect).expiring(ROW_TTL_S)];
         let a = self.queen.kv(bearer, &ops).await?.into_iter().next();
         Ok(a.filter(|a| a.applied != Some(false)).map(|a| a.version))
     }
@@ -203,7 +344,8 @@ impl Txns {
         if !(1..=MAX_TIMEOUT_MS).contains(&timeout_ms) {
             return Err(INVALID_TRANSACTION_TIMEOUT);
         }
-        let mut inner = self.inner.lock().await;
+        let timeout = Duration::from_millis(timeout_ms as u64);
+        let mut e = self.lock(tid).await;
         let row = self
             .read_row(bearer, tid)
             .await
@@ -223,24 +365,21 @@ impl Txns {
                 }
             }
         };
-        let value = json!({"pid": pid, "epoch": epoch, "state": "ready", "token": 0});
+        let value = row_value(pid, epoch, "ready", 0, timeout);
         let version = match self.write_row(bearer, tid, expect, value).await {
             Ok(Some(v)) => v,
             Ok(None) => return Err(CONCURRENT_TRANSACTIONS),
             Err(e) => return Err(of_call_for_group(&e)),
         };
-        if let Some(old) = inner.insert(
-            tid.to_string(),
-            Txn {
-                pid,
-                epoch,
-                version,
-                timeout: Duration::from_millis(timeout_ms as u64),
-                stage: Stage::Ready,
-                last_end: None,
-                bearer: bearer.map(str::to_string),
-            },
-        ) {
+        if let Some(old) = e.txn.replace(Txn {
+            pid,
+            epoch,
+            version,
+            timeout,
+            stage: Stage::Ready,
+            last_end: None,
+            bearer: bearer.map(str::to_string),
+        }) {
             if let Stage::Open(o) = old.stage {
                 self.held.fetch_sub(o.bytes as u64, Ordering::Relaxed);
                 tracing::info!(target: "kafka", %tid, "a newer producer fenced an open transaction; its records are dropped");
@@ -253,37 +392,34 @@ impl Txns {
     /// read from the row when this node does not hold it.
     async fn held<'a>(
         &self,
-        inner: &'a mut HashMap<String, Txn>,
+        slot: &'a mut Option<Txn>,
         bearer: Option<&str>,
         tid: &str,
         pid: i64,
         epoch: i16,
     ) -> Result<&'a mut Txn, i16> {
-        if !inner.contains_key(tid) {
+        if slot.is_none() {
             let row = self
                 .read_row(bearer, tid)
                 .await
                 .map_err(|e| of_call_for_group(&e))?
                 .ok_or(INVALID_PRODUCER_ID_MAPPING)?;
-            inner.insert(
-                tid.to_string(),
-                Txn {
-                    pid: row.pid,
-                    epoch: row.epoch,
-                    version: row.version,
-                    timeout: Duration::from_secs(60),
-                    stage: if row.state == "open" {
-                        Stage::Lost
-                    } else {
-                        Stage::Ready
-                    },
-                    last_end: matches!(row.state.as_str(), "committed" | "aborted")
-                        .then_some((row.token, row.state == "committed")),
-                    bearer: None,
+            *slot = Some(Txn {
+                pid: row.pid,
+                epoch: row.epoch,
+                version: row.version,
+                timeout: row.timeout.unwrap_or(DEFAULT_TIMEOUT),
+                stage: if row.state == "open" {
+                    Stage::Lost
+                } else {
+                    Stage::Ready
                 },
-            );
+                last_end: matches!(row.state.as_str(), "committed" | "aborted")
+                    .then_some((row.token, row.state == "committed")),
+                bearer: None,
+            });
         }
-        let t = inner.get_mut(tid).expect("inserted above");
+        let t = slot.as_mut().expect("loaded above");
         if t.pid != pid {
             return Err(INVALID_PRODUCER_ID_MAPPING);
         }
@@ -304,7 +440,7 @@ impl Txns {
             Stage::Ready => {}
         }
         let token = self.new_token();
-        let value = json!({"pid": t.pid, "epoch": t.epoch, "state": "open", "token": token});
+        let value = row_value(t.pid, t.epoch, "open", token, t.timeout);
         match self.write_row(bearer, tid, t.version, value).await {
             Ok(Some(v)) => {
                 t.version = v;
@@ -328,8 +464,8 @@ impl Txns {
         epoch: i16,
         partitions: &[(String, i32)],
     ) -> i16 {
-        let mut inner = self.inner.lock().await;
-        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+        let mut e = self.lock(tid).await;
+        let t = match self.held(&mut e.txn, bearer, tid, pid, epoch).await {
             Ok(t) => t,
             Err(e) => return e,
         };
@@ -359,8 +495,8 @@ impl Txns {
         epoch: i16,
         group: &str,
     ) -> i16 {
-        let mut inner = self.inner.lock().await;
-        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+        let mut e = self.lock(tid).await;
+        let t = match self.held(&mut e.txn, bearer, tid, pid, epoch).await {
             Ok(t) => t,
             Err(e) => return e,
         };
@@ -384,8 +520,8 @@ impl Txns {
         partition: (&str, i32),
         records: Vec<RawPush>,
     ) -> i16 {
-        let mut inner = self.inner.lock().await;
-        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+        let mut e = self.lock(tid).await;
+        let t = match self.held(&mut e.txn, bearer, tid, pid, epoch).await {
             Ok(t) => t,
             Err(e) => return e,
         };
@@ -423,8 +559,8 @@ impl Txns {
         epoch: i16,
         offsets: Vec<PositionOp>,
     ) -> i16 {
-        let mut inner = self.inner.lock().await;
-        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+        let mut e = self.lock(tid).await;
+        let t = match self.held(&mut e.txn, bearer, tid, pid, epoch).await {
             Ok(t) => t,
             Err(e) => return e,
         };
@@ -455,8 +591,8 @@ impl Txns {
         epoch: i16,
         commit: bool,
     ) -> i16 {
-        let mut inner = self.inner.lock().await;
-        let t = match self.held(&mut inner, bearer, tid, pid, epoch).await {
+        let mut e = self.lock(tid).await;
+        let t = match self.held(&mut e.txn, bearer, tid, pid, epoch).await {
             Ok(t) => t,
             Err(e) => return e,
         };
@@ -475,8 +611,7 @@ impl Txns {
             Stage::Lost => Open::default(),
         };
         if !commit {
-            let value =
-                json!({"pid": t.pid, "epoch": t.epoch, "state": "aborted", "token": open.token});
+            let value = row_value(t.pid, t.epoch, "aborted", open.token, t.timeout);
             return match self.write_row(bearer, tid, t.version, value).await {
                 Ok(Some(v)) => {
                     t.version = v;
@@ -509,9 +644,10 @@ impl Txns {
         let fence = crate::core::KvOp::fence(
             NS,
             &key(tid),
-            json!({"pid": t.pid, "epoch": t.epoch, "state": "committed", "token": open.token}),
+            row_value(t.pid, t.epoch, "committed", open.token, t.timeout),
             t.version,
-        );
+        )
+        .expiring(ROW_TTL_S);
         let positions: Vec<PositionOp> = open.offsets.values().cloned().collect();
         let outcome = self
             .queen
@@ -552,45 +688,71 @@ impl Txns {
             }
         };
         if forget {
-            inner.remove(tid);
+            e.txn = None;
         }
         code
     }
 
     /// Abort what has outlived its timeout; the producer is fenced, as Kafka's
-    /// coordinator fences it, by the epoch its next InitProducerId bumps.
+    /// coordinator fences it, by the epoch its next InitProducerId bumps. An
+    /// id in a call waits for the next sweep; an idle one leaves memory.
     pub async fn expire(&self) {
-        let now = Instant::now();
-        let mut inner = self.inner.lock().await;
-        let mut timed_out: Vec<String> = Vec::new();
-        for (tid, t) in inner.iter() {
-            if let Stage::Open(o) = &t.stage {
-                if !o.committing && o.started.is_some_and(|s| now.duration_since(s) > t.timeout) {
-                    timed_out.push(tid.clone());
-                }
-            }
+        if self.sweeping.swap(true, Ordering::AcqRel) {
+            return;
         }
-        for tid in timed_out {
-            let Some(t) = inner.get_mut(&tid) else {
+        let _done = Reset(&self.sweeping);
+        let slots: Vec<Slot> = {
+            let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+            slots.values().cloned().collect()
+        };
+        for slot in slots {
+            let Ok(mut guard) = Arc::clone(&slot).try_lock_owned() else {
                 continue;
             };
-            let Stage::Open(o) = &t.stage else { continue };
-            let (token, bytes) = (o.token, o.bytes);
-            // The epoch moves on: the timed-out producer is fenced.
-            let value = json!({"pid": t.pid, "epoch": t.epoch.saturating_add(1), "state": "aborted", "token": token});
-            let bearer = t.bearer.clone();
-            if let Ok(Some(v)) = self
-                .write_row(bearer.as_deref(), &tid, t.version, value)
-                .await
-            {
-                t.version = v;
-                t.epoch = t.epoch.saturating_add(1);
+            let e = &mut *guard;
+            if e.dead {
+                continue;
             }
-            self.held.fetch_sub(bytes as u64, Ordering::Relaxed);
-            t.stage = Stage::Ready;
-            t.last_end = Some((token, false));
-            tracing::info!(target: "kafka", %tid, "a transaction passed its timeout and was aborted");
+            if let Some(t) = e.txn.as_mut() {
+                self.abort_timed_out(&e.tid, t).await;
+            }
+            let holds = matches!(
+                &e.txn,
+                Some(Txn {
+                    stage: Stage::Open(_),
+                    ..
+                })
+            );
+            if !holds && e.used.elapsed() > IDLE {
+                e.dead = true;
+                self.unmap(&e.tid, &slot);
+            }
         }
+    }
+
+    async fn abort_timed_out(&self, tid: &str, t: &mut Txn) {
+        let (token, bytes) = match &t.stage {
+            Stage::Open(o)
+                if !o.committing && o.started.is_some_and(|s| s.elapsed() > t.timeout) =>
+            {
+                (o.token, o.bytes)
+            }
+            _ => return,
+        };
+        // The epoch moves on: the timed-out producer is fenced.
+        let value = row_value(t.pid, t.epoch.saturating_add(1), "aborted", token, t.timeout);
+        let bearer = t.bearer.clone();
+        if let Ok(Some(v)) = self
+            .write_row(bearer.as_deref(), tid, t.version, value)
+            .await
+        {
+            t.version = v;
+            t.epoch = t.epoch.saturating_add(1);
+        }
+        self.held.fetch_sub(bytes as u64, Ordering::Relaxed);
+        t.stage = Stage::Ready;
+        t.last_end = Some((token, false));
+        tracing::info!(target: "kafka", %tid, "a transaction passed its timeout and was aborted");
     }
 }
 

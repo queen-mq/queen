@@ -95,7 +95,8 @@ pub async fn serve(
     }
     ticker.abort();
     ctx.groups.clear();
-    ctx.txns.clear().await;
+    let cleared = ctx.txns.clear();
+    ctx.txns.release(cleared).await;
     Ok(())
 }
 
@@ -116,7 +117,11 @@ async fn tick(ctx: Arc<Ctx>) {
             }
             ctx.groups.clear();
             ctx.indexed.clear();
-            ctx.txns.clear().await;
+            // Emptied now; an id still in a call is dropped when it returns,
+            // off the tick.
+            let cleared = ctx.txns.clear();
+            let c = Arc::clone(&ctx);
+            tokio::spawn(async move { c.txns.release(cleared).await });
         }
         if leads != led {
             ctx.topics.invalidate();
@@ -125,7 +130,9 @@ async fn tick(ctx: Arc<Ctx>) {
         ctx.groups.tick(Instant::now());
         n += 1;
         if leads && n.is_multiple_of(10) {
-            ctx.txns.expire().await;
+            // Off the tick: an abort waits on raft, session expiry must not.
+            let c = Arc::clone(&ctx);
+            tokio::spawn(async move { c.txns.expire().await });
             // One presence write at a time: a row deleted for a group that
             // left is never put back by an earlier write that landed late.
             if writing.as_ref().is_none_or(|w| w.is_finished()) {
