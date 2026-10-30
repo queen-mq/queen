@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smartpricing/queen/clients/client-go/v2/streams/operators"
@@ -22,8 +23,55 @@ const watermarkStateKey = "__wm__"
 // owns — and since the flush path commits with ack=nil, the server's lease
 // check (inside `IF v_ack IS NOT NULL`) never runs and both replicas can read,
 // emit and delete the same ripe window. Mirrors PARTITION_RECENCY_MS in
-// clients/client-js/client-v2/streams/runtime/Runner.js.
+// clients/client-js/client-v2/streams/runtime/Runner.js. Only for a broker
+// without POST /streams/v1/claim (before 2.7), and for event-time windows.
 const partitionRecencyMs int64 = 5 * 60 * 1000 // 5 minutes
+
+// Closing processing-time windows under a claim (broker 2.7, issue #153).
+// Same values as clients/client-rust/src/streams/runner.rs.
+const (
+	// sweepEvery is how often a runner asks the broker for the partitions
+	// holding the query's state (POST /streams/v1/state/partitions): after a
+	// restart, a scale-down, or for partitions another runner left, these are
+	// the windows nobody tracks.
+	sweepEvery = 30 * time.Second
+	// sweepUntouchedMs is how old a partition's newest state row must be
+	// before a later sweep takes it on: a younger one is some runner's live
+	// work, which tracks it already. The first sweep after a start takes
+	// every partition: this runner tracks nothing yet.
+	sweepUntouchedMs int64 = 30_000
+	// sweepPage is the partitions per page of the sweep.
+	sweepPage = 1000
+	// claimBatch is the partitions per claim, which is also the most one
+	// flush tick closes: a sweep that finds thousands of quiet partitions
+	// (after an outage) works through them a batch per tick instead of all
+	// at once.
+	claimBatch = 100
+	// claimLeaseS is the lease a claim asks for. A close is one state read
+	// and one commit.
+	claimLeaseS = 30
+	// claimRetryMs is how soon to try again a partition someone else holds,
+	// or whose claim or close failed.
+	claimRetryMs int64 = 1000
+	// stopFlushWait is how long Stop waits for a close in flight before
+	// cutting it short.
+	stopFlushWait = 10 * time.Second
+)
+
+// Whether the broker serves POST /streams/v1/claim.
+const (
+	claimsUnknown int32 = iota
+	claimsYes
+	// claimsNo: an older broker, so the unleased flush of recent partitions.
+	claimsNo
+)
+
+// dueEntry is a partition with open windows, and when the earliest closes (ms,
+// on the broker's clock: processing time is the messages' createdAt).
+type dueEntry struct {
+	name string
+	atMs int64
+}
 
 // Source abstracts the QueueBuilder methods the Runner needs from the
 // queen-mq Go client. The real *queen.QueueBuilder satisfies this.
@@ -60,13 +108,13 @@ type Message struct {
 
 // Stages is the compiled chain consumed by the Runner.
 type Stages struct {
-	Pre      []StatelessOp
-	KeyBy    *operators.KeyByOperator
-	Window   WindowOp
-	Reducer  *operators.ReduceOperator
-	Gate     *operators.GateOperator
-	Post     []StatelessOp
-	Sink     SinkLike
+	Pre     []StatelessOp
+	KeyBy   *operators.KeyByOperator
+	Window  WindowOp
+	Reducer *operators.ReduceOperator
+	Gate    *operators.GateOperator
+	Post    []StatelessOp
+	Sink    SinkLike
 }
 
 // CompiledStream is what Stream._compile() produces.
@@ -123,39 +171,50 @@ type RunOptions struct {
 	//
 	// Requires broker >= 1.1.0 - an older broker ignores it and the pop fails
 	// loudly rather than silently replaying the whole backlog.
-	Conflation       bool
-	Logger           util.Logger
+	Conflation bool
+	Logger     util.Logger
 }
 
 // Metrics is the snapshot returned by Runner.Metrics().
 type Metrics struct {
-	CyclesTotal       int64
-	FlushCyclesTotal  int64
-	MessagesTotal     int64
-	PushItemsTotal    int64
-	StateOpsTotal     int64
-	LateEventsTotal   int64
-	ErrorsTotal       int64
-	GateAllowsTotal   int64
-	GateDenialsTotal  int64
-	LastError         string
+	CyclesTotal      int64
+	FlushCyclesTotal int64
+	MessagesTotal    int64
+	PushItemsTotal   int64
+	StateOpsTotal    int64
+	LateEventsTotal  int64
+	ErrorsTotal      int64
+	GateAllowsTotal  int64
+	GateDenialsTotal int64
+	LastError        string
 }
 
 // Runner is the streaming engine's pop/process/cycle loop.
 type Runner struct {
-	stream          *CompiledStream
-	opts            RunOptions
-	logger          util.Logger
-	http            *HTTPClient
-	consumerGroup   string
-	serverQueryID   string
-	mu              sync.Mutex
-	stats           Metrics
-	stopped         bool
-	cancel          context.CancelFunc
-	loopDone        chan struct{}
-	flushDone       chan struct{}
-	watermarks      map[string]int64
+	stream        *CompiledStream
+	opts          RunOptions
+	logger        util.Logger
+	http          *HTTPClient
+	consumerGroup string
+	serverQueryID string
+	mu            sync.Mutex
+	stats         Metrics
+	stopped       bool
+	cancel        context.CancelFunc
+	// flushCancel cuts short the calls of the idle-flush goroutine. Stop
+	// calls it only when a close is still running after stopFlushWait: a
+	// close cut short keeps its claim on the partition until the lease runs
+	// out.
+	flushCancel context.CancelFunc
+	loopDone    chan struct{}
+	flushDone   chan struct{}
+	watermarks  map[string]int64
+	// due holds the processing-time windows still open, by partition id:
+	// what the idle flush claims and closes once their time has come.
+	// Guarded by mu.
+	due map[string]dueEntry
+	// claims is claimsUnknown, claimsYes or claimsNo.
+	claims atomic.Int32
 	// recent is the idle-flush sweep set: partitionId -> last pop. Entries
 	// older than partitionRecencyMs are pruned on every touch and on every
 	// sweep, so a partition lost to another replica leaves the sweep instead
@@ -205,6 +264,7 @@ func NewRunner(stream *CompiledStream, opts RunOptions) *Runner {
 		http:          NewHTTPClient(opts.URL, opts.BearerToken, 0, 0),
 		consumerGroup: cg,
 		watermarks:    map[string]int64{},
+		due:           map[string]dueEntry{},
 		recent:        map[string]recentPartition{},
 		nowMs:         func() int64 { return time.Now().UnixMilli() },
 		partLocks:     map[string]*sync.Mutex{},
@@ -238,25 +298,29 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.cancel = cancel
 	r.loopDone = make(chan struct{})
 
-	// Start the idle-flush loop if we have a window operator.
+	// Start the idle-flush loop if we have a window operator. It stops when
+	// loopCtx ends, but its calls run on their own context: Stop lets a close
+	// in flight finish (see stopFlushWait).
 	if r.stream.Stages.Window != nil && r.stream.Stages.Window.IdleMs() > 0 {
+		flushCtx, flushCancel := context.WithCancel(context.WithoutCancel(ctx))
+		r.flushCancel = flushCancel
 		r.flushDone = make(chan struct{})
-		go r.flushLoop(loopCtx, r.stream.Stages.Window.IdleMs())
+		go r.flushLoop(loopCtx, flushCtx, r.stream.Stages.Window.IdleMs())
 	}
 
 	go r.loop(loopCtx)
 	return nil
 }
 
-// Stop gracefully shuts the runner down.
+// Stop gracefully shuts the runner down: it waits for the cycle in flight,
+// and up to 10 seconds for a close in flight. A close cut short would keep its
+// claim on the partition until the lease ran out. Calling it again, or after
+// the context given to Start ended, waits the same way.
 func (r *Runner) Stop() {
 	r.mu.Lock()
-	if r.stopped {
-		r.mu.Unlock()
-		return
-	}
 	r.stopped = true
 	r.mu.Unlock()
+	// Ends the pop loop, and wakes the flush loop.
 	if r.cancel != nil {
 		r.cancel()
 	}
@@ -264,7 +328,12 @@ func (r *Runner) Stop() {
 		<-r.loopDone
 	}
 	if r.flushDone != nil {
-		<-r.flushDone
+		select {
+		case <-r.flushDone:
+		case <-time.After(stopFlushWait):
+			r.flushCancel()
+			<-r.flushDone
+		}
 	}
 }
 
@@ -300,7 +369,11 @@ func (r *Runner) loop(ctx context.Context) {
 			if r.isStopped(ctx) {
 				return
 			}
-			r.touchPartition(g.PartitionID, g.PartitionName)
+			// Under claims the due map tracks the partition (processCycle);
+			// the recent set is the flush of a broker without them.
+			if !r.leasedCloses() || r.claims.Load() != claimsYes {
+				r.touchPartition(g.PartitionID, g.PartitionName)
+			}
 			// Mutual exclusion with the idle-flush goroutine (see partLocks).
 			l := r.partitionLock(g.PartitionID)
 			l.Lock()
@@ -523,13 +596,16 @@ func (r *Runner) processCycle(ctx context.Context, g partitionGroup) error {
 	// 3. window + reducer
 	var stateOps []operators.StateOp
 	var emits []operators.ReduceEmit
+	// When the earliest window left open closes (nil: none).
+	var nextClose *int64
 	if stages.Window != nil {
 		if stages.Window.WindowKind() == "session" {
-			res, err := r.processSession(ctx, stages, envs, pid)
+			res, err := r.processSession(ctx, stages, envs, pid, ordered)
 			if err != nil {
 				return err
 			}
 			stateOps = res.StateOps
+			nextClose = res.NextCloseMs
 			for _, e := range res.Emits {
 				emits = append(emits, operators.ReduceEmit{
 					Key: e.Key, WindowStart: e.WindowStart, WindowEnd: e.WindowEnd,
@@ -543,6 +619,7 @@ func (r *Runner) processCycle(ctx context.Context, g partitionGroup) error {
 			}
 			stateOps = res.StateOps
 			emits = res.Emits
+			nextClose = res.NextCloseMs
 		}
 	} else {
 		for _, env := range envs {
@@ -584,7 +661,17 @@ func (r *Runner) processCycle(ctx context.Context, g partitionGroup) error {
 	r.mu.Unlock()
 
 	_, err = CommitCycle(ctx, r.http, r.serverQueryID, pid, g.ConsumerGroup, stateOps, pushItems, ack, true)
-	return err
+	if err != nil {
+		return err
+	}
+	// What stays open closes when its time comes, under a claim. Set here,
+	// under the partition lock, so a close on this partition cannot
+	// overwrite it with an older answer. A broker without claims never
+	// closes these, so they are not kept.
+	if r.leasedCloses() && r.claims.Load() != claimsNo {
+		r.setDue(pid, g.PartitionName, nextClose)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -806,7 +893,7 @@ func (r *Runner) processStatelessWindow(ctx context.Context, stages Stages, envs
 // Session path
 // ---------------------------------------------------------------------------
 
-func (r *Runner) processSession(ctx context.Context, stages Stages, envs []operators.Envelope, pid string) (operators.SessionResult, error) {
+func (r *Runner) processSession(ctx context.Context, stages Stages, envs []operators.Envelope, pid string, ordered []Message) (operators.SessionResult, error) {
 	w, ok := stages.Window.(*operators.WindowSessionOperator)
 	if !ok {
 		return operators.SessionResult{}, fmt.Errorf("session path requires WindowSessionOperator")
@@ -839,17 +926,17 @@ func (r *Runner) processSession(ctx context.Context, stages Stages, envs []opera
 		}
 	}
 
+	// The close trigger. In processing time it is the batch's newest
+	// createdAt: the broker's clock, the one a close under a claim uses too,
+	// so a cycle and a close agree on which sessions are over whatever this
+	// machine's clock says.
 	now := time.Now().UnixMilli()
-	initial := func() interface{} {
-		if reducer.Initial == nil {
-			return float64(0)
+	if w.EventTime() == nil {
+		if newest, ok := newestCreatedAt(ordered); ok {
+			now = newest
 		}
-		b, _ := json.Marshal(reducer.Initial)
-		var v interface{}
-		_ = json.Unmarshal(b, &v)
-		return v
 	}
-	res := w.RunSession(enriched, state, reducer.Fn, initial, now)
+	res := w.RunSession(enriched, state, reducer.Fn, reducerInitial(reducer), now)
 
 	if w.EventTime() != nil {
 		if wm, ok := r.getWatermark(pid); ok && wm > int64(-1<<62) {
@@ -968,22 +1055,342 @@ func (r *Runner) buildSink(_ context.Context, sink SinkLike, emits []operators.R
 	return nil, nil
 }
 
-// flushLoop runs the idle-flush sweep.
-func (r *Runner) flushLoop(ctx context.Context, intervalMs int64) {
+// flushLoop runs the idle flush every intervalMs until loopCtx ends. The calls
+// of a close under a claim use callCtx, which Stop cancels only after
+// stopFlushWait.
+//
+// A processing-time window with a reducer closes under a claim (closeDue),
+// once its time has come, also on a partition this process never read. An
+// event-time window, or any window on a broker without claims, keeps the
+// flush of the partitions this process read recently (flushTick).
+func (r *Runner) flushLoop(loopCtx, callCtx context.Context, intervalMs int64) {
 	defer close(r.flushDone)
+	defer func() {
+		if r.flushCancel != nil {
+			r.flushCancel()
+		}
+	}()
 	t := time.NewTicker(time.Duration(intervalMs) * time.Millisecond)
 	defer t.Stop()
+	// The first sweep runs right at start and takes every partition holding
+	// state: this runner tracks nothing yet.
+	var nextSweep time.Time
+	untouchedMs := int64(0)
+	immediate := r.leasedCloses()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			if r.isStopped(ctx) {
+		if !immediate {
+			select {
+			case <-loopCtx.Done():
 				return
+			case <-t.C:
 			}
-			r.flushTick(ctx)
+		}
+		immediate = false
+		if r.isStopped(loopCtx) {
+			return
+		}
+		if !r.leasedCloses() || r.claims.Load() == claimsNo {
+			// The old flush, as it was: it holds no lease, so Stop cuts it
+			// short.
+			r.flushTick(loopCtx)
+			continue
+		}
+		if !time.Now().Before(nextSweep) {
+			r.sweep(loopCtx, callCtx, untouchedMs)
+			nextSweep = time.Now().Add(sweepEvery)
+			untouchedMs = sweepUntouchedMs
+		}
+		if r.claims.Load() != claimsNo {
+			r.closeDue(loopCtx, callCtx)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Closes under a claim
+//
+// A processing-time window closes when its time comes even if its partition
+// gets no more messages. The runner keeps, per partition, when the earliest
+// open window closes (from each cycle it commits, and from the sweep), claims
+// the partition when that time has come (POST /streams/v1/claim: a lease with
+// an empty batch, granted only when nobody holds the partition and the group
+// has read all of it), and closes the windows in a cycle that acks the empty
+// batch. The broker refuses that cycle whole when the lease is gone, so two
+// runners never close one window, and a close never deletes a window another
+// runner just extended. The clock is the broker's, the one createdAt comes
+// from.
+// ---------------------------------------------------------------------------
+
+// leasedCloses reports whether this stream closes its windows under claims:
+// processing-time windows with a reducer and an idle flush. Event-time
+// windows close on the watermark, which only events move.
+func (r *Runner) leasedCloses() bool {
+	w := r.stream.Stages.Window
+	return w != nil && w.EventTime() == nil && w.IdleMs() > 0 && r.stream.Stages.Reducer != nil
+}
+
+// setDue tracks (or forgets, atMs nil) when the partition's earliest open
+// window closes.
+func (r *Runner) setDue(pid, pname string, atMs *int64) {
+	if pid == "" || pid == "unknown" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if atMs == nil {
+		delete(r.due, pid)
+		return
+	}
+	r.due[pid] = dueEntry{name: pname, atMs: *atMs}
+}
+
+// retryDue moves a tracked partition's due time to atMs at the earliest. A
+// partition no longer tracked stays untracked: a cycle has closed what it had.
+func (r *Runner) retryDue(pid string, atMs int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if d, ok := r.due[pid]; ok && d.atMs < atMs {
+		d.atMs = atMs
+		r.due[pid] = d
+	}
+}
+
+// claimsMissing reports whether err says the broker has no such route: a
+// broker before 2.7, so no claims either.
+func (r *Runner) claimsMissing(err error) bool {
+	he, ok := err.(*HTTPError)
+	if !ok || he.Status != 404 {
+		return false
+	}
+	r.claims.Store(claimsNo)
+	// Nothing left that would never be closed.
+	r.mu.Lock()
+	r.due = map[string]dueEntry{}
+	r.mu.Unlock()
+	r.logger.Info("broker has no stream claims; idle flush of recent partitions", nil)
+	return true
+}
+
+// sweep tracks, as due now, the partitions holding the query's state that
+// nobody touched for untouchedMs (0: all of them) and this runner does not
+// track yet, so the next ticks claim them a batch at a time.
+func (r *Runner) sweep(loopCtx, ctx context.Context, untouchedMs int64) {
+	after := ""
+	for {
+		if r.isStopped(loopCtx) {
+			return
+		}
+		body := map[string]interface{}{
+			"query_id": r.serverQueryID,
+			"limit":    sweepPage,
+		}
+		if untouchedMs > 0 {
+			body["untouched_for_ms"] = untouchedMs
+		}
+		if after != "" {
+			body["after"] = after
+		}
+		res, err := r.http.Post(ctx, "/streams/v1/state/partitions", body)
+		if err != nil {
+			if !r.claimsMissing(err) {
+				r.reportError(err, "stream sweep")
+			}
+			return
+		}
+		if ok, isBool := res["success"].(bool); isBool && !ok {
+			r.reportError(fmt.Errorf("stream sweep refused: %v", res["error"]), "stream sweep")
+			return
+		}
+		now := r.nowMs()
+		parts, _ := res["partitions"].([]interface{})
+		r.mu.Lock()
+		for _, pi := range parts {
+			p, _ := pi.(map[string]interface{})
+			pid, _ := p["partition_id"].(string)
+			if pid == "" {
+				continue
+			}
+			if _, tracked := r.due[pid]; !tracked {
+				name, _ := p["partition"].(string)
+				r.due[pid] = dueEntry{name: name, atMs: now}
+			}
+		}
+		r.mu.Unlock()
+		next, _ := res["next"].(string)
+		if next == "" {
+			return
+		}
+		after = next
+	}
+}
+
+// closeDue claims the partitions whose windows are due (the oldest first, at
+// most claimBatch), and closes them.
+func (r *Runner) closeDue(loopCtx, ctx context.Context) {
+	type ready struct {
+		pid  string
+		atMs int64
+	}
+	now := r.nowMs()
+	var list []ready
+	r.mu.Lock()
+	for pid, d := range r.due {
+		if d.atMs <= now {
+			list = append(list, ready{pid, d.atMs})
+		}
+	}
+	r.mu.Unlock()
+	if len(list) == 0 {
+		return
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].atMs != list[j].atMs {
+			return list[i].atMs < list[j].atMs
+		}
+		return list[i].pid < list[j].pid
+	})
+	if len(list) > claimBatch {
+		list = list[:claimBatch]
+	}
+	pids := make([]string, len(list))
+	for i, p := range list {
+		pids[i] = p.pid
+	}
+
+	res, err := r.http.Post(ctx, "/streams/v1/claim", map[string]interface{}{
+		"query_id":       r.serverQueryID,
+		"partition_ids":  pids,
+		"consumer_group": r.consumerGroup,
+		"lease_seconds":  claimLeaseS,
+	})
+	if err != nil {
+		if r.claimsMissing(err) {
+			return
+		}
+		r.reportError(err, "stream claim")
+		retry := r.nowMs() + claimRetryMs
+		for _, pid := range pids {
+			r.retryDue(pid, retry)
+		}
+		return
+	}
+	r.claims.Store(claimsYes)
+	if ok, isBool := res["success"].(bool); isBool && !ok {
+		r.reportError(fmt.Errorf("stream claim refused: %v", res["error"]), "stream claim")
+		return
+	}
+	leaseID, _ := res["lease_id"].(string)
+	// The broker's clock at the claim: windows close on it.
+	clock := r.nowMs()
+	if v, ok := res["now_ms"].(float64); ok && v > 0 {
+		clock = int64(v)
+	}
+	busyWait := r.stream.Stages.Window.IdleMs()
+	if busyWait < claimRetryMs {
+		busyWait = claimRetryMs
+	}
+
+	parts, _ := res["partitions"].([]interface{})
+	for _, pi := range parts {
+		p, _ := pi.(map[string]interface{})
+		pid, _ := p["partition_id"].(string)
+		name, _ := p["partition"].(string)
+		status, _ := p["status"].(string)
+		if pid == "" {
+			continue
+		}
+		if name == "" {
+			r.mu.Lock()
+			name = r.due[pid].name
+			r.mu.Unlock()
+		}
+		switch status {
+		case "claimed":
+			// Stopping: the claims not closed yet lapse with their lease,
+			// nothing is lost.
+			if r.isStopped(loopCtx) {
+				continue
+			}
+			if err := r.closeClaimed(ctx, pid, name, leaseID, clock); err != nil {
+				r.reportError(fmt.Errorf("partition %s: %w; its claim lapses", pid, err), "stream close")
+				r.retryDue(pid, r.nowMs()+claimRetryMs)
+			}
+		case "busy":
+			r.retryDue(pid, r.nowMs()+busyWait)
+		default:
+			// backlog: messages wait, and the cycle that takes them tracks
+			// the partition again. missing: nothing to close there.
+			r.setDue(pid, name, nil)
+		}
+	}
+}
+
+// closeClaimed closes what is ripe on a claimed partition at clock (the
+// broker's time at the claim), in a cycle that acks the claim's empty batch,
+// and tracks when the windows left open close.
+func (r *Runner) closeClaimed(ctx context.Context, pid, pname, leaseID string, clock int64) error {
+	stages := r.stream.Stages
+	l := r.partitionLock(pid)
+	l.Lock()
+	defer l.Unlock()
+
+	// Every row: the windows left open say when to come back.
+	loaded, err := GetState(ctx, r.http, r.serverQueryID, pid, nil)
+	if err != nil {
+		return err
+	}
+	var stateOps []operators.StateOp
+	var emits []operators.ReduceEmit
+	var nextClose *int64
+	if w, ok := stages.Window.(*operators.WindowSessionOperator); ok {
+		state := map[string]interface{}{}
+		for k, v := range loaded {
+			if strings.HasPrefix(k, w.OperatorTag()+"\u001fopen\u001f") {
+				state[k] = v
+			}
+		}
+		res := w.RunSession(nil, state, stages.Reducer.Fn, reducerInitial(stages.Reducer), clock)
+		stateOps, nextClose = res.StateOps, res.NextCloseMs
+		for _, e := range res.Emits {
+			emits = append(emits, operators.ReduceEmit{
+				Key: e.Key, WindowStart: e.WindowStart, WindowEnd: e.WindowEnd,
+				WindowKey: e.WindowKey, Value: e.Value,
+			})
+		}
+	} else {
+		res := stages.Reducer.Run(nil, loaded, clock, stages.Window.OperatorTag(), stages.Window.GraceMs())
+		stateOps, emits, nextClose = res.StateOps, res.Emits, res.NextCloseMs
+	}
+	closed := len(emits) > 0
+	emits, err = r.applyPostStages(ctx, stages.Post, emits, pid, pname, nil)
+	if err != nil {
+		return err
+	}
+	pushItems, err := r.buildSink(ctx, stages.Sink, emits, pid, pname)
+	if err != nil {
+		return err
+	}
+	// The empty batch's ack: the cursor stays and the lease goes, also when
+	// nothing was ripe (another runner closed it first).
+	ack := map[string]interface{}{
+		"transactionId": "",
+		"leaseId":       leaseID,
+		"status":        "completed",
+		"count":         0,
+	}
+	if _, err := CommitCycle(ctx, r.http, r.serverQueryID, pid, r.consumerGroup, stateOps, pushItems, ack, true); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if closed {
+		r.stats.FlushCyclesTotal++
+	}
+	r.stats.StateOpsTotal += int64(len(stateOps))
+	r.stats.PushItemsTotal += int64(len(pushItems))
+	r.mu.Unlock()
+	// Under the partition lock, like the cycle's own setDue.
+	r.setDue(pid, pname, nextClose)
+	return nil
 }
 
 func (r *Runner) flushTick(ctx context.Context) {
@@ -1107,16 +1514,7 @@ func (r *Runner) flushSessionPartition(ctx context.Context, pid, pname string, c
 		return nil
 	}
 	reducer := r.stream.Stages.Reducer
-	initial := func() interface{} {
-		if reducer.Initial == nil {
-			return float64(0)
-		}
-		b, _ := json.Marshal(reducer.Initial)
-		var v interface{}
-		_ = json.Unmarshal(b, &v)
-		return v
-	}
-	res := w.RunSession([]operators.Envelope{}, state, reducer.Fn, initial, clock)
+	res := w.RunSession([]operators.Envelope{}, state, reducer.Fn, reducerInitial(reducer), clock)
 	if len(res.Emits) == 0 {
 		return nil
 	}
@@ -1144,6 +1542,35 @@ func (r *Runner) flushSessionPartition(ctx context.Context, pid, pname string, c
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// reducerInitial gives a session a fresh copy of the reducer's initial value,
+// so no two sessions share one accumulator.
+func reducerInitial(reducer *operators.ReduceOperator) func() interface{} {
+	return func() interface{} {
+		if reducer.Initial == nil {
+			return float64(0)
+		}
+		b, _ := json.Marshal(reducer.Initial)
+		var v interface{}
+		_ = json.Unmarshal(b, &v)
+		return v
+	}
+}
+
+// newestCreatedAt is the latest createdAt of a batch, in ms. false: none of
+// them parses.
+func newestCreatedAt(messages []Message) (int64, bool) {
+	var newest int64
+	found := false
+	for _, m := range messages {
+		if t, err := time.Parse(time.RFC3339Nano, m.CreatedAt); err == nil {
+			if ms := t.UnixMilli(); !found || ms > newest {
+				newest, found = ms, true
+			}
+		}
+	}
+	return newest, found
+}
 
 func messageToMap(m Message) map[string]interface{} {
 	return map[string]interface{}{

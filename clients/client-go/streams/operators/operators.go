@@ -23,16 +23,16 @@ import (
 // Envelope is the per-message bag of fields the runtime threads through
 // operators. Mirrors the JS / Python envelope shape exactly.
 type Envelope struct {
-	Msg            map[string]interface{}
-	Key            string
-	Value          interface{}
-	Ctx            map[string]interface{}
-	EventTimeMs    int64
-	WindowStart    int64
-	WindowEnd      int64
-	WindowKey      string
-	OperatorTag    string
-	GracePeriodMs  int64
+	Msg           map[string]interface{}
+	Key           string
+	Value         interface{}
+	Ctx           map[string]interface{}
+	EventTimeMs   int64
+	WindowStart   int64
+	WindowEnd     int64
+	WindowKey     string
+	OperatorTag   string
+	GracePeriodMs int64
 }
 
 // EmitCtx is the context passed to post-reducer .map(value, ctx) and
@@ -324,11 +324,11 @@ func (g GateOperator) Evaluate(env Envelope, ctx GateContext) (bool, error) {
 const msPerSec = 1000
 
 type windowBaseConfig struct {
-	GracePeriodMs    int64
-	IdleFlushMs      int64
-	EventTimeFn      EventTimeFn
+	GracePeriodMs     int64
+	IdleFlushMs       int64
+	EventTimeFn       EventTimeFn
 	AllowedLatenessMs int64
-	OnLatePolicy     string
+	OnLatePolicy      string
 }
 
 func normaliseLate(s string) string {
@@ -382,13 +382,13 @@ func NewWindowTumblingOperator(seconds float64, opts ...WindowOption) *WindowTum
 	return &WindowTumblingOperator{Seconds: seconds, windowBaseConfig: wo}
 }
 
-func (w *WindowTumblingOperator) Kind() string { return "window" }
-func (w *WindowTumblingOperator) WindowKind() string { return "tumbling" }
-func (w *WindowTumblingOperator) WindowMs() int64 { return int64(w.Seconds * msPerSec) }
-func (w *WindowTumblingOperator) GraceMs() int64  { return w.GracePeriodMs }
-func (w *WindowTumblingOperator) IdleMs() int64   { return w.IdleFlushMs }
-func (w *WindowTumblingOperator) AllowedLateMs() int64 { return w.AllowedLatenessMs }
-func (w *WindowTumblingOperator) OnLate() string  { return w.OnLatePolicy }
+func (w *WindowTumblingOperator) Kind() string           { return "window" }
+func (w *WindowTumblingOperator) WindowKind() string     { return "tumbling" }
+func (w *WindowTumblingOperator) WindowMs() int64        { return int64(w.Seconds * msPerSec) }
+func (w *WindowTumblingOperator) GraceMs() int64         { return w.GracePeriodMs }
+func (w *WindowTumblingOperator) IdleMs() int64          { return w.IdleFlushMs }
+func (w *WindowTumblingOperator) AllowedLateMs() int64   { return w.AllowedLatenessMs }
+func (w *WindowTumblingOperator) OnLate() string         { return w.OnLatePolicy }
 func (w *WindowTumblingOperator) EventTime() EventTimeFn { return w.EventTimeFn }
 func (w *WindowTumblingOperator) OperatorTag() string {
 	// Match the JS / Python format exactly: integer seconds render without
@@ -448,15 +448,15 @@ func NewWindowSlidingOperator(size, slide float64, opts ...WindowOption) *Window
 	return &WindowSlidingOperator{Size: size, Slide: slide, windowBaseConfig: wo}
 }
 
-func (w *WindowSlidingOperator) Kind() string         { return "window" }
-func (w *WindowSlidingOperator) WindowKind() string   { return "sliding" }
-func (w *WindowSlidingOperator) SizeMs() int64        { return int64(w.Size * msPerSec) }
-func (w *WindowSlidingOperator) SlideMs() int64       { return int64(w.Slide * msPerSec) }
-func (w *WindowSlidingOperator) WindowsPerEvent() int { return int(w.Size / w.Slide) }
-func (w *WindowSlidingOperator) GraceMs() int64       { return w.GracePeriodMs }
-func (w *WindowSlidingOperator) IdleMs() int64        { return w.IdleFlushMs }
-func (w *WindowSlidingOperator) AllowedLateMs() int64 { return w.AllowedLatenessMs }
-func (w *WindowSlidingOperator) OnLate() string       { return w.OnLatePolicy }
+func (w *WindowSlidingOperator) Kind() string           { return "window" }
+func (w *WindowSlidingOperator) WindowKind() string     { return "sliding" }
+func (w *WindowSlidingOperator) SizeMs() int64          { return int64(w.Size * msPerSec) }
+func (w *WindowSlidingOperator) SlideMs() int64         { return int64(w.Slide * msPerSec) }
+func (w *WindowSlidingOperator) WindowsPerEvent() int   { return int(w.Size / w.Slide) }
+func (w *WindowSlidingOperator) GraceMs() int64         { return w.GracePeriodMs }
+func (w *WindowSlidingOperator) IdleMs() int64          { return w.IdleFlushMs }
+func (w *WindowSlidingOperator) AllowedLateMs() int64   { return w.AllowedLatenessMs }
+func (w *WindowSlidingOperator) OnLate() string         { return w.OnLatePolicy }
 func (w *WindowSlidingOperator) EventTime() EventTimeFn { return w.EventTimeFn }
 func (w *WindowSlidingOperator) OperatorTag() string {
 	return "slide:" + numToShort(w.Size) + ":" + numToShort(w.Slide)
@@ -534,15 +534,15 @@ func NewWindowCronOperator(every string, opts ...WindowOption) *WindowCronOperat
 	return &WindowCronOperator{Every: every, windowBaseConfig: wo}
 }
 
-func (w *WindowCronOperator) Kind() string             { return "window" }
-func (w *WindowCronOperator) WindowKind() string       { return "cron" }
-func (w *WindowCronOperator) WindowMs() int64          { return everyToMs(w.Every) }
-func (w *WindowCronOperator) GraceMs() int64           { return w.GracePeriodMs }
-func (w *WindowCronOperator) IdleMs() int64            { return w.IdleFlushMs }
-func (w *WindowCronOperator) AllowedLateMs() int64     { return w.AllowedLatenessMs }
-func (w *WindowCronOperator) OnLate() string           { return w.OnLatePolicy }
-func (w *WindowCronOperator) EventTime() EventTimeFn   { return w.EventTimeFn }
-func (w *WindowCronOperator) OperatorTag() string      { return "cron:" + w.Every }
+func (w *WindowCronOperator) Kind() string           { return "window" }
+func (w *WindowCronOperator) WindowKind() string     { return "cron" }
+func (w *WindowCronOperator) WindowMs() int64        { return everyToMs(w.Every) }
+func (w *WindowCronOperator) GraceMs() int64         { return w.GracePeriodMs }
+func (w *WindowCronOperator) IdleMs() int64          { return w.IdleFlushMs }
+func (w *WindowCronOperator) AllowedLateMs() int64   { return w.AllowedLatenessMs }
+func (w *WindowCronOperator) OnLate() string         { return w.OnLatePolicy }
+func (w *WindowCronOperator) EventTime() EventTimeFn { return w.EventTimeFn }
+func (w *WindowCronOperator) OperatorTag() string    { return "cron:" + w.Every }
 func (w *WindowCronOperator) Config() map[string]interface{} {
 	return map[string]interface{}{
 		"kind":            "window-cron",
@@ -596,15 +596,15 @@ func NewWindowSessionOperator(gap float64, opts ...WindowOption) *WindowSessionO
 	return &WindowSessionOperator{Gap: gap, windowBaseConfig: wo}
 }
 
-func (w *WindowSessionOperator) Kind() string                   { return "window" }
-func (w *WindowSessionOperator) WindowKind() string             { return "session" }
-func (w *WindowSessionOperator) GapMs() int64                   { return int64(w.Gap * msPerSec) }
-func (w *WindowSessionOperator) GraceMs() int64                 { return w.GracePeriodMs }
-func (w *WindowSessionOperator) IdleMs() int64                  { return w.IdleFlushMs }
-func (w *WindowSessionOperator) AllowedLateMs() int64           { return w.AllowedLatenessMs }
-func (w *WindowSessionOperator) OnLate() string                 { return w.OnLatePolicy }
-func (w *WindowSessionOperator) EventTime() EventTimeFn         { return w.EventTimeFn }
-func (w *WindowSessionOperator) OperatorTag() string            { return "sess:" + numToShort(w.Gap) }
+func (w *WindowSessionOperator) Kind() string           { return "window" }
+func (w *WindowSessionOperator) WindowKind() string     { return "session" }
+func (w *WindowSessionOperator) GapMs() int64           { return int64(w.Gap * msPerSec) }
+func (w *WindowSessionOperator) GraceMs() int64         { return w.GracePeriodMs }
+func (w *WindowSessionOperator) IdleMs() int64          { return w.IdleFlushMs }
+func (w *WindowSessionOperator) AllowedLateMs() int64   { return w.AllowedLatenessMs }
+func (w *WindowSessionOperator) OnLate() string         { return w.OnLatePolicy }
+func (w *WindowSessionOperator) EventTime() EventTimeFn { return w.EventTimeFn }
+func (w *WindowSessionOperator) OperatorTag() string    { return "sess:" + numToShort(w.Gap) }
 func (w *WindowSessionOperator) Config() map[string]interface{} {
 	return map[string]interface{}{
 		"kind":            "window-session",
@@ -650,6 +650,20 @@ type SessionEmit struct {
 type SessionResult struct {
 	StateOps []StateOp
 	Emits    []SessionEmit
+	// NextCloseMs is when the earliest session still open closes
+	// (lastEventTime + gap + grace), on the clock the sessions are kept in.
+	// nil: nothing is open. The runner comes back then to close it, also when
+	// the partition gets no more messages.
+	NextCloseMs *int64
+}
+
+// earliest keeps the sooner of a close time seen so far (nil: none yet) and
+// another one.
+func earliest(cur *int64, closeMs int64) *int64 {
+	if cur != nil && *cur <= closeMs {
+		return cur
+	}
+	return &closeMs
 }
 
 // RunSession applies a batch of envelopes to per-key open sessions and
@@ -747,8 +761,12 @@ func (w *WindowSessionOperator) RunSession(envelopes []Envelope, loadedState map
 	}
 
 	var stateOps []StateOp
+	var nextClose *int64
 	for userKey, s := range sessions {
 		stateKey := w.OpenSessionStateKey(userKey)
+		if !s.Closed && s.LastEventTime != 0 {
+			nextClose = earliest(nextClose, s.LastEventTime+w.GapMs()+w.GracePeriodMs)
+		}
 		if s.Closed {
 			if s.Seeded {
 				stateOps = append(stateOps, StateOp{Type: "delete", Key: stateKey})
@@ -766,7 +784,7 @@ func (w *WindowSessionOperator) RunSession(envelopes []Envelope, loadedState map
 		}
 	}
 
-	return SessionResult{StateOps: stateOps, Emits: emits}
+	return SessionResult{StateOps: stateOps, Emits: emits, NextCloseMs: nextClose}
 }
 
 func (w *WindowSessionOperator) buildEmit(userKey string, s struct {
@@ -793,7 +811,7 @@ func (w *WindowSessionOperator) buildEmit(userKey string, s struct {
 const stateKeySep = "\u001f"
 
 type StateOp struct {
-	Type  string      `json:"type"`            // "upsert" | "delete"
+	Type  string      `json:"type"` // "upsert" | "delete"
 	Key   string      `json:"key"`
 	Value interface{} `json:"value,omitempty"`
 }
@@ -809,6 +827,12 @@ type ReduceEmit struct {
 type ReduceResult struct {
 	StateOps []StateOp
 	Emits    []ReduceEmit
+	// NextCloseMs is when the earliest window still open closes
+	// (windowEnd + grace), stored windows the batch did not touch included,
+	// on the clock the windows are kept in. nil: nothing is open. The runner
+	// comes back then to close it, also when the partition gets no more
+	// messages.
+	NextCloseMs *int64
 }
 
 type ReduceOperator struct {
@@ -898,8 +922,13 @@ func (r ReduceOperator) Run(envelopes []Envelope, loadedState map[string]interfa
 
 	var ops []StateOp
 	var emits []ReduceEmit
+	var nextClose *int64
 	for sk, e := range accs {
-		closed := (e.WindowEnd + gracePeriodMs) <= effective
+		closesAt := e.WindowEnd + gracePeriodMs
+		closed := closesAt <= effective
+		if !closed {
+			nextClose = earliest(nextClose, closesAt)
+		}
 		if closed {
 			emits = append(emits, ReduceEmit{
 				Key: e.Key, WindowStart: e.WindowStart,
@@ -917,7 +946,7 @@ func (r ReduceOperator) Run(envelopes []Envelope, loadedState map[string]interfa
 			})
 		}
 	}
-	return ReduceResult{StateOps: ops, Emits: emits}
+	return ReduceResult{StateOps: ops, Emits: emits, NextCloseMs: nextClose}
 }
 
 // StateKey parts.

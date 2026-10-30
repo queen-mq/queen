@@ -19,7 +19,13 @@ import (
 // sum-based, or partition-coverage stopping conditions.
 func drainUntil(t *testing.T, qb *queen.QueueBuilder, until func([]*queen.Message) bool, timeout time.Duration) []*queen.Message {
 	t.Helper()
-	cg := "drain-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	return drainGroupUntil(t, qb, "drain-"+strconv.FormatInt(time.Now().UnixNano(), 36), until, timeout)
+}
+
+// drainGroupUntil is drainUntil with a consumer group the caller names, so a
+// second call with the same group reads only what came after the first.
+func drainGroupUntil(t *testing.T, qb *queen.QueueBuilder, cg string, until func([]*queen.Message) bool, timeout time.Duration) []*queen.Message {
+	t.Helper()
 	out := []*queen.Message{}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
