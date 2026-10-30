@@ -295,9 +295,10 @@ impl Coordinator {
                 return Joined::Now(JoinOut::error(MEMBER_ID_REQUIRED, &id));
             }
             id
-        } else if g.members.contains_key(&a.member_id) {
-            a.member_id.clone()
-        } else if g.pending.remove(&a.member_id).is_some() {
+        } else if g.members.contains_key(&a.member_id)
+            // KIP-394: an id handed out above, coming back with its join.
+            || g.pending.remove(&a.member_id).is_some()
+        {
             a.member_id.clone()
         } else {
             return Joined::Now(JoinOut::error(UNKNOWN_MEMBER_ID, &a.member_id));
