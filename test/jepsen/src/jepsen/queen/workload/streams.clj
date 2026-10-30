@@ -12,9 +12,17 @@
                  transactionId is unique per attempt, so a cycle committed
                  twice cannot hide behind push dedup.
 
+    :flush       close a quiet partition's windows the way a runner does
+                 (issue #153): POST /streams/v1/claim leases the partition with
+                 an EMPTY batch (only when nobody holds it and the group has
+                 read all of it), then ONE cycle under the claim's lease acks
+                 count 0, pushes a marker {p, values [], flush true} to o<p>
+                 and adds 1 to the state cell's :flushes.
+
   A cycle is one transaction: the planner refuses it whole when the ack's lease
   is gone (bad_lease), so a processor whose lease expired writes nothing, and
-  its batch is processed again by whoever holds it next.
+  its batch is processed again by whoever holds it next. A flush whose claim
+  lease is gone is refused the same way.
 
   Final phase: processors drain the source; then every thread reads the whole
   sink (POST /api/v1/fetch, every o<p> from offset 0) and every state cell
@@ -25,6 +33,9 @@
       double processing); nothing in the sink was never pushed;
     - each partition's state cell equals the sum of its sink records (count,
       sum, sum of squares): the ack, the sink push and the state move together;
+    - each partition's :flushes equals its flush markers in the sink: a flush
+      cycle commits at most once, and never interleaves with a processor on
+      the same partition (a lost or doubled update shows here);
     - a sink record's values all come from its own partition; every node reads
       the same sink."
   (:require [clojure.tools.logging :refer [info warn]]
@@ -147,9 +158,10 @@
         (if (nil? state)
           ; Nothing committed: the lease runs out and the batch comes back.
           (assoc op :type :fail, :p p, :values vs, :error :state-read)
-          (let [agg  {:count (+ (:count state 0) (count vs))
-                      :sum   (+ (:sum state 0) (reduce + vs))
-                      :sq    (+ (:sq state 0) (reduce + (map #(* % %) vs)))}
+          (let [agg  {:count   (+ (:count state 0) (count vs))
+                      :sum     (+ (:sum state 0) (reduce + vs))
+                      :sq      (+ (:sq state 0) (reduce + (map #(* % %) vs)))
+                      :flushes (:flushes state 0)}
                 body {:query_id       qid
                       :partition_id   (str pid)
                       :consumer_group group
@@ -173,6 +185,61 @@
               (:success (:body cr))    (assoc op :type :ok, :p p, :values vs, :agg agg)
               :else                    (assoc op :type :fail, :p p, :values vs
                                               :error [:cycle (:reason (:body cr)) (:error (:body cr))]))))))))
+
+(defn- flush!
+  "Close a quiet partition the way a stream runner does: claim it (an empty
+  batch under a lease), then one cycle under the claim's lease that acks
+  count 0, pushes a flush marker and counts the flush in the state cell."
+  [client test op]
+  (let [qid (register! client)
+        p   (or (:p op) (rand/long partitions))
+        pid (get (:pids @(:shared client)) p)]
+    (if (nil? pid)
+      ; Not popped yet: its partition id is not known here.
+      (assoc op :type :fail, :p p, :error :unknown-partition)
+      (let [r (call client :post (str (:base client) "/streams/v1/claim")
+                    {:query_id qid, :partition_ids [(str pid)], :consumer_group group
+                     :lease_seconds 3}
+                    (:client-timeout-ms test))]
+        (cond
+          ; A claim only leases: whatever happened to it, nothing is written,
+          ; and a lease nobody uses runs out.
+          (:exception r)         (assoc op :type :fail, :p p, :error [:claim (:type (:exception r))])
+          (not= 200 (:status r)) (assoc op :type :fail, :p p, :error [:claim (:status r) (:body r)])
+          :else
+          (let [part (first (filter #(= (str pid) (str (:partition_id %))) (:partitions (:body r))))]
+            (if-not (= "claimed" (:status part))
+              (assoc op :type :ok, :p p, :values [], :claim (:status part))
+              (let [state (state-of client test qid pid)]
+                (if (nil? state)
+                  (assoc op :type :fail, :p p, :error :state-read)
+                  (let [agg  {:count   (:count state 0)
+                              :sum     (:sum state 0)
+                              :sq      (:sq state 0)
+                              :flushes (inc (:flushes state 0))}
+                        body {:query_id       qid
+                              :partition_id   (str pid)
+                              :consumer_group group
+                              :push_items     [{:queue         sink
+                                                :partition     (str "o" p)
+                                                :payload       {:p p, :values [], :flush true}
+                                                :transactionId (str "f" p "-" (random-uuid))}]
+                              :ack            {:status  "completed"
+                                               :leaseId (:lease_id (:body r))
+                                               :count   0}
+                              :state_ops      [{:key "agg", :type "upsert", :value agg}]}
+                        cr   (call client :post (str (:base client) "/streams/v1/cycle") body
+                                   (:client-timeout-ms test))]
+                    (cond
+                      (unknown? cr)           (assoc op :type :info, :p p, :values [], :agg agg
+                                                     :error [:flush-cycle (:type (:exception cr))])
+                      (:exception cr)         (assoc op :type :fail, :p p, :values []
+                                                     :error [:flush-cycle (:type (:exception cr))])
+                      (not= 200 (:status cr)) (assoc op :type (log/push-failure test (:status cr) (:body cr))
+                                                     :p p, :values [], :error [:flush-cycle (:status cr) (:body cr)])
+                      (:success (:body cr))   (assoc op :type :ok, :p p, :values [], :agg agg, :flushed true)
+                      :else                   (assoc op :type :fail, :p p, :values []
+                                                     :error [:flush-cycle (:reason (:body cr)) (:error (:body cr))]))))))))))))
 
 (defn- read-sink!
   [client test op]
@@ -228,6 +295,7 @@
       (case (:f op)
         :enqueue    (enqueue! this test op)
         :process    (process! this test op)
+        :flush      (flush! this test op)
         :read-sink  (read-sink! this test op)
         :read-state (read-state! this test op))
       (catch clojure.lang.ExceptionInfo e
@@ -298,13 +366,16 @@
                          (take 16) vec)
             by-p    (group-by :partition recs)
             want    (into (sorted-map)
-                          (map (fn [[p rs]] [p (agg-of (mapcat (comp :values :payload) rs))]) by-p))
+                          (map (fn [[p rs]]
+                                 [p (assoc (agg-of (mapcat (comp :values :payload) rs))
+                                           :flushes (count (filter (comp :flush :payload) rs)))])
+                               by-p))
             bad-state (->> states
                            (mapcat (fn [op]
                                      (for [[p got] (:value op)
-                                           :let [w (get want p (agg-of []))
-                                                 got (select-keys got [:count :sum :sq])]
-                                           :when (not= w (merge (agg-of []) got))]
+                                           :let [w (get want p (assoc (agg-of []) :flushes 0))
+                                                 got (select-keys got [:count :sum :sq :flushes])]
+                                           :when (not= w (merge (assoc (agg-of []) :flushes 0) got))]
                                        {:node (:node op), :partition p, :state got, :sink w})))
                            (take 16) vec)]
         {:valid?          (and (seq sinks) (seq states)
@@ -317,6 +388,8 @@
                                                  (seq (:values %)))
                                            ops))
          :cycles-unknown  (count (h/filter #(and (= :process (:f %)) (= :info (:type %))) ops))
+         :flushes-ok      (count (h/filter #(and (= :flush (:f %)) (= :ok (:type %)) (:flushed %)) ops))
+         :flush-markers   (count (filter (comp :flush :payload) recs))
          :processed-twice (take 16 dup)
          :processed-twice-count (count dup)
          :lost            (take 16 lost)
@@ -332,9 +405,13 @@
     {:client          (map->Client {:shared shared})
      :checker         (streams-checker)
      :generator       (gen/mix [(map (fn [v] {:f :enqueue, :value v}) (range))
-                                (repeat {:f :process, :value nil})])
+                                (repeat {:f :process, :value nil})
+                                (repeat {:f :flush, :value nil})])
      :final-generator (gen/phases
                         (gen/each-thread (->DrainUntilEmpty 0 0))
+                        (gen/sleep 4)
+                        ; Every partition is drained: a claim can lease it now.
+                        (map (fn [p] {:f :flush, :value nil, :p p}) (range partitions))
                         (gen/sleep 3)
                         (gen/each-thread {:f :read-sink, :value nil})
                         (gen/each-thread {:f :read-state, :value nil}))}))
