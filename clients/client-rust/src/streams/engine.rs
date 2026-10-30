@@ -53,6 +53,16 @@ pub(crate) struct Emit {
 pub(crate) struct Outcome {
     pub state_ops: Vec<StateOp>,
     pub emits: Vec<Emit>,
+    /// When the earliest window still open closes (`window_end + grace`,
+    /// or a session's `last_event + gap + grace`), on the clock the windows
+    /// are kept in. `None`: nothing is open.
+    pub next_close_ms: Option<i64>,
+}
+
+impl Outcome {
+    fn open_until(&mut self, close_ms: i64) {
+        self.next_close_ms = Some(self.next_close_ms.map_or(close_ms, |t| t.min(close_ms)));
+    }
 }
 
 /// Monday 00:00 UTC alignment: 1 Jan 1970 was a Thursday, so weeks shift by 4
@@ -223,7 +233,11 @@ pub(crate) fn run_reduce(
 
     let mut out = Outcome::default();
     for (state_key, entry) in accs {
-        let closed = entry.window_end + grace_ms <= clock;
+        let closes_at = entry.window_end + grace_ms;
+        let closed = closes_at <= clock;
+        if !closed {
+            out.open_until(closes_at);
+        }
         if closed {
             out.emits.push(Emit {
                 key: entry.key,
@@ -356,6 +370,11 @@ pub(crate) fn run_session(
 
     for (key, s) in sessions {
         let state_key = session_state_key(&tag, &key);
+        if !s.closed {
+            if let Some(last) = s.last_event {
+                out.open_until(last + gap_ms + window.grace_ms());
+            }
+        }
         if s.closed {
             if s.seeded {
                 out.state_ops.push(StateOp::Delete { key: state_key });
@@ -830,5 +849,72 @@ mod tests {
         assert!(check_user_key("normal").is_ok());
         assert!(check_user_key("__wm__").is_err());
         assert!(check_user_key("__anything").is_err());
+    }
+
+    // ------------------------------------------------- when to come back
+
+    // The runner claims a quiet partition when its earliest open window
+    // closes; the engine says when that is.
+
+    #[test]
+    fn the_next_close_is_the_earliest_open_window_end_plus_grace() {
+        let w = Window::new(WindowKind::Tumbling { seconds: 10 });
+        let mut envs = w.annotate(rec(1.0), "k".into(), 5_000);
+        envs.extend(w.annotate(rec(1.0), "k".into(), 15_000));
+        let state = BTreeMap::new();
+
+        let out = run_reduce(&counter(), &envs, &state, Some(9_000), "tumb:10", 2_000);
+        assert_eq!(
+            out.next_close_ms,
+            Some(12_000),
+            "first window: end 10 s + 2 s grace"
+        );
+
+        // The first closed: the second is next.
+        let out = run_reduce(&counter(), &envs, &state, Some(12_000), "tumb:10", 2_000);
+        assert_eq!(out.emits.len(), 1);
+        assert_eq!(out.next_close_ms, Some(22_000));
+
+        // Both closed: nothing to come back for.
+        let out = run_reduce(&counter(), &envs, &state, Some(22_000), "tumb:10", 2_000);
+        assert_eq!(out.emits.len(), 2);
+        assert_eq!(out.next_close_ms, None);
+    }
+
+    #[test]
+    fn a_seeded_window_left_untouched_still_counts_for_the_next_close() {
+        let mut state = BTreeMap::new();
+        state.insert(
+            state_key_for("tumb:10", "1970-01-01T00:00:10.000Z", "k"),
+            serde_json::json!({ "acc": { "count": 1.0 }, "windowStart": 10_000, "windowEnd": 20_000 }),
+        );
+        let out = run_reduce(&counter(), &[], &state, Some(15_000), "tumb:10", 0);
+        assert!(out.emits.is_empty());
+        assert_eq!(out.next_close_ms, Some(20_000));
+    }
+
+    #[test]
+    fn a_sessions_next_close_is_its_last_event_plus_gap_and_grace() {
+        let w = session_window(30);
+        let envs: Vec<Envelope> = [0i64, 10_000]
+            .iter()
+            .flat_map(|ts| w.annotate(rec(1.0), "u1".into(), *ts))
+            .collect();
+        let out = run_session(&w, &counter(), &envs, &BTreeMap::new(), 11_000);
+        assert!(out.emits.is_empty());
+        assert_eq!(out.next_close_ms, Some(40_000));
+
+        // The idle close of the stored session: nothing left open after it.
+        let mut state = BTreeMap::new();
+        state.insert(
+            session_state_key(&w.tag(), "u1"),
+            serde_json::json!({ "acc": { "count": 2.0 }, "sessionStart": 0, "lastEventTime": 10_000 }),
+        );
+        let out = run_session(&w, &counter(), &[], &state, 39_999);
+        assert!(out.emits.is_empty());
+        assert_eq!(out.next_close_ms, Some(40_000));
+        let out = run_session(&w, &counter(), &[], &state, 40_000);
+        assert_eq!(out.emits.len(), 1);
+        assert_eq!(out.next_close_ms, None);
     }
 }

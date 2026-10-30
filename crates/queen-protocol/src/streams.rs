@@ -261,6 +261,115 @@ pub struct CycleResponse {
     pub error: Option<String>,
 }
 
+/// `POST /streams/v1/state/partitions`: the partitions holding state for a
+/// query, in partition id order (broker 2.7). A runner remembers only the
+/// partitions it processed, so after a restart this is how it finds the
+/// windows nobody is closing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatePartitionsRequest {
+    pub query_id: String,
+
+    /// Only partitions whose newest state row is at least this old.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untouched_for_ms: Option<i64>,
+
+    /// Resume after this partition id (the previous page's `next`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// One partition holding state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatePartition {
+    pub partition_id: String,
+    #[serde(default)]
+    pub partition: String,
+    #[serde(default)]
+    pub queue: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StatePartitionsResponse {
+    #[serde(default = "default_true")]
+    pub success: bool,
+
+    #[serde(default)]
+    pub partitions: Vec<StatePartition>,
+
+    /// More to read: pass it as `after`. `None` at the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `POST /streams/v1/claim`: lease idle partitions of the query's source
+/// queue for the stream's group, with an empty batch (broker 2.7). A cycle
+/// that names the lease with a `count: 0` ack closes their windows; the
+/// broker refuses it whole if the lease is gone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaimRequest {
+    pub query_id: String,
+
+    pub partition_ids: Vec<String>,
+
+    /// Defaults to `streams.<query name>` on the broker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_group: Option<String>,
+
+    /// 30 s when absent, 600 s at most.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_seconds: Option<i32>,
+}
+
+/// One partition's answer to a claim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaimedPartition {
+    pub partition_id: String,
+    #[serde(default)]
+    pub partition: String,
+    /// `claimed`, `busy` (someone holds it), `backlog` (messages wait for
+    /// the group: its next pop delivers them) or `missing`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<String>,
+}
+
+impl ClaimedPartition {
+    pub fn is_claimed(&self) -> bool {
+        self.status == "claimed"
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClaimResponse {
+    #[serde(default = "default_true")]
+    pub success: bool,
+
+    /// The lease every `claimed` partition got.
+    #[serde(default)]
+    pub lease_id: String,
+
+    #[serde(default)]
+    pub lease_seconds: i64,
+
+    /// The broker's clock: processing-time windows close on it.
+    #[serde(default)]
+    pub now_ms: i64,
+
+    #[serde(default)]
+    pub partitions: Vec<ClaimedPartition>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Reserved state key holding a partition's event-time watermark.
 ///
 /// User keys must never start with `__`: the reducer skips anything whose

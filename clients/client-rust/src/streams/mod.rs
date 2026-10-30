@@ -244,9 +244,13 @@ impl Stream {
         self.window_options(move |w| w.grace_seconds = seconds)
     }
 
-    /// How often quiet partitions are swept for ripe windows. `0` disables the
-    /// sweep, which means a window on a partition that goes silent stays open
-    /// until traffic returns.
+    /// How often quiet partitions are checked for ripe windows. On a broker
+    /// with `POST /streams/v1/claim` (2.7) a processing-time window closes
+    /// within this interval of its end, under a lease on its partition, also
+    /// after a restart and with several runners; on an older broker, only on
+    /// the partitions this process read in the last five minutes. `0` turns it
+    /// off: a window on a partition that goes silent then stays open until
+    /// traffic returns.
     pub fn idle_flush_ms(self, ms: i64) -> Self {
         self.window_options(move |w| w.idle_flush_ms = ms)
     }

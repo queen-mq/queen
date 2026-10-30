@@ -1,15 +1,16 @@
 //! The pop → process → commit loop, and the idle-flush sweep.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
 use queen_protocol::{
-    CycleAck, CycleRequest, CycleResponse, Message, RegisterRequest, RegisterResponse,
-    SinkPushItem, StateGetRequest, StateGetResponse, StateOp, SubscriptionMode,
+    ClaimRequest, ClaimResponse, CycleAck, CycleRequest, CycleResponse, Message, RegisterRequest,
+    RegisterResponse, SinkPushItem, StateGetRequest, StateGetResponse, StateOp,
+    StatePartitionsRequest, StatePartitionsResponse, SubscriptionMode,
 };
 
 use super::engine::{self, Emit, Envelope};
@@ -23,8 +24,46 @@ use crate::queue::QueueBuilder;
 
 /// How long a partition stays eligible for the idle-flush sweep after we last
 /// saw it. Beyond this it is assumed to belong to another worker, and
-/// speculatively flushing it would race that worker's own cycles.
+/// speculatively flushing it would race that worker's own cycles. Only for a
+/// broker without `POST /streams/v1/claim` (before 2.7), and for event-time
+/// windows.
 const PARTITION_RECENCY: Duration = Duration::from_secs(300);
+
+/// How often a runner asks the broker for the partitions holding the query's
+/// state (`POST /streams/v1/state/partitions`): after a restart, a scale-down,
+/// or for partitions another runner left, these are the windows nobody
+/// tracks.
+const SWEEP_EVERY: Duration = Duration::from_secs(30);
+/// How old a partition's newest state row must be before a later sweep takes
+/// it on: a younger one is some runner's live work, which tracks it already.
+/// The first sweep after a start takes every partition: this runner tracks
+/// nothing yet.
+const SWEEP_UNTOUCHED_MS: i64 = 30_000;
+/// Partitions per page of the sweep.
+const SWEEP_PAGE: u32 = 1_000;
+/// Partitions per claim, which is also the most one flush tick closes: a
+/// sweep that finds thousands of quiet partitions (after an outage) works
+/// through them a batch per tick instead of all at once.
+const CLAIM_BATCH: usize = 100;
+/// The lease a claim asks for. A close is one state read and one commit.
+const CLAIM_LEASE_S: i32 = 30;
+/// How soon to try again a partition that someone else holds.
+const CLAIM_RETRY_MS: i64 = 1_000;
+/// How long `stop()` waits for a close in flight before cutting it short.
+const STOP_FLUSH_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether the broker serves `POST /streams/v1/claim`.
+const CLAIMS_UNKNOWN: u8 = 0;
+const CLAIMS_YES: u8 = 1;
+const CLAIMS_NO: u8 = 2;
+
+/// A partition with open windows, and when the earliest closes (ms, on the
+/// broker's clock: processing time is the messages' `createdAt`).
+#[derive(Debug, Clone)]
+struct Due {
+    partition: String,
+    at_ms: i64,
+}
 
 /// What a running stream has done so far.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -184,6 +223,14 @@ pub(crate) struct Runner {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     recent: Mutex<HashMap<String, (String, Instant)>>,
     watermarks: Mutex<HashMap<String, i64>>,
+    /// Processing-time windows still open, by partition: what the idle flush
+    /// claims and closes once their time has come.
+    due: Mutex<HashMap<String, Due>>,
+    /// [`CLAIMS_UNKNOWN`], [`CLAIMS_YES`] or [`CLAIMS_NO`] (an older broker:
+    /// the unleased flush of `recent`).
+    claims: AtomicU8,
+    /// Wakes the flush task early (on stop).
+    wake: tokio::sync::Notify,
 }
 
 /// A running stream.
@@ -203,15 +250,20 @@ impl std::fmt::Debug for StreamHandle {
 }
 
 impl StreamHandle {
-    /// Stop and wait for the in-flight cycle and flush to finish.
+    /// Stop and wait for the in-flight cycle and flush to finish. A close
+    /// cut short would keep its claim on the partition until the lease ran
+    /// out, so it gets 10 seconds to end.
     pub async fn stop(mut self) -> Result<()> {
         self.runner.stopped.store(true, Ordering::SeqCst);
-        if let Some(t) = self.flush_task.take() {
-            t.abort();
-            let _ = t.await;
-        }
+        self.runner.wake.notify_one();
         if let Some(t) = self.loop_task.take() {
             let _ = t.await;
+        }
+        if let Some(mut t) = self.flush_task.take() {
+            if tokio::time::timeout(STOP_FLUSH_WAIT, &mut t).await.is_err() {
+                t.abort();
+                let _ = t.await;
+            }
         }
         Ok(())
     }
@@ -296,6 +348,9 @@ pub(crate) async fn start(
         locks: Mutex::new(HashMap::new()),
         recent: Mutex::new(HashMap::new()),
         watermarks: Mutex::new(HashMap::new()),
+        due: Mutex::new(HashMap::new()),
+        claims: AtomicU8::new(CLAIMS_UNKNOWN),
+        wake: tokio::sync::Notify::new(),
     });
 
     let loop_runner = Arc::clone(&runner);
@@ -306,12 +361,28 @@ pub(crate) async fn start(
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(ms as u64));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut next_sweep = Instant::now();
+            let mut untouched_ms = 0;
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = r.wake.notified() => {}
+                }
                 if r.is_stopped() {
                     break;
                 }
-                r.flush_tick().await;
+                if !r.leased_closes() || r.claims.load(Ordering::Acquire) == CLAIMS_NO {
+                    r.flush_tick().await;
+                    continue;
+                }
+                if Instant::now() >= next_sweep {
+                    r.sweep(untouched_ms).await;
+                    next_sweep = Instant::now() + SWEEP_EVERY;
+                    untouched_ms = SWEEP_UNTOUCHED_MS;
+                }
+                if r.claims.load(Ordering::Acquire) != CLAIMS_NO {
+                    r.close_due().await;
+                }
             }
         })
     });
@@ -366,7 +437,9 @@ impl Runner {
                 if self.is_stopped() {
                     break;
                 }
-                self.touch(&group.partition_id, &group.partition);
+                if !self.leased_closes() || self.claims.load(Ordering::Acquire) != CLAIMS_YES {
+                    self.touch(&group.partition_id, &group.partition);
+                }
                 let n = group.messages.len() as u64;
                 match self.cycle(group).await {
                     Ok(()) => {
@@ -448,7 +521,7 @@ impl Runner {
         }
 
         // 3. Window + reduce, or straight through.
-        let (state_ops, emits) = match (&self.stages.window, &self.stages.reducer) {
+        let (state_ops, emits, next_close) = match (&self.stages.window, &self.stages.reducer) {
             (Some(window), Some(reducer)) => {
                 let loaded = self.load_state(&group.partition_id, None, None).await?;
                 self.windowed(
@@ -480,7 +553,7 @@ impl Runner {
                         });
                     }
                 }
-                (Vec::new(), emits)
+                (Vec::new(), emits, None)
             }
             (None, _) => (
                 Vec::new(),
@@ -494,6 +567,7 @@ impl Runner {
                         value: rec.data,
                     })
                     .collect(),
+                None,
             ),
         };
 
@@ -523,7 +597,12 @@ impl Runner {
             ack,
             true,
         )
-        .await
+        .await?;
+        // What stays open closes when its time comes, under a claim.
+        if self.leased_closes() {
+            self.set_due(&group.partition_id, &group.partition, next_close);
+        }
+        Ok(())
     }
 
     fn windowed(
@@ -534,7 +613,7 @@ impl Runner {
         messages: &[Message],
         partition_id: &str,
         loaded: &BTreeMap<String, Value>,
-    ) -> Result<(Vec<StateOp>, Vec<Emit>)> {
+    ) -> Result<(Vec<StateOp>, Vec<Emit>, Option<i64>)> {
         let event_time = window.event_time.is_some();
 
         // Restore the watermark before filtering, so a restart does not accept
@@ -623,7 +702,7 @@ impl Runner {
             }
         }
 
-        Ok((outcome.state_ops, outcome.emits))
+        Ok((outcome.state_ops, outcome.emits, outcome.next_close_ms))
     }
 
     // -------------------------------------------------------------- gate
@@ -878,6 +957,270 @@ impl Runner {
             true,
         )
         .await
+    }
+
+    // ------------------------------------------------- closes under a claim
+    //
+    // A processing-time window closes when its time comes even if its
+    // partition gets no more messages. The runner keeps, per partition, when
+    // the earliest open window closes (from each cycle it commits, and from
+    // the sweep), claims the partition when that time has come
+    // (`POST /streams/v1/claim`: a lease with an empty batch, granted only
+    // when nobody holds the partition and the group has read all of it), and
+    // closes the windows in a cycle that acks the empty batch. The broker
+    // refuses that cycle whole when the lease is gone, so two runners never
+    // close one window, and a close never deletes a window another runner just
+    // extended. The clock is the broker's, the one `createdAt` comes from.
+
+    /// Whether this stream closes its windows under claims: processing-time
+    /// windows with an idle flush. Event-time windows close on the
+    /// watermark, which only events move.
+    fn leased_closes(&self) -> bool {
+        self.stages
+            .window
+            .as_ref()
+            .is_some_and(|w| w.event_time.is_none() && w.idle_flush_ms > 0)
+            && self.stages.reducer.is_some()
+    }
+
+    /// Track (or forget, `None`) when the partition's earliest open window
+    /// closes.
+    fn set_due(&self, partition_id: &str, partition: &str, at_ms: Option<i64>) {
+        if partition_id.is_empty() {
+            return;
+        }
+        let mut due = self.due.lock().unwrap();
+        match at_ms {
+            Some(at_ms) => {
+                due.insert(
+                    partition_id.to_string(),
+                    Due {
+                        partition: partition.to_string(),
+                        at_ms,
+                    },
+                );
+            }
+            None => {
+                due.remove(partition_id);
+            }
+        }
+    }
+
+    fn retry_due(&self, partition_id: &str, at_ms: i64) {
+        if let Some(d) = self.due.lock().unwrap().get_mut(partition_id) {
+            d.at_ms = d.at_ms.max(at_ms);
+        }
+    }
+
+    /// The partitions holding the query's state that nobody touched for
+    /// `untouched_ms` and this runner does not track yet: tracked as due now,
+    /// so the next ticks claim them a batch at a time.
+    async fn sweep(&self, untouched_ms: i64) {
+        let mut after: Option<String> = None;
+        loop {
+            if self.is_stopped() {
+                return;
+            }
+            let req = StatePartitionsRequest {
+                query_id: self.server_query_id.clone(),
+                untouched_for_ms: (untouched_ms > 0).then_some(untouched_ms),
+                after: after.clone(),
+                limit: Some(SWEEP_PAGE),
+            };
+            let resp: StatePartitionsResponse = match self
+                .inner
+                .http
+                .post_json("/streams/v1/state/partitions", &req, &Opts::default())
+                .await
+            {
+                Ok(Some(r)) => r,
+                Ok(None) => return,
+                Err(e) if e.status() == Some(404) => {
+                    // A broker before 2.7: no claims either.
+                    self.claims.store(CLAIMS_NO, Ordering::Release);
+                    tracing::info!("broker has no stream claims; idle flush of recent partitions");
+                    return;
+                }
+                Err(e) => {
+                    self.counters.errors.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(error = %e, "stream sweep failed");
+                    return;
+                }
+            };
+            let now = now_ms();
+            {
+                let mut due = self.due.lock().unwrap();
+                for p in resp.partitions {
+                    due.entry(p.partition_id).or_insert(Due {
+                        partition: p.partition,
+                        at_ms: now,
+                    });
+                }
+            }
+            match resp.next {
+                Some(next) => after = Some(next),
+                None => return,
+            }
+        }
+    }
+
+    /// Claim the partitions whose windows are due, and close them.
+    async fn close_due(&self) {
+        let (Some(window), Some(reducer)) = (&self.stages.window, &self.stages.reducer) else {
+            return;
+        };
+        let now = now_ms();
+        let mut ready: Vec<(String, i64)> = self
+            .due
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, d)| d.at_ms <= now)
+            .map(|(pid, d)| (pid.clone(), d.at_ms))
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        ready.sort_by_key(|(_, at)| *at);
+        ready.truncate(CLAIM_BATCH);
+        let req = ClaimRequest {
+            query_id: self.server_query_id.clone(),
+            partition_ids: ready.iter().map(|(pid, _)| pid.clone()).collect(),
+            consumer_group: Some(self.consumer_group.clone()),
+            lease_seconds: Some(CLAIM_LEASE_S),
+        };
+        let resp: ClaimResponse = match self
+            .inner
+            .http
+            .post_json("/streams/v1/claim", &req, &Opts::default())
+            .await
+        {
+            Ok(Some(r)) => r,
+            Ok(None) => return,
+            Err(e) if e.status() == Some(404) => {
+                self.claims.store(CLAIMS_NO, Ordering::Release);
+                tracing::info!("broker has no stream claims; idle flush of recent partitions");
+                return;
+            }
+            Err(e) => {
+                self.counters.errors.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(error = %e, "stream claim failed");
+                let retry = now_ms() + CLAIM_RETRY_MS;
+                for (pid, _) in &ready {
+                    self.retry_due(pid, retry);
+                }
+                return;
+            }
+        };
+        self.claims.store(CLAIMS_YES, Ordering::Release);
+        if !resp.success {
+            self.counters.errors.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                error = resp.error.as_deref().unwrap_or("no reason given"),
+                "stream claim refused"
+            );
+            return;
+        }
+        for mut p in resp.partitions {
+            if p.partition.is_empty() {
+                if let Some(d) = self.due.lock().unwrap().get(&p.partition_id) {
+                    p.partition = d.partition.clone();
+                }
+            }
+            match p.status.as_str() {
+                "claimed" => {
+                    // Stopping: the claims not closed yet lapse with their
+                    // lease, nothing is lost.
+                    if self.is_stopped() {
+                        continue;
+                    }
+                    match self
+                        .close_claimed(
+                            window,
+                            reducer,
+                            &p.partition_id,
+                            &p.partition,
+                            &resp.lease_id,
+                            resp.now_ms,
+                        )
+                        .await
+                    {
+                        Ok(next) => self.set_due(&p.partition_id, &p.partition, next),
+                        Err(e) => {
+                            self.counters.errors.fetch_add(1, Ordering::Relaxed);
+                            tracing::error!(
+                                partition_id = %p.partition_id,
+                                error = %e,
+                                "stream close failed; its claim lapses"
+                            );
+                            self.retry_due(&p.partition_id, now_ms() + CLAIM_RETRY_MS);
+                        }
+                    }
+                }
+                "busy" => {
+                    let wait = window.idle_flush_ms.max(CLAIM_RETRY_MS);
+                    self.retry_due(&p.partition_id, now_ms() + wait);
+                }
+                // Messages wait: the cycle that takes them tracks the
+                // partition again. Missing: nothing to close there.
+                _ => self.set_due(&p.partition_id, &p.partition, None),
+            }
+        }
+    }
+
+    /// Close what is ripe on a claimed partition at `clock` (the broker's
+    /// time at the claim), in a cycle that acks the claim's empty batch.
+    /// Answers when the windows left open close.
+    async fn close_claimed(
+        &self,
+        window: &super::ops::Window,
+        reducer: &super::ops::Reducer,
+        partition_id: &str,
+        partition: &str,
+        lease_id: &str,
+        clock: i64,
+    ) -> Result<Option<i64>> {
+        let lock = self.lock_for(partition_id);
+        let _guard = lock.lock().await;
+        // Every row: the windows left open say when to come back.
+        let loaded = self.load_state(partition_id, None, None).await?;
+        let outcome = if window.is_session() {
+            engine::run_session(window, reducer, &[], &loaded, clock)
+        } else {
+            engine::run_reduce(
+                reducer,
+                &[],
+                &loaded,
+                Some(clock),
+                &window.tag(),
+                window.grace_ms(),
+            )
+        };
+        let next = outcome.next_close_ms;
+        let closed = !outcome.emits.is_empty();
+        let emits = self.apply_post(outcome.emits, partition, partition_id)?;
+        let push_items = self.terminal(&emits, partition, partition_id).await?;
+        // The empty batch's ack: the cursor stays and the lease goes, also
+        // when nothing was ripe (another runner closed it first).
+        let ack = CycleAck {
+            transaction_id: String::new(),
+            lease_id: lease_id.to_string(),
+            status: "completed".into(),
+            count: 0,
+        };
+        self.commit(
+            partition_id,
+            &self.consumer_group,
+            outcome.state_ops,
+            push_items,
+            Some(ack),
+            true,
+        )
+        .await?;
+        if closed {
+            self.counters.flush_cycles.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(next)
     }
 
     // ------------------------------------------------------------- shared

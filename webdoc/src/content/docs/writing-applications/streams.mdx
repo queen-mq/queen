@@ -7,6 +7,8 @@ sidebar:
   label: "Streams"
   order: 11
 sourceOfTruth:
+  - clients/client-rust/src/streams/runner.rs
+  - server/src/rsm/consume/idle.rs
   - clients/client-js/client-v2/streams/Stream.js
   - clients/client-js/client-v2/streams/runtime/Runner.js
   - clients/client-js/client-v2/streams/runtime/cycle.js
@@ -93,6 +95,10 @@ A message the gate refuses stops its partition there: it and the ones after it a
 `run()` takes the stream's `queryId`, its identity: its state is stored under it, so a process restarted with the same id carries on with the same windows, and several processes with the same id share the partitions between them. `batchSize` (200) and `maxPartitions` (4) size each cycle, and `stop()` on the handle `run()` returns stops it cleanly.
 
 <Why>a stream is a long-running worker like any other: it has to survive restarts, scale out, and stop during a deploy without losing its place.</Why>
+
+A window on a partition that goes quiet still closes on time. The Rust client keeps the time each open window ends, and at that time leases the quiet partition from the broker (`POST /streams/v1/claim`, broker 2.7) and closes the window under that lease. A partition someone else holds, or one with messages still waiting, is not leased: the window then closes in that cycle. So a window closes once, even with several processes on one `queryId`, and a process that starts asks the broker which partitions hold state (`POST /streams/v1/state/partitions`), so windows left open by a restart or a scale-down close too. The JavaScript, Python and Go clients, and the Rust client on an older broker, close only the windows of partitions their own process read in the last five minutes.
+
+<Why>a session per visit or per trace ends with silence, not with a message. If closing it waited for the next message, a deploy or a crash would leave it open for good, and its result would never be sent.</Why>
 
 Push, consume, ack, replay, fetch, transactions, KV, timers, locks, streams and ephemeral queues all combine. Build on them and Queen carries the logic you would otherwise write around a broker. [Patterns](/patterns/) shows them combined, one real case each.
 

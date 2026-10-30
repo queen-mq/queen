@@ -2558,3 +2558,151 @@ async fn a_windowed_stream_totals_hundreds_of_messages_across_lanes_exactly() {
     drop_queue(&q, &src).await;
     drop_queue(&q, &sink).await;
 }
+
+// ============================================================================
+// Closing windows under a claim (broker 2.7, issue #153)
+// ============================================================================
+
+/// A session open when its runner stops closes on the next runner with no new
+/// event on its partition. Before claims, the idle flush only knew the
+/// partitions its own process had popped, so this window stayed open for good
+/// (and kept its partition from being cleaned up).
+#[tokio::test]
+async fn a_session_open_at_a_restart_closes_without_a_new_event() {
+    let q = broker!();
+    let src = unique("st-restart-src");
+    let sink = unique("st-restart-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+    let query = unique("st-restart-q");
+
+    let build = |queen: &queen_mq::Queen| {
+        Stream::from(queen.queue(&src))
+            .window_session(3)
+            .idle_flush_ms(250)
+            .aggregate_count("count")
+            .to(queen.queue(&sink))
+    };
+    let opts = || {
+        RunOptions::new(&query)
+            .max_wait(Duration::from_millis(200))
+            .subscription_mode(SubscriptionMode::All)
+    };
+
+    // Two events of trace-a, then a stop while its 3 s session is open.
+    let first = build(&q).run(&q, opts().reset(true)).await.unwrap();
+    for _ in 0..2 {
+        q.queue(&src)
+            .partition("trace-a")
+            .push(serde_json::json!({ "n": 1 }))
+            .await
+            .unwrap();
+        sleep_ms(100).await;
+    }
+    sleep_ms(1_200).await;
+    let folded = first.metrics().messages;
+    first.stop().await.unwrap();
+    assert_eq!(folded, 2, "runner 1 should have folded both events");
+
+    // Runner 2, same query. trace-b is the control: it gets an event now.
+    let second = build(&q).run(&q, opts()).await.unwrap();
+    q.queue(&src)
+        .partition("trace-b")
+        .push(serde_json::json!({ "n": 1 }))
+        .await
+        .unwrap();
+
+    let out = drain_until(&q, &sink, Duration::from_secs(15), |m| {
+        m.iter().any(|m| m.partition == "trace-a") && m.iter().any(|m| m.partition == "trace-b")
+    })
+    .await;
+    // Nothing more comes for either partition.
+    sleep_ms(2_000).await;
+    let late = drain_until(&q, &sink, Duration::from_millis(500), |_| false).await;
+    second.stop().await.unwrap();
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+
+    let count_of = |p: &str| -> Vec<f64> {
+        out.iter()
+            .chain(late.iter())
+            .filter(|m| m.partition == p)
+            .map(|m| m.data["count"].as_f64().unwrap_or(-1.0))
+            .collect()
+    };
+    assert_eq!(
+        count_of("trace-a"),
+        vec![2.0],
+        "trace-a's session closes once, with both events"
+    );
+    assert_eq!(count_of("trace-b"), vec![1.0]);
+}
+
+/// Two runners on one query close every session exactly once: each close
+/// runs under its partition's lease, and the broker refuses a close whose
+/// lease is gone.
+#[tokio::test]
+async fn two_runners_close_each_session_once() {
+    let q = broker!();
+    let src = unique("st-two-src");
+    let sink = unique("st-two-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+    let query = unique("st-two-q");
+
+    let build = |queen: &queen_mq::Queen| {
+        Stream::from(queen.queue(&src))
+            .window_session(2)
+            .idle_flush_ms(100)
+            .aggregate_count("count")
+            .to(queen.queue(&sink))
+    };
+    let opts = || {
+        RunOptions::new(&query)
+            .max_wait(Duration::from_millis(100))
+            .max_partitions(2)
+            .subscription_mode(SubscriptionMode::All)
+    };
+    let a = build(&q).run(&q, opts().reset(true)).await.unwrap();
+    let b = build(&q).run(&q, opts()).await.unwrap();
+
+    const PARTITIONS: usize = 20;
+    for round in 0..2 {
+        for p in 0..PARTITIONS {
+            q.queue(&src)
+                .partition(format!("s-{p}"))
+                .push(serde_json::json!({ "round": round }))
+                .await
+                .unwrap();
+        }
+        sleep_ms(300).await;
+    }
+
+    let out = drain_until(&q, &sink, Duration::from_secs(20), |m| {
+        m.len() >= PARTITIONS
+    })
+    .await;
+    // Anything emitted twice would arrive within a few flush ticks.
+    sleep_ms(2_000).await;
+    let late = drain_until(&q, &sink, Duration::from_millis(500), |_| false).await;
+    a.stop().await.unwrap();
+    b.stop().await.unwrap();
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+
+    let mut by_partition: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+    for m in out.iter().chain(late.iter()) {
+        by_partition
+            .entry(m.partition.clone())
+            .or_default()
+            .push(m.data["count"].as_f64().unwrap_or(-1.0));
+    }
+    assert_eq!(by_partition.len(), PARTITIONS, "{by_partition:?}");
+    for (p, counts) in &by_partition {
+        assert_eq!(
+            counts,
+            &vec![2.0],
+            "partition {p}: one session of two events"
+        );
+    }
+}

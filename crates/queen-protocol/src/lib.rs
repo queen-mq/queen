@@ -77,9 +77,11 @@ pub use partitions::{
 pub use pop::{AutopilotEcho, Message, PopParams, PopResponse, SubscriptionMode};
 pub use push::{PushItem, PushRequest, PushResult, PushStatus};
 pub use streams::{
-    parse_state_key, session_state_key, state_key_for, CycleAck, CycleAckResult, CycleRequest,
-    CycleResponse, RegisterRequest, RegisterResponse, SinkPushItem, StateGetRequest,
-    StateGetResponse, StateKeyParts, StateOp, StateRow, STATE_KEY_SEP, WATERMARK_STATE_KEY,
+    parse_state_key, session_state_key, state_key_for, ClaimRequest, ClaimResponse,
+    ClaimedPartition, CycleAck, CycleAckResult, CycleRequest, CycleResponse, RegisterRequest,
+    RegisterResponse, SinkPushItem, StateGetRequest, StateGetResponse, StateKeyParts, StateOp,
+    StatePartition, StatePartitionsRequest, StatePartitionsResponse, StateRow, STATE_KEY_SEP,
+    WATERMARK_STATE_KEY,
 };
 pub use timers::{
     TimerListRow, TimerOpKind, TimerOperation, TimerPage, TimerPeek, TimerRequest, TimerResponse,

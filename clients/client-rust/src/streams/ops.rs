@@ -190,9 +190,9 @@ pub struct Window {
     pub kind: WindowKind,
     /// Extra time a closed window stays open for stragglers.
     pub grace_seconds: i64,
-    /// How often the runner sweeps quiet partitions for ripe windows.
-    /// 0 disables it — which means a window on a partition that goes silent
-    /// never closes until traffic returns.
+    /// How often the runner checks quiet partitions for ripe windows (see
+    /// [`super::Stream::idle_flush_ms`]). 0 disables it — which means a window
+    /// on a partition that goes silent never closes until traffic returns.
     pub idle_flush_ms: i64,
     /// Present in event-time mode.
     pub event_time: Option<EventTimeFn>,
