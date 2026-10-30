@@ -43,6 +43,10 @@ verifiedBy:
   - examples/tutorials/rust/src/bin/book_client_guide.rs
   - examples/tutorials/php/book-client-guide.php
   - examples/tutorials/cpp/book-client-guide.cpp
+# sourceOfTruth re-read 2026-10-30 (JS and Python consumers wait out a broker that cannot answer):
+# ConsumerManager.js and consumer_manager.py poll again after a 408, 429 or 5xx (but a 503
+# raft_phase1_unsupported), a timeout or a lost connection, waiting Retry-After or 1 s doubling up
+# to 30 s; a 4xx still stops them. "Running a consumer for real" says so, with the other SDKs.
 ---
 
 There are two ways to read. `consume()` is a loop: it takes messages, calls your handler, acks them when the handler returns, and goes on. `pop()` is one call: it hands you the messages and leaves the ack to you.
@@ -138,8 +142,9 @@ A pop with `.commitOnDelivery()` moves the group's cursor as the messages are ha
 - `limit(n)` stops after `n` messages, and `idleMillis(ms)` stops after that long with nothing to do.
 - `wait(true)` (the default) waits for messages instead of returning empty, up to `timeoutMillis(ms)` (30 seconds by default, at most 60).
 - A `signal` stops the loop at once. Messages it had taken but not started go back with a `retry` ack, which spends no retry, so a deploy does not leave partitions waiting for their leases to run out.
+- When the broker cannot answer for a while (a 503 during a leader election, another 5xx, a 408 or 429, a timeout, a dropped connection), the loop waits and polls again, for as long as it takes: the broker's `Retry-After` (1 s), or 1 s doubling up to 30 s when there is none. Each failed pop logs a warning. A 4xx still stops the loop, and `consume()` rejects with the error.
 
-**In the other SDKs:** in 2.6.0 only JavaScript gives the unstarted messages back. Python, Go, Rust, PHP and C++ stop after the message they are handling, and the rest wait for their lease. Python, Rust and C++ also notice the stop only between two long polls, so their code sets a short poll timeout. PHP stops on SIGTERM by itself.
+**In the other SDKs:** in 2.6.0 only JavaScript gives the unstarted messages back. Python, Go, Rust, PHP and C++ stop after the message they are handling, and the rest wait for their lease. Python, Rust and C++ also notice the stop only between two long polls, so their code sets a short poll timeout. PHP stops on SIGTERM by itself. Python waits out a broker that cannot answer the same way as JavaScript. Go, Rust, PHP and C++ poll again too, but PHP stops on a 500.
 
 <Why>a worker runs for weeks, through deploys and quiet nights. These options decide how much it does at once, when it stops, and how it gives its work back when it is told to.</Why>
 

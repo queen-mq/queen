@@ -12,6 +12,16 @@ that run against a broker and check their results (`examples/tutorials/run.sh`).
 PDF at [queenmq.com/book](https://queenmq.com/book/). Every page of the old tree redirects to the
 page that now answers its question.
 
+**JavaScript and Python clients: a consumer waits out a broker that cannot answer, instead of
+stopping.** While a cluster elects a leader, pops are answered 503 (`timeout`, "the request deadline
+elapsed", or `no_leader`) for seconds to minutes. `consume()` retried only a 429 and a refused
+connection: any other error stopped it, and a process that stayed up consumed nothing until it was
+restarted. A pop answered 408, 429 or any 5xx, a timeout, or a dropped connection now waits and
+polls again, for as long as it takes: the broker's `Retry-After` when it sent one, otherwise 1 s
+doubling up to 30 s, ±20 %. Each failed pop logs a warning (`pop-failed-retrying`) and the first
+answered one logs `pop-recovered`. A 4xx and a 503 `raft_phase1_unsupported` still stop the
+consumer. The Go, Rust and PHP consumers already polled again after a 503.
+
 **Go client: a guarded step no longer rolls back while its lock is held, after a slow renew.** The
 background renew gives up after `RenewEvery` (a third of the lifetime by default). A renew slower
 than that could still land on the broker: the lock's token moved and the handle kept the old one,

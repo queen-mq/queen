@@ -23,6 +23,9 @@ verifiedBy:
   - examples/tutorials/rust/src/bin/00_five_minutes.rs
   - examples/tutorials/php/00-five-minutes.php
   - examples/tutorials/cpp/00-five-minutes.cpp
+# sourceOfTruth re-read 2026-10-30 (JS and Python consumers wait out a broker that cannot answer):
+# ConsumerManager.js polls again after a 408, 429 or 5xx, a timeout or a lost connection instead of
+# stopping (said on writing-applications/pop). Nothing this page states changes.
 ---
 
 The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.
