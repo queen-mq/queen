@@ -142,6 +142,10 @@ impl RaftFacade {
             }
             ("POST", "/streams/v1/queries") => self.api_streams_register(ctx, &req.body).await,
             ("POST", "/streams/v1/state/get") => self.api_streams_state_get(ctx, &req.body).await,
+            ("POST", "/streams/v1/state/partitions") => {
+                self.api_streams_state_partitions(ctx, &req.body).await
+            }
+            ("POST", "/streams/v1/claim") => self.api_streams_claim(ctx, &req.body).await,
             ("POST", "/streams/v1/cycle") => self.api_streams_cycle(ctx, &req.body).await,
             _ => {
                 if let Some(out) = self.api_dynamic(&ctx, &req).await? {
@@ -1163,7 +1167,322 @@ impl RaftFacade {
             None => Ok(ApiOut::json(404, json!({"error":"not found"}).to_string())),
         }
     }
+
+    /// `POST /streams/v1/state/partitions`: the partitions holding state for
+    /// one query. A runner only remembers the partitions it popped itself, so
+    /// after a restart this is how it finds the windows nobody is closing.
+    ///
+    /// `untouched_for_ms` keeps the partitions whose newest state row is at
+    /// least that old. `after` (a partition id) and `limit` page, in partition
+    /// id order. One range scan over the query's state keys, which start with
+    /// query id + partition id; a call stops after [`STATE_PARTITIONS_SCAN_ROWS`]
+    /// rows at the next partition boundary and answers `next` to resume from.
+    async fn api_streams_state_partitions(
+        &self,
+        ctx: ReqCtx,
+        body: &[u8],
+    ) -> Result<ApiOut, RsmError> {
+        self.linearizable(&ctx).await?;
+        let root: Value = serde_json::from_slice(body).map_err(|e| rejected("bad_body", e))?;
+        let qid = root
+            .get("query_id")
+            .and_then(Value::as_str)
+            .and_then(uuid_string_to_bytes)
+            .ok_or_else(|| reject("bad_request", "query_id is required"))?;
+        let untouched_for_ms = match root.get("untouched_for_ms") {
+            None | Some(Value::Null) => 0,
+            Some(v) => v
+                .as_i64()
+                .filter(|ms| *ms >= 0)
+                .ok_or_else(|| reject("bad_request", "untouched_for_ms must be >= 0"))?,
+        };
+        let after = match root.get("after") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .or_else(|| v.as_u64())
+                    .ok_or_else(|| reject("bad_request", "after must be a partition id"))?,
+            ),
+        };
+        let limit = match root.get("limit") {
+            None | Some(Value::Null) => STATE_PARTITIONS_LIMIT,
+            Some(v) => v
+                .as_u64()
+                .filter(|n| *n >= 1)
+                .ok_or_else(|| reject("bad_request", "limit must be >= 1"))?
+                .min(STATE_PARTITIONS_LIMIT_MAX as u64) as usize,
+        };
+        let cutoff_us = (untouched_for_ms > 0)
+            .then(|| super::wall_micros().saturating_sub(untouched_for_ms.saturating_mul(1000)));
+        let store = self.store.clone();
+        let tenant = ctx.tenant.clone();
+        let page = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                if r.streams_query(&tenant, &qid)?.is_none() {
+                    return Ok(None);
+                }
+                let prefix = keys::streams_query_state_prefix(&qid);
+                let from = match after {
+                    None => prefix.clone(),
+                    Some(pid) => match pid.checked_add(1) {
+                        Some(next) => keys::streams_state_prefix(&qid, next),
+                        None => return Ok(Some((Vec::new(), None))),
+                    },
+                };
+                let keep = |newest: i64| cutoff_us.is_none_or(|cutoff| newest <= cutoff);
+                // The partition being read, with its newest row so far.
+                let mut current: Option<(u64, i64)> = None;
+                let mut held: Vec<(u64, i64)> = Vec::new();
+                let mut rows_seen = 0usize;
+                let mut stopped_after: Option<u64> = None;
+                r.scan_raw(
+                    Keyspace::StreamsState,
+                    &from,
+                    &prefix,
+                    usize::MAX,
+                    &mut |k, v| {
+                        let Some(pid) = keys::read_u64(k, 16) else {
+                            return true;
+                        };
+                        // A row that does not decode is skipped, as state/get does.
+                        let Ok(at) = rows::streams_state_updated_at(v) else {
+                            return true;
+                        };
+                        match &mut current {
+                            Some((p, newest)) if *p == pid => *newest = (*newest).max(at),
+                            _ => {
+                                if let Some((p, newest)) = current.take() {
+                                    if keep(newest) {
+                                        held.push((p, newest));
+                                    }
+                                    if held.len() >= limit
+                                        || rows_seen >= STATE_PARTITIONS_SCAN_ROWS
+                                    {
+                                        stopped_after = Some(p);
+                                        return false;
+                                    }
+                                }
+                                current = Some((pid, at));
+                            }
+                        }
+                        rows_seen += 1;
+                        true
+                    },
+                )?;
+                if stopped_after.is_none() {
+                    if let Some((p, newest)) = current {
+                        if keep(newest) {
+                            held.push((p, newest));
+                        }
+                    }
+                }
+                let mut out = Vec::with_capacity(held.len());
+                for (pid, newest) in held {
+                    // State can outlive its partition only if the partition
+                    // went with its queue; nothing can be closed there.
+                    let Some(part) = r.partition(pid)?.filter(|p| p.tenant == tenant) else {
+                        continue;
+                    };
+                    out.push(json!({
+                        "partition_id": pid.to_string(),
+                        "partition": part.partition,
+                        "queue": part.queue,
+                        "updated_at": crate::rsm::planner::timers::iso_us(newest),
+                    }));
+                }
+                Ok(Some((out, stopped_after.map(|p| p.to_string()))))
+            })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("streams state partitions: {e}")))?
+        .map_err(read_error)?;
+        match page {
+            Some((partitions, next)) => Ok(ApiOut::json(
+                200,
+                json!({"success":true,"partitions":partitions,"next":next}).to_string(),
+            )),
+            None => Ok(ApiOut::json(404, json!({"error":"not found"}).to_string())),
+        }
+    }
 }
+
+impl RaftFacade {
+    /// `POST /streams/v1/claim`: lease idle partitions of a stream's source
+    /// queue for its group, with an empty batch
+    /// ([`crate::rsm::consume::IdleClaimCommand`]), so a runner closes the
+    /// windows of a quiet partition under a lease, and a cycle with a lost
+    /// one is refused whole. Body: `{query_id, partition_ids: [..],
+    /// consumer_group?, lease_seconds?}`; the group defaults to
+    /// `streams.<query name>`, the lease to 30 s. Each partition answers
+    /// `claimed` (with the call's `lease_id`), `busy` (leased, held by a
+    /// transaction or a retry delay), `backlog` (messages wait for the group:
+    /// its next pop delivers them) or `missing`. `now_ms` is the broker's
+    /// clock, the one processing-time windows close on.
+    async fn api_streams_claim(&self, ctx: ReqCtx, body: &[u8]) -> Result<ApiOut, RsmError> {
+        let root: Value = serde_json::from_slice(body).map_err(|e| rejected("bad_body", e))?;
+        let qid = root
+            .get("query_id")
+            .and_then(Value::as_str)
+            .and_then(uuid_string_to_bytes)
+            .ok_or_else(|| reject("bad_request", "query_id is required"))?;
+        let mut pids: Vec<u64> = Vec::new();
+        for v in root
+            .get("partition_ids")
+            .and_then(Value::as_array)
+            .ok_or_else(|| reject("bad_request", "partition_ids is required"))?
+        {
+            let pid = v
+                .as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| v.as_u64())
+                .ok_or_else(|| reject("bad_request", "partition_ids holds partition ids"))?;
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+        if pids.is_empty() || pids.len() > STREAMS_CLAIM_MAX {
+            return Err(reject(
+                "bad_request",
+                format!("partition_ids takes 1 to {STREAMS_CLAIM_MAX} partitions"),
+            ));
+        }
+        let lease_seconds = match root.get("lease_seconds") {
+            None | Some(Value::Null) => STREAMS_CLAIM_LEASE_S,
+            Some(v) => v
+                .as_i64()
+                .filter(|s| (1..=STREAMS_CLAIM_LEASE_MAX_S).contains(s))
+                .ok_or_else(|| {
+                    reject(
+                        "bad_request",
+                        format!("lease_seconds must be 1 to {STREAMS_CLAIM_LEASE_MAX_S}"),
+                    )
+                })?,
+        } as i32;
+        let store = self.store.clone();
+        let tenant = ctx.tenant.clone();
+        let query =
+            tokio::task::spawn_blocking(move || store.read(|r| r.streams_query(&tenant, &qid)))
+                .await
+                .map_err(|e| RsmError::Internal(format!("streams claim read: {e}")))?
+                .map_err(read_error)?;
+        let Some(query) = query else {
+            return Ok(ApiOut::json(404, json!({"error":"not found"}).to_string()));
+        };
+        let group = root
+            .get("consumer_group")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("streams.{}", query.name));
+        let lease_id = uuid_bytes_to_string(&crate::util::uuidv7_bytes());
+        let cmd = crate::rsm::consume::IdleClaimCommand {
+            tenant: ctx.tenant.clone(),
+            queue: query.source_queue.clone(),
+            group,
+            pids,
+            worker: lease_id.clone(),
+            lease_seconds,
+        };
+        let engine = self.engine.clone();
+        let now = super::wall_micros();
+        let (results, served) = tokio::task::spawn_blocking(move || engine.claim_idle(&cmd, now))
+            .await
+            .map_err(|e| RsmError::Internal(format!("streams claim: {e}")))?
+            .map_err(|r| RsmError::Internal(format!("streams claim: {}", r.message)))?;
+        let reply = match served {
+            crate::rsm::consume::Served::Now(r) => r,
+            crate::rsm::consume::Served::Later(rx) => rx
+                .await
+                .map_err(|_| RsmError::Retry { leader_hint: None })?,
+            crate::rsm::consume::Served::NotMine => {
+                return Err(RsmError::Internal("streams claim was not served".into()))
+            }
+        };
+        match reply {
+            Reply::Done { .. } => {}
+            Reply::Retry { hint } => {
+                return Err(RsmError::Retry {
+                    leader_hint: hint.map(|h| h.to_string()),
+                })
+            }
+            Reply::Refused(r) => {
+                return Ok(ApiOut::json(
+                    200,
+                    json!({"success":false,"error":r.message,"reason":r.code}).to_string(),
+                ))
+            }
+        }
+        let store = self.store.clone();
+        let wanted: Vec<u64> = results.iter().map(|c| c.pid()).collect();
+        let names = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                let mut names = BTreeMap::new();
+                for pid in wanted {
+                    if let Some(p) = r.partition(pid)? {
+                        names.insert(pid, p.partition);
+                    }
+                }
+                Ok::<_, StoreError>(names)
+            })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("streams claim names: {e}")))?
+        .map_err(read_error)?;
+        let partitions: Vec<Value> = results
+            .iter()
+            .map(|c| {
+                use crate::rsm::consume::IdleClaim;
+                let pid = c.pid();
+                let mut o = json!({
+                    "partition_id": pid.to_string(),
+                    "partition": names.get(&pid).cloned().unwrap_or_default(),
+                });
+                let status = match c {
+                    IdleClaim::Claimed { expires_us, .. } => {
+                        o["lease_expires_at"] =
+                            json!(crate::rsm::planner::timers::iso_us(*expires_us));
+                        "claimed"
+                    }
+                    IdleClaim::Busy { .. } => "busy",
+                    IdleClaim::Backlog { .. } => "backlog",
+                    IdleClaim::Missing { .. } => "missing",
+                };
+                o["status"] = json!(status);
+                o
+            })
+            .collect();
+        Ok(ApiOut::json(
+            200,
+            json!({
+                "success": true,
+                "lease_id": lease_id,
+                "lease_seconds": lease_seconds,
+                "now_ms": now / 1000,
+                "partitions": partitions,
+            })
+            .to_string(),
+        ))
+    }
+}
+
+/// `POST /streams/v1/claim`: the most partitions one call claims, and the
+/// lease it gives by default and at most.
+const STREAMS_CLAIM_MAX: usize = 1_000;
+const STREAMS_CLAIM_LEASE_S: i64 = 30;
+const STREAMS_CLAIM_LEASE_MAX_S: i64 = 600;
+
+/// `POST /streams/v1/state/partitions`: partitions per page by default, and
+/// the most a caller may ask for.
+const STATE_PARTITIONS_LIMIT: usize = 1_000;
+const STATE_PARTITIONS_LIMIT_MAX: usize = 10_000;
+/// The rows one call reads before it stops at the next partition boundary, so
+/// a query with a huge state answers in pages instead of one long read. Tiny
+/// under test, so the facade tests walk the paging path.
+#[cfg(not(test))]
+const STATE_PARTITIONS_SCAN_ROWS: usize = 100_000;
+#[cfg(test)]
+const STATE_PARTITIONS_SCAN_ROWS: usize = 2;
 
 fn map_propose(e: ProposeError) -> RsmError {
     match e {

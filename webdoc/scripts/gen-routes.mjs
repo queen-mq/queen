@@ -89,7 +89,7 @@ const AUTH = "server/src/auth.rs";
 // right after the KV and timer arm instead of left to the fallthrough. The
 // route is POST only, so nothing for it belongs in the `m === "GET"` block: a
 // `get` operation travels in the POST body and takes the route's level.
-const ACCESS_FINGERPRINT = "215d0b9c1407bdaa";
+const ACCESS_FINGERPRINT = "61cad4f0271697ef";
 
 /** PLAN_PG_CONNECTORS.md — the connectors config surface (feature `pg`). */
 function isConnectorsPath(path) {
@@ -156,7 +156,7 @@ function accessLevel(method, path) {
   // is a key, hence a POST; method- and path-exact, like the two arms above it.
   if (m === "POST" && path === "/api/v1/resources/kv/list") return "read-only";
 
-  if (path === "/streams/v1/state/get") return "read-only";
+  if (path === "/streams/v1/state/get" || path === "/streams/v1/state/partitions") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";
 
   if (path === "/api/v1/push") return "write-only";

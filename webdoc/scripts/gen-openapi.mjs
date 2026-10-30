@@ -498,7 +498,7 @@ function accessLevel(method, path) {
   // namespace. A POST because its cursor is a key, read-only because it is a
   // read; method- and path-exact, like the two arms above it.
   if (m === "POST" && path === "/api/v1/resources/kv/list") return "read-only";
-  if (path === "/streams/v1/state/get") return "read-only";
+  if (path === "/streams/v1/state/get" || path === "/streams/v1/state/partitions") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";
   if (path === "/api/v1/push") return "write-only";
   if (m === "POST" && path === "/api/v1/ephemeral/push") return "write-only";

@@ -181,6 +181,15 @@ impl Engine {
                 let Some(g) =
                     self.target_part(r, &fr, &a.tenant, &a.queue, &a.group, a.pid, now)?
                 else {
+                    // The partition (or its queue) is gone: a lease named on
+                    // it cannot be held, and the bundle must not commit
+                    // without it.
+                    if !a.worker.is_empty() {
+                        return Ok(Err(Refusal::client(
+                            "bad_lease",
+                            "invalid or expired lease",
+                        )));
+                    }
                     continue;
                 };
                 let s = shadow!(g, a.pid);

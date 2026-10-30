@@ -386,7 +386,8 @@ fn is_connectors_path(path: &str) -> bool {
 
 /// Per-route required access level — a faithful port of the C++
 /// `get_route_access_level`, extended with the segments broker's `/streams/*`
-/// surface (queries/cycle = READ_WRITE, state/get = READ_ONLY).
+/// surface (queries/cycle = READ_WRITE, state/get and state/partitions =
+/// READ_ONLY).
 pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     use AccessLevel::*;
     let m = method.as_str();
@@ -552,7 +553,7 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     }
 
     // -------- Streams --------
-    if path == "/streams/v1/state/get" {
+    if path == "/streams/v1/state/get" || path == "/streams/v1/state/partitions" {
         return ReadOnly;
     }
     if path.starts_with("/streams/") {

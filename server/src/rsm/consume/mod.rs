@@ -45,6 +45,7 @@ mod ack;
 mod checkpoint;
 mod frames;
 mod hooks;
+mod idle;
 mod load;
 mod pop;
 mod state;
@@ -77,6 +78,7 @@ use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::segments;
 use crate::rsm::store::HeedStore;
 
+pub use idle::{IdleClaim, IdleClaimCommand};
 use state::{lock, read, write, Answers, Held, Registry, Shard, Tickets, SHARDS};
 
 /// What the engine did with a command.

@@ -3152,3 +3152,569 @@ async fn with_a_key_a_binary_transaction_keeps_the_clients_bytes_for_its_plain_q
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// One `POST` through the facade: the status and parsed body of an answer, or
+/// the code of a rejection (which the HTTP layer renders as a 4xx).
+async fn post_api(facade: &RaftFacade, path: &str, body: Value) -> Result<(u16, Value), String> {
+    let req = ApiReq {
+        method: "POST".to_string(),
+        path: path.to_string(),
+        query: None,
+        body: serde_json::to_vec(&body).unwrap(),
+    };
+    match facade.api(ctx(), req).await {
+        Ok(out) => Ok((out.status, parse(&out.body))),
+        Err(crate::rsm::facade::RsmError::Rejected { code, .. }) => Err(code),
+        Err(e) => panic!("{path}: {e}"),
+    }
+}
+
+/// Every page of `POST /streams/v1/state/partitions`, following `next`.
+async fn state_partitions_walk(
+    facade: &RaftFacade,
+    qid: &str,
+    limit: Option<u64>,
+    untouched_for_ms: Option<i64>,
+) -> Vec<Vec<(String, String)>> {
+    let mut pages = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let mut body = serde_json::json!({"query_id": qid});
+        if let Some(n) = limit {
+            body["limit"] = n.into();
+        }
+        if let Some(ms) = untouched_for_ms {
+            body["untouched_for_ms"] = ms.into();
+        }
+        if let Some(a) = &after {
+            body["after"] = a.clone().into();
+        }
+        let (status, page) = post_api(facade, "/streams/v1/state/partitions", body)
+            .await
+            .expect("listing");
+        assert_eq!(status, 200, "{page}");
+        let rows: Vec<(String, String)> = page["partitions"]
+            .as_array()
+            .expect("partitions")
+            .iter()
+            .map(|p| {
+                assert_eq!(p["queue"], "sp-src", "{p}");
+                assert!(p["updated_at"].is_string(), "{p}");
+                (
+                    p["partition_id"]
+                        .as_str()
+                        .expect("partition_id")
+                        .to_string(),
+                    p["partition"].as_str().expect("partition").to_string(),
+                )
+            })
+            .collect();
+        pages.push(rows);
+        match page["next"].as_str() {
+            Some(n) => after = Some(n.to_string()),
+            None => return pages,
+        }
+        assert!(pages.len() < 50, "the walk does not end: {pages:?}");
+    }
+}
+
+/// `POST /streams/v1/state/partitions` lists the partitions holding a query's
+/// state, pages in partition id order (under test a call reads 2 rows before
+/// it stops at a partition boundary, so the walks cross pages), and keeps only
+/// the partitions whose newest row is old enough when asked to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn stream_state_partitions_lists_pages_and_filters_by_age() {
+    let dir = scratch("state-partitions");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: br#"{"items":[
+                    {"queue":"sp-src","partition":"a","payload":{"n":1}},
+                    {"queue":"sp-src","partition":"b","payload":{"n":2}},
+                    {"queue":"sp-src","partition":"c","payload":{"n":3}},
+                    {"queue":"sp-src","partition":"d","payload":{"n":4}}
+                ]}"#
+                .to_vec(),
+            },
+        )
+        .await
+        .expect("push");
+    let mut pids = std::collections::BTreeMap::new();
+    for _ in 0..4 {
+        let popped = facade
+            .pop_wildcard(
+                ctx(),
+                PopReq {
+                    queue: "sp-src".into(),
+                    group: Some("sp-group".into()),
+                    batch: 1,
+                    auto_ack: false,
+                    wait: false,
+                    timeout_ms: 1_000,
+                    options: crate::rsm::facade::PopOptions {
+                        subscription_mode: "all".into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("pop");
+        let pop = parse(&popped.body);
+        let name = pop["messages"][0]["partition"]
+            .as_str()
+            .expect("partition")
+            .to_string();
+        let pid = pop["partitionId"]
+            .as_str()
+            .expect("partitionId")
+            .to_string();
+        pids.insert(name, pid);
+    }
+    assert_eq!(pids.len(), 4, "{pids:?}");
+    let pid = |name: &str| pids[name].clone();
+
+    let (status, registered) = post_api(
+        &facade,
+        "/streams/v1/queries",
+        serde_json::json!({"name":"sp","source_queue":"sp-src","config_hash":"sp-1"}),
+    )
+    .await
+    .expect("register");
+    assert_eq!(status, 200, "{registered}");
+    let qid = registered["query_id"]
+        .as_str()
+        .expect("query id")
+        .to_string();
+
+    // State on a (one row), b (two rows) and d (one row); none on c. No ack:
+    // a flush's shape.
+    let write = |partition: String, ops: Value| {
+        let qid = qid.clone();
+        let facade = &facade;
+        async move {
+            let (status, out) = post_api(
+                facade,
+                "/streams/v1/cycle",
+                serde_json::json!({"query_id": qid, "partition_id": partition,
+                    "consumer_group": "sp-group", "state_ops": ops, "push_items": []}),
+            )
+            .await
+            .expect("cycle");
+            assert_eq!(status, 200, "{out}");
+            assert_eq!(out["success"], true, "{out}");
+        }
+    };
+    write(
+        pid("a"),
+        serde_json::json!([{"type":"upsert","key":"k1","value":{"n":1}}]),
+    )
+    .await;
+    write(
+        pid("b"),
+        serde_json::json!([
+            {"type":"upsert","key":"k1","value":{"n":1}},
+            {"type":"upsert","key":"k2","value":{"n":2}}
+        ]),
+    )
+    .await;
+    write(
+        pid("d"),
+        serde_json::json!([{"type":"upsert","key":"k1","value":{"n":4}}]),
+    )
+    .await;
+
+    let sorted = |mut v: Vec<(String, String)>| {
+        v.sort();
+        v
+    };
+    let a = (pid("a"), "a".to_string());
+    let b = (pid("b"), "b".to_string());
+    let d = (pid("d"), "d".to_string());
+
+    // All of it, whatever the page size; never a partition twice. Unlimited,
+    // the 2-row scan budget still stops the first page after b (4 rows in).
+    for limit in [None, Some(1), Some(2), Some(3)] {
+        let pages = state_partitions_walk(&facade, &qid, limit, None).await;
+        if let Some(n) = limit {
+            assert!(pages.iter().all(|p| p.len() <= n as usize), "{pages:?}");
+        } else {
+            assert_eq!(pages.len(), 2, "the scan budget pages: {pages:?}");
+        }
+        assert_eq!(
+            sorted(pages.concat()),
+            sorted(vec![a.clone(), b.clone(), d.clone()]),
+            "limit {limit:?}: {pages:?}"
+        );
+    }
+
+    // Age: a is written again, b is left alone.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    write(
+        pid("a"),
+        serde_json::json!([{"type":"upsert","key":"k1","value":{"n":2}}]),
+    )
+    .await;
+    let pages = state_partitions_walk(&facade, &qid, None, Some(200)).await;
+    assert_eq!(
+        sorted(pages.concat()),
+        sorted(vec![b.clone(), d.clone()]),
+        "a was just written: {pages:?}"
+    );
+    let pages = state_partitions_walk(&facade, &qid, None, Some(60_000)).await;
+    assert!(
+        pages.concat().is_empty(),
+        "nothing is untouched for a minute: {pages:?}"
+    );
+
+    // Deleting its rows drops b.
+    write(
+        pid("b"),
+        serde_json::json!([{"type":"delete","key":"k1"},{"type":"delete","key":"k2"}]),
+    )
+    .await;
+    let pages = state_partitions_walk(&facade, &qid, None, None).await;
+    assert_eq!(
+        sorted(pages.concat()),
+        sorted(vec![a.clone(), d.clone()]),
+        "{pages:?}"
+    );
+
+    // Past the last partition: an empty page.
+    let (status, page) = post_api(
+        &facade,
+        "/streams/v1/state/partitions",
+        serde_json::json!({"query_id": qid, "after": u64::MAX.to_string()}),
+    )
+    .await
+    .expect("past the end");
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["partitions"], serde_json::json!([]), "{page}");
+    assert!(page["next"].is_null(), "{page}");
+
+    // Refusals.
+    let unknown = post_api(
+        &facade,
+        "/streams/v1/state/partitions",
+        serde_json::json!({"query_id": "00000000-0000-7000-8000-000000000000"}),
+    )
+    .await
+    .expect("unknown query answers");
+    assert_eq!(unknown.0, 404, "{}", unknown.1);
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({"query_id": qid, "after": "x"}),
+        serde_json::json!({"query_id": qid, "limit": 0}),
+        serde_json::json!({"query_id": qid, "untouched_for_ms": -1}),
+    ] {
+        let refused = post_api(&facade, "/streams/v1/state/partitions", bad.clone()).await;
+        assert_eq!(refused, Err("bad_request".to_string()), "{bad}");
+    }
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `POST /streams/v1/claim` (issue #153): an idle partition is leased with an
+/// empty batch; a partition someone holds is `busy`, one with messages waiting
+/// is `backlog`, an unknown one `missing`. A cycle that acks the claim with
+/// `count: 0` closes the window under the lease, keeps the cursor and releases
+/// the lease; the same cycle sent again, or one with another lease, is refused
+/// whole and writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn stream_claim_leases_idle_partitions_and_fences_cycles() {
+    let dir = scratch("stream-claim");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let push = |raw: &'static [u8]| {
+        let facade = &facade;
+        async move {
+            facade
+                .push(ctx(), PushReq { raw: raw.to_vec() })
+                .await
+                .expect("push");
+        }
+    };
+    push(
+        br#"{"items":[
+        {"queue":"cl-src","partition":"a","payload":{"n":1}},
+        {"queue":"cl-src","partition":"b","payload":{"n":2}},
+        {"queue":"cl-src","partition":"c","payload":{"n":3}}
+    ]}"#,
+    )
+    .await;
+
+    let (status, registered) = post_api(
+        &facade,
+        "/streams/v1/queries",
+        serde_json::json!({"name":"cl","source_queue":"cl-src","config_hash":"cl-1"}),
+    )
+    .await
+    .expect("register");
+    assert_eq!(status, 200, "{registered}");
+    let qid = registered["query_id"]
+        .as_str()
+        .expect("query id")
+        .to_string();
+
+    // One pop per partition, as the stream's group (its default name).
+    let mut popped = std::collections::BTreeMap::new();
+    for _ in 0..3 {
+        let out = facade
+            .pop_wildcard(
+                ctx(),
+                PopReq {
+                    queue: "cl-src".into(),
+                    group: Some("streams.cl".into()),
+                    batch: 1,
+                    auto_ack: false,
+                    wait: false,
+                    timeout_ms: 1_000,
+                    options: crate::rsm::facade::PopOptions {
+                        subscription_mode: "all".into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("pop");
+        let pop = parse(&out.body);
+        let name = pop["messages"][0]["partition"]
+            .as_str()
+            .expect("partition")
+            .to_string();
+        let pid = pop["partitionId"]
+            .as_str()
+            .expect("partitionId")
+            .to_string();
+        let lease = pop["leaseId"].as_str().expect("leaseId").to_string();
+        popped.insert(name, (pid, lease));
+    }
+    let pid = |name: &str| popped[name].0.clone();
+    let lease = |name: &str| popped[name].1.clone();
+
+    let cycle = |body: Value| {
+        let facade = &facade;
+        async move {
+            let (status, out) = post_api(facade, "/streams/v1/cycle", body)
+                .await
+                .expect("cycle");
+            assert_eq!(status, 200, "{out}");
+            out
+        }
+    };
+    let ack = |lease: String, count: i64| serde_json::json!({"transactionId": "", "leaseId": lease, "status": "completed", "count": count});
+    // a: consumed, with an open window. c: consumed, then a new message
+    // waits. b: still leased by its pop.
+    let out = cycle(
+        serde_json::json!({"query_id": qid, "partition_id": pid("a"),
+        "consumer_group": "streams.cl", "release_lease": true, "ack": ack(lease("a"), 1),
+        "state_ops": [{"type":"upsert","key":"w1","value":{"windowEnd": 1}}]}),
+    )
+    .await;
+    assert_eq!(out["success"], true, "{out}");
+    let out = cycle(
+        serde_json::json!({"query_id": qid, "partition_id": pid("c"),
+        "consumer_group": "streams.cl", "release_lease": true, "ack": ack(lease("c"), 1)}),
+    )
+    .await;
+    assert_eq!(out["success"], true, "{out}");
+    push(br#"{"items":[{"queue":"cl-src","partition":"c","payload":{"n":4}}]}"#).await;
+
+    let claim = |pids: Vec<String>, lease_seconds: i64| {
+        let facade = &facade;
+        let qid = qid.clone();
+        async move {
+            let (status, out) = post_api(
+                facade,
+                "/streams/v1/claim",
+                serde_json::json!({"query_id": qid, "partition_ids": pids,
+                    "lease_seconds": lease_seconds}),
+            )
+            .await
+            .expect("claim");
+            assert_eq!(status, 200, "{out}");
+            assert_eq!(out["success"], true, "{out}");
+            out
+        }
+    };
+    let statuses = |out: &Value| -> Vec<(String, String)> {
+        out["partitions"]
+            .as_array()
+            .expect("partitions")
+            .iter()
+            .map(|p| {
+                (
+                    p["partition"].as_str().unwrap_or("").to_string(),
+                    p["status"].as_str().expect("status").to_string(),
+                )
+            })
+            .collect()
+    };
+
+    let out = claim(vec![pid("a"), pid("b"), pid("c"), "999999".into()], 30).await;
+    assert_eq!(
+        statuses(&out),
+        vec![
+            ("a".to_string(), "claimed".to_string()),
+            ("b".to_string(), "busy".to_string()),
+            ("c".to_string(), "backlog".to_string()),
+            ("".to_string(), "missing".to_string()),
+        ],
+        "{out}"
+    );
+    let now_ms = out["now_ms"].as_i64().expect("now_ms");
+    assert!(now_ms > 1_700_000_000_000, "{out}");
+    let claimed = out["lease_id"].as_str().expect("lease_id").to_string();
+    assert_eq!(
+        out["partitions"][0]["lease_expires_at"].is_string(),
+        true,
+        "{out}"
+    );
+
+    // Claimed once is busy for everyone else, this caller included.
+    let out = claim(vec![pid("a")], 30).await;
+    assert_eq!(
+        statuses(&out),
+        vec![("a".to_string(), "busy".to_string())],
+        "{out}"
+    );
+
+    let state_rows = |partition: String| {
+        let facade = &facade;
+        let qid = qid.clone();
+        async move {
+            let (status, out) = post_api(
+                facade,
+                "/streams/v1/state/get",
+                serde_json::json!({"query_id": qid, "partition_id": partition}),
+            )
+            .await
+            .expect("state get");
+            assert_eq!(status, 200, "{out}");
+            out["rows"].as_array().expect("rows").len()
+        }
+    };
+    let close = |lease: String| {
+        serde_json::json!({"query_id": qid, "partition_id": pid("a"),
+            "consumer_group": "streams.cl", "release_lease": true, "ack": ack(lease, 0),
+            "state_ops": [{"type":"delete","key":"w1"}],
+            "push_items": [{"queue":"cl-sink","partition":"a","payload":{"closed":"w1"}}]})
+    };
+
+    // Another lease (b's, a pop's) cannot close a's window.
+    let out = cycle(close(lease("b"))).await;
+    assert_eq!(out["success"], false, "{out}");
+    assert_eq!(out["reason"], "bad_lease", "{out}");
+    assert_eq!(state_rows(pid("a")).await, 1);
+
+    // The claim's lease closes it: state gone, result pushed, cursor kept.
+    let out = cycle(close(claimed.clone())).await;
+    assert_eq!(out["success"], true, "{out}");
+    assert_eq!(out["ack_result"]["count"], 0, "{out}");
+    assert_eq!(out["ack_result"]["lease_released"], true, "{out}");
+    assert_eq!(state_rows(pid("a")).await, 0);
+
+    // The same close again (an SDK retry after a lost answer) is refused:
+    // the first one released the lease. Nothing is pushed twice.
+    let out = cycle(close(claimed.clone())).await;
+    assert_eq!(out["success"], false, "{out}");
+    assert_eq!(out["reason"], "bad_lease", "{out}");
+    let sink = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "cl-sink".into(),
+                group: Some("check".into()),
+                batch: 10,
+                auto_ack: true,
+                wait: false,
+                timeout_ms: 1_000,
+                options: crate::rsm::facade::PopOptions {
+                    subscription_mode: "all".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("sink pop");
+    let sink = parse(&sink.body);
+    assert_eq!(sink["messages"].as_array().map(Vec::len), Some(1), "{sink}");
+
+    // Released: claimable again. The cursor did not move, so a's next message
+    // is backlog for the group, not skipped.
+    let out = claim(vec![pid("a")], 1).await;
+    assert_eq!(
+        statuses(&out),
+        vec![("a".to_string(), "claimed".to_string())],
+        "{out}"
+    );
+    // A lease that ran out holds nothing.
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    let out = claim(vec![pid("a")], 30).await;
+    assert_eq!(
+        statuses(&out),
+        vec![("a".to_string(), "claimed".to_string())],
+        "{out}"
+    );
+    let expired = cycle(close(claimed.clone())).await;
+    assert_eq!(expired["success"], false, "{expired}");
+    let renewed = out["lease_id"].as_str().expect("lease_id").to_string();
+    let out = cycle(
+        serde_json::json!({"query_id": qid, "partition_id": pid("a"),
+        "consumer_group": "streams.cl", "release_lease": true, "ack": ack(renewed, 0)}),
+    )
+    .await;
+    assert_eq!(out["success"], true, "{out}");
+    push(br#"{"items":[{"queue":"cl-src","partition":"a","payload":{"n":5}}]}"#).await;
+    let out = claim(vec![pid("a")], 30).await;
+    assert_eq!(
+        statuses(&out),
+        vec![("a".to_string(), "backlog".to_string())],
+        "{out}"
+    );
+
+    // A partition the group never read holds no lease: a cycle that names one
+    // there is refused instead of committing its state with no lease (it used
+    // to skip the ack and commit the rest).
+    push(br#"{"items":[{"queue":"cl-src","partition":"d","payload":{"n":6}}]}"#).await;
+    // d's id, from a separate group's pops (one partition per pop).
+    let mut d_pid = None;
+    for _ in 0..8 {
+        let pop = facade
+            .pop_wildcard(
+                ctx(),
+                PopReq {
+                    queue: "cl-src".into(),
+                    group: Some("finder".into()),
+                    batch: 10,
+                    auto_ack: true,
+                    wait: false,
+                    timeout_ms: 1_000,
+                    options: crate::rsm::facade::PopOptions {
+                        subscription_mode: "all".into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("finder pop");
+        let pop = parse(&pop.body);
+        if pop["messages"][0]["partition"] == "d" {
+            d_pid = pop["partitionId"].as_str().map(str::to_string);
+            break;
+        }
+    }
+    let d_pid = d_pid.expect("d's id");
+    let out = cycle(serde_json::json!({"query_id": qid, "partition_id": d_pid,
+        "consumer_group": "streams.cl", "release_lease": true, "ack": ack("not-a-lease".into(), 1),
+        "state_ops": [{"type":"upsert","key":"w9","value":{"n":1}}]}))
+    .await;
+    assert_eq!(out["success"], false, "{out}");
+    assert_eq!(out["reason"], "bad_lease", "{out}");
+    assert_eq!(state_rows(d_pid).await, 0);
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

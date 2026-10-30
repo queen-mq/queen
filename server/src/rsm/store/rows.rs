@@ -1121,6 +1121,21 @@ pub fn streams_state_decode(b: &[u8]) -> Result<StreamsStateRow, CodecError> {
     Ok(row)
 }
 
+/// A state row's `updated_at_us` alone. The value is skipped, not copied:
+/// `POST /streams/v1/state/partitions` reads every row of a query, and a
+/// window's value can be large.
+pub fn streams_state_updated_at(b: &[u8]) -> Result<i64, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "streams state row version")?;
+    let n = r.u32("value")? as usize;
+    r.skip(n, "value")?;
+    let at = r.i64("updated_at_us")?;
+    if !r.done() {
+        return Err(CodecError::Field("streams state row trailing bytes"));
+    }
+    Ok(at)
+}
+
 pub fn quota_encode(q: &QuotaGrant) -> Vec<u8> {
     let mut w = Writer::with_capacity(80);
     head(&mut w);

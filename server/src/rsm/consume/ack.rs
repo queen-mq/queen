@@ -621,6 +621,12 @@ pub(crate) fn positional(
     now: i64,
 ) -> std::result::Result<Option<AckResult>, Refusal> {
     if !has_row {
+        // No cursor row: the group holds no lease here, so an ack that names
+        // one has lost it. Skipping it would let a Streams cycle commit its
+        // state and sink pushes with no lease at all.
+        if !cmd.worker.is_empty() {
+            return Err(Refusal::client("bad_lease", "invalid or expired lease"));
+        }
         return Ok(None);
     }
     let cur0 = cur.clone();
