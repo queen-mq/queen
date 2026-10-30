@@ -47,6 +47,12 @@ with a limit, and a binary push is admitted at its inflated size. `/depth` and
 counts dead letters without reading their payloads, `/messages` refuses an `offset` past 10,000.
 Why: a read built many times its size in memory, and a few at once took a node down.
 
+**Broker: a KV read no longer builds a JSON tree of each value it answers.** Reads are answered
+on the apply path, so they see the state at their entry; each stored value was parsed into a tree
+there and printed again by the route. The KV routes and the in-process Kafka facade now put each
+value's stored text into the answer, checked without building a tree; the answer is the same, byte
+for byte. Why: a client reading large values made apply build them, and every write waited.
+
 **Broker: a memory guard and connection limits.** Each node reads its cgroup memory limit and its
 anonymous memory every 250 ms. Past `QUEEN_MEMGUARD_SOFT_PCT` (80 %) heavy reads answer 503
 `memory_pressure` with a `Retry-After`; past `QUEEN_MEMGUARD_HARD_PCT` (90 %) writes that grow the
@@ -75,6 +81,15 @@ most `QUEEN_KAFKA_METADATA_MAX_PARTITIONS` (100,000) partitions and a request au
 16 topics; offset requests are checked against their limits before anything is built; a group
 holds at most `QUEEN_KAFKA_GROUP_MAX_MEMBERS` (1,000) members; token checks are cached. Why: a
 client could make the broker reserve memory from counts it declared.
+
+**Kafka facade: one transactional id never waits for another.** The transaction coordinator held
+one lock over every transactional id across its KV and commit calls, so one slow commit stalled
+every transactional producer, and the timeout sweep inside the 100 ms tick stalled group session
+expiry with it. Each id now has its own lock, the sweep runs on its own task and skips an id that
+is in a call, and an id idle for 10 minutes leaves memory (its row brings it back). The row keeps
+the producer's transaction timeout, and expires 7 days after its last write, as Kafka's
+`transactional.id.expiration.ms`. Why: a client minting transactional ids grew memory and KV rows
+without end, and one slow commit held back every other producer.
 
 **Ephemeral queues, proxy and PG connectors: bounded.** An implicit inbox is removed after
 `QUEEN_EPHEMERAL_IMPLICIT_TTL_S` (600 s) idle even when it still holds messages, at most
