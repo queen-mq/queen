@@ -39,6 +39,8 @@ sourceOfTruth:
 # 512 KiB frame before a SASL login, and a transactional id idle for 7 days being forgotten.
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): kafka_inproc.rs
 # reformatted, line wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-30 (f94c649cf): groups.rs merges two join branches that answered the
+# same member id (clippy); the join behaves as before. Nothing this page states changes.
 ---
 
 This is the contract a Kafka client gets from Queen, in the form you check things against: the
