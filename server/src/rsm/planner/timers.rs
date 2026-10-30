@@ -488,8 +488,30 @@ pub fn parse_timer_ops(ops: &[Value], producer_sub: Option<&str>) -> Result<Vec<
         let encrypted = jbool(o, "encrypted", i)?;
         // A flagged payload is decompressed before packing, a malformed one
         // to nothing.
+        //
+        // The inflated size is bounded by the same ceiling the route puts on
+        // a payload (`QUEEN_TIMERS_MAX_PAYLOAD_BYTES`, default 1 MiB): the
+        // route only sees the compressed bytes, and an unbounded decode of
+        // one 1 MiB frame can take gigabytes.
         let payload = if zstd {
-            crate::frames::zstd_decompress(&raw)
+            static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+            let cap = *CAP.get_or_init(|| {
+                std::env::var("QUEEN_TIMERS_MAX_PAYLOAD_BYTES")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or(1024 * 1024)
+            });
+            match crate::frames::zstd_decompress_bounded(&raw, cap) {
+                Ok(p) => p,
+                Err(crate::frames::ZstdBound::Invalid) => Vec::new(),
+                Err(crate::frames::ZstdBound::TooLarge) => {
+                    return Err(OpError::new(format!(
+                        "QTIMER op {i}: payload decompresses past {cap} bytes \
+                         (QUEEN_TIMERS_MAX_PAYLOAD_BYTES)"
+                    )))
+                }
+            }
         } else {
             raw
         };

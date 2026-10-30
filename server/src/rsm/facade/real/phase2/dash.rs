@@ -319,7 +319,15 @@ impl RaftFacade {
                 let mut errors: std::collections::BTreeMap<Option<String>, i64> =
                     std::collections::BTreeMap::new();
                 let mut pids = std::collections::HashSet::new();
-                let rows = super::reads::scan_dlq_rows(r, &t, None, None)?;
+                // Heads only (the payloads were copied on every poll), and
+                // at most `DLQ_SCAN_MAX_ROWS` of them.
+                let (rows, _) = super::reads::scan_dlq_heads(
+                    r,
+                    &t,
+                    None,
+                    None,
+                    super::reads::DLQ_SCAN_MAX_ROWS,
+                )?;
                 for (_, _, _, row) in &rows {
                     pids.insert(row.pid);
                     let e = Some(row.error.clone()).filter(|e| !e.is_empty());

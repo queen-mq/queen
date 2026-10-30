@@ -1427,9 +1427,10 @@ fn queue_detail<R: TypedReads + ?Sized>(
     let mut truncated = false;
     let mut dlq_by_pid: BTreeMap<u64, i64> = BTreeMap::new();
     if max > 0 {
-        for (_, _, _, row) in reads::scan_dlq_rows(r, tenant, Some(queue), None)? {
+        // Counted from the rows' heads: no payload is copied.
+        reads::each_dlq_head(r, tenant, Some(queue), None, usize::MAX, &mut |(_, _, _, row)| {
             *dlq_by_pid.entry(row.pid).or_default() += 1;
-        }
+        })?;
     }
     let mut partitions = Vec::new();
     let mut totals = [0i64; 5]; // total, pending, processing, completed, dlq
