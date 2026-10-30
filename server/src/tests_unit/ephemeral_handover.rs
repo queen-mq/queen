@@ -246,7 +246,11 @@ async fn with_jwt_on_a_sigterm_hand_over_delivers_every_message() {
     assert_eq!(d.shipped.messages as i64, before);
     assert_eq!(d.still_shipping, 0);
     assert_eq!(held(&a, 5), 0, "nothing left behind");
-    assert_eq!(a.ephemeral.global_bytes(), 0);
+    // Only the queues' own overhead is left on A: every message moved.
+    assert_eq!(
+        a.ephemeral.global_bytes(),
+        a.ephemeral.queue_count() as i64 * crate::ephemeral::QUEUE_OVERHEAD
+    );
     assert_eq!(held(&b, 5), before, "every message is on B");
 
     let g = b

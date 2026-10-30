@@ -164,6 +164,58 @@ impl Knobs {
     }
 }
 
+/// Bytes charged to the tenant and cell budgets for each message on top of its
+/// payload: the `Msg` (seq, payload handle, time) and its deque slot. Without
+/// it a stream of 1-byte messages fills RAM while the cap still reads empty.
+/// The per-queue `maxBytes` keeps counting payload bytes only: it is the
+/// queue owner's declared contract, and `maxLength` already bounds the count.
+pub(crate) const MSG_OVERHEAD: i64 = 48;
+
+/// Bytes charged to the cell budget for each live queue: the map entry, the
+/// `EqQueue` with its mutexes, maps and budgets. An empty inbox costs RAM too,
+/// and a cell of empty inboxes must not read as an empty cell.
+pub(crate) const QUEUE_OVERHEAD: i64 = 2048;
+
+/// Consumer groups one ring keeps a cursor for. The names come from clients,
+/// so without a cap every pop with a fresh group name pins a cursor forever.
+/// Idle groups are expired by the backstop, which frees room under the cap.
+const RING_GROUPS_CAP: usize = 256;
+
+/// Queues one backstop tick visits. The map can hold `max_queues` entries, and
+/// a tick that visited all of them under the global mutex each second would be
+/// the stall this loop exists to prevent.
+const SWEEP_BATCH: usize = 4096;
+
+fn env_i64(name: &str, default: i64) -> i64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
+/// `QUEEN_EPHEMERAL_IMPLICIT_TTL_S` (600), in ms: an implicit queue nobody
+/// pushed to, popped or acked for this long is collected EVEN IF it still
+/// holds messages. An inbox whose requester went away would otherwise keep its
+/// replies for the life of the process. 0 = off.
+pub(crate) fn implicit_ttl_ms_env() -> i64 {
+    static V: OnceLock<i64> = OnceLock::new();
+    *V.get_or_init(|| env_i64("QUEEN_EPHEMERAL_IMPLICIT_TTL_S", 600).max(0).saturating_mul(1000))
+}
+
+/// `QUEEN_EPHEMERAL_MAX_QUEUES` (100000): live ephemeral queues per broker,
+/// declared and implicit together. Past it, creating one answers 503. 0 = off.
+pub(crate) fn max_queues_env() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| env_i64("QUEEN_EPHEMERAL_MAX_QUEUES", 100_000).max(0) as usize)
+}
+
+/// `QUEEN_EPHEMERAL_POP_MAX_BYTES` (16 MiB): payload bytes one pop answer may
+/// carry. A pop always takes at least one message, whatever its size.
+pub(crate) fn pop_max_bytes() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| env_i64("QUEEN_EPHEMERAL_POP_MAX_BYTES", 16 * 1024 * 1024).max(1) as usize)
+}
+
 /// What a full queue does to the next push (§1.6 rung 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
@@ -650,8 +702,9 @@ struct Msg {
     /// Copied OUT of the request buffer at push. A 1 KB slice of a 64 MiB body
     /// must not pin the whole body allocation for the life of the message —
     /// with thousands of live inboxes that is the difference between a few MB
-    /// and the cell.
-    payload: Box<[u8]>,
+    /// and the cell. A `Bytes` over that copy, so a pop hands out a reference
+    /// and not a second copy of every payload it answers with.
+    payload: bytes::Bytes,
     enqueued_ms: i64,
 }
 
@@ -673,15 +726,21 @@ struct GroupState {
     /// it (§3.2). Counted per group and never silently swallowed: for a fan-out
     /// consumer this is the difference between "slow" and "lost data".
     skipped: u64,
+    /// Last pop or ack by this group on this ring (or its creation). A group
+    /// idle past `implicit_idle_ms` with nothing leased is expired by the
+    /// backstop: the names come from clients, and a cursor nobody uses pins
+    /// both a slot and, through `trim_consumed`'s floor, the messages behind it.
+    last_ms: i64,
 }
 
 impl GroupState {
-    fn new(next: u64) -> GroupState {
+    fn new(next: u64, now_ms: i64) -> GroupState {
         GroupState {
             next,
             redeliver: VecDeque::new(),
             attempts: HashMap::new(),
             skipped: 0,
+            last_ms: now_ms,
         }
     }
 
@@ -749,12 +808,17 @@ struct Ring {
     lease_at: HashMap<(u32, u64), (i64, u64)>,
     next_lease_id: u64,
     bytes: i64,
+    /// Last push, pop or ack on this ring. An empty ring idle past
+    /// `implicit_idle_ms` is collected by the backstop even inside a busy
+    /// queue: a queue that rotates partition names would otherwise keep one
+    /// ring per name it ever saw.
+    last_ms: i64,
 }
 
 impl Ring {
     /// `start` is the seq this incarnation of the ring begins numbering at —
     /// never 0 after the first, see `Ephemeral::next_ring_base`.
-    fn new(start: u64) -> Ring {
+    fn new(start: u64, now_ms: i64) -> Ring {
         Ring {
             deque: VecDeque::new(),
             head_seq: start,
@@ -765,12 +829,21 @@ impl Ring {
             lease_at: HashMap::new(),
             next_lease_id: 0,
             bytes: 0,
+            last_ms: now_ms,
         }
     }
 
-    fn group(&mut self, name: &str) -> u32 {
+    /// The group's index, created on first sight. `None` when the ring
+    /// already holds `RING_GROUPS_CAP` groups: the caller serves nothing from
+    /// this ring to that group until the backstop expires an idle one.
+    fn group(&mut self, name: &str, now_ms: i64) -> Option<u32> {
         if let Some(&i) = self.gix.get(name) {
-            return i;
+            let g = &mut self.groups[i as usize];
+            g.last_ms = g.last_ms.max(now_ms);
+            return Some(i);
+        }
+        if self.groups.len() >= RING_GROUPS_CAP {
+            return None;
         }
         // A brand-new group starts at the ring's HEAD, not at its tail: the
         // messages still in RAM are the only history that exists, and there is
@@ -778,9 +851,73 @@ impl Ring {
         // history, so the concept has no referent). Starting at the tail would
         // make a fan-out subscriber miss everything already buffered for it.
         let i = self.groups.len() as u32;
-        self.groups.push(GroupState::new(self.head_seq));
+        self.groups.push(GroupState::new(self.head_seq, now_ms));
         self.gix.insert(name.to_string(), i);
-        i
+        Some(i)
+    }
+
+    /// Drop every group idle for `idle_ms` that holds no lease. Indices are
+    /// compacted, so the lease maps are remapped in the same pass. A group that
+    /// comes back starts at the head again, like any new group: possibly a
+    /// redelivery, which the class allows (§1.4). Returns how many went.
+    fn expire_idle_groups(&mut self, now_ms: i64, idle_ms: i64) -> u64 {
+        if idle_ms <= 0 || self.groups.is_empty() {
+            return 0;
+        }
+        let mut leased = vec![false; self.groups.len()];
+        for (gi, _) in self.lease_at.keys() {
+            if let Some(b) = leased.get_mut(*gi as usize) {
+                *b = true;
+            }
+        }
+        let keep: Vec<bool> = self
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| leased[i] || now_ms - g.last_ms < idle_ms)
+            .collect();
+        let dropped = keep.iter().filter(|k| !**k).count() as u64;
+        if dropped == 0 {
+            return 0;
+        }
+        let mut remap = vec![u32::MAX; self.groups.len()];
+        let old = std::mem::take(&mut self.groups);
+        for (i, g) in old.into_iter().enumerate() {
+            if keep[i] {
+                remap[i] = self.groups.len() as u32;
+                self.groups.push(g);
+            }
+        }
+        self.gix.retain(|_, i| match remap.get(*i as usize) {
+            Some(&n) if n != u32::MAX => {
+                *i = n;
+                true
+            }
+            _ => false,
+        });
+        // Every leased group was kept, so every lease has a new index.
+        for r in self.leases.values_mut() {
+            r.gix = remap[r.gix as usize];
+        }
+        self.lease_at = std::mem::take(&mut self.lease_at)
+            .into_iter()
+            .map(|((gi, s), k)| ((remap[gi as usize], s), k))
+            .collect();
+        dropped
+    }
+
+    /// Nothing held, nothing leased, and every group caught up: dropping the
+    /// ring loses nothing a client can observe (a recreated ring takes a fresh
+    /// seq base and seeds the known groups at its head).
+    fn reclaimable(&self, now_ms: i64, idle_ms: i64) -> bool {
+        idle_ms > 0
+            && now_ms - self.last_ms >= idle_ms
+            && self.deque.is_empty()
+            && self.leases.is_empty()
+            && self
+                .groups
+                .iter()
+                .all(|g| g.redeliver.is_empty() && g.next >= self.next_seq)
     }
 
     #[inline]
@@ -865,15 +1002,18 @@ impl Ring {
         if self.groups.is_empty() {
             return out;
         }
+        // The lowest leased seq of every group in ONE pass over the leases,
+        // not one pass per group: an ack batch on a ring with many groups and
+        // many leases was groups x leases per call.
+        let mut lowest: Vec<Option<u64>> = vec![None; self.groups.len()];
+        for (gi, s) in self.lease_at.keys() {
+            if let Some(slot) = lowest.get_mut(*gi as usize) {
+                *slot = Some(slot.map_or(*s, |c| c.min(*s)));
+            }
+        }
         let mut floor = u64::MAX;
         for (i, g) in self.groups.iter().enumerate() {
-            let leased = self
-                .lease_at
-                .keys()
-                .filter(|(gi, _)| *gi == i as u32)
-                .map(|(_, s)| *s)
-                .min();
-            floor = floor.min(g.low_water(leased));
+            floor = floor.min(g.low_water(lowest[i]));
         }
         while let Some((seq, bytes)) = self.deque.front().map(|m| (m.seq, m.payload.len() as i64)) {
             if seq >= floor {
@@ -1057,7 +1197,7 @@ impl Ring {
         let msgs = self
             .deque
             .drain(..)
-            .map(|m| (m.enqueued_ms, m.payload))
+            .map(|m| (m.enqueued_ms, Vec::from(m.payload).into_boxed_slice()))
             .collect();
         self.bytes = 0;
         self.head_seq = self.next_seq;
@@ -1077,9 +1217,10 @@ impl Ring {
     /// already took new pushes (the seconds while nodes disagree) the messages
     /// land after them and groups keep their cursors: reordered and possibly
     /// re-delivered, which the class allows (§1.4) where losing them is worse.
-    fn adopt(&mut self, msgs: Vec<(i64, Box<[u8]>)>, groups: &[GroupExport]) {
+    fn adopt(&mut self, msgs: Vec<(i64, Box<[u8]>)>, groups: &[GroupExport], now_ms: i64) {
         let fresh = self.deque.is_empty() && self.leases.is_empty();
         let base = self.next_seq;
+        self.last_ms = now_ms;
         for (enqueued_ms, payload) in msgs {
             let seq = self.next_seq;
             self.next_seq += 1;
@@ -1089,13 +1230,18 @@ impl Ring {
             self.bytes += payload.len() as i64;
             self.deque.push_back(Msg {
                 seq,
-                payload,
+                payload: bytes::Bytes::from(payload),
                 enqueued_ms,
             });
         }
         let end = self.next_seq;
         for g in groups {
-            let gi = self.group(&g.name) as usize;
+            // A group past the cap travels without its cursor: it rejoins at
+            // the head when it pops, like any new group.
+            let Some(gi) = self.group(&g.name, now_ms) else {
+                continue;
+            };
+            let gi = gi as usize;
             if !fresh {
                 continue;
             }
@@ -1180,7 +1326,12 @@ impl EqQueue {
     }
 
     /// Get-or-create. `base` is called ONLY on the create path.
-    fn ring_or_create(&self, partition: &str, base: impl FnOnce() -> u64) -> Arc<Mutex<Ring>> {
+    fn ring_or_create(
+        &self,
+        partition: &str,
+        now_ms: i64,
+        base: impl FnOnce() -> u64,
+    ) -> Arc<Mutex<Ring>> {
         if let Some(r) = self.ring(partition) {
             return r;
         }
@@ -1193,9 +1344,11 @@ impl EqQueue {
         let mut p = self.partitions.lock().unwrap();
         p.entry(partition.to_string())
             .or_insert_with(|| {
-                let mut r = Ring::new(start);
+                let mut r = Ring::new(start, now_ms);
+                // `known_groups` is capped at the ring's own group cap, so
+                // every seeded name fits.
                 for g in &seed {
-                    r.group(g);
+                    let _ = r.group(g, now_ms);
                 }
                 Arc::new(Mutex::new(r))
             })
@@ -1319,16 +1472,46 @@ pub enum Refusal {
     QueueFull,
     /// §1.6 rung 3, the cell ceiling. 503 `ephemeral_unavailable`.
     NoRoom,
+    /// `QUEEN_EPHEMERAL_MAX_QUEUES` live queues already. 503
+    /// `ephemeral_queue_limit`: a cell condition, gone when inboxes are collected.
+    TooManyQueues,
     /// §1.6 rung 2. Unreachable until the grant ladder lands; the variant exists
     /// so the handler's match is already exhaustive over the real taxonomy.
     TenantQuota,
+}
+
+/// The byte budget of one pop answer (`QUEEN_EPHEMERAL_POP_MAX_BYTES`).
+struct PopBudget {
+    used: usize,
+    max: usize,
+    /// The answer has nothing yet, so its first message is taken whatever
+    /// its size.
+    take_one: bool,
+}
+
+impl PopBudget {
+    fn fits(&self, len: usize) -> bool {
+        (self.take_one && self.used == 0) || self.used.saturating_add(len) <= self.max
+    }
+
+    fn spend(&mut self, len: usize) {
+        self.used = self.used.saturating_add(len);
+        // Past the first message the budget alone decides, so a run of empty
+        // payloads after it is still bounded by `max`.
+        self.take_one = false;
+    }
+
+    fn spent(&self) -> bool {
+        !self.take_one && self.used >= self.max
+    }
 }
 
 /// One message on its way out.
 pub struct Delivered {
     pub id: String,
     pub partition: String,
-    pub payload: Box<[u8]>,
+    /// A reference to the ring's copy, not a second one.
+    pub payload: bytes::Bytes,
     pub attempts: u32,
 }
 
@@ -1457,6 +1640,12 @@ pub struct Sweep {
     pub exhausted: u64,
     pub dropped_ttl: u64,
     pub gc_queues: u64,
+    /// Messages dropped with implicit queues collected by
+    /// `QUEEN_EPHEMERAL_IMPLICIT_TTL_S` while they still held them.
+    pub gc_dropped: u64,
+    /// Idle empty rings and idle consumer groups collected inside live queues.
+    pub gc_rings: u64,
+    pub gc_groups: u64,
     /// Epoch ms of the nearest known lease expiry, for `sweeper::hint_in_ms`.
     pub next_expiry_ms: Option<i64>,
 }
@@ -1502,6 +1691,15 @@ pub struct Ephemeral {
     shipping: std::sync::atomic::AtomicUsize,
     /// Wakes the placement loop early: a hand-over queued, a drain notice.
     kick: tokio::sync::Notify,
+    /// `QUEEN_EPHEMERAL_IMPLICIT_TTL_S` in ms (0 = off). A field and not a
+    /// knob read, so the engine tests can set it.
+    implicit_ttl_ms: AtomicI64,
+    /// `QUEEN_EPHEMERAL_MAX_QUEUES` (0 = off).
+    max_queues: std::sync::atomic::AtomicUsize,
+    /// The backstop's place in the queue map: the keys the pass in progress
+    /// has not visited yet. One key snapshot per PASS, `SWEEP_BATCH` queues
+    /// per tick, instead of every key cloned every second.
+    sweep_cursor: Mutex<Vec<String>>,
 }
 
 impl Ephemeral {
@@ -1528,6 +1726,9 @@ impl Ephemeral {
             outbox: Mutex::new(Vec::new()),
             shipping: std::sync::atomic::AtomicUsize::new(0),
             kick: tokio::sync::Notify::new(),
+            implicit_ttl_ms: AtomicI64::new(implicit_ttl_ms_env()),
+            max_queues: std::sync::atomic::AtomicUsize::new(max_queues_env()),
+            sweep_cursor: Mutex::new(Vec::new()),
         })
     }
 
@@ -1603,15 +1804,27 @@ impl Ephemeral {
     // -------------------------------------------------------------- queues
 
     fn lookup(&self, tenant: &str, name: &str, create: bool) -> Option<Arc<EqQueue>> {
+        if create {
+            return self.get_or_create(tenant, name).ok();
+        }
+        self.queues
+            .lock()
+            .unwrap()
+            .get(&Self::qkey(tenant, name))
+            .cloned()
+    }
+
+    /// Get-or-create with the reason a creation was refused: the tenant's
+    /// `max_queues` or a full tenant map (`NoRoom`, as before), the cell's
+    /// queue count (`TooManyQueues`) or no cell room for the queue's own
+    /// overhead (`NoRoom`).
+    fn get_or_create(&self, tenant: &str, name: &str) -> Result<Arc<EqQueue>, Refusal> {
         let key = Self::qkey(tenant, name);
         {
             let q = self.queues.lock().unwrap();
             if let Some(x) = q.get(&key) {
-                return Some(x.clone());
+                return Ok(x.clone());
             }
-        }
-        if !create {
-            return None;
         }
         // §1.6 rung 2, the OBJECT half: `max_queues` counts declared plus live
         // implicit (§1.1). Checked HERE, on the auto-vivify path, because that is
@@ -1625,7 +1838,7 @@ impl Ephemeral {
             })
             .unwrap_or(false)
         {
-            return None;
+            return Err(Refusal::NoRoom);
         }
         let fresh = Arc::new(EqQueue {
             name: name.to_string(),
@@ -1641,20 +1854,31 @@ impl Ephemeral {
             dropped_retry: AtomicU64::new(0),
         });
         let mut q = self.queues.lock().unwrap();
-        let created = !q.contains_key(&key);
-        let arc = q.entry(key).or_insert(fresh).clone();
+        if let Some(x) = q.get(&key) {
+            // Lost the race to another creator: theirs is the queue.
+            return Ok(x.clone());
+        }
+        let max = self.max_queues.load(Ordering::Relaxed);
+        if max > 0 && q.len() >= max {
+            return Err(Refusal::TooManyQueues);
+        }
+        // The queue's own RAM, charged to the cell like a message's. An atomic
+        // CAS and no lock, so it is safe under the map lock.
+        if !self.global.charge(QUEUE_OVERHEAD) {
+            return Err(Refusal::NoRoom);
+        }
+        q.insert(key, fresh.clone());
         let n = q.len() as i64;
         drop(q);
-        // Only on a real creation: two racing pushes to the same new inbox must
-        // not count it twice, which for the per-tenant `max_queues` grant would
-        // be a refusal the tenant cannot explain.
-        if created {
-            self.metrics.eph_queues.store(n, Ordering::Relaxed);
-            let _ = self.with_tenant(tenant, |t| {
-                t.queues.fetch_add(1, Ordering::Relaxed);
-            });
-        }
-        Some(arc)
+        // Only on a real creation (the race loser returned above): two racing
+        // pushes to the same new inbox must not count it twice, which for the
+        // per-tenant `max_queues` grant would be a refusal the tenant cannot
+        // explain.
+        self.metrics.eph_queues.store(n, Ordering::Relaxed);
+        let _ = self.with_tenant(tenant, |t| {
+            t.queues.fetch_add(1, Ordering::Relaxed);
+        });
+        Ok(fresh)
     }
 
     /// Run `f` against this tenant's usage, creating the entry on first sight.
@@ -2237,35 +2461,35 @@ impl Ephemeral {
         if msgs.is_empty() {
             return Ok(0);
         }
-        let Some(q) = self.lookup(&tenant, &queue, true) else {
-            return Err(Refusal::NoRoom);
-        };
+        let q = self.get_or_create(&tenant, &queue)?;
         let cfg = *q.config.lock().unwrap();
         for g in &groups {
             q.remember_group(&g.name);
         }
-        let ring = q.ring_or_create(&partition, || self.next_ring_base());
+        let ring = q.ring_or_create(&partition, now_ms, || self.next_ring_base());
         q.touch(now_ms);
         let total: i64 = msgs.iter().map(|(_, p)| p.len() as i64).sum();
         let count = msgs.len() as i64;
+        // The tenant and the cell pay the per-message overhead too.
+        let cell = total.saturating_add(count.saturating_mul(MSG_OVERHEAD));
         if !self.charge_queue(&q, cfg.policy, &ring, total, count, &tenant) {
             return Err(Refusal::QueueFull);
         }
         let tenant_ok = self
-            .with_tenant(&tenant, |t| t.bytes.charge(total))
+            .with_tenant(&tenant, |t| t.bytes.charge(cell))
             .unwrap_or(false);
         if !tenant_ok {
             q.bytes.refund(total);
             q.length.refund(count);
             return Err(Refusal::TenantQuota);
         }
-        if !self.global.charge(total) {
+        if !self.global.charge(cell) {
             q.bytes.refund(total);
             q.length.refund(count);
-            let _ = self.with_tenant(&tenant, |t| t.bytes.refund(total));
+            let _ = self.with_tenant(&tenant, |t| t.bytes.refund(cell));
             return Err(Refusal::NoRoom);
         }
-        ring.lock().unwrap().adopt(msgs, &groups);
+        ring.lock().unwrap().adopt(msgs, &groups, now_ms);
         self.metrics
             .eph_bytes
             .store(self.global.used(), Ordering::Relaxed);
@@ -2322,15 +2546,16 @@ impl Ephemeral {
         if payloads.is_empty() {
             return Ok(0);
         }
-        let Some(q) = self.lookup(tenant, name, true) else {
-            return Err(Refusal::NoRoom);
-        };
+        let q = self.get_or_create(tenant, name)?;
         let cfg = *q.config.lock().unwrap();
-        let ring = q.ring_or_create(partition, || self.next_ring_base());
+        let ring = q.ring_or_create(partition, now_ms, || self.next_ring_base());
         q.touch(now_ms);
 
         let total: i64 = payloads.iter().map(|p| p.len() as i64).sum();
         let count = payloads.len() as i64;
+        // The tenant and the cell pay the per-message overhead too (see
+        // `MSG_OVERHEAD`); the queue's own `maxBytes` counts payload only.
+        let cell = total.saturating_add(count.saturating_mul(MSG_OVERHEAD));
 
         // Opportunistic maintenance BEFORE the charge, never after: room a ttl
         // drop or a consumed-prefix trim is about to free must be visible to
@@ -2360,22 +2585,23 @@ impl Ephemeral {
             return Err(Refusal::QueueFull);
         }
         let tenant_ok = self
-            .with_tenant(tenant, |t| t.bytes.charge(total))
+            .with_tenant(tenant, |t| t.bytes.charge(cell))
             .unwrap_or(false);
         if !tenant_ok {
             q.bytes.refund(total);
             q.length.refund(count);
             return Err(Refusal::TenantQuota);
         }
-        if !self.global.charge(total) {
+        if !self.global.charge(cell) {
             q.bytes.refund(total);
             q.length.refund(count);
-            let _ = self.with_tenant(tenant, |t| t.bytes.refund(total));
+            let _ = self.with_tenant(tenant, |t| t.bytes.refund(cell));
             return Err(Refusal::NoRoom);
         }
 
         {
             let mut r = ring.lock().unwrap();
+            r.last_ms = now_ms;
             for p in payloads {
                 let seq = r.next_seq;
                 r.next_seq += 1;
@@ -2385,7 +2611,7 @@ impl Ephemeral {
                 r.bytes += p.len() as i64;
                 r.deque.push_back(Msg {
                     seq,
-                    payload: p,
+                    payload: bytes::Bytes::from(p),
                     enqueued_ms: now_ms,
                 });
             }
@@ -2459,8 +2685,10 @@ impl Ephemeral {
         }
         q.bytes.refund(f.bytes);
         q.length.refund(f.count);
-        let _ = self.with_tenant(tenant, |t| t.bytes.refund(f.bytes));
-        self.global.refund(f.bytes);
+        // The tenant and the cell were charged the per-message overhead too.
+        let cell = f.bytes.saturating_add(f.count.saturating_mul(MSG_OVERHEAD));
+        let _ = self.with_tenant(tenant, |t| t.bytes.refund(cell));
+        self.global.refund(cell);
         if f.by_ttl > 0 {
             self.metrics
                 .eph_dropped_ttl
@@ -2497,10 +2725,46 @@ impl Ephemeral {
         auto_ack: bool,
         now_ms: i64,
     ) -> Vec<Delivered> {
+        self.pop_bounded(
+            tenant,
+            name,
+            partition,
+            group,
+            batch,
+            auto_ack,
+            now_ms,
+            pop_max_bytes(),
+            true,
+        )
+    }
+
+    /// [`Ephemeral::pop`] under a payload byte budget: messages are taken
+    /// while they fit in `max_bytes`, and the first one always when
+    /// `take_one` (an answer that has nothing yet must make progress, or a
+    /// single message over the budget would block its queue for ever). A
+    /// message that does not fit stays where it is, unclaimed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pop_bounded(
+        &self,
+        tenant: &str,
+        name: &str,
+        partition: Option<&str>,
+        group: Option<&str>,
+        batch: usize,
+        auto_ack: bool,
+        now_ms: i64,
+        max_bytes: usize,
+        take_one: bool,
+    ) -> Vec<Delivered> {
         let mut out = Vec::new();
         if batch == 0 {
             return out;
         }
+        let mut budget = PopBudget {
+            used: 0,
+            max: max_bytes,
+            take_one,
+        };
         // Auto-vivify on pop too (§1.1): a consumer that parks on its inbox
         // before the producer's first push is the NORMAL req/reply order, and
         // a pop that created nothing would have no gate for the push to wake.
@@ -2522,14 +2786,14 @@ impl Ephemeral {
         };
         let mut leased_any = false;
         for p in parts {
-            if out.len() >= batch {
+            if out.len() >= batch || budget.spent() {
                 break;
             }
             // A named partition is created on demand (a pop may legitimately
             // be the first thing that touches an inbox); a partition-less pop
             // only visits the rings that already exist.
             let ring = match partition {
-                Some(_) => q.ring_or_create(&p, || self.next_ring_base()),
+                Some(_) => q.ring_or_create(&p, now_ms, || self.next_ring_base()),
                 None => match q.ring(&p) {
                     Some(r) => r,
                     None => continue,
@@ -2547,19 +2811,33 @@ impl Ephemeral {
                         .fetch_add(sweep.exhausted, Ordering::Relaxed);
                 }
                 freed.merge(r.drop_expired(now_ms, cfg.ttl_ms));
+                r.last_ms = now_ms;
 
-                let gi = r.group(group);
-                let want = batch - out.len();
-                let taken = Self::take(&mut r, gi, want, auto_ack, cfg.lease_ms, now_ms);
-                leased_any |= !auto_ack && !taken.is_empty();
-                for (seq, attempts) in taken {
-                    if let Some(m) = r.get(seq) {
-                        out.push(Delivered {
-                            id: mint_id(self.epoch, &p, seq),
-                            partition: p.clone(),
-                            payload: m.payload.clone(),
-                            attempts,
-                        });
+                // `None`: the ring is at its group cap and this group has no
+                // cursor on it. Nothing is served from this ring until the
+                // backstop expires an idle group.
+                if let Some(gi) = r.group(group, now_ms) {
+                    let want = batch - out.len();
+                    let taken = Self::take(
+                        &mut r,
+                        gi,
+                        want,
+                        auto_ack,
+                        cfg.lease_ms,
+                        now_ms,
+                        &mut budget,
+                    );
+                    leased_any |= !auto_ack && !taken.is_empty();
+                    for (seq, attempts) in taken {
+                        if let Some(m) = r.get(seq) {
+                            out.push(Delivered {
+                                id: mint_id(self.epoch, &p, seq),
+                                partition: p.clone(),
+                                // A refcount, not a copy of the payload.
+                                payload: m.payload.clone(),
+                                attempts,
+                            });
+                        }
                     }
                 }
                 freed.merge(r.trim_consumed());
@@ -2589,30 +2867,46 @@ impl Ephemeral {
         auto_ack: bool,
         lease_ms: i64,
         now_ms: i64,
+        budget: &mut PopBudget,
     ) -> Vec<(u64, u32)> {
         let mut picked: Vec<(u64, u32)> = Vec::new();
         let tail = r.next_seq;
         while picked.len() < want {
-            let seq = {
-                let g = &mut r.groups[gi as usize];
-                match g.redeliver.pop_front() {
-                    Some(s) => s,
+            // Look before claiming: a message over the byte budget must stay
+            // exactly where it is (cursor not advanced, redelivery not popped).
+            let (seq, redelivery) = {
+                let g = &r.groups[gi as usize];
+                match g.redeliver.front() {
+                    Some(&s) => (s, true),
                     None => {
                         if g.next >= tail {
                             break;
                         }
-                        let s = g.next;
-                        g.next += 1;
-                        s
+                        (g.next, false)
                     }
                 }
             };
+            let len = r.get(seq).map(|m| m.payload.len());
+            if let Some(len) = len {
+                if !budget.fits(len) {
+                    break;
+                }
+            }
+            {
+                let g = &mut r.groups[gi as usize];
+                if redelivery {
+                    g.redeliver.pop_front();
+                } else {
+                    g.next += 1;
+                }
+            }
             // A redelivery whose message has since been evicted (bounds/ttl) is
             // silently skipped: the drop was already counted where it happened,
             // and handing back a hole would be worse than handing back nothing.
-            if r.get(seq).is_none() {
+            let Some(len) = len else {
                 continue;
-            }
+            };
+            budget.spend(len);
             let attempts = {
                 let g = &mut r.groups[gi as usize];
                 let n = g.attempts.entry(seq).or_insert(0);
@@ -2669,6 +2963,9 @@ impl Ephemeral {
         q.touch(now_ms);
         let mut acked = 0u64;
         let mut exhausted = 0u64;
+        // The rings this call touched, trimmed ONCE each after the loop: a
+        // trim per id made a 10,000-id ack 10,000 floor computations.
+        let mut touched: HashMap<&str, Arc<Mutex<Ring>>> = HashMap::new();
         for (id, status) in acks {
             let Some((epoch, part, seq)) = parse_id(id) else {
                 out.push((id.clone(), AckOutcome::Unknown));
@@ -2678,15 +2975,24 @@ impl Ephemeral {
                 out.push((id.clone(), AckOutcome::Stale));
                 continue;
             }
-            let Some(ring) = q.ring(part) else {
-                out.push((id.clone(), AckOutcome::Unknown));
-                continue;
+            let ring = match touched.get(part) {
+                Some(r) => r.clone(),
+                None => {
+                    let Some(r) = q.ring(part) else {
+                        out.push((id.clone(), AckOutcome::Unknown));
+                        continue;
+                    };
+                    touched.insert(part, r.clone());
+                    r
+                }
             };
             let mut r = ring.lock().unwrap();
             let Some(&gi) = r.gix.get(group) else {
                 out.push((id.clone(), AckOutcome::Unknown));
                 continue;
             };
+            r.last_ms = now_ms;
+            r.groups[gi as usize].last_ms = now_ms;
             let Some(key) = r.lease_at.remove(&(gi, seq)) else {
                 out.push((id.clone(), AckOutcome::Unknown));
                 continue;
@@ -2720,10 +3026,12 @@ impl Ephemeral {
                     }
                 }
             };
-            let freed = r.trim_consumed();
             drop(r);
-            self.release(tenant, &q, &freed);
             out.push((id.clone(), outcome));
+        }
+        for ring in touched.into_values() {
+            let freed = ring.lock().unwrap().trim_consumed();
+            self.release(tenant, &q, &freed);
         }
         if acked > 0 {
             self.metrics.eph_acked.fetch_add(acked, Ordering::Relaxed);
@@ -2740,59 +3048,89 @@ impl Ephemeral {
     // --------------------------------------------------------------- sweep
 
     /// The sweeper's backstop pass (§3.2, M10): expire leases nobody touched,
-    /// drop ttl'd heads on queues nobody is polling, and garbage-collect
-    /// implicit queues that have been empty and idle past
-    /// `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S`.
+    /// drop ttl'd heads on queues nobody is polling, expire idle groups and
+    /// idle empty rings, and garbage-collect implicit queues that have been
+    /// empty and idle past `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` (or idle past
+    /// `QUEEN_EPHEMERAL_IMPLICIT_TTL_S` whatever they hold). One call visits
+    /// at most `SWEEP_BATCH` queues; consecutive calls cover the whole map.
     ///
     /// Everything here also happens opportunistically on every ring touch. This
     /// pass exists for the rings NOBODY touches — which, for a class built on
     /// thousands of short-lived inboxes, is most of them most of the time.
     pub fn sweep(&self, now_ms: i64) -> Sweep {
         let mut out = Sweep::default();
-        // A snapshot of `Arc`s, so the pass never holds the queue map while it
-        // locks a ring — but it MUST be dropped before `gc_implicit`, whose
-        // eviction interlock is `Arc::strong_count == 1`. Holding these clones
-        // across the GC would make every queue look busy and the collector a
-        // no-op forever, which is the kind of bug that only shows up as a slow
-        // memory climb on a cell with a lot of short-lived inboxes.
-        {
-            let snapshot: Vec<(String, Arc<EqQueue>)> = self
-                .queues
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            for (key, q) in &snapshot {
-                let (tenant, _) = crate::handlers::split_tenant_queue(key);
-                let cfg = *q.config.lock().unwrap();
-                let mut freed = Freed::default();
-                let mut next: Option<i64> = None;
-                for p in q.partition_names() {
-                    let Some(ring) = q.ring(&p) else { continue };
-                    let mut r = ring.lock().unwrap();
-                    let ls = r.sweep_leases(now_ms, cfg.retry_limit);
-                    out.redelivered += ls.redelivered;
-                    out.exhausted += ls.exhausted;
-                    if ls.exhausted > 0 {
-                        q.dropped_retry.fetch_add(ls.exhausted, Ordering::Relaxed);
-                    }
-                    freed.merge(r.drop_expired(now_ms, cfg.ttl_ms));
-                    freed.merge(r.trim_consumed());
-                    if let Some(d) = r.next_expiry() {
-                        next = Some(next.map_or(d, |c: i64| c.min(d)));
-                    }
+        let idle = self.knobs.implicit_idle_ms;
+        let ttl = self.implicit_ttl_ms.load(Ordering::Relaxed);
+        // This tick's share of the pass. The key snapshot is taken once per
+        // PASS and handed out `SWEEP_BATCH` keys per tick, so a cell of 100k
+        // inboxes no longer clones every key and walks the whole map under
+        // the global mutex every second. Keys and never `Arc`s: an `Arc` held
+        // across ticks would defeat the `strong_count == 1` GC interlock.
+        let keys: Vec<String> = {
+            let mut pending = self.sweep_cursor.lock().unwrap();
+            if pending.is_empty() {
+                *pending = self.queues.lock().unwrap().keys().cloned().collect();
+            }
+            let n = pending.len().min(SWEEP_BATCH);
+            let at = pending.len() - n;
+            pending.split_off(at)
+        };
+        for key in keys {
+            let Some(q) = self.queues.lock().unwrap().get(&key).cloned() else {
+                continue;
+            };
+            let (tenant, _) = crate::handlers::split_tenant_queue(&key);
+            let cfg = *q.config.lock().unwrap();
+            let mut freed = Freed::default();
+            let mut next: Option<i64> = None;
+            for p in q.partition_names() {
+                let Some(ring) = q.ring(&p) else { continue };
+                let mut r = ring.lock().unwrap();
+                let ls = r.sweep_leases(now_ms, cfg.retry_limit);
+                out.redelivered += ls.redelivered;
+                out.exhausted += ls.exhausted;
+                if ls.exhausted > 0 {
+                    q.dropped_retry.fetch_add(ls.exhausted, Ordering::Relaxed);
                 }
-                out.dropped_ttl += freed.by_ttl;
-                // Refund only what was actually reclaimed — `release` also
-                // writes the cell gauge, and a no-op pass over ten thousand
-                // idle queues must not write it ten thousand times.
-                if freed.count != 0 || freed.bytes != 0 {
-                    self.release(tenant, q, &freed);
+                freed.merge(r.drop_expired(now_ms, cfg.ttl_ms));
+                // Before the trim: a group that went away must stop holding
+                // the floor in this same pass.
+                out.gc_groups += r.expire_idle_groups(now_ms, idle);
+                freed.merge(r.trim_consumed());
+                if let Some(d) = r.next_expiry() {
+                    next = Some(next.map_or(d, |c: i64| c.min(d)));
                 }
-                if let Some(d) = next {
-                    out.next_expiry_ms = Some(out.next_expiry_ms.map_or(d, |c| c.min(d)));
-                }
+            }
+            out.dropped_ttl += freed.by_ttl;
+            // Refund only what was actually reclaimed — `release` also
+            // writes the cell gauge, and a no-op pass over ten thousand
+            // idle queues must not write it ten thousand times.
+            if freed.count != 0 || freed.bytes != 0 {
+                self.release(tenant, &q, &freed);
+            }
+            if let Some(d) = next {
+                out.next_expiry_ms = Some(out.next_expiry_ms.map_or(d, |c| c.min(d)));
+            }
+            // Idle empty rings inside a live queue. Same interlock as the
+            // queue GC: only a ring the map alone holds can go, so a push or
+            // pop that has taken it never appends to an orphan.
+            {
+                let mut parts = q.partitions.lock().unwrap();
+                let before = parts.len();
+                parts.retain(|_, ring| {
+                    Arc::strong_count(ring) != 1
+                        || match ring.try_lock() {
+                            Ok(r) => !r.reclaimable(now_ms, idle),
+                            Err(_) => true,
+                        }
+                });
+                out.gc_rings += (before - parts.len()) as u64;
+            }
+            // Dropped before the queue GC, whose interlock is the count.
+            drop(q);
+            if let Some(dropped) = self.gc_one(&key, now_ms, idle, ttl) {
+                out.gc_queues += 1;
+                out.gc_dropped += dropped;
             }
         }
         // Counted once per PASS and not once per ring, so the counter and the
@@ -2802,60 +3140,79 @@ impl Ephemeral {
                 .eph_dropped_retry
                 .fetch_add(out.exhausted, Ordering::Relaxed);
         }
-        out.gc_queues = self.gc_implicit(now_ms);
         if let Some(d) = out.next_expiry_ms {
             self.hint((d - now_ms).max(0));
         }
         out
     }
 
-    /// §1.1/§3.2 — free implicit queues that are empty and unpolled.
+    /// §1.1/§3.2 — free one implicit queue: empty and unpolled past
+    /// `implicit_idle_ms`, or unpolled past `QUEEN_EPHEMERAL_IMPLICIT_TTL_S`
+    /// WHATEVER it holds (a requester that went away leaves its replies
+    /// behind, and nobody else will ever pop them). `Some(messages dropped)`
+    /// when it went.
     ///
     /// The `strong_count == 1` test under the map lock is the same eviction
     /// interlock `Notifier::evict_idle` uses, and it is not decoration: a push
     /// that has taken its `Arc` and is about to append must not have its queue
     /// removed out from under it, or the message lands in an orphaned ring and
     /// is lost from a queue that is demonstrably in use.
-    fn gc_implicit(&self, now_ms: i64) -> u64 {
-        let idle = self.knobs.implicit_idle_ms;
-        if idle <= 0 {
-            return 0;
-        }
-        let mut gone: Vec<(String, Arc<EqQueue>)> = Vec::new();
-        {
+    fn gc_one(&self, key: &str, now_ms: i64, idle: i64, ttl: i64) -> Option<u64> {
+        let q = {
             let mut m = self.queues.lock().unwrap();
-            m.retain(|k, q| {
-                if q.declared.load(Ordering::Relaxed) || Arc::strong_count(q) != 1 {
-                    return true;
-                }
-                if q.length.used() > 0 || q.bytes.used() > 0 {
-                    return true;
-                }
-                if now_ms - q.last_touch_ms.load(Ordering::Relaxed) < idle {
-                    return true;
-                }
-                gone.push((k.clone(), q.clone()));
-                false
-            });
-            let n = m.len() as i64;
-            drop(m);
-            self.metrics.eph_queues.store(n, Ordering::Relaxed);
+            let q = m.get(key)?;
+            if q.declared.load(Ordering::Relaxed) || Arc::strong_count(q) != 1 {
+                return None;
+            }
+            let quiet = now_ms - q.last_touch_ms.load(Ordering::Relaxed);
+            let empty = q.length.used() == 0 && q.bytes.used() == 0;
+            let collect = (idle > 0 && empty && quiet >= idle) || (ttl > 0 && quiet >= ttl);
+            if !collect {
+                return None;
+            }
+            let q = m.remove(key)?;
+            self.metrics
+                .eph_queues
+                .store(m.len() as i64, Ordering::Relaxed);
+            q
+        };
+        // Out of the map, and nobody else held it: nobody can reach its rings.
+        let (tenant, _) = crate::handlers::split_tenant_queue(key);
+        let rings: Vec<Arc<Mutex<Ring>>> = q
+            .partitions
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, r)| r)
+            .collect();
+        let mut freed = Freed::default();
+        for ring in rings {
+            freed.merge(ring.lock().unwrap().wipe());
         }
-        for (k, q) in &gone {
-            // Empty by the test above, so there are no bytes to give back; the
-            // per-tenant queue COUNT is what has to come down.
-            let (tenant, _) = crate::handlers::split_tenant_queue(k);
-            let _ = self.with_tenant(tenant, |t| {
-                #[allow(deprecated)] // fetch_update: see Budget::refund
-                let _ = t
-                    .queues
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                        Some((n - 1).max(0))
-                    });
-            });
-            debug_assert_eq!(q.bytes.used(), 0);
+        let dropped = freed.count.max(0) as u64;
+        // Counted with the ttl drops: the implicit TTL is an age limit.
+        freed.by_ttl = dropped;
+        self.release(tenant, &q, &freed);
+        self.global.refund(QUEUE_OVERHEAD);
+        let _ = self.with_tenant(tenant, |t| {
+            #[allow(deprecated)] // fetch_update: see Budget::refund
+            let _ = t
+                .queues
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some((n - 1).max(0))
+                });
+        });
+        if dropped > 0 {
+            tracing::warn!(
+                target: "ephemeral",
+                %tenant,
+                queue = %q.name,
+                dropped,
+                idle_s = (now_ms - q.last_touch_ms.load(Ordering::Relaxed)) / 1000,
+                "implicit queue idle past QUEEN_EPHEMERAL_IMPLICIT_TTL_S collected with its messages"
+            );
         }
-        gone.len() as u64
+        Some(dropped)
     }
 
     // ---------------------------------------------------------- inspection
@@ -3007,6 +3364,7 @@ impl Ephemeral {
             gone
         };
         if gone {
+            self.global.refund(QUEUE_OVERHEAD);
             let _ = self.with_tenant(tenant, |t| {
                 #[allow(deprecated)] // fetch_update: see Budget::refund
                 let _ = t
@@ -3168,7 +3526,10 @@ impl Ephemeral {
             .cloned()
             .collect();
         for key in victims {
+            // The key holds the `eph:`-prefixed name and `remove` takes the
+            // bare one (it adds the prefix back through `qkey`).
             let queue = key.strip_prefix(&prefix).unwrap_or(&key);
+            let queue = queue.strip_prefix(EPH_PREFIX).unwrap_or(queue);
             self.remove(tenant, queue);
         }
         self.tenants.lock().unwrap().remove(tenant);
@@ -3317,13 +3678,22 @@ pub(crate) fn spawn_backstop(eph: Arc<Ephemeral>) -> tokio::task::JoinHandle<()>
         loop {
             iv.tick().await;
             let s = eph.sweep(crate::util::now_epoch_ms());
-            if s.redelivered > 0 || s.exhausted > 0 || s.dropped_ttl > 0 || s.gc_queues > 0 {
+            if s.redelivered > 0
+                || s.exhausted > 0
+                || s.dropped_ttl > 0
+                || s.gc_queues > 0
+                || s.gc_rings > 0
+                || s.gc_groups > 0
+            {
                 tracing::info!(
                     target: "ephemeral",
                     redelivered = s.redelivered,
                     exhausted = s.exhausted,
                     dropped_ttl = s.dropped_ttl,
                     gc_queues = s.gc_queues,
+                    gc_dropped = s.gc_dropped,
+                    gc_rings = s.gc_rings,
+                    gc_groups = s.gc_groups,
                     queues = eph.queue_count(),
                     bytes = eph.global_bytes(),
                     "backstop"
