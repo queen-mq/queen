@@ -395,7 +395,8 @@ fn build_request(req: LocalRequest) -> Result<axum::http::Request<axum::body::Bo
     let mut builder = axum::http::Request::builder()
         .method(req.method)
         .uri(req.path.as_str())
-        .header(header::CONTENT_TYPE, "application/json");
+        .header(header::CONTENT_TYPE, "application/json")
+        .extension(crate::handlers::raft::KafkaFacadeCall);
     if let Some(host) = &req.host {
         builder = builder.header(header::HOST, host.as_str());
     }

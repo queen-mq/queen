@@ -69,8 +69,10 @@ first.
 `QUEEN_MAX_DEDUP_WINDOW_S` (7 days). The KV expiry sweep keeps going while it has expired rows
 (it removed at most 512 a second). A Streams cycle carries at most `QUEEN_STREAMS_MAX_STATE_OPS`
 (10,000) state ops; `QUEEN_STREAMS_STATE_TTL_S` removes state rows not written for that long (off
-by default). The Raft log cache counts each entry's real size, and the retention scan finishes its
-rounds while partitions grow fast. Why: every row lives in memory on every node and is reloaded at
+by default). KV operations inside a transaction (a `once()` gate, a `kv` rider) take the tenant's
+KV quota and KV write rate (`QUEEN_KV_WRITE_RATE`, 100 a second) as `POST /api/v1/kv` does; the
+Kafka facade's own commit row does not. The Raft log cache counts each entry's real size, and the
+retention scan finishes its rounds while partitions grow fast. Why: every row lives in memory on every node and is reloaded at
 start, so state that only grows ends in a node that cannot start.
 
 **Kafka facade: bounded requests.** Before a client authenticates its frames are at most 512 KiB,

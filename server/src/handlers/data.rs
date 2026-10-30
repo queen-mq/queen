@@ -456,11 +456,19 @@ pub async fn handle_transaction(
     State(st): State<Arc<AppState>>,
     Extension(authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
+    facade: Option<Extension<crate::handlers::raft::KafkaFacadeCall>>,
     body: Bytes,
 ) -> Response {
     // As on the standalone push path, identity comes only from validated auth.
     let producer_sub = authed.0.filter(|s| !s.is_empty());
-    crate::handlers::raft::dispatch_transaction(&st, tenant.as_str(), producer_sub, body).await
+    crate::handlers::raft::dispatch_transaction(
+        &st,
+        tenant.as_str(),
+        producer_sub,
+        body,
+        facade.is_some(),
+    )
+    .await
 }
 
 #[cfg(test)]

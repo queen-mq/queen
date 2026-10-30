@@ -377,6 +377,13 @@ pub(crate) async fn dispatch_ack(st: &AppState, tenant: &str, body: axum::body::
     }
 }
 
+/// Marks a request the in-process Kafka facade sent through the router. Its
+/// transaction rider is the facade's own row for a transactional id, which
+/// skips the tenant KV rate ladder as the facade's KV calls do
+/// (`kafka_inproc::direct_kv`). A request extension, so no client can set it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct KafkaFacadeCall;
+
 /// `POST /api/v1/transaction` (Phase B): the whole bundle to the facade, which
 /// renders the SQL wire transaction's body (HTTP 200 on commit AND on rollback).
 pub(crate) async fn dispatch_transaction(
@@ -384,12 +391,15 @@ pub(crate) async fn dispatch_transaction(
     tenant: &str,
     producer_sub: Option<String>,
     body: axum::body::Bytes,
+    facade: bool,
 ) -> Response {
     // The KV rider takes the tenant's KV write rate and quota charge, as POST
     // /api/v1/kv does (`kv::gated`): without it a transaction was a way
     // around both, e.g. a `once()` gate per message at thousands a second.
+    // The Kafka facade's commit fence does not: it is one row per producer,
+    // and charging it capped Kafka transactions at the KV write rate.
     let kv_charge = match transaction_kv_ops(&body) {
-        Some(ops) if kv_ops_write(&ops) => {
+        Some(ops) if !facade && kv_ops_write(&ops) => {
             let (rows, bytes) = super::kv::write_footprint(&ops);
             if let Some(resp) =
                 super::kv::gated(st, tenant, crate::switches::Surface::KvWrite, rows, bytes)
