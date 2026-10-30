@@ -14,7 +14,13 @@
  *   seconds         (req) window size in seconds
  *   gracePeriod     (sec) accept events for windowEnd + grace before closing (default 0)
  *   idleFlushMs     (ms)  Runner closes ripe windows on quiet partitions every
- *                         this many ms. Default 5000. Pass 0 to disable.
+ *                         this many ms. Default 5000. Pass 0 to disable. On a
+ *                         broker with POST /streams/v1/claim (2.7) a
+ *                         processing-time window closes within this interval
+ *                         of its end, under a lease on its partition, also
+ *                         after a restart and with several runners; on an
+ *                         older broker, only on the partitions this process
+ *                         read in the last five minutes.
  *   eventTime       (fn)  msg => epoch_ms; if set, switches to event-time mode
  *   allowedLateness (sec) drop events older than wm - allowedLateness (default 0)
  *   onLate          (str) 'drop' (default) | 'include' — what to do with
@@ -29,7 +35,8 @@
  *   processing-time: windowEnd + grace <= max(createdAt) seen in batch
  *                                          OR latest streamTime fed by Runner
  *   event-time:      windowEnd + grace <= partition watermark
- *   idle flush:      windowEnd + grace <= Date.now() (per Runner timer)
+ *   idle flush:      windowEnd + grace <= the broker's clock at the claim
+ *                    (Date.now() on a broker without claims)
  */
 
 import { extractEventTime, normaliseLateOpts, MS_PER_SEC } from './_windowCommon.js'

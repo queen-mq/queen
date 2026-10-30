@@ -13,6 +13,7 @@
  *   throughput.js — multi-partition / many-window throughput
  *   combined.js   — full pipelines + concurrent streams
  *   gate.js       — .gate() partial acks against the broker
+ *   claims.js     — quiet windows closed under a claim (broker 2.7)
  */
 
 export * from './operators.js'
@@ -25,3 +26,4 @@ export * from './recovery.js'
 export * from './throughput.js'
 export * from './combined.js'
 export * from './gate.js'
+export * from './claims.js'

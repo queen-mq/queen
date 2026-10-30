@@ -19,13 +19,22 @@
  *       - build push_items / run foreach effects
  *       - commit cycle (state ops + push items + ack) atomically
  *
- *   flush timer:
+ *   flush timer, processing-time windows with a reducer (broker 2.7):
+ *     each cycle notes when the partition's earliest open window closes ->
+ *     when that time comes, claim the partition (POST /streams/v1/claim: a
+ *     lease with an empty batch) -> close what is ripe on the broker's
+ *     clock -> commit a cycle that acks the empty batch (count 0) under
+ *     the claim's lease. A sweep (POST /streams/v1/state/partitions) finds
+ *     the windows nobody tracks: after a restart, or left by another runner.
+ *
+ *   flush timer, event-time windows or a broker without the claim route:
  *     periodically wake -> for partitions touched recently, query state
  *     for ripe windows -> apply post-reducer ops + foreach + sink push,
  *     commit no-ack cycle (state deletes + sink push, no source ack).
  *
  *   stop():
- *     - signal abort, wait for in-flight cycle and flush, return.
+ *     - signal abort, wait for in-flight cycle and flush (a flush at most
+ *       10 s), return.
  *
  * Retry / fault model unchanged from v0.1: cycle commit failures roll
  * back; Queen redelivers via lease/retry. Stateless / reducer / foreach
@@ -46,8 +55,39 @@ const DEFAULT_MAX_PARTITIONS = 4
 const DEFAULT_IDLE_SLEEP_MS = 100
 // Track partitions we've touched within this rolling window. Drives the
 // idle-flush sweep — anything older than this is assumed to be owned by a
-// different worker and we don't speculatively flush it.
+// different worker and we don't speculatively flush it. Only for a broker
+// without POST /streams/v1/claim (before 2.7), and for event-time windows.
 const PARTITION_RECENCY_MS = 5 * 60 * 1000  // 5 minutes
+
+// Closes under a claim (broker 2.7, issue #153).
+//
+// How often a runner asks the broker for the partitions holding the query's
+// state: after a restart, a scale-down, or for partitions another runner
+// left, these are the windows nobody tracks.
+const SWEEP_EVERY_MS = 30_000
+// How old a partition's newest state row must be before a later sweep takes
+// it on: a younger one is some runner's live work, which tracks it already.
+// The first sweep after a start takes every partition: this runner tracks
+// nothing yet.
+const SWEEP_UNTOUCHED_MS = 30_000
+// Partitions per page of the sweep.
+const SWEEP_PAGE = 1000
+// Partitions per claim, which is also the most one flush tick closes: a
+// sweep that finds thousands of quiet partitions (after an outage) works
+// through them a batch per tick instead of all at once.
+const CLAIM_BATCH = 100
+// The lease a claim asks for. A close is one state read and one commit.
+const CLAIM_LEASE_S = 30
+// How soon to try again a partition that someone else holds, or whose claim
+// or close failed.
+const CLAIM_RETRY_MS = 1000
+// How long stop() waits for a flush in flight.
+const STOP_FLUSH_WAIT_MS = 10_000
+
+// Whether the broker serves POST /streams/v1/claim.
+const CLAIMS_UNKNOWN = 'unknown'
+const CLAIMS_YES     = 'yes'
+const CLAIMS_NO      = 'no'   // an older broker: the unleased flush of recent partitions
 
 const WATERMARK_STATE_KEY = '__wm__'  // reserved internal key for per-partition watermark
 
@@ -100,6 +140,14 @@ export class Runner {
     this._partitionMutexes     = new Map()   // partitionId -> tail promise
     this._recentPartitions     = new Map()   // partitionId -> { partitionName, touchedAt }
     this._partitionWatermarks  = new Map()   // partitionId -> wmMs (cache; the broker is source of truth)
+    // Processing-time windows still open, by partition: what the idle flush
+    // claims and closes once their time has come. atMs is on the broker's
+    // clock (processing time is the messages' createdAt).
+    this._due                  = new Map()   // partitionId -> { partitionName, atMs }
+    this._claims               = CLAIMS_UNKNOWN
+    this._nextSweepAt          = 0           // the first flush tick sweeps
+    this._sweepUntouchedMs     = 0           // the first sweep takes every partition
+    this._flushPromise         = null        // the flush tick in flight, for stop()
     this._stats = {
       cyclesTotal:      0,
       flushCyclesTotal: 0,
@@ -157,6 +205,9 @@ export class Runner {
     }
 
     this._loopPromise = this._loop()
+    // The first flush tick runs now rather than one interval later: its sweep
+    // finds the windows a previous runner left open.
+    if (this._flushTimers.length > 0) this._flushTick().catch(() => {})
     return this
   }
 
@@ -165,8 +216,17 @@ export class Runner {
     for (const t of this._flushTimers) clearInterval(t)
     this._flushTimers = []
     if (this._loopPromise) await this._loopPromise
-    // Allow any in-flight flush to drain.
-    while (this._flushInFlight) await sleep(20)
+    // Allow any in-flight flush to drain. A close cut short would keep its
+    // claim on the partition until the lease ran out, so it gets up to 10 s;
+    // past that stop() returns and the flush ends on its own.
+    if (this._flushPromise) {
+      let timer
+      await Promise.race([
+        this._flushPromise.catch(() => {}),
+        new Promise(resolve => { timer = setTimeout(resolve, STOP_FLUSH_WAIT_MS) })
+      ])
+      clearTimeout(timer)
+    }
   }
 
   metrics() {
@@ -187,7 +247,10 @@ export class Runner {
         const groups = this._groupByPartition(messages)
         for (const group of groups) {
           if (this._isStopped()) break
-          this._touchPartition(group.partitionId, group.partitionName)
+          // The recent map feeds only the unleased flush.
+          if (!this._leasedCloses() || this._claims !== CLAIMS_YES) {
+            this._touchPartition(group.partitionId, group.partitionName)
+          }
           try {
             await this._processPartitionCycle(group)
             this._stats.cyclesTotal++
@@ -373,12 +436,14 @@ export class Runner {
     // 3. Window operator + reducer (if present).
     let stateOps = []
     let emits = []
+    let nextCloseMs = null
     if (stages.window) {
       const result = stages.window.windowKind === 'session'
-        ? await this._processSessionWindow(stages, envelopes, partitionId)
+        ? await this._processSessionWindow(stages, envelopes, partitionId, orderedMessages)
         : await this._processStatelessWindow(stages, envelopes, partitionId, orderedMessages)
       stateOps = result.stateOps
       emits = result.emits
+      nextCloseMs = result.nextCloseMs ?? null
     } else {
       // No window: each remaining envelope becomes an emit.
       emits = envelopes.map(env => ({ key: env.key, value: env.value, sourceMsg: env.msg }))
@@ -427,6 +492,9 @@ export class Runner {
       pushItems,
       ack
     })
+    // What stays open closes when its time comes, under a claim.
+    // A broker without claims never closes these, so they are not kept.
+    if (this._leasedCloses() && this._claims !== CLAIMS_NO) this._setDue(partitionId, partitionName, nextCloseMs)
   }
 
   // --------------------------------------------------------------- gate path
@@ -756,7 +824,7 @@ export class Runner {
 
   // ----------------------------------------------------- session window path
 
-  async _processSessionWindow(stages, envelopes, partitionId) {
+  async _processSessionWindow(stages, envelopes, partitionId, orderedMessages) {
     const window = stages.window
     const reducer = stages.reducer
     if (!reducer) {
@@ -822,8 +890,17 @@ export class Runner {
       this._partitionWatermarks.set(partitionId, advancedWm)
       nowMs = advancedWm
     } else {
-      // Use max event time observed in the batch; idle-flush uses Date.now().
-      nowMs = maxObservedEventTime > -Infinity ? maxObservedEventTime : Date.now()
+      // Processing time: the batch's newest createdAt. That is the broker's
+      // clock, the one the claimed closes use too; this host's Date.now()
+      // could close a session early when it runs ahead, and would close
+      // every session of an old backlog at once. Date.now() only when no
+      // message carries a createdAt.
+      let newest = -Infinity
+      for (const m of orderedMessages || []) {
+        const t = Date.parse(m.createdAt || '')
+        if (Number.isFinite(t) && t > newest) newest = t
+      }
+      nowMs = newest > -Infinity ? newest : Date.now()
     }
 
     const reducerFn = reducer.fn
@@ -886,23 +963,50 @@ export class Runner {
   // ------------------------------------------------ idle flush (per-window)
 
   async _flushTick() {
+    // A tick that would overlap the one still running is skipped.
     if (this._stopped || this._flushInFlight) return
     const stages = this.stream.stages
     if (!stages.window) return
     this._flushInFlight = true
+    const run = this._flushTickInner()
+    this._flushPromise = run
     try {
-      const partitions = Array.from(this._recentPartitions.entries())
-      for (const [partitionId, info] of partitions) {
-        if (this._isStopped()) break
-        try {
-          await this._flushPartition(partitionId, info.partitionName)
-        } catch (err) {
-          this._reportError(err, { phase: 'flush', partition: partitionId })
-        }
-      }
-      this._stats.lastFlushAt = new Date().toISOString()
+      await run
     } finally {
       this._flushInFlight = false
+    }
+  }
+
+  async _flushTickInner() {
+    if (!this._leasedCloses() || this._claims === CLAIMS_NO) {
+      await this._flushRecent()
+    } else {
+      if (Date.now() >= this._nextSweepAt) {
+        await this._sweep(this._sweepUntouchedMs)
+        this._nextSweepAt = Date.now() + SWEEP_EVERY_MS
+        this._sweepUntouchedMs = SWEEP_UNTOUCHED_MS
+      }
+      // Not when stopping: a claim we would not close holds its partition
+      // until the lease runs out.
+      if (this._claims !== CLAIMS_NO && !this._isStopped()) await this._closeDue()
+    }
+    this._stats.lastFlushAt = new Date().toISOString()
+  }
+
+  /**
+   * The unleased flush of the partitions this process popped in the last
+   * five minutes: event-time windows, and every window on a broker without
+   * the claim route.
+   */
+  async _flushRecent() {
+    const partitions = Array.from(this._recentPartitions.entries())
+    for (const [partitionId, info] of partitions) {
+      if (this._isStopped()) break
+      try {
+        await this._flushPartition(partitionId, info.partitionName)
+      } catch (err) {
+        this._reportError(err, { phase: 'flush', partition: partitionId })
+      }
     }
   }
 
@@ -1066,6 +1170,238 @@ export class Runner {
       }
     }
     return map
+  }
+
+  // ------------------------------------------------ closes under a claim
+  //
+  // A processing-time window closes when its time comes even if its
+  // partition gets no more messages. The runner keeps, per partition, when
+  // the earliest open window closes (from each cycle it commits, and from
+  // the sweep), claims the partition when that time has come
+  // (POST /streams/v1/claim: a lease with an empty batch, granted only when
+  // nobody holds the partition and the group has read all of it), and
+  // closes the windows in a cycle that acks the empty batch. The broker
+  // refuses that cycle whole when the lease is gone, so two runners never
+  // close one window, and a close never deletes a window another runner
+  // just extended. The clock is the broker's, the one createdAt comes from.
+
+  /**
+   * Whether this stream closes its windows under claims: processing-time
+   * windows with a reducer and an idle flush. Event-time windows close on
+   * the watermark, which only events move.
+   */
+  _leasedCloses() {
+    const { window, reducer } = this.stream.stages
+    return !!(window && !window.eventTimeFn && window.idleFlushMs > 0 && reducer)
+  }
+
+  /** Track (or forget, atMs null) when the partition's earliest open window closes. */
+  _setDue(partitionId, partitionName, atMs) {
+    if (!partitionId) return
+    if (typeof atMs === 'number' && Number.isFinite(atMs)) {
+      this._due.set(partitionId, { partitionName, atMs })
+    } else {
+      this._due.delete(partitionId)
+    }
+  }
+
+  /** Try a tracked partition again no sooner than atMs. */
+  _retryDue(partitionId, atMs) {
+    const d = this._due.get(partitionId)
+    if (d) d.atMs = Math.max(d.atMs, atMs)
+  }
+
+  _claimsOff() {
+    if (this._claims !== CLAIMS_NO) {
+      this.logger.info('broker has no stream claims; idle flush of recent partitions', { queryId: this.queryId })
+    }
+    this._claims = CLAIMS_NO
+    // Nothing left that would never be closed.
+    this._due.clear()
+  }
+
+  /**
+   * The partitions holding the query's state that nobody touched for
+   * `untouchedMs` (0: all of them) and this runner does not track yet:
+   * tracked as due now, so the next ticks claim them a batch at a time.
+   */
+  async _sweep(untouchedMs) {
+    let after = null
+    for (;;) {
+      if (this._isStopped()) return
+      const body = { query_id: this._serverQueryId, limit: SWEEP_PAGE }
+      if (untouchedMs > 0) body.untouched_for_ms = untouchedMs
+      if (after) body.after = after
+      let res
+      try {
+        res = await this.http.post('/streams/v1/state/partitions', body)
+      } catch (err) {
+        // A broker before 2.7: no claims either.
+        if (err && err.status === 404) return this._claimsOff()
+        this._reportError(err, { phase: 'sweep' })
+        return
+      }
+      if (!res) return
+      if (res.success === false) {
+        this._reportError(new Error(res.error || 'state/partitions failed'), { phase: 'sweep' })
+        return
+      }
+      const now = Date.now()
+      for (const p of res.partitions || []) {
+        if (!p || !p.partition_id || this._due.has(p.partition_id)) continue
+        this._due.set(p.partition_id, { partitionName: p.partition || '', atMs: now })
+      }
+      if (!res.next) return
+      after = res.next
+    }
+  }
+
+  /** Claim the partitions whose windows are due, and close them. */
+  async _closeDue() {
+    const window = this.stream.stages.window
+    const now = Date.now()
+    const ready = []
+    for (const [partitionId, d] of this._due) {
+      if (d.atMs <= now) ready.push([partitionId, d.atMs])
+    }
+    if (ready.length === 0) return
+    ready.sort((a, b) => a[1] - b[1])
+    const partitionIds = ready.slice(0, CLAIM_BATCH).map(([partitionId]) => partitionId)
+
+    let res
+    try {
+      res = await this.http.post('/streams/v1/claim', {
+        query_id:       this._serverQueryId,
+        partition_ids:  partitionIds,
+        consumer_group: this.consumerGroup,
+        lease_seconds:  CLAIM_LEASE_S
+      })
+    } catch (err) {
+      if (err && err.status === 404) return this._claimsOff()
+      this._reportError(err, { phase: 'claim' })
+      const retryAt = Date.now() + CLAIM_RETRY_MS
+      for (const partitionId of partitionIds) this._retryDue(partitionId, retryAt)
+      return
+    }
+    if (!res) return
+    this._claims = CLAIMS_YES
+    if (res.success === false) {
+      this._reportError(new Error(res.error || 'claim refused'), { phase: 'claim' })
+      return
+    }
+
+    for (const p of res.partitions || []) {
+      const partitionId = p.partition_id
+      let partitionName = p.partition
+      if (!partitionName) {
+        const d = this._due.get(partitionId)
+        partitionName = d ? d.partitionName : ''
+      }
+      if (p.status === 'claimed') {
+        // Stopping: the claims not closed yet lapse with their lease,
+        // nothing is lost.
+        if (this._isStopped()) continue
+        const clockMs = Number.isFinite(res.now_ms) ? res.now_ms : Date.now()
+        try {
+          await this._closeClaimed(partitionId, partitionName, res.lease_id, clockMs)
+        } catch (err) {
+          // Its claim lapses with the lease; the next try comes after it.
+          this._reportError(err, { phase: 'flush', partition: partitionId })
+          this._retryDue(partitionId, Date.now() + CLAIM_RETRY_MS)
+        }
+      } else if (p.status === 'busy') {
+        // Someone holds it (a cycle, maybe another runner's): come back
+        // after an idle-flush interval.
+        this._retryDue(partitionId, Date.now() + Math.max(window.idleFlushMs, CLAIM_RETRY_MS))
+      } else {
+        // backlog: messages wait, and the cycle that takes them tracks the
+        // partition again. missing: nothing to close there.
+        this._setDue(partitionId, partitionName, null)
+      }
+    }
+  }
+
+  /**
+   * Close what is ripe on a claimed partition at `clockMs` (the broker's
+   * time at the claim), in a cycle that acks the claim's empty batch, and
+   * track when the windows left open close. The due time is set while the
+   * partition lock is held, as a cycle sets it: set after, it could
+   * overwrite the newer time of a cycle that ran in between.
+   */
+  _closeClaimed(partitionId, partitionName, leaseId, clockMs) {
+    // Mutual exclusion with the pop/cycle loop (see _partitionMutexes).
+    return this._withPartitionLock(partitionId, async () => {
+      const stages = this.stream.stages
+      const window = stages.window
+      const reducer = stages.reducer
+      // Every row: the windows left open say when to come back.
+      const loadedAll = await getState({
+        http: this.http,
+        queryId: this._serverQueryId,
+        partitionId,
+        keys: []
+      })
+      let result
+      if (window.windowKind === 'session') {
+        const sessionState = new Map()
+        for (const [key, value] of loadedAll.entries()) {
+          if (key.startsWith(window.operatorTag + '\u001fopen\u001f')) sessionState.set(key, value)
+        }
+        result = await window.runSession({
+          envelopes:      [],
+          loadedState:    sessionState,
+          reducerFn:      reducer.fn,
+          reducerInitial: () => reducer._initial ? reducer._initial() : 0,
+          nowMs:          clockMs
+        })
+      } else {
+        result = await reducer.run({
+          envelopes:     [],
+          loadedState:   loadedAll,
+          streamTimeMs:  clockMs,
+          operatorTag:   window.operatorTag,
+          gracePeriodMs: window.gracePeriodMs
+        })
+      }
+      const closed = result.emits.length > 0
+      const emits = await this._applyPostStages(stages.post, result.emits, partitionId, partitionName)
+      const pushItems = await this._terminal(emits, partitionName, partitionId)
+      // The empty batch's ack: count 0 keeps the cursor where it is and the
+      // lease goes back, also when nothing was ripe (another runner closed
+      // it first).
+      await commitCycle({
+        http: this.http,
+        queryId: this._serverQueryId,
+        partitionId,
+        consumerGroup: this.consumerGroup,
+        stateOps: result.stateOps,
+        pushItems,
+        ack: { transactionId: '', leaseId, status: 'completed', count: 0 },
+        releaseLease: true
+      })
+      if (closed) this._stats.flushCyclesTotal++
+      this._stats.stateOpsTotal += result.stateOps.length
+      this._stats.pushItemsTotal += pushItems.length
+      this._setDue(partitionId, partitionName, result.nextCloseMs ?? null)
+    })
+  }
+
+  /** Sink push items for the emits, or run foreach on them (then none). */
+  async _terminal(emits, partitionName, partitionId) {
+    const sink = this.stream.stages.sink
+    if (sink && sink.kind === 'sink') {
+      return sink.buildPushItems(
+        emits.map(e => ({ key: e.key, value: e.value, sourceMsg: e.sourceMsg || null })),
+        partitionName
+      )
+    }
+    if (sink && sink.kind === 'foreach') {
+      await sink.runEffects(emits.map(e => ({
+        value: e.value,
+        ctx:   this._buildEmitCtx(e, partitionName, partitionId)
+      })))
+    }
+    return []
   }
 
   // --------------------------------------------------------------- helpers

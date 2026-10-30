@@ -187,10 +187,17 @@ export class WindowSessionOperator {
       }
     }
 
-    // Build state ops.
+    // Build state ops, and note when the earliest session still open closes
+    // (`lastEventTime + gap + grace`): the Runner claims the partition then
+    // to close it, even if no more messages come. null: nothing is open.
     const stateOps = []
+    let nextCloseMs = null
     for (const [userKey, s] of sessions.entries()) {
       const stateKey = this.openSessionStateKey(userKey)
+      if (!s.closed && s.lastEventTime !== null) {
+        const closesAt = s.lastEventTime + this.gapMs + this.gracePeriodMs
+        if (nextCloseMs === null || closesAt < nextCloseMs) nextCloseMs = closesAt
+      }
       if (s.closed) {
         if (s.seeded) stateOps.push({ type: 'delete', key: stateKey })
         // Newly-opened sessions that closed in the same batch were never
@@ -208,7 +215,7 @@ export class WindowSessionOperator {
       }
     }
 
-    return { stateOps, emits: closedEmits }
+    return { stateOps, emits: closedEmits, nextCloseMs }
   }
 
   _buildEmit(userKey, s) {

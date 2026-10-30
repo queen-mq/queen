@@ -38,8 +38,15 @@ export class ReduceOperator {
    * }} ctx
    * @returns {Promise<{
    *   stateOps: Array<{type:'upsert'|'delete',key:string,value?:any}>,
-   *   emits: Array<{key:string, windowStart:number, windowKey:string, value:any}>
+   *   emits: Array<{key:string, windowStart:number, windowKey:string, value:any}>,
+   *   nextCloseMs: number|null
    * }>}
+   *
+   * `nextCloseMs` is when the earliest window still open closes
+   * (`windowEnd + gracePeriodMs`, on the clock the windows are kept in),
+   * counting the stored windows this batch did not touch; null when nothing
+   * stays open. The Runner claims the partition then to close it, even if
+   * no more messages come.
    *
    * Window-close semantics
    * ----------------------
@@ -121,8 +128,13 @@ export class ReduceOperator {
 
     const stateOps = []
     const emits = []
+    let nextCloseMs = null
     for (const [stateKey, entry] of accumulators.entries()) {
-      const closed = (entry.windowEnd + gracePeriodMs) <= effectiveStreamTime
+      const closesAt = entry.windowEnd + gracePeriodMs
+      const closed = closesAt <= effectiveStreamTime
+      if (!closed && (nextCloseMs === null || closesAt < nextCloseMs)) {
+        nextCloseMs = closesAt
+      }
       if (closed) {
         emits.push({
           key: entry.key,
@@ -142,7 +154,7 @@ export class ReduceOperator {
         })
       }
     }
-    return { stateOps, emits }
+    return { stateOps, emits, nextCloseMs }
   }
 
   _initial() {

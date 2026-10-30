@@ -6,11 +6,13 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 
-export function createFakeStreamsServer({ stateSeeds } = {}) {
+export function createFakeStreamsServer({ stateSeeds, claims } = {}) {
   const recorded = {
     registers: [],
     cycles: [],
-    stateGets: []
+    stateGets: [],
+    statePartitions: [],
+    claims: []
   }
   const queries = new Map()        // name -> { id, config_hash }
   // state: `${queryId}|${partitionId}|${key}` -> value
@@ -80,6 +82,43 @@ export function createFakeStreamsServer({ stateSeeds } = {}) {
           rows.push({ key: stateKey, value: v, updated_at: new Date().toISOString() })
         }
         return send(200, { success: true, rows })
+      }
+
+      // The claim routes of broker 2.7, only when the test asks for them
+      // (`claims: { names?, status?, nowMs? }`); without, they answer 404 like
+      // an older broker. One page, no untouched_for_ms filter.
+      if (claims && req.method === 'POST' && req.url === '/streams/v1/state/partitions') {
+        recorded.statePartitions.push(parsed)
+        const pids = new Set()
+        for (const k of state.keys()) {
+          const [qid, pid] = k.split('|')
+          if (qid === parsed.query_id) pids.add(pid)
+        }
+        const partitions = [...pids].sort().map(pid => ({
+          partition_id: pid,
+          partition: (claims.names && claims.names[pid]) || '',
+          queue: 'src',
+          updated_at: new Date().toISOString()
+        }))
+        return send(200, { success: true, partitions, next: null })
+      }
+
+      if (claims && req.method === 'POST' && req.url === '/streams/v1/claim') {
+        const leaseId = randomUUID()
+        recorded.claims.push({ request: parsed, leaseId, at: Date.now() })
+        const partitions = (parsed.partition_ids || []).map(pid => {
+          const status = claims.status ? claims.status(pid) : 'claimed'
+          const p = { partition_id: pid, partition: (claims.names && claims.names[pid]) || '', status }
+          if (status === 'claimed') p.lease_expires_at = new Date(Date.now() + 30_000).toISOString()
+          return p
+        })
+        return send(200, {
+          success: true,
+          lease_id: leaseId,
+          lease_seconds: parsed.lease_seconds || 30,
+          now_ms: claims.nowMs ? claims.nowMs() : Date.now(),
+          partitions
+        })
       }
 
       if (req.method === 'POST' && req.url === '/streams/v1/cycle') {
