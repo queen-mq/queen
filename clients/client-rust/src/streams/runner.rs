@@ -377,6 +377,7 @@ pub(crate) async fn start(
                 }
                 if Instant::now() >= next_sweep {
                     r.sweep(untouched_ms).await;
+                    r.prune_locks();
                     next_sweep = Instant::now() + SWEEP_EVERY;
                     untouched_ms = SWEEP_UNTOUCHED_MS;
                 }
@@ -598,8 +599,9 @@ impl Runner {
             true,
         )
         .await?;
-        // What stays open closes when its time comes, under a claim.
-        if self.leased_closes() {
+        // What stays open closes when its time comes, under a claim. A broker
+        // without claims never closes these, so they are not kept.
+        if self.leased_closes() && self.claims.load(Ordering::Acquire) != CLAIMS_NO {
             self.set_due(&group.partition_id, &group.partition, next_close);
         }
         Ok(())
@@ -1012,6 +1014,25 @@ impl Runner {
         }
     }
 
+    /// The broker has no claims (before 2.7): back to the flush of recent
+    /// partitions, and nothing left in `due` that would never be closed.
+    fn no_claims(&self) {
+        self.claims.store(CLAIMS_NO, Ordering::Release);
+        self.due.lock().unwrap().clear();
+        tracing::info!("broker has no stream claims; idle flush of recent partitions");
+    }
+
+    /// Drop the locks nobody holds of partitions with nothing open. Without
+    /// the recent map's five minutes to bound them, they would grow with
+    /// every partition a long-running stream has seen.
+    fn prune_locks(&self) {
+        let due = self.due.lock().unwrap();
+        let recent = self.recent.lock().unwrap();
+        self.locks.lock().unwrap().retain(|pid, l| {
+            Arc::strong_count(l) > 1 || due.contains_key(pid) || recent.contains_key(pid)
+        });
+    }
+
     /// The partitions holding the query's state that nobody touched for
     /// `untouched_ms` and this runner does not track yet: tracked as due now,
     /// so the next ticks claim them a batch at a time.
@@ -1037,8 +1058,7 @@ impl Runner {
                 Ok(None) => return,
                 Err(e) if e.status() == Some(404) => {
                     // A broker before 2.7: no claims either.
-                    self.claims.store(CLAIMS_NO, Ordering::Release);
-                    tracing::info!("broker has no stream claims; idle flush of recent partitions");
+                    self.no_claims();
                     return;
                 }
                 Err(e) => {
@@ -1098,8 +1118,7 @@ impl Runner {
             Ok(Some(r)) => r,
             Ok(None) => return,
             Err(e) if e.status() == Some(404) => {
-                self.claims.store(CLAIMS_NO, Ordering::Release);
-                tracing::info!("broker has no stream claims; idle flush of recent partitions");
+                self.no_claims();
                 return;
             }
             Err(e) => {
@@ -1145,7 +1164,7 @@ impl Runner {
                         )
                         .await
                     {
-                        Ok(next) => self.set_due(&p.partition_id, &p.partition, next),
+                        Ok(()) => {}
                         Err(e) => {
                             self.counters.errors.fetch_add(1, Ordering::Relaxed);
                             tracing::error!(
@@ -1169,8 +1188,10 @@ impl Runner {
     }
 
     /// Close what is ripe on a claimed partition at `clock` (the broker's
-    /// time at the claim), in a cycle that acks the claim's empty batch.
-    /// Answers when the windows left open close.
+    /// time at the claim), in a cycle that acks the claim's empty batch, and
+    /// track when the windows left open close. The due time is set while the
+    /// partition lock is held, as a cycle sets it: set after, it could
+    /// overwrite the newer time of a cycle that ran in between.
     async fn close_claimed(
         &self,
         window: &super::ops::Window,
@@ -1179,7 +1200,7 @@ impl Runner {
         partition: &str,
         lease_id: &str,
         clock: i64,
-    ) -> Result<Option<i64>> {
+    ) -> Result<()> {
         let lock = self.lock_for(partition_id);
         let _guard = lock.lock().await;
         // Every row: the windows left open say when to come back.
@@ -1220,7 +1241,8 @@ impl Runner {
         if closed {
             self.counters.flush_cycles.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(next)
+        self.set_due(partition_id, partition, next);
+        Ok(())
     }
 
     // ------------------------------------------------------------- shared
