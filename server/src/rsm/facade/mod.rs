@@ -1070,6 +1070,15 @@ pub trait Rsm: Send + Sync {
     fn route(&self) -> Route {
         Route::Local
     }
+
+    /// Where a request served only by the leader's consumption engine goes,
+    /// whether or not followers serve their own clients: the leader serves it,
+    /// a follower forwards it there. Only a stream claim needs this today: a
+    /// claim leases partitions in the engine, and every lease lives on the
+    /// leader; a pop or a cycle is a command, prepared on any node.
+    fn leader_route(&self) -> Route {
+        self.route()
+    }
     /// `POST /api/v1/push`.
     async fn push(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError>;
 

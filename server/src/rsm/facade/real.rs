@@ -6818,6 +6818,18 @@ impl Rsm for RaftFacade {
         self.api_impl(ctx, req).await
     }
 
+    fn leader_route(&self) -> crate::rsm::facade::Route {
+        use crate::rsm::facade::Route;
+        use crate::rsm::replicator::Role;
+        match self.repl.role() {
+            Role::Leader { .. } | Role::Stopped => Route::Local,
+            _ => match self.repl.leader_http() {
+                Some(addr) => Route::Leader(addr),
+                None => Route::NoLeader,
+            },
+        }
+    }
+
     fn route(&self) -> crate::rsm::facade::Route {
         use crate::rsm::facade::Route;
         use crate::rsm::replicator::Role;

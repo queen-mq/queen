@@ -1390,7 +1390,18 @@ async fn forward_to_leader(
     if !forwardable || req.headers().contains_key(FORWARDED_HEADER) {
         return next.run(req).await;
     }
-    match st.rsm.route() {
+    // A stream claim leases partitions in the consumption engine, and the
+    // engine's leases live on the leader: a follower serving its own clients
+    // has none to give, and answered every claim "retry" until the runner gave
+    // up (a quiet window on that node never closed). The claim alone goes to
+    // the leader whatever the offload; the cycle that uses its lease is a
+    // command, prepared on any node.
+    let route = if path == "/streams/v1/claim" {
+        st.rsm.leader_route()
+    } else {
+        st.rsm.route()
+    };
+    match route {
         facade::Route::Local => next.run(req).await,
         facade::Route::NoLeader => err_response(RsmError::NoLeader),
         facade::Route::Leader(addr) => forward(&addr, req).await,
