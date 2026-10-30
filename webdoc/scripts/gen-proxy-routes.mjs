@@ -120,8 +120,10 @@ const PROXY_ROUTES = "proxy/src/routes.rs";
 // trailing-slash spelling) only; every other method is `Blocked`. Not `Mixed`:
 // that op half stays `POST /api/v1/kv` alone, which `kafka_kv` keys on. Re-read
 // in full: nothing else in the function moved, and `is_operator_route` is
-// untouched.
-const CLASSIFY_FINGERPRINT = "0664a0b2249f9d44";
+// untouched. 2026-10-30, 2523c5591: rustfmt rewrapped `classify` and added
+// trailing commas; with whitespace and those commas removed the function is
+// the same text, so the mirror below stands.
+const CLASSIFY_FINGERPRINT = "af1e81a887c627bb";
 const OPERATOR_FINGERPRINT = "0eca43d77dc8c6f2";
 
 // --- mirror of `is_operator_route` -----------------------------------------
