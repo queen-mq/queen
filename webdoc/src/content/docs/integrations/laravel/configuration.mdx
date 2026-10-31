@@ -88,6 +88,9 @@ sourceOfTruth:
 # carry the client's binaryPush, pushCompression and framedPop, and HttpClient sends and reads the
 # binary forms through PushBinary, PopFrames and Zstd, which join the list. The queue driver table,
 # its notes and the refused-at-start table say so; the 20 environment variables are unchanged.
+# sourceOfTruth re-read 2026-10-31 (supervisor 0.9.0, 2e7d58b5f): SupervisorBinary pins 0.9.0; this
+# page names no supervisor version, and the installer keys and defaults are unchanged. Nothing this
+# page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. The file reads 20 environment variables, for what differs between environments (the broker, its credentials, the queue and group, paths, and the switches of optional features); every other setting is a plain value in the file. This page lists the 20, then every key area by area, with its default in PHP client 2.1.0 and later.
