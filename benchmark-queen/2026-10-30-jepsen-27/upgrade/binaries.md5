@@ -1,0 +1,2 @@
+c51d2e97582589f26990d8eb1ce63098  queen-260   ghcr.io/queen-mq/queen:2.6.0, linux/amd64, /app/bin/queen
+d278d16f3e570ea4995c9e0aa532ee59  queen-27b2  ghcr.io/queen-mq/queen:2.7.0-beta.2@sha256:07eab65bce456d06299628be2ea01e3c4abc6ef69218eddf176db74f4aaf1c75, /app/bin/queen

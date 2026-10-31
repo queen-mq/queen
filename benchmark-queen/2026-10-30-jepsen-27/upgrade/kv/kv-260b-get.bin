@@ -1,0 +1,1 @@
+{"expiresAt":null,"found":true,"index":0,"key":"k1","op":"get","updatedAt":"2026-10-31T09:20:09.339791+00:00","value":{"a":[1,2.5,-0.0,1e+21,"x é ☃ \"q\""],"b":2,"n":{"x":{},"y":true},"z":null},"version":1}

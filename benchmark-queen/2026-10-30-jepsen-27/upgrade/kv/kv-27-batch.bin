@@ -1,0 +1,1 @@
+{"results":[{"index":0,"missing":["k3"],"op":"getMany","rows":[{"expiresAt":null,"key":"k1","updatedAt":"2026-10-31T09:20:09.339791+00:00","value":{"a":[1,2.5,-0.0,1e+21,"x é ☃ \"q\""],"b":2,"n":{"x":{},"y":true},"z":null},"version":1},{"expiresAt":null,"key":"k2","updatedAt":"2026-10-31T09:20:09.345889+00:00","value":"plain","version":2}],"truncated":false}]}

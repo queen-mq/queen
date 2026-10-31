@@ -1,0 +1,114 @@
+09:19:29 roll27: OLD=c51d2e97 (2.6.0) NEW=d278d16f (2.7.0-beta.2)
+09:19:34 0. a fresh cluster of 2.7.0
+09:19:37     clusterVersion 7 on all three: OK
+09:19:37     n1: 2.7.0-beta.2 follower cv 7 kinds 7 applied 3 lag 0 healthy
+09:19:37     n2: 2.7.0-beta.2 follower cv 7 kinds 7 applied 3 lag 0 healthy
+09:19:37     n3: 2.7.0-beta.2 leader cv 7 kinds 7 applied 3 lag 0 healthy
+09:19:41 1. three nodes on 2.6.0
+09:19:43     n1: 2.6.0 follower cv 7 kinds 7 applied 3 lag 0 healthy
+09:19:43     n2: 2.6.0 follower cv 7 kinds 7 applied 3 lag 0 healthy
+09:19:43     n3: 2.6.0 leader cv 7 kinds 7 applied 3 lag 0 healthy
+09:20:08     history written by 2.6.0: pushErr=0 | pushed=192000
+09:20:09     dup A new: set A new: 2000 items, answers {'queued': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:20:09     PUT roll/k1: 200 {"applied":true,"index":0,"key":"k1","op":"put","value":{"a":[1,2.5,-0.0,1e+21,"x é ☃ \"q\""],"b":2,"n":{"x":{},"y":t
+PUT roll/k2: 200 {"applied":true,"index":0,"key":"k2","op":"put","value":"plain","version":2}
+09:20:09     GET roll/k1: 200, 209 bytes, value equal to what was put: True; getMany: 200, 365 bytes
+09:20:09     register query: 200 {"config_hash":"roll-1","fresh":true,"name":"roll","query_id":"01a19142-6384-7000-8e2b-31ae716d3707","reset":false,"success":true}
+09:20:09     claim: HTTP 404 {"code":"no_such_route","error":"not found","path":"/streams/v1/claim"}
+09:20:25 2. n3, then n2, move to 2.7.0 (leader n3)
+09:20:34     n1: 2.6.0 leader cv 7 kinds 7 applied 16818 lag 0 healthy
+09:20:34     n2: 2.7.0-beta.2 follower cv 7 kinds 7 applied 16910 lag 0 healthy
+09:20:34     n3: 2.7.0-beta.2 follower cv 7 kinds 7 applied 17004 lag 0 healthy
+09:20:34     cluster version 7 with n1 on 2.6.0: OK
+09:20:34     leader: n1
+09:20:34     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:20:35     dup B new: set B new: 2000 items, answers {'queued': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:20:35     push of 12000 via n1: HTTP 201, answers {'queued': 12000}
+09:20:35     push of 12000 via n2: HTTP 400 {"error":"a push carries 12000 items, the ceiling is 10000 (QUEEN_PUSH_MAX_ITEMS)","code":"too_many_items"}
+09:20:35     claim: HTTP 404 {"code":"no_such_route","error":"not found","path":"/streams/v1/claim"}
+09:20:36     n1: 2.6.0 leader cv 7 kinds 7 applied 17975 lag 0 healthy
+09:20:36     n2: 2.7.0-beta.2 follower cv 7 kinds 7 applied 18065 lag 0 healthy
+09:20:36     n3: 2.7.0-beta.2 follower cv 7 kinds 7 applied 18147 lag 0 healthy
+09:20:36 3. n3 goes back to 2.6.0, then forward again
+09:20:38     2.6.0 started on a directory 2.7.0 had written: OK
+09:20:38     n1: 2.6.0 leader cv 7 kinds 7 applied 19215 lag 0 healthy
+09:20:39     n2: 2.7.0-beta.2 follower cv 7 kinds 7 applied 19300 lag 0 healthy
+09:20:39     n3: 2.6.0 follower cv 7 kinds 7 applied 18509 lag 0 healthy
+09:20:39     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:20:41 4. n1 moves: the last 2.6.0 member (leader before: n1)
+09:20:45     every node on 2.7.0, cluster version 7: OK
+09:20:45     n1: 2.7.0-beta.2 follower cv 7 kinds 7 applied 21341 lag 0 healthy
+09:20:45     n2: 2.7.0-beta.2 leader cv 7 kinds 7 applied 22014 lag 0 healthy
+09:20:46     n3: 2.7.0-beta.2 follower cv 7 kinds 7 applied 22081 lag 0 healthy
+09:20:46 5. after the roll
+09:20:46     dup C new: set C new: 2000 items, answers {'queued': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:20:46     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:20:46     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:20:47     dup C dup: set C dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:20:47     GET roll/k1: 200, 209 bytes, value equal to what was put: True; getMany: 200, 365 bytes
+09:20:47     kv-260-get.bin = kv-27-get.bin: same bytes
+09:20:47     kv-260-batch.bin = kv-27-batch.bin: same bytes
+09:20:47     PUT roll/k3: 200 {"applied":true,"index":0,"key":"k3","op":"put","value":{"a":[1,2.5,-0.0,1e+21,"x é ☃ \"q\""],"b":2,"n":{"x":{},"y":t
+09:20:47     GET roll/k1: 200, 209 bytes, value equal to what was put: True; getMany: 200, 537 bytes
+09:20:47     claim: HTTP 200 {"lease_id":"01a19142-f919-7001-8d9b-711ccaf2fa7a","lease_seconds":30,"now_ms":1793438447897,"partitions":[{"partition":"","partition_id":"999999","status":"missing"}],"success":true}
+09:20:48     pops of batch 15000: [10000, 2000, 0], total 12000
+09:26:29     live traffic over the roll (360 s, 4,500 msg/s offered):
+09:26:29     loader via n1: pushErr=110 | pushed=536280 popped=531340 lag=4940 | popErr=306 ackErr=320 
+09:26:29     loader via n2: pushErr=74 | pushed=537020 popped=552460 lag=-15440 | popErr=321 ackErr=40 
+09:26:29     loader via n3: pushErr=247 | pushed=533560 popped=523820 lag=9740 | popErr=910 ackErr=400 
+09:26:29 6. a full stop and start of the cluster on 2.7.0
+09:26:35     n1: 2.7.0-beta.2 follower cv 7 kinds 7 applied 215623 lag 0 healthy
+09:26:35     n2: 2.7.0-beta.2 leader cv 7 kinds 7 applied 215623 lag 0 healthy
+09:26:36     n3: 2.7.0-beta.2 follower cv 7 kinds 7 applied 215624 lag 0 healthy
+09:26:36     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:26:36     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:26:36     dup C dup: set C dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:27:17     history (written by 2.6.0) read back: popped=192000 popErr=0 
+09:27:17 7. kill -9 of the leader under load
+09:27:48     leader n2 killed
+09:27:56     n1: 2.7.0-beta.2 follower cv 7 kinds 7 applied 236405 lag 0 healthy
+09:27:56     n2: 2.7.0-beta.2 follower cv 7 kinds 7 applied 236509 lag 0 healthy
+09:27:57     n3: 2.7.0-beta.2 leader cv 7 kinds 7 applied 236610 lag 0 healthy
+09:27:57     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:27:57     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:27:57     dup C dup: set C dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:27:58     dup D new: set D new: 2000 items, answers {'queued': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:27:58     dup D dup: set D dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:07     loader via n1: pushErr=0 | pushed=133500 popped=133560 lag=-60 | popErr=4 ackErr=0 
+09:29:07     loader via n2: pushErr=553 | pushed=122460 popped=122160 lag=300 | popErr=2438 ackErr=0 
+09:29:07     loader via n3: pushErr=0 | pushed=133500 popped=133740 lag=-240 | popErr=4 ackErr=20 
+09:29:07 8. n3 back on 2.6.0 after 2.7.0 wrote everything
+09:29:10     2.6.0 on n3's own directory serves: OK
+09:29:10     n1: 2.7.0-beta.2 follower cv 7 kinds 7 applied 268017 lag 0 healthy
+09:29:10     n2: 2.7.0-beta.2 leader cv 7 kinds 7 applied 268018 lag 0 healthy
+09:29:10     n3: 2.6.0 follower cv 7 kinds 7 applied 268018 lag 0 healthy
+09:29:10     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:11     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:11     dup C dup: set C dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:11     dup D dup: set D dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:11 8b. n3 (2.6.0) made the leader: each 2.7.0 leader stopped until n3 wins an election
+09:29:30     n3 (2.6.0) leads after 3 tries: OK
+09:29:30     n1: 2.7.0-beta.2 follower cv 7 kinds 7 applied 268072 lag 0 healthy
+09:29:30     n2: 2.7.0-beta.2 follower cv 7 kinds 7 applied 268072 lag 0 healthy
+09:29:30     n3: 2.6.0 leader cv 7 kinds 7 applied 268073 lag 0 healthy
+09:29:30     dup A dup: set A dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:30     dup B dup: set B dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:31     dup C dup: set C dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:31     dup D dup: set D dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:31     dup E new: set E new: 2000 items, answers {'queued': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:31     dup E dup: set E dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:31     GET roll/k1: 200, 209 bytes, value equal to what was put: True; getMany: 200, 537 bytes
+09:29:31     kv-260-get.bin = kv-260b-get.bin: same bytes
+09:29:31     kv-27b-batch.bin = kv-260b-batch.bin: same bytes
+09:29:34     n1: 2.7.0-beta.2 follower cv 7 kinds 7 applied 268106 lag 0 healthy
+09:29:34     n2: 2.7.0-beta.2 leader cv 7 kinds 7 applied 268106 lag 0 healthy
+09:29:35     n3: 2.7.0-beta.2 follower cv 7 kinds 7 applied 268106 lag 0 healthy
+09:29:35     dup E dup: set E dup: 2000 items, answers {'duplicate': 2000}, offset mismatches 0, retries 0, pushes lost 0 -> OK
+09:29:35 errors and warnings per node (all starts):
+09:29:35   n1 FATAL/panic/poison/unknown-version/APPLY FAILED lines: 0
+09:29:36   n1:      66  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=1, target=2) failed to send a heartbeat: Err(Elapsed(()));     29  WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.N:N/raft/v1/stream: client error (Connect), wh;     22  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=1, target=3) failed to send a heartbeat: Err(Elapsed(()));     15  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=1, target=2) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: c;     14  WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.N:N/raft/v1/stream: client er;     11  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=1, target=3) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: c;      7 WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=1, target=2) failed to send a heartbeat: Err(Elapsed(()));      4 WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=1, target=3) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: co;
+09:29:36   n2 FATAL/panic/poison/unknown-version/APPLY FAILED lines: 0
+09:29:36   n2:      18  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=2, target=3) failed to send a heartbeat: Err(Elapsed(()));     17  WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.N:N/raft/v1/stream: client error (Connect), wh;     10  WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.N:N/raft/v1/stream: client er;      9  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=2, target=3) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: c;      9  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=2, target=1) failed to send a heartbeat: Err(Elapsed(()));      7  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=2, target=1) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: c;      3 WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=2, target=3) failed to send a heartbeat: Err(Elapsed(()));      3 WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=2, target=1) failed to send a heartbeat: Err(Elapsed(()));
+09:29:37   n3 FATAL/panic/poison/unknown-version/APPLY FAILED lines: 0
+09:29:37   n3:      61  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=3, target=1) failed to send a heartbeat: Err(Elapsed(()));     34  WARN openraft::replication: ReplicationCore recv RPCError: Unreachable node: core::io::error::Error: http://10.N.0.N:N/raft/v1/stream: client error (Connect), wh;     28  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=3, target=2) failed to send a heartbeat: Err(Elapsed(()));     27  WARN openraft::engine::handler::replication_handler: update progress error: Unreachable node: core::io::error::Error: http://10.N.0.N:N/raft/v1/stream: client er;     18  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=3, target=1) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: c;     12  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=3, target=2) failed to send a heartbeat: Ok(Err(Unreachable(Unreachable { source: BoxedErrorSource { inner: c;      8  WARN openraft::core::raft_core: error sending transfer_leader: Unreachable node: core::io::error::Error: http://10.N.0.N:N/raft/v1/transfer: client error (Connec;      7  WARN rsm: raft: a member restarted with an empty data directory: its log may go back to nothing once, and it is sent a snapshot member=2;
+09:29:39 ROLL_DONE
