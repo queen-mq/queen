@@ -103,7 +103,7 @@ watch(pickKey, () => { sheetOpen.value = false })
 }
 .ss-row:hover { background: var(--ink-3); }
 .ss-row:hover .ss-name { color: var(--text-hi); }
-.ss-row.on, .ss-row.on:hover { background: var(--selected); }
+.ss-row.on, .ss-row.on:hover { background: var(--selected); --text-low: var(--text-mid); }
 .ss-row.on .ss-name { color: var(--accent-text); font-weight: 500; }
 .ss-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ss-mark { flex: none; width: 8px; display: inline-flex; justify-content: center; }

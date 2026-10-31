@@ -408,8 +408,8 @@ const RAIL_ICONS = {
   traces: 'route',
   settings: 'sliders-horizontal',
   system: 'server',
-  members: 'users',
-  keys: 'id-card',
+  access: 'shield-check',
+  cellUsers: 'users',
 }
 </script>
 

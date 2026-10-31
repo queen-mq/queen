@@ -1,7 +1,10 @@
 <template>
-  <SubSidebar label="API keys" :current="title">
-    <template #side><ApiKeysSide :keys="keys" :loaded="loaded" :error="error" /></template>
-
+  <!--
+    Access's API keys table: the credentials services use to call the acting
+    cluster. The list beside it (AccessSide) filters it by state (?state=);
+    the keys are the Access store's, read with the members.
+  -->
+  <div>
     <PaneHead :title="title" :facts="facts">
       <template #actions>
         <button class="btn btn-primary" @click="openCreate">Create key</button>
@@ -141,34 +144,31 @@
         </form>
       </div>
     </Teleport>
-  </SubSidebar>
+  </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 
 import { access, describeApiError } from '@/api'
 import { SCOPES, filterKeys, inScopeOrder, keyPickTitle, pickKeyState } from '@/composables/accessGroups'
 import { formatRelativeTime } from '@/composables/useApi'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
-import { useRefresh } from '@/composables/useRefresh'
 import { useRouteState } from '@/composables/useRouteState'
 import { useToast } from '@/composables/useToast'
+import { useAccessStore } from '@/stores/accessStore'
 import { useIdentity } from '@/stores/identity'
-import ApiKeysSide from '@/components/ApiKeysSide.vue'
 import Icon from '@/components/Icon.vue'
 import PaneHead from '@/components/PaneHead.vue'
-import SubSidebar from '@/components/SubSidebar.vue'
 import UiCheck from '@/components/UiCheck.vue'
 
 const { epoch, actingClusterSlug, actingTenantSlug } = useIdentity()
 const { notifySuccess } = useToast()
 const origin = window.location.origin
 
-const keys = ref([])
-const loading = ref(false)
-const loaded = ref(false)
-const error = ref(null)
+// Read by the Access page with the members (stores/accessStore), so its list
+// counts both; a change here reloads this list.
+const { keys, keysLoading: loading, keysLoaded: loaded, keysError: error, loadKeys: load } = useAccessStore()
 const busy = ref(null) // id of the row with a call in flight
 const confirming = ref(null) // id of the row asking "revoke?"
 const created = ref(null) // { name, key } — held only until dismissed
@@ -181,7 +181,7 @@ const day = v => formatTimestamp(v, 'en-US', { hour: undefined, minute: undefine
 // Live keys first, newest first within each half.
 const sortedKeys = computed(() => [...keys.value].sort((a, b) =>
   (!!a.revoked_at - !!b.revoked_at) || String(b.created_at).localeCompare(String(a.created_at))))
-// The state picked in the list (ApiKeysSide): the same address field, so the
+// The state picked in the list (AccessSide): the same address field, so the
 // list and the table show the same keys. Anything but active or revoked (the
 // proxy has no expiry) reads as all keys.
 const state = ref('')
@@ -202,31 +202,11 @@ const facts = computed(() => [
     : null,
 ].filter(Boolean))
 
-async function load() {
-  if (loading.value) return
-  loading.value = true
-  error.value = null
-  try {
-    const { data } = await access.listKeys()
-    keys.value = Array.isArray(data) ? data : []
-    loaded.value = true
-  } catch (err) {
-    error.value = err
-  } finally {
-    loading.value = false
-  }
-}
-
-onMounted(load)
-useRefresh(load)
-// Keys belong to the acting cluster: a switch is a different list, and a key
-// just revealed for the old one must not linger on the new one.
+// Keys belong to the acting cluster: a switch is a different list (the page
+// reloads it), and a key just revealed for the old one must not linger.
 watch(epoch, () => {
-  keys.value = []
-  loaded.value = false
   confirming.value = null
   created.value = null
-  load()
 })
 
 async function revoke(key) {

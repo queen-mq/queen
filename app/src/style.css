@@ -17,34 +17,36 @@
 
 @layer base {
   :root {
-    /* ---- Surfaces: rail < frame < page ≈ card (2026-10-30, Iggy's frame) --
-       Three warm greys, the icon rail darkest, then the FRAME (a page's sub
-       sidebar and the top bar, one tone), then the page, about 2 L* apart,
-       and the shell's hairlines mark where each zone ends. None is black:
-       under L* ~5 a screen shows plain black, and a black frame reads as a
-       hole around the page, the loudest edge on the screen, and cold beside
-       these warm greys. A card stays near the page (1.02:1) and is drawn by
-       its edge, not by a lighter box. */
-    --rail:  #121110;  /* the icon rail, L* 5.1                               */
-    --frame: #161514;  /* sub sidebar and top bar, L* 6.8                     */
+    /* ---- Surfaces: one near-black sheet (2026-10-30, evening) -------------
+       The morning's ramp again: page #0b0a0a, a card barely above it (1.04:1)
+       and told apart by its edge. Lifted to #1a1917 for the "soft steps" the
+       warm undertone read as brown, and she asked for the dark back. The
+       chrome is not a black hole either: the rail sits a hair under the page
+       and the frame (a page's sub sidebar and the top bar) on the page's own
+       tone, each zone ended by the shell's hairlines, as Iggy's does. */
+    --rail:  #090808;  /* the icon rail: a hair under the page                */
+    --frame: #0b0a0a;  /* sub sidebar and top bar: the page's own tone        */
     --sub-rail: var(--frame);
-    --ink-0: #1a1917;  /* page                                               */
-    --ink-1: #141312;  /* deepest well inside the page                       */
-    --ink-2: #1c1b19;  /* card                                               */
-    --ink-3: #22211f;  /* input, recessed                                    */
-    --ink-4: #272523;  /* hover                                              */
-    --ink-5: #2e2c29;  /* active / selected                                  */
+    --ink-0: #0b0a0a;  /* page                                               */
+    --ink-1: #070606;  /* deepest well inside the page                       */
+    --ink-2: #111010;  /* card                                               */
+    --ink-3: #171615;  /* input, recessed                                    */
+    --ink-4: #1c1b19;  /* hover                                              */
+    --ink-5: #242220;  /* active / selected                                  */
 
     --recessed: var(--ink-1);
     --card:     var(--ink-2);
     /* What is picked — the rail's page, a list row, a segment — sits on a
        yellow tint, its text and icon yellow: the look before the redesign,
-       which she asked back (2026-10-30). */
-    --selected: color-mix(in srgb, var(--accent) 14%, var(--ink-2));
+       which she asked back (2026-10-30). 20%, so it reads as yellow on the
+       near-black card (14% came out olive). On it --text-low falls to 4.1:1,
+       so a picked surface that holds grey words lifts them to --text-mid
+       (5.9:1) with --text-low: var(--text-mid) on the surface. */
+    --selected: color-mix(in srgb, var(--accent) 20%, var(--ink-2));
 
     /* ---- Text: warm white down to warm grey. Every tier that carries words
-       holds 4.5:1 on every surface it sits on (--text-low: 4.8:1 on the
-       selected step, 6.0:1 on a card). */
+       holds 4.5:1 on every surface it sits on (--text-low: 6.4:1 on a card;
+       a picked row's yellow tint swaps it for --text-mid, see --selected). */
     --text-hi:    #f3f0eb;
     --text-mid:   #b8b3ab;
     --text-low:   #9a958e;
@@ -100,7 +102,7 @@
     /* Categorical hues: what tells entities (namespaces, tasks, queues) and
        several measures in one chart apart — never a status, so no orange,
        yellow or red (amber and coral mean degrading and failing here).
-       Checked with the dataviz validator on the dark card #1c1b19: lightness
+       Checked with the dataviz validator on the dark card #111010: lightness
        band, chroma floor, contrast >= 3:1, and every NEIGHBOUR pair under
        normal and colour-blind vision. Only neighbours pass, so the order is
        part of the palette: aqua beside magenta is ΔE 1.6 for deuteranopes,
@@ -112,9 +114,9 @@
     --cat-5: #008300; /* green */
 
     /* ---- Lines ----------------------------------------------------------- */
-    --bd:      #2c2a27;  /* a card's edge: 1.20:1 on the card */
-    --bd-hi:   #403d39;
-    --bd-soft: #232120;
+    --bd:      #2a2725;  /* a card's edge: the card is nearly the page's tone, so this line sets it off (1.33:1) */
+    --bd-hi:   #34312e;
+    --bd-soft: #181716;
 
     --ring: var(--accent-text);
 
@@ -1099,7 +1101,7 @@
   padding: 7px 10px; cursor: pointer; border: none; background: transparent; text-align: left;
 }
 .cluster-option:hover { background: var(--ink-4); }
-.cluster-option-active { background: var(--selected); }
+.cluster-option-active { background: var(--selected); --text-low: var(--text-mid); }
 .cluster-option-main { display: flex; align-items: baseline; gap: 4px; font-size: 12px; min-width: 0; }
 .cluster-option-meta { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
 .cluster-role { font-size: 11px; color: var(--text-low); }

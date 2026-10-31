@@ -211,28 +211,21 @@ const routes = [
     }
   },
   {
-    // Tenant-level, cluster admins only: who may use the acting cluster and with
-    // which credentials. The proxy owns these identities (proxy/src/console.rs),
-    // so a broker-direct build has nothing to show.
-    path: '/members',
-    name: 'Members',
-    component: () => import('@/views/Members.vue'),
+    // Tenant-level, cluster admins only: who may use the acting cluster, its
+    // members and its API keys, in one page. The proxy owns these identities
+    // (proxy/src/console.rs), so a broker-direct build has nothing to show.
+    path: '/access',
+    name: 'Access',
+    component: () => import('@/views/Access.vue'),
     meta: {
-      title: 'Members', subtitle: 'Who may use this cluster, and with which role',
+      title: 'Access', subtitle: 'Who may use this cluster: its members and its API keys',
       requires: 'clusterAdmin', scope: 'tenant', proxyOnly: true,
-      nav: { group: 'Access', icon: 'members', order: 1 },
+      nav: { group: 'Access', icon: 'access', order: 1 },
     }
   },
-  {
-    path: '/keys',
-    name: 'ApiKeys',
-    component: () => import('@/views/ApiKeys.vue'),
-    meta: {
-      title: 'API keys', subtitle: 'Credentials services use to call this cluster',
-      requires: 'clusterAdmin', scope: 'tenant', proxyOnly: true,
-      nav: { group: 'Access', icon: 'keys', order: 2 },
-    }
-  },
+  // The two pages before 2026-10-30: an old address opens its section.
+  { path: '/members', redirect: (to) => ({ path: '/access', query: { ...to.query } }) },
+  { path: '/keys', redirect: (to) => ({ path: '/access', query: { ...to.query, view: 'keys' } }) },
   {
     // Cell-level: host resources and the replicated log cover every tenant on
     // this cell, which is why the proxy answers it for live operators only.
@@ -246,15 +239,15 @@ const routes = [
     }
   },
   {
-    // Accounts across the cell. No row of its own: it is reached from Members
-    // through the scope switch both pages carry (components/AccessScope.vue).
+    // Accounts across the cell, a live operator's: beside System in the rail,
+    // since like System it covers every tenant on the cell.
     path: '/users',
     name: 'Users',
     component: () => import('@/views/Users.vue'),
     meta: {
       title: 'Users', subtitle: 'Cell-level: user accounts and cluster access',
       requires: 'operator', scope: 'cell', proxyOnly: true,
-      navParent: '/members',
+      nav: { group: 'Cell', icon: 'cellUsers', order: 2 },
     }
   },
   {

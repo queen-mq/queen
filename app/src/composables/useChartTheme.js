@@ -37,9 +37,9 @@ const FALLBACK = {
   '--text-hi': '#f3f0eb',
   '--text-mid': '#b8b3ab',
   '--text-low': '#9a958e',
-  '--ink-3': '#22211f',
-  '--bd': '#2c2a27',
-  '--bd-hi': '#403d39',
+  '--ink-3': '#171615',
+  '--bd': '#2a2725',
+  '--bd-hi': '#34312e',
   '--ok-500': '#9a958e',
   '--warn-400': '#e8a849',
   '--ember-400': '#f07a5f',
@@ -113,7 +113,7 @@ export const chartPalette = reactive(SERIES.map(() => ({ line: '', fill: '' })))
 // apart. Fixed order, never cycled: a sixth entity is grey ("Other"), and the
 // caller owns the entity → slot map (composables/useCategoryColors) so a
 // colour follows its namespace, not its rank. Both token sets pass the
-// dataviz validator on their card surface (#1c1b19 dark, #ffffff light) for
+// dataviz validator on their card surface (#111010 dark, #ffffff light) for
 // NEIGHBOURING slots only — aqua beside magenta collapses for deuteranopes,
 // blue beside violet is too close for anyone — so draw a stack in slot order.
 const CATEGORY = ['--cat-1', '--cat-2', '--cat-3', '--cat-4', '--cat-5']

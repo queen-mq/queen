@@ -4,7 +4,6 @@
 
     <PaneHead :title="title" :facts="facts">
       <template #actions>
-        <AccessScope />
         <button class="btn btn-primary" :disabled="!tenants.length" @click="openCreate">Add user</button>
       </template>
     </PaneHead>
@@ -206,7 +205,6 @@ import { useRefresh } from '@/composables/useRefresh'
 import { useRouteState } from '@/composables/useRouteState'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
-import AccessScope from '@/components/AccessScope.vue'
 import Icon from '@/components/Icon.vue'
 import PaneHead from '@/components/PaneHead.vue'
 import SubSidebar from '@/components/SubSidebar.vue'

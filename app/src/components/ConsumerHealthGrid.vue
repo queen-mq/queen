@@ -163,7 +163,7 @@ const fmtLag = (seconds) => formatSpan(Math.round(toNum(seconds) || 0))
 }
 .crow:last-child { border-bottom: 0; }
 .crow:hover { background: var(--ink-3); }
-.crow.on, .crow.on:hover { background: var(--selected); }
+.crow.on, .crow.on:hover { background: var(--selected); --text-low: var(--text-mid); }
 .crow:focus-visible { outline-offset: -2px; }
 .crow .g { justify-self: center; }
 .crow-skeleton { cursor: default; }

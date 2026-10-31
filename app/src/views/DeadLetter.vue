@@ -1073,7 +1073,7 @@ fetchWhy()
   transition: background-color .12s var(--ease);
 }
 .dlq-why-row:hover:not(:disabled) { background: var(--ink-3); }
-.dlq-why-row.on, .dlq-why-row.on:hover { background: var(--selected); }
+.dlq-why-row.on, .dlq-why-row.on:hover { background: var(--selected); --text-low: var(--text-mid); }
 .dlq-why-row:disabled { cursor: default; }
 .dlq-why-row:focus-visible { outline-offset: -2px; }
 .dlq-why-share { font-size: 13px; font-weight: 600; color: var(--text-hi); text-align: right; line-height: 20px; }
@@ -1110,7 +1110,7 @@ fetchWhy()
 .dlq-table .r { text-align: right; }
 .dlq-row { cursor: pointer; }
 .dlq-row:focus-visible { outline-offset: -2px; }
-.dlq-row.dlq-row-on td { background: var(--selected); }
+.dlq-row.dlq-row-on td { background: var(--selected); --text-low: var(--text-mid); }
 /* Long ids, names and errors end in an ellipsis; the whole is the tooltip. */
 .dlq-cut { display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .dlq-txn { font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); white-space: nowrap; }

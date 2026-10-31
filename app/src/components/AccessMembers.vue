@@ -1,10 +1,12 @@
 <template>
-  <SubSidebar label="Members" :current="title">
-    <template #side><MembersSide :members="members" :loaded="loaded" :error="error" /></template>
-
+  <!--
+    Access's People table: who may use the acting cluster, and with which
+    role. The list beside it (AccessSide) filters it by role (?role=); the
+    members are the Access store's, read with the keys.
+  -->
+  <div>
     <PaneHead :title="title" :facts="facts">
       <template #actions>
-        <AccessScope />
         <button class="btn btn-primary" @click="openGrant">Add member</button>
       </template>
     </PaneHead>
@@ -117,24 +119,21 @@
         </form>
       </div>
     </Teleport>
-  </SubSidebar>
+  </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 
 import { access, describeApiError } from '@/api'
 import { ROLES, filterMembers, memberPickTitle, roleCan } from '@/composables/accessGroups'
-import { useRefresh } from '@/composables/useRefresh'
 import { useRouteState } from '@/composables/useRouteState'
 import { useToast } from '@/composables/useToast'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { useAccessStore } from '@/stores/accessStore'
 import { useIdentity } from '@/stores/identity'
-import AccessScope from '@/components/AccessScope.vue'
 import Icon from '@/components/Icon.vue'
-import MembersSide from '@/components/MembersSide.vue'
 import PaneHead from '@/components/PaneHead.vue'
-import SubSidebar from '@/components/SubSidebar.vue'
 import UiSelect from '@/components/UiSelect.vue'
 
 const { email, epoch, actingClusterSlug, actingTenantSlug } = useIdentity()
@@ -143,14 +142,13 @@ const { notifySuccess } = useToast()
 // The roles as a picker names them; the values are the proxy's.
 const roleOptions = ROLES.map(r => ({ value: r.name, label: r.name[0].toUpperCase() + r.name.slice(1) }))
 
-const members = ref([])
-const loading = ref(false)
-const loaded = ref(false)
-const error = ref(null)
+// Read by the Access page with the keys (stores/accessStore), so its list
+// counts both; a change here reloads this list.
+const { members, membersLoading: loading, membersLoaded: loaded, membersError: error, loadMembers: load } = useAccessStore()
 const busy = ref(null) // email of the row with a call in flight
 const confirming = ref(null) // email of the row asking "remove?"
 
-// The role picked in the list (MembersSide): the same address field, so the
+// The role picked in the list (AccessSide): the same address field, so the
 // list and the table show the same members.
 const role = ref('')
 useRouteState({ role })
@@ -172,30 +170,9 @@ const facts = computed(() => [
     : (loaded.value ? { k: 'Admins', v: String(adminCount.value), title: 'A cluster keeps at least one admin: the proxy refuses a change that would leave none' } : null),
 ].filter(Boolean))
 
-async function load() {
-  if (loading.value) return
-  loading.value = true
-  error.value = null
-  try {
-    const { data } = await access.listMembers()
-    members.value = Array.isArray(data) ? data : []
-    loaded.value = true
-  } catch (err) {
-    error.value = err
-  } finally {
-    loading.value = false
-  }
-}
-
-onMounted(load)
-useRefresh(load)
-// Members belong to the acting cluster: a switch is a different list.
-watch(epoch, () => {
-  members.value = []
-  loaded.value = false
-  confirming.value = null
-  load()
-})
+// Members belong to the acting cluster: a switch is a different list (the
+// page reloads it); a question asked of the old one is dropped.
+watch(epoch, () => { confirming.value = null })
 
 async function changeRole(member, next) {
   if (!next || next === member.role) return

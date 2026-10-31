@@ -213,7 +213,7 @@ watch(() => props.focusIndex, async (i) => {
 .rc-quiet { padding: 14px 16px; font-size: 13px; color: var(--text-low); }
 .rc-table td { white-space: nowrap; }
 /* The node picked in the page's list: the list's own selection tone. */
-.rc-table tr.on > td, .rc-table tr.on:hover > td { background: var(--selected); }
+.rc-table tr.on > td, .rc-table tr.on:hover > td { background: var(--selected); --text-low: var(--text-mid); }
 
 .rc-node { display: flex; align-items: baseline; gap: 8px; }
 .rc-node-name { font-weight: 500; color: var(--text-hi); }
