@@ -7,15 +7,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Queen - Message Queue Dashboard</title>
     
-    <!-- Fonts. Variable axes, not a weight list: the stylesheet asks for 450
-         and 550 in several places (.card-header h3, .stat-label) and Google
-         Fonts only ships static instances at 100-step intervals, so those two
-         were silently rounding to 400/500. `wght@100..900` serves the variable
-         face, which is also what the docs site self-hosts. -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@100..800&display=swap" rel="stylesheet">
-    
+    <!-- No web fonts from elsewhere: the console serves IBM Plex with the app
+         (app/src/console/console.css), so an air-gapped install looks the same
+         and no page asks a third party for anything. -->
+
     <!-- Theme initialization (prevent flash) -->
     <!-- Same resolution as src/composables/useTheme.js resolveTheme(): stored
          Light/Dark wins; System (or no stored choice) follows the OS, else dark.
@@ -40,12 +35,8 @@
         root.style.colorScheme = t;
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-BE3uk4l9.js"></script>
-    <link rel="modulepreload" crossorigin href="/assets/runtime-core.esm-bundler-DBqVe_8f.js">
-    <link rel="modulepreload" crossorigin href="/assets/useRefresh-CrAtTAli.js">
-    <link rel="modulepreload" crossorigin href="/assets/settingsDoc-BYiwW2a8.js">
-    <link rel="modulepreload" crossorigin href="/assets/useSeverity-DzpkcAPZ.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-1yxr1881.css">
+    <script type="module" crossorigin src="/assets/index-5oeAmUek.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-xt7TG7qC.css">
   </head>
   <body class="antialiased">
     <div id="app"></div>
