@@ -4,7 +4,7 @@ ARG SOURCE_DATE_EPOCH
 ENV CARGO_INCREMENTAL=0 \
     SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH
 
-RUN apk add --no-cache musl-dev=1.2.5-r12
+RUN apk add --no-cache musl-dev=1.2.5-r13
 WORKDIR /source
 COPY supervisor/Cargo.toml supervisor/Cargo.lock ./
 COPY supervisor/src ./src
