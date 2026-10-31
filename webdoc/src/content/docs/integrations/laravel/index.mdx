@@ -332,7 +332,7 @@ Both supervisors read the same `supervisor` section of `config/queen.php`, publi
 
 ## Versions
 
-The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary whose version each client release pins. These pages describe PHP client 2.5.0, which pins supervisor 0.8.1, published for Linux (amd64, arm64) and macOS with a signed manifest. Everything not listed works from 1.6.0.
+The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary whose version each client release pins. These pages describe PHP client 2.7.0, which pins supervisor 0.9.0, published for Linux (amd64, arm64) and macOS with a signed manifest. Everything not listed works from 1.6.0.
 
 | PHP client | Supervisor | Brings |
 | --- | --- | --- |
@@ -349,6 +349,8 @@ The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a s
 | 2.4.2 | 0.8.0 | a supervised worker that cannot consume leaves, or `queen:supervisor status` reports it after a minute ([inspect and control](/integrations/laravel/supervisors/#inspect-and-control-either-engine)); a delivery that carries no Laravel job goes to the dead-letter queue at once; refused installations and states name their owner, and `queen:supervisor-install --owner`; job metrics count timed-out attempts and `fail()` as failed |
 | 2.4.3 | 0.8.1 | a worker that has not consumed counts from the start of its first failed pop, so a broker that stops answering shows once that pop times out; supervisor 0.8.1 stops stray workers, tries prefork again at `queue:restart`, reaps a dead fork server's workers and closes a circuit only with the probe |
 | 2.5.0 | 0.8.1 | `binary_push`, `push_compression` and `framed_pop`, off by default ([the queue driver's settings](/integrations/laravel/configuration/#queue-driver)); the first two need a 2.3 broker on every node, and compression and framed pops need the zstd extension |
+| 2.6.0 | 0.8.1 | `fetch` and `changedSince` read a partition by position, with no lease, cursor or ack ([reads by offset](/writing-applications/clients/#reads-by-offset-by-sdk)) |
+| 2.7.0 | 0.9.0 | supervisor 0.9.0: a SIGTERM during a broker call or during start-up reaches the workers sooner, a pool is refilled at once after a deploy, a master that is PID 1 reaps the orphans it inherits, a status that cannot be written or a closed stderr no longer costs the workers, a fork server that failed to boot is not booted again at every exit, and a bad control request is discarded instead of stopping the master |
 
 ## Limits
 

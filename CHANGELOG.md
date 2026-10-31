@@ -264,7 +264,8 @@ Supervisor fixes made after supervisor 0.8.1, which PHP client 2.5.0 pins: they 
 supervisor release.
 
 **Clients 2.7.0.** The JavaScript, Python, Rust, Go, PHP and C++ clients are 2.7.0 and talk to
-any 2.x broker. Stream claims need a 2.7.0 broker: on an older one a runner falls back to 2.6's idle
+any 2.x broker. PHP client 2.7.0 pins supervisor 0.9.0, which carries the supervisor fixes below,
+and the Rust client takes `queen-protocol` 1.5.0, with the stream claim types. Stream claims need a 2.7.0 broker: on an older one a runner falls back to 2.6's idle
 flush of recently read partitions.
 
 **Laravel and supervisor: a SIGTERM during a broker call reaches the workers sooner.** A SIGTERM
