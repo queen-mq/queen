@@ -706,3 +706,119 @@ mod tests {
         }
     }
 }
+
+/// A window that ended this long ago and still holds state was never closed:
+/// `GET /streams/v1/queries` counts it as overdue. Five minutes is past the
+/// grace a runner gives late events by default, and short enough that a
+/// stream stuck on a partition shows within one look.
+const OVERDUE_AFTER_MS: i64 = 5 * 60 * 1000;
+
+/// The state rows one `GET /streams/v1/queries` reads across every query;
+/// past it a query's counts are a floor and say so (`"exact": false`). Tiny
+/// under test, so the facade tests walk that path.
+#[cfg(not(test))]
+const LIST_STATE_SCAN_ROWS: usize = 200_000;
+#[cfg(test)]
+const LIST_STATE_SCAN_ROWS: usize = 5;
+
+/// What one query's state holds now, as `GET /streams/v1/queries` reports it.
+#[derive(Default)]
+struct StateSummary {
+    partitions: u64,
+    rows: u64,
+    windows: u64,
+    overdue: u64,
+    oldest_overdue_end_ms: Option<i64>,
+    newest_write_us: Option<i64>,
+    exact: bool,
+}
+
+impl RaftFacade {
+    /// `GET /streams/v1/queries`: the tenant's registered streams, each with
+    /// its source and sink and what its state holds now: the partitions with
+    /// state, the open windows (rows whose document has a `windowEnd`), and
+    /// the windows past their end by [`OVERDUE_AFTER_MS`] that never closed.
+    /// Read-only, for the console. One scan of the registry, then one range
+    /// scan per query over its state, at most [`LIST_STATE_SCAN_ROWS`] rows
+    /// in all; a query the budget cuts short answers `"exact": false`.
+    pub(super) async fn api_streams_list(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
+        use crate::rsm::planner::timers::iso_us;
+        use crate::rsm::store::keys;
+        use crate::rsm::store::rows;
+        use crate::rsm::store::Keyspace;
+
+        self.linearizable(&ctx).await?;
+        let store = self.store.clone();
+        let tenant = ctx.tenant.clone();
+        let now_ms = super::super::wall_micros() / 1000;
+        let body = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                let mut found = Vec::new();
+                r.scan_streams_queries(&tenant, usize::MAX, &mut |id, row| {
+                    found.push((id, row));
+                    true
+                })?;
+                found.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+                let mut budget = LIST_STATE_SCAN_ROWS;
+                let mut out = Vec::with_capacity(found.len());
+                for (id, row) in found {
+                    let mut s = StateSummary { exact: true, ..StateSummary::default() };
+                    if budget == 0 {
+                        s.exact = false;
+                    } else {
+                        let prefix = keys::streams_query_state_prefix(&id);
+                        let mut last_pid = None;
+                        r.scan_raw(Keyspace::StreamsState, &prefix, &prefix, usize::MAX, &mut |k, v| {
+                            if budget == 0 {
+                                s.exact = false;
+                                return false;
+                            }
+                            budget -= 1;
+                            s.rows += 1;
+                            if let Some((_, pid, _)) = keys::streams_state_parts(k) {
+                                if last_pid != Some(pid) {
+                                    s.partitions += 1;
+                                    last_pid = Some(pid);
+                                }
+                            }
+                            if let Ok((value, updated_us)) = rows::streams_state_view(v) {
+                                s.newest_write_us = Some(s.newest_write_us.map_or(updated_us, |n| n.max(updated_us)));
+                                if let Some(end) = super::json_out::checked(value).and_then(super::json_out::window_end) {
+                                    s.windows += 1;
+                                    if end <= now_ms - OVERDUE_AFTER_MS {
+                                        s.overdue += 1;
+                                        s.oldest_overdue_end_ms = Some(s.oldest_overdue_end_ms.map_or(end, |o| o.min(end)));
+                                    }
+                                }
+                            }
+                            true
+                        })?;
+                    }
+                    out.push(json!({
+                        "query_id": uuid_bytes_to_string(&id),
+                        "name": row.name,
+                        "source_queue": row.source_queue,
+                        "sink_queue": row.sink_queue,
+                        "config_hash": row.config_hash,
+                        "created_at": iso_us(row.created_at_us),
+                        "updated_at": iso_us(row.updated_at_us),
+                        "state": {
+                            "partitions": s.partitions,
+                            "rows": s.rows,
+                            "windows": s.windows,
+                            "overdue": s.overdue,
+                            "oldest_overdue_end": s.oldest_overdue_end_ms.map(|ms| iso_us(ms.saturating_mul(1000))),
+                            "newest_write": s.newest_write_us.map(iso_us),
+                            "exact": s.exact,
+                        },
+                    }));
+                }
+                Ok(json!({ "success": true, "queries": out, "overdue_after_ms": OVERDUE_AFTER_MS }).to_string())
+            })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("streams list read: {e}")))?
+        .map_err(super::read_error)?;
+        Ok(ApiOut::json(200, body))
+    }
+}

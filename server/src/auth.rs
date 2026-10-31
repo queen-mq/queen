@@ -556,6 +556,10 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     if path == "/streams/v1/state/get" || path == "/streams/v1/state/partitions" {
         return ReadOnly;
     }
+    // The console's list of streams: a read, whatever the token may write.
+    if m == "GET" && path == "/streams/v1/queries" {
+        return ReadOnly;
+    }
     if path.starts_with("/streams/") {
         return ReadWrite;
     }

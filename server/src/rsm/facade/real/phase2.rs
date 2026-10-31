@@ -142,6 +142,7 @@ impl RaftFacade {
                 self.api_ephemeral_configure(ctx, &req.body).await
             }
             ("POST", "/streams/v1/queries") => self.api_streams_register(ctx, &req.body).await,
+            ("GET", "/streams/v1/queries") => self.api_streams_list(ctx).await,
             ("POST", "/streams/v1/state/get") => self.api_streams_state_get(ctx, &req.body).await,
             ("POST", "/streams/v1/state/partitions") => {
                 self.api_streams_state_partitions(ctx, &req.body).await

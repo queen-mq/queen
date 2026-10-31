@@ -175,6 +175,14 @@ four charts per node; Storage draws each node's log and store over time, Disk th
 and CPU and memory the workers' event loop and the cell's rows per batch. Why: three grey lines
 read as one, and a disk filling up showed only as a number.
 
+**Broker: `GET /streams/v1/queries` lists a tenant's streams.** Each registered
+stream with its source and sink queues, its config hash, and what its state
+holds now: the partitions with state, the open windows, and the windows that
+ended more than five minutes ago and never closed (with the oldest). Read-only;
+one read counts at most 200,000 state rows, past which a stream's counts are a
+floor (`"exact": false`). Why: the console had no way to list streams, and a
+window that never closes is a result that was never sent.
+
 **Broker: each node records its disk use.** Every minute's sample of a node now carries its data
 disk's used and total bytes, as the write gate measures them, served by
 `/api/v1/analytics/system-metrics` as `disk.used_bytes` and `disk.total_bytes`. The history starts

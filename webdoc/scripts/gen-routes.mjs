@@ -89,7 +89,11 @@ const AUTH = "server/src/auth.rs";
 // right after the KV and timer arm instead of left to the fallthrough. The
 // route is POST only, so nothing for it belongs in the `m === "GET"` block: a
 // `get` operation travels in the POST body and takes the route's level.
-const ACCESS_FINGERPRINT = "61cad4f0271697ef";
+// 2026-10-31: re-read for the console's Streams page. One new rule, in the
+// position the Rust evaluates it: `GET /streams/v1/queries` (the list) is
+// read-only, right after the two state reads; the POST on the same path (the
+// register) keeps the family's read-write.
+const ACCESS_FINGERPRINT = "69617ce1f8bd3a0b";
 
 /** PLAN_PG_CONNECTORS.md — the connectors config surface (feature `pg`). */
 function isConnectorsPath(path) {
@@ -157,6 +161,9 @@ function accessLevel(method, path) {
   if (m === "POST" && path === "/api/v1/resources/kv/list") return "read-only";
 
   if (path === "/streams/v1/state/get" || path === "/streams/v1/state/partitions") return "read-only";
+  // The console's list of streams: a read, method- and path-exact, so the
+  // register on the same path (a POST) stays read-write.
+  if (m === "GET" && path === "/streams/v1/queries") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";
 
   if (path === "/api/v1/push") return "write-only";

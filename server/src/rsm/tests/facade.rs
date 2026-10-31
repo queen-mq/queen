@@ -3748,3 +3748,180 @@ async fn stream_claim_leases_idle_partitions_and_fences_cycles() {
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `GET /streams/v1/queries` lists the tenant's streams by name, each with its
+/// source, sink and what its state holds: partitions, windows (rows whose
+/// document has a `windowEnd`), and the windows past their end by five
+/// minutes that never closed. Under test one call reads 5 state rows in all,
+/// so the second query's counts come back as a floor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn stream_queries_list_counts_windows_and_overdue() {
+    let dir = scratch("streams-list");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let call = |method: &str, path: &str, body: Value| ApiReq {
+        method: method.to_string(),
+        path: path.to_string(),
+        query: None,
+        body: if body.is_null() {
+            Vec::new()
+        } else {
+            serde_json::to_vec(&body).unwrap()
+        },
+    };
+
+    // Nothing registered: an empty list, not an error.
+    let empty = facade
+        .api(ctx(), call("GET", "/streams/v1/queries", Value::Null))
+        .await
+        .expect("list");
+    assert_eq!(empty.status, 200, "{}", empty.body);
+    let empty = parse(&empty.body);
+    assert_eq!(empty["queries"], serde_json::json!([]), "{empty}");
+    assert_eq!(empty["overdue_after_ms"], 300_000, "{empty}");
+
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: br#"{"items":[
+                    {"queue":"sl-src","partition":"a","payload":{"n":1}},
+                    {"queue":"sl-src","partition":"b","payload":{"n":2}}
+                ]}"#
+                .to_vec(),
+            },
+        )
+        .await
+        .expect("push");
+    let mut pids = Vec::new();
+    for _ in 0..2 {
+        let popped = facade
+            .pop_wildcard(
+                ctx(),
+                PopReq {
+                    queue: "sl-src".into(),
+                    group: Some("streams.totals".into()),
+                    batch: 1,
+                    auto_ack: false,
+                    wait: false,
+                    timeout_ms: 1_000,
+                    options: crate::rsm::facade::PopOptions {
+                        subscription_mode: "all".into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("pop");
+        let pop = parse(&popped.body);
+        pids.push(
+            pop["partitionId"]
+                .as_str()
+                .expect("partitionId")
+                .to_string(),
+        );
+    }
+
+    let register = |name: &'static str, sink: Option<&'static str>| {
+        let facade = &facade;
+        async move {
+            let mut body =
+                serde_json::json!({"name": name, "source_queue": "sl-src", "config_hash": "h1"});
+            if let Some(s) = sink {
+                body["sink_queue"] = s.into();
+            }
+            let (status, out) = post_api(facade, "/streams/v1/queries", body)
+                .await
+                .expect("register");
+            assert_eq!(status, 200, "{out}");
+            out["query_id"].as_str().expect("query id").to_string()
+        }
+    };
+    let totals = register("totals", Some("sl-out")).await;
+    let audit = register("audit", None).await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as i64;
+    let write = |qid: String, partition: String, ops: Value| {
+        let facade = &facade;
+        async move {
+            let (status, out) = post_api(
+                facade,
+                "/streams/v1/cycle",
+                serde_json::json!({"query_id": qid, "partition_id": partition,
+                    "consumer_group": "streams.totals", "state_ops": ops, "push_items": []}),
+            )
+            .await
+            .expect("cycle");
+            assert_eq!(status, 200, "{out}");
+        }
+    };
+    // "audit" (listed first, by name): one window ended an hour ago (overdue)
+    // and one ends in a minute, on partition a; a plain row on b.
+    write(
+        audit.clone(),
+        pids[0].clone(),
+        serde_json::json!([
+            {"type":"upsert","key":"w-old","value":{"windowEnd": now_ms - 3_600_000}},
+            {"type":"upsert","key":"w-new","value":{"windowEnd": now_ms + 60_000}}
+        ]),
+    )
+    .await;
+    write(
+        audit.clone(),
+        pids[1].clone(),
+        serde_json::json!([{"type":"upsert","key":"seen","value":{"n":1}}]),
+    )
+    .await;
+    // "totals": three windows on a, which the 5-row budget cuts after two.
+    write(
+        totals.clone(),
+        pids[0].clone(),
+        serde_json::json!([
+            {"type":"upsert","key":"w1","value":{"windowEnd": now_ms + 1}},
+            {"type":"upsert","key":"w2","value":{"windowEnd": now_ms + 2}},
+            {"type":"upsert","key":"w3","value":{"windowEnd": now_ms + 3}}
+        ]),
+    )
+    .await;
+
+    let listed = facade
+        .api(ctx(), call("GET", "/streams/v1/queries", Value::Null))
+        .await
+        .expect("list");
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    let listed = parse(&listed.body);
+    let q = listed["queries"].as_array().expect("queries");
+    assert_eq!(q.len(), 2, "{listed}");
+
+    assert_eq!(q[0]["name"], "audit", "{listed}");
+    assert_eq!(q[0]["query_id"], audit.as_str(), "{listed}");
+    assert_eq!(q[0]["source_queue"], "sl-src", "{listed}");
+    assert_eq!(q[0]["sink_queue"], Value::Null, "{listed}");
+    assert_eq!(q[0]["config_hash"], "h1", "{listed}");
+    assert!(
+        q[0]["created_at"].is_string() && q[0]["updated_at"].is_string(),
+        "{listed}"
+    );
+    let s = &q[0]["state"];
+    assert_eq!(s["partitions"], 2, "{listed}");
+    assert_eq!(s["rows"], 3, "{listed}");
+    assert_eq!(s["windows"], 2, "{listed}");
+    assert_eq!(s["overdue"], 1, "{listed}");
+    assert!(s["oldest_overdue_end"].is_string(), "{listed}");
+    assert!(s["newest_write"].is_string(), "{listed}");
+    assert_eq!(s["exact"], true, "{listed}");
+
+    assert_eq!(q[1]["name"], "totals", "{listed}");
+    assert_eq!(q[1]["sink_queue"], "sl-out", "{listed}");
+    let s = &q[1]["state"];
+    assert_eq!(s["rows"], 2, "the budget of 5 left 2 rows for it: {listed}");
+    assert_eq!(s["windows"], 2, "{listed}");
+    assert_eq!(s["overdue"], 0, "{listed}");
+    assert_eq!(s["oldest_overdue_end"], Value::Null, "{listed}");
+    assert_eq!(s["exact"], false, "{listed}");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
