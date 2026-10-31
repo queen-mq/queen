@@ -224,12 +224,12 @@ export const guideClosing =
   "around a broker.";
 
 export const dashboardShot = {
-  image: "dashboard-overview",
+  image: "dashboard-queue",
   caption: "The dashboard, served on the same port as the API.",
   alt:
-    "The dashboard's overview of a broker under load: messages pushed and consumed per second, " +
-    "queues, partitions and consumer groups, the backlog and its trend, the partitions drawn as a " +
-    "sunflower, and tiles for throughput, lag and errors.",
+    "The dashboard's page for one queue under load, orders.created: its 600 partitions and two " +
+    "consumer groups, a status line (flowing, every group keeps up), messages in and acked per " +
+    "second over 15 minutes, and each group's backlog and oldest unread message.",
 };
 
 export const proofSection = {
