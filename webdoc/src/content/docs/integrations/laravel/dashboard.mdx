@@ -145,6 +145,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (107aaaf9b, 72b9c9767): node_views.rs adds each node's data-disk
 # used and total bytes to the System rows, sampled once a minute; this page reads analytics/queue-
 # ops only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-31 (6e7061f00): app/src/router/index.js adds /access for a cluster's
+# members and API keys and redirects /members and /keys to it. The paths this panel links to
+# (/queues/{queue} and its messages) are as they were. Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

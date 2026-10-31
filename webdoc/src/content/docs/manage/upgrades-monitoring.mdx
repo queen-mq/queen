@@ -51,6 +51,9 @@ sourceOfTruth:
 # Overview (version, uptime, four charts per node), and its Disk view draws the data disk's use. The
 # page's System sentences (every node with its role, term, applied index and disk; per-node network,
 # disk and Raft traffic) still hold. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-31 (6e7061f00): app/src/router/index.js adds /access (members and
+# API keys on one page) and redirects /members and /keys there; the System pages this page names
+# keep their paths. Nothing this page states changes.
 ---
 
 ## Upgrade one node at a time
