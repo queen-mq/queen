@@ -43,11 +43,11 @@ const showSections = sections.length >= 2;
 const showSiteNav = isOutsideDocs(Astro.url.pathname);
 const navLink =
   "px-2 py-1 rounded-md text-[0.8125rem] font-medium no-underline transition-colors";
-const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent/60";
+const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent";
 ---
 
 <header
-  class="sticky top-0 z-30 border-b border-border bg-card/80 backdrop-blur-lg"
+  class="sticky top-0 z-30 bg-background/85 backdrop-blur-lg"
   data-transparent-top={transparentTop ? "" : undefined}
 >
   {transparentTop && (
@@ -85,19 +85,19 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent/60"
       </a>
 
       {showSections ? (
-        <nav aria-label="Sections" class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-border h-6">
+        <nav aria-label="Sections" class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-line h-6">
           {sections.map((section) => (
             <a
               href={section.href}
               aria-current={section.isActive ? "page" : undefined}
-              class:list={[navLink, section.isActive ? "text-foreground bg-accent" : navIdle]}
+              class:list={[navLink, section.isActive ? "text-foreground bg-selected" : navIdle]}
             >
               {section.label}
             </a>
           ))}
         </nav>
       ) : showSiteNav && (
-        <nav aria-label="Main" class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-border h-6">
+        <nav aria-label="Main" class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-line h-6">
           {SITE_NAV.map((link) => (
             <a href={link.href} class:list={[navLink, navIdle]}>
               {link.label}
@@ -161,12 +161,12 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent/60"
             id="site-menu"
             popover
             aria-label="Main"
-            class="site-menu w-60 rounded-xl border border-border bg-card p-1.5 text-foreground shadow-lg"
+            class="site-menu w-60 rounded-pop bg-card p-1.5 text-foreground shadow-lg"
           >
             {[...SITE_NAV, CLOUD_LINK].map((link) => (
               <a
                 href={link.href}
-                class="flex items-center justify-between rounded-lg px-3 py-2.5 text-[0.9375rem] font-medium text-foreground no-underline transition-colors hover:bg-accent"
+                class="flex items-center justify-between rounded-ctl px-3 py-2.5 text-[0.9375rem] font-medium text-foreground no-underline transition-colors hover:bg-selected"
               >
                 {link.label}
                 {link.external && <Icon name="ph:arrow-up-right" class="h-4 w-4 text-muted-foreground" aria-hidden="true" />}

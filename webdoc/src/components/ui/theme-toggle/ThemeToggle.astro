@@ -1,9 +1,10 @@
 ---
 /**
  * ThemeToggle — light, dark or system. Each click moves to the next choice;
- * "system" stores nothing and follows the OS. Persists to localStorage; the
- * theme applies to `<html data-mode="dark">` via the inline script in
- * BaseLayout (no FOUC), which also sets `data-nb-pref` and the label here.
+ * "system" follows the OS. Persists to localStorage; nothing stored is a
+ * first visit, shown dark like the console. The theme applies to
+ * `<html data-mode="dark">` via the inline script in BaseLayout (no FOUC),
+ * which also sets `data-nb-pref` and the label here.
  */
 import { Icon } from "astro-icon/components";
 import { cn } from "@/lib/cn";
@@ -21,10 +22,10 @@ const { class: className, ...attrs } = Astro.props;
     className,
   )}
   {...attrs}
-  aria-label="Theme: system"
-  title="Theme: system"
-  data-nb-state="light"
-  data-nb-pref="system"
+  aria-label="Theme: dark"
+  title="Theme: dark"
+  data-nb-state="dark"
+  data-nb-pref="dark"
 >
   <Icon name="ph:sun" class="w-[1.125rem] h-[1.125rem] hidden group-data-[nb-pref=light]:block" />
   <Icon name="ph:moon" class="w-[1.125rem] h-[1.125rem] hidden group-data-[nb-pref=dark]:block" />

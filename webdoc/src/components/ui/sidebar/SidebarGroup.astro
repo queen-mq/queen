@@ -67,7 +67,7 @@ const isOpen = Boolean(hasActive || collapsed === false || collapsed === undefin
 // rendering modes (landing-as-link vs. label-as-trigger).
 const rowClass = cn(
   "group/expander flex min-h-[2rem] items-center rounded-lg px-3 py-1 text-[0.8125rem] no-underline transition-colors duration-150 focus-visible:outline-offset-[-2px]",
-  "hover:bg-accent hover:text-foreground",
+  "hover:bg-selected/60 hover:text-foreground",
   hasActive ? "font-semibold text-foreground" : "font-medium text-muted-foreground",
 );
 // Chevron icon classes. Rotation is driven by an explicit CSS rule in
@@ -89,7 +89,7 @@ const caretClass =
         "p-0",
         // Active state covers the WHOLE row (label-link + chevron),
         // not just the link half.
-        indexIsCurrent ? "bg-accent text-foreground font-semibold" : "",
+        indexIsCurrent ? "bg-selected text-foreground font-semibold" : "",
       )}
       data-nb-state={isOpen ? "open" : "closed"}
       data-nb-sidebar-group-label
@@ -120,7 +120,7 @@ const caretClass =
           // which would otherwise compete with the label-link's
           // `flex-1` and starve the label's width.
           "w-auto flex items-center shrink-0 min-h-[2rem] px-1.5 py-1 rounded-r-lg",
-          "hover:bg-accent hover:text-foreground focus-visible:outline-offset-[-2px]",
+          "hover:bg-selected/60 hover:text-foreground focus-visible:outline-offset-[-2px]",
           // The chevron icon uses `group-data-[nb-state=open]/expander:rotate-90`
           // to rotate on toggle. That variant resolves to the nearest
           // ancestor with `group/expander` *AND* `data-nb-state="open"`.
@@ -160,7 +160,7 @@ const caretClass =
   )}
 
   <CollapsibleContent data-nb-state={isOpen ? "open" : "closed"}>
-    <ul class="mt-0.5 ml-3 list-none border-l border-border p-0 pl-2 flex flex-col gap-px">
+    <ul class="mt-0.5 ml-3 list-none border-l border-line p-0 pl-2 flex flex-col gap-px">
       {items.map((item) => (
         <li class="break-words">
           {item.type === "group" ? (

@@ -41,7 +41,7 @@
   Referrer-Policy: strict-origin-when-cross-origin
   X-Frame-Options: DENY
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-dqcmwrHMBG7uo7u3L4cMDzwG8wr8naMTg+aYi2R8MSQ=' 'sha256-WLkmCQrDNilcsSDm7EAuRm/E0DqN0suNkO/hh57hMco=' 'sha256-CPDS92rsGe0EmMcU8ohRhwg22wRrXo/Ym51cJHCsVEk=' 'sha256-zHp3EGqSSfSRI0kpOQTMmiR6Wr6+r542qadbffDfY/8='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-dMJ0eqlZH9bd+voTFSeebLnXG1B/hWyhmJ3KSUXu/Xw=' 'sha256-WLkmCQrDNilcsSDm7EAuRm/E0DqN0suNkO/hh57hMco=' 'sha256-CPDS92rsGe0EmMcU8ohRhwg22wRrXo/Ym51cJHCsVEk=' 'sha256-zHp3EGqSSfSRI0kpOQTMmiR6Wr6+r542qadbffDfY/8='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
 
 # Content-hashed by the bundler: the filename changes when the bytes change,
 # so the response never has to be revalidated.

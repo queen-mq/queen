@@ -43,7 +43,7 @@ const uid = `sdk-${id}-${Math.random().toString(36).slice(2, 8)}`;
               aria-controls={`${uid}-panel-${i}`}
               aria-selected={i === 0 ? "true" : "false"}
               data-sdk-tab
-              class="m-0 cursor-pointer rounded-md border-0 bg-transparent px-2 py-0.5 text-xs leading-5 font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground aria-selected:bg-selected aria-selected:text-foreground"
+              class="m-0 cursor-pointer rounded-md border-0 bg-transparent px-2 py-0.5 text-xs leading-5 font-medium text-muted-foreground transition-colors hover:bg-selected/60 hover:text-foreground aria-selected:bg-selected aria-selected:text-foreground"
             >
               {v.lang.label}
             </button>
@@ -59,7 +59,7 @@ const uid = `sdk-${id}-${Math.random().toString(36).slice(2, 8)}`;
           aria-labelledby={`${uid}-tab-${i}`}
           data-sdk-panel
           hidden={i !== 0}
-          class="relative overflow-hidden rounded-lg bg-card ring ring-border"
+          class="relative overflow-hidden border-t border-line bg-card"
         >
           {v.code !== null ? (
             <div class="sdk-row">
@@ -102,7 +102,16 @@ const uid = `sdk-${id}-${Math.random().toString(36).slice(2, 8)}`;
     line-height: 1.6;
     background: transparent;
   }
+  /* The block is already one card with its own tabs and copy button: the code
+     figure inside it draws no second box, badge or button. */
+  [data-sdk] .sdk-code .nb-code-figure {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
   [data-sdk] .sdk-code pre.astro-code::before,
+  [data-sdk] .sdk-code .nb-code-figure::before,
   [data-sdk] .nb-code-copy {
     display: none;
   }

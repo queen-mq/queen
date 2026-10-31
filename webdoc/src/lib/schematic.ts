@@ -13,7 +13,8 @@ export const TOKEN = {
   muted: "var(--nb-muted-foreground)",
   card: "var(--nb-card)",
   surface: "var(--nb-muted)",
-  border: "var(--nb-border)",
+  /** A line inside a drawing. Outlines of page areas are transparent (tone), lines in a drawing are not. */
+  border: "var(--nb-line)",
   borderStrong: "var(--nb-border-strong)",
   primary: "var(--nb-primary-text)",
   /** Requests in flight and the broker. */

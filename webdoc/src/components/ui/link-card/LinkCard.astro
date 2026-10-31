@@ -22,7 +22,7 @@ const { title, description, href, class: className, ...attrs } = Astro.props;
 <a
   href={href}
   class={cn(
-    "group flex items-center justify-between gap-3 rounded-lg bg-card p-5 shadow-sm ring ring-border no-underline text-inherit transition-all hover:shadow-default hover:ring-border-strong",
+    "group flex items-center justify-between gap-3 rounded-card bg-card p-5 no-underline text-inherit transition-colors hover:bg-selected",
     className,
   )}
   {...attrs}

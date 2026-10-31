@@ -1,6 +1,6 @@
 ---
 /**
- * LayerCard — two-layer card (recessed header + raised content).
+ * LayerCard — one filled card: a header row (title or tabs) over its content.
  *
  *   <LayerCard>
  *     <LayerCardHeader>Title or tabs</LayerCardHeader>
@@ -16,7 +16,7 @@ const { class: className, ...attrs } = Astro.props;
 ---
 
 <div
-  class={cn("flex w-full flex-col overflow-hidden rounded-lg bg-muted text-sm ring ring-border", className)}
+  class={cn("flex w-full flex-col overflow-hidden rounded-card bg-card text-sm ring ring-border", className)}
   {...attrs}
 >
   <slot />

@@ -21,8 +21,8 @@ const { label, href, isCurrent, badge, class: className, ...attrs } = Astro.prop
   class={cn(
     "flex min-h-[2rem] items-center gap-2 rounded-lg px-3 py-1 text-[0.8125rem] font-medium no-underline focus-visible:outline-offset-[-2px]",
     isCurrent
-      ? "bg-accent font-semibold text-foreground"
-      : "text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground",
+      ? "bg-selected font-semibold text-foreground"
+      : "text-muted-foreground transition-colors duration-150 hover:bg-selected/60 hover:text-foreground",
     className,
   )}
   {...attrs}

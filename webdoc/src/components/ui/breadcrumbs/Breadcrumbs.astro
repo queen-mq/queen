@@ -47,12 +47,12 @@ const tailItems = shouldCollapse ? items.slice(items.length - tailCount) : [];
             >
               <span class="tracking-widest">&hellip;</span>
             </summary>
-            <div class="absolute left-0 top-full z-40 mt-1 min-w-[10rem] max-w-[16rem] rounded-lg border border-border bg-card p-1 shadow-lg">
+            <div class="absolute left-0 top-full z-40 mt-1 min-w-[10rem] max-w-[16rem] rounded-pop bg-card p-1 shadow-lg">
               {collapsedItems.map((crumb) => (
                 crumb.href ? (
                   <a
                     href={crumb.href}
-                    class="block truncate rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                    class="block truncate rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-selected/60 hover:text-foreground transition-colors"
                   >
                     {crumb.label}
                   </a>

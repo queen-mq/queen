@@ -12,8 +12,8 @@ interface Props extends HTMLAttributes<"aside"> {
 const { type = "note", title, class: className, ...attrs } = Astro.props;
 
 const config: Record<string, { label: string; color: string; tint: string }> = {
-  note:    { label: "Note",    color: "var(--nb-info)",    tint: "var(--nb-info-muted)" },
-  tip:     { label: "Tip",     color: "var(--nb-success)", tint: "var(--nb-success-muted)" },
+  note:    { label: "Note",    color: "var(--nb-info)",    tint: "var(--nb-card)" },
+  tip:     { label: "Tip",     color: "var(--nb-success)", tint: "var(--nb-card)" },
   caution: { label: "Caution", color: "var(--nb-warning)", tint: "var(--nb-warning-muted)" },
   danger:  { label: "Danger",  color: "var(--nb-danger)",  tint: "var(--nb-danger-muted)" },
 };
@@ -25,7 +25,7 @@ const displayTitle = title ?? c.label;
 <aside
   role="note"
   aria-label={displayTitle}
-  class={cn("aside-card flex items-start gap-3 rounded-lg px-4 py-3 my-4", className)}
+  class={cn("aside-card flex items-start gap-3 rounded-card px-4 py-3 my-4", className)}
   style={`--_c: ${c.color}; --_t: ${c.tint};`}
   {...attrs}
 >
@@ -44,8 +44,9 @@ const displayTitle = title ?? c.label;
 </aside>
 
 <style>
+  /* Tone: a filled area, no outline. A note or a tip is a plain card; only
+     caution and danger carry a colour, because only they say something is wrong. */
   .aside-card {
-    border: 1px solid color-mix(in oklch, var(--_c) 25%, transparent);
     background: var(--_t);
   }
 
@@ -62,8 +63,7 @@ const displayTitle = title ?? c.label;
   .aside-card-body :global(code:not(:where(pre *))) {
     font-family: var(--nb-font-mono);
     font-size: 0.8125em;
-    background: color-mix(in oklch, var(--_c) 10%, transparent);
-    border: 1px solid color-mix(in oklch, var(--_c) 15%, transparent);
+    background: color-mix(in oklch, var(--_c) 12%, transparent);
     border-radius: 0.25rem;
     padding: 0.0625rem 0.3125rem;
   }

@@ -47,9 +47,9 @@ const SHIKI = { light: "github-light", dark: "github-dark" } as const;
 const eyebrow = "text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-muted-foreground";
 const h2 = "mt-3 text-2xl font-semibold tracking-tight text-foreground lg:text-[1.875rem] lg:leading-[1.15]";
 const lead = "mt-4 max-w-2xl text-base leading-relaxed text-muted-foreground";
-const card =
-  "block rounded-xl border border-border bg-background p-5 no-underline transition-colors hover:border-border-strong";
-const cardStatic = "block rounded-xl border border-border bg-background p-5";
+// Tone, as in the console: a card is a filled area, never an outline.
+const card = "block rounded-card bg-card p-5 no-underline transition-colors hover:bg-selected";
+const cardStatic = "block rounded-card bg-card p-5";
 ---
 
 <BaseLayout title={HOME_TITLE} description={config.description}>
@@ -84,13 +84,13 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
             <div class="mt-8 flex flex-wrap items-center gap-3">
               <a
                 href={hero.primary.href}
-                class="rounded-lg bg-primary px-4 py-2 text-[0.8125rem] font-medium text-primary-foreground no-underline transition-colors hover:bg-primary-hover"
+                class="rounded-ctl bg-primary px-4 py-2 text-[0.8125rem] font-medium text-primary-foreground no-underline transition-colors hover:bg-primary-hover"
               >
                 {hero.primary.label}
               </a>
               <a
                 href={hero.secondary.href}
-                class="rounded-lg border border-border px-4 py-2 text-[0.8125rem] font-medium text-foreground no-underline transition-colors hover:border-border-strong"
+                class="rounded-ctl bg-muted px-4 py-2 text-[0.8125rem] font-medium text-foreground no-underline transition-colors hover:bg-selected"
               >
                 {hero.secondary.label}
               </a>
@@ -102,7 +102,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
               </a>
             </div>
 
-            <div class="mt-8 rounded-lg border border-border bg-card px-4 py-3">
+            <div class="mt-8 rounded-ctl bg-card px-4 py-3">
               <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
             </div>
             <p class="mt-3 text-[0.8125rem] text-muted-foreground">{hero.runNote}</p>
@@ -130,14 +130,14 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
       </section>
 
       {/* The five-minute guide */}
-      <section id="guide" data-guide-lang="js" class="scroll-mt-14 border-t border-border">
+      <section id="guide" data-guide-lang="js" class="scroll-mt-14">
         <div class="mx-auto w-full max-w-5xl px-6 pt-20 lg:px-10 lg:pt-28">
           <p class={eyebrow}>{guideSection.eyebrow}</p>
           <h2 data-md class={h2}>{guideSection.title}</h2>
           {guideSection.lead.map((t) => <p data-md class={lead}>{t}</p>)}
         </div>
 
-        <div class="guide-bar sticky top-14 z-20 mt-10 border-y border-border">
+        <div class="guide-bar sticky top-14 z-20 mt-10">
           <div
             class="mx-auto flex w-full max-w-5xl items-center gap-1.5 overflow-x-auto px-6 py-2.5 lg:px-10"
             role="group"
@@ -163,19 +163,19 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
               <div class="min-w-0">
                 <h3 data-md class="guide-title">{guideRun.title}</h3>
                 {guideRun.body.map((t) => <p data-md class="guide-text">{t}</p>)}
-                <div class="mt-5 rounded-lg border border-border bg-card px-4 py-3">
+                <div class="mt-5 rounded-ctl bg-card px-4 py-3">
                   <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
                 </div>
                 <p data-md class="guide-text mt-5">{guideRun.installNote}</p>
                 {
                   GUIDE_LANGS.map((l) => (
-                    <div class="guide-variant mt-3 rounded-lg border border-border bg-card px-4 py-3" data-lang={l.id}>
+                    <div class="guide-variant mt-3 rounded-ctl bg-card px-4 py-3" data-lang={l.id}>
                       <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code>{l.install.split("\n").map((cmd, j) => <>{j > 0 && "\n"}<span class="select-none text-muted-foreground">$ </span>{cmd}</>)}</code></pre>
                     </div>
                   ))
                 }
                 <figure class="mt-6">
-                  <div class="overflow-hidden rounded-xl border border-border">
+                  <div class="overflow-hidden rounded-card bg-card p-2">
                     {/* WebP at 2048 wide: twice the 1024px the frame reaches, so it stays
                         sharp on a 2x screen. Only the visible one loads: a lazy image
                         that is not rendered is not fetched. */}
@@ -186,7 +186,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
                       height="1280"
                       loading="lazy"
                       decoding="async"
-                      class="home-shot-light block h-auto w-full"
+                      class="home-shot-light block h-auto w-full rounded-ctl"
                     />
                     <img
                       src={`/screenshots/${dashboardShot.image}-dark.webp`}
@@ -195,7 +195,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
                       height="1280"
                       loading="lazy"
                       decoding="async"
-                      class="home-shot-dark block h-auto w-full"
+                      class="home-shot-dark block h-auto w-full rounded-ctl"
                     />
                   </div>
                   <figcaption class="mt-3 text-[0.8125rem] text-muted-foreground">
@@ -217,12 +217,12 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
                         {GUIDE_LANGS.map((l) => {
                           const code = guideCode(l, c.id);
                           return code === null ? (
-                            <div class="guide-variant mt-5 rounded-xl border border-dashed border-border px-5 py-4 text-[0.875rem] leading-relaxed text-muted-foreground" data-lang={l.id}>
+                            <div class="guide-variant mt-5 rounded-card bg-card px-5 py-4 text-[0.875rem] leading-relaxed text-muted-foreground" data-lang={l.id}>
                               {l.missing?.[c.id]}
                             </div>
                           ) : (
-                            <div class="guide-variant home-code mt-5 overflow-hidden rounded-xl border border-border bg-card" data-lang={l.id}>
-                              <div class="flex items-center justify-between border-b border-border px-5 py-2.5 text-xs text-muted-foreground">
+                            <div class="guide-variant home-code mt-5 overflow-hidden rounded-card bg-card" data-lang={l.id}>
+                              <div class="flex items-center justify-between border-b border-line px-5 py-2.5 text-xs text-muted-foreground">
                                 <span class="font-medium">{c.caption}</span>
                                 <span>{l.label}</span>
                               </div>
@@ -297,7 +297,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
       </section>
 
       {/* Numbers */}
-      <section class="border-t border-border bg-card">
+      <section class="bg-zone">
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p class={eyebrow}>{proofSection.eyebrow}</p>
           <h2 data-md class={h2}>{proofSection.title}</h2>
@@ -326,14 +326,14 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
       </section>
 
       {/* Proven */}
-      <section class="border-t border-border">
+      <section>
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p class={eyebrow}>{provenSection.eyebrow}</p>
           <h2 data-md class={h2}>{provenSection.title}</h2>
           <div class="mt-12 grid grid-cols-1 gap-x-12 gap-y-10 sm:grid-cols-3">
             {
               proven.map((d) => (
-                <div class="border-t border-border pt-5">
+                <div>
                   <h3 class="text-[0.9375rem] font-medium text-foreground">
                     <a href={d.href} class="no-underline">
                       {d.title}
@@ -348,11 +348,11 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
       </section>
 
       {/* Next */}
-      <section class="border-t border-border bg-card">
+      <section class="bg-zone">
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-24">
           <p class={eyebrow}>{nextSection.eyebrow}</p>
           <h2 data-md class={h2}>{nextSection.title}</h2>
-          <a href={book.href} class="mt-10 flex items-center gap-5 rounded-xl border border-border bg-background p-4 transition-colors hover:border-foreground/30">
+          <a href={book.href} class="mt-10 flex items-center gap-5 rounded-card bg-card p-4 no-underline transition-colors hover:bg-selected">
             <img src="/book/cover.webp" alt="" width={edition.cover[0]} height={edition.cover[1]} loading="lazy" decoding="async" class="w-16 shrink-0 rounded shadow-md sm:w-20" />
             <div class="min-w-0">
               <div class="text-[0.9375rem] font-medium text-foreground">{book.title}</div>
@@ -371,14 +371,14 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
             }
           </div>
           <p data-md class="mt-12 text-[0.9375rem] leading-relaxed text-muted-foreground">{nextSection.mcpNote}</p>
-          <div class="mt-3 max-w-3xl rounded-lg border border-border bg-background px-4 py-3">
+          <div class="mt-3 max-w-3xl rounded-ctl bg-card px-4 py-3">
             <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{nextSection.mcp}</code></pre>
           </div>
         </div>
       </section>
 
       {/* The last line */}
-      <section class="border-t border-border">
+      <section>
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p
             data-md
@@ -390,7 +390,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
         </div>
       </section>
 
-      <footer class="border-t border-border">
+      <footer>
         <div class="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-8 text-[0.8125rem] text-muted-foreground lg:px-10">
           <span>Apache 2.0</span>
           <a href="https://github.com/queen-mq/queen">GitHub</a>
@@ -444,8 +444,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
   }
   .guide-pick[aria-pressed="true"] {
     color: var(--nb-foreground, var(--foreground));
-    border-color: var(--nb-border-strong, var(--border));
-    background: var(--nb-card, var(--card));
+    background: var(--nb-selected);
   }
   .guide-step {
     display: grid;
@@ -461,7 +460,7 @@ const cardStatic = "block rounded-xl border border-border bg-background p-5";
     align-items: center;
     justify-content: center;
     border-radius: 9999px;
-    border: 1px solid var(--nb-border, var(--border));
+    background: var(--nb-muted);
     font-size: 0.8125rem;
     font-weight: 600;
     color: var(--nb-foreground, var(--foreground));

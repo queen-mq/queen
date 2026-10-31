@@ -44,8 +44,7 @@
 .qf-frame {
 	--qf-cue: color-mix(in oklab, var(--nb-foreground) 32%, transparent);
 	overflow-x: auto;
-	border: 1px solid var(--nb-border);
-	border-radius: 0.625rem;
+	border-radius: var(--nb-r-card);
 	background:
 		linear-gradient(to right, var(--nb-card) 30%, transparent) left / 2.5rem 100% no-repeat local,
 		linear-gradient(to left, var(--nb-card) 30%, transparent) right / 2.5rem 100% no-repeat local,
@@ -271,7 +270,7 @@
 
 /* ---- Charts ---- */
 .qf-grid {
-	stroke: var(--nb-border);
+	stroke: var(--nb-line);
 	stroke-width: 1;
 }
 .qf-axis {

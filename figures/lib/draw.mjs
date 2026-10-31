@@ -9,6 +9,10 @@
 // with colours: build.mjs renders each figure twice, with the light palette for
 // the book and the site's light theme, and with the dark one for the site's
 // dark theme.
+//
+// The dark palette sits on the site's dark page, the console's Soft (#202020):
+// `paper` is that page (labels mask the lines behind them with it), and boxes
+// are one step lighter (#2b2b2b, the console's cards), never darker.
 
 export const W = 1000;
 
@@ -21,11 +25,11 @@ export const PALETTES = {
     info: "#2c5f8a", infoFill: "#e3eef7",
   },
   dark: {
-    ink: "#f2f0ec", muted: "#a8a29a", faint: "#7a746d", line: "#4d4842", grid: "#2b2825",
-    fill: "#1d1b19", paper: "#0f0e0d",
-    accent: "#fcc620", accentInk: "#fcc620", accentFill: "#3a300d",
-    ok: "#6cc08b", okFill: "#16301f", danger: "#f08a5d", dangerFill: "#3b2016",
-    info: "#7fb4e0", infoFill: "#15283a",
+    ink: "#f3f3f3", muted: "#b4b4b4", faint: "#969696", line: "#565656", grid: "#333333",
+    fill: "#2b2b2b", paper: "#202020",
+    accent: "#fcc620", accentInk: "#fcc620", accentFill: "#4a3d14",
+    ok: "#6cc08b", okFill: "#24402d", danger: "#f08a5d", dangerFill: "#4d2b1f",
+    info: "#7fb4e0", infoFill: "#1f3348",
   },
 };
 

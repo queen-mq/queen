@@ -81,10 +81,10 @@ const { start, class: className, ...attrs } = Astro.props;
     grid-column: 1;
     width: 1.75rem;
     height: 1.75rem;
-    border-radius: 0.5rem;
-    background: var(--nb-accent);
+    border-radius: var(--nb-r-ctl);
+    background: var(--nb-muted);
     color: var(--nb-foreground);
-    border: 1px solid var(--nb-border-strong);
+    border: 1px solid var(--nb-border);
     font-size: 0.6875rem;
     font-weight: 600;
     display: grid;
@@ -101,7 +101,7 @@ const { start, class: className, ...attrs } = Astro.props;
     top: 1.75rem;
     bottom: 0;
     width: 1.5px;
-    background: var(--nb-border);
+    background: var(--nb-line);
   }
 
   .steps :global(ol > li > p:first-child > strong:only-child) {

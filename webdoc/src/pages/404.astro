@@ -35,7 +35,7 @@ const sections = [
       </p>
       <a
         href="/"
-        class="mt-8 inline-block rounded-lg border border-border px-4 py-2 font-medium text-foreground no-underline transition-colors hover:border-border-strong"
+        class="mt-8 inline-block rounded-ctl bg-muted px-4 py-2 font-medium text-foreground no-underline transition-colors hover:bg-selected"
       >
         Back home
       </a>
@@ -48,7 +48,7 @@ const sections = [
               <li class="m-0">
                 <a
                   href={section.href}
-                  class="block h-full rounded-lg border border-border px-4 py-3 no-underline transition-colors hover:border-border-strong"
+                  class="block h-full rounded-card bg-card px-4 py-3 no-underline transition-colors hover:bg-selected"
                 >
                   <span class="block text-sm font-medium text-foreground">{section.label}</span>
                   <span class="mt-0.5 block text-[0.8125rem] text-muted-foreground leading-snug">

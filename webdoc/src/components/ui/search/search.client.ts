@@ -67,7 +67,7 @@ export function initSearch(config: SearchConfig): SearchInstance {
     const option = document.createElement("div");
     option.id = `search-result-${resultIdCounter++}`;
     option.setAttribute("role", "option");
-    option.className = "rounded-lg px-2 py-2 transition-colors cursor-pointer hover:bg-accent focus-within:bg-accent data-[highlighted]:bg-accent";
+    option.className = "rounded-ctl px-2 py-2 transition-colors cursor-pointer hover:bg-selected/60 focus-within:bg-selected data-[highlighted]:bg-selected";
 
     const link = resultLink(result.title, result.url, "block truncate text-sm font-medium text-foreground no-underline focus-visible:outline-none");
     option.appendChild(link);
@@ -81,7 +81,7 @@ export function initSearch(config: SearchConfig): SearchInstance {
 
     if (result.subResults?.length) {
       const subList = document.createElement("div");
-      subList.className = "mt-2 border-l border-border pl-3";
+      subList.className = "mt-2 border-l border-line pl-3";
       for (const sub of result.subResults.slice(0, 3)) {
         subList.appendChild(resultLink(sub.title, sub.url, "block truncate py-0.5 text-xs text-muted-foreground no-underline hover:text-foreground"));
       }

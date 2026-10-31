@@ -17,7 +17,7 @@ const { class: className, ...attrs } = Astro.props;
     // leaking past the page. Scrollbar hidden so it doesn't collide with the
     // underline/indicator on classic-scrollbar platforms; the strip stays
     // scrollable via wheel/touch and the tabs remain keyboard-navigable.
-    "relative flex overflow-x-auto overscroll-x-contain border-b border-border",
+    "relative flex overflow-x-auto overscroll-x-contain border-b border-line",
     "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
     className,
   )}

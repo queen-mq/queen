@@ -1,8 +1,9 @@
 /**
  * theme-toggle.client.ts — light, dark, system. Writes the choice to
- * localStorage ("ui-mode"); "system" removes it, so the OS decides.
- * BaseLayout's pre-paint script owns DOM application so view transitions,
- * OS changes, and cross-tab edits stay in sync.
+ * localStorage ("ui-mode"); "system" is stored too and follows the OS.
+ * Nothing stored is a first visit, which BaseLayout shows dark (the
+ * console's Soft). BaseLayout's pre-paint script owns DOM application so
+ * view transitions, OS changes, and cross-tab edits stay in sync.
  */
 
 import { mount } from "@cloudflare/nimbus-docs/client";
@@ -20,8 +21,7 @@ function initThemeToggle(button: HTMLElement): () => void {
     const current = button.getAttribute("data-nb-pref");
     const next = order[(order.indexOf(current as (typeof order)[number]) + 1) % order.length];
     try {
-      if (next === "system") localStorage.removeItem("ui-mode");
-      else localStorage.setItem("ui-mode", next);
+      localStorage.setItem("ui-mode", next);
     } catch {
       // Ignore storage errors (private mode / restricted contexts).
     }

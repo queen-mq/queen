@@ -64,21 +64,23 @@ const briefUrl = Astro.site
         const readPref = () => {
           try {
             const v = localStorage.getItem(KEY);
-            return v === "dark" || v === "light" ? v : null;
+            return v === "dark" || v === "light" || v === "system" ? v : null;
           } catch {
             return null;
           }
         };
 
-        const resolveMode = () => readPref() ?? (media.matches ? "dark" : "light");
+        // A first visit is dark (the console's Soft), as in the console.
+        // "system" follows the OS and is stored like the other two choices.
+        const prefOf = () => readPref() ?? "dark";
+        const resolveMode = (pref) => (pref === "system" ? (media.matches ? "dark" : "light") : pref);
 
-        // No stored preference is the "system" choice: follow the OS.
         const labels = { light: "Theme: light", dark: "Theme: dark", system: "Theme: system" };
 
         const applyTheme = () => {
           const root = document.documentElement;
-          const mode = resolveMode();
-          const pref = readPref() ?? "system";
+          const pref = prefOf();
+          const mode = resolveMode(pref);
           if (mode === "dark") root.setAttribute("data-mode", "dark");
           else root.removeAttribute("data-mode");
           root.style.colorScheme = mode;
@@ -92,7 +94,7 @@ const briefUrl = Astro.site
 
         applyTheme();
         media.addEventListener("change", () => {
-          if (!readPref()) applyTheme();
+          if (prefOf() === "system") applyTheme();
         });
         window.addEventListener("storage", (e) => {
           if (e.key === KEY) applyTheme();

@@ -15,7 +15,7 @@
     align-items: baseline;
     margin: 1rem 0 1.25rem;
     padding: 0.125rem 0 0.125rem 0.875rem;
-    border-left: 2px solid #fcc620;
+    border-left: 2px solid var(--nb-border-strong);
   }
   .qwhy-label {
     flex-shrink: 0;
@@ -23,10 +23,8 @@
     font-weight: 600;
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: #b07d00;
-  }
-  :global(:root[data-mode="dark"]) .qwhy-label {
-    color: #fcc620;
+    /* A routine marker, so no colour: yellow lives in the logo only. */
+    color: var(--nb-muted-foreground);
   }
   .qwhy-text {
     font-style: italic;
