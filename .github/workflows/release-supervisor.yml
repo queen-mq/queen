@@ -54,6 +54,19 @@ jobs:
         run: python3 -m unittest discover -s supervisor/scripts/tests -v
       - name: Install pinned Rust toolchain for release gates
         run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+      # The supervisor's prefork tests boot the PHP client's fork server and
+      # need its Composer dependencies; under CI a missing one fails the test
+      # instead of skipping it (tests.yml sets up the same before its run).
+      - name: Set up PHP 8.3 for the supervisor's fork-server tests
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pcntl, posix, dom, xml, xmlwriter
+          coverage: none
+          tools: composer:v2
+      - name: Install the PHP client's dependencies
+        working-directory: clients/client-php
+        run: composer install --no-interaction --no-progress --prefer-dist
       - name: Verify Rust supervisor before building release artifacts
         run: |
           cargo +1.88.0 fmt --manifest-path supervisor/Cargo.toml --check
