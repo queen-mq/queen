@@ -1,0 +1,454 @@
+2026-10-30T11:39:31Z start p11-w9-kill: --workload streams --nemesis kill --time-limit 300 --rate 200
+2026-10-30T11:45:17Z done  p11-w9-kill: valid store=/root/src/test/jepsen/store/queen-streams-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T11:39:40.18518896Z log=/root/runs-prio/p11-w9-kill.log
+2026-10-30T11:45:17Z start p11-w9-lz-kill: --workload streams --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-30T11:52:47Z done  p11-w9-lz-kill: valid store=/root/src/test/jepsen/store/queen-streams-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T11:45:25.82865921Z log=/root/runs-prio/p11-w9-lz-kill.log
+2026-10-30T11:52:47Z start p11-w9-part: --workload streams --nemesis partition --time-limit 300 --rate 200
+2026-10-30T11:58:32Z done  p11-w9-part: valid store=/root/src/test/jepsen/store/queen-streams-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T11:52:55.403878996Z log=/root/runs-prio/p11-w9-part.log
+2026-10-30T11:58:32Z start p11-w9-pause: --workload streams --nemesis pause --time-limit 300 --rate 200
+2026-10-30T12:04:22Z done  p11-w9-pause: valid store=/root/src/test/jepsen/store/queen-streams-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T11:58:40.889677537Z log=/root/runs-prio/p11-w9-pause.log
+2026-10-30T12:04:22Z start p11-w9-leader-deaf: --workload streams --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T12:10:23Z done  p11-w9-leader-deaf: valid store=/root/src/test/jepsen/store/queen-streams-leader-deaf_offload=on_lanes=16/2026-10-30T12:04:30.79053049Z log=/root/runs-prio/p11-w9-leader-deaf.log
+2026-10-30T12:10:23Z start p11-w9-restart: --workload streams --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T12:15:03Z done  p11-w9-restart: valid store=/root/src/test/jepsen/store/queen-streams-restart_offload=on_lanes=16/2026-10-30T12:10:31.585888661Z log=/root/runs-prio/p11-w9-restart.log
+2026-10-30T12:15:03Z start p11-w9-membership: --workload streams --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T12:20:38Z done  p11-w9-membership: valid store=/root/src/test/jepsen/store/queen-streams-membership_offload=on_lanes=16/2026-10-30T12:15:11.998033339Z log=/root/runs-prio/p11-w9-membership.log
+2026-10-30T12:20:38Z start p11-w9-member-snap: --workload streams --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+2026-10-30T12:26:18Z done  p11-w9-member-snap: valid store=/root/src/test/jepsen/store/queen-streams-kill,membership_t=one,primaries,majority,all_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=5/2026-10-30T12:20:47.151345831Z log=/root/runs-prio/p11-w9-member-snap.log
+2026-10-30T12:26:18Z start p11-w9-clock: --workload streams --nemesis clock --time-limit 300 --rate 200
+2026-10-30T12:32:23Z done  p11-w9-clock: valid store=/root/src/test/jepsen/store/queen-streams-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T12:26:26.8696596Z log=/root/runs-prio/p11-w9-clock.log
+2026-10-30T12:32:23Z start p11-w9-bridge: --workload streams --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T12:38:09Z done  p11-w9-bridge: valid store=/root/src/test/jepsen/store/queen-streams-bridge_offload=on_lanes=16/2026-10-30T12:32:32.269568366Z log=/root/runs-prio/p11-w9-bridge.log
+2026-10-30T12:38:09Z start p11-w2-kill: --workload queue --nemesis kill --time-limit 300 --rate 200
+2026-10-30T12:43:49Z done  p11-w2-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T12:38:17.383593262Z log=/root/runs-prio/p11-w2-kill.log
+2026-10-30T12:43:49Z start p11-w2-lz-kill: --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-30T12:49:14Z done  p11-w2-lz-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T12:43:57.769018492Z log=/root/runs-prio/p11-w2-lz-kill.log
+2026-10-30T12:49:14Z start p11-w2-slow-lz-kill: --workload queue --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --env QUEEN_RAFT_DURABLE_EVERY_MS=20 --time-limit 300 --rate 200
+2026-10-30T12:54:59Z done  p11-w2-slow-lz-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one_lazyfs_slowfsync=n4,n5:300_offload=on_lanes=16_env=DURABLE_EVERY_MS=20/2026-10-30T12:49:22.758236358Z log=/root/runs-prio/p11-w2-slow-lz-kill.log
+2026-10-30T12:54:59Z start p11-w2-part: --workload queue --nemesis partition --time-limit 300 --rate 200
+2026-10-30T13:00:09Z done  p11-w2-part: valid store=/root/src/test/jepsen/store/queen-queue-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T12:55:08.012064952Z log=/root/runs-prio/p11-w2-part.log
+2026-10-30T13:00:09Z start p11-w2-pause: --workload queue --nemesis pause --time-limit 300 --rate 200
+2026-10-30T13:06:00Z done  p11-w2-pause: valid store=/root/src/test/jepsen/store/queen-queue-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T13:00:17.882580216Z log=/root/runs-prio/p11-w2-pause.log
+2026-10-30T13:06:00Z start p11-w2-leader-deaf: --workload queue --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T13:11:45Z done  p11-w2-leader-deaf: valid store=/root/src/test/jepsen/store/queen-queue-leader-deaf_offload=on_lanes=16/2026-10-30T13:06:08.278845994Z log=/root/runs-prio/p11-w2-leader-deaf.log
+2026-10-30T13:11:45Z start p11-w2-restart: --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T13:17:10Z done  p11-w2-restart: valid store=/root/src/test/jepsen/store/queen-queue-restart_offload=on_lanes=16/2026-10-30T13:11:53.312265957Z log=/root/runs-prio/p11-w2-restart.log
+2026-10-30T13:17:10Z start p11-w2-membership: --workload queue --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T13:23:00Z done  p11-w2-membership: valid store=/root/src/test/jepsen/store/queen-queue-membership_offload=on_lanes=16/2026-10-30T13:17:19.077553143Z log=/root/runs-prio/p11-w2-membership.log
+2026-10-30T13:23:00Z start p11-w2-member-snap: --workload queue --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+2026-10-30T13:28:15Z done  p11-w2-member-snap: valid store=/root/src/test/jepsen/store/queen-queue-kill,membership_t=one,primaries,majority,all_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=5/2026-10-30T13:23:08.882874348Z log=/root/runs-prio/p11-w2-member-snap.log
+2026-10-30T13:28:15Z start p11-w2-clock: --workload queue --nemesis clock --time-limit 300 --rate 200
+2026-10-30T13:28:16Z note  binary swapped to next-release f9c9a37f2 (md5 03df1a5db8cfc30d3015cfa3a3078c57) after 19 tests
+2026-10-30T13:34:06Z done  p11-w2-clock: valid store=/root/src/test/jepsen/store/queen-queue-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T13:28:24.172897239Z log=/root/runs-prio/p11-w2-clock.log
+2026-10-30T13:34:06Z start p11-w2-clock-2: --workload queue --nemesis clock --time-limit 300 --rate 200
+2026-10-30T13:40:01Z done  p11-w2-clock-2: valid store=/root/src/test/jepsen/store/queen-queue-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T13:34:15.949675257Z log=/root/runs-prio/p11-w2-clock-2.log
+2026-10-30T13:40:01Z start p11-w2-clock-3: --workload queue --nemesis clock --time-limit 300 --rate 200
+2026-10-30T13:45:51Z done  p11-w2-clock-3: valid store=/root/src/test/jepsen/store/queen-queue-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T13:40:10.062672281Z log=/root/runs-prio/p11-w2-clock-3.log
+2026-10-30T13:45:51Z start p11-w2-bridge: --workload queue --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T13:51:41Z done  p11-w2-bridge: valid store=/root/src/test/jepsen/store/queen-queue-bridge_offload=on_lanes=16/2026-10-30T13:46:00.365488006Z log=/root/runs-prio/p11-w2-bridge.log
+2026-10-30T13:51:41Z start p11-w3c-kill: --workload claim --nemesis kill --time-limit 300 --rate 100
+2026-10-30T13:57:07Z done  p11-w3c-kill: valid store=/root/src/test/jepsen/store/queen-claim-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T13:51:50.73670359Z log=/root/runs-prio/p11-w3c-kill.log
+2026-10-30T13:57:07Z start p11-w3c-lz-kill: --workload claim --lazyfs --nemesis kill --time-limit 300 --rate 100
+2026-10-30T14:02:42Z done  p11-w3c-lz-kill: valid store=/root/src/test/jepsen/store/queen-claim-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T13:57:16.126590067Z log=/root/runs-prio/p11-w3c-lz-kill.log
+2026-10-30T14:02:42Z start p11-w3c-part: --workload claim --nemesis partition --time-limit 300 --rate 100
+2026-10-30T14:08:12Z done  p11-w3c-part: valid store=/root/src/test/jepsen/store/queen-claim-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T14:02:51.291089138Z log=/root/runs-prio/p11-w3c-part.log
+2026-10-30T14:08:12Z start p11-w3c-pause: --workload claim --nemesis pause --time-limit 300 --rate 100
+2026-10-30T14:13:37Z done  p11-w3c-pause: valid store=/root/src/test/jepsen/store/queen-claim-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T14:08:20.721657804Z log=/root/runs-prio/p11-w3c-pause.log
+2026-10-30T14:13:37Z start p11-w3c-pause-2: --workload claim --nemesis pause --time-limit 300 --rate 100
+2026-10-30T14:19:07Z done  p11-w3c-pause-2: valid store=/root/src/test/jepsen/store/queen-claim-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T14:13:46.2751801Z log=/root/runs-prio/p11-w3c-pause-2.log
+2026-10-30T14:19:07Z start p11-w3c-pause-3: --workload claim --nemesis pause --time-limit 300 --rate 100
+2026-10-30T14:24:22Z done  p11-w3c-pause-3: valid store=/root/src/test/jepsen/store/queen-claim-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T14:19:16.293563393Z log=/root/runs-prio/p11-w3c-pause-3.log
+2026-10-30T14:24:22Z start p11-w3c-leader-deaf: --workload claim --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T14:29:53Z done  p11-w3c-leader-deaf: valid store=/root/src/test/jepsen/store/queen-claim-leader-deaf_offload=on_lanes=16/2026-10-30T14:24:31.681328089Z log=/root/runs-prio/p11-w3c-leader-deaf.log
+2026-10-30T14:29:53Z start p11-w3c-restart: --workload claim --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T14:35:03Z done  p11-w3c-restart: valid store=/root/src/test/jepsen/store/queen-claim-restart_offload=on_lanes=16/2026-10-30T14:30:01.684865142Z log=/root/runs-prio/p11-w3c-restart.log
+2026-10-30T14:35:03Z start p11-w3c-membership: --workload claim --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T14:39:23Z done  p11-w3c-membership: valid store=/root/src/test/jepsen/store/queen-claim-membership_offload=on_lanes=16/2026-10-30T14:35:13.784774696Z log=/root/runs-prio/p11-w3c-membership.log
+2026-10-30T14:39:23Z start p11-w4-lz-kill: --workload elle --lazyfs --nemesis kill --time-limit 300 --rate 100
+2026-10-30T14:44:53Z done  p11-w4-lz-kill: valid store=/root/src/test/jepsen/store/queen-elle-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T14:39:32.195947613Z log=/root/runs-prio/p11-w4-lz-kill.log
+2026-10-30T14:44:53Z start p11-w4-kill: --workload elle --nemesis kill --time-limit 300 --rate 100
+2026-10-30T14:50:43Z done  p11-w4-kill: valid store=/root/src/test/jepsen/store/queen-elle-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T14:45:02.440716579Z log=/root/runs-prio/p11-w4-kill.log
+2026-10-30T14:50:43Z start p11-w4-part: --workload elle --nemesis partition --time-limit 300 --rate 100
+2026-10-30T14:56:34Z done  p11-w4-part: valid store=/root/src/test/jepsen/store/queen-elle-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T14:50:53.301505816Z log=/root/runs-prio/p11-w4-part.log
+2026-10-30T14:56:34Z start p11-w4-pause: --workload elle --nemesis pause --time-limit 300 --rate 100
+2026-10-30T15:02:19Z done  p11-w4-pause: valid store=/root/src/test/jepsen/store/queen-elle-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T14:56:45.192736182Z log=/root/runs-prio/p11-w4-pause.log
+2026-10-30T15:02:19Z start p11-w4-leader-deaf: --workload elle --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T15:08:04Z done  p11-w4-leader-deaf: valid store=/root/src/test/jepsen/store/queen-elle-leader-deaf_offload=on_lanes=16/2026-10-30T15:02:28.022936405Z log=/root/runs-prio/p11-w4-leader-deaf.log
+2026-10-30T15:08:04Z start p11-w4-restart: --workload elle --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T15:13:49Z done  p11-w4-restart: valid store=/root/src/test/jepsen/store/queen-elle-restart_offload=on_lanes=16/2026-10-30T15:08:13.935645674Z log=/root/runs-prio/p11-w4-restart.log
+2026-10-30T15:13:49Z start p11-w4-membership: --workload elle --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T15:19:35Z done  p11-w4-membership: valid store=/root/src/test/jepsen/store/queen-elle-membership_offload=on_lanes=16/2026-10-30T15:13:58.327988442Z log=/root/runs-prio/p11-w4-membership.log
+2026-10-30T15:19:35Z start p11-w4-bridge: --workload elle --nemesis bridge --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T15:25:30Z done  p11-w4-bridge: valid store=/root/src/test/jepsen/store/queen-elle-bridge_offload=on_lanes=16/2026-10-30T15:19:43.854507881Z log=/root/runs-prio/p11-w4-bridge.log
+2026-10-30T15:25:30Z start p11-w1-kill: --workload log --nemesis kill --time-limit 300 --rate 200
+2026-10-30T15:31:10Z done  p11-w1-kill: valid store=/root/src/test/jepsen/store/queen-log-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T15:25:39.078552921Z log=/root/runs-prio/p11-w1-kill.log
+2026-10-30T15:31:10Z start p11-w1-lz-kill: --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+2026-10-30T15:36:50Z done  p11-w1-lz-kill: valid store=/root/src/test/jepsen/store/queen-log-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T15:31:19.253161958Z log=/root/runs-prio/p11-w1-lz-kill.log
+2026-10-30T15:36:50Z start p11-w1-slow-lz-kill: --workload log --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --env QUEEN_RAFT_DURABLE_EVERY_MS=20 --time-limit 300 --rate 200
+2026-10-30T15:42:35Z done  p11-w1-slow-lz-kill: valid store=/root/src/test/jepsen/store/queen-log-kill_t=one_lazyfs_slowfsync=n4,n5:300_offload=on_lanes=16_env=DURABLE_EVERY_MS=20/2026-10-30T15:36:59.675614625Z log=/root/runs-prio/p11-w1-slow-lz-kill.log
+2026-10-30T15:42:35Z start p11-w1-part: --workload log --nemesis partition --time-limit 300 --rate 200
+2026-10-30T15:49:36Z done  p11-w1-part: valid store=/root/src/test/jepsen/store/queen-log-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T15:42:45.229596049Z log=/root/runs-prio/p11-w1-part.log
+2026-10-30T15:49:36Z start p11-w1-pause: --workload log --nemesis pause --time-limit 300 --rate 200
+2026-10-30T15:56:36Z done  p11-w1-pause: valid store=/root/src/test/jepsen/store/queen-log-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T15:49:45.285307747Z log=/root/runs-prio/p11-w1-pause.log
+2026-10-30T15:56:36Z start p11-w1-leader-deaf: --workload log --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T16:02:16Z done  p11-w1-leader-deaf: valid store=/root/src/test/jepsen/store/queen-log-leader-deaf_offload=on_lanes=16/2026-10-30T15:56:45.145669655Z log=/root/runs-prio/p11-w1-leader-deaf.log
+2026-10-30T16:02:16Z start p11-w1-restart: --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T16:07:56Z done  p11-w1-restart: valid store=/root/src/test/jepsen/store/queen-log-restart_offload=on_lanes=16/2026-10-30T16:02:25.033120055Z log=/root/runs-prio/p11-w1-restart.log
+2026-10-30T16:07:56Z start p11-w1-membership: --workload log --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T16:13:37Z done  p11-w1-membership: valid store=/root/src/test/jepsen/store/queen-log-membership_offload=on_lanes=16/2026-10-30T16:08:05.624315195Z log=/root/runs-prio/p11-w1-membership.log
+2026-10-30T16:13:37Z start p11-w1-member-kill: --workload log --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T16:19:52Z done  p11-w1-member-kill: valid store=/root/src/test/jepsen/store/queen-log-kill,membership_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T16:13:45.462431391Z log=/root/runs-prio/p11-w1-member-kill.log
+2026-10-30T16:19:52Z start p11-w1-member-lz-kill: --workload log --lazyfs --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T16:25:42Z done  p11-w1-member-lz-kill: valid store=/root/src/test/jepsen/store/queen-log-kill,membership_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T16:20:00.738438493Z log=/root/runs-prio/p11-w1-member-lz-kill.log
+2026-10-30T16:25:42Z start p11-w1-member-snap: --workload log --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+2026-10-30T16:31:17Z done  p11-w1-member-snap: valid store=/root/src/test/jepsen/store/queen-log-kill,membership_t=one,primaries,majority,all_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=5/2026-10-30T16:25:51.31742152Z log=/root/runs-prio/p11-w1-member-snap.log
+2026-10-30T16:31:17Z start p11-w1-corrupt-store: --workload log --nemesis corrupt --corrupt-classes store --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 10
+2026-10-30T16:37:08Z done  p11-w1-corrupt-store: valid store=/root/src/test/jepsen/store/queen-log-corrupt_c=store_mix_offload=on_lanes=16/2026-10-30T16:31:26.840177256Z log=/root/runs-prio/p11-w1-corrupt-store.log
+2026-10-30T16:37:08Z start p11-w1-corrupt-all: --workload log --nemesis corrupt --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 10
+2026-10-30T16:42:53Z done  p11-w1-corrupt-all: valid store=/root/src/test/jepsen/store/queen-log-corrupt_c=qlog,store,state_mix_offload=on_lanes=16/2026-10-30T16:37:17.085571428Z log=/root/runs-prio/p11-w1-corrupt-all.log
+2026-10-30T16:42:53Z start p11-w1-clock: --workload log --nemesis clock --time-limit 300 --rate 200
+2026-10-30T16:48:38Z done  p11-w1-clock: valid store=/root/src/test/jepsen/store/queen-log-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T16:43:02.658598784Z log=/root/runs-prio/p11-w1-clock.log
+2026-10-30T16:48:38Z start p11-w1-bridge: --workload log --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T16:54:23Z done  p11-w1-bridge: valid store=/root/src/test/jepsen/store/queen-log-bridge_offload=on_lanes=16/2026-10-30T16:48:47.415598464Z log=/root/runs-prio/p11-w1-bridge.log
+2026-10-30T16:54:23Z start p11-w6-kill: --workload dedup --nemesis kill --time-limit 300 --rate 200
+2026-10-30T16:59:53Z done  p11-w6-kill: valid store=/root/src/test/jepsen/store/queen-dedup-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T16:54:32.707420144Z log=/root/runs-prio/p11-w6-kill.log
+2026-10-30T16:59:53Z start p11-w6-lz-kill: --workload dedup --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-30T17:05:34Z done  p11-w6-lz-kill: valid store=/root/src/test/jepsen/store/queen-dedup-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T17:00:03.017015977Z log=/root/runs-prio/p11-w6-lz-kill.log
+2026-10-30T17:05:34Z start p11-w6-part: --workload dedup --nemesis partition --time-limit 300 --rate 200
+2026-10-30T17:11:14Z done  p11-w6-part: valid store=/root/src/test/jepsen/store/queen-dedup-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T17:05:43.952395309Z log=/root/runs-prio/p11-w6-part.log
+2026-10-30T17:11:14Z start p11-w6-pause: --workload dedup --nemesis pause --time-limit 300 --rate 200
+2026-10-30T17:16:34Z done  p11-w6-pause: valid store=/root/src/test/jepsen/store/queen-dedup-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T17:11:24.036680789Z log=/root/runs-prio/p11-w6-pause.log
+2026-10-30T17:16:34Z start p11-w6-leader-deaf: --workload dedup --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T17:22:09Z done  p11-w6-leader-deaf: valid store=/root/src/test/jepsen/store/queen-dedup-leader-deaf_offload=on_lanes=16/2026-10-30T17:16:43.314467469Z log=/root/runs-prio/p11-w6-leader-deaf.log
+2026-10-30T17:22:09Z start p11-w6-restart: --workload dedup --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T17:27:24Z done  p11-w6-restart: valid store=/root/src/test/jepsen/store/queen-dedup-restart_offload=on_lanes=16/2026-10-30T17:22:19.097838145Z log=/root/runs-prio/p11-w6-restart.log
+2026-10-30T17:27:25Z start p11-w6-membership: --workload dedup --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T17:33:00Z done  p11-w6-membership: valid store=/root/src/test/jepsen/store/queen-dedup-membership_offload=on_lanes=16/2026-10-30T17:27:34.482314558Z log=/root/runs-prio/p11-w6-membership.log
+2026-10-30T17:33:00Z start p11-w6-bridge: --workload dedup --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T17:38:35Z done  p11-w6-bridge: valid store=/root/src/test/jepsen/store/queen-dedup-bridge_offload=on_lanes=16/2026-10-30T17:33:09.243277126Z log=/root/runs-prio/p11-w6-bridge.log
+2026-10-30T17:38:35Z start p11-w5-kill: --workload pipeline --nemesis kill --time-limit 300 --rate 200
+2026-10-30T17:44:20Z done  p11-w5-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T17:38:44.398622628Z log=/root/runs-prio/p11-w5-kill.log
+2026-10-30T17:44:20Z start p11-w5-lz-kill: --workload pipeline --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-30T17:50:00Z done  p11-w5-lz-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T17:44:29.759920932Z log=/root/runs-prio/p11-w5-lz-kill.log
+2026-10-30T17:50:00Z start p11-w5-slow-lz-kill: --workload pipeline --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --env QUEEN_RAFT_DURABLE_EVERY_MS=20 --time-limit 300 --rate 200
+2026-10-30T17:55:51Z done  p11-w5-slow-lz-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill_t=one_lazyfs_slowfsync=n4,n5:300_offload=on_lanes=16_env=DURABLE_EVERY_MS=20/2026-10-30T17:50:10.172806329Z log=/root/runs-prio/p11-w5-slow-lz-kill.log
+2026-10-30T17:55:51Z start p11-w5-part: --workload pipeline --nemesis partition --time-limit 300 --rate 200
+2026-10-30T18:01:36Z done  p11-w5-part: valid store=/root/src/test/jepsen/store/queen-pipeline-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T17:55:59.94554941Z log=/root/runs-prio/p11-w5-part.log
+2026-10-30T18:01:36Z start p11-w5-pause: --workload pipeline --nemesis pause --time-limit 300 --rate 200
+2026-10-30T18:07:16Z done  p11-w5-pause: valid store=/root/src/test/jepsen/store/queen-pipeline-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T18:01:45.296138225Z log=/root/runs-prio/p11-w5-pause.log
+2026-10-30T18:07:16Z start p11-w5-leader-deaf: --workload pipeline --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T18:12:52Z done  p11-w5-leader-deaf: valid store=/root/src/test/jepsen/store/queen-pipeline-leader-deaf_offload=on_lanes=16/2026-10-30T18:07:25.641407414Z log=/root/runs-prio/p11-w5-leader-deaf.log
+2026-10-30T18:12:52Z start p11-w5-restart: --workload pipeline --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T18:18:27Z done  p11-w5-restart: valid store=/root/src/test/jepsen/store/queen-pipeline-restart_offload=on_lanes=16/2026-10-30T18:13:00.788569681Z log=/root/runs-prio/p11-w5-restart.log
+2026-10-30T18:18:27Z start p11-w5-membership: --workload pipeline --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T18:24:22Z done  p11-w5-membership: valid store=/root/src/test/jepsen/store/queen-pipeline-membership_offload=on_lanes=16/2026-10-30T18:18:36.343495302Z log=/root/runs-prio/p11-w5-membership.log
+2026-10-30T18:24:22Z start p11-w5-member-kill: --workload pipeline --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T18:30:52Z done  p11-w5-member-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill,membership_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T18:24:31.083175636Z log=/root/runs-prio/p11-w5-member-kill.log
+2026-10-30T18:30:52Z start p11-w5-member-snap: --workload pipeline --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+2026-10-30T18:36:43Z done  p11-w5-member-snap: valid store=/root/src/test/jepsen/store/queen-pipeline-kill,membership_t=one,primaries,majority,all_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=5/2026-10-30T18:31:01.061186353Z log=/root/runs-prio/p11-w5-member-snap.log
+2026-10-30T18:36:43Z start p11-w5-corrupt-store: --workload pipeline --nemesis corrupt --corrupt-classes store --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 10
+2026-10-30T18:42:28Z done  p11-w5-corrupt-store: valid store=/root/src/test/jepsen/store/queen-pipeline-corrupt_c=store_mix_offload=on_lanes=16/2026-10-30T18:36:51.724491947Z log=/root/runs-prio/p11-w5-corrupt-store.log
+2026-10-30T18:42:28Z start p11-w5-clock: --workload pipeline --nemesis clock --time-limit 300 --rate 200
+2026-10-30T18:48:13Z done  p11-w5-clock: valid store=/root/src/test/jepsen/store/queen-pipeline-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T18:42:37.16678633Z log=/root/runs-prio/p11-w5-clock.log
+2026-10-30T18:48:13Z start p11-w5-clock-2: --workload pipeline --nemesis clock --time-limit 300 --rate 200
+2026-10-30T18:54:24Z done  p11-w5-clock-2: valid store=/root/src/test/jepsen/store/queen-pipeline-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T18:48:22.758459203Z log=/root/runs-prio/p11-w5-clock-2.log
+2026-10-30T18:54:24Z start p11-w5-bridge: --workload pipeline --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T18:59:29Z done  p11-w5-bridge: valid store=/root/src/test/jepsen/store/queen-pipeline-bridge_offload=on_lanes=16/2026-10-30T18:54:33.20253205Z log=/root/runs-prio/p11-w5-bridge.log
+2026-10-30T18:59:29Z start p11-w8-kill: --workload retention --nemesis kill --time-limit 300 --rate 200
+2026-10-30T19:05:24Z done  p11-w8-kill: valid store=/root/src/test/jepsen/store/queen-retention-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T18:59:38.581372602Z log=/root/runs-prio/p11-w8-kill.log
+2026-10-30T19:05:24Z start p11-w8-lz-kill: --workload retention --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-30T19:11:19Z done  p11-w8-lz-kill: valid store=/root/src/test/jepsen/store/queen-retention-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T19:05:36.678650138Z log=/root/runs-prio/p11-w8-lz-kill.log
+2026-10-30T19:11:19Z start p11-w8-part: --workload retention --nemesis partition --time-limit 300 --rate 200
+2026-10-30T19:17:15Z done  p11-w8-part: valid store=/root/src/test/jepsen/store/queen-retention-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T19:11:29.013124672Z log=/root/runs-prio/p11-w8-part.log
+2026-10-30T19:17:15Z start p11-w8-pause: --workload retention --nemesis pause --time-limit 300 --rate 200
+2026-10-30T19:23:10Z done  p11-w8-pause: valid store=/root/src/test/jepsen/store/queen-retention-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T19:17:24.113886858Z log=/root/runs-prio/p11-w8-pause.log
+2026-10-30T19:23:10Z start p11-w8-leader-deaf: --workload retention --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T19:28:55Z done  p11-w8-leader-deaf: valid store=/root/src/test/jepsen/store/queen-retention-leader-deaf_offload=on_lanes=16/2026-10-30T19:23:18.863929648Z log=/root/runs-prio/p11-w8-leader-deaf.log
+2026-10-30T19:28:55Z start p11-w8-restart: --workload retention --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T19:34:55Z done  p11-w8-restart: valid store=/root/src/test/jepsen/store/queen-retention-restart_offload=on_lanes=16/2026-10-30T19:29:04.402380956Z log=/root/runs-prio/p11-w8-restart.log
+2026-10-30T19:34:55Z start p11-w8-membership: --workload retention --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T19:40:50Z done  p11-w8-membership: valid store=/root/src/test/jepsen/store/queen-retention-membership_offload=on_lanes=16/2026-10-30T19:35:04.344940412Z log=/root/runs-prio/p11-w8-membership.log
+2026-10-30T19:40:50Z start p11-w8-clock: --workload retention --nemesis clock --time-limit 300 --rate 200
+2026-10-30T19:46:56Z done  p11-w8-clock: valid store=/root/src/test/jepsen/store/queen-retention-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T19:40:59.795470353Z log=/root/runs-prio/p11-w8-clock.log
+2026-10-30T19:46:56Z start p11-w8-bridge: --workload retention --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T19:53:31Z done  p11-w8-bridge: valid store=/root/src/test/jepsen/store/queen-retention-bridge_offload=on_lanes=16/2026-10-30T19:47:04.6204128Z log=/root/runs-prio/p11-w8-bridge.log
+2026-10-30T19:53:31Z start p11-w7-kill: --workload dlq --nemesis kill --time-limit 300 --rate 200
+2026-10-30T19:59:16Z done  p11-w7-kill: valid store=/root/src/test/jepsen/store/queen-dlq-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T19:53:40.330459108Z log=/root/runs-prio/p11-w7-kill.log
+2026-10-30T19:59:16Z start p11-w7-lz-kill: --workload dlq --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-30T20:05:01Z done  p11-w7-lz-kill: valid store=/root/src/test/jepsen/store/queen-dlq-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T19:59:25.354123977Z log=/root/runs-prio/p11-w7-lz-kill.log
+2026-10-30T20:05:01Z start p11-w7-part: --workload dlq --nemesis partition --time-limit 300 --rate 200
+2026-10-30T20:10:51Z done  p11-w7-part: valid store=/root/src/test/jepsen/store/queen-dlq-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T20:05:10.631180479Z log=/root/runs-prio/p11-w7-part.log
+2026-10-30T20:10:51Z start p11-w7-pause: --workload dlq --nemesis pause --time-limit 300 --rate 200
+2026-10-30T20:16:37Z done  p11-w7-pause: valid store=/root/src/test/jepsen/store/queen-dlq-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T20:11:00.7530253Z log=/root/runs-prio/p11-w7-pause.log
+2026-10-30T20:16:37Z start p11-w7-leader-deaf: --workload dlq --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T20:22:12Z done  p11-w7-leader-deaf: valid store=/root/src/test/jepsen/store/queen-dlq-leader-deaf_offload=on_lanes=16/2026-10-30T20:16:45.942413217Z log=/root/runs-prio/p11-w7-leader-deaf.log
+2026-10-30T20:22:12Z start p11-w7-restart: --workload dlq --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T20:27:52Z done  p11-w7-restart: valid store=/root/src/test/jepsen/store/queen-dlq-restart_offload=on_lanes=16/2026-10-30T20:22:20.808313996Z log=/root/runs-prio/p11-w7-restart.log
+2026-10-30T20:27:52Z start p11-w7-membership: --workload dlq --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T20:33:37Z done  p11-w7-membership: valid store=/root/src/test/jepsen/store/queen-dlq-membership_offload=on_lanes=16/2026-10-30T20:28:01.09446504Z log=/root/runs-prio/p11-w7-membership.log
+2026-10-30T20:33:37Z start p11-w7-clock: --workload dlq --nemesis clock --time-limit 300 --rate 200
+2026-10-30T20:39:48Z done  p11-w7-clock: valid store=/root/src/test/jepsen/store/queen-dlq-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T20:33:46.34852959Z log=/root/runs-prio/p11-w7-clock.log
+2026-10-30T20:39:48Z start p11-w7-bridge: --workload dlq --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T20:45:28Z done  p11-w7-bridge: valid store=/root/src/test/jepsen/store/queen-dlq-bridge_offload=on_lanes=16/2026-10-30T20:39:56.505260292Z log=/root/runs-prio/p11-w7-bridge.log
+2026-10-30T20:45:28Z start p11-w10-kill: --workload timers --nemesis kill --time-limit 300 --rate 200
+2026-10-30T20:51:08Z done  p11-w10-kill: valid store=/root/src/test/jepsen/store/queen-timers-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T20:45:36.415806664Z log=/root/runs-prio/p11-w10-kill.log
+2026-10-30T20:51:08Z start p11-w10-lz-kill: --workload timers --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-30T20:57:03Z done  p11-w10-lz-kill: valid store=/root/src/test/jepsen/store/queen-timers-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T20:51:16.974171492Z log=/root/runs-prio/p11-w10-lz-kill.log
+2026-10-30T20:57:03Z start p11-w10-part: --workload timers --nemesis partition --time-limit 300 --rate 200
+2026-10-30T21:02:28Z done  p11-w10-part: valid store=/root/src/test/jepsen/store/queen-timers-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T20:57:12.512002895Z log=/root/runs-prio/p11-w10-part.log
+2026-10-30T21:02:28Z start p11-w10-pause: --workload timers --nemesis pause --time-limit 300 --rate 200
+2026-10-30T21:08:09Z done  p11-w10-pause: valid store=/root/src/test/jepsen/store/queen-timers-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T21:02:37.658659998Z log=/root/runs-prio/p11-w10-pause.log
+2026-10-30T21:08:09Z start p11-w10-leader-deaf: --workload timers --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T21:13:24Z done  p11-w10-leader-deaf: valid store=/root/src/test/jepsen/store/queen-timers-leader-deaf_offload=on_lanes=16/2026-10-30T21:08:18.115780345Z log=/root/runs-prio/p11-w10-leader-deaf.log
+2026-10-30T21:13:24Z start p11-w10-restart: --workload timers --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T21:18:44Z done  p11-w10-restart: valid store=/root/src/test/jepsen/store/queen-timers-restart_offload=on_lanes=16/2026-10-30T21:13:32.790657124Z log=/root/runs-prio/p11-w10-restart.log
+2026-10-30T21:18:44Z start p11-w10-membership: --workload timers --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T21:24:29Z done  p11-w10-membership: valid store=/root/src/test/jepsen/store/queen-timers-membership_offload=on_lanes=16/2026-10-30T21:18:52.871822339Z log=/root/runs-prio/p11-w10-membership.log
+2026-10-30T21:24:29Z start p11-w10-clock: --workload timers --nemesis clock --time-limit 300 --rate 200
+2026-10-30T21:30:14Z done  p11-w10-clock: valid store=/root/src/test/jepsen/store/queen-timers-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T21:24:38.485186382Z log=/root/runs-prio/p11-w10-clock.log
+2026-10-30T21:30:14Z start p11-w10-bridge: --workload timers --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-30T21:34:45Z done  p11-w10-bridge: valid store=/root/src/test/jepsen/store/queen-timers-bridge_offload=on_lanes=16/2026-10-30T21:30:23.556179707Z log=/root/runs-prio/p11-w10-bridge.log
+2026-10-30T21:34:45Z start p11-w3-kill: --workload register --nemesis kill --time-limit 300 --rate 100
+2026-10-30T21:40:20Z done  p11-w3-kill: valid store=/root/src/test/jepsen/store/queen-register-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T21:34:53.524315479Z log=/root/runs-prio/p11-w3-kill.log
+2026-10-30T21:40:20Z start p11-w3-lz-kill: --workload register --lazyfs --nemesis kill --time-limit 300 --rate 100
+2026-10-30T21:46:00Z done  p11-w3-lz-kill: valid store=/root/src/test/jepsen/store/queen-register-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T21:40:28.637213738Z log=/root/runs-prio/p11-w3-lz-kill.log
+2026-10-30T21:46:00Z start p11-w3-kvdefault-kill: --workload register --no-kv-lift --kv-route leader --nemesis kill --time-limit 300 --rate 400
+2026-10-30T21:51:35Z done  p11-w3-kvdefault-kill: valid store=/root/src/test/jepsen/store/queen-register-kill_t=one,primaries,majority,all_kv-leader_kv-default-limits_offload=on_lanes=16/2026-10-30T21:46:08.857258804Z log=/root/runs-prio/p11-w3-kvdefault-kill.log
+2026-10-30T21:51:35Z start p11-w3-lead-kill: --workload register --kv-route leader --nemesis kill --time-limit 300 --rate 100
+2026-10-30T21:57:20Z done  p11-w3-lead-kill: valid store=/root/src/test/jepsen/store/queen-register-kill_t=one,primaries,majority,all_kv-leader_offload=on_lanes=16/2026-10-30T21:51:44.091631208Z log=/root/runs-prio/p11-w3-lead-kill.log
+2026-10-30T21:57:20Z start p11-w3-part: --workload register --nemesis partition --time-limit 300 --rate 100
+2026-10-30T22:03:06Z done  p11-w3-part: valid store=/root/src/test/jepsen/store/queen-register-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T21:57:29.933414294Z log=/root/runs-prio/p11-w3-part.log
+2026-10-30T22:03:06Z start p11-w3-lead-part: --workload register --kv-route leader --nemesis partition --time-limit 300 --rate 100
+2026-10-30T22:08:46Z done  p11-w3-lead-part: valid store=/root/src/test/jepsen/store/queen-register-partition_p=one,primaries,majority,majorities-ring_kv-leader_offload=on_lanes=16/2026-10-30T22:03:14.515558378Z log=/root/runs-prio/p11-w3-lead-part.log
+2026-10-30T22:08:46Z start p11-w3-pause: --workload register --nemesis pause --time-limit 300 --rate 100
+2026-10-30T22:14:21Z done  p11-w3-pause: valid store=/root/src/test/jepsen/store/queen-register-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T22:08:54.846604379Z log=/root/runs-prio/p11-w3-pause.log
+2026-10-30T22:14:21Z start p11-w3-lead-pause: --workload register --kv-route leader --nemesis pause --time-limit 300 --rate 100
+2026-10-30T22:19:46Z done  p11-w3-lead-pause: valid store=/root/src/test/jepsen/store/queen-register-pause_t=one,primaries,majority,all_kv-leader_offload=on_lanes=16/2026-10-30T22:14:30.053147057Z log=/root/runs-prio/p11-w3-lead-pause.log
+2026-10-30T22:19:46Z start p11-w3-leader-deaf: --workload register --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T22:24:51Z done  p11-w3-leader-deaf: valid store=/root/src/test/jepsen/store/queen-register-leader-deaf_offload=on_lanes=16/2026-10-30T22:19:55.315504077Z log=/root/runs-prio/p11-w3-leader-deaf.log
+2026-10-30T22:24:51Z start p11-w3-lead-deaf: --workload register --kv-route leader --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T22:29:52Z done  p11-w3-lead-deaf: valid store=/root/src/test/jepsen/store/queen-register-leader-deaf_kv-leader_offload=on_lanes=16/2026-10-30T22:25:00.199614229Z log=/root/runs-prio/p11-w3-lead-deaf.log
+2026-10-30T22:29:52Z start p11-w3-restart: --workload register --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T22:35:22Z done  p11-w3-restart: valid store=/root/src/test/jepsen/store/queen-register-restart_offload=on_lanes=16/2026-10-30T22:30:00.425548706Z log=/root/runs-prio/p11-w3-restart.log
+2026-10-30T22:35:22Z start p11-w3-membership: --workload register --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T22:41:32Z done  p11-w3-membership: valid store=/root/src/test/jepsen/store/queen-register-membership_offload=on_lanes=16/2026-10-30T22:35:30.676239943Z log=/root/runs-prio/p11-w3-membership.log
+2026-10-30T22:41:32Z start p11-w3-clock: --workload register --nemesis clock --time-limit 300 --rate 100
+2026-10-30T22:47:12Z done  p11-w3-clock: valid store=/root/src/test/jepsen/store/queen-register-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T22:41:40.615904492Z log=/root/runs-prio/p11-w3-clock.log
+2026-10-30T22:47:12Z start p11-w3-bridge: --workload register --nemesis bridge --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T22:52:52Z done  p11-w3-bridge: valid store=/root/src/test/jepsen/store/queen-register-bridge_offload=on_lanes=16/2026-10-30T22:47:20.947722438Z log=/root/runs-prio/p11-w3-bridge.log
+2026-10-30T22:52:52Z start p11-w3b-kill: --workload counter --nemesis kill --time-limit 300 --rate 100
+2026-10-30T22:58:22Z done  p11-w3b-kill: valid store=/root/src/test/jepsen/store/queen-counter-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T22:53:01.151145966Z log=/root/runs-prio/p11-w3b-kill.log
+2026-10-30T22:58:23Z start p11-w3b-lz-kill: --workload counter --lazyfs --nemesis kill --time-limit 300 --rate 100
+2026-10-30T23:03:58Z done  p11-w3b-lz-kill: valid store=/root/src/test/jepsen/store/queen-counter-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-30T22:58:31.431288572Z log=/root/runs-prio/p11-w3b-lz-kill.log
+2026-10-30T23:03:58Z start p11-w3b-part: --workload counter --nemesis partition --time-limit 300 --rate 100
+2026-10-30T23:09:33Z done  p11-w3b-part: valid store=/root/src/test/jepsen/store/queen-counter-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-30T23:04:06.801561769Z log=/root/runs-prio/p11-w3b-part.log
+2026-10-30T23:09:33Z start p11-w3b-pause: --workload counter --nemesis pause --time-limit 300 --rate 100
+2026-10-30T23:15:08Z done  p11-w3b-pause: valid store=/root/src/test/jepsen/store/queen-counter-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-30T23:09:41.765644611Z log=/root/runs-prio/p11-w3b-pause.log
+2026-10-30T23:15:08Z start p11-w3b-leader-deaf: --workload counter --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T23:20:18Z done  p11-w3b-leader-deaf: valid store=/root/src/test/jepsen/store/queen-counter-leader-deaf_offload=on_lanes=16/2026-10-30T23:15:17.413174293Z log=/root/runs-prio/p11-w3b-leader-deaf.log
+2026-10-30T23:20:18Z start p11-w3b-restart: --workload counter --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T23:25:53Z done  p11-w3b-restart: valid store=/root/src/test/jepsen/store/queen-counter-restart_offload=on_lanes=16/2026-10-30T23:20:27.499542246Z log=/root/runs-prio/p11-w3b-restart.log
+2026-10-30T23:25:53Z start p11-w3b-membership: --workload counter --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-30T23:31:29Z done  p11-w3b-membership: valid store=/root/src/test/jepsen/store/queen-counter-membership_offload=on_lanes=16/2026-10-30T23:26:02.318480685Z log=/root/runs-prio/p11-w3b-membership.log
+2026-10-30T23:31:29Z start b-w1-kill: --workload log --batch-sends 8 --nemesis kill --time-limit 300 --rate 200
+2026-10-30T23:37:19Z done  b-w1-kill: valid store=/root/src/test/jepsen/store/queen-log-kill_t=one,primaries,majority,all_batch=8_offload=on_lanes=16/2026-10-30T23:31:37.598069177Z log=/root/runs-prio/b-w1-kill.log
+2026-10-30T23:37:19Z start b-w1-part: --workload log --batch-sends 8 --nemesis partition --time-limit 300 --rate 200
+2026-10-30T23:43:24Z done  b-w1-part: valid store=/root/src/test/jepsen/store/queen-log-partition_p=one,primaries,majority,majorities-ring_batch=8_offload=on_lanes=16/2026-10-30T23:37:27.411776153Z log=/root/runs-prio/b-w1-part.log
+2026-10-30T23:43:24Z start b-w1-pause: --workload log --batch-sends 8 --nemesis pause --time-limit 300 --rate 200
+2026-10-30T23:52:34Z done  b-w1-pause: valid store=/root/src/test/jepsen/store/queen-log-pause_t=one,primaries,majority,all_batch=8_offload=on_lanes=16/2026-10-30T23:43:33.120115887Z log=/root/runs-prio/b-w1-pause.log
+2026-10-30T23:52:34Z start b-w1-lz-kill: --workload log --batch-sends 8 --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+2026-10-30T23:58:30Z done  b-w1-lz-kill: valid store=/root/src/test/jepsen/store/queen-log-kill_t=one,primaries,majority,all_batch=8_lazyfs_offload=on_lanes=16/2026-10-30T23:52:43.080719622Z log=/root/runs-prio/b-w1-lz-kill.log
+2026-10-30T23:58:30Z start b-w1-leader-deaf: --workload log --batch-sends 8 --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T00:04:35Z done  b-w1-leader-deaf: valid store=/root/src/test/jepsen/store/queen-log-leader-deaf_batch=8_offload=on_lanes=16/2026-10-30T23:58:38.305740504Z log=/root/runs-prio/b-w1-leader-deaf.log
+2026-10-31T00:04:35Z start b-w1-restart: --workload log --batch-sends 8 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T00:10:50Z done  b-w1-restart: valid store=/root/src/test/jepsen/store/queen-log-restart_batch=8_offload=on_lanes=16/2026-10-31T00:04:49.060039179Z log=/root/runs-prio/b-w1-restart.log
+2026-10-31T00:10:50Z start b-w1-member-snap: --workload log --batch-sends 8 --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+2026-10-31T00:16:45Z done  b-w1-member-snap: valid store=/root/src/test/jepsen/store/queen-log-kill,membership_t=one,primaries,majority,all_batch=8_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=5/2026-10-31T00:10:59.239534644Z log=/root/runs-prio/b-w1-member-snap.log
+2026-10-31T00:16:45Z start b-w1-clock: --workload log --batch-sends 8 --nemesis clock --time-limit 300 --rate 200
+2026-10-31T00:22:56Z done  b-w1-clock: valid store=/root/src/test/jepsen/store/queen-log-clock_t=one,primaries,majority,all_batch=8_offload=on_lanes=16/2026-10-31T00:16:54.544957061Z log=/root/runs-prio/b-w1-clock.log
+2026-10-31T00:22:56Z start b-w1-rw-kill: --workload log --batch-sends 8 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T00:28:51Z done  b-w1-rw-kill: valid store=/root/src/test/jepsen/store/queen-log-kill_t=one,primaries,majority,all_batch=8_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T00:23:04.593285963Z log=/root/runs-prio/b-w1-rw-kill.log
+2026-10-31T00:28:51Z start b-w6-kill: --workload dedup --batch-sends 6 --nemesis kill --time-limit 300 --rate 200
+2026-10-31T00:34:26Z done  b-w6-kill: valid store=/root/src/test/jepsen/store/queen-dedup-kill_t=one,primaries,majority,all_batch=6_offload=on_lanes=16/2026-10-31T00:28:59.532600046Z log=/root/runs-prio/b-w6-kill.log
+2026-10-31T00:34:26Z start b-w6-part: --workload dedup --batch-sends 6 --nemesis partition --time-limit 300 --rate 200
+2026-10-31T00:40:06Z done  b-w6-part: valid store=/root/src/test/jepsen/store/queen-dedup-partition_p=one,primaries,majority,majorities-ring_batch=6_offload=on_lanes=16/2026-10-31T00:34:35.70032786Z log=/root/runs-prio/b-w6-part.log
+2026-10-31T00:40:06Z start b-w6-restart: --workload dedup --batch-sends 6 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T00:45:37Z done  b-w6-restart: valid store=/root/src/test/jepsen/store/queen-dedup-restart_batch=6_offload=on_lanes=16/2026-10-31T00:40:15.03254088Z log=/root/runs-prio/b-w6-restart.log
+2026-10-31T00:45:37Z start b-w6-lz-kill: --workload dedup --batch-sends 6 --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+2026-10-31T00:51:12Z done  b-w6-lz-kill: valid store=/root/src/test/jepsen/store/queen-dedup-kill_t=one,primaries,majority,all_batch=6_lazyfs_offload=on_lanes=16/2026-10-31T00:45:44.811504977Z log=/root/runs-prio/b-w6-lz-kill.log
+2026-10-31T00:51:12Z start w11-lock-smoke: --workload locks --nemesis none --time-limit 120 --rate 200
+2026-10-31T00:53:52Z done  w11-lock-smoke: valid store=/root/src/test/jepsen/store/queen-locks-none_offload=on_lanes=16/2026-10-31T00:51:28.459946331Z log=/root/runs-prio/w11-lock-smoke.log
+2026-10-31T00:53:52Z start w11-sem-smoke: --workload semaphore --nemesis none --time-limit 120 --rate 200
+2026-10-31T00:56:27Z done  w11-sem-smoke: valid store=/root/src/test/jepsen/store/queen-semaphore-none_offload=on_lanes=16/2026-10-31T00:54:01.856225208Z log=/root/runs-prio/w11-sem-smoke.log
+2026-10-31T00:56:27Z start w11-lock-kill: --workload locks --nemesis kill --time-limit 300 --rate 200
+2026-10-31T01:01:52Z done  w11-lock-kill: valid store=/root/src/test/jepsen/store/queen-locks-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T00:56:35.835882425Z log=/root/runs-prio/w11-lock-kill.log
+2026-10-31T01:01:52Z start w11-lock-part: --workload locks --nemesis partition --time-limit 300 --rate 200
+2026-10-31T01:07:23Z done  w11-lock-part: valid store=/root/src/test/jepsen/store/queen-locks-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-31T01:02:01.120712194Z log=/root/runs-prio/w11-lock-part.log
+2026-10-31T01:07:23Z start w11-lock-pause: --workload locks --nemesis pause --time-limit 300 --rate 200
+2026-10-31T01:12:48Z done  w11-lock-pause: valid store=/root/src/test/jepsen/store/queen-locks-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T01:07:31.394562285Z log=/root/runs-prio/w11-lock-pause.log
+2026-10-31T01:12:48Z start w11-lock-restart: --workload locks --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T01:18:23Z done  w11-lock-restart: valid store=/root/src/test/jepsen/store/queen-locks-restart_offload=on_lanes=16/2026-10-31T01:12:56.55735232Z log=/root/runs-prio/w11-lock-restart.log
+2026-10-31T01:18:23Z start w11-lock-leader-deaf: --workload locks --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T01:23:38Z done  w11-lock-leader-deaf: valid store=/root/src/test/jepsen/store/queen-locks-leader-deaf_offload=on_lanes=16/2026-10-31T01:18:31.7016814Z log=/root/runs-prio/w11-lock-leader-deaf.log
+2026-10-31T01:23:38Z start w11-lock-bridge: --workload locks --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T01:29:13Z done  w11-lock-bridge: valid store=/root/src/test/jepsen/store/queen-locks-bridge_offload=on_lanes=16/2026-10-31T01:23:47.022530149Z log=/root/runs-prio/w11-lock-bridge.log
+2026-10-31T01:29:13Z start w11-lock-lz-kill: --workload locks --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-31T01:34:29Z done  w11-lock-lz-kill: valid store=/root/src/test/jepsen/store/queen-locks-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-31T01:29:22.023180796Z log=/root/runs-prio/w11-lock-lz-kill.log
+2026-10-31T01:34:29Z start w11-lock-membership: --workload locks --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T01:40:04Z done  w11-lock-membership: valid store=/root/src/test/jepsen/store/queen-locks-membership_offload=on_lanes=16/2026-10-31T01:34:37.421796736Z log=/root/runs-prio/w11-lock-membership.log
+2026-10-31T01:40:04Z start w11-lock-clock: --workload locks --nemesis clock --time-limit 300 --rate 200
+2026-10-31T01:45:49Z done  w11-lock-clock: valid store=/root/src/test/jepsen/store/queen-locks-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T01:40:12.527141382Z log=/root/runs-prio/w11-lock-clock.log
+2026-10-31T01:45:49Z start w11-lock-many-kill: --workload locks --w11-locks 12 --nemesis kill --time-limit 300 --rate 400
+2026-10-31T01:51:29Z done  w11-lock-many-kill: valid store=/root/src/test/jepsen/store/queen-locks-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T01:45:58.008060533Z log=/root/runs-prio/w11-lock-many-kill.log
+2026-10-31T01:51:29Z start w11-sem-kill: --workload semaphore --nemesis kill --time-limit 300 --rate 200
+2026-10-31T01:57:05Z done  w11-sem-kill: valid store=/root/src/test/jepsen/store/queen-semaphore-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T01:51:38.204102507Z log=/root/runs-prio/w11-sem-kill.log
+2026-10-31T01:57:05Z start w11-sem-part: --workload semaphore --nemesis partition --time-limit 300 --rate 200
+2026-10-31T02:02:30Z done  w11-sem-part: valid store=/root/src/test/jepsen/store/queen-semaphore-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-31T01:57:13.612209337Z log=/root/runs-prio/w11-sem-part.log
+2026-10-31T02:02:30Z start w11-sem-pause: --workload semaphore --nemesis pause --time-limit 300 --rate 200
+2026-10-31T02:08:10Z done  w11-sem-pause: valid store=/root/src/test/jepsen/store/queen-semaphore-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T02:02:38.76858898Z log=/root/runs-prio/w11-sem-pause.log
+2026-10-31T02:08:10Z start w11-sem-restart: --workload semaphore --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T02:13:50Z done  w11-sem-restart: valid store=/root/src/test/jepsen/store/queen-semaphore-restart_offload=on_lanes=16/2026-10-31T02:08:19.016524058Z log=/root/runs-prio/w11-sem-restart.log
+2026-10-31T02:13:50Z start x-lock-all: --workload locks --nemesis all --time-limit 300 --rate 200
+2026-10-31T02:19:26Z done  x-lock-all: valid store=/root/src/test/jepsen/store/queen-locks-clock,kill,partition,pause_p=one,primaries,majority,majorities-ring_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T02:13:59.153240891Z log=/root/runs-prio/x-lock-all.log
+2026-10-31T02:19:26Z start x-lock-kill-nooffload: --workload locks --no-offload --nemesis kill --time-limit 300 --rate 200
+2026-10-31T02:25:01Z done  x-lock-kill-nooffload: valid store=/root/src/test/jepsen/store/queen-locks-kill_t=one,primaries,majority,all_offload=off_lanes=16/2026-10-31T02:19:34.426057093Z log=/root/runs-prio/x-lock-kill-nooffload.log
+2026-10-31T02:25:01Z start x-lock-part-nooffload: --workload locks --no-offload --nemesis partition --time-limit 300 --rate 200
+2026-10-31T02:30:36Z done  x-lock-part-nooffload: valid store=/root/src/test/jepsen/store/queen-locks-partition_p=one,primaries,majority,majorities-ring_offload=off_lanes=16/2026-10-31T02:25:09.370914966Z log=/root/runs-prio/x-lock-part-nooffload.log
+2026-10-31T02:30:36Z start x-lock-pause-kill: --workload locks --lazyfs --nemesis pause-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+2026-10-31T02:36:31Z done  x-lock-pause-kill: valid store=/root/src/test/jepsen/store/queen-locks-pause-kill_lazyfs_offload=on_lanes=16/2026-10-31T02:30:44.682189452Z log=/root/runs-prio/x-lock-pause-kill.log
+2026-10-31T02:36:31Z start x-lock-part-kill: --workload locks --lazyfs --nemesis part-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+2026-10-31T02:42:26Z done  x-lock-part-kill: valid store=/root/src/test/jepsen/store/queen-locks-part-kill_lazyfs_offload=on_lanes=16/2026-10-31T02:36:40.19053139Z log=/root/runs-prio/x-lock-part-kill.log
+2026-10-31T02:42:26Z start x-lock-lanes1-kill: --workload locks --lanes 1 --nemesis kill --time-limit 300 --rate 200
+2026-10-31T02:48:02Z done  x-lock-lanes1-kill: valid store=/root/src/test/jepsen/store/queen-locks-kill_t=one,primaries,majority,all_offload=on_lanes=1/2026-10-31T02:42:35.377194778Z log=/root/runs-prio/x-lock-lanes1-kill.log
+2026-10-31T02:48:02Z start x-sem-clock: --workload semaphore --nemesis clock --time-limit 300 --rate 200
+2026-10-31T02:53:52Z done  x-sem-clock: valid store=/root/src/test/jepsen/store/queen-semaphore-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T02:48:10.581298935Z log=/root/runs-prio/x-sem-clock.log
+2026-10-31T02:53:52Z start x-sem-leader-deaf: --workload semaphore --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T02:58:52Z done  x-sem-leader-deaf: valid store=/root/src/test/jepsen/store/queen-semaphore-leader-deaf_offload=on_lanes=16/2026-10-31T02:54:00.434423781Z log=/root/runs-prio/x-sem-leader-deaf.log
+2026-10-31T02:58:52Z start x-sem-bridge: --workload semaphore --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T03:04:22Z done  x-sem-bridge: valid store=/root/src/test/jepsen/store/queen-semaphore-bridge_offload=on_lanes=16/2026-10-31T02:59:01.042960554Z log=/root/runs-prio/x-sem-bridge.log
+2026-10-31T03:04:22Z start x-sem-lz-kill: --workload semaphore --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-31T03:10:03Z done  x-sem-lz-kill: valid store=/root/src/test/jepsen/store/queen-semaphore-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-31T03:04:31.658073867Z log=/root/runs-prio/x-sem-lz-kill.log
+2026-10-31T03:10:03Z start x-sem-membership: --workload semaphore --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-31T03:15:38Z done  x-sem-membership: valid store=/root/src/test/jepsen/store/queen-semaphore-membership_offload=on_lanes=16/2026-10-31T03:10:11.443056519Z log=/root/runs-prio/x-sem-membership.log
+2026-10-31T03:15:38Z start x-sem-wide-kill: --workload semaphore --w11-limit 8 --w11-locks 2 --nemesis kill --time-limit 300 --rate 400
+2026-10-31T03:21:18Z done  x-sem-wide-kill: valid store=/root/src/test/jepsen/store/queen-semaphore-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T03:15:46.384172684Z log=/root/runs-prio/x-sem-wide-kill.log
+2026-10-31T03:21:18Z start rw-w8-kill: --workload retention --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T03:27:03Z done  rw-w8-kill: valid store=/root/src/test/jepsen/store/queen-retention-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T03:21:26.887081931Z log=/root/runs-prio/rw-w8-kill.log
+2026-10-31T03:27:03Z start rw-w2-lz-kill: --workload queue --w2-partitions 400 --lazyfs --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T03:32:34Z done  rw-w2-lz-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_lazyfs_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T03:27:12.039867177Z log=/root/runs-prio/rw-w2-lz-kill.log
+2026-10-31T03:32:34Z start rw-w2-slow-lz-kill: --workload queue --w2-partitions 400 --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_DURABLE_EVERY_MS=20,QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T03:38:14Z done  rw-w2-slow-lz-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one_lazyfs_slowfsync=n4,n5:300_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,DURABLE_EVERY_MS=20,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T03:32:42.134355975Z log=/root/runs-prio/rw-w2-slow-lz-kill.log
+2026-10-31T03:38:14Z start rw-w8-lz-kill: --workload retention --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T03:44:04Z done  rw-w8-lz-kill: valid store=/root/src/test/jepsen/store/queen-retention-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T03:38:22.366664691Z log=/root/runs-prio/rw-w8-lz-kill.log
+2026-10-31T03:44:04Z start s-w2-rows: --workload queue --w2-partitions 400 --nemesis kill --time-limit 60 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T03:45:39Z done  s-w2-rows: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T03:44:12.859359528Z log=/root/runs-prio/s-w2-rows.log
+2026-10-31T03:45:39Z start rw-w2-kill: --workload queue --w2-partitions 400 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T03:51:14Z done  rw-w2-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T03:45:48.045031525Z log=/root/runs-prio/rw-w2-kill.log
+2026-10-31T03:51:14Z start rw-w2-part: --workload queue --w2-partitions 400 --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T03:56:54Z done  rw-w2-part: valid store=/root/src/test/jepsen/store/queen-queue-partition_p=one,primaries,majority,majorities-ring_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T03:51:23.132708504Z log=/root/runs-prio/rw-w2-part.log
+2026-10-31T03:56:55Z start rw-w2-kill-2000: --workload queue --w2-partitions 2000 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:02:10Z done  rw-w2-kill-2000: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T03:57:03.259517453Z log=/root/runs-prio/rw-w2-kill-2000.log
+2026-10-31T04:02:10Z start rw-w5-kill: --workload pipeline --w5-partitions 200 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:07:55Z done  rw-w5-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:02:18.559566302Z log=/root/runs-prio/rw-w5-kill.log
+2026-10-31T04:07:55Z start rw-w2-member-snap: --workload queue --w2-partitions 400 --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:13:15Z done  rw-w2-member-snap: valid store=/root/src/test/jepsen/store/queen-queue-kill,membership_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,LOG_KEEP=16,PURGE_HOLD_S=5,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:08:04.005925899Z log=/root/runs-prio/rw-w2-member-snap.log
+2026-10-31T04:13:15Z start rw-w2-restart: --workload queue --w2-partitions 400 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:18:10Z done  rw-w2-restart: valid store=/root/src/test/jepsen/store/queen-queue-restart_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:13:23.810182439Z log=/root/runs-prio/rw-w2-restart.log
+2026-10-31T04:18:10Z start rw-w2-pause: --workload queue --w2-partitions 400 --nemesis pause --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:23:50Z done  rw-w2-pause: valid store=/root/src/test/jepsen/store/queen-queue-pause_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:18:18.872268156Z log=/root/runs-prio/rw-w2-pause.log
+2026-10-31T04:23:51Z start rw-w2-leader-deaf: --workload queue --w2-partitions 400 --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:29:16Z done  rw-w2-leader-deaf: valid store=/root/src/test/jepsen/store/queen-queue-leader-deaf_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:23:59.303094366Z log=/root/runs-prio/rw-w2-leader-deaf.log
+2026-10-31T04:29:16Z start rw-w5-part: --workload pipeline --w5-partitions 200 --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:34:41Z done  rw-w5-part: valid store=/root/src/test/jepsen/store/queen-pipeline-partition_p=one,primaries,majority,majorities-ring_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:29:24.55811299Z log=/root/runs-prio/rw-w5-part.log
+2026-10-31T04:34:41Z start rw-w5-member-snap: --workload pipeline --w5-partitions 200 --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:40:16Z done  rw-w5-member-snap: valid store=/root/src/test/jepsen/store/queen-pipeline-kill,membership_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,LOG_KEEP=16,PURGE_HOLD_S=5,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:34:49.899406128Z log=/root/runs-prio/rw-w5-member-snap.log
+2026-10-31T04:40:16Z start rw-w8-kill-200: --workload retention --w2-partitions 200 --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:45:46Z done  rw-w8-kill-200: valid store=/root/src/test/jepsen/store/queen-retention-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:40:24.65343547Z log=/root/runs-prio/rw-w8-kill-200.log
+2026-10-31T04:45:46Z start rw-w8-part: --workload retention --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:51:17Z done  rw-w8-part: valid store=/root/src/test/jepsen/store/queen-retention-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:45:54.992594506Z log=/root/runs-prio/rw-w8-part.log
+2026-10-31T04:51:17Z start rw-w1-kill: --workload log --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T04:56:52Z done  rw-w1-kill: valid store=/root/src/test/jepsen/store/queen-log-kill_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:51:25.261915586Z log=/root/runs-prio/rw-w1-kill.log
+2026-10-31T04:56:52Z start rw-w5-lz-kill: --workload pipeline --w5-partitions 200 --lazyfs --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:02:37Z done  rw-w5-lz-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill_t=one,primaries,majority,all_lazyfs_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T04:57:00.65083775Z log=/root/runs-prio/rw-w5-lz-kill.log
+2026-10-31T05:02:37Z start rw-w5-restart: --workload pipeline --w5-partitions 200 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:08:17Z done  rw-w5-restart: valid store=/root/src/test/jepsen/store/queen-pipeline-restart_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:02:45.714868498Z log=/root/runs-prio/rw-w5-restart.log
+2026-10-31T05:08:17Z start rw-w8-restart: --workload retention --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:13:58Z done  rw-w8-restart: valid store=/root/src/test/jepsen/store/queen-retention-restart_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:08:26.119557498Z log=/root/runs-prio/rw-w8-restart.log
+2026-10-31T05:13:58Z start rw-w2-bridge: --workload queue --w2-partitions 400 --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:19:33Z done  rw-w2-bridge: valid store=/root/src/test/jepsen/store/queen-queue-bridge_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:14:06.432443324Z log=/root/runs-prio/rw-w2-bridge.log
+2026-10-31T05:19:33Z start rw-w2-clock: --workload queue --w2-partitions 400 --nemesis clock --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:25:08Z done  rw-w2-clock: valid store=/root/src/test/jepsen/store/queen-queue-clock_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:19:41.849281575Z log=/root/runs-prio/rw-w2-clock.log
+2026-10-31T05:25:08Z start rw-w2-membership: --workload queue --w2-partitions 400 --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:30:53Z done  rw-w2-membership: valid store=/root/src/test/jepsen/store/queen-queue-membership_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:25:17.046586573Z log=/root/runs-prio/rw-w2-membership.log
+2026-10-31T05:30:53Z start rw-w5-leader-deaf: --workload pipeline --w5-partitions 200 --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:36:23Z done  rw-w5-leader-deaf: valid store=/root/src/test/jepsen/store/queen-pipeline-leader-deaf_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:31:02.102515494Z log=/root/runs-prio/rw-w5-leader-deaf.log
+2026-10-31T05:36:23Z start rw-w5-pause: --workload pipeline --w5-partitions 200 --nemesis pause --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:42:04Z done  rw-w5-pause: valid store=/root/src/test/jepsen/store/queen-pipeline-pause_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:36:32.206912566Z log=/root/runs-prio/rw-w5-pause.log
+2026-10-31T05:42:04Z start rw-w7-kill: --workload dlq --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:47:39Z done  rw-w7-kill: valid store=/root/src/test/jepsen/store/queen-dlq-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:42:12.536998062Z log=/root/runs-prio/rw-w7-kill.log
+2026-10-31T05:47:39Z start rw-w1-part: --workload log --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:53:19Z done  rw-w1-part: valid store=/root/src/test/jepsen/store/queen-log-partition_p=one,primaries,majority,majorities-ring_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:47:47.988222385Z log=/root/runs-prio/rw-w1-part.log
+2026-10-31T05:53:19Z start rw-w8-pause: --workload retention --nemesis pause --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T05:59:04Z done  rw-w8-pause: valid store=/root/src/test/jepsen/store/queen-retention-pause_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:53:28.083214131Z log=/root/runs-prio/rw-w8-pause.log
+2026-10-31T05:59:04Z start rw-w8-leader-deaf: --workload retention --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T06:04:39Z done  rw-w8-leader-deaf: valid store=/root/src/test/jepsen/store/queen-retention-leader-deaf_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T05:59:13.020338334Z log=/root/runs-prio/rw-w8-leader-deaf.log
+2026-10-31T06:04:40Z start rw-w7-part: --workload dlq --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T06:10:30Z done  rw-w7-part: valid store=/root/src/test/jepsen/store/queen-dlq-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T06:04:48.58486812Z log=/root/runs-prio/rw-w7-part.log
+2026-10-31T06:10:30Z start rw-w1-restart: --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T06:16:10Z done  rw-w1-restart: valid store=/root/src/test/jepsen/store/queen-log-restart_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T06:10:38.538249933Z log=/root/runs-prio/rw-w1-restart.log
+2026-10-31T06:16:10Z start d-w2-kill: --workload queue --nemesis kill --time-limit 300 --rate 200
+2026-10-31T06:21:45Z done  d-w2-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T06:16:19.22772904Z log=/root/runs-prio/d-w2-kill.log
+2026-10-31T06:21:45Z start d-w2-part: --workload queue --nemesis partition --time-limit 300 --rate 200
+2026-10-31T06:27:25Z done  d-w2-part: valid store=/root/src/test/jepsen/store/queen-queue-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-31T06:21:54.348371109Z log=/root/runs-prio/d-w2-part.log
+2026-10-31T06:27:25Z start d-w5-kill: --workload pipeline --nemesis kill --time-limit 300 --rate 200
+2026-10-31T06:32:51Z done  d-w5-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T06:27:34.213287844Z log=/root/runs-prio/d-w5-kill.log
+2026-10-31T06:32:51Z start d-w6-kill: --workload dedup --nemesis kill --time-limit 300 --rate 200
+2026-10-31T06:38:16Z done  d-w6-kill: valid store=/root/src/test/jepsen/store/queen-dedup-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T06:32:59.242863191Z log=/root/runs-prio/d-w6-kill.log
+2026-10-31T06:38:16Z start d-w6-part: --workload dedup --nemesis partition --time-limit 300 --rate 200
+2026-10-31T06:43:56Z done  d-w6-part: valid store=/root/src/test/jepsen/store/queen-dedup-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-31T06:38:24.957351977Z log=/root/runs-prio/d-w6-part.log
+2026-10-31T06:43:56Z start d-w3-kill: --workload register --nemesis kill --time-limit 300 --rate 100
+2026-10-31T06:49:21Z done  d-w3-kill: valid store=/root/src/test/jepsen/store/queen-register-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T06:44:04.831928195Z log=/root/runs-prio/d-w3-kill.log
+2026-10-31T06:49:21Z start d-w4-kill: --workload elle --nemesis kill --time-limit 300 --rate 100
+2026-10-31T06:55:01Z done  d-w4-kill: valid store=/root/src/test/jepsen/store/queen-elle-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-31T06:49:30.318443026Z log=/root/runs-prio/d-w4-kill.log
+2026-10-31T06:55:01Z start d-w2-member-snap: --workload queue --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+2026-10-31T07:00:42Z done  d-w2-member-snap: valid store=/root/src/test/jepsen/store/queen-queue-kill,membership_t=one,primaries,majority,all_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=5/2026-10-31T06:55:10.22400905Z log=/root/runs-prio/d-w2-member-snap.log
+2026-10-31T07:00:42Z start sf-w2-kill: --workload queue --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:06:22Z done  sf-w2-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:00:51.211502813Z log=/root/runs-prio/sf-w2-kill.log
+2026-10-31T07:06:22Z start sf-w2-part: --workload queue --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:11:37Z done  sf-w2-part: valid store=/root/src/test/jepsen/store/queen-queue-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:06:30.646942611Z log=/root/runs-prio/sf-w2-part.log
+2026-10-31T07:11:37Z start sf-w2-lz-kill: --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:17:22Z done  sf-w2-lz-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:11:45.73031821Z log=/root/runs-prio/sf-w2-lz-kill.log
+2026-10-31T07:17:22Z start sf-w2-restart: --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:22:57Z done  sf-w2-restart: valid store=/root/src/test/jepsen/store/queen-queue-restart_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:17:30.935634122Z log=/root/runs-prio/sf-w2-restart.log
+2026-10-31T07:22:57Z start sf-w5-kill: --workload pipeline --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:28:33Z done  sf-w5-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:23:06.078823614Z log=/root/runs-prio/sf-w5-kill.log
+2026-10-31T07:28:33Z start sf-w5-lz-kill: --workload pipeline --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:34:18Z done  sf-w5-lz-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:28:41.412169405Z log=/root/runs-prio/sf-w5-lz-kill.log
+2026-10-31T07:34:18Z start sf-w8-kill: --workload retention --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:40:03Z done  sf-w8-kill: valid store=/root/src/test/jepsen/store/queen-retention-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:34:26.81009062Z log=/root/runs-prio/sf-w8-kill.log
+2026-10-31T07:40:03Z start sf-w8-part: --workload retention --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:45:48Z done  sf-w8-part: valid store=/root/src/test/jepsen/store/queen-retention-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:40:11.818666893Z log=/root/runs-prio/sf-w8-part.log
+2026-10-31T07:45:48Z start sf-w8-lz-kill: --workload retention --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:51:39Z done  sf-w8-lz-kill: valid store=/root/src/test/jepsen/store/queen-retention-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:45:57.212892849Z log=/root/runs-prio/sf-w8-lz-kill.log
+2026-10-31T07:51:39Z start sf-w1-kill: --workload log --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T07:57:14Z done  sf-w1-kill: valid store=/root/src/test/jepsen/store/queen-log-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:51:47.572913331Z log=/root/runs-prio/sf-w1-kill.log
+2026-10-31T07:57:14Z start sf-w1-lz-kill: --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T08:02:54Z done  sf-w1-lz-kill: valid store=/root/src/test/jepsen/store/queen-log-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T07:57:22.863836988Z log=/root/runs-prio/sf-w1-lz-kill.log
+2026-10-31T08:02:54Z start sf-w6-kill: --workload dedup --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-31T08:08:29Z done  sf-w6-kill: valid store=/root/src/test/jepsen/store/queen-dedup-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-10-31T08:03:02.667485356Z log=/root/runs-prio/sf-w6-kill.log
+2026-10-31T08:08:29Z start sh-w2-kill: --workload queue --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+2026-10-31T08:14:04Z done  sh-w2-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SHARDS=4/2026-10-31T08:08:37.838458925Z log=/root/runs-prio/sh-w2-kill.log
+2026-10-31T08:14:04Z start sh-w2-lz-kill: --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+2026-10-31T08:19:45Z done  sh-w2-lz-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=QLOG_SHARDS=4/2026-10-31T08:14:13.208350505Z log=/root/runs-prio/sh-w2-lz-kill.log
+2026-10-31T08:19:45Z start sh-w5-kill: --workload pipeline --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+2026-10-31T08:25:30Z done  sh-w5-kill: valid store=/root/src/test/jepsen/store/queen-pipeline-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SHARDS=4/2026-10-31T08:19:53.229058585Z log=/root/runs-prio/sh-w5-kill.log
+2026-10-31T08:25:30Z start sh-w1-part: --workload log --nemesis partition --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+2026-10-31T08:31:10Z done  sh-w1-part: valid store=/root/src/test/jepsen/store/queen-log-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16_env=QLOG_SHARDS=4/2026-10-31T08:25:38.553312906Z log=/root/runs-prio/sh-w1-part.log
+2026-10-31T08:31:10Z start sh-rw-w2-kill: --workload queue --w2-partitions 400 --nemesis kill --time-limit 300 --rate 200 --queues 8 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+2026-10-31T08:36:50Z done  sh-rw-w2-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,QLOG_SHARDS=4,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T08:31:18.548806876Z log=/root/runs-prio/sh-rw-w2-kill.log
+2026-10-31T08:36:50Z start sh-rw-w2-lz-kill: --workload queue --w2-partitions 400 --lazyfs --nemesis kill --time-limit 300 --rate 200 --queues 8 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+2026-10-31T08:42:40Z done  sh-rw-w2-lz-kill: valid store=/root/src/test/jepsen/store/queen-queue-kill_t=one,primaries,majority,all_lazyfs_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,QLOG_SHARDS=4,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T08:36:59.34694218Z log=/root/runs-prio/sh-rw-w2-lz-kill.log
+2026-10-31T08:42:40Z start sh-rw-w5-part: --workload pipeline --w5-partitions 200 --nemesis partition --time-limit 300 --rate 200 --queues 8 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+2026-10-31T08:48:21Z done  sh-rw-w5-part: valid store=/root/src/test/jepsen/store/queen-pipeline-partition_p=one,primaries,majority,majorities-ring_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,QLOG_SHARDS=4,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T08:42:49.275021031Z log=/root/runs-prio/sh-rw-w5-part.log
+2026-10-31T08:48:21Z start sh-rw-w8-kill: --workload retention --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+2026-10-31T08:54:11Z done  sh-rw-w8-kill: valid store=/root/src/test/jepsen/store/queen-retention-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,QLOG_SHARDS=4,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-31T08:48:29.350687389Z log=/root/runs-prio/sh-rw-w8-kill.log
+2026-10-31T08:54:11Z matrix matrix-prio-2026-10-30.txt finished

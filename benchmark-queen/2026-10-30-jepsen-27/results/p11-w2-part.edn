@@ -1,0 +1,163 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final nil,
+          :member-removals {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:total-queue {:ok-count 17578,
+                          :duplicated-count 2,
+                          :valid? true,
+                          :lost-count 0,
+                          :lost #{},
+                          :acknowledged-count 17491,
+                          :recovered #{6951
+                                       15811
+                                       5243
+                                       8363
+                                       9832
+                                       6580
+                                       13143
+                                       16745
+                                       14158
+                                       6492
+                                       12858
+                                       9341
+                                       5863
+                                       13178
+                                       17216
+                                       9230
+                                       4458
+                                       16473
+                                       12872
+                                       8303
+                                       17026
+                                       1433
+                                       4030
+                                       12862
+                                       9338
+                                       6197
+                                       13186
+                                       13185
+                                       281
+                                       4031
+                                       8726
+                                       7819
+                                       16870
+                                       6949
+                                       4412
+                                       16155
+                                       1091
+                                       1044
+                                       15802
+                                       5103
+                                       6950
+                                       365
+                                       9347
+                                       1082
+                                       380
+                                       8764
+                                       16132
+                                       15013
+                                       17023
+                                       4832
+                                       9566
+                                       6
+                                       7982
+                                       6109
+                                       7428
+                                       15033
+                                       7921
+                                       16535
+                                       15016
+                                       15806
+                                       4787
+                                       3795
+                                       4341
+                                       1525
+                                       8666
+                                       16582
+                                       13546
+                                       16868
+                                       381
+                                       81
+                                       7386
+                                       4018
+                                       12476
+                                       7319
+                                       15012
+                                       5539
+                                       7288
+                                       13577
+                                       12868
+                                       7523
+                                       16858
+                                       16942
+                                       5854
+                                       9154
+                                       1453
+                                       8
+                                       7293},
+                          :attempt-count 17587,
+                          :unexpected #{},
+                          :unexpected-count 0,
+                          :recovered-count 87,
+                          :duplicated #{12471 12470}},
+            :queue {:lease-overlaps (),
+                    :payload-mismatch (),
+                    :valid? true,
+                    :noop-ack-examples (),
+                    :acked-twice (),
+                    :acked-twice-count 0,
+                    :lease-overlap-count 0,
+                    :partial-acks 0,
+                    :acked 17576,
+                    :redeliveries 169,
+                    :pop-skips (),
+                    :offset-value-mismatch (),
+                    :ack-unknown 4,
+                    :pop-skip-count 0,
+                    :noop-acks 0,
+                    :deliveries 17589,
+                    :pop-internal-gaps (),
+                    :redelivered-after-ack-count 0,
+                    :ack-rejected 9,
+                    :redelivered-after-ack ()},
+            :valid? true},
+ :stats {:valid? true,
+         :count 35235,
+         :ok-count 34997,
+         :fail-count 139,
+         :info-count 99,
+         :by-f {:dequeue {:valid? true,
+                          :count 17648,
+                          :ok-count 17506,
+                          :fail-count 139,
+                          :info-count 3},
+                :enqueue {:valid? true,
+                          :count 17587,
+                          :ok-count 17491,
+                          :fail-count 0,
+                          :info-count 96}}}}

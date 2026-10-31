@@ -1,0 +1,276 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final {:leader 1,
+                         :term 9,
+                         :voters [1 2 3 4 5],
+                         :learners []},
+          :member-removals {[503 "leader_unreachable"] 2,
+                            [200 nil] 4,
+                            [nil nil] 1},
+          :corrupt-trials 0,
+          :member-rejoins {true 4},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {:member-cycle 7,
+                       :member-double 2,
+                       :member-heal 1},
+          :member-skipped {:no-membership 2}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:total-queue {:ok-count 3522,
+                          :duplicated-count 6,
+                          :valid? true,
+                          :lost-count 0,
+                          :lost #{},
+                          :acknowledged-count 3334,
+                          :recovered #{24832
+                                       24882
+                                       25292
+                                       27135
+                                       25392
+                                       9629
+                                       27159
+                                       27187
+                                       27068
+                                       27175
+                                       27067
+                                       9619
+                                       27188
+                                       25334
+                                       25353
+                                       24910
+                                       9527
+                                       25308
+                                       27057
+                                       25219
+                                       25397
+                                       25358
+                                       9557
+                                       24999
+                                       27107
+                                       9644
+                                       27069
+                                       27077
+                                       25282
+                                       27152
+                                       27162
+                                       24936
+                                       27176
+                                       25387
+                                       25316
+                                       9676
+                                       25396
+                                       24912
+                                       25548
+                                       27103
+                                       25373
+                                       24966
+                                       27182
+                                       25351
+                                       25336
+                                       24969
+                                       27120
+                                       25311
+                                       27093
+                                       25550
+                                       24928
+                                       25001
+                                       25364
+                                       25335
+                                       24895
+                                       9615
+                                       9588
+                                       24873
+                                       27096
+                                       9567
+                                       25357
+                                       27155
+                                       25359
+                                       25333
+                                       25363
+                                       27138
+                                       25345
+                                       27191
+                                       24922
+                                       27165
+                                       24830
+                                       25666
+                                       27065
+                                       27059
+                                       9682
+                                       9554
+                                       25317
+                                       27102
+                                       25294
+                                       25376
+                                       9641
+                                       25298
+                                       27129
+                                       27121
+                                       27115
+                                       9672
+                                       9571
+                                       25388
+                                       27145
+                                       24981
+                                       24875
+                                       9525
+                                       27073
+                                       25338
+                                       9632
+                                       25355
+                                       25007
+                                       25278
+                                       9663
+                                       27151
+                                       27105
+                                       24948
+                                       24974
+                                       25346
+                                       24908
+                                       25362
+                                       27060
+                                       25369
+                                       27111
+                                       9579
+                                       24907
+                                       25218
+                                       27070
+                                       25386
+                                       24926
+                                       25343
+                                       9565
+                                       27149
+                                       24867
+                                       25378
+                                       25314
+                                       25300
+                                       25332
+                                       25342
+                                       9562
+                                       9595
+                                       24960
+                                       27185
+                                       9677
+                                       25325
+                                       27132
+                                       25337
+                                       24913
+                                       27179
+                                       9582
+                                       9574
+                                       27089
+                                       27066
+                                       25327
+                                       9657
+                                       9613
+                                       24886
+                                       24963
+                                       24979
+                                       24761
+                                       27108
+                                       9675
+                                       24932
+                                       9611
+                                       9667
+                                       9578
+                                       27098
+                                       25305
+                                       27062
+                                       27044
+                                       25318
+                                       25287
+                                       9659
+                                       27156
+                                       27063
+                                       24899
+                                       9620
+                                       24957
+                                       27181
+                                       24951
+                                       27112
+                                       27074
+                                       27064
+                                       27061
+                                       25340
+                                       24955
+                                       24942
+                                       25280
+                                       25348
+                                       25399
+                                       27116
+                                       25360
+                                       25350
+                                       9647
+                                       27095
+                                       9599
+                                       25393
+                                       27071
+                                       27100
+                                       24995
+                                       9624
+                                       27058
+                                       24984},
+                          :attempt-count 28210,
+                          :unexpected #{},
+                          :unexpected-count 0,
+                          :recovered-count 188,
+                          :duplicated #{27135
+                                        27311
+                                        27166
+                                        27123
+                                        27164
+                                        27157}},
+            :queue {:lease-overlaps (),
+                    :payload-mismatch (),
+                    :valid? true,
+                    :noop-ack-examples (),
+                    :acked-twice (),
+                    :acked-twice-count 0,
+                    :lease-overlap-count 0,
+                    :partial-acks 0,
+                    :acked 3521,
+                    :redeliveries 18,
+                    :pop-skips (),
+                    :offset-value-mismatch (),
+                    :ack-unknown 7,
+                    :pop-skip-count 0,
+                    :noop-acks 0,
+                    :deliveries 3528,
+                    :pop-internal-gaps (),
+                    :redelivered-after-ack-count 0,
+                    :ack-rejected 0,
+                    :redelivered-after-ack ()},
+            :valid? true},
+ :stats {:valid? true,
+         :count 56379,
+         :ok-count 6706,
+         :fail-count 49357,
+         :info-count 316,
+         :by-f {:dequeue {:valid? true,
+                          :count 28169,
+                          :ok-count 3372,
+                          :fail-count 24794,
+                          :info-count 3},
+                :enqueue {:valid? true,
+                          :count 28210,
+                          :ok-count 3334,
+                          :fail-count 24563,
+                          :info-count 313}}}}

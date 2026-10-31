@@ -1,0 +1,238 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final nil,
+          :member-removals {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:w2 {:total-queue {:ok-count 18822,
+                               :duplicated-count 1,
+                               :valid? true,
+                               :lost-count 0,
+                               :lost #{},
+                               :acknowledged-count 18749,
+                               :recovered #{10859
+                                            12261
+                                            15885
+                                            17184
+                                            15890
+                                            11636
+                                            1660
+                                            10402
+                                            10413
+                                            11709
+                                            18521
+                                            17875
+                                            18052
+                                            16880
+                                            1268
+                                            14050
+                                            17776
+                                            17680
+                                            1428
+                                            11267
+                                            14761
+                                            18266
+                                            18336
+                                            16051
+                                            17170
+                                            18372
+                                            15946
+                                            553
+                                            11094
+                                            18560
+                                            16846
+                                            5534
+                                            10958
+                                            14762
+                                            17418
+                                            10417
+                                            15342
+                                            17058
+                                            17531
+                                            18376
+                                            29
+                                            424
+                                            6
+                                            1662
+                                            1420
+                                            15367
+                                            15331
+                                            16708
+                                            17799
+                                            17590
+                                            484
+                                            17507
+                                            14089
+                                            11156
+                                            9
+                                            11155
+                                            5512
+                                            5507
+                                            795
+                                            12262
+                                            10414
+                                            16312
+                                            11263
+                                            14054
+                                            11265
+                                            15366
+                                            10952
+                                            5525
+                                            960
+                                            12289
+                                            11635
+                                            8
+                                            11639},
+                               :attempt-count 18846,
+                               :unexpected #{},
+                               :unexpected-count 0,
+                               :recovered-count 73,
+                               :duplicated #{13733}},
+                 :queue {:lease-overlaps (),
+                         :payload-mismatch (),
+                         :valid? true,
+                         :noop-ack-examples (),
+                         :acked-twice (),
+                         :acked-twice-count 0,
+                         :lease-overlap-count 0,
+                         :partial-acks 0,
+                         :acked 18819,
+                         :redeliveries 151,
+                         :pop-skips (),
+                         :offset-value-mismatch (),
+                         :ack-unknown 4,
+                         :pop-skip-count 0,
+                         :noop-acks 0,
+                         :deliveries 18826,
+                         :pop-internal-gaps (),
+                         :redelivered-after-ack-count 0,
+                         :ack-rejected 3,
+                         :redelivered-after-ack ()},
+                 :valid? true},
+            :retention {:valid? true,
+                        :reads {"n1" {"w5" {:log-start 2355,
+                                            :hwm 2355},
+                                      "w0" {:log-start 2396,
+                                            :hwm 2396},
+                                      "w4" {:log-start 2336,
+                                            :hwm 2336},
+                                      "w7" {:log-start 2376,
+                                            :hwm 2376},
+                                      "w2" {:log-start 2398,
+                                            :hwm 2398},
+                                      "w3" {:log-start 2298,
+                                            :hwm 2298},
+                                      "w6" {:log-start 2280,
+                                            :hwm 2280},
+                                      "w1" {:log-start 2383,
+                                            :hwm 2383}},
+                                "n2" {"w5" {:log-start 2355,
+                                            :hwm 2355},
+                                      "w0" {:log-start 2396,
+                                            :hwm 2396},
+                                      "w4" {:log-start 2336,
+                                            :hwm 2336},
+                                      "w7" {:log-start 2376,
+                                            :hwm 2376},
+                                      "w2" {:log-start 2398,
+                                            :hwm 2398},
+                                      "w3" {:log-start 2298,
+                                            :hwm 2298},
+                                      "w6" {:log-start 2280,
+                                            :hwm 2280},
+                                      "w1" {:log-start 2383,
+                                            :hwm 2383}},
+                                "n3" {"w5" {:log-start 2355,
+                                            :hwm 2355},
+                                      "w0" {:log-start 2396,
+                                            :hwm 2396},
+                                      "w4" {:log-start 2336,
+                                            :hwm 2336},
+                                      "w7" {:log-start 2376,
+                                            :hwm 2376},
+                                      "w2" {:log-start 2398,
+                                            :hwm 2398},
+                                      "w3" {:log-start 2298,
+                                            :hwm 2298},
+                                      "w6" {:log-start 2280,
+                                            :hwm 2280},
+                                      "w1" {:log-start 2383,
+                                            :hwm 2383}},
+                                "n4" {"w5" {:log-start 2355,
+                                            :hwm 2355},
+                                      "w0" {:log-start 2396,
+                                            :hwm 2396},
+                                      "w4" {:log-start 2336,
+                                            :hwm 2336},
+                                      "w7" {:log-start 2376,
+                                            :hwm 2376},
+                                      "w2" {:log-start 2398,
+                                            :hwm 2398},
+                                      "w3" {:log-start 2298,
+                                            :hwm 2298},
+                                      "w6" {:log-start 2280,
+                                            :hwm 2280},
+                                      "w1" {:log-start 2383,
+                                            :hwm 2383}},
+                                "n5" {"w5" {:log-start 2355,
+                                            :hwm 2355},
+                                      "w0" {:log-start 2396,
+                                            :hwm 2396},
+                                      "w4" {:log-start 2336,
+                                            :hwm 2336},
+                                      "w7" {:log-start 2376,
+                                            :hwm 2376},
+                                      "w2" {:log-start 2398,
+                                            :hwm 2398},
+                                      "w3" {:log-start 2298,
+                                            :hwm 2298},
+                                      "w6" {:log-start 2280,
+                                            :hwm 2280},
+                                      "w1" {:log-start 2383,
+                                            :hwm 2383}}},
+                        :partitions-moved 80,
+                        :log-start-past-hwm []},
+            :valid? true},
+ :stats {:valid? true,
+         :count 37737,
+         :ok-count 37502,
+         :fail-count 134,
+         :info-count 101,
+         :by-f {:dequeue {:valid? true,
+                          :count 18881,
+                          :ok-count 18743,
+                          :fail-count 134,
+                          :info-count 4},
+                :enqueue {:valid? true,
+                          :count 18846,
+                          :ok-count 18749,
+                          :fail-count 0,
+                          :info-count 97},
+                :watermarks {:valid? true,
+                             :count 10,
+                             :ok-count 10,
+                             :fail-count 0,
+                             :info-count 0}}}}
