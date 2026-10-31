@@ -60,7 +60,7 @@ rsvg-convert -f pdf -o "$OUT/assets/wordmark-on-dark.pdf" "$ROOT/assets/logo/que
 
 # Screenshots come from the site's own files (WebP there; LaTeX reads PNG), so the
 # book always shows the dashboard the homepage shows. Light mode, for a white page.
-magick "$ROOT/webdoc/public/screenshots/dashboard-overview-light.webp" "$OUT/assets/dashboard-overview.png"
+magick "$ROOT/webdoc/public/screenshots/dashboard-queue-light.webp" "$OUT/assets/dashboard-queue.png"
 
 # The drawings: figures/src in the repository, one source for the book and the website.
 node "$ROOT/figures/build.mjs" --pdf "$OUT/figures" >/dev/null
@@ -73,8 +73,10 @@ while read -r id; do
 done < <(grep -rhoE '\\queenfig(\[[a-z!]*\])?\{[a-z0-9-]+\}' "$HERE/chapters" 2>/dev/null | sed -E 's/.*\{(.*)\}/\1/' | sort -u)
 [ "$missing" = 0 ] || exit 1
 
-# 3. The date on the cover.
-printf '\\newcommand{\\builddate}{%s}\n' "$(date '+%B %Y')" > "$OUT/meta.tex"
+# 3. The date and the release on the cover.
+# The cover names the month and the release (major.minor of server/server.json).
+queen_release=$(node -p "require('$ROOT/server/server.json').version.split('.').slice(0, 2).join('.')")
+printf '\\newcommand{\\builddate}{%s}\n\\newcommand{\\buildqueen}{%s}\n' "$(date '+%B %Y')" "$queen_release" > "$OUT/meta.tex"
 
 # 4. Compile.
 (cd "$HERE" && tectonic --chatter minimal --outdir build main.tex)
