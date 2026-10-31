@@ -1,0 +1,7 @@
+[07:23:34] run ab262-a2-262: binary 262, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[07:23:41] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 1000 partitions
+[07:25:31] 3,000,000: offered 2,999,980 pushed 2,999,945 consumed 2,999,905 shed 0 errors 0 lag 0 | push p50 3.2 p99 8.6 | e2e p50 6.7 p99 17.4 | n1 11.4c apply 75% raft 236%; n2 5.3c apply 57% raft 72%; n3 5.4c apply 58% raft 73% | loaders 19.2c  OK 
+RUN_DONE

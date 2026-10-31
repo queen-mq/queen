@@ -1,0 +1,73 @@
+[07:16:26] start ab262-a1-250
+[07:16:26] run ab262-a1-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[07:16:51] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[07:18:41] 3,000,000: offered 2,999,997 pushed 2,999,949 consumed 2,999,964 shed 0 errors 0 lag 0 | push p50 3.3 p99 8.4 | e2e p50 6.8 p99 17.9 | n1 11.2c apply 75% raft 235%; n2 5.1c apply 57% raft 71%; n3 5.2c apply 56% raft 72% | loaders 19.3c  OK 
+[07:18:46] done
+[07:18:46] start ab262-a1-262
+[07:18:46] run ab262-a1-262: binary 262, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[07:19:10] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[07:21:08] 3,000,000: offered 3,000,001 pushed 3,000,041 consumed 3,000,051 shed 0 errors 0 lag 0 | push p50 3.3 p99 9.6 | e2e p50 6.8 p99 20.0 | n1 11.4c apply 75% raft 236%; n2 4.8c apply 51% raft 66%; n3 4.9c apply 52% raft 66% | loaders 19.2c  OK 
+[07:21:13] done
+[07:21:13] start ab262-a2-250
+[07:21:13] run ab262-a2-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[07:21:40] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[07:23:30] 3,000,000: offered 3,000,000 pushed 3,000,015 consumed 3,000,038 shed 0 errors 0 lag 0 | push p50 3.2 p99 8.0 | e2e p50 6.6 p99 17.2 | n1 11.3c apply 76% raft 238%; n2 5.2c apply 57% raft 73%; n3 5.2c apply 57% raft 73% | loaders 19.2c  OK 
+[07:23:34] done
+[07:23:34] start ab262-a2-262
+[07:23:34] run ab262-a2-262: binary 262, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 3000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[07:23:41] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000 partitions
+[07:25:31] 3,000,000: offered 2,999,980 pushed 2,999,945 consumed 2,999,905 shed 0 errors 0 lag 0 | push p50 3.2 p99 8.6 | e2e p50 6.7 p99 17.4 | n1 11.4c apply 75% raft 236%; n2 5.3c apply 57% raft 72%; n3 5.4c apply 58% raft 73% | loaders 19.2c  OK 
+[07:25:35] done
+[07:25:35] start ab262-b1-250
+[07:25:35] run ab262-b1-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 1000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[07:25:54] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000000 partitions
+[07:27:51] 1,000,000: offered 999,985 pushed 999,985 consumed 999,978 shed 0 errors 0 lag 0 | push p50 2.0 p99 3.2 | e2e p50 3.3 p99 5.1 | n1 6.7c apply 42% raft 203%; n2 3.1c apply 33% raft 90%; n3 3.2c apply 33% raft 91% | loaders 6.8c  OK 
+[07:27:55] done
+[07:27:55] start ab262-b1-262
+[07:27:55] run ab262-b1-262: binary 262, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 1000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[07:28:20] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000000 partitions
+[07:30:18] 1,000,000: offered 999,995 pushed 999,998 consumed 999,970 shed 0 errors 0 lag 0 | push p50 2.0 p99 3.2 | e2e p50 3.3 p99 5.1 | n1 6.8c apply 42% raft 202%; n2 3.2c apply 33% raft 90%; n3 3.2c apply 33% raft 90% | loaders 6.8c  OK 
+[07:30:22] done
+[07:30:22] start ab262-b2-250
+[07:30:22] run ab262-b2-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 1000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[07:30:33] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000000 partitions
+[07:32:30] 1,000,000: offered 999,995 pushed 999,996 consumed 1,000,006 shed 0 errors 0 lag 0 | push p50 2.0 p99 3.2 | e2e p50 3.3 p99 5.1 | n1 6.7c apply 42% raft 202%; n2 3.2c apply 33% raft 89%; n3 3.2c apply 33% raft 89% | loaders 6.8c  OK 
+[07:32:35] done
+[07:32:35] start ab262-b2-262
+[07:32:35] run ab262-b2-262: binary 262, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 70s at: 1000000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 30s
+[07:33:01] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 1000000 partitions
+[07:35:09] 1,000,000: offered 1,000,000 pushed 999,993 consumed 999,998 shed 0 errors 0 lag 0 | push p50 2.0 p99 3.2 | e2e p50 3.3 p99 5.1 | n1 6.9c apply 43% raft 204%; n2 3.2c apply 33% raft 90%; n3 3.2c apply 33% raft 90% | loaders 6.7c  OK 
+[07:35:13] done
+[07:35:13] start ab262-c1-250
+[07:35:13] run ab262-c1-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100, consumers 33 per process, retention completed 1800s, dedup 60s, steps of 70s at: 1000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -ack-counts -pop-frames -tail 30s
+[07:35:38] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 100 partitions
+[07:37:28] 1,000,000: offered 999,997 pushed 1,000,084 consumed 999,952 shed 0 errors 0 lag 0 | push p50 10.2 p99 20.5 | e2e p50 30.2 p99 54.3 | n1 8.5c apply 19% raft 158%; n2 2.3c apply 14% raft 39%; n3 2.4c apply 14% raft 40% | loaders 5.9c  OK 
+[07:37:33] done
+[07:37:33] start ab262-c1-262
+[07:37:33] run ab262-c1-262: binary 262, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100, consumers 33 per process, retention completed 1800s, dedup 60s, steps of 70s at: 1000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -ack-counts -pop-frames -tail 30s
+[07:37:54] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 100 partitions
+[07:39:45] 1,000,000: offered 1,000,010 pushed 999,955 consumed 999,955 shed 0 errors 0 lag 0 | push p50 10.2 p99 20.2 | e2e p50 30.2 p99 54.3 | n1 8.7c apply 19% raft 158%; n2 2.5c apply 14% raft 40%; n3 2.5c apply 14% raft 40% | loaders 5.9c  OK 
+[07:39:49] done
+[07:39:49] start ab262-c2-250
+[07:39:49] run ab262-c2-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100, consumers 33 per process, retention completed 1800s, dedup 60s, steps of 70s at: 1000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -ack-counts -pop-frames -tail 30s
+[07:40:19] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 100 partitions
+[07:42:11] 1,000,000: offered 1,000,011 pushed 999,977 consumed 999,986 shed 0 errors 0 lag 0 | push p50 10.1 p99 20.0 | e2e p50 30.2 p99 53.8 | n1 8.5c apply 19% raft 159%; n2 2.3c apply 14% raft 39%; n3 2.3c apply 14% raft 39% | loaders 5.9c  OK 
+[07:42:15] done
+[07:42:15] start ab262-c2-262
+[07:42:15] run ab262-c2-262: binary 262, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100, consumers 33 per process, retention completed 1800s, dedup 60s, steps of 70s at: 1000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -ack-counts -pop-frames -tail 30s
+[07:42:42] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 100 partitions
+[07:44:33] 1,000,000: offered 999,988 pushed 1,000,001 consumed 999,973 shed 0 errors 0 lag 0 | push p50 10.1 p99 20.5 | e2e p50 30.0 p99 54.3 | n1 8.7c apply 19% raft 160%; n2 2.5c apply 15% raft 40%; n3 2.5c apply 14% raft 39% | loaders 5.9c  OK 
+[07:44:37] done
+AB262_DONE

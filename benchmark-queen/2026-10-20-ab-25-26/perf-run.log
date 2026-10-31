@@ -1,0 +1,7 @@
+[21:26:15] start kab26-250-r500000: bin 250, 500000 msg/s
+kab26-250-r500000   500,000: steady offered 500,013 pushed 500,015 consumed 499,988 errors 0 | produce p50 8.8 p99 12.3 | e2e p50 11.1 p99 17.2 ms | broker cores 7.8 / 1.8 / 1.9 | OK
+[21:28:15] start kab26-260-r500000: bin 260, 500000 msg/s
+kab26-260-r500000   500,000: only 0 of 3 kload processes reported
+[21:33:44] start kab26-250-r1000000: bin 250, 1000000 msg/s
+kab26-250-r1000000 1,000,000: steady offered 999,992 pushed 872,376 consumed 37,516 errors 0 | produce p50 1736.7 p99 1998.8 | e2e p50 51380.2 p99 60293.1 ms | broker cores 10.3 / 0.9 / 1.1 | NOT CARRIED
+[21:35:48] start kab26-260-r1000000: bin 260, 1000000 msg/s

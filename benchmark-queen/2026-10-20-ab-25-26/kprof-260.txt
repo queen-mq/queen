@@ -1,0 +1,47 @@
+leader n1
+    21.61%  queen-kafka    
+    20.92%  tokio-rt-worker
+    12.80%  queen-raft     
+     8.10%  qlog-zstd-1    
+     8.06%  qlog-zstd-0    
+     8.05%  qlog-zstd-3    
+     8.05%  qlog-zstd-2    
+     2.48%  queen-qlog-writ
+     1.19%  queen-planner  
+     1.12%  queen-lane-4   
+     1.07%  queen-lane-2   
+     1.04%  queen-lane-3   
+---
+     5.81%  qlog-zstd-1      [.] ZSTD_compressBlock_fast
+     5.69%  qlog-zstd-2      [.] ZSTD_compressBlock_fast
+     5.65%  qlog-zstd-0      [.] ZSTD_compressBlock_fast
+     5.61%  qlog-zstd-3      [.] ZSTD_compressBlock_fast
+     4.90%  queen-kafka      [.] <base64::engine::general_purpose::GeneralPurpose as base64::engine::Engine>::internal_encode
+     4.37%  queen-raft       [.] 0x00000000001a19d2
+                          0x8948085789481a7e
+     2.69%  tokio-rt-worker  [.] xxhash_rust::xxh3::hash_long_internal_loop
+     2.47%  queen-kafka      [.] XXH32_update
+     2.42%  tokio-rt-worker  [.] mi_free
+     2.19%  queen-kafka      [.] LZ4_decompress_safe
+               0x37313a227374227b
+     2.01%  queen-kafka      [.] 0x00000000001a19d2
+     1.98%  tokio-rt-worker  [.] <queen::rsm::facade::real::RaftFacade>::push_inputs::{closure#0}
+     1.64%  queen-raft       [.] HIST_count_parallel_wksp
+     1.45%  tokio-rt-worker  [.] 0x00000000001a180e
+     1.13%  queen-raft       [.] HUF_compress1X_usingCTable_internal_bmi2
+     1.11%  queen-kafka      [k] _copy_to_iter
+                                     0x1
+     1.02%  queen-raft       [k] kernel_init_pages
+     0.82%  tokio-rt-worker  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.81%  queen-raft       [.] ZSTD_compressBlock_fast
+     0.79%  qlog-zstd-0      [.] HUF_compress1X_usingCTable_internal_bmi2
+     0.78%  queen-raft       [k] _copy_from_iter
+     0.73%  queen-qlog-writ  [k] kernel_init_pages
+     0.72%  qlog-zstd-1      [.] HUF_compress1X_usingCTable_internal_bmi2
+     0.70%  qlog-zstd-2      [.] HUF_compress1X_usingCTable_internal_bmi2
+     0.68%  tokio-rt-worker  [.] 0x00000000001a185b
+     0.64%  qlog-zstd-1      [.] HIST_count_parallel_wksp
+     0.63%  qlog-zstd-3      [.] HUF_compress1X_usingCTable_internal_bmi2
+kprof-260-r1000000 1,000,000: steady offered 1,000,002 pushed 681,360 consumed 49,686 errors 0 | produce p50 2326.5 p99 2687.0 | e2e p50 58720.3 p99 60817.4 ms | broker cores 5.9 / 0.4 / 0.3 | NOT CARRIED
+
+[exited with code 0]

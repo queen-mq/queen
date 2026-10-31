@@ -1,0 +1,5 @@
+[22:12:00] start kprof-260-r1000000: bin 260, 1000000 msg/s
+  [topic] t=+10s describe log dirs: request DescribeLogDirs has 3 separate shard errors, first: broker is too old; the broker has already indicated it will not know how to handle the request
+FATAL topic: topics not ready within -topic-timeout 20s: describe log dirs: request DescribeLogDirs has 1 separate shard errors, first: context deadline exceeded
+kprof-260-r1000000 1,000,000: steady offered 1,000,002 pushed 681,360 consumed 49,686 errors 0 | produce p50 2326.5 p99 2687.0 | e2e p50 58720.3 p99 60817.4 ms | broker cores 5.9 / 0.4 / 0.3 | NOT CARRIED
+[22:14:45] KAB26_DONE

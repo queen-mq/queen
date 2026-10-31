@@ -1,0 +1,17 @@
+[21:37:50] start kab26-250-r500000: bin 250, 500000 msg/s
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+[create] done: 1 topics x 100 partitions ready
+kab26-250-r500000   500,000: steady offered 499,994 pushed 499,989 consumed 499,994 errors 0 | produce p50 8.8 p99 12.0 | e2e p50 11.8 p99 17.7 ms | broker cores 1.9 / 1.6 / 6.7 | OK
+[21:40:01] start kab26-260-r500000: bin 260, 500000 msg/s
+  [topic] t=+10s describe log dirs: request DescribeLogDirs has 3 separate shard errors, first: broker is too old; the broker has already indicated it will not know how to handle the request
+FATAL topic: topics not ready within -topic-timeout 20s: describe log dirs: request DescribeLogDirs has 1 separate shard errors, first: context deadline exceeded
+kab26-260-r500000   500,000: steady offered 499,986 pushed 499,989 consumed 499,996 errors 0 | produce p50 9.5 p99 14.0 | e2e p50 10.1 p99 15.0 ms | broker cores 0.7 / 0.7 / 7.4 | OK
+[21:42:26] start kab26-250-r1000000: bin 250, 1000000 msg/s
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+[create] done: 1 topics x 100 partitions ready
+kab26-250-r1000000 1,000,000: steady offered 1,000,002 pushed 972,587 consumed 66,366 errors 0 | produce p50 1376.3 p99 1638.4 | e2e p50 46137.3 p99 58196.0 ms | broker cores 10.3 / 1.4 / 1.5 | NOT CARRIED
+[21:44:38] start kab26-260-r1000000: bin 260, 1000000 msg/s
+  [topic] t=+10s describe log dirs: request DescribeLogDirs has 3 separate shard errors, first: broker is too old; the broker has already indicated it will not know how to handle the request
+FATAL topic: topics not ready within -topic-timeout 20s: describe log dirs: request DescribeLogDirs has 1 separate shard errors, first: context deadline exceeded
+kab26-260-r1000000 1,000,000: steady offered 999,999 pushed 700,738 consumed 57,576 errors 0 | produce p50 2261.0 p99 2555.9 | e2e p50 58196.0 p99 59768.8 ms | broker cores 0.4 / 6.8 / 0.4 | NOT CARRIED
+[21:47:05] KAB26_DONE

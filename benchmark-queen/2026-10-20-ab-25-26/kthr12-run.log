@@ -1,0 +1,9 @@
+[22:05:54] start kthr12-260-r850000: bin 260, 850000 msg/s
+  [topic] t=+10s describe log dirs: request DescribeLogDirs has 3 separate shard errors, first: broker is too old; the broker has already indicated it will not know how to handle the request
+FATAL topic: topics not ready within -topic-timeout 20s: describe log dirs: request DescribeLogDirs has 1 separate shard errors, first: context deadline exceeded
+kthr12-260-r850000   850,000: steady offered 849,998 pushed 849,883 consumed 680,808 errors 0 | produce p50 32.0 p99 82.9 | e2e p50 8323.1 p99 16515.1 ms | broker cores 11.4 / 0.7 / 0.7 | NOT CARRIED
+[22:08:16] start kthr12-260-r1000000: bin 260, 1000000 msg/s
+  [topic] t=+10s describe log dirs: request DescribeLogDirs has 3 separate shard errors, first: broker is too old; the broker has already indicated it will not know how to handle the request
+FATAL topic: topics not ready within -topic-timeout 20s: describe log dirs: request DescribeLogDirs has 1 separate shard errors, first: context deadline exceeded
+kthr12-260-r1000000 1,000,000: steady offered 999,997 pushed 678,821 consumed 61,290 errors 0 | produce p50 2293.8 p99 2654.2 | e2e p50 56098.8 p99 59768.8 ms | broker cores 0.4 / 0.4 / 6.9 | NOT CARRIED
+[22:10:40] KAB26_DONE

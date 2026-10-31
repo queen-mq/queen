@@ -13,5 +13,8 @@ There are two causes, both in files #443 added or changed:
   - nothing in the repository calls it;
   - the class is only ever built through its constructor, never by Jackson.
 
+#463 formats the same five files but leaves the spotbugs finding, so `verify` still fails with it
+alone. If #463 is merged first, this PR comes down to the `getBuckets()` change.
+
 Tested with the workflow's own command, `mvn --no-transfer-progress --batch-mode verify`, on JDK 17
 (Temurin): BUILD SUCCESS.

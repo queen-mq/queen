@@ -1,0 +1,7 @@
+[20:42:45] run setup-check-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 1000, consumers 33 per process, retention completed 1800s, dedup 0s, steps of 25s at: 100000 | EXTRA= | QEXTRA=-push-wire bin -push-zstd -ack-counts -pop-frames -tail 10s
+[20:42:55] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 1000 partitions
+[20:44:02]   100,000: offered 100,019 pushed 100,069 consumed 100,079 shed 0 errors 0 lag 0 | push p50 1.8 p99 3.5 | e2e p50 2.6 p99 5.7 | n1 1.3c apply 4% raft 63%; n2 0.7c apply 4% raft 33%; n3 0.7c apply 4% raft 33% | loaders 0.8c  OK 
+RUN_DONE

@@ -1,0 +1,7 @@
+[07:35:13] run ab262-c1-250: binary 250, groups 1, sync, checkpoint 5 ms, tenants 0, partitions 100, consumers 33 per process, retention completed 1800s, dedup 60s, steps of 70s at: 1000000 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 | QEXTRA=-push-wire bin -ack-counts -pop-frames -tail 30s
+[07:35:38] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":1800,"deadLetterQueue":true
+
+[create] done: bench x 100 partitions
+[07:37:28] 1,000,000: offered 999,997 pushed 1,000,084 consumed 999,952 shed 0 errors 0 lag 0 | push p50 10.2 p99 20.5 | e2e p50 30.2 p99 54.3 | n1 8.5c apply 19% raft 158%; n2 2.3c apply 14% raft 39%; n3 2.4c apply 14% raft 40% | loaders 5.9c  OK 
+RUN_DONE

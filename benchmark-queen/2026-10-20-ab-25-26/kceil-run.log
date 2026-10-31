@@ -1,0 +1,17 @@
+[21:47:33] start kceil-250-r700000: bin 250, 700000 msg/s
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+[create] done: 1 topics x 100 partitions ready
+kceil-250-r700000   700,000: steady offered 699,993 pushed 700,003 consumed 700,000 errors 0 | produce p50 9.7 p99 15.6 | e2e p50 15.5 p99 32.0 ms | broker cores 8.6 / 1.9 / 1.9 | OK
+[21:49:40] start kceil-260-r700000: bin 260, 700000 msg/s
+  [topic] t=+10s describe log dirs: request DescribeLogDirs has 3 separate shard errors, first: broker is too old; the broker has already indicated it will not know how to handle the request
+FATAL topic: topics not ready within -topic-timeout 20s: describe log dirs: request DescribeLogDirs has 1 separate shard errors, first: context deadline exceeded
+kceil-260-r700000   700,000: steady offered 699,987 pushed 699,996 consumed 699,942 errors 0 | produce p50 12.9 p99 21.2 | e2e p50 18.4 p99 33.8 ms | broker cores 0.7 / 0.7 / 9.2 | OK
+[21:52:05] start kceil-250-r850000: bin 250, 850000 msg/s
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+[create] done: 1 topics x 100 partitions ready
+kceil-250-r850000   850,000: steady offered 849,988 pushed 849,948 consumed 755,509 errors 0 | produce p50 16.0 p99 26.9 | e2e p50 3899.4 p99 10879.0 ms | broker cores 2.0 / 1.8 / 9.7 | NOT CARRIED
+[21:54:19] start kceil-260-r850000: bin 260, 850000 msg/s
+  [topic] t=+10s describe log dirs: request DescribeLogDirs has 3 separate shard errors, first: broker is too old; the broker has already indicated it will not know how to handle the request
+FATAL topic: topics not ready within -topic-timeout 20s: describe log dirs: request DescribeLogDirs has 1 separate shard errors, first: context deadline exceeded
+kceil-260-r850000   850,000: steady offered 850,010 pushed 849,870 consumed 537,932 errors 0 | produce p50 40.4 p99 94.2 | e2e p50 17563.6 p99 25690.1 ms | broker cores 0.7 / 10.2 / 0.7 | NOT CARRIED
+[21:56:45] KAB26_DONE

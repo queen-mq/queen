@@ -32,7 +32,9 @@ against the queue's dedup window. The driver cannot turn either off.
   - three profiles, like the Kafka driver's: `queen.yaml` (the settings we benchmark with),
     `queen-throughput.yaml` (`popBatch` 10,000 for one or a few partitions) and
     `queen-many-topics.yaml` (`maxPops` 12,000, with the brokers on `QUEEN_QLOG_SHARDS=16`), plus
-    `queen-local.yaml` for the Docker cluster;
+    `queen-local.yaml` for the Docker cluster. All four pop with `leaseSeconds: 30`, so a pop
+    whose answer is lost on the network holds its partitions for 30 s rather than the queue's
+    300 s;
   - a README that documents every key.
 - `driver-queen/deploy/docker`: a three-node cluster on one machine.
 - `driver-queen/deploy/ssd-deployment`: Terraform and Ansible for AWS. It uses the same instance types
@@ -46,17 +48,18 @@ against the queue's dedup window. The driver cannot turn either off.
   - Master does not pass `verify` today, so this branch's first commit is the fix from the separate
     PR "Fix mvn verify on master: spotless and spotbugs in the files #443 added".
   - Once that PR is merged, this PR is a single commit.
-- **Local, against `deploy/docker`.** Queen 2.4.0, with `verify: true` in the driver (it counts
-  duplicates and gaps per partition):
-  - `simple-workload.yaml`, shortened to 1 minute, at 10,000 msg/s: 1,222,984 messages produced,
+- **Local, against `deploy/docker`.** Queen 2.5.0 with the settings of `queen-local.yaml`, plus
+  `verify: true` in the driver (it counts duplicates and gaps per partition):
+  - `simple-workload.yaml`, shortened to 1 minute, at 10,000 msg/s: 1,232,740 messages produced,
     consumed and acked. None was delivered twice, and no partition had a gap.
   - 20 topics with `maxPops: 4`, so the subscriptions wait on the long-poll fetch that tells them
-    which partitions got data: 242,954 messages over 20 subscriptions. None was delivered twice, and
+    which partitions got data: 489,272 messages over 20 subscriptions. None was delivered twice, and
     no partition had a gap.
-- **GCP.** Three brokers (24 vCPU, local NVMe) and three benchmark clients, against a pre-release Queen
-  build. We ran workloads from four of the five families in `workloads/` (many topics is next):
+- **GCP.** Three brokers (24 vCPU, local NVMe) and three benchmark clients, against pre-release builds
+  of Queen 2.5.0. We ran workloads from all five families in `workloads/`:
   - fixed rates on 100 and 10,000 partitions;
   - max rate;
+  - many topics: 100, 1,000 and 10,000;
   - 1M msg/s on 10 topics;
   - backlog.
 
