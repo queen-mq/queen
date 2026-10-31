@@ -175,6 +175,29 @@ four charts per node; Storage draws each node's log and store over time, Disk th
 and CPU and memory the workers' event loop and the cell's rows per batch. Why: three grey lines
 read as one, and a disk filling up showed only as a number.
 
+**Dashboard: a new console.** Every page is redrawn around one question each,
+in one frame: an icon rail, and a band with search (⌘K), the cluster with its
+nodes' CPU, memory, disk and network, the time window (live, a preset, a
+from-to, or a drag across any chart) and the theme. The Overview says what needs
+you and why (a cause, still happening or not, how a backlog spreads over
+partitions), on one screen. A queue's page holds its groups, partitions,
+messages, dead letters, timers and options. Queues lists them by namespace and
+never re-sorts under you, beside every consumer group (with seek, skip and
+delete), the workers that publish their pools (the former Supervisors page),
+the newest messages of every queue, and each ephemeral queue. Dead letters
+groups them by cause across queues, with replay, discard and download. Streams,
+Workload, Entities (a traced entity's timeline across queues), State (keys,
+locks, timers), Cluster and Settings (access, alert lines, users and tenants,
+with adding users and changing their roles) complete it. Every action shows what
+changes, the cluster and the HTTP call before it runs, and the broker's answer
+after. Colour only says what will not fix itself (amber) or is failing (red);
+charts are white and grey. Themes dark, soft and light; areas by tone (the
+default) or by lines; IBM Plex, served with the app, and no font from Google.
+The previous design is gone: its addresses (`/consumers`, `/messages`,
+`/supervisors`, `/ephemeral`, `/system`, `/kv`, `/users`, `/classic/…`) open the
+new pages. Why: the console should say what needs you and why before you open
+anything, and show the call behind every button.
+
 **Broker: `GET /streams/v1/queries` lists a tenant's streams.** Each registered
 stream with its source and sink queues, its config hash, and what its state
 holds now: the partitions with state, the open windows, and the windows that

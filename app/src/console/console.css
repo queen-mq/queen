@@ -1,0 +1,300 @@
+/* =========================================================================
+   THE NEW CONSOLE (2026-10-31): the design of the "from scratch" canvas.
+   Everything sits under .qn, the root of ConsoleShell.vue, so the old pages,
+   style.css and the shell.css shared with Gate and Traceflow stay as they are.
+
+   Colour means a message: amber = it will not fix itself, red = failing or
+   destructive. Healthy is grey, never green. Yellow lives in the logo only;
+   a picked item is white on a lighter step. Charts are white and grey.
+
+   Themes: soft (neutral grey, the default), dark (near-black), light.
+   Areas: tone (filled areas, no lines, rounder controls, the default) or
+   lines (hairlines between areas).
+   ========================================================================= */
+
+@import '@fontsource/ibm-plex-sans/latin-400.css';
+@import '@fontsource/ibm-plex-sans/latin-500.css';
+@import '@fontsource/ibm-plex-sans/latin-600.css';
+@import '@fontsource/ibm-plex-mono/latin-400.css';
+@import '@fontsource/ibm-plex-mono/latin-500.css';
+
+.qn {
+  /* surfaces */
+  --bg: #0d0c0b;      /* page */
+  --bg2: #151413;     /* raised, hover */
+  --bg3: #1e1c1a;     /* picked */
+  --line: #2a2725;    /* hairline between areas */
+  --line2: #1c1a18;   /* hairline between rows */
+  /* words */
+  --text: #eeebe6;
+  --text2: #b9b3ab;
+  --text3: #908a82;
+  /* messages */
+  --amber: #e9a23b;
+  --amberbg: rgba(233, 162, 59, .13);
+  --red: #f0614f;
+  --redbg: rgba(240, 97, 79, .13);
+  /* charts: white and greys */
+  --ink-in: #eeebe6;
+  --ink-out: #8f897f;
+  --ink-fill: rgba(238, 235, 230, .07);
+  --ink-brush: rgba(238, 235, 230, .08);
+  --scrim: rgba(5, 4, 4, .72);
+  /* tone areas */
+  --zone: #151413;
+  --card: #1c1b1a;
+  --well: #121110;
+  --ctl: #262422;
+  --pop: #1a1918;
+  /* shape */
+  --r-ctl: 4px;
+  --r-card: 6px;
+  --r-pop: 6px;
+  --rail-w: 64px;
+
+  font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  /* the old body's Inter tuning must not reach Plex */
+  letter-spacing: normal;
+  font-feature-settings: normal;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  color-scheme: dark;
+}
+
+.qn.soft {
+  --bg: #202020;
+  --bg2: #2c2c2c;
+  --bg3: #3a3a3a;
+  --line: #3d3d3d;
+  --line2: #2e2e2e;
+  --text: #f3f3f3;
+  --text2: #bdbdbd;
+  --text3: #9e9e9e;
+  --amber: #eaa646;
+  --amberbg: rgba(234, 166, 70, .16);
+  --red: #f26a59;
+  --redbg: rgba(242, 106, 89, .16);
+  --ink-in: #f3f3f3;
+  --ink-out: #9a9a9a;
+  --ink-fill: rgba(243, 243, 243, .07);
+  --ink-brush: rgba(243, 243, 243, .09);
+  --scrim: rgba(0, 0, 0, .5);
+  --zone: #262626;
+  --card: #2b2b2b;
+  --well: #242424;
+  --ctl: #363636;
+  --pop: #2a2a2a;
+}
+
+.qn.light {
+  --bg: #f6f5f3;
+  --bg2: #edebe8;
+  --bg3: #e3e1dd;
+  --line: #dad7d2;
+  --line2: #e8e6e2;
+  --text: #1b1a18;
+  --text2: #4b4741;
+  --text3: #6b665f;
+  --amber: #9a5b07;
+  --amberbg: rgba(154, 91, 7, .10);
+  --red: #c03221;
+  --redbg: rgba(192, 50, 33, .08);
+  --ink-in: #1b1a18;
+  --ink-out: #8a847c;
+  --ink-fill: rgba(27, 26, 24, .06);
+  --ink-brush: rgba(27, 26, 24, .07);
+  --scrim: rgba(40, 36, 32, .38);
+  --zone: #ecebe8;
+  --card: #ffffff;
+  --well: #f1f0ed;
+  --ctl: #ecebe8;
+  --pop: #ffffff;
+  color-scheme: light;
+}
+
+/* Areas told apart by tone: filled cards, no hairlines, rounder controls. */
+.qn.tone {
+  --line: transparent;
+  --line2: transparent;
+  --r-ctl: 8px;
+  --r-card: 14px;
+  --r-pop: 12px;
+}
+.qn.tone .qn-rail { background: var(--zone); }
+.qn.tone .qn-card { background: var(--card); padding: 16px 18px; --bg2: var(--well); }
+.qn.tone .qn-card .qn-row:hover { background: var(--ctl); }
+.qn.tone .qn-chip,
+.qn.tone .qn-btn2 { background: var(--ctl); }
+.qn.tone .qn-chip:hover,
+.qn.tone .qn-btn2:hover { background: var(--bg3); }
+.qn.tone .qn-field { background: var(--ctl); }
+.qn.tone .qn-seg { background: var(--ctl); }
+.qn.tone .qn-baseline { stroke: var(--bg3) !important; }
+
+/* ---- base, scoped ------------------------------------------------------- */
+/* Resets at zero specificity (:where), so every part below wins over them. */
+:where(.qn) *, :where(.qn) *::before, :where(.qn) *::after { box-sizing: border-box; }
+:where(.qn) :where(h1, h2, h3, p, ol, ul, figure) { margin: 0; padding: 0; }
+:where(.qn) :where(ol, ul) { list-style: none; }
+:where(.qn) a { color: inherit; text-decoration: none; }
+:where(.qn) a:hover { text-decoration: underline; text-underline-offset: 3px; }
+:where(.qn) button { font: inherit; color: inherit; cursor: pointer; background: none; border: 0; padding: 0; margin: 0; text-align: inherit; }
+:where(.qn) button:disabled { opacity: .4; cursor: not-allowed; }
+:where(.qn) :where(input, select, textarea) { font: inherit; color: inherit; }
+.qn :focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.qn :focus:not(:focus-visible) { outline: none; }
+:where(.qn) svg { display: block; }
+.qn .qn-mono { font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; }
+.qn .qn-num { font-variant-numeric: tabular-nums; }
+.qn .qn-kbd { font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 11px; color: var(--text3); }
+.qn .qn-vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.qn .qn-t2 { color: var(--text2); }
+.qn .qn-t3 { color: var(--text3); }
+.qn .amber { color: var(--amber); }
+.qn .red { color: var(--red); }
+
+/* ---- parts -------------------------------------------------------------- */
+
+/* A chip: a small bordered control in the band, a filter, a switch. */
+.qn-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 10px;
+  border: 1px solid var(--line) !important; border-radius: var(--r-ctl);
+  background: transparent; color: var(--text); white-space: nowrap;
+}
+.qn-chip:hover { background: var(--bg2); text-decoration: none; }
+.qn-chip[aria-pressed='true'], .qn-chip.on { background: var(--bg3); font-weight: 500; }
+
+/* Buttons: one primary per place (white on the page), then outlined, then plain. */
+.qn-btn, .qn-btn2, .qn-btn3 {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 32px; padding: 0 12px; border-radius: var(--r-ctl); white-space: nowrap;
+}
+.qn-btn { background: var(--text) !important; color: var(--bg) !important; font-weight: 500; }
+.qn-btn:hover { background: var(--text2) !important; text-decoration: none; }
+.qn-btn2 { border: 1px solid var(--line) !important; background: transparent; }
+.qn-btn2:hover { background: var(--bg3); text-decoration: none; }
+.qn-btn3 { color: var(--text2); padding: 0 8px; }
+.qn-btn3:hover { background: var(--bg2); color: var(--text); text-decoration: none; }
+.qn-btn.danger { background: var(--red) !important; color: #fff !important; }
+.qn-btn2.danger { color: var(--red); border-color: var(--red) !important; }
+
+/* A popover panel and its rows. */
+.qn-pop {
+  position: absolute; z-index: 30;
+  background: var(--pop); border: 1px solid var(--line); border-radius: var(--r-pop);
+  padding: 6px; box-shadow: 0 12px 32px rgba(0, 0, 0, .28);
+}
+.qn.light .qn-pop { box-shadow: 0 10px 28px rgba(40, 36, 32, .12); }
+.qn.tone .qn-pop { border-color: transparent; }
+.qn-opt {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  min-height: 32px; padding: 0 10px; border-radius: var(--r-ctl);
+  color: var(--text); text-align: left; white-space: nowrap;
+}
+.qn-opt:hover, .qn-opt.hover { background: var(--bg2); text-decoration: none; }
+.qn-opt[aria-pressed='true'], .qn-opt[aria-selected='true'], .qn-opt.on { background: var(--bg3); font-weight: 500; }
+.qn-popsep { height: 1px; background: var(--line2); margin: 6px 0; }
+.qn.tone .qn-popsep { background: var(--bg3); }
+
+/* An input in a box. */
+.qn-field {
+  display: flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 10px;
+  border: 1px solid var(--line); border-radius: var(--r-ctl);
+  background: var(--bg2); color: var(--text3);
+}
+.qn-field input { flex: 1 1 0; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); }
+.qn-field input::placeholder { color: var(--text3); }
+.qn-field:focus-within { border-color: var(--text3); }
+/* the box shows the focus; the input inside draws none */
+.qn .qn-field input:focus, .qn .qn-field input:focus-visible { outline: none; box-shadow: none; }
+
+/* A segmented switch. */
+.qn-seg { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: calc(var(--r-ctl) + 1px); }
+.qn-seg button { height: 26px; padding: 0 10px; border-radius: calc(var(--r-ctl) - 1px); color: var(--text2); }
+.qn-seg button:hover { background: var(--bg2); }
+.qn-seg button[aria-pressed='true'] { background: var(--bg3); color: var(--text); font-weight: 500; }
+
+/* Section titles: quiet, small. */
+.qn-h2 { font-size: 13px; font-weight: 500; color: var(--text3); }
+
+/* A list row that links somewhere. */
+.qn-row { border-radius: var(--r-ctl); }
+.qn-row:hover { background: var(--bg2); text-decoration: none; }
+
+/* The marks: amber square (will not fix itself), red diamond (failing). */
+.qn-mark { display: inline-block; flex: 0 0 auto; }
+.qn-mark.amber { width: 8px; height: 8px; background: var(--amber); }
+.qn-mark.red { width: 8px; height: 8px; background: var(--red); transform: rotate(45deg) scale(.86); }
+
+/* A tag that names where an action lands ("on stage"). */
+.qn-where { font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 500; padding: 2px 8px; border: 1px solid var(--text2); border-radius: var(--r-ctl); white-space: nowrap; }
+
+/* The HTTP call behind an action, shown before it runs. */
+.qn-call { font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--text3); overflow-wrap: anywhere; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .qn-fade-enter-active, .qn-fade-leave-active { transition: opacity .12s ease; }
+  .qn-fade-enter-from, .qn-fade-leave-to { opacity: 0; }
+}
+
+/* ---- lists and forms (the queue page and the pages after it) ----------- */
+
+/* A table drawn as grid rows (role=table); each table sets --cols. */
+.qn .qn-tr { display: grid; grid-template-columns: var(--cols); align-items: center; gap: 0 14px; min-height: 38px; border-bottom: 1px solid var(--line2); }
+.qn .qn-tr > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qn .qn-tr.head { min-height: 32px; font-size: 12px; color: var(--text3); border-bottom-color: var(--line); }
+.qn .qn-tr .r { text-align: right; }
+.qn .qn-tr.click { cursor: pointer; }
+.qn .qn-tr.click:hover { background: var(--bg2); }
+.qn .qn-tr.on, .qn .qn-tr.on:hover { background: var(--bg3); }
+.qn.tone .qn-tr.head { border-bottom-color: var(--bg3); }
+.qn .qn-tr .wrap { white-space: normal; }
+
+/* Tabs: words with a line under the picked one. */
+.qn .qn-tabs { display: flex; flex-wrap: wrap; gap: 4px 26px; border-bottom: 1px solid var(--line); }
+.qn .qn-tab { padding: 10px 0; margin-bottom: -1px; border-bottom: 2px solid transparent; color: var(--text2); }
+.qn .qn-tab:hover { color: var(--text); }
+.qn .qn-tab[aria-selected='true'] { color: var(--text); border-bottom-color: var(--text); font-weight: 500; }
+.qn .qn-tab .qn-count { color: var(--text3); font-weight: 400; margin-left: 6px; font-variant-numeric: tabular-nums; }
+.qn.tone .qn-tabs { border-bottom-color: var(--bg3); }
+
+/* A bordered area that holds one story (why a queue needs you). */
+.qn .qn-panel { border: 1px solid var(--line); border-radius: var(--r-card); padding: 20px 22px; }
+.qn.tone .qn-panel { border-color: transparent; background: var(--card); --bg2: var(--well); }
+
+/* Where the numbers come from, under a list. */
+.qn .qn-read { font-size: 12px; color: var(--text3); }
+
+/* Small bordered facts beside a title. */
+.qn .qn-tag { font-size: 12px; color: var(--text2); padding: 2px 8px; border: 1px solid var(--line); border-radius: var(--r-ctl); white-space: nowrap; }
+.qn.tone .qn-tag { border-color: transparent; background: var(--ctl); }
+
+/* Key and value. */
+.qn .qn-dl { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 8px 14px; font-size: 12.5px; margin: 0; }
+.qn .qn-dl dt { color: var(--text3); }
+.qn .qn-dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+/* A payload or a body. */
+.qn .qn-pre { margin: 0; padding: 12px 14px; border-radius: var(--r-ctl); background: var(--bg2); font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.6; color: var(--text2); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
+.qn .qn-textarea { display: block; width: 100%; min-height: 150px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--bg2); color: var(--text); font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; line-height: 1.55; resize: vertical; }
+.qn .qn-textarea:focus { outline: none; border-color: var(--text3); }
+.qn.tone .qn-textarea { border-color: transparent; background: var(--ctl); }
+
+/* A word that acts, inside a sentence. */
+.qn .qn-link { text-decoration: underline; text-underline-offset: 3px; }
+.qn .qn-link:hover { color: var(--text); }
+
+/* A share of a whole, as a thin bar. */
+.qn .qn-share { display: flex; height: 8px; gap: 2px; border-radius: 2px; overflow: hidden; }
+.qn .qn-share > span { display: block; }
+
+/* Light, lines: the paper needs a little more structure than the dark sheet.
+   The rail sits one step below the page (chrome one or two steps below, never
+   more), and a story panel or a drawer is white on the paper. */
+.qn.light:not(.tone) .qn-rail { background: #efeeeb; }
+.qn.light:not(.tone) .qn-panel { background: #ffffff; }

@@ -42,7 +42,7 @@ The ack, the order's new state, the next event and tomorrow's reminder commit as
 
 <SdkCode id="transaction" />
 
-Then open the dashboard: its KV page holds the order's new state, and its Timers page holds tomorrow's reminder.
+Then open the dashboard's State page: its keys hold the order's new state, and its timers hold tomorrow's reminder.
 
 <Why>a worker's step is several writes: it marks its input done, saves what changed, tells the next service and plans what comes later. When those writes go to different systems, a crash between two of them leaves the step half done, and someone writes code to find and repair the halves. One commit has no halves.</Why>
 

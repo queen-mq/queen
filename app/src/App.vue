@@ -19,65 +19,41 @@
     </div>
   </div>
 
-  <div v-else class="app-shell" :class="{ 'nav-rail': rail }">
-    <!-- Sidebar wrapper - hidden from grid flow on mobile -->
-    <div class="sidebar-slot">
-      <Sidebar />
-    </div>
-
-    <section class="app-main">
-      <Header @refresh="handleRefresh" />
-
-      <!-- One banner, always true, never guessed: it is driven by what the
-           wire actually did, not by a health endpoint that is itself
-           unreachable when it matters. -->
-      <div v-if="offline" class="status-strip">
-        <div class="status-banner banner-bad">
-          <span class="pulse-ember" style="width:7px; height:7px; flex-shrink:0;" />
-          <span :title="formatTimestampUtc(offlineSince)">
-            <strong>Cannot reach the API</strong> ·
-            everything on screen is from before {{ offlineSinceText }} and may be wrong
-          </span>
-        </div>
-      </div>
-      <div v-else-if="!actingCluster" class="status-strip">
-        <div class="status-banner banner-warn">
-          <span>
-            <strong>No cluster selected</strong> ·
-            this account has no cluster membership, so there is nothing to show
-          </span>
-        </div>
-      </div>
-
-      <main class="app-page">
-        <!-- A queue's tabs belong to the Queues section (QueuesLayout), beside
-             its queue list, not over every page. -->
-        <router-view />
-      </main>
-    </section>
+  <!-- Until the router has resolved the first page (its chunk is loading),
+       the mark rather than an empty window. -->
+  <div v-else-if="!route.matched.length" class="boot-screen">
+    <span class="boot-mark" aria-hidden="true" v-html="mark" />
   </div>
 
-  <ToastHost />
+  <!-- Every page is the console's: it draws its own rail and band (app/src/console). -->
+  <router-view v-else />
 </template>
 
 <script setup>
-import { computed, onUnmounted, provide, watch } from 'vue'
+import { onUnmounted, provide, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
 import mark from '@/assets/q.svg?raw'
-import Sidebar from '@/components/Sidebar.vue'
-import Header from '@/components/Header.vue'
-import ToastHost from '@/components/ToastHost.vue'
-import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
-import { rail } from '@/composables/useSidebar'
+import { toast } from '@/console/toasts'
 import { useIdentity } from '@/stores/identity'
 import { useUiStore } from '@/stores/ui'
 
-const { status, loadError, actingCluster, epoch, ensureIdentity } = useIdentity()
-const { offline, offlineSince } = useUiStore()
+const route = useRoute()
+const { status, loadError, epoch, ensureIdentity } = useIdentity()
+const { toasts: notices } = useUiStore()
 
-const offlineSinceText = computed(() =>
-  offlineSince.value ? formatTimestamp(offlineSince.value) : 'the last successful load'
-)
+// The app's own notices (a page refused by the guard, a failed call nobody
+// caught, an interface error) show as console toasts: one place for them.
+// The store keeps its dedupe and expiry; only new ones are passed on.
+const TONE = { error: 'red', warn: 'amber' }
+const passed = new Set()
+watch(notices, (list) => {
+  for (const n of list) {
+    if (passed.has(n.id)) continue
+    passed.add(n.id)
+    toast(n.title, n.detail || '', TONE[n.level] || '')
+  }
+}, { deep: true })
 
 const retry = () => { ensureIdentity().catch(() => {}) }
 
@@ -102,8 +78,6 @@ const fire = (onlyAuto) => {
     try { entry.callback() } catch (e) { console.error('[refresh] callback failed', e) }
   }
 }
-
-const handleRefresh = () => fire(false)
 
 // A cluster switch invalidates everything on screen. The stores have already
 // cleared themselves (identity's reset hooks); this pulls the new tenant's

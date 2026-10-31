@@ -621,9 +621,9 @@ monotonic uptime at the heartbeat, engine version and installed client version w
 These fields are optional, so earlier publishers remain readable. The Rust engine requests client
 metadata during its internal configuration export; ordinary exports retain the older shape.
 
-With [remote status enabled](/integrations/laravel/dashboard/#a-supervisor-on-another-host), the broker's
-[Supervisors page](/manage/upgrades-monitoring/) lists each instance under its
-publication group and opens its queue/pool details in a drawer. The
+With [remote status enabled](/integrations/laravel/dashboard/#a-supervisor-on-another-host), the broker
+dashboard's Workers view (Queues › Workers) lists each instance under its
+publication group and opens its pool details beside the list. The
 [status contract](/reference/supervisor-status/) defines the group and instance keys. Controls
 still run on the supervisor's host.
 

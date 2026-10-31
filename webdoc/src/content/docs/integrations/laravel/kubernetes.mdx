@@ -178,7 +178,7 @@ status lets the dashboard and the Prometheus endpoint on the web pods see every 
 a slug of `APP_NAME` and `APP_ENV`, such as `orders-production`, so web and worker pods that share
 both values agree on it. The key is a publication group: use one segment of letters, digits, dots,
 underscores or hyphens, starting with a letter or digit; `coordination` is reserved. Every pod
-writes to its own instance slot. The broker's [Supervisors page](/manage/upgrades-monitoring/)
+writes to its own instance slot. The broker dashboard's Workers view (Queues › Workers)
 can read the same publications. This grouping does not change replica coordination
 ([status contract](/reference/supervisor-status/)). Every 2.0 broker serves the long poll of
 `event_driven`. The supervisor holds it with the token it reads depth with, and through the broker's
@@ -377,8 +377,9 @@ pod's share within seconds, while KEDA changes the number of pods over minutes.
 
 1. `kubectl exec deploy/queen-workers -- php artisan queen:supervisor status --json`: in
    `pool_status`, each autoscaling pool reports `replicas`, the number of pods sharing its target.
-2. The dashboard's **Supervisors** page lists one card per pod, and each `shared` pool shows its
-   share. A warning about masters that autoscale one queue means a pod runs without coordination.
+2. The dashboard's **Workers** view (Queues › Workers) lists each pod as an instance of its
+   application, and a `shared` pool's details say how many replicas coordinate it. A warning about
+   masters that autoscale one queue means a pod runs without coordination.
 3. In Prometheus, `sum(queen_workers)` stays within the fleet limits and `queen_pool_replicas`
    matches the replica count.
 4. The pod log says `event-driven: watching N partition(s)`. If watching is off, the line says why,

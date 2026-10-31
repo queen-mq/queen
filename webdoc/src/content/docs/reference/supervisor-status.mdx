@@ -14,11 +14,10 @@ sourceOfTruth:
   - supervisor/src/main.rs
   - supervisor/src/coordination.rs
   - app/src/composables/supervisorStatus.js
-  - app/src/composables/supervisorQueueMetrics.js
-  - app/src/views/Supervisors.vue
-  - app/src/components/SupervisorGroupCard.vue
-  - app/src/components/SupervisorActivity.vue
-  - app/src/composables/supervisorActivity.js
+  - app/src/console/queues/QueuesWorkers.vue
+  - app/src/console/queues/WorkersDetail.vue
+  - app/src/console/queues/workersView.js
+  - app/src/console/queues/useWorkers.js
   - app/src/composables/supervisorGroups.js
   - server/src/rsm/dashboard/queue_views.rs
   - app/src/composables/consumerStatus.js
@@ -110,6 +109,11 @@ verifiedBy:
 # Supervisors.vue (cc23f6381): the dashboard lists each page's items in a column beside it. The
 # Supervisors page is a list beside one card per group; the first sentence of the application
 # overview says so.
+# sourceOfTruth re-read 2026-10-31 (the new console): the Supervisors page is Queues › Workers
+# (console/queues/QueuesWorkers.vue, WorkersDetail.vue, workersView.js, useWorkers.js): one list of
+# groups with their pools, details beside it, a bounded KV read with Read more. The application
+# overview is rewritten to say so; the old view, its components, supervisorActivity.js and
+# supervisorQueueMetrics.js left the sources with the files.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
@@ -121,22 +125,23 @@ integration.
 
 ## Application overview
 
-The dashboard's Supervisors page shows one card per publication group, across all SDK languages
-and the PHP/Rust process supervisors; the list beside it names every group, and picking one
-narrows the page to it. A queue's Supervisors tab shows the groups that report that queue. Each card includes current worker capacity, pools
-needing attention, heartbeat age and runtime-specific diagnostics: busy workers and cumulative
-handler failures for SDK consumers, or draining workers and free process slots for process
-supervisors. Expand the instances line to see every loaded instance, then
-select an instance to open its queues and diagnostics. Search and engine filters select
-whole groups: a matching healthy host never hides an unhealthy sibling. Display pagination
-counts applications, while **Load more publications** extends the bounded KV scan.
+The dashboard's Workers view (Queues › Workers) lists every publication group, across all SDK
+languages and the PHP/Rust process supervisors, in name order, each with its pools under it: the
+queue a pool reads, its state, its workers running against those wanted, its instances, what
+waits in its queue and that queue's last hour. A line above the list names the groups that need
+you. A queue's menu opens the view narrowed to the pools that read that queue.
 
-A grey dot before the application's name means no issue was reported by the loaded
-instances, as a healthy state is marked on every other page. An amber mark means attention
-or incomplete status and a red one a critical issue, each with its label in the header; a
-hollow dot means the instances are not running. The line under the card counts the instances
-in each state: expand it to inspect all of them. A partial KV scan marks summaries as partial, even if the loaded instances
-report no problems. The dashboard cannot infer missing replicas after their publications
+Picking a group opens its details beside the list: current worker capacity, free process slots,
+heartbeat age and every loaded instance. Picking an instance or a pool opens its own: heartbeat,
+uptime, PIDs, versions, readiness and the process budget for process supervisors; busy workers and
+cumulative handler failures for SDK consumers; a pool's settings and restart failures. The filter
+matches a group, host, instance id, engine, pool, queue or consumer group, and the switch above
+the list shows the pools that need you, drain, stopped, or whose instances stopped reporting.
+
+Healthy groups and pools carry no mark. An amber mark means attention or incomplete status and a
+red one a critical issue, each with its word. The KV read is bounded: when more reports are
+stored than were read, the view says so and **Read more** reads the next page, and the counts
+cover the instances read so far. The dashboard cannot infer missing replicas after their publications
 have expired and disappeared.
 
 Worker totals are available only when every loaded instance in the group has a fresh,

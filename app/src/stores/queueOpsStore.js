@@ -18,12 +18,15 @@
 import { ref, shallowRef } from 'vue'
 
 import { system } from '@/api'
-import { opsByQueue } from '@/composables/queueOps'
+import { opsByQueue, seriesByQueue } from '@/composables/queueOps'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
 
 const DEFAULT_TTL_MS = 30_000
 
 const ops = shallowRef(null) // null = not read (or not served); Map name → totals
+// The same read's minutes per queue (seriesByQueue) and their bucket starts.
+const series = shallowRef(null)
+const buckets = shallowRef([])
 const error = ref(null)
 const lastFetched = ref(0)
 let inflight = null
@@ -41,6 +44,8 @@ const fetchOps = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
       const d = (await system.getWorkload({ groupBy: 'queue' }, { probe: true, quiet: true })).data
       if (epochAtStart !== currentEpoch()) return ops.value
       ops.value = opsByQueue(d)
+      series.value = seriesByQueue(d)
+      buckets.value = Array.isArray(d?.buckets) ? d.buckets : []
       error.value = null
       return ops.value
     } catch (err) {
@@ -61,6 +66,8 @@ const reset = () => {
   inflight = null
   inflightEpoch = -1
   ops.value = null
+  series.value = null
+  buckets.value = []
   error.value = null
   lastFetched.value = 0
 }
@@ -68,5 +75,5 @@ const reset = () => {
 onClusterChange(reset)
 
 export function useQueueOpsStore() {
-  return { ops, error, lastFetched, fetchOps, reset }
+  return { ops, series, buckets, error, lastFetched, fetchOps, reset }
 }

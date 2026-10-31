@@ -15,7 +15,10 @@ const isJsonApiPath = (url = '') => url.startsWith('/api/') || url === '/health'
 // hostname or broker-direct.
 const isClusterScoped = (url = '') =>
   url.startsWith('/api/v1/') || url.startsWith('/api/console/') ||
-  url.startsWith('/api/operator/') || url === '/health'
+  url.startsWith('/api/operator/') || url === '/health' ||
+  // The console's list of streams (GET /streams/v1/queries) is a tenant read
+  // like the /api/v1 ones.
+  url.startsWith('/streams/v1/')
 
 function retryAfterSeconds(headers) {
   const raw = headers?.get?.('retry-after')

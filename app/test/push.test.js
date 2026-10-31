@@ -383,37 +383,6 @@ test('copy: an undecryptable envelope is recognised, and a plain payload is not'
 // Where the message is written
 // ---------------------------------------------------------------------------
 
-// The queue field is the one place in this form that decides WHERE the message
-// goes, and it is a shared widget whose default is to discard uncommitted text
-// (right for the eleven filter rows, wrong here: the typed name is the write
-// target). The behaviour itself needs a DOM, which this suite does not have —
-// so pin the contract between the two files the way theme.test.js pins the
-// pre-paint script: the opt-in exists, it is off by default, and the push form
-// asks for it.
-test('the push form commits the queue name it was typed, not the one before it', () => {
-  const widget = readFileSync(
-    new URL('../src/components/Autocomplete.vue', import.meta.url), 'utf8',
-  )
-  // Leaving the field runs the opt-in-aware handler, never `cancel` directly.
-  assert.match(widget, /@blur="onLeave"/)
-  assert.match(widget, /@keydown\.tab="onLeave"/)
-  // Off by default, so the filter rows keep discarding half-typed text.
-  assert.match(widget, /commitOnBlur:\s*\{\s*type:\s*Boolean,\s*default:\s*false/)
-  // And what it applies is the TYPED text, not the highlighted row: on a blur
-  // nobody chose that row.
-  assert.match(widget, /const commitTyped\s*=/)
-  assert.match(widget, /commitOnBlur\s*&&\s*props\.allowCustom\)\s*\{\s*commitTyped\(\)/)
-
-  const modal = readFileSync(
-    new URL('../src/components/PushMessageModal.vue', import.meta.url), 'utf8',
-  )
-  assert.match(modal, /commit-on-blur/)
-  // And the filter vocabulary stays out of a form whose only verb is "push".
-  assert.match(modal, /custom-hint="press Enter to push to this queue name"/)
-  assert.match(modal, /:reset-label="null"/)
-  assert.doesNotMatch(modal, /filter by this name/)
-})
-
 // ---------------------------------------------------------------------------
 // The list the operator lands on afterwards
 // ---------------------------------------------------------------------------

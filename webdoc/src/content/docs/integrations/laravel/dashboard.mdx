@@ -148,6 +148,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-31 (6e7061f00): app/src/router/index.js adds /access for a cluster's
 # members and API keys and redirects /members and /keys to it. The paths this panel links to
 # (/queues/{queue} and its messages) are as they were. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-31 (the new console): app/src/router/index.js routes every page to
+# the console. /queues/{queue} is the queue's page, and /messages?queue=…&status=… redirects to
+# Queues › Messages with the same queue and status, so both links this panel makes still land
+# where they did. Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the
@@ -480,8 +484,8 @@ other.
 The key is a group name: 1–255 ASCII letters, digits, dots, underscores or hyphens, starting
 with a letter or digit. Names are case-sensitive and cannot contain slashes; `coordination` is
 reserved. See the [publication contract](/reference/supervisor-status/) for identity, compatibility
-and requirements for other implementations. The broker dashboard's **Supervisors** page can also
-read these publications, grouped across applications, without a Laravel web host.
+and requirements for other implementations. The broker dashboard's **Workers** view (Queues › Workers) can also
+read these publications, grouped by application, without a Laravel web host.
 
 The Laravel Supervisors page then shows one card per instance: a live local supervisor first, then every
 published one, live before stale, each with its host, PID and last heartbeat. The overview, the

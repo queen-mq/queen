@@ -27,6 +27,22 @@ export function opsByQueue(payload) {
   return out
 }
 
+/**
+ * The same answer's minutes, Map name → `{ push, pop, ackFailed }`: counts per
+ * minute aligned with the answer's `buckets`, oldest first. The first minute
+ * may be null (before the window) and the last one is still filling. For the
+ * small last-hour lines beside a queue.
+ */
+export function seriesByQueue(payload) {
+  const out = new Map()
+  const pick = (a) => (Array.isArray(a) ? a.map((v) => (v === null || v === undefined || v === '' ? null : num(v))) : [])
+  for (const r of payload?.rows || []) {
+    if (!r?.key || !r.series) continue
+    out.set(r.key, { push: pick(r.series.push), pop: pick(r.series.pop), ackFailed: pick(r.series.ackFailed) })
+  }
+  return out
+}
+
 /** "2,132 of 2,132 acks failed (100%)": a queue's hour of acks in words. */
 export function acksText(o) {
   if (!o) return ''

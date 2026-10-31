@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 
 import { overviewVerdict, attentionWhy } from '../src/composables/overviewViews.js'
 import { queueAlerts } from '../src/composables/queueAlerts.js'
-import { acksText, opsByQueue } from '../src/composables/queueOps.js'
+import { acksText, opsByQueue, seriesByQueue } from '../src/composables/queueOps.js'
 import { buildQueueTriage, filterQueueTriage } from '../src/composables/queueTriage.js'
 import { ackAttention, queueAttention } from '../src/composables/useAttention.js'
 import { THRESHOLDS } from '../src/composables/useSeverity.js'
@@ -97,4 +97,17 @@ test('the triage list carries the hour and filters failing acks', () => {
   assert.deepEqual(rows.slice(0, 2).map((r) => [r.name, r.sev, r.reason]), [['channel.opsync_fetch', 'bad', 'acks'], ['orders', 'warn', 'acks']])
   assert.equal(rows[0].ops.ackFailed, 2132)
   assert.deepEqual(filterQueueTriage(rows, '', 'acks').map((r) => r.name), ['channel.opsync_fetch', 'orders'])
+})
+
+test('seriesByQueue keeps each queue\'s minutes, null where the broker has none', () => {
+  const payload = { buckets: ['07:20', '07:21', '07:22'], rows: [
+    { key: 'channel.opsync_fetch', series: { push: [null, 5, '7'], pop: [null, 30, 31], ackFailed: [null, 30, 31] } },
+    { key: 'quiet', series: { push: [null, 0, 0] } },
+    { key: 'no-series' },
+  ] }
+  const s = seriesByQueue(payload)
+  assert.deepEqual(s.get('channel.opsync_fetch'), { push: [null, 5, 7], pop: [null, 30, 31], ackFailed: [null, 30, 31] })
+  assert.deepEqual(s.get('quiet'), { push: [null, 0, 0], pop: [], ackFailed: [] })
+  assert.equal(s.has('no-series'), false)
+  assert.equal(seriesByQueue(null).size, 0)
 })

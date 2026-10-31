@@ -456,31 +456,18 @@ test('a listing with no row id falls back to transaction id PLUS group', () => {
   assert.equal(dlqRowKey(undefined), null)
 })
 
-test('the DLQ view selects and replays by the row identity, and purges by the address', () => {
-  // The behaviour needs a DOM this suite does not have, so the contract between
-  // the two files is pinned the way push.test.js pins the Autocomplete's: the
-  // view imports the helper, the table/drawer/selection are keyed on it, and
-  // `msgKey` survives ONLY where delete_message_v1's every-group semantics are
-  // the truth.
-  const view = readFileSync(new URL('../src/views/DeadLetter.vue', import.meta.url), 'utf8')
-
-  assert.match(view, /import \{ dlqRowKey,/)
-  assert.match(view, /const rowKey = dlqRowKey/)
-  // Row key, selection, the drawer's row, and the stale-selection drop.
-  assert.match(view, /:key="rowKey\(msg\)"/)
-  assert.match(view, /rowKey\(msg\) === selectedKey/)
-  assert.match(view, /find\(m => rowKey\(m\) === selectedKey\.value\)/)
-  assert.match(view, /rows\.some\(m => rowKey\(m\) === selectedKey\.value\)/)
-  // Nothing resolves a row by the message address any more.
-  assert.doesNotMatch(view, /msgKey\(m\) === selectedKey\.value/)
-  assert.doesNotMatch(view, /selectedKey\.value === msgKey/)
-
-  // The purge keeps it, deliberately: one call deletes every consumer group's
-  // record under the address, so its in-flight flag, its error line and its
-  // suppression set are all address-wide.
-  assert.match(view, /deleting\.value\.has\(msgKey\(msg\)\)/)
-  assert.match(view, /rowErrors\.value\.get\(msgKey\(msg\)\)/)
-  assert.match(view, /purged\.value\.has\(msgKey\(m\)\)/)
+test('the Dead letters page replays by the row identity, and discards by the address', () => {
+  // The page needs a DOM this suite does not have, so the contract is pinned in
+  // the source: a replay addresses the DLQ row (its id), never the message
+  // address, with an empty body (it lands where it failed); a discard deletes by
+  // the address, which is every consumer group's record under it, or purges a
+  // whole queue's dead letters.
+  const actions = readFileSync(new URL('../src/console/deadletters/dlActions.js', import.meta.url), 'utf8')
+  assert.match(actions, /filter\(\(m\) => m\?\.id\)/)
+  assert.match(actions, /dlqApi\.replay\(m\.id, \{\}/)
+  assert.doesNotMatch(actions, /dlqApi\.replay\(m\.transactionId/)
+  assert.match(actions, /dlqApi\.delete\(m\.partitionId, m\.transactionId/)
+  assert.match(actions, /dlqApi\.purge\(\{ queue \}/)
 })
 
 test('the transaction id is the row id, every time', () => {

@@ -37,6 +37,8 @@ export default defineConfig({
       '/auth': upstream,
       '/health': upstream,
       '/metrics': upstream,
+      // The console's Streams page reads GET /streams/v1/queries.
+      '/streams/': upstream,
     }
   }
 })

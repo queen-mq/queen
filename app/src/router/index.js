@@ -1,12 +1,10 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
-import { can, ensureIdentity, useIdentity } from '@/stores/identity'
+import { can, ensureIdentity } from '@/stores/identity'
 import { notifyError } from '@/stores/ui'
 
-const { standalone } = useIdentity()
-
 // Route meta is the declaration of what a page needs and what it is about.
-// Nothing else may decide either — the sidebar and the guard both read it.
+// Nothing else may decide either: the guard and the console's shell read it.
 //
 //   requires : capability the identity store must grant. One of
 //              'read' | 'produce' | 'consume' | 'queueAdmin' | 'operator'.
@@ -14,19 +12,9 @@ const { standalone } = useIdentity()
 //   scope    : 'tenant' (numbers are for the acting tenant) or 'cell'
 //              (numbers cover the whole cell, every tenant on it). A cell-level
 //              page MUST say so on screen; a cell number read as a tenant
-//              number is the lie class this shell exists to prevent.
-//   nav      : { group, order } to appear in the sidebar. Omit to stay
-//              reachable by URL but out of the nav.
-//   navParent: the nav row that stands for this page when it has none of its
-//              own: that row is the one lit while you are here.
-//   proxyOnly: the broker-direct dashboard has no pxdb-backed account store.
-//   pick     : the address field naming what the page's list has picked
-//              (KV's ?ns=, Ephemeral's ?name=): the top bar reads
-//              "Title / <pick>", and Title drops the pick.
-//   queueTab : the page is a tab of the Queues section (its queue list on the
-//              left, the queue's tabs on the right). With queueTabNeedsQueue
-//              it is one only while a queue is picked (?queue=); without one
-//              it is its own page (Consumer groups, Supervisors).
+//              number is the lie class the console exists to prevent.
+//   console  : the page draws the console's own rail and band (app/src/console).
+//   section  : the rail item lit while you are here.
 function performanceMoved(to) {
   const query = {}
   for (const key of ['range', 'from', 'to']) {
@@ -38,223 +26,176 @@ function performanceMoved(to) {
 
 const routes = [
   {
+    // The new console's Overview (app/src/console): its own rail and band,
+    // so App.vue draws no old shell around it (meta.console).
     path: '/',
-    name: 'Dashboard',
-    component: () => import('@/views/Dashboard.vue'),
+    name: 'Overview',
+    component: () => import('@/views/Overview.vue'),
     meta: {
-      title: 'Overview', subtitle: 'System overview and key metrics',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Overview', icon: 'dashboard', order: 1 },
+      title: 'Overview', subtitle: 'Is anything waiting on you?',
+      requires: 'read', scope: 'tenant', console: true, section: 'overview',
     }
   },
+
   {
+    // The new console's Queues (app/src/console).
     path: '/queues',
-    name: 'Queues',
-    component: () => import('@/views/Queues.vue'),
+    name: 'QueuesPage',
+    component: () => import('@/views/QueuesPage.vue'),
     meta: {
-      title: 'Queues', subtitle: 'Manage message queues and partitions',
-      requires: 'read', scope: 'tenant', queueTab: 'overview',
-      nav: { group: 'Messaging', icon: 'queues', order: 1 },
+      title: 'Queues', subtitle: 'Where is the work stuck?',
+      requires: 'read', scope: 'tenant', console: true, section: 'queues',
     }
   },
+
   {
+    // A queue in the new console (app/src/console): its groups, partitions,
+    // messages, dead letters, timers and options as tabs (?tab=).
     path: '/queues/:queueName',
-    name: 'QueueDetail',
-    component: () => import('@/views/QueueDetail.vue'),
+    name: 'QueuePage',
+    component: () => import('@/views/QueuePage.vue'),
     meta: {
-      title: 'Queue', subtitle: 'Queue configuration and status',
-      requires: 'read', scope: 'tenant', queueTab: 'overview', navParent: '/queues',
+      title: 'Queue', subtitle: 'Is this queue all right?',
+      requires: 'read', scope: 'tenant', console: true, section: 'queues',
     }
   },
-  {
-    // A queue's Alerts tab: what needs you on it now, and the lines it is
-    // judged by (the Settings document's entry for this queue).
-    path: '/queues/:queueName/alerts',
-    name: 'QueueAlerts',
-    component: () => import('@/views/QueueAlerts.vue'),
-    meta: {
-      title: 'Alerts', subtitle: 'What needs you on this queue, and the lines it is judged by',
-      requires: 'read', scope: 'tenant', queueTab: 'alerts', navParent: '/queues',
+
+  // A queue's alert lines live in Settings now (the new console).
+  { path: '/queues/:queueName/alerts', redirect: (to) => ({ path: '/settings', query: { queue: to.params.queueName } }) },
+
+  // Ephemeral queues are a filter of Queues in the new console (?name= picks one).
+  { path: '/ephemeral', redirect: (to) => ({ path: '/queues', query: { show: 'eph', ...(typeof to.query.name === 'string' && to.query.name ? { name: to.query.name } : {}) } }) },
+  // Consumer groups: one queue's are that queue's page; all of them, the
+  // Queues section's Consumer groups view (?group= picks one).
+  { path: '/consumers', redirect: (to) => (typeof to.query.queue === 'string' && to.query.queue
+    ? { path: `/queues/${encodeURIComponent(to.query.queue)}` }
+    : { path: '/queues', query: { view: 'groups', ...(typeof to.query.group === 'string' && to.query.group ? { group: to.query.group } : {}) } }) },
+  // Messages: the Queues section's Messages view, with the old page's filters
+  // (the Laravel dashboard links /messages?queue=X&status=pending|processing,
+  // and the old Traces page one message by partitionId + transactionId).
+  { path: '/messages', redirect: (to) => {
+    const q = (k) => (typeof to.query[k] === 'string' && to.query[k] ? to.query[k] : '')
+    const query = { view: 'messages' }
+    for (const [from, into] of [['queue', 'mq'], ['status', 'mstatus'], ['partition', 'mpart'], ['partitionId', 'mpid'], ['transactionId', 'mtx']]) {
+      if (q(from)) query[into] = q(from)
     }
-  },
-  {
-    // The RAM storage class (EPHEMERAL_QUEUES.md §5.3). Tenant-scoped and
-    // 'read' like the durable list — the two status routes are classified
-    // Gated(Ephemeral, Read) at the proxy, so anyone who may read queues may
-    // read these. It is a SEPARATE page on purpose: an ephemeral queue has no
-    // pending, no retained bytes and no DLQ, so its rows cannot share a table
-    // with columns that would have to lie about them.
-    path: '/ephemeral',
-    name: 'Ephemeral',
-    component: () => import('@/views/Ephemeral.vue'),
-    meta: {
-      title: 'Ephemeral queues', subtitle: 'RAM-class queues — contents survive nothing',
-      requires: 'read', scope: 'tenant', pick: 'name',
-      nav: { group: 'Messaging', icon: 'ephemeral', order: 2 },
-    }
-  },
-  {
-    path: '/consumers',
-    name: 'Consumers',
-    component: () => import('@/views/Consumers.vue'),
-    meta: {
-      title: 'Consumer groups', subtitle: 'Monitor consumer lag and status',
-      requires: 'read', scope: 'tenant', queueTab: 'consumers', navParent: '/queues',
-    }
-  },
-  {
-    path: '/messages',
-    name: 'Messages',
-    component: () => import('@/views/Messages.vue'),
-    meta: {
-      title: 'Messages', subtitle: 'Browse, inspect and push messages',
-      requires: 'read', scope: 'tenant', queueTab: 'messages', navParent: '/queues',
-    }
-  },
-  {
-    // Tenant-scoped read access to the key-value store.
-    path: '/kv',
-    name: 'Kv',
-    component: () => import('@/views/Kv.vue'),
-    meta: {
-      title: 'KV', subtitle: 'Browse the key-value store, namespace by namespace',
-      requires: 'read', scope: 'tenant', pick: 'ns',
-      nav: { group: 'Messaging', icon: 'kv', order: 7 },
-    }
-  },
-  {
-    // Scheduled messages that have not fired yet. 'read' because the list, the
-    // count and the peek are Gated(Timers, Read) at the proxy — the CANCEL on
-    // this page is gated separately, on the rule Ephemeral.vue already uses
-    // for a gated write (produce ‖ consume, i.e. not a Viewer).
-    path: '/timers',
-    name: 'Timers',
-    component: () => import('@/views/Timers.vue'),
-    meta: {
-      title: 'Timers', subtitle: 'Scheduled messages waiting to fire, per queue',
-      requires: 'read', scope: 'tenant', queueTab: 'scheduled', navParent: '/queues',
-    }
-  },
-  {
-    // Who holds each lock and semaphore permit. 'read' because a permit is a
-    // KV row and the page reads it through the console's KV listing (Read at
-    // the proxy by prefix), not through POST /api/v1/locks, which is
-    // read-write even for a `get`. The page writes nothing.
-    path: '/locks',
-    name: 'Locks',
-    component: () => import('@/views/Locks.vue'),
-    meta: {
-      title: 'Locks', subtitle: 'Who holds each lock and semaphore, and until when',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Messaging', icon: 'locks', order: 8 },
-    }
-  },
-  {
-    path: '/traces',
-    name: 'Traces',
-    component: () => import('@/views/Traces.vue'),
-    meta: {
-      title: 'Traces', subtitle: 'Track message flows across queues',
-      requires: 'read', scope: 'tenant', pick: 'trace',
-      nav: { group: 'Analysis', icon: 'traces', order: 3 },
-    }
-  },
-  {
-    path: '/supervisors',
-    name: 'Supervisors',
-    component: () => import('@/views/Supervisors.vue'),
-    meta: {
-      title: 'Supervisors', subtitle: 'Published supervisor status and worker pool health',
-      requires: 'read', scope: 'tenant', queueTab: 'supervisors', queueTabNeedsQueue: true,
-      nav: { group: 'Workers', icon: 'supervisors', order: 2 },
-    }
-  },
+    return { path: '/queues', query }
+  } },
+  // KV, locks and timers are State in the new console.
+  { path: '/kv', redirect: (to) => ({ path: '/state', query: typeof to.query.ns === 'string' ? { ns: to.query.ns } : {} }) },
+
+  // One queue's timers are its Scheduled tab; all of them, State's timers.
+  { path: '/timers', redirect: (to) => (typeof to.query.queue === 'string' && to.query.queue
+    ? { path: `/queues/${encodeURIComponent(to.query.queue)}`, query: { tab: 'scheduled' } }
+    : { path: '/state', query: { view: 'timers' } }) },
+
+  { path: '/locks', redirect: { path: '/state', query: { view: 'locks' } } },
+
+  // Traces are Entities in the new console: one traced name's timeline.
+  { path: '/traces', redirect: (to) => ({ path: '/entities', query: typeof to.query.trace === 'string' ? { name: to.query.trace } : {} }) },
+
+  // Supervisors are the Queues section's Workers view (?queue= narrows it).
+  { path: '/supervisors', redirect: (to) => ({ path: '/queues', query: { view: 'workers', ...(typeof to.query.queue === 'string' && to.query.queue ? { queue: to.query.queue } : {}) } }) },
   // The two Performance pages are gone: what they showed is on Workload, on a
   // queue's own page and on System. A link someone kept still lands somewhere
   // that answers it — the queue it named, else Workload — on the same window.
   { path: '/analytics', redirect: performanceMoved },
   { path: '/operations', redirect: performanceMoved },
   {
-    // Who is doing the work. Tenant-scoped: /api/v1/analytics/workload counts
-    // only this tenant's queues, and its `tenant` total is what every share on
-    // the page is computed against.
+    // The new console's Workload: who does the work, how much, and what is
+    // stuck. Tenant-scoped: /api/v1/analytics/workload counts only this
+    // tenant's queues.
     path: '/workload',
-    name: 'Workload',
-    component: () => import('@/views/Workload.vue'),
+    name: 'WorkloadPage',
+    component: () => import('@/views/WorkloadPage.vue'),
     meta: {
       title: 'Workload', subtitle: 'Who is doing the work, how much, and what is stuck',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Analysis', icon: 'workload', order: 2 },
+      requires: 'read', scope: 'tenant', console: true, section: 'workload',
     }
   },
   {
+    // The new console's Dead letters, by cause (?queue= narrows to one queue).
     path: '/dlq',
-    name: 'DeadLetter',
-    component: () => import('@/views/DeadLetter.vue'),
+    name: 'DeadLetters',
+    component: () => import('@/views/DeadLettersPage.vue'),
     meta: {
-      title: 'Dead letter', subtitle: 'Inspect, replay and purge failed messages',
-      requires: 'read', scope: 'tenant', queueTab: 'failed', navParent: '/queues',
+      title: 'Dead letters', subtitle: 'Why messages failed, by cause',
+      requires: 'read', scope: 'tenant', console: true, section: 'dlq',
     }
   },
+
   {
-    // The lines this console judges by, for the acting tenant: one document in
-    // its KV (stores/settingsStore.js). 'read' because the page states the
-    // lines in force to anyone; saving is offered to queueAdmin, the capability
-    // that configures a queue.
+    // The new console's Settings: access, alert lines, users and tenants, the
+    // audit log (?view=). 'read' because it states the lines in force to
+    // anyone; saving them is offered to queueAdmin.
     path: '/settings',
-    name: 'Settings',
-    component: () => import('@/views/Settings.vue'),
+    name: 'SettingsPage',
+    component: () => import('@/views/SettingsPage.vue'),
     meta: {
-      title: 'Settings', subtitle: 'The lines this console judges by',
-      requires: 'read', scope: 'tenant', pick: 'for',
-      nav: { group: 'Analysis', icon: 'settings', order: 4 },
+      title: 'Settings', subtitle: 'Access, alert lines, users and the audit log',
+      requires: 'read', scope: 'tenant', console: true, section: 'settings',
+    }
+  },
+
+  // Members and API keys are Settings → Access in the new console.
+  { path: '/access', redirect: { path: '/settings', query: { view: 'access' } } },
+
+  // The two pages before 2026-10-30.
+  { path: '/members', redirect: { path: '/settings', query: { view: 'access' } } },
+  { path: '/keys', redirect: { path: '/settings', query: { view: 'access' } } },
+  // The cell is Cluster in the new console.
+  { path: '/system', redirect: '/cluster' },
+
+  // Accounts across the cell: Settings › Users and tenants.
+  { path: '/users', redirect: { path: '/settings', query: { view: 'users' } } },
+  {
+    // The new console's State: KV keys by namespace, locks, timers of every queue (?view=).
+    path: '/state',
+    name: 'StatePage',
+    component: () => import('@/views/StatePage.vue'),
+    meta: {
+      title: 'State', subtitle: 'Keys, locks and timers',
+      requires: 'read', scope: 'tenant', console: true, section: 'state',
     }
   },
   {
-    // Tenant-level, cluster admins only: who may use the acting cluster, its
-    // members and its API keys, in one page. The proxy owns these identities
-    // (proxy/src/console.rs), so a broker-direct build has nothing to show.
-    path: '/access',
-    name: 'Access',
-    component: () => import('@/views/Access.vue'),
+    // The new console's Cluster: the cell under every tenant (operators).
+    path: '/cluster',
+    name: 'ClusterPage',
+    component: () => import('@/views/ClusterPage.vue'),
     meta: {
-      title: 'Access', subtitle: 'Who may use this cluster: its members and its API keys',
-      requires: 'clusterAdmin', scope: 'tenant', proxyOnly: true,
-      nav: { group: 'Access', icon: 'access', order: 1 },
-    }
-  },
-  // The two pages before 2026-10-30: an old address opens its section.
-  { path: '/members', redirect: (to) => ({ path: '/access', query: { ...to.query } }) },
-  { path: '/keys', redirect: (to) => ({ path: '/access', query: { ...to.query, view: 'keys' } }) },
-  {
-    // Cell-level: host resources and the replicated log cover every tenant on
-    // this cell, which is why the proxy answers it for live operators only.
-    path: '/system',
-    name: 'System',
-    component: () => import('@/views/System.vue'),
-    meta: {
-      title: 'System', subtitle: 'Cell-level: server resources and the replicated log',
-      requires: 'operator', scope: 'cell',
-      nav: { group: 'Cell', icon: 'system', order: 1 },
+      title: 'Cluster', subtitle: 'The cell: nodes, the replicated log, traffic',
+      requires: 'operator', scope: 'cell', console: true, section: 'cluster',
     }
   },
   {
-    // Accounts across the cell, a live operator's: beside System in the rail,
-    // since like System it covers every tenant on the cell.
-    path: '/users',
-    name: 'Users',
-    component: () => import('@/views/Users.vue'),
+    // The new console's Entities: one entity's timeline across queues, from the trace API (?name=).
+    path: '/entities',
+    name: 'EntitiesPage',
+    component: () => import('@/views/EntitiesPage.vue'),
     meta: {
-      title: 'Users', subtitle: 'Cell-level: user accounts and cluster access',
-      requires: 'operator', scope: 'cell', proxyOnly: true,
-      nav: { group: 'Cell', icon: 'cellUsers', order: 2 },
+      title: 'Entities', subtitle: 'What happened to one of them?',
+      requires: 'read', scope: 'tenant', console: true, section: 'entities',
     }
   },
+  {
+    // The new console's Streams: each stream, what it reads and writes, and
+    // its windows past their end (GET /streams/v1/queries, ?name=).
+    path: '/streams',
+    name: 'StreamsPage',
+    component: () => import('@/views/StreamsPage.vue'),
+    meta: {
+      title: 'Streams', subtitle: 'Does every stream keep up?',
+      requires: 'read', scope: 'tenant', console: true, section: 'streams',
+    }
+  },
+  // The old design is gone: its addresses open the new console.
+  { path: '/classic/:rest(.*)*', redirect: (to) => ({ path: '/' + [].concat(to.params.rest || []).join('/'), query: to.query }) },
   {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
-    component: () => import('@/components/NotFound.vue'),
-    meta: { title: 'Not found', subtitle: 'No such page', requires: 'read' }
+    component: () => import('@/views/NotFoundPage.vue'),
+    meta: { title: 'Not found', subtitle: 'No such page', requires: 'read', console: true, section: 'none' }
   },
 ]
 
@@ -277,11 +218,6 @@ router.beforeEach(async (to) => {
     // Boot failed (network / 5xx). App.vue renders the failure; let the
     // navigation through so it has something to render into.
     return true
-  }
-
-  if (to.meta.proxyOnly && standalone.value) {
-    notifyError('User accounts are managed by queen-proxy and are unavailable in broker-direct mode', 'Not available')
-    return { path: '/', replace: true }
   }
 
   const requires = to.meta.requires || 'read'

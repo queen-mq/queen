@@ -24,14 +24,16 @@ sourceOfTruth:
   - app/src/router/index.js
   - app/src/composables/settingsDoc.js
   - app/src/composables/useSeverity.js
-  - app/src/views/Supervisors.vue
-  - app/src/components/SupervisorGroupCard.vue
-  - app/src/components/SupervisorActivity.vue
+  - app/src/console/queues/QueuesWorkers.vue
+  - app/src/console/queues/workersView.js
   - app/src/composables/supervisorGroups.js
-  - app/src/composables/supervisorActivity.js
   - app/src/composables/supervisorStatus.js
   - app/src/composables/consumerStatus.js
-  - app/src/views/System.vue
+  - app/src/views/ClusterPage.vue
+  - app/src/console/cluster/clusterViews.js
+  - app/src/console/ClusterChip.vue
+  - app/src/console/useConsoleFrame.js
+  - app/src/console/useOverview.js
   - app/src/composables/useTraffic.js
   - app/src/composables/useBrokerStatus.js
   - server/src/rsm/replicator/raft/traffic.rs
@@ -54,6 +56,13 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-31 (6e7061f00): app/src/router/index.js adds /access (members and
 # API keys on one page) and redirects /members and /keys there; the System pages this page names
 # keep their paths. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-31 (the new console replaces every dashboard page): System is
+# the Cluster page (views/ClusterPage.vue, console/cluster/clusterViews.js), the top bar is the
+# band's cluster chip (console/ClusterChip.vue, useConsoleFrame.js: highest CPU and memory, the
+# fullest disk, the network of all nodes), the Overview's cell problems are a Cell card in Needs
+# you (console/useOverview.js), and Supervisors is Queues › Workers (console/queues/QueuesWorkers.vue,
+# workersView.js). The dashboard paragraphs say so; Supervisors.vue, System.vue and the old
+# components and composables left the sources with the files.
 ---
 
 ## Upgrade one node at a time
@@ -103,11 +112,11 @@ To keep the way back open while a new release proves itself, set `QUEEN_RAFT_CLU
 
 Every node serves three things on port 6632: the dashboard at `/`, its health at `/health`, and its metrics at `/metrics/prometheus`. Each one describes the node that answered, so probe and scrape every node at its own address, never through a load balancer.
 
-**The dashboard.** Its System page shows the replicated log and every node, with its role, its term, how far it has applied the log and how much disk it uses. A bar at the top of every page says when a node refuses writes because its disk is full.
+**The dashboard.** Its Cluster page lists every node: its role and term, its version, its CPU, memory and disk, how far it is behind the leader and when the leader last heard from it. A node's detail adds how far it has applied the log. On every page, the cluster chip at the top shows the highest CPU and memory of any node, the fullest disk and the network of all nodes; the disk number turns red when a node refuses writes because its disk is full.
 
-System also charts what each node moves, per second: its network in and out (Linux only), its disk reads and writes, and its Raft traffic by channel: `replication` (the leader's appends), `forward` (client commands a follower hands to the leader), `snapshot`, `link` (a standby cluster's reads) and `control` (votes, membership). The Raft table adds what each node sent and received in the last minute; hover a cell for the channels. The figures are averages over the metrics interval (`METRICS_FLUSH_MS`, 60 s), and the Raft traffic counts message bodies, so it reads a little below the network.
+Cluster also charts each node over the time window: its CPU, memory, disk use, network in and out (Linux only) and the bytes on its Raft port. A node's detail adds its disk reads and writes, and its Raft traffic by channel: `replication` (the leader's appends), `forward` (client commands a follower hands to the leader), `snapshot`, `link` (a standby cluster's reads) and `control` (votes, membership). The figures are averages over the metrics interval (`METRICS_FLUSH_MS`, 60 s), and the Raft traffic counts message bodies, so it reads a little below the network.
 
-For an operator, the Overview's verdict also covers the cell, not only the queues. Its Open issues list starts with what is wrong under them, each row linked to System:
+For an operator, the Overview also covers the cell, not only the queues. What is wrong under them comes first in its Needs you list, as a Cell card that opens Cluster:
 
 | Problem | Amber | Red |
 | --- | --- | --- |
@@ -118,7 +127,7 @@ For an operator, the Overview's verdict also covers the cell, not only the queue
 | A node's disk | past the gate's low line | at its high line, where writes answer 507 |
 | A node's memory or CPU | 80% of its limit, 90% of its cores | 90% of its limit |
 
-These are the lines that colour the top bar, so the two never disagree. The top bar adds the bytes on the Raft port's wire beside Raft (`Raft 3/3 · 12 MB/s`), and its panel each node's network, disk writes and Raft traffic.
+These are the lines that colour the cluster chip, so the two never disagree. The chip's panel lists each node with its CPU, memory, disk and how far it is behind.
 
 <Why>a cell in trouble is trouble for every queue on it. A follower that falls behind or a snapshot that runs for minutes shows in the verdict before it shows as latency.</Why>
 
