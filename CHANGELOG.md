@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## 2.7.0 - unreleased
+## 2.7.0 - 2026-10-31
 
 **Before upgrading: what 2.7.0 refuses, trims or removes that 2.6 kept.** Most of what 2.7.0 adds
 is a limit on something a client could grow without end; each is in the entries below and on
@@ -324,7 +324,10 @@ PHP engine; one that cannot be removed still stops the master, as a fault of the
 **The cluster version stays 7.** Nothing in 2.7.0 raises it: its log entries and stored rows are
 those of 2.6.0, so a cluster rolls from 2.6 to 2.7.0 one node at a time, and back. During the roll
 a stream runner whose claim reaches a 2.6 node turns claims off and keeps 2.6's idle flush until it
-restarts: restart stream runners once every node runs 2.7.0.
+restarts: restart stream runners once every node runs 2.7.0. Tested on three GCP VMs under load,
+from the released 2.6.0 to 2.7.0-beta.2 and back, with a 2.6.0 node leading a directory 2.7.0
+wrote, and the Jepsen campaign ran on 2.7.0's code: 226 tests, 2.6.0's without its 31 standby
+failovers, all valid at their first run (`benchmark-queen/2026-10-30-jepsen-27`).
 
 ## queenctl 2.6.1 and Go client 2.6.1 - 2026-10-24
 

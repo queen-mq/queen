@@ -14,9 +14,7 @@ second. Every customer, order or conversation gets its own ordered partition. Ev
 takes is saved as one commit, or not at all. One binary, no database, and Kafka clients work with
 it out of the box.
 
-**Live demo, Codemotion week:** [milan.queenmq.com](https://milan.queenmq.com): 50,000 cars in Milan, each car its own partition, 500,000 messages a second on one Queen node.
-
-[Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.6
+[Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.7
 
 </div>
 
@@ -172,7 +170,7 @@ Full details: [queenmq.com/benchmarks](https://queenmq.com/benchmarks/)
 ## Proven
 
 - In production at [Smartness](https://www.smartness.com/en).
-- [257 Jepsen tests](https://queenmq.com/benchmarks/jepsen/) on 2.6, all passed. No acknowledged message lost, no lease held twice.
+- [226 Jepsen tests](https://queenmq.com/benchmarks/jepsen/) on 2.7, all passed. No acknowledged message lost, no lease held twice.
 - Written in Rust. Apache-2.0.
 
 ## Documentation

@@ -62,7 +62,7 @@ A broker that promises "all or nothing" has to keep the promise exactly when som
 | Timers | A timer fires at most once, never after a cancel that reported removing it, and never before its delay. |
 | Every answered write, with two exceptions below | Survives kill -9 and power loss. |
 
-The campaign on the code of 2.6.0 ran 257 tests, and all were valid. [Jepsen](/benchmarks/jepsen/) lists every campaign, every fault, and every bug the earlier campaigns found and we fixed.
+The campaign on the code of 2.7.0 ran 226 tests, all of 2.6.0's but its 31 standby failovers, and all were valid. [Jepsen](/benchmarks/jepsen/) lists every campaign, every fault, and every bug the earlier campaigns found and we fixed.
 
 <Why>"exactly once" and "no message lost" are easy to write and hard to keep. A test that kills, cuts and pauses the nodes while it checks every answer is the only way we know to find out whether we keep them.</Why>
 

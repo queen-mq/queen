@@ -21,7 +21,7 @@ digest: >-
   782 ms at 10,000, and did not carry 50,000. Exactly-once
   consume-transform-produce transactions of 10 messages commit in 3 to 4 ms at the median and peak near 12,900 a second (16-vCPU nodes, 2026-10-12). A soak at
   500,000 msg/s on 2.0.0-beta.1 held e2e p99 near 86 ms for 3 h 23 min through kill -9 and
-  graceful restarts of the leader. Jepsen: 257 tests on the code of 2.6.0, all valid.
+  graceful restarts of the leader. Jepsen: 226 tests on the code of 2.7.0, all valid.
 ---
 
 Queen replicates every write through raft, so we measure it as a cluster: three nodes, every
@@ -53,7 +53,7 @@ kinds of machines.
 | Kafka clients at 1,000,000 msg/s through the facade inside the broker, e2e p99 48 ms; at 2,000,000 the consumers keep the rate | the 16-vCPU nodes; franz-go, `acks=all`, idempotent; 2.3.0-beta.1, 2026-10-13 | [Kafka clients](/benchmarks/kafka-clients/) |
 | 2,753 Laravel jobs/s with 32 workers on Queen's driver and supervisor, against 1,124 for Horizon on Redis | one raft node, 2.0.0-beta.2, 2026-10-01; 10 ms jobs, Redis fsyncing every write; medians of 3 runs | [Laravel workers](/benchmarks/laravel/) |
 | 500,000 msg/s for 3 h 23 min over 1,000,000 partitions, e2e p50 20 ms and p99 86 ms in the median window, through a kill -9 of the leader, a graceful leader restart and a kill -9 of a follower | deduplication and retention on; the builds that became 2.0.0-beta.1, 2026-10-01 | [Soak and failover](/benchmarks/soak/) |
-| 257 Jepsen tests, all valid: no acknowledged message lost, no lease held twice, KV linearizable, transactions atomic | the code of 2.6.0, 2026-10-21 and 22; five nodes, and six for a standby's failover; kill -9, pauses, partitions, clock jumps, power loss; 13 tests push several messages of a partition at once. 255 valid at their first run, a pipeline test in four reruns after its first run's final drain ran out of time, and a register test once its history was checked with the checker's other search | [Jepsen](/benchmarks/jepsen/) |
+| 226 Jepsen tests, all valid at their first run: no acknowledged message lost, no lease held twice, KV linearizable, transactions atomic | the code of 2.7.0, 2026-10-30 and 31; five nodes; kill -9, pauses, partitions, clock jumps, power loss; 13 tests push several messages of a partition at once, and the stream tests close quiet partitions under a claim. The 31 standby failovers last ran on 2.6.0, all valid | [Jepsen](/benchmarks/jepsen/) |
 
 ## Where Queen leads, and where it does not
 
@@ -108,7 +108,7 @@ of 60 and called a system behind under 97%. Every number names its build and dat
 moves fast: read a figure as what that build did on that rig. The GCP figures are Queen
 2.4.0-beta.1; the DigitalOcean ones are the builds of the two days before 2.3.0. Both ran with the
 binary wire forms a client turns on; the default JSON forms have not been run through the matrix.
-The Jepsen campaign ran on the code of 2.6.0. The full method, each system's settings and the
+The Jepsen campaign ran on the code of 2.7.0. The full method, each system's settings and the
 commands to run it again are in [how we measure](/benchmarks/methodology/), and for the GCP runs
 on [Queen vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/#how-we-ran-it).
 

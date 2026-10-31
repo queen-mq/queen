@@ -282,8 +282,8 @@ export const provenSection = {
 export const proven: { title: string; body: string; href: string }[] = [
   { title: "In production", body: "At Smartness, where Queen is built.", href: "/introduction/about/" },
   {
-    title: "257 Jepsen tests",
-    body: "On 2.6, all passed. No acknowledged message lost, no lease held twice.",
+    title: "226 Jepsen tests",
+    body: "On 2.7, all passed. No acknowledged message lost, no lease held twice.",
     href: "/benchmarks/jepsen/",
   },
   { title: "Rust, Apache-2.0", body: "Written in Rust. Open source under Apache-2.0.", href: "https://github.com/queen-mq/queen" },
