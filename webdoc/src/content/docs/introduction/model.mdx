@@ -40,6 +40,8 @@ digest: >-
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): rsm/consume/txn.rs,
 # rsm/facade/real.rs, rsm/facade/real/phase2.rs, rsm/maintenance.rs reformatted, line wrapping only.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-31 (97b0f2f8e): phase2.rs routes the read-only GET /streams/v1/queries,
+# which lists a tenant's streams for the console. Nothing this page states changes.
 ---
 
 The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases, transactions and a simple interface.

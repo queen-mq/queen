@@ -102,6 +102,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (no body before authentication): gateway.rs reads a
 # POST /api/v1/kv body, and runs that batch's plan gates, after authentication; a KV batch with no
 # credential gets 401 where it got 403 feature_gated. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-31 (97b0f2f8e): phase2.rs routes, and auth.rs classifies, (no new error code) the read-only GET /streams/v1/queries,
+# which lists a tenant's streams for the console. Nothing this page states changes.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code

@@ -43,6 +43,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): auth.rs,
 # handlers/kv.rs, proxy routes.rs, quota.rs, rsm/facade/real/kv.rs, rsm/kv_reads.rs reformatted,
 # line wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-31 (97b0f2f8e): auth.rs classifies the read-only GET /streams/v1/queries,
+# which lists a tenant's streams for the console. Nothing this page states changes.
 ---
 
 The transaction above already used two of the three: `kv.put` stored the order's state, and `timer()` scheduled tomorrow's reminder, which arrives as a message.

@@ -38,6 +38,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (failed credentials and the anonymous limit): harden.rs charges
 # a request whose credential is refused 401 to the per-address budget for requests with no
 # credential (QUEEN_EDGE_ANON_RPS_PER_IP), and refuses the address 429 once it is spent. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-31 (97b0f2f8e): auth.rs classifies, and streams.rs answers, the read-only GET /streams/v1/queries,
+# which lists a tenant's streams for the console. Nothing this page states changes.
 ---
 
 Out of the box a node authenticates nobody: its port is plain HTTP, and every route answers any caller that can reach it. That keeps the first run to one command, and it is the first thing to change. Put one of two front doors on it (the broker's own JWT for services, or the built-in proxy for API keys and people), keep the raft port private, and encrypt the queues whose payloads must not sit on disk in clear.

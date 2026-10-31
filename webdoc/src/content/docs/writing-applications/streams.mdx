@@ -32,6 +32,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates):
 # rsm/facade/real/phase2/streams.rs reformatted, line wrapping only. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-31 (97b0f2f8e): streams.rs answers GET /streams/v1/queries, the list of a
+# tenant's streams with their state and the windows past their end; the page says so under Running a stream.
 ---
 
 A stream reads a queue and writes its results to another. The partition is the key, so each customer gets its own windows. Streams are in the JavaScript, Python, Go and Rust clients; PHP and C++ have none, and a stream reads any queue, whoever pushes to it. Like a new group it starts at the tail: push a few more orders and a result arrives a minute later.
@@ -104,6 +106,10 @@ A message the gate refuses stops its partition there: it and the ones after it a
 A window on a partition that goes quiet still closes on time. The client keeps the time each open window ends, and at that time leases the quiet partition from the broker (`POST /streams/v1/claim`, broker 2.7) and closes the window under that lease, on the broker's clock. A partition someone else holds, or one with messages still waiting, is not leased: the window then closes in that cycle. So a window closes once, even with several processes on one `queryId`, and a process that starts asks the broker which partitions hold state (`POST /streams/v1/state/partitions`), so windows left open by a restart or a scale-down close too. On an older broker a client closes only the windows of partitions its own process read in the last five minutes. Event-time windows close on their watermark, as before.
 
 <Why>a session per visit or per trace ends with silence, not with a message. If closing it waited for the next message, a deploy or a crash would leave it open for good, and its result would never be sent.</Why>
+
+`GET /streams/v1/queries` (broker 2.7) lists a tenant's streams: each with its source and sink queues and what its state holds now, the partitions with state, the open windows, and the windows that ended more than five minutes ago and never closed. The dashboard's Streams page reads it.
+
+<Why>a window that never closes is a result that was never sent. It has to show before someone asks where the number went.</Why>
 
 Push, consume, ack, replay, fetch, transactions, KV, timers, locks, streams and ephemeral queues all combine. Build on them and Queen carries the logic you would otherwise write around a broker. [Patterns](/patterns/) shows them combined, one real case each.
 

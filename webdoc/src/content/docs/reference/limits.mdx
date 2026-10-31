@@ -113,6 +113,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (failed credentials and the anonymous limit): harden.rs charges
 # a request whose credential is refused 401 to the per-address budget for requests with no
 # credential (QUEEN_EDGE_ANON_RPS_PER_IP), and refuses the address 429 once it is spent. The anonymous-limit row now says so.
+# sourceOfTruth re-read 2026-10-31 (97b0f2f8e): streams.rs reads at most 200,000 state rows per
+# GET /streams/v1/queries and marks a stream cut short exact: false; the Streams table says so.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -295,6 +297,7 @@ and row and byte caps; see [tenants](/manage/tenants/).
 | The lease a claim gives | 30 s, or `lease_seconds` from 1 to 600 |
 | Partitions per page of `POST /streams/v1/state/partitions` | 1,000, or `limit` up to 10,000 |
 | State rows one `state/partitions` call reads | 100,000, then it stops at the next partition and answers `next` |
+| State rows one `GET /streams/v1/queries` counts | 200,000 across the tenant's streams, then a stream's counts are a floor (`"exact": false`) |
 
 Why: a claimed partition waits for its lease to end if the runner that claimed it stops, so the lease
 is short; and a query with a large state answers in pages instead of one long read. Applied in
