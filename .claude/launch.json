@@ -223,6 +223,74 @@
         "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6649 exec npx vite --port 4009 --strictPort"
       ],
       "port": 4009
+    },
+    {
+      "name": "webdoc-book",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "QUEEN_DOCS_ALLOW_MISSING_SDK=1 exec pnpm --dir webdoc dev --port 4379"
+      ],
+      "port": 4379
+    },
+    {
+      "name": "cmplay-sim",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/alice/Work/codemotionplay && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH exec node sim/index.mjs"
+      ],
+      "port": 19701,
+      "autoPort": false
+    },
+    {
+      "name": "cmplay-bff",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/alice/Work/codemotionplay && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH exec node bff/index.mjs"
+      ],
+      "port": 19700,
+      "autoPort": false
+    },
+    {
+      "name": "cmplay-web",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/alice/Work/codemotionplay/web && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH exec npx vite --port 5199 --strictPort --host 0.0.0.0"
+      ],
+      "port": 5199,
+      "autoPort": false
+    },
+    {
+      "name": "cmplay-web-live",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/alice/Work/codemotionplay/web && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH BFF_URL=http://127.0.0.1:29710 exec npx vite --port 5198 --strictPort"
+      ],
+      "port": 5198,
+      "autoPort": false
+    },
+    {
+      "name": "cmplay-ended",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/alice/Work/codemotionplay/ended && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH exec npx wrangler dev --port 5197 --ip 127.0.0.1"
+      ],
+      "port": 5197,
+      "autoPort": false
+    },
+    {
+      "name": "queen-traffic-live",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-alice-Work-queen/c5ef7dc9-76bb-4dde-b7aa-b3db285b65bd/scratchpad/tc/cluster.sh"
+      ],
+      "port": 17632,
+      "autoPort": false
     }
   ]
 }
