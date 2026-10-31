@@ -75,8 +75,9 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent";
         {/*
           The logo, inlined (assets/logo.py writes src/assets/): the petals
           keep their yellow and the letters take the text colour of the
-          theme. The home page shows the name; every other page has the room
-          for the q alone. The line "message queue" stays out of this bar:
+          theme. The home page shows the name, and so does a docs page over
+          its sidebar (lg and up), where the column has the room; below that
+          the bar keeps the q alone. The line "message queue" stays out of this bar:
           the flower is tall, and at a height that fits here the line could
           not be read.
         */}
@@ -85,6 +86,17 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent";
             class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[44px] [&>svg]:w-auto"
             set:html={wordmark}
           />
+        ) : sidebarUnder ? (
+          <>
+            <span
+              class="hidden lg:block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[44px] [&>svg]:w-auto"
+              set:html={wordmark}
+            />
+            <span
+              class="block lg:hidden shrink-0 text-foreground [&>svg]:block [&>svg]:h-[40px] [&>svg]:w-auto"
+              set:html={mark}
+            />
+          </>
         ) : (
           <span
             class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[40px] [&>svg]:w-auto"
