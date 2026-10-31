@@ -22,6 +22,12 @@ interface Props {
    */
   showSidebar?: boolean;
   /**
+   * The desktop sidebar runs up under this bar, as the console's rail does:
+   * the bar's part above it takes the sidebar's colour, so the logo sits on
+   * the sidebar and the column reads as one strip.
+   */
+  sidebarUnder?: boolean;
+  /**
    * Over a full-bleed hero: no background, border or blur until the page
    * scrolls, so the hero runs up under the bar. Only the homepage sets it.
    */
@@ -31,7 +37,7 @@ interface Props {
 // `entryId` is part of Props as a forward-compat hook (the version-switcher
 // recipe reads it) but the base Header doesn't use it, so leave it off the
 // destructure to avoid an unused-var warning.
-const { collection, showSidebar = true, transparentTop = false } = Astro.props;
+const { collection, showSidebar = true, sidebarUnder = false, transparentTop = false } = Astro.props;
 
 // Normalize trailing slash so isActive matches sidebar hrefs.
 const currentSlug = Astro.url.pathname.replace(/\/$/, "") || "/";
@@ -60,7 +66,10 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent";
       })();
     </script>
   )}
-  <div class="mx-auto flex items-center justify-between h-14 px-4 lg:px-6">
+  {sidebarUnder && (
+    <div aria-hidden="true" class="pointer-events-none hidden lg:block absolute inset-y-0 left-0 w-(--nb-sidebar-width) bg-zone" />
+  )}
+  <div class="relative mx-auto flex items-center justify-between h-14 px-4 lg:px-6">
     <div class="flex items-center gap-3">
       <a href="/" class="group flex items-center" aria-label={config.title}>
         {/*
