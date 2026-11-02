@@ -4,10 +4,9 @@
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -pthread
 
-# Include paths
-INCLUDES = -I. \
-           -I../server/vendor \
-           -I../server/include
+# Include paths: the header, and third_party/nlohmann/json.hpp beside it (used
+# when the system has no nlohmann/json of its own).
+INCLUDES = -I.
 
 # Check for cpp-httplib installation
 # Try Homebrew path first (macOS), then system paths
@@ -29,10 +28,11 @@ endif
 # Libraries
 LIBS = -lpthread
 
-# SSL support (optional but recommended)
+# TLS (https:// URLs). On by default: the header turns on cpp-httplib's OpenSSL
+# support itself. USE_SSL=0 builds without it (QUEEN_CLIENT_NO_TLS), and an
+# https:// URL is then refused at construction.
 USE_SSL ?= 1
 ifeq ($(USE_SSL),1)
-    CXXFLAGS += -DCPPHTTPLIB_OPENSSL_SUPPORT
     
     # Detect OpenSSL installation
     OPENSSL_PREFIX := $(shell brew --prefix openssl 2>/dev/null)
@@ -45,7 +45,8 @@ ifeq ($(USE_SSL),1)
         $(info SSL support enabled (using system OpenSSL))
     endif
 else
-    $(info SSL support disabled. Set USE_SSL=1 to enable)
+    CXXFLAGS += -DQUEEN_CLIENT_NO_TLS
+    $(info TLS disabled (QUEEN_CLIENT_NO_TLS): https:// URLs are refused)
 endif
 
 # zstd (optional): the push_compression and framed_pop client options need it,
@@ -76,7 +77,7 @@ test: bin/test_client
 	@echo "Run with: ./bin/test_client [server_url]"
 	@echo "Example: ./bin/test_client http://localhost:6632"
 
-bin/test_client: test_client.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_client: test_client.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_client.cpp -o bin/test_client $(LIBS)
 
@@ -87,7 +88,7 @@ retry429: bin/test_retry429
 	@echo "Proxy contract test suite built successfully!"
 	@echo "Run with: ./bin/test_retry429"
 
-bin/test_retry429: test_retry429.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_retry429: test_retry429.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_retry429.cpp -o bin/test_retry429 $(LIBS)
 
@@ -104,7 +105,7 @@ kvtimers: bin/test_kv_timers
 	@echo "KV/timers wire test suite built successfully!"
 	@echo "Run with: ./bin/test_kv_timers"
 
-bin/test_kv_timers: test_kv_timers.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_kv_timers: test_kv_timers.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_kv_timers.cpp -o bin/test_kv_timers $(LIBS)
 
@@ -119,7 +120,7 @@ locks: bin/test_locks
 	@echo "Run with: ./bin/test_locks            (wire only)"
 	@echo "      or: ./bin/test_locks <url>      (wire + a live broker)"
 
-bin/test_locks: test_locks.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_locks: test_locks.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_locks.cpp -o bin/test_locks $(LIBS)
 
@@ -136,7 +137,7 @@ conflation: bin/test_conflation
 	@echo "Conflation wire test suite built successfully!"
 	@echo "Run with: ./bin/test_conflation"
 
-bin/test_conflation: test_conflation.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_conflation: test_conflation.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_conflation.cpp -o bin/test_conflation $(LIBS)
 
@@ -153,7 +154,7 @@ buffer: bin/test_buffer
 	@echo "Buffer contract test suite built successfully!"
 	@echo "Run with: ./bin/test_buffer"
 
-bin/test_buffer: test_buffer.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_buffer: test_buffer.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_buffer.cpp -o bin/test_buffer $(LIBS)
 
@@ -170,7 +171,7 @@ ephemeral: bin/test_ephemeral
 	@echo "Ephemeral wire test suite built successfully!"
 	@echo "Run with: ./bin/test_ephemeral"
 
-bin/test_ephemeral: test_ephemeral.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_ephemeral: test_ephemeral.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_ephemeral.cpp -o bin/test_ephemeral $(LIBS)
 
@@ -187,7 +188,7 @@ autopilot: bin/test_autopilot
 	@echo "Pop autopilot wire test suite built successfully!"
 	@echo "Run with: ./bin/test_autopilot"
 
-bin/test_autopilot: test_autopilot.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_autopilot: test_autopilot.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_autopilot.cpp -o bin/test_autopilot $(LIBS)
 
@@ -202,7 +203,7 @@ consumer: bin/test_consumer
 	@echo "Consume path contract test suite built successfully!"
 	@echo "Run with: ./bin/test_consumer"
 
-bin/test_consumer: test_consumer.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_consumer: test_consumer.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_consumer.cpp -o bin/test_consumer $(LIBS)
 
@@ -219,7 +220,7 @@ wireforms: bin/test_wire_forms
 	@echo "Wire forms test suite built successfully!"
 	@echo "Run with: ./bin/test_wire_forms"
 
-bin/test_wire_forms: test_wire_forms.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_wire_forms: test_wire_forms.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(ZSTD_FLAGS) $(INCLUDES) test_wire_forms.cpp -o bin/test_wire_forms $(LIBS) $(ZSTD_LIBS)
 
@@ -233,7 +234,7 @@ reads: bin/test_reads
 	@echo "Run with: ./bin/test_reads            (wire only)"
 	@echo "      or: ./bin/test_reads <url>      (wire + a live broker)"
 
-bin/test_reads: test_reads.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/test_reads: test_reads.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_reads.cpp -o bin/test_reads $(LIBS)
 
@@ -264,19 +265,14 @@ example: bin/example_basic
 	@echo "Example built successfully!"
 	@echo "Run with: ./bin/example_basic"
 
-bin/example_basic: example_basic.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+bin/example_basic: example_basic.cpp queen_client.hpp third_party/nlohmann/json.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) example_basic.cpp -o bin/example_basic $(LIBS)
 	@echo "✓ Example built in bin/example_basic"
 
-# Example programs (for future expansion)
-examples: example_basic example_consumer
+examples: bin/example_basic
 
 example_basic: bin/example_basic
-
-example_consumer: examples/consumer.cpp queen_client.hpp
-	@mkdir -p bin
-	$(CXX) $(CXXFLAGS) $(INCLUDES) examples/consumer.cpp -o bin/example_consumer $(LIBS)
 
 # Clean build artifacts
 clean:
@@ -332,10 +328,10 @@ help:
 	@echo "Dependencies:"
 	@echo "  - C++17 compiler (g++ or clang++)"
 	@echo "  - cpp-httplib (header-only HTTP client)"
-	@echo "  - OpenSSL (optional, for HTTPS support)"
+	@echo "  - OpenSSL (for https://; USE_SSL=0 builds without it)"
 	@echo "  - zstd (optional, for the push_compression and framed_pop options)"
 	@echo ""
 	@echo "Install cpp-httplib:"
 	@echo "  macOS:   brew install cpp-httplib"
-	@echo "  Manual:  curl -o httplib.h https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h"
+	@echo "  Manual:  curl -o httplib.h https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.27.0/httplib.h"
 

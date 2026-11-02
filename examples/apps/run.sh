@@ -174,15 +174,13 @@ if wanted cpp; then
   echo
   echo "C++"
   # Same header and library set as the tutorials: see examples/tutorials/run.sh
-  # for why json.hpp, threadpool.hpp and OpenSSL are all required.
+  # for why httplib.h and OpenSSL are required.
   if ! command -v c++ >/dev/null; then
     skip_lang "no c++ compiler"
   elif [ ! -d "$HERE/cpp" ]; then
     skip_lang "no cpp applications here"
-  elif [ ! -f "$ROOT/clients/server/vendor/json.hpp" ] || [ ! -f "$ROOT/clients/server/include/threadpool.hpp" ]; then
-    skip_lang "clients/server/{vendor/json.hpp,include/threadpool.hpp} missing (see test/runners/cpp/Dockerfile)"
   else
-    cxx=(-std=c++17 -O1 -pthread -I"$ROOT/clients/client-cpp" -I"$ROOT/clients/server/vendor")
+    cxx=(-std=c++17 -O1 -pthread -I"$ROOT/clients/client-cpp")
     ld=(-lssl -lcrypto -lpthread)
     if brew_prefix="$(brew --prefix 2>/dev/null)" && [ -n "$brew_prefix" ]; then
       cxx+=(-I"$brew_prefix/include")

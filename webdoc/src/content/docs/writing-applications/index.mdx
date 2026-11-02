@@ -33,7 +33,7 @@ Open `http://localhost:6632` and watch every step of these pages land in the das
 | Go | `go get github.com/smartpricing/queen/clients/client-go/v2` |
 | Rust | `cargo add queen-mq serde_json` and `cargo add tokio --features rt-multi-thread,macros` |
 | PHP | `composer require queen-mq/php-client` |
-| C++ | Header only: `clients/client-cpp/queen_client.hpp`, with cpp-httplib and nlohmann/json |
+| C++ | Header only: `clients/client-cpp/queen_client.hpp`, or the CMake target `queen::client`; needs cpp-httplib (nlohmann/json comes with it) |
 
 No SDK is needed to try anything: the API is JSON over HTTP, and `curl` is a complete client.
 

@@ -1,12 +1,12 @@
 /**
  * Queen C++ Client - Comprehensive Test Suite
- * 
+ *
  * Ported from Node.js client test-v2/ directory
  * Covers all human-written tests (excluding ai_*)
- * 
+ *
  * Test Categories:
  * - Push operations
- * - Pop operations  
+ * - Pop operations
  * - Consume operations
  * - Queue configuration
  * - Transactions
@@ -15,6 +15,11 @@
  * - Subscription modes
  * - Complete workflows
  * - Load testing
+ *
+ * Written against the 2.7.1 client API: push() takes one payload as it is,
+ * pop() hands back typed Messages and throws on failure, consume() is one
+ * message per call and consume_batch() a whole batch, and an ack reads its
+ * consumer group and lease from the message.
  */
 
 #include "queen_client.hpp"
@@ -23,6 +28,8 @@
 #include <thread>
 #include <chrono>
 #include <set>
+#include <map>
+#include <atomic>
 #include <random>
 
 using namespace queen;
@@ -45,17 +52,17 @@ class TestRunner {
 private:
     std::vector<TestResult> results;
     std::string server_url;
-    
+
 public:
     TestRunner(const std::string& url) : server_url(url) {}
-    
+
     void run_test(const std::string& name, std::function<bool()> test_fn) {
         std::cout << BLUE << "Running: " << name << RESET << std::endl;
-        
+
         try {
             bool passed = test_fn();
             results.push_back({name, passed, passed ? "Success" : "Failed"});
-            
+
             if (passed) {
                 std::cout << GREEN << "✓ PASS: " << name << RESET << std::endl;
             } else {
@@ -65,19 +72,19 @@ public:
             results.push_back({name, false, std::string("Exception: ") + e.what()});
             std::cout << RED << "✗ FAIL: " << name << " - " << e.what() << RESET << std::endl;
         }
-        
+
         std::cout << std::endl;
     }
-    
+
     void print_summary() {
         int passed = 0;
         int failed = 0;
-        
+
         for (const auto& result : results) {
             if (result.passed) passed++;
             else failed++;
         }
-        
+
         std::cout << "========================================" << std::endl;
         std::cout << "Test Summary" << std::endl;
         std::cout << "========================================" << std::endl;
@@ -85,18 +92,18 @@ public:
         std::cout << GREEN << "Passed: " << passed << RESET << std::endl;
         std::cout << RED << "Failed: " << failed << RESET << std::endl;
         std::cout << "========================================" << std::endl;
-        
+
         if (failed > 0) {
             std::cout << "\nFailed tests:" << std::endl;
             for (const auto& result : results) {
                 if (!result.passed) {
-                    std::cout << RED << "  - " << result.name << ": " 
+                    std::cout << RED << "  - " << result.name << ": "
                              << result.message << RESET << std::endl;
                 }
             }
         }
     }
-    
+
     int get_failure_count() const {
         int count = 0;
         for (const auto& result : results) {
@@ -112,9 +119,9 @@ public:
 
 void cleanup_test_queues(const std::string& server_url) {
     std::cout << YELLOW << "Cleaning up test queues..." << RESET << std::endl;
-    
+
     QueenClient client(server_url);
-    
+
     // List of all test queues to clean up
     std::vector<std::string> test_queues = {
         "test-queue-v2",
@@ -167,7 +174,7 @@ void cleanup_test_queues(const std::string& server_url) {
         "test-queue-v2-timer-cancel",
         "test-queue-v2-timer-txn"
     };
-    
+
     int deleted_count = 0;
     for (const auto& queue_name : test_queues) {
         try {
@@ -177,7 +184,7 @@ void cleanup_test_queues(const std::string& server_url) {
             // Queue might not exist, ignore errors
         }
     }
-    
+
     std::cout << GREEN << "✓ Cleaned up " << deleted_count << " test queues" << RESET << "\n" << std::endl;
 }
 
@@ -235,8 +242,43 @@ void cleanup_test_kv_and_timers(const std::string& server_url) {
 }
 
 // ============================================================================
+// DIAGNOSTICS
+// ============================================================================
+// The client hands back typed values (Message, AckResult, RenewResult); these
+// turn them back into json for the lines a failing test prints, and nothing
+// else.
+
+json describe(const std::vector<Message>& messages) {
+    json out = json::array();
+    for (const auto& message : messages) {
+        out.push_back(message.to_json());
+    }
+    return out;
+}
+
+json describe(const AckResult& result) {
+    return {{"index", result.index},
+            {"transactionId", result.transaction_id},
+            {"success", result.success},
+            {"error", result.error},
+            {"leaseReleased", result.lease_released},
+            {"dlq", result.dlq},
+            {"noop", result.noop}};
+}
+
+json describe(const RenewResult& result) {
+    return {{"leaseId", result.lease_id},
+            {"success", result.success},
+            {"newExpiresAt", result.new_expires_at},
+            {"error", result.error}};
+}
+
+// ============================================================================
 // PUSH TESTS
 // ============================================================================
+// push() takes ONE payload and sends it as it is: there is no {"data": ...}
+// wrapper any more. A message whose dedup key matters goes through
+// push_items() with PushItem::transaction_id.
 
 bool test_push_message(const std::string& server_url) {
     QueenClient client(server_url);
@@ -244,138 +286,141 @@ bool test_push_message(const std::string& server_url) {
     if (!queue.contains("configured") || !queue["configured"].get<bool>()) {
         return false;
     }
-    
-    auto res = client.queue("test-queue-v2").push({
-        {{"data", {{"message", "Hello, world!"}}}}
-    });
-    
-    return res.is_array() && res.size() > 0 && res[0]["status"].get<std::string>() == "queued";
+
+    auto res = client.queue("test-queue-v2").push(json{{"message", "Hello, world!"}});
+
+    return !res.empty() && res[0].status == PushStatus::Queued && res[0].status_text == "queued";
 }
 
 bool test_push_duplicate_message(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-duplicate").create();
-    
-    auto res1 = client.queue("test-queue-v2-duplicate").push({
-        {{"transactionId", "test-transaction-id"}, {"data", {{"message", "Hello, world!"}}}}
+
+    auto res1 = client.queue("test-queue-v2-duplicate").push_items({
+        PushItem{json{{"message", "Hello, world!"}}, "test-transaction-id"}
     });
-    
-    auto res2 = client.queue("test-queue-v2-duplicate").push({
-        {{"transactionId", "test-transaction-id"}, {"data", {{"message", "Hello, world!"}}}}
+
+    auto res2 = client.queue("test-queue-v2-duplicate").push_items({
+        PushItem{json{{"message", "Hello, world!"}}, "test-transaction-id"}
     });
-    
-    return res1[0]["status"].get<std::string>() == "queued" && 
-           res2[0]["status"].get<std::string>() == "duplicate";
+
+    return !res1.empty() && !res2.empty() &&
+           res1[0].status == PushStatus::Queued &&
+           res2[0].status == PushStatus::Duplicate;
 }
 
 bool test_push_duplicate_partition(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-partition-duplicate").create();
-    
+
     auto res1 = client.queue("test-queue-partition-duplicate")
         .partition("0")
-        .push({{{"transactionId", "test-transaction-id"}, {"data", {{"message", "Hello"}}}}});
-    
+        .push_items({PushItem{json{{"message", "Hello"}}, "test-transaction-id"}});
+
     auto res2 = client.queue("test-queue-partition-duplicate")
         .partition("0")
-        .push({{{"transactionId", "test-transaction-id"}, {"data", {{"message", "Hello"}}}}});
-    
-    return res1[0]["status"].get<std::string>() == "queued" && 
-           res2[0]["status"].get<std::string>() == "duplicate";
+        .push_items({PushItem{json{{"message", "Hello"}}, "test-transaction-id"}});
+
+    return !res1.empty() && !res2.empty() &&
+           res1[0].status == PushStatus::Queued &&
+           res2[0].status == PushStatus::Duplicate;
 }
 
 bool test_push_duplicate_different_partition(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-partition-duplicate-different").create();
-    
+
     auto res1 = client.queue("test-queue-partition-duplicate-different")
         .partition("0")
-        .push({{{"transactionId", "test-transaction-id"}, {"data", {{"message", "Hello"}}}}});
-    
+        .push_items({PushItem{json{{"message", "Hello"}}, "test-transaction-id"}});
+
     auto res2 = client.queue("test-queue-partition-duplicate-different")
         .partition("1")
-        .push({{{"transactionId", "test-transaction-id"}, {"data", {{"message", "Hello"}}}}});
-    
+        .push_items({PushItem{json{{"message", "Hello"}}, "test-transaction-id"}});
+
     // Same transaction ID in different partitions should both succeed
-    return res1[0]["status"].get<std::string>() == "queued" && 
-           res2[0]["status"].get<std::string>() == "queued";
+    return !res1.empty() && !res2.empty() &&
+           res1[0].status == PushStatus::Queued &&
+           res2[0].status == PushStatus::Queued;
 }
 
 bool test_push_with_transaction_id(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-transaction-id").create();
-    
-    auto res = client.queue("test-queue-transaction-id").push({
-        {{"transactionId", "test-transaction-id"}, {"data", {{"message", "Hello!"}}}}
+
+    auto res = client.queue("test-queue-transaction-id").push_items({
+        PushItem{json{{"message", "Hello!"}}, "test-transaction-id"}
     });
-    
-    if (!res.is_array() || res.empty()) return false;
-    if (!res[0].contains("status") || res[0]["status"].get<std::string>() != "queued") return false;
-    
+
+    if (res.empty()) return false;
+    if (res[0].status_text.empty() || res[0].status != PushStatus::Queued) return false;
+
     // Check if the message was pushed successfully
     // Note: Server may or may not echo back the transactionId
-    return res[0]["status"].get<std::string>() == "queued";
+    return res[0].status == PushStatus::Queued;
 }
 
 bool test_push_buffered(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-buffered").create();
-    
+
     BufferOptions buffer_opts{10, 1000};
     auto res = client.queue("test-queue-buffered")
         .buffer(buffer_opts)
-        .push({{{"data", {{"message", "Hello, world!"}}}}});
-    
+        .push(json{{"message", "Hello, world!"}});
+
+    // A buffered push has no verdict yet: it comes with the flush.
+    if (!res.empty()) return false;
+
     // Should be buffered
     auto pop = client.queue("test-queue-buffered").batch(1).wait(false).pop();
     if (!pop.empty()) return false;
-    
+
     // Wait for buffer timeout
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    
+
     auto pop2 = client.queue("test-queue-buffered").batch(1).wait(false).pop();
     return !pop2.empty();
 }
 
 bool test_push_delayed(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
     QueueConfig config;
     config.delayed_processing = 2;
     client.queue("test-queue-delayed").config(config).create();
-    
-    client.queue("test-queue-delayed").push({
-        {{"transactionId", "test-transaction-delayed-id"}, 
-         {"data", {{"message", "Hello, world!"}, {"aaa", "1"}}}}
+
+    client.queue("test-queue-delayed").push_items({
+        PushItem{json{{"message", "Hello, world!"}, {"aaa", "1"}}, "test-transaction-delayed-id"}
     });
-    
+
     auto pop = client.queue("test-queue-delayed").batch(1).wait(false).pop();
     if (!pop.empty()) return false;
-    
+
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
-    
+
     auto pop2 = client.queue("test-queue-delayed").batch(1).wait(true).pop();
     return pop2.size() == 1;
 }
 
 bool test_push_window_buffer(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
     QueueConfig config;
     config.window_buffer = 2;
     client.queue("test-queue-window-buffer").config(config).create();
-    
-    client.queue("test-queue-window-buffer").push({
-        {{"data", {{"message", "Hello, world 1!"}}}},
-        {{"data", {{"message", "Hello, world 2!"}}}},
-        {{"data", {{"message", "Hello, world 3!"}}}}
+
+    client.queue("test-queue-window-buffer").push_many({
+        json{{"message", "Hello, world 1!"}},
+        json{{"message", "Hello, world 2!"}},
+        json{{"message", "Hello, world 3!"}}
     });
-    
+
     auto pop = client.queue("test-queue-window-buffer").batch(1).wait(false).pop();
     if (!pop.empty()) return false;
-    
+
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
-    
+
     auto pop2 = client.queue("test-queue-window-buffer").batch(4).wait(false).pop();
     return pop2.size() == 3;
 }
@@ -383,42 +428,36 @@ bool test_push_window_buffer(const std::string& server_url) {
 bool test_push_null_payload(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-null-payload").create();
-    
-    client.queue("test-queue-null-payload").push({
-        {{"data", nullptr}}
-    });
-    
+
+    client.queue("test-queue-null-payload").push(json(nullptr));
+
     auto received = client.queue("test-queue-null-payload").batch(1).wait(false).pop();
-    return !received.empty() && received[0]["data"].is_null();
+    return !received.empty() && received[0].data.is_null();
 }
 
 bool test_push_empty_payload(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-empty-payload").create();
-    
-    client.queue("test-queue-empty-payload").push({
-        {{"data", json::object()}}
-    });
-    
+
+    client.queue("test-queue-empty-payload").push(json::object());
+
     auto received = client.queue("test-queue-empty-payload").batch(1).wait(false).pop();
-    return !received.empty() && received[0]["data"].is_object() && 
-           received[0]["data"].empty();
+    return !received.empty() && received[0].data.is_object() &&
+           received[0].data.empty();
 }
 
 bool test_push_encrypted(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
     QueueConfig config;
     config.encryption_enabled = true;
     client.queue("test-queue-encrypted-payload").config(config).create();
-    
-    client.queue("test-queue-encrypted-payload").push({
-        {{"data", {{"message", "Hello, world!"}}}}
-    });
-    
+
+    client.queue("test-queue-encrypted-payload").push(json{{"message", "Hello, world!"}});
+
     auto received = client.queue("test-queue-encrypted-payload").batch(1).wait(false).pop();
-    return !received.empty() && 
-           received[0]["data"]["message"].get<std::string>() == "Hello, world!";
+    return !received.empty() && received[0].data.is_object() &&
+           received[0].data.value("message", std::string()) == "Hello, world!";
 }
 
 // ============================================================================
@@ -428,7 +467,7 @@ bool test_push_encrypted(const std::string& server_url) {
 bool test_pop_empty_queue(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-pop-empty").create();
-    
+
     auto res = client.queue("test-queue-v2-pop-empty").batch(1).wait(false).pop();
     return res.empty();
 }
@@ -436,11 +475,9 @@ bool test_pop_empty_queue(const std::string& server_url) {
 bool test_pop_non_empty_queue(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-pop-non-empty").create();
-    
-    client.queue("test-queue-v2-pop-non-empty").push({
-        {{"data", {{"message", "Hello, world!"}}}}
-    });
-    
+
+    client.queue("test-queue-v2-pop-non-empty").push(json{{"message", "Hello, world!"}});
+
     auto res = client.queue("test-queue-v2-pop-non-empty").batch(1).wait(false).pop();
     return res.size() == 1;
 }
@@ -448,221 +485,228 @@ bool test_pop_non_empty_queue(const std::string& server_url) {
 bool test_pop_with_wait(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-pop-with-wait").create();
-    
-    // Push message after 2 seconds in background thread
-    std::thread([&]() {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-        client.queue("test-queue-v2-pop-with-wait").push({
-            {{"data", {{"message", "Hello, world!"}}}}
-        });
-    }).detach();
-    
-    auto res = client.queue("test-queue-v2-pop-with-wait").batch(1).wait(true).pop();
-    return res.size() == 1;
+
+    // Push message after 2 seconds in background thread. Joined, not detached:
+    // the thread uses this function's client.
+    std::atomic<bool> pushed{false};
+    std::thread pusher([&]() {
+        try {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            auto res = client.queue("test-queue-v2-pop-with-wait")
+                .push(json{{"message", "Hello, world!"}});
+            pushed = !res.empty() && res[0].ok();
+        } catch (const std::exception& e) {
+            std::cerr << "the background push failed: " << e.what() << std::endl;
+        }
+    });
+
+    std::vector<Message> res;
+    try {
+        res = client.queue("test-queue-v2-pop-with-wait").batch(1).wait(true).pop();
+    } catch (...) {
+        pusher.join();
+        throw;
+    }
+    pusher.join();
+    return pushed.load() && res.size() == 1;
 }
 
 bool test_pop_with_ack(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-pop-with-ack").create();
-    
-    client.queue("test-queue-v2-pop-with-ack").push({
-        {{"data", {{"message", "Hello, world!"}}}}
-    });
-    
+
+    client.queue("test-queue-v2-pop-with-ack").push(json{{"message", "Hello, world!"}});
+
     auto res = client.queue("test-queue-v2-pop-with-ack").batch(1).wait(false).pop();
-    auto resAck = client.ack(res[0]);
-    
-    return resAck.contains("success") && resAck["success"].get<bool>();
+    if (res.empty()) return false;
+    AckResult resAck = client.ack(res[0]);
+
+    return resAck.success;
 }
 
 bool test_pop_with_ack_reconsume(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
     QueueConfig config;
     config.lease_time = 1;  // 1 second lease
     client.queue("test-queue-v2-pop-with-ack-reconsume").config(config).create();
-    
-    client.queue("test-queue-v2-pop-with-ack-reconsume").push({
-        {{"data", {{"message", "Hello, world!"}}}}
-    });
-    
+
+    client.queue("test-queue-v2-pop-with-ack-reconsume").push(json{{"message", "Hello, world!"}});
+
     auto res = client.queue("test-queue-v2-pop-with-ack-reconsume")
         .batch(1).wait(false).pop();
-    
+
     if (res.size() != 1) return false;
-    
+
     // Wait for lease to expire
     std::this_thread::sleep_for(std::chrono::seconds(2));
-    
+
     auto res2 = client.queue("test-queue-v2-pop-with-ack-reconsume")
         .batch(1).wait(true).pop();
-    
+
     return res2.size() == 1;  // Message should be reconsumed
 }
 
 // ============================================================================
-// CONSUME TESTS  
+// CONSUME TESTS
 // ============================================================================
+// consume_batch() hands the handler a whole popped batch (what consume() did
+// without .each() before 2.7.1); consume() hands it one message per call (what
+// .each() did).
 
 bool test_consumer(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-consume").create();
-    
-    client.queue("test-queue-v2-consume").push({
-        {{"data", {{"message", "Hello, world!"}}}}
-    });
-    
+
+    client.queue("test-queue-v2-consume").push(json{{"message", "Hello, world!"}});
+
     bool msg_received = false;
     client.queue("test-queue-v2-consume")
         .batch(1)
         .limit(1)
-        .consume([&](const json& msg) {
-            msg_received = true;
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            msg_received = !msgs.empty();
         });
-    
+
     return msg_received;
 }
 
 bool test_consumer_namespace(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
     client.queue("test-queue-v2-namespace")
         .namespace_name("test-namespace")
         .create();
-    
-    client.queue("test-queue-v2-namespace").push({
-        {{"data", {{"message", "Hello, world!"}}}}
-    });
-    
+
+    client.queue("test-queue-v2-namespace").push(json{{"message", "Hello, world!"}});
+
     bool msg_received = false;
     client.queue()
         .namespace_name("test-namespace")
         .batch(1)
         .limit(1)
-        .consume([&](const json& msg) {
-            msg_received = true;
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            msg_received = !msgs.empty();
         });
-    
+
     return msg_received;
 }
 
 bool test_consumer_task(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
     client.queue("test-queue-v2-task")
         .task("test-task")
         .create();
-    
-    client.queue("test-queue-v2-task").push({
-        {{"data", {{"message", "Hello, world!"}}}}
-    });
-    
+
+    client.queue("test-queue-v2-task").push(json{{"message", "Hello, world!"}});
+
     bool msg_received = false;
     client.queue()
         .task("test-task")
         .batch(1)
         .limit(1)
-        .consume([&](const json& msg) {
-            msg_received = true;
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            msg_received = !msgs.empty();
         });
-    
+
     return msg_received;
 }
 
 bool test_consumer_with_partition(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-consume-with-partition").create();
-    
+
     // Push 10 messages to partition 1 (without buffering for reliability)
     std::vector<json> messages1;
     for (int i = 0; i < 10; i++) {
-        messages1.push_back({{"data", {{"message", "Hello, world!"}}}});
+        messages1.push_back(json{{"message", "Hello, world!"}});
     }
     client.queue("test-queue-v2-consume-with-partition")
         .partition("test-partition-01")
-        .push(messages1);
-    
+        .push_many(messages1);
+
     // Push 10 messages to partition 2
     std::vector<json> messages2;
     for (int i = 0; i < 10; i++) {
-        messages2.push_back({{"data", {{"message", "Hello, world!"}}}});
+        messages2.push_back(json{{"message", "Hello, world!"}});
     }
     client.queue("test-queue-v2-consume-with-partition")
         .partition("test-partition-02")
-        .push(messages2);
-    
+        .push_many(messages2);
+
     // Small delay to ensure messages are available
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
+
     int msg_count1 = 0;
     client.queue("test-queue-v2-consume-with-partition")
         .partition("test-partition-01")
         .batch(10)
         .limit(1)
         .wait(false)
-        .consume([&](const json& msgs) {
-            msg_count1 = msgs.size();
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            msg_count1 = static_cast<int>(msgs.size());
         });
-    
+
     int msg_count2 = 0;
     client.queue("test-queue-v2-consume-with-partition")
         .partition("test-partition-02")
         .batch(10)
         .limit(1)
         .wait(false)
-        .consume([&](const json& msgs) {
-            msg_count2 = msgs.size();
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            msg_count2 = static_cast<int>(msgs.size());
         });
-    
+
     return msg_count1 == 10 && msg_count2 == 10;
 }
 
 bool test_consumer_batch(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-consume-batch").create();
-    
-    client.queue("test-queue-v2-consume-batch").push({
-        {{"data", {{"message", "Hello, world!"}}}},
-        {{"data", {{"message", "Hello, world 2!"}}}},
-        {{"data", {{"message", "Hello, world 3!"}}}}
+
+    client.queue("test-queue-v2-consume-batch").push_many({
+        json{{"message", "Hello, world!"}},
+        json{{"message", "Hello, world 2!"}},
+        json{{"message", "Hello, world 3!"}}
     });
-    
+
     int msg_length = 0;
     client.queue("test-queue-v2-consume-batch")
         .batch(10)
         .wait(false)
         .limit(1)
-        .consume([&](const json& msgs) {
-            msg_length = msgs.size();
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            msg_length = static_cast<int>(msgs.size());
         });
-    
+
     return msg_length == 3;
 }
 
 bool test_consumer_ordering(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-consume-ordering").create();
-    
+
     int messages_to_push = 20;  // Reduced for speed
     std::vector<json> messages;
     for (int i = 0; i < messages_to_push; i++) {
-        messages.push_back({{"data", {{"id", i}}}});
+        messages.push_back(json{{"id", i}});
     }
-    client.queue("test-queue-v2-consume-ordering").push(messages);
-    
+    client.queue("test-queue-v2-consume-ordering").push_many(messages);
+
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
+
     int last_id = -1;
     bool ordered = true;
-    
+
     client.queue("test-queue-v2-consume-ordering")
         .batch(1)
         .wait(false)
         .idle_millis(2000)  // Add idle timeout to prevent infinite loop
         .limit(messages_to_push)
-        .each()  // CRITICAL: Process messages one-by-one, not as array!
-        .consume([&](const json& msg) {
-            int id = msg["data"]["id"].get<int>();
+        // consume(): one message per call, which is what the ordering check needs.
+        .consume([&](const Message& msg) {
+            int id = msg.data.at("id").get<int>();
             if (last_id == -1) {
                 last_id = id;
             } else {
@@ -672,24 +716,24 @@ bool test_consumer_ordering(const std::string& server_url) {
                 last_id = id;
             }
         });
-    
+
     return ordered && last_id == messages_to_push - 1;
 }
 
 bool test_consumer_group(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-consume-group").create();
-    
+
     // Push messages without buffering for reliability
     int messages_to_push = 10;
     std::vector<json> messages;
     for (int i = 0; i < messages_to_push; i++) {
-        messages.push_back({{"data", {{"id", i}}}});
+        messages.push_back(json{{"id", i}});
     }
-    client.queue("test-queue-v2-consume-group").push(messages);
-    
+    client.queue("test-queue-v2-consume-group").push_many(messages);
+
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
+
     int group01_messages = 0;
     client.queue("test-queue-v2-consume-group")
         .group("test-group-01")
@@ -697,10 +741,10 @@ bool test_consumer_group(const std::string& server_url) {
         .batch(messages_to_push)
         .limit(1)
         .wait(false)
-        .consume([&](const json& msgs) {
-            group01_messages = msgs.size();
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            group01_messages = static_cast<int>(msgs.size());
         });
-    
+
     int group02_messages = 0;
     client.queue("test-queue-v2-consume-group")
         .group("test-group-02")
@@ -708,29 +752,29 @@ bool test_consumer_group(const std::string& server_url) {
         .batch(messages_to_push)
         .limit(1)
         .wait(false)
-        .consume([&](const json& msgs) {
-            group02_messages = msgs.size();
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            group02_messages = static_cast<int>(msgs.size());
         });
-    
+
     return group01_messages == messages_to_push && group02_messages == messages_to_push;
 }
 
 bool test_consumer_group_with_partition(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-consume-group-with-partition").create();
-    
+
     // Push messages without buffering
     int messages_to_push = 10;
     std::vector<json> messages;
     for (int i = 0; i < messages_to_push; i++) {
-        messages.push_back({{"data", {{"id", i}}}});
+        messages.push_back(json{{"id", i}});
     }
     client.queue("test-queue-v2-consume-group-with-partition")
         .partition("test-partition-01")
-        .push(messages);
-    
+        .push_many(messages);
+
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
+
     int group01_messages = 0;
     client.queue("test-queue-v2-consume-group-with-partition")
         .partition("test-partition-01")
@@ -739,10 +783,10 @@ bool test_consumer_group_with_partition(const std::string& server_url) {
         .batch(messages_to_push)
         .limit(1)
         .wait(false)
-        .consume([&](const json& msgs) {
-            group01_messages = msgs.size();
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            group01_messages = static_cast<int>(msgs.size());
         });
-    
+
     int group02_messages = 0;
     client.queue("test-queue-v2-consume-group-with-partition")
         .partition("test-partition-01")
@@ -751,10 +795,10 @@ bool test_consumer_group_with_partition(const std::string& server_url) {
         .batch(messages_to_push)
         .limit(1)
         .wait(false)
-        .consume([&](const json& msgs) {
-            group02_messages = msgs.size();
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            group02_messages = static_cast<int>(msgs.size());
         });
-    
+
     return group01_messages == messages_to_push && group02_messages == messages_to_push;
 }
 
@@ -777,7 +821,7 @@ bool test_delete_queue(const std::string& server_url) {
 
 bool test_configure_queue(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
     QueueConfig config;
     config.completed_retention_seconds = 1;
     config.delayed_processing = 1;
@@ -788,13 +832,13 @@ bool test_configure_queue(const std::string& server_url) {
     config.retention_seconds = 0;
     config.retry_limit = 3;
     config.window_buffer = 100;
-    
+
     auto res = client.queue("test-queue-v2-configure").config(config).create();
-    
+
     if (!res.contains("configured") || !res["configured"].get<bool>()) {
         return false;
     }
-    
+
     // Verify configuration (spot check a few fields)
     auto opts = res["options"];
     return opts["priority"].get<int>() == 5 &&
@@ -810,29 +854,27 @@ bool test_transaction_basic_push_ack(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-txn-basic-a").create();
     client.queue("test-queue-v2-txn-basic-b").create();
-    
-    client.queue("test-queue-v2-txn-basic-a").push({
-        {{"data", {{"value", 1}}}}
-    });
-    
+
+    client.queue("test-queue-v2-txn-basic-a").push(json{{"value", 1}});
+
     auto messages = client.queue("test-queue-v2-txn-basic-a")
         .batch(1).wait(false).pop();
-    
+
     if (messages.empty()) return false;
-    
-    int next_value = messages[0]["data"]["value"].get<int>() + 1;
-    
-    client.transaction()
+
+    int next_value = messages[0].data["value"].get<int>() + 1;
+
+    TransactionResult committed = client.transaction()
         .queue("test-queue-v2-txn-basic-b")
-        .push({{{"data", {{"value", next_value}}}}})
+        .push(json{{"value", next_value}})
         .ack(messages[0])
         .commit();
-    
+
     auto resultB = client.queue("test-queue-v2-txn-basic-b").batch(1).wait(false).pop();
     auto resultA = client.queue("test-queue-v2-txn-basic-a").batch(1).wait(false).pop();
-    
-    return resultB.size() == 1 && resultA.empty() && 
-           resultB[0]["data"]["value"].get<int>() == 2;
+
+    return committed.success && resultB.size() == 1 && resultA.empty() &&
+           resultB[0].data["value"].get<int>() == 2;
 }
 
 bool test_transaction_multiple_pushes(const std::string& server_url) {
@@ -840,104 +882,104 @@ bool test_transaction_multiple_pushes(const std::string& server_url) {
     client.queue("test-queue-v2-txn-multi-a").create();
     client.queue("test-queue-v2-txn-multi-b").create();
     client.queue("test-queue-v2-txn-multi-c").create();
-    
-    client.queue("test-queue-v2-txn-multi-a").push({
-        {{"data", {{"id", "source"}}}}
-    });
-    
+
+    client.queue("test-queue-v2-txn-multi-a").push(json{{"id", "source"}});
+
     auto messages = client.queue("test-queue-v2-txn-multi-a")
         .batch(1).wait(false).pop();
-    
+
     if (messages.empty()) return false;
-    
-    client.transaction()
+
+    TransactionResult committed = client.transaction()
         .queue("test-queue-v2-txn-multi-b")
-        .push({{{"data", {{"id", "b"}, {"source", messages[0]["data"]["id"]}}}}})
+        .push(json{{"id", "b"}, {"source", messages[0].data["id"]}})
         .queue("test-queue-v2-txn-multi-c")
-        .push({{{"data", {{"id", "c"}, {"source", messages[0]["data"]["id"]}}}}})
+        .push(json{{"id", "c"}, {"source", messages[0].data["id"]}})
         .ack(messages[0])
         .commit();
-    
+
     auto resultB = client.queue("test-queue-v2-txn-multi-b").batch(1).wait(false).pop();
     auto resultC = client.queue("test-queue-v2-txn-multi-c").batch(1).wait(false).pop();
     auto resultA = client.queue("test-queue-v2-txn-multi-a").batch(1).wait(false).pop();
-    
-    return resultB.size() == 1 && resultC.size() == 1 && resultA.empty();
+
+    return committed.success && resultB.size() == 1 && resultC.size() == 1 && resultA.empty();
 }
 
 bool test_transaction_multiple_acks(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-txn-multi-ack-a").create();
     client.queue("test-queue-v2-txn-multi-ack-b").create();
-    
-    client.queue("test-queue-v2-txn-multi-ack-a").push({
-        {{"data", {{"value", 1}}}},
-        {{"data", {{"value", 2}}}},
-        {{"data", {{"value", 3}}}}
+
+    client.queue("test-queue-v2-txn-multi-ack-a").push_many({
+        json{{"value", 1}},
+        json{{"value", 2}},
+        json{{"value", 3}}
     });
-    
+
     auto messages = client.queue("test-queue-v2-txn-multi-ack-a")
         .batch(3).wait(false).pop();
-    
+
     if (messages.size() != 3) return false;
-    
+
     int sum = 0;
     for (const auto& msg : messages) {
-        sum += msg["data"]["value"].get<int>();
+        sum += msg.data.at("value").get<int>();
     }
-    
-    client.transaction()
+
+    TransactionResult committed = client.transaction()
         .ack(messages[0])
         .ack(messages[1])
         .ack(messages[2])
         .queue("test-queue-v2-txn-multi-ack-b")
-        .push({{{"data", {{"sum", sum}}}}})
+        .push(json{{"sum", sum}})
         .commit();
-    
+
     auto resultA = client.queue("test-queue-v2-txn-multi-ack-a").batch(3).wait(false).pop();
     auto resultB = client.queue("test-queue-v2-txn-multi-ack-b").batch(1).wait(false).pop();
-    
-    return resultA.empty() && resultB.size() == 1 && 
-           resultB[0]["data"]["sum"].get<int>() == 6;
+
+    return committed.success && resultA.empty() && resultB.size() == 1 &&
+           resultB[0].data["sum"].get<int>() == 6;
 }
 
 bool test_transaction_empty_commit(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
+    // An empty bundle is a misuse: std::invalid_argument, thrown before
+    // anything is sent.
     bool error_thrown = false;
     try {
         client.transaction().commit();
-    } catch (const std::exception& e) {
-        error_thrown = std::string(e.what()).find("no operations") != std::string::npos;
+    } catch (const std::invalid_argument& e) {
+        error_thrown = std::string(e.what()).find("at least one operation") != std::string::npos;
     }
-    
+
     return error_thrown;
 }
 
 bool test_transaction_ack_with_consumer_group(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
     // Use unique queue names for C++ tests with timestamp to avoid state from previous runs
     auto now = std::chrono::system_clock::now();
     auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    
+
     std::string queue_a = "test-queue-cpp-txn-cg-a-" + std::to_string(timestamp);
     std::string queue_b = "test-queue-cpp-txn-cg-b-" + std::to_string(timestamp);
-    
+
     client.queue(queue_a).create();
     client.queue(queue_b).create();
-    
+
     std::string consumer_group = "test-cg-txn-cpp-" + std::to_string(timestamp);
-    
+
     // Push messages to queue A
-    client.queue(queue_a).push({
-        {{"data", {{"value", 1}}}},
-        {{"data", {{"value", 2}}}}
+    client.queue(queue_a).push_many({
+        json{{"value", 1}},
+        json{{"value", 2}}
     });
-    
+
     // Small delay to ensure messages are written
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
+
     // Pop with consumer group
     auto messages = client.queue(queue_a)
         .group(consumer_group)
@@ -945,33 +987,41 @@ bool test_transaction_ack_with_consumer_group(const std::string& server_url) {
         .batch(2)
         .wait(false)
         .pop();
-    
+
     if (messages.size() != 2) {
         std::cerr << "Expected 2 messages, got " << messages.size() << std::endl;
         return false;
     }
-    
-    int sum = messages[0]["data"]["value"].get<int>() + messages[1]["data"]["value"].get<int>();
-    
-    // Transaction: ACK with consumer group context, push to B
-    json context = {{"consumerGroup", consumer_group}};
+
+    // The transaction's acks take the consumer group from the messages, so the
+    // pop has to have put it there.
+    if (messages[0].consumer_group != consumer_group ||
+        messages[1].consumer_group != consumer_group) {
+        std::cerr << "the popped messages should carry the group " << consumer_group
+                  << ", got " << describe(messages).dump() << std::endl;
+        return false;
+    }
+
+    int sum = messages[0].data["value"].get<int>() + messages[1].data["value"].get<int>();
+
+    // Transaction: ACK in the consumer group the messages came from, push to B
     client.transaction()
-        .ack(messages[0], "completed", context)
-        .ack(messages[1], "completed", context)
+        .ack(messages[0])
+        .ack(messages[1])
         .queue(queue_b)
-        .push({{{"data", {{"sum", sum}}}}})
+        .push(json{{"sum", sum}})
         .commit();
-    
+
     // Verify: Pop again with same consumer group should get no messages
     auto messages_after_ack = client.queue(queue_a)
         .group(consumer_group)
         .batch(2)
         .wait(false)
         .pop();
-    
+
     // Verify: Queue B has the result
     auto result_b = client.queue(queue_b).batch(1).wait(false).pop();
-    
+
     // Verify: Using a different consumer group should still see the messages
     auto messages_other_group = client.queue(queue_a)
         .group("other-consumer-group-cpp")
@@ -979,10 +1029,10 @@ bool test_transaction_ack_with_consumer_group(const std::string& server_url) {
         .batch(2)
         .wait(false)
         .pop();
-    
-    return messages_after_ack.empty() && 
-           result_b.size() == 1 && 
-           result_b[0]["data"]["sum"].get<int>() == 3 &&
+
+    return messages_after_ack.empty() &&
+           result_b.size() == 1 &&
+           result_b[0].data["sum"].get<int>() == 3 &&
            messages_other_group.size() == 2;
 }
 
@@ -1002,10 +1052,11 @@ bool test_transaction_ack_with_consumer_group(const std::string& server_url) {
 
 /// Pop one message of `queue` without a long wait, retrying for up to
 /// `budget_millis`. A budget of 0 is a single look.
-json pop_one(QueenClient& client, const std::string& queue, int budget_millis) {
+std::vector<Message> pop_one(QueenClient& client, const std::string& queue, int budget_millis) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_millis);
     while (true) {
-        json messages = client.queue(queue).subscription_mode("all").batch(1).wait(false).pop();
+        std::vector<Message> messages =
+            client.queue(queue).subscription_mode("all").batch(1).wait(false).pop();
         if (!messages.empty() || std::chrono::steady_clock::now() >= deadline) {
             return messages;
         }
@@ -1044,36 +1095,45 @@ bool test_transaction_refuses_an_ack_under_an_expired_lease(const std::string& s
     client.queue(queue_a).config(short_lease).create();
     client.queue(queue_b).config(long_lease).create();
 
-    client.queue(queue_a).push({{{"data", {{"name", "a"}}}}});
-    client.queue(queue_b).push({{{"data", {{"name", "b"}}}}});
+    client.queue(queue_a).push(json{{"name", "a"}});
+    client.queue(queue_b).push(json{{"name", "b"}});
 
-    json a = pop_one(client, queue_a, 5000);
-    json b = pop_one(client, queue_b, 5000);
-    if (a.size() != 1 || b.size() != 1 || a[0]["leaseId"] == b[0]["leaseId"]) {
-        std::cerr << "expected one message under each of two leases, got " << a.dump()
-                  << " and " << b.dump() << std::endl;
+    std::vector<Message> a = pop_one(client, queue_a, 5000);
+    std::vector<Message> b = pop_one(client, queue_b, 5000);
+    if (a.size() != 1 || b.size() != 1 || a[0].lease_id == b[0].lease_id) {
+        std::cerr << "expected one message under each of two leases, got " << describe(a).dump()
+                  << " and " << describe(b).dump() << std::endl;
         return false;
     }
 
     // Lease A expires, and another consumer takes the message. The broker reads
     // the queue's leaseTime at every pop, so the new holder's lease is long.
     client.queue(queue_a).config(long_lease).create();
-    json taken = pop_one(client, queue_a, 15000);
-    if (taken.size() != 1 || taken[0]["transactionId"] != a[0]["transactionId"] ||
-        taken[0]["leaseId"] == a[0]["leaseId"]) {
+    std::vector<Message> taken = pop_one(client, queue_a, 15000);
+    if (taken.size() != 1 || taken[0].transaction_id != a[0].transaction_id ||
+        taken[0].lease_id == a[0].lease_id) {
         std::cerr << "the message of the expired lease should come back under a new lease, got "
-                  << taken.dump() << std::endl;
+                  << describe(taken).dump() << std::endl;
         return false;
     }
 
+    // A refused bundle is thrown as TransactionError. Its what() always says
+    // "transaction rolled back" (the client's own prefix), so the broker's
+    // verdict is read from the result it carries.
     std::string refusal;
     try {
-        json result = client.transaction().ack(a[0]).ack(b[0]).commit();
-        std::cerr << "a bundle with an ACK under an expired lease committed: "
-                  << result.dump() << std::endl;
+        TransactionResult result = client.transaction().ack(a[0]).ack(b[0]).commit();
+        std::cerr << "a bundle with an ACK under an expired lease "
+                  << (result.success ? "committed: " : "was returned instead of thrown: ")
+                  << result.raw.dump() << std::endl;
         return false;
-    } catch (const std::exception& e) {
-        refusal = e.what();
+    } catch (const TransactionError& e) {
+        if (e.result().success) {
+            std::cerr << "TransactionError carrying a successful result: "
+                      << e.result().raw.dump() << std::endl;
+            return false;
+        }
+        refusal = e.result().error;
     }
     if (refusal.find("rolled back") == std::string::npos) {
         std::cerr << "the bundle should be refused whole, got: " << refusal << std::endl;
@@ -1081,8 +1141,8 @@ bool test_transaction_refuses_an_ack_under_an_expired_lease(const std::string& s
     }
 
     // Nothing of the bundle happened: each holder still settles its own message.
-    if (!client.transaction().ack(taken[0]).commit().value("success", false) ||
-        !client.transaction().ack(b[0]).commit().value("success", false)) {
+    if (!client.transaction().ack(taken[0]).commit().success ||
+        !client.transaction().ack(b[0]).commit().success) {
         return false;
     }
     return pop_one(client, queue_a, 0).empty() && pop_one(client, queue_b, 0).empty();
@@ -1102,19 +1162,19 @@ bool test_transaction_acks_two_live_leases(const std::string& server_url) {
     client.queue(queue_a).config(long_lease).create();
     client.queue(queue_b).config(long_lease).create();
 
-    client.queue(queue_a).push({{{"data", {{"name", "a"}}}}});
-    client.queue(queue_b).push({{{"data", {{"name", "b"}}}}});
+    client.queue(queue_a).push(json{{"name", "a"}});
+    client.queue(queue_b).push(json{{"name", "b"}});
 
-    json a = pop_one(client, queue_a, 5000);
-    json b = pop_one(client, queue_b, 5000);
-    if (a.size() != 1 || b.size() != 1 || a[0]["leaseId"] == b[0]["leaseId"]) {
-        std::cerr << "expected one message under each of two leases, got " << a.dump()
-                  << " and " << b.dump() << std::endl;
+    std::vector<Message> a = pop_one(client, queue_a, 5000);
+    std::vector<Message> b = pop_one(client, queue_b, 5000);
+    if (a.size() != 1 || b.size() != 1 || a[0].lease_id == b[0].lease_id) {
+        std::cerr << "expected one message under each of two leases, got " << describe(a).dump()
+                  << " and " << describe(b).dump() << std::endl;
         return false;
     }
 
-    json result = client.transaction().ack(a[0]).ack(b[0]).commit();
-    return result.value("success", false) &&
+    TransactionResult result = client.transaction().ack(a[0]).ack(b[0]).commit();
+    return result.success &&
            pop_one(client, queue_a, 0).empty() && pop_one(client, queue_b, 0).empty();
 }
 
@@ -1143,20 +1203,23 @@ bool test_consumer_does_not_nack_without_auto_ack(const std::string& server_url)
     QueueConfig config;
     config.retry_limit = 1;
     client.queue(queue).config(config).create();
-    client.queue(queue).push({{{"data", {{"poison", true}}}}});
+    client.queue(queue).push(json{{"poison", true}});
 
     std::atomic<int> attempts{0};
-    client.queue(queue).group("cpp-no-nack").subscription_mode("all").batch(1).each()
-        .auto_ack(false).wait(false).idle_millis(1500)
-        .consume([&](const json&) {
+    ConsumeSummary summary = client.queue(queue).group("cpp-no-nack").subscription_mode("all")
+        .batch(1).auto_ack(false).wait(false).idle_millis(1500)
+        .consume([&](const Message&) {
             attempts++;
             throw std::runtime_error("poison");
         });
 
     json dlq = client.queue(queue).dlq("cpp-no-nack").limit(10).get();
-    if (attempts.load() != 1 || dlq.value("total", 0) != 0) {
+    // The summary counts what the loop sent: nothing, without auto_ack.
+    if (attempts.load() != 1 || dlq.value("total", 0) != 0 ||
+        summary.acked != 0 || summary.nacked != 0) {
         std::cerr << "expected 1 attempt and no dead letter, got " << attempts.load()
-                  << " attempt(s) and " << dlq.dump() << std::endl;
+                  << " attempt(s) and " << dlq.dump() << " (acked " << summary.acked
+                  << ", nacked " << summary.nacked << ")" << std::endl;
         return false;
     }
     return true;
@@ -1171,25 +1234,27 @@ bool test_consumer_nack_leaves_the_other_partitions_alone(const std::string& ser
     DropQueuesOnExit drop{client, {queue}};
 
     client.queue(queue).create();
-    client.queue(queue).partition("A").push({{{"data", {{"id", "a1"}}}}, {{"data", {{"id", "a2"}}}}});
-    client.queue(queue).partition("B").push({{{"data", {{"id", "b1"}}}}, {{"data", {{"id", "b2"}}}}});
+    client.queue(queue).partition("A").push_many({json{{"id", "a1"}}, json{{"id", "a2"}}});
+    client.queue(queue).partition("B").push_many({json{{"id", "b1"}}, json{{"id", "b2"}}});
 
     std::map<std::string, int> handled;
     client.queue(queue).group("cpp-nack-partitions").subscription_mode("all")
-        .partitions(2).batch(10).each().wait(false).idle_millis(1500)
-        .consume([&](const json& msg) {
-            std::string id = msg["data"]["id"].get<std::string>();
+        .partitions(2).batch(10).wait(false).idle_millis(1500)
+        .consume([&](const Message& msg) {
+            std::string id = msg.data.at("id").get<std::string>();
             // a1 fails on its first delivery only.
             if (++handled[id] == 1 && id == "a1") {
                 throw std::runtime_error("a1 fails once");
             }
         });
 
-    json leftovers = client.queue(queue).group("cpp-nack-partitions").batch(10).wait(false).pop();
+    std::vector<Message> leftovers =
+        client.queue(queue).group("cpp-nack-partitions").batch(10).wait(false).pop();
     std::map<std::string, int> expected = {{"a1", 2}, {"a2", 1}, {"b1", 1}, {"b2", 1}};
     if (handled != expected || !leftovers.empty()) {
         std::cerr << "expected a1 twice and every other message once, got "
-                  << json(handled).dump() << ", left over " << leftovers.dump() << std::endl;
+                  << json(handled).dump() << ", left over " << describe(leftovers).dump()
+                  << std::endl;
         return false;
     }
     return true;
@@ -1206,60 +1271,62 @@ bool test_consumer_renews_the_lease_while_the_handler_runs(const std::string& se
     QueueConfig config;
     config.lease_time = 2;
     client.queue(queue).config(config).create();
-    client.queue(queue).push({{{"data", {{"slow", true}}}}});
+    client.queue(queue).push(json{{"slow", true}});
 
     std::atomic<bool> stolen{false};
     client.queue(queue).group("cpp-renew").subscription_mode("all").batch(1)
         .wait(false).limit(1).renew_lease(true, 500)
-        .consume([&](const json&) {
+        .consume_batch([&](const std::vector<Message>&) {
             std::this_thread::sleep_for(std::chrono::seconds(3));
-            json other = client.queue(queue).group("cpp-renew").batch(1).wait(false).pop();
+            std::vector<Message> other =
+                client.queue(queue).group("cpp-renew").batch(1).wait(false).pop();
             stolen = !other.empty();
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         });
 
-    json after = client.queue(queue).group("cpp-renew").batch(1).wait(false).pop();
+    std::vector<Message> after = client.queue(queue).group("cpp-renew").batch(1).wait(false).pop();
     if (stolen.load() || !after.empty()) {
         std::cerr << "the lease lapsed under the handler: stolen=" << stolen.load()
-                  << ", redelivered after the ack=" << after.dump() << std::endl;
+                  << ", redelivered after the ack=" << describe(after).dump() << std::endl;
         return false;
     }
     return true;
 }
 
 // ack() and renew() say when the broker settled or extended nothing, which it
-// answers with HTTP 200 and success:false in the body.
+// answers with HTTP 200 and success:false in the body: a value, not an
+// exception. The ack's consumer group and lease come from the message.
 bool test_ack_and_renew_report_a_broker_refusal(const std::string& server_url) {
     QueenClient client(server_url);
     std::string queue = unique_queue("test-queue-cpp-refusal-");
     DropQueuesOnExit drop{client, {queue}};
 
     client.queue(queue).create();
-    client.queue(queue).push({{{"data", {{"n", 1}}}}});
-    json popped = client.queue(queue).group("cpp-refusal").subscription_mode("all")
+    client.queue(queue).push(json{{"n", 1}});
+    std::vector<Message> popped = client.queue(queue).group("cpp-refusal").subscription_mode("all")
         .batch(1).wait(false).pop();
-    if (popped.size() != 1) {
-        std::cerr << "expected one message, got " << popped.dump() << std::endl;
+    if (popped.size() != 1 || popped[0].consumer_group != "cpp-refusal") {
+        std::cerr << "expected one message of the group cpp-refusal, got "
+                  << describe(popped).dump() << std::endl;
         return false;
     }
-    json msg = popped[0];
-    json group = {{"group", "cpp-refusal"}};
+    Message msg = popped[0];
 
-    json unknown_lease = client.renew("00000000-0000-0000-0000-000000000000");
-    json live_lease = client.renew(msg);
-    json wrong_lease = msg;
-    wrong_lease["leaseId"] = "00000000-0000-0000-0000-000000000000";
-    json refused = client.ack(wrong_lease, true, group);
-    json accepted = client.ack(msg, true, group);
+    RenewResult unknown_lease = client.renew(std::string("00000000-0000-0000-0000-000000000000"));
+    RenewResult live_lease = client.renew(msg);
+    Message wrong_lease = msg;
+    wrong_lease.lease_id = "00000000-0000-0000-0000-000000000000";
+    AckResult refused = client.ack(wrong_lease);
+    AckResult accepted = client.ack(msg);
 
-    bool ok = unknown_lease.value("success", true) == false &&
-              live_lease.value("success", false) &&
-              refused.value("success", true) == false &&
-              accepted.value("success", false);
+    bool ok = !unknown_lease.success &&
+              live_lease.success &&
+              !refused.success &&
+              accepted.success;
     if (!ok) {
-        std::cerr << "renew unknown=" << unknown_lease.dump() << " renew live="
-                  << live_lease.dump() << " ack wrong lease=" << refused.dump()
-                  << " ack=" << accepted.dump() << std::endl;
+        std::cerr << "renew unknown=" << describe(unknown_lease).dump() << " renew live="
+                  << describe(live_lease).dump() << " ack wrong lease=" << describe(refused).dump()
+                  << " ack=" << describe(accepted).dump() << std::endl;
     }
     return ok;
 }
@@ -1275,7 +1342,7 @@ bool test_consumer_surfaces_a_refused_pop(const std::string& server_url) {
     int status = 0;
     try {
         client.queue(queue).conflation().wait(false).idle_millis(1000)
-            .consume([](const json&) {});
+            .consume_batch([](const std::vector<Message>&) {});
     } catch (const HttpError& e) {
         status = e.status_code();
     }
@@ -1299,29 +1366,26 @@ bool test_pop_commit_on_delivery(const std::string& server_url) {
     QueueConfig config;
     config.lease_time = 1;
     client.queue(queue).config(config).create();
-    client.queue(queue).push({{{"data", {{"n", 1}}}}});
+    client.queue(queue).push(json{{"n", 1}});
 
-    json committed = client.queue(queue).group("cpp-commit").subscription_mode("all")
+    std::vector<Message> committed = client.queue(queue).group("cpp-commit").subscription_mode("all")
         .commit_on_delivery().batch(1).wait(false).pop();
-    json leased = client.queue(queue).group("cpp-leased").subscription_mode("all")
+    std::vector<Message> leased = client.queue(queue).group("cpp-leased").subscription_mode("all")
         .batch(1).wait(false).pop();
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
-    json committed_again = client.queue(queue).group("cpp-commit").batch(1).wait(false).pop();
-    json leased_again = client.queue(queue).group("cpp-leased").batch(1).wait(true).pop();
+    std::vector<Message> committed_again =
+        client.queue(queue).group("cpp-commit").batch(1).wait(false).pop();
+    std::vector<Message> leased_again =
+        client.queue(queue).group("cpp-leased").batch(1).wait(true).pop();
 
-    auto lease_of = [](const json& messages) {
-        const json& msg = messages[0];
-        return msg.contains("leaseId") && msg["leaseId"].is_string()
-                   ? msg["leaseId"].get<std::string>() : std::string();
-    };
-    bool ok = committed.size() == 1 && lease_of(committed).empty() &&
-              leased.size() == 1 && !lease_of(leased).empty() &&
+    bool ok = committed.size() == 1 && committed[0].lease_id.empty() &&
+              leased.size() == 1 && !leased[0].lease_id.empty() &&
               committed_again.empty() && leased_again.size() == 1;
     if (!ok) {
-        std::cerr << "committed=" << committed.dump() << " leased=" << leased.dump()
-                  << " committed again=" << committed_again.dump()
-                  << " leased again=" << leased_again.dump() << std::endl;
+        std::cerr << "committed=" << describe(committed).dump() << " leased=" << describe(leased).dump()
+                  << " committed again=" << describe(committed_again).dump()
+                  << " leased again=" << describe(leased_again).dump() << std::endl;
     }
     return ok;
 }
@@ -1334,16 +1398,16 @@ bool test_pop_commit_on_delivery(const std::string& server_url) {
 // PRODUCER SUB TESTS (issue #23, feature A)
 // ============================================================================
 // These tests verify that the producerSub field surfaces correctly on popped
-// messages in C++. The C++ client uses nlohmann::json for messages, so the
-// field is accessed as msg["producerSub"] - no struct change required. The
-// tests also verify that server-side anti-impersonation logic prevents a
-// client from spoofing the field.
+// messages in C++: a popped Message carries it as Message::producer_sub, empty
+// when the broker sends null or leaves it out. The tests also verify that
+// server-side anti-impersonation logic prevents a client from spoofing the
+// field.
 // ============================================================================
 
 // Verify that producerSub (when present in the server response) is accessible
-// via the nlohmann::json-based Message. Uses a raw HTTP push that attempts to
-// set producerSub in the body; the server (with auth disabled, the typical
-// CI environment) must ignore it and store NULL, which surfaces as JSON null.
+// on the popped Message. Uses a raw HTTP push that attempts to set producerSub
+// in the body; the server (with auth disabled, the typical CI environment)
+// must ignore it and store NULL, which surfaces as an empty producer_sub.
 bool test_producer_sub_ignored_without_auth(const std::string& server_url) {
     QueenClient client(server_url);
     const std::string queue_name = "test-auth-cpp-noauth";
@@ -1381,9 +1445,9 @@ bool test_producer_sub_ignored_without_auth(const std::string& server_url) {
     const auto& m = msgs[0];
     // The server returns the field as null when producer_sub is NULL in DB.
     // Valid expectations: field missing OR field is null - either way the
-    // spoofing attempt must NOT be reflected.
-    if (m.contains("producerSub") && !m["producerSub"].is_null()) {
-        std::cerr << "producerSub leaked: " << m["producerSub"].dump() << std::endl;
+    // spoofing attempt must NOT be reflected, and producer_sub stays empty.
+    if (!m.producer_sub.empty()) {
+        std::cerr << "producerSub leaked: " << m.producer_sub << std::endl;
         return false;
     }
     return true;
@@ -1391,42 +1455,47 @@ bool test_producer_sub_ignored_without_auth(const std::string& server_url) {
 
 bool test_dlq(const std::string& server_url) {
     QueenClient client(server_url);
-    
+
     QueueConfig config;
     config.retry_limit = 1;  // Only 1 retry
     client.queue("test-queue-v2-dlq").config(config).create();
-    
-    client.queue("test-queue-v2-dlq").push({
-        {{"data", {{"message", "Test DLQ message"}, {"timestamp", std::time(nullptr)}}}}
-    });
-    
+
+    client.queue("test-queue-v2-dlq").push(
+        json{{"message", "Test DLQ message"}, {"timestamp", std::time(nullptr)}});
+
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
-    // Consume and fail MULTIPLE times (original + retry)
+
+    // Consume and fail MULTIPLE times (original + retry). A handler that
+    // throws is nacked with the exception's text (auto_ack); the throw does
+    // not leave consume_batch().
     int attempt_count = 0;
-    try {
-        client.queue("test-queue-v2-dlq")
-            .batch(1)
-            .wait(true)
-            .limit(2)  // Allow 2 attempts (original + 1 retry)
-            .auto_ack(true)
-            .idle_millis(3000)
-            .consume([&](const json& msg) {
-                attempt_count++;
-                throw std::runtime_error("Test error - triggering DLQ");
-            });
-    } catch (...) {
-        // Expected to fail
+    ConsumeSummary summary = client.queue("test-queue-v2-dlq")
+        .batch(1)
+        .wait(true)
+        .limit(2)  // Allow 2 attempts (original + 1 retry)
+        .auto_ack(true)
+        .idle_millis(3000)
+        .consume_batch([&](const std::vector<Message>&) {
+            attempt_count++;
+            throw std::runtime_error("Test error - triggering DLQ");
+        });
+
+    if (attempt_count < 1 || summary.nacked != static_cast<uint64_t>(attempt_count) ||
+        summary.acked != 0) {
+        std::cerr << "every failed attempt should be nacked: " << attempt_count
+                  << " attempt(s), acked " << summary.acked << ", nacked " << summary.nacked
+                  << std::endl;
+        return false;
     }
-    
+
     // Wait longer for DLQ processing
     std::this_thread::sleep_for(std::chrono::seconds(1));
-    
+
     auto dlq_result = client.queue("test-queue-v2-dlq")
         .dlq()
         .limit(10)
         .get();
-    
+
     // DLQ might be empty if message hasn't been moved yet or retries still pending
     // For now, just check that query works (even if no messages yet)
     return dlq_result.contains("messages") && dlq_result.contains("total");
@@ -1439,16 +1508,15 @@ bool test_dlq(const std::string& server_url) {
 bool test_subscription_mode_new(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-subscription-mode-new").create();
-    
+
     // Push historical messages
     for (int i = 0; i < 5; i++) {
-        client.queue("test-queue-v2-subscription-mode-new").push({
-            {{"data", {{"id", i}, {"type", "historical"}}}}
-        });
+        client.queue("test-queue-v2-subscription-mode-new").push(
+            json{{"id", i}, {"type", "historical"}});
     }
-    
+
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
+
     // The replay baseline for the contrast below. This used to rely on the broker
     // default being "all"; that default is now "new", so the baseline has to ask
     // for the backlog explicitly or the comparison with "new" is vacuous.
@@ -1459,10 +1527,10 @@ bool test_subscription_mode_new(const std::string& server_url) {
         .batch(10)
         .wait(false)
         .limit(1)
-        .consume([&](const json& msgs) {
-            all_messages_count = msgs.size();
+        .consume_batch([&](const std::vector<Message>& msgs) {
+            all_messages_count = static_cast<int>(msgs.size());
         });
-    
+
     // New mode - should skip historical
     auto new_only_messages = client.queue("test-queue-v2-subscription-mode-new")
         .group("group-new-only")
@@ -1470,23 +1538,22 @@ bool test_subscription_mode_new(const std::string& server_url) {
         .batch(10)
         .wait(false)
         .pop();
-    
+
     return all_messages_count == 5 && new_only_messages.empty();
 }
 
 bool test_subscription_from_now(const std::string& server_url) {
     QueenClient client(server_url);
     client.queue("test-queue-v2-subscription-from-now").create();
-    
+
     // Push historical messages
     for (int i = 0; i < 5; i++) {
-        client.queue("test-queue-v2-subscription-from-now").push({
-            {{"data", {{"id", i}, {"type", "historical"}}}}
-        });
+        client.queue("test-queue-v2-subscription-from-now").push(
+            json{{"id", i}, {"type", "historical"}});
     }
-    
+
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
+
     // subscriptionFrom('now') - should skip historical
     auto now_messages = client.queue("test-queue-v2-subscription-from-now")
         .group("group-from-now")
@@ -1494,7 +1561,7 @@ bool test_subscription_from_now(const std::string& server_url) {
         .batch(10)
         .wait(false)
         .pop();
-    
+
     return now_messages.empty();
 }
 
@@ -1507,51 +1574,47 @@ bool test_complete_workflow(const std::string& server_url) {
     client.queue("test-queue-v2-complete-init").create();
     client.queue("test-queue-v2-complete-next").create();
     client.queue("test-queue-v2-complete-final").create();
-    
-    client.queue("test-queue-v2-complete-init").push({
-        {{"data", {{"message", "First"}, {"count", 0}}}}
-    });
-    
+
+    client.queue("test-queue-v2-complete-init").push(json{{"message", "First"}, {"count", 0}});
+
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
+
     // Stage 1: init -> next
     client.queue("test-queue-v2-complete-init")
         .batch(1)
         .wait(false)
         .idle_millis(3000)  // Idle timeout
         .limit(1)
-        .each()  // Process individual messages
         .auto_ack(false)
-        .consume([&](const json& msg) {
-            int next_count = msg["data"]["count"].get<int>() + 1;
+        .consume([&](const Message& msg) {  // Process individual messages
+            int next_count = msg.data.at("count").get<int>() + 1;
             client.transaction()
                 .queue("test-queue-v2-complete-next")
-                .push({{{"data", {{"message", "Next"}, {"count", next_count}}}}})
+                .push(json{{"message", "Next"}, {"count", next_count}})
                 .ack(msg)
                 .commit();
         });
-    
+
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
+
     // Stage 2: next -> final
     client.queue("test-queue-v2-complete-next")
         .batch(1)
         .wait(false)
         .idle_millis(3000)  // Idle timeout
         .limit(1)
-        .each()  // Process individual messages
         .auto_ack(false)
-        .consume([&](const json& msg) {
-            int final_count = msg["data"]["count"].get<int>() + 1;
+        .consume([&](const Message& msg) {  // Process individual messages
+            int final_count = msg.data.at("count").get<int>() + 1;
             client.transaction()
                 .queue("test-queue-v2-complete-final")
-                .push({{{"data", {{"message", "Final"}, {"count", final_count}}}}})
+                .push(json{{"message", "Final"}, {"count", final_count}})
                 .ack(msg)
                 .commit();
         });
-    
+
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
+
     // Stage 3: consume final
     bool final_received = false;
     int final_count = -1;
@@ -1560,12 +1623,11 @@ bool test_complete_workflow(const std::string& server_url) {
         .wait(false)
         .idle_millis(3000)  // Idle timeout
         .limit(1)
-        .each()  // Process individual messages
-        .consume([&](const json& msg) {
-            final_count = msg["data"]["count"].get<int>();
+        .consume([&](const Message& msg) {  // Process individual messages
+            final_count = msg.data.at("count").get<int>();
             final_received = (final_count == 2);
         });
-    
+
     return final_received && final_count == 2;
 }
 
@@ -1616,16 +1678,16 @@ static const char* KV_NS = "cpp-kv-test";
 static const int TIMER_DELIVERY_BUDGET_MS = 45000;
 
 /// Poll a queue until a message shows up or the budget runs out.
-json await_message(QueenClient& client, const std::string& queue, int budget_millis) {
+std::vector<Message> await_message(QueenClient& client, const std::string& queue, int budget_millis) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_millis);
     while (std::chrono::steady_clock::now() < deadline) {
-        json messages = client.queue(queue).batch(1).wait(false).pop();
+        std::vector<Message> messages = client.queue(queue).batch(1).wait(false).pop();
         if (!messages.empty()) {
             return messages;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    return json::array();
+    return {};
 }
 
 bool test_kv_put_and_get(const std::string& server_url) {
@@ -1754,36 +1816,37 @@ bool test_transaction_kv_gate_returns_instead_of_throwing(const std::string& ser
     auto attempt = [&](int n) {
         return client.transaction()
             .queue("test-queue-v2-kv-gate")
-            .push({{{"data", {{"n", n}}}}})
+            .push(json{{"n", n}})
             .kv(KV_NS).put_if_absent("txn-gate", {{"claimed", true}}, KvTtl::seconds(300), gate)
             .commit();
     };
 
-    json first = attempt(1);
-    if (!first.value("success", false)) return false;
+    TransactionResult first = attempt(1);
+    if (!first.success) return false;
 
     // The redelivery. §8.3: HTTP 200, success:false, reason kv_precondition --
     // and commit() RETURNS it rather than throwing, because this is the expected
     // outcome of every legitimate redelivery and must stay out of the caller's
     // error path.
-    json second;
+    TransactionResult second;
     try {
         second = attempt(2);
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+        std::cerr << "a lost KV gate was thrown instead of returned: " << e.what() << std::endl;
         return false;
     }
 
-    if (second.value("success", true) != false) return false;
-    if (second.value("reason", std::string()) != "kv_precondition") return false;
-    if (second.value("kvReason", std::string()) != "exists") return false;
+    if (second.success) return false;
+    if (second.reason != "kv_precondition" || !second.lost_precondition()) return false;
+    if (second.kv_reason != "exists") return false;
     // The flat index space (§8.2): the operations first, then the kv array. One
     // push means the single KV rider sits at flat index 1.
-    if (second.value("failedIndex", -1) != 1) return false;
-    if (second["value"] != json({{"claimed", true}})) return false;
+    if (!second.failed_index.has_value() || *second.failed_index != 1) return false;
+    if (second.value != json({{"claimed", true}})) return false;
 
     // The gate did its job: the second push must NOT have been committed.
-    json messages = client.queue("test-queue-v2-kv-gate").batch(10).wait(false).pop();
-    return messages.size() == 1 && messages[0]["data"]["n"].get<int>() == 1;
+    std::vector<Message> messages = client.queue("test-queue-v2-kv-gate").batch(10).wait(false).pop();
+    return messages.size() == 1 && messages[0].data["n"].get<int>() == 1;
 }
 
 bool test_timer_fires_into_its_queue(const std::string& server_url) {
@@ -1804,8 +1867,9 @@ bool test_timer_fires_into_its_queue(const std::string& server_url) {
     // it exists.
     if (!scheduled.contains("messageId") || scheduled["messageId"].is_null()) return false;
 
-    json messages = await_message(client, "test-queue-v2-timer-fire", TIMER_DELIVERY_BUDGET_MS);
-    return messages.size() == 1 && messages[0]["data"] == json({{"kind", "reminder"}, {"n", 7}});
+    std::vector<Message> messages =
+        await_message(client, "test-queue-v2-timer-fire", TIMER_DELIVERY_BUDGET_MS);
+    return messages.size() == 1 && messages[0].data == json({{"kind", "reminder"}, {"n", 7}});
 }
 
 bool test_timer_cancel_before_it_fires(const std::string& server_url) {
@@ -1823,7 +1887,7 @@ bool test_timer_cancel_before_it_fires(const std::string& server_url) {
     if (!cancelled.value("ok", false)) return false;
     if (cancelled.value("status", std::string()) != "cancelled") return false;
 
-    json messages = await_message(client, "test-queue-v2-timer-cancel", 2000);
+    std::vector<Message> messages = await_message(client, "test-queue-v2-timer-cancel", 2000);
     return messages.empty();
 }
 
@@ -1877,13 +1941,13 @@ bool test_transaction_schedules_a_timer(const std::string& server_url) {
     timer.payload = {{"from", "bundle"}};
     timer.delay_millis = 500;
 
-    json committed = client.transaction()
+    TransactionResult committed = client.transaction()
         .queue("test-queue-v2-timer-txn")
-        .push({{{"data", {{"immediate", true}}}}})
+        .push(json{{"immediate", true}})
         .timers().schedule(timer)
         .commit();
 
-    if (!committed.value("success", false)) return false;
+    if (!committed.success) return false;
 
     // Both the immediate push and the timer's later delivery land in the same
     // queue. Each message is ACKED as it is seen, and that is load-bearing here
@@ -1894,11 +1958,12 @@ bool test_transaction_schedules_a_timer(const std::string& server_url) {
     bool saw_timer = false;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(TIMER_DELIVERY_BUDGET_MS);
     while (std::chrono::steady_clock::now() < deadline && !(saw_immediate && saw_timer)) {
-        json messages = client.queue("test-queue-v2-timer-txn").batch(10).wait(false).pop();
+        std::vector<Message> messages =
+            client.queue("test-queue-v2-timer-txn").batch(10).wait(false).pop();
         for (const auto& msg : messages) {
-            if (msg["data"] == json({{"immediate", true}})) saw_immediate = true;
-            if (msg["data"] == json({{"from", "bundle"}})) saw_timer = true;
-            client.ack(msg, true);
+            if (msg.data == json({{"immediate", true}})) saw_immediate = true;
+            if (msg.data == json({{"from", "bundle"}})) saw_timer = true;
+            client.ack(msg);
         }
         if (saw_immediate && saw_timer) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -1913,17 +1978,17 @@ bool test_transaction_schedules_a_timer(const std::string& server_url) {
 
 int main(int argc, char** argv) {
     std::string server_url = "http://localhost:6632";
-    
+
     if (argc > 1) {
         server_url = argv[1];
     }
-    
+
     std::cout << "========================================" << std::endl;
     std::cout << "Queen C++ Client - Full Test Suite" << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << "Server URL: " << server_url << std::endl;
     std::cout << "========================================\n" << std::endl;
-    
+
     // Cleanup from previous runs. KV and timers first: a pending timer left
     // behind by a failed run fires into a queue this run is about to assert on,
     // and cancelling it before the queues are recreated keeps that impossible.
@@ -1931,7 +1996,7 @@ int main(int argc, char** argv) {
     cleanup_test_queues(server_url);
 
     TestRunner runner(server_url);
-    
+
     // PUSH TESTS
     std::cout << YELLOW << "\n=== PUSH TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("Push Message", [&]() { return test_push_message(server_url); });
@@ -1945,7 +2010,7 @@ int main(int argc, char** argv) {
     runner.run_test("Push Null Payload", [&]() { return test_push_null_payload(server_url); });
     runner.run_test("Push Empty Payload", [&]() { return test_push_empty_payload(server_url); });
     runner.run_test("Push Encrypted Payload", [&]() { return test_push_encrypted(server_url); });
-    
+
     // POP TESTS
     std::cout << YELLOW << "\n=== POP TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("Pop Empty Queue", [&]() { return test_pop_empty_queue(server_url); });
@@ -1953,7 +2018,7 @@ int main(int argc, char** argv) {
     runner.run_test("Pop with Wait (Long Polling)", [&]() { return test_pop_with_wait(server_url); });
     runner.run_test("Pop with ACK", [&]() { return test_pop_with_ack(server_url); });
     runner.run_test("Pop with ACK Reconsume", [&]() { return test_pop_with_ack_reconsume(server_url); });
-    
+
     // CONSUME TESTS
     std::cout << YELLOW << "\n=== CONSUME TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("Consumer Basic", [&]() { return test_consumer(server_url); });
@@ -1964,13 +2029,13 @@ int main(int argc, char** argv) {
     runner.run_test("Consumer Ordering", [&]() { return test_consumer_ordering(server_url); });
     runner.run_test("Consumer Group", [&]() { return test_consumer_group(server_url); });
     runner.run_test("Consumer Group with Partition", [&]() { return test_consumer_group_with_partition(server_url); });
-    
+
     // QUEUE TESTS
     std::cout << YELLOW << "\n=== QUEUE TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("Create Queue", [&]() { return test_create_queue(server_url); });
     runner.run_test("Delete Queue", [&]() { return test_delete_queue(server_url); });
     runner.run_test("Configure Queue", [&]() { return test_configure_queue(server_url); });
-    
+
     // TRANSACTION TESTS
     std::cout << YELLOW << "\n=== TRANSACTION TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("Transaction Basic Push+ACK", [&]() { return test_transaction_basic_push_ack(server_url); });
@@ -1997,7 +2062,7 @@ int main(int argc, char** argv) {
                     [&]() { return test_consumer_surfaces_a_refused_pop(server_url); });
     runner.run_test("Pop with commit_on_delivery commits at delivery",
                     [&]() { return test_pop_commit_on_delivery(server_url); });
-    
+
     // DLQ TEST
     std::cout << YELLOW << "\n=== DLQ TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("Dead Letter Queue", [&]() { return test_dlq(server_url); });
@@ -2006,12 +2071,12 @@ int main(int argc, char** argv) {
     std::cout << YELLOW << "\n=== PRODUCER SUB TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("Producer Sub ignored from body without auth",
                     [&]() { return test_producer_sub_ignored_without_auth(server_url); });
-    
+
     // SUBSCRIPTION TESTS
     std::cout << YELLOW << "\n=== SUBSCRIPTION TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("Subscription Mode: new", [&]() { return test_subscription_mode_new(server_url); });
     runner.run_test("Subscription From: now", [&]() { return test_subscription_from_now(server_url); });
-    
+
     // COMPLETE WORKFLOW
     std::cout << YELLOW << "\n=== WORKFLOW TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("Complete Multi-Stage Pipeline", [&]() { return test_complete_workflow(server_url); });
@@ -2054,6 +2119,6 @@ int main(int argc, char** argv) {
 
     std::cout << std::endl;
     runner.print_summary();
-    
+
     return runner.get_failure_count() > 0 ? 1 : 0;
 }

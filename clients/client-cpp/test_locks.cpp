@@ -12,20 +12,31 @@
  * What lives in the CLIENT and nowhere else, and is pinned there:
  *   - the handle always sends its owner, the same one on every call;
  *   - a renew's NEW token replaces the old one for the guard and the release;
- *   - keep_alive() sends nothing until a third of the lifetime has passed;
- *   - a guard that loses is the verdict, and the handle then holds nothing;
+ *   - by default the handle renews itself in the background, each renew
+ *     carrying the token the last one answered; a refused renew, or a lifetime
+ *     that runs out unrenewed, is a loss that is_lost() and wait_lost() report;
+ *     release() stops the renewal;
+ *   - with auto_renew off nothing goes out in the background, and keep_alive()
+ *     sends nothing until a third of the lifetime has passed;
+ *   - a guard that loses is the verdict, and the handle then holds nothing --
+ *     unless it lost only to the handle's own renewal: the bundle is then sent
+ *     again with the new token, at most three times;
  *   - a transaction that asked for a guard never goes out without one.
  *
  * THE LIVE HALF runs only with a server URL, and shows what only a broker can:
  * one holder; a call sent again by its owner is the same permit; an expired
  * lock goes to the next handle with a higher token and the old handle's guarded
- * step pushes nothing; a semaphore never grants more than its limit.
+ * step pushes nothing; a handle left alone stays held past its lifetime; a
+ * semaphore never grants more than its limit.
  */
 
 #include "queen_client.hpp"
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <chrono>
@@ -49,9 +60,18 @@ struct RecordedCall {
     std::string method;
     std::string target;
     std::string body;
+    std::chrono::steady_clock::time_point at;   // when the stub received it
 };
 
-/// Serves `plan` in request order, then `fallback` forever.
+using Responder = std::function<json(const RecordedCall&)>;
+
+/// Tag for the PlanServer that answers each call with a function of the call.
+struct Answering {};
+
+/// Serves `plan` in request order, then `fallback` forever -- or, built with
+/// Answering, whatever `respond` returns for each call. The renewal tests use
+/// that one: a background renew arrives whenever it is due, so they answer by
+/// operation, as a broker does.
 class PlanServer {
 private:
     httplib::Server server_;
@@ -62,17 +82,23 @@ private:
     std::vector<json> plan_;
     json fallback_;
     size_t index_ = 0;
+    Responder respond_;
 
-public:
-    explicit PlanServer(std::vector<json> plan, json fallback = json::object())
-        : plan_(std::move(plan)), fallback_(std::move(fallback)) {
+    void start() {
         auto handler = [this](const httplib::Request& req, httplib::Response& res) {
+            RecordedCall call{req.method, req.target, req.body, std::chrono::steady_clock::now()};
             json answer;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                calls_.push_back({req.method, req.target, req.body});
-                answer = index_ < plan_.size() ? plan_[index_] : fallback_;
-                ++index_;
+                calls_.push_back(call);
+                if (!respond_) {
+                    answer = index_ < plan_.size() ? plan_[index_] : fallback_;
+                    ++index_;
+                }
+            }
+            // Outside the lock: a responder may wait, or send a request of its own.
+            if (respond_) {
+                answer = respond_(call);
             }
             res.status = 200;
             res.set_content(answer.dump(), "application/json");
@@ -82,6 +108,16 @@ public:
         port_ = server_.bind_to_any_port("127.0.0.1");
         thread_ = std::thread([this]() { server_.listen_after_bind(); });
         server_.wait_until_ready();
+    }
+
+public:
+    explicit PlanServer(std::vector<json> plan, json fallback = json::object())
+        : plan_(std::move(plan)), fallback_(std::move(fallback)) {
+        start();
+    }
+
+    PlanServer(Answering, Responder respond) : respond_(std::move(respond)) {
+        start();
     }
 
     ~PlanServer() {
@@ -191,6 +227,61 @@ json lost_to(int failed_index, const std::string& kv_reason, const json& value, 
             {"version", version}};
 }
 
+json renew_refused(const std::string& name) {
+    return results({{"index", 0}, {"op", "renew"}, {"name", name}, {"renewed", false},
+                    {"reason", "lost"}, {"slot", 0}, {"holders", json::array()}});
+}
+
+/// A handle that renews only when told to: the tests that count requests, or
+/// drive renew() and keep_alive() themselves, cannot have a renewer beside them.
+LockOptions manual_renew() {
+    LockOptions options;
+    options.auto_renew = false;
+    return options;
+}
+
+/// Answers the lock operations as a broker does for one holder: the acquire
+/// grants token 100, every renew answers the token after the last one, a
+/// release releases. `last` is the token the stub answered last.
+Responder one_holder(const std::string& name, std::atomic<long long>& last) {
+    return [&last, name](const RecordedCall& call) -> json {
+        const json op = json::parse(call.body)["operations"][0];
+        const std::string what = op.value("op", std::string());
+        if (what == "acquire") {
+            last = 100;
+            return granted(name, 100);
+        }
+        if (what == "renew") {
+            return renewed(name, ++last);
+        }
+        if (what == "release") {
+            return released(name);
+        }
+        return json::object();
+    };
+}
+
+std::string op_of(const RecordedCall& call) {
+    json body = json::parse(call.body);
+    return body.contains("requiredLeases") ? "transaction"
+                                           : body["operations"][0].value("op", std::string());
+}
+
+/// Poll until pred holds or timeout_millis elapses; returns the final verdict.
+bool eventually(std::function<bool()> pred, int timeout_millis) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_millis);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return pred();
+}
+
+long long millis_between(std::chrono::steady_clock::time_point from,
+                         std::chrono::steady_clock::time_point to) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count();
+}
+
 // ============================================================================
 // Wire: check
 // ============================================================================
@@ -219,10 +310,11 @@ void test_check_posts_to_the_kv_route_and_rides_a_transaction() {
                "the standalone check body");
     check(held["applied"] == true && !held.contains("value"), "a held check hands back no value");
 
-    client.transaction()
+    TransactionResult step = client.transaction()
         .kv("queen-locks").check("job#0", 41)
         .kv("work").put("state", 1, KvTtl::forever())
         .commit();
+    check(step.success, "committed");
     json body = json::parse(server.calls()[1].body);
     check(body["kv"][0] == guard_of("job", 0, 41),
           "a check in a bundle is required by default: " + body["kv"][0].dump());
@@ -304,7 +396,7 @@ void test_a_short_answer_is_loud() {
 void test_the_handle_names_its_owner_and_follows_a_renew() {
     PlanServer server({refused("job"), granted("job", 100), renewed("job", 101), released("job")});
     QueenClient client(server.url());
-    Lock lock = client.lock("job", 30);
+    Lock lock = client.lock("job", 30, manual_renew());
     Lock other = client.lock("job", 30);
     check(lock.owner() != other.owner(), "an owner per handle");
     LockOptions named;
@@ -332,7 +424,14 @@ void test_the_handle_names_its_owner_and_follows_a_renew() {
     check_json(server.op(3), R"({"op":"release","name":"job","token":101})",
                "the release carries the current token");
     check(!lock.held() && !lock.release() && server.count() == 4, "nothing left to give back");
-    check_throws([&] { lock.guard(); }, "a guard of an unheld lock");
+    check(!lock.is_lost(), "a release is not a loss");
+    bool not_held = false;
+    try {
+        lock.guard();
+    } catch (const LockNotHeldError&) {
+        not_held = true;
+    }
+    check(not_held, "a guard of an unheld lock is a LockNotHeldError");
 }
 
 void test_a_semaphore_handle_sends_its_limit_and_keeps_its_slot() {
@@ -348,7 +447,7 @@ void test_a_semaphore_handle_sends_its_limit_and_keeps_its_slot() {
 }
 
 void test_acquire_with_a_wait_comes_back() {
-    LockOptions fast;
+    LockOptions fast = manual_renew();
     fast.retry_min_millis = 5;
     fast.retry_max_millis = 10;
     {
@@ -366,13 +465,12 @@ void test_acquire_with_a_wait_comes_back() {
 }
 
 void test_a_refused_renew_is_a_loss() {
-    PlanServer server({granted("job", 100),
-                       results({{"index", 0}, {"op", "renew"}, {"name", "job"}, {"renewed", false},
-                                {"reason", "lost"}, {"slot", 0}, {"holders", json::array()}})});
+    PlanServer server({granted("job", 100), renew_refused("job")});
     QueenClient client(server.url());
-    Lock lock = client.lock("job", 30);
+    Lock lock = client.lock("job", 30, manual_renew());
     lock.acquire();
     check(!lock.renew() && !lock.held() && lock.token() == 0, "a refused renew");
+    check(lock.is_lost(), "and the handle says it is lost");
     check(!lock.release() && server.count() == 2, "nothing to give back, and no call");
 }
 
@@ -380,25 +478,150 @@ void test_keep_alive_renews_only_when_due_and_a_lifetime_runs_out() {
     {
         PlanServer server({granted("job", 100), renewed("job", 101)});
         QueenClient client(server.url());
-        Lock lock = client.lock("job", 3);
+        Lock lock = client.lock("job", 3, manual_renew());
         lock.acquire();
         check(lock.keep_alive() && lock.keep_alive() && server.count() == 1,
               "not due yet: nothing was sent");
         std::this_thread::sleep_for(std::chrono::milliseconds(1050));
+        check(server.count() == 1, "auto_renew off: nothing went out in the background");
         check(lock.keep_alive() && server.count() == 2 && lock.token() == 101,
               "a third of the lifetime passed: one renew");
     }
     {
         PlanServer server({granted("job", 100)});
         QueenClient client(server.url());
-        Lock lock = client.lock("job", 1);
+        Lock lock = client.lock("job", 1, manual_renew());
         lock.acquire();
         check(lock.held(), "held");
         std::this_thread::sleep_for(std::chrono::milliseconds(1050));
         check(!lock.held() && lock.token() == 0,
               "past its deadline a handle does not claim to hold");
+        // With auto_renew off the watcher still runs: it renews nothing, and
+        // calls the permit lost at its deadline, as the Go and Rust handles do.
+        check(lock.is_lost(), "the lifetime ran out: the permit is lost");
         check(!lock.keep_alive() && server.count() == 1, "and keep_alive says stop, without a call");
+        check(lock.is_lost(), "keep_alive() found the lifetime over: lost");
     }
+    {
+        // With auto_renew on (the default) keep_alive() only reads held(): the
+        // background renewal is the one that renews.
+        PlanServer server({granted("job", 100), released("job")});
+        QueenClient client(server.url());
+        LockOptions slow;
+        slow.renew_every_millis = 60000;   // the background renew is far away
+        Lock lock = client.lock("job", 3, slow);
+        lock.acquire();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1050));
+        check(lock.keep_alive() && server.count() == 1,
+              "auto_renew on: due by the clock, and keep_alive() still sent nothing");
+        check(lock.release() && server.count() == 2, "release");
+    }
+}
+
+// ============================================================================
+// Wire: the background renewal
+// ============================================================================
+
+void test_the_handle_renews_itself_and_its_token_moves() {
+    std::atomic<long long> last{0};
+    PlanServer server(Answering{}, one_holder("job", last));
+    QueenClient client(server.url());
+    // auto_renew is the default: a renew every third of the one-second lifetime.
+    Lock lock = client.lock("job", 1);
+    const auto started = std::chrono::steady_clock::now();
+    check(lock.acquire() && lock.token() == 100, "acquired");
+    check(eventually([&] { return server.count() >= 3; }, 3000),
+          "two renews went out with no call from the caller");
+
+    auto calls = server.calls();
+    check_json(json::parse(calls[1].body),
+               R"({"operations":[{"op":"renew","name":"job","token":100,"ttlSeconds":1,"owner":")" +
+                   lock.owner() + R"("}]})",
+               "the first renew carries the acquire's token and the handle's owner");
+    check(server.op(2)["op"] == "renew" && server.op(2)["token"] == 101 &&
+              server.op(2)["owner"] == lock.owner(),
+          "the next renew carries the token the last one answered: " + server.op(2).dump());
+    const long long first_gap = millis_between(calls[0].at, calls[1].at);
+    check(first_gap >= 300,
+          "the first renew waits a third of the lifetime; it came after " +
+              std::to_string(first_gap) + " ms");
+
+    // Held at 1.5 s needs a renew sent after 0.5 s: carried past its lifetime.
+    std::this_thread::sleep_until(started + std::chrono::milliseconds(1500));
+    json guard = lock.guard();   // one read: the token and its guard together
+    const long long now_token = guard["expect"].get<long long>();
+    check(lock.held() && !lock.is_lost() && now_token >= 102 &&
+              guard == guard_of("job", 0, now_token),
+          "held past its first lifetime, at a renewed token: " + guard.dump());
+
+    check(lock.release(), "release");
+    const size_t after = server.count();
+    calls = server.calls();
+    bool chained = true;
+    for (size_t i = 1; i + 1 < after; ++i) {
+        chained = chained && op_of(calls[i]) == "renew" &&
+                  server.op(i)["token"] == 100 + static_cast<long long>(i) - 1;
+    }
+    check(chained, "every renew carried the token the one before it answered");
+    check_json(server.op(after - 1),
+               R"({"op":"release","name":"job","token":)" + std::to_string(last.load()) + "}",
+               "the release carries the token the last renew answered");
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    check(server.count() == after, "release() stopped the renewal: nothing went out after it");
+    check(!lock.held() && !lock.is_lost(), "a release is not a loss");
+}
+
+void test_a_renew_the_broker_refuses_in_the_background_is_a_loss() {
+    PlanServer server({granted("job", 100), renew_refused("job"), granted("job", 200), released("job")});
+    QueenClient client(server.url());
+    Lock lock = client.lock("job", 1);
+    lock.acquire();
+    check(!lock.is_lost() && !lock.wait_lost(std::chrono::milliseconds(50)), "held, not lost");
+    check(lock.wait_lost(std::chrono::milliseconds(3000)),
+          "wait_lost() wakes when the broker refuses the background renew");
+    check(lock.is_lost() && !lock.held() && lock.token() == 0 && lock.slot() == -1,
+          "lost: the handle holds nothing");
+    check(server.count() == 2 && server.op(1)["op"] == "renew" && server.op(1)["token"] == 100,
+          "one renew, and nothing after the refusal");
+    bool not_held = false;
+    try {
+        lock.guard();
+    } catch (const LockNotHeldError&) {
+        not_held = true;
+    }
+    check(not_held, "a lost permit has no guard");
+    check(!lock.release() && server.count() == 2, "nothing to give back, and no call");
+    check(lock.acquire() && !lock.is_lost() && lock.token() == 200, "a new acquire starts over");
+    check(lock.release() && server.count() == 4, "release");
+}
+
+void test_a_renew_that_cannot_reach_the_broker_is_retried_until_the_lifetime_runs_out() {
+    auto server = std::make_unique<PlanServer>(std::vector<json>{granted("job", 100)});
+    ClientConfig one_try;
+    one_try.retry_attempts = 1;   // a failed renew comes back at once, to the renewer's own retry
+    QueenClient client(server->url(), one_try);
+    Lock lock = client.lock("job", 1);
+    const auto sent = std::chrono::steady_clock::now();
+    check(lock.acquire(), "acquired");
+    server.reset();   // the broker is gone: every renew from here fails to connect
+    check(lock.wait_lost(std::chrono::milliseconds(3000)),
+          "the permit is lost once its lifetime runs out unrenewed");
+    const long long lost_after = millis_between(sent, std::chrono::steady_clock::now());
+    check(lost_after >= 950,
+          "not at the first failed renew: the lifetime decided, after " +
+              std::to_string(lost_after) + " ms");
+    check(lock.is_lost() && !lock.held() && lock.token() == 0, "the handle holds nothing");
+}
+
+void test_with_auto_renew_off_nothing_goes_out_in_the_background() {
+    PlanServer server({granted("job", 100), released("job")});
+    QueenClient client(server.url());
+    Lock lock = client.lock("job", 1, manual_renew());
+    lock.acquire();
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    check(server.count() == 1 && lock.held() && lock.token() == 100,
+          "past the third of the lifetime a renewer would have used, nothing was sent");
+    check(lock.release() && server.count() == 2, "release");
 }
 
 // ============================================================================
@@ -408,13 +631,13 @@ void test_keep_alive_renews_only_when_due_and_a_lifetime_runs_out() {
 void test_the_guard_is_the_first_kv_op_at_the_token_held_when_commit_sends() {
     PlanServer server({granted("job", 100), renewed("job", 101), committed()});
     QueenClient client(server.url());
-    Lock lock = client.lock("job", 30);
+    Lock lock = client.lock("job", 30, manual_renew());
     lock.acquire();
     auto tx = client.transaction();
     tx.guard(lock).kv("work").put("state", json{{"n", 1}}, KvTtl::forever());
     lock.renew(); // after the guard was asked for, before commit
-    json result = tx.commit();
-    check(result["success"] == true, "committed");
+    TransactionResult result = tx.commit();
+    check(result.success, "committed");
     check(server.calls()[2].target == "/api/v1/transaction", "the transaction route");
     json body = json::parse(server.calls()[2].body);
     check(body["kv"].size() == 2 && body["kv"][0] == guard_of("job", 0, 101),
@@ -428,13 +651,14 @@ void test_a_guard_that_loses_is_the_verdict_and_the_handle_holds_nothing() {
     QueenClient client(server.url());
     Lock lock = client.lock("job", 30);
     lock.acquire();
-    json result = client.transaction()
+    TransactionResult result = client.transaction()
         .guard(lock)
-        .queue("reports").push({json{{"data", 1}}, json{{"data", 2}}})
+        .queue("reports").push_many({json(1), json(2)})
         .commit();
-    check(result["success"] == false && result["reason"] == "kv_precondition",
-          "returned, not thrown");
-    check(!lock.held(), "the handle holds nothing");
+    check(!result.success && result.reason == "kv_precondition" && result.failed_index == 2u,
+          "returned, not thrown: " + result.raw.dump());
+    check(!lock.held() && lock.is_lost(), "the handle holds nothing, and says it is lost");
+    check(server.count() == 2, "another holder's version is not the handle's renewal: not sent again");
 }
 
 void test_a_precondition_that_is_not_the_guards_leaves_the_lock_alone() {
@@ -445,11 +669,119 @@ void test_a_precondition_that_is_not_the_guards_leaves_the_lock_alone() {
     lock.acquire();
     KvWriteOptions gate;
     gate.required = true;
-    json result = client.transaction()
+    TransactionResult result = client.transaction()
         .guard(lock)
         .kv("idem").put_if_absent("order-1", true, KvTtl::seconds(3600), gate)
         .commit();
-    check(result["success"] == false && lock.held(), "the marker lost, not the lock");
+    check(!result.success && result.lost_precondition() && lock.held() && !lock.is_lost(),
+          "the marker lost, not the lock");
+    check(server.count() == 2, "the caller's own precondition is not sent again");
+}
+
+void test_a_guard_lost_only_to_the_handles_own_renewal_is_sent_again_with_the_new_token() {
+    std::atomic<long long> last{0};
+    Responder lock_ops = one_holder("job", last);
+    std::mutex mutex;
+    std::condition_variable renew_answered;
+    int renews = 0;
+    int transactions = 0;
+    const std::string owner = "worker-7";
+    PlanServer server(Answering{}, [&](const RecordedCall& call) -> json {
+        if (op_of(call) != "transaction") {
+            json answer = lock_ops(call);
+            if (op_of(call) == "renew") {
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    ++renews;
+                }
+                renew_answered.notify_all();
+            }
+            return answer;
+        }
+        std::unique_lock<std::mutex> lock(mutex);
+        if (transactions++ > 0) {
+            return committed();
+        }
+        // The first send is in flight while the handle renews by itself: the
+        // broker judged the guard at the token before, the row has moved on,
+        // and the row's owner is this handle.
+        renew_answered.wait_for(lock, std::chrono::seconds(3), [&] { return renews > 0; });
+        return lost_to(1, "version", {{"owner", owner}}, last.load());
+    });
+    QueenClient client(server.url());
+    LockOptions named;
+    named.owner = owner;
+    Lock lock = client.lock("job", 1, named);   // renews itself every ~333 ms
+    check(lock.acquire(), "acquired");
+
+    TransactionResult result = client.transaction()
+        .guard(lock)
+        .queue("reports").push(json{{"n", 1}})
+        .commit();
+    check(result.success, "the step committed on the second send: " + result.raw.dump());
+
+    std::vector<json> sent;
+    long long renews_before_second = 0;
+    for (const auto& call : server.calls()) {
+        if (op_of(call) == "transaction") {
+            sent.push_back(json::parse(call.body));
+        } else if (sent.size() < 2 && op_of(call) == "renew") {
+            ++renews_before_second;
+        }
+    }
+    check(sent.size() == 2, "sent twice, got " + std::to_string(sent.size()));
+    if (sent.size() == 2) {
+        check(sent[0]["kv"][0] == guard_of("job", 0, 100),
+              "the first send carried the token before the renew: " + sent[0]["kv"].dump());
+        check(renews_before_second >= 1 &&
+                  sent[1]["kv"][0] == guard_of("job", 0, 100 + renews_before_second),
+              "the second carries the token the renewal answered: " + sent[1]["kv"].dump());
+        json first = sent[0];
+        json second = sent[1];
+        first["kv"].erase(0);
+        second["kv"].erase(0);
+        check(first == second,
+              "the same step sent again, its push keeping its transactionId:\n      " +
+                  first.dump() + "\n      " + second.dump());
+    }
+    check(lock.held() && !lock.is_lost(), "the lock is still the handle's");
+    check(lock.release(), "release");
+}
+
+void test_a_guard_is_sent_again_at_most_three_times() {
+    // Every send is in flight while the handle renews, and every time the
+    // broker answers that the guard lost to that renewal.
+    Lock* handle = nullptr;
+    PlanServer server(Answering{}, [&](const RecordedCall& call) -> json {
+        if (op_of(call) == "transaction") {
+            handle->renew();
+            return lost_to(0, "version", {{"owner", handle->owner()}}, handle->token());
+        }
+        const json op = json::parse(call.body)["operations"][0];
+        if (op["op"] == "acquire") return granted("job", 100);
+        if (op["op"] == "renew") return renewed("job", op["token"].get<long long>() + 1);
+        return json::object();
+    });
+    QueenClient client(server.url());
+    Lock lock = client.lock("job", 30, manual_renew());
+    handle = &lock;
+    lock.acquire();
+    TransactionResult result = client.transaction()
+        .guard(lock)
+        .kv("work").put("state", 1, KvTtl::seconds(60))
+        .commit();
+
+    std::vector<long long> guards;
+    for (const auto& call : server.calls()) {
+        if (op_of(call) == "transaction") {
+            guards.push_back(json::parse(call.body)["kv"][0]["expect"].get<long long>());
+        }
+    }
+    check(guards == std::vector<long long>({100, 101, 102, 103}),
+          "the first send and three more, each at the token of the renew before it, got " +
+              json(guards).dump());
+    check(!result.success && result.lost_precondition() && result.failed_index == 0u,
+          "then the verdict is returned, not thrown: " + result.raw.dump());
 }
 
 void test_a_step_that_asked_for_a_guard_never_goes_out_without_one() {
@@ -500,9 +832,9 @@ std::vector<json> drain(QueenClient& client, const std::string& queue) {
             return seen;
         }
         for (const auto& m : messages) {
-            seen.push_back(m["data"]);
+            seen.push_back(m.data);
         }
-        client.ack(messages, true);
+        client.ack_all(messages);
     }
 }
 
@@ -526,11 +858,11 @@ void live_a_lock_has_one_holder_and_its_guarded_step_commits() {
     check(row["found"] == true && row["version"] == token && row["value"]["owner"] == a.owner(),
           "the permit's row: " + row.dump());
 
-    json result = client.transaction()
+    TransactionResult result = client.transaction()
         .guard(a)
-        .queue(queue).push({json{{"data", {{"step", 1}}}}})
+        .queue(queue).push(json{{"step", 1}})
         .commit();
-    check(result["success"] == true, "the holder's guarded step commits");
+    check(result.success, "the holder's guarded step commits");
     auto got = drain(client, queue);
     check(got.size() == 1 && got[0]["step"] == 1, "the one guarded message exists");
 
@@ -567,8 +899,9 @@ void live_an_expired_lock_is_taken_over_and_the_old_holder_commits_nothing() {
     checks_are_served(client);
     std::string name = unique("expiry");
     std::string queue = unique("expiry-q");
-    // The old holder never calls keep_alive(): it is "paused" past its lease.
-    Lock old = client.lock(name, 1);
+    // The old holder renews nothing, by itself or by keep_alive(): it is
+    // "paused" past its lease.
+    Lock old = client.lock(name, 1, manual_renew());
     Lock next = client.lock(name, 30);
 
     check(old.acquire(), "the old holder acquires");
@@ -581,27 +914,53 @@ void live_an_expired_lock_is_taken_over_and_the_old_holder_commits_nothing() {
           "an expired lock goes to the next holder, with a higher token");
 
     // The old holder wakes up and sends the step it was about to send.
-    json stale = client.transaction()
+    TransactionResult stale = client.transaction()
         .kv(stale_guard["ns"].get<std::string>())
             .check(stale_guard["key"].get<std::string>(), stale_guard["expect"].get<long long>())
-        .queue(queue).push({json{{"data", {{"from", "old"}}}}})
+        .queue(queue).push(json{{"from", "old"}})
         .commit();
-    check(stale["success"] == false && stale["reason"] == "kv_precondition",
-          "the old holder's step rolls back: " + stale.dump());
+    check(!stale.success && stale.reason == "kv_precondition",
+          "the old holder's step rolls back: " + stale.raw.dump());
 
-    json ok = client.transaction()
+    TransactionResult ok = client.transaction()
         .guard(next)
-        .queue(queue).push({json{{"data", {{"from", "next"}}}}})
+        .queue(queue).push(json{{"from", "next"}})
         .commit();
-    check(ok["success"] == true, "the new holder's step commits");
+    check(ok.success, "the new holder's step commits");
     auto got = drain(client, queue);
     check(got.size() == 1 && got[0]["from"] == "next", "only the new holder's message exists");
     next.release();
 }
 
+void live_the_handle_left_alone_stays_held_past_its_first_lifetime() {
+    QueenClient client(live_url);
+    checks_are_served(client);
+    std::string name = unique("auto-renew");
+    std::string queue = unique("auto-renew-q");
+    Lock lock = client.lock(name, 2);   // renews itself every ~667 ms
+    check(lock.acquire(), "acquire");
+    long long first = lock.token();
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));   // no call from the caller
+    check(lock.held() && !lock.is_lost() && lock.token() > first,
+          "held past its lifetime, renewed in the background");
+    json who = client.locks().get(name);
+    check(who["held"] == true && who["holders"][0]["owner"] == lock.owner(),
+          "the broker agrees: " + who.dump());
+
+    TransactionResult step = client.transaction()
+        .guard(lock)
+        .queue(queue).push(json{{"late", true}})
+        .commit();
+    check(step.success, "a guarded step after the first lifetime commits: " + step.raw.dump());
+    auto got = drain(client, queue);
+    check(got.size() == 1 && got[0]["late"] == true, "its message exists");
+    check(lock.release(), "release");
+    check(client.locks().get(name)["held"] == false, "released: the broker holds nothing");
+}
+
 void live_keep_alive_carries_a_lock_past_its_first_lifetime() {
     QueenClient client(live_url);
-    Lock lock = client.lock(unique("keepalive"), 2);
+    Lock lock = client.lock(unique("keepalive"), 2, manual_renew());
     check(lock.acquire(), "acquire");
     long long first = lock.token();
     auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
@@ -671,12 +1030,24 @@ int main(int argc, char** argv) {
     run_test("a refused renew is a loss", test_a_refused_renew_is_a_loss);
     run_test("keep_alive renews only when due, and a lifetime runs out",
              test_keep_alive_renews_only_when_due_and_a_lifetime_runs_out);
+    run_test("the handle renews itself, and its token moves",
+             test_the_handle_renews_itself_and_its_token_moves);
+    run_test("a renew the broker refuses in the background is a loss",
+             test_a_renew_the_broker_refuses_in_the_background_is_a_loss);
+    run_test("a renew that cannot reach the broker is retried until the lifetime runs out",
+             test_a_renew_that_cannot_reach_the_broker_is_retried_until_the_lifetime_runs_out);
+    run_test("with auto_renew off nothing goes out in the background",
+             test_with_auto_renew_off_nothing_goes_out_in_the_background);
     run_test("the guard is the first kv op, at the token held when commit sends",
              test_the_guard_is_the_first_kv_op_at_the_token_held_when_commit_sends);
     run_test("a guard that loses is the verdict, and the handle holds nothing",
              test_a_guard_that_loses_is_the_verdict_and_the_handle_holds_nothing);
     run_test("a precondition that is not the guard's leaves the lock alone",
              test_a_precondition_that_is_not_the_guards_leaves_the_lock_alone);
+    run_test("a guard lost only to the handle's own renewal is sent again with the new token",
+             test_a_guard_lost_only_to_the_handles_own_renewal_is_sent_again_with_the_new_token);
+    run_test("a guard is sent again at most three times",
+             test_a_guard_is_sent_again_at_most_three_times);
     run_test("a step that asked for a guard never goes out without one",
              test_a_step_that_asked_for_a_guard_never_goes_out_without_one);
 
@@ -689,6 +1060,8 @@ int main(int argc, char** argv) {
                  live_a_call_sent_again_by_its_owner_is_the_same_permit);
         run_test("live: an expired lock is taken over and the old holder commits nothing",
                  live_an_expired_lock_is_taken_over_and_the_old_holder_commits_nothing);
+        run_test("live: a handle left alone stays held past its first lifetime",
+                 live_the_handle_left_alone_stays_held_past_its_first_lifetime);
         run_test("live: keep_alive carries a lock past its first lifetime",
                  live_keep_alive_carries_a_lock_past_its_first_lifetime);
         run_test("live: a semaphore never grants more than its limit",

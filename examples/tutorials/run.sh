@@ -181,21 +181,18 @@ fi
 if wanted cpp; then
   echo
   echo "C++"
-  # queen_client.hpp is header-only, but it includes three headers this
-  # repository does not vendor: json.hpp (expected under clients/server/vendor),
-  # threadpool.hpp (expected under clients/server/include) and cpp-httplib's
-  # httplib.h. It also turns cpp-httplib's OpenSSL support on unconditionally,
-  # so -lssl -lcrypto is required even over plain http. These are the flags each
-  # tutorial's own header comment prints; keep the two in step.
-  # test/runners/cpp/Dockerfile is what puts the three headers in place.
+  # queen_client.hpp is header-only and carries its nlohmann/json in
+  # third_party/; the one header it needs from outside is cpp-httplib's
+  # httplib.h (brew install cpp-httplib). It turns cpp-httplib's OpenSSL support
+  # on unless QUEEN_CLIENT_NO_TLS, so -lssl -lcrypto is required even over plain
+  # http. These are the flags each tutorial's own header comment prints; keep
+  # the two in step.
   if ! command -v c++ >/dev/null; then
     skip_lang "no c++ compiler"
   elif [ ! -d "$HERE/cpp" ]; then
     skip_lang "no cpp tutorials here"
-  elif [ ! -f "$ROOT/clients/server/vendor/json.hpp" ] || [ ! -f "$ROOT/clients/server/include/threadpool.hpp" ]; then
-    skip_lang "clients/server/{vendor/json.hpp,include/threadpool.hpp} missing (see test/runners/cpp/Dockerfile)"
   else
-    cxx=(-std=c++17 -O1 -pthread -I"$ROOT/clients/client-cpp" -I"$ROOT/clients/server/vendor")
+    cxx=(-std=c++17 -O1 -pthread -I"$ROOT/clients/client-cpp")
     ld=(-lssl -lcrypto -lpthread)
     if brew_prefix="$(brew --prefix 2>/dev/null)" && [ -n "$brew_prefix" ]; then
       cxx+=(-I"$brew_prefix/include")

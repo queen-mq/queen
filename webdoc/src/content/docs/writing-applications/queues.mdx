@@ -15,6 +15,8 @@ sourceOfTruth:
   - server/src/rsm/consume/pop.rs
   - server/src/encryption.rs
   - clients/client-js/client-v2/builders/QueueBuilder.js
+# sourceOfTruth re-read 2026-11-02 (C++ client 2.7.1): QueueConfig sets every option, so the trap
+# about C++ posting to /api/v1/configure itself is gone.
 verifiedBy:
   - examples/tutorials/run.sh
   - examples/tutorials/js/00-five-minutes.mjs
@@ -104,7 +106,6 @@ Here is a queue that sets most of them, and the table below says what each one d
 - `config(...).create()` in the JavaScript client sends your options together with the client's own defaults (a 300-second lease, encryption off, no retention). Calling it on an existing queue resets every option you leave out. Name every option you care about.
 - On a node without `QUEEN_ENCRYPTION_KEY`, an encrypted queue stores plain text, and nothing warns you.
 - `priority`, `ttl`, `maxSize` and `minPopWaitTime` are accepted and stored, and do nothing.
-- The C++ client cannot set `retentionEnabled`, `retryDelay`, `dedupWindowSeconds` or `maxWaitTimeSeconds`, so its code above posts to `/api/v1/configure` itself. A C++ queue configured with `retention_seconds` alone never runs retention.
 
 ## See also
 

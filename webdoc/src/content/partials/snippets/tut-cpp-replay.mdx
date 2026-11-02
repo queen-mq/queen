@@ -20,11 +20,10 @@ description: "Verified snippet extracted from examples/tutorials/cpp/04-replay.c
 // bug, backfilling a new consumer, and auditing what was delivered, all without
 // asking the producer to send anything twice.
 //
-// Build it (see 01-hello-world.cpp for the two headers queen_client.hpp
-// expects but this repository does not vendor):
+// Build it (01-hello-world.cpp says why each flag is there):
 //   mkdir -p build
 //   g++ -std=c++17 -O2 -pthread \
-//       -I../../../clients/client-cpp -I../../../clients/server/vendor \
+//       -I../../../clients/client-cpp \
 //       -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
 //       04-replay.cpp -o build/04-replay \
 //       -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
@@ -34,7 +33,6 @@ description: "Verified snippet extracted from examples/tutorials/cpp/04-replay.c
 
 #include "queen_client.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -44,7 +42,6 @@ description: "Verified snippet extracted from examples/tutorials/cpp/04-replay.c
 #include <string>
 #include <vector>
 
-using queen::QueenClient;
 using queen::QueueBuilder;
 using json = nlohmann::json;
 
@@ -106,7 +103,7 @@ int main() {
     const std::string RUN = run_id();
     const std::string EVENTS = "tut-cpp-replay-" + RUN;
 
-    QueenClient client(QUEEN_URL);
+    queen::Queen client(QUEEN_URL);
 
     std::string verdict;
     bool failed = false;
@@ -121,7 +118,7 @@ int main() {
                          const std::string& mode) -> std::vector<int> {
             std::vector<int> seen;
             std::exception_ptr handler_error;
-            std::atomic<bool> stop{false};
+            queen::Cancel stop;
 
             // The C++ builder is mutated in place rather than chained into a
             // temporary, because the optional subscription_mode() below has to
@@ -129,36 +126,34 @@ int main() {
             QueueBuilder builder = client.queue(EVENTS);
             builder.partition("order-1")
                 .group(group)
-                .each()
                 .limit(expected)
                 // wait(false) keeps idle_millis meaningful: the idle clock is
                 // only consulted between polls, so a long-polling pop would
                 // stretch a 4 second budget to the length of one server-side
                 // park. A lost event has to fail this run, not block it.
                 .wait(false)
-                .idle_millis(4000);
+                .idle_millis(4000)
+                .cancel(stop);
             if (!mode.empty()) builder.subscription_mode(mode);
 
-            builder.consume([&](const json& msg) {
+            builder.consume([&](const queen::Message& msg) {
                 try {
-                    seen.push_back(msg["data"]["seq"].get<int>());
+                    seen.push_back(msg.data["seq"].get<int>());
                 } catch (...) {
                     // The consumer turns a thrown handler into a negative
                     // acknowledgement and carries on, so the error has to be
                     // carried out by hand.
                     if (!handler_error) handler_error = std::current_exception();
-                    stop = true;
+                    stop.cancel();
                 }
-            }, &stop);
+            });
 
             if (handler_error) std::rethrow_exception(handler_error);
             return seen;
         };
 
         for (const Event& event : EVENTS_IN) {
-            client.queue(EVENTS).partition("order-1").push({
-                json{{"data", {{"seq", event.seq}, {"type", event.type}}}}
-            });
+            client.queue(EVENTS).partition("order-1").push({{"seq", event.seq}, {"type", event.type}});
         }
         std::cout << "pushed " << EVENTS_IN.size() << " events" << std::endl;
 
@@ -191,18 +186,9 @@ int main() {
         // Move the live group's cursor back an hour, which is before anything in
         // this run was pushed. The seek also releases any live lease, so an
         // in-flight batch is abandoned rather than acknowledged.
-        //
-        // The C++ client has no admin surface -- there is no equivalent of the
-        // JavaScript queen.admin.seekConsumerGroup -- so the call goes through
-        // the client's own HTTP transport, which keeps the base URL, the retry
-        // and the 429 backoff policy that every other call in this file uses.
-        std::string seek_path = "/api/v1/consumer-groups/" +
-                                queen::util::url_encode("tut-cpp-live") + "/queues/" +
-                                queen::util::url_encode(EVENTS) + "/seek";
-        json seek = client.get_http_client()->post(
-            seek_path,
-            json{{"timestamp", iso_utc(std::chrono::system_clock::now() -
-                                       std::chrono::hours(1))}});
+        queen::SeekOptions an_hour_ago;
+        an_hour_ago.timestamp = iso_utc(std::chrono::system_clock::now() - std::chrono::hours(1));
+        json seek = client.admin().seek_consumer_group("tut-cpp-live", EVENTS, an_hour_ago);
         if (!seek.value("success", false)) {
             throw std::runtime_error("seek rejected: " +
                                      seek.value("error", std::string("unknown")));
@@ -215,7 +201,7 @@ int main() {
 
         // Replay is per group. The audit group was not moved, so it stays where
         // it was and sees nothing new.
-        json audit_again = client.queue(EVENTS)
+        auto audit_again = client.queue(EVENTS)
                                .partition("order-1")
                                .group("tut-cpp-audit")
                                .batch(10)

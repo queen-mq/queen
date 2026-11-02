@@ -18,14 +18,13 @@
 // group once and in the order of its conversation, and the English
 // conversations finish while the Japanese one is still being translated.
 //
-// Build it. queen_client.hpp needs json.hpp and threadpool.hpp, which this
-// repository carries under clients/server, and cpp-httplib, which it does not
-// (Homebrew puts httplib.h under /opt/homebrew/include). The client switches on
-// cpp-httplib's OpenSSL support, so -lssl -lcrypto are needed even over plain
-// http.
+// Build it. queen_client.hpp carries its nlohmann/json beside it; the one
+// header to install is cpp-httplib's (Homebrew puts httplib.h under
+// /opt/homebrew/include). The client switches on cpp-httplib's OpenSSL support
+// for https://, so -lssl -lcrypto are needed even over plain http.
 //   mkdir -p build
 //   c++ -std=c++17 -O1 -pthread \
-//       -I../../../clients/client-cpp -I../../../clients/server/vendor \
+//       -I../../../clients/client-cpp \
 //       -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
 //       chat.cpp -o build/chat \
 //       -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
@@ -48,7 +47,6 @@
 #include <thread>
 #include <vector>
 
-using queen::QueenClient;
 using json = nlohmann::json;
 
 // The queue name is prefixed per language and suffixed per run, so every
@@ -129,10 +127,9 @@ int main() {
     const std::string QUEEN_URL = env_url ? env_url : "http://localhost:6632";
     const std::string MESSAGES = "app-cpp-chat-" + run_id();
 
-    // There is no signal-handling option to turn off on this client:
-    // QueenClient always installs its own SIGINT and SIGTERM handlers, and its
-    // SIGINT handler ends the process on the spot, with exit status 0.
-    QueenClient client(QUEEN_URL);
+    // The client installs no signal handlers unless asked
+    // (ClientConfig::handle_signals): a Ctrl-C ends this run as usual.
+    queen::Queen client(QUEEN_URL);
 
     std::string verdict;
     bool failed = false;
@@ -142,8 +139,8 @@ int main() {
 
         // A crashed worker's messages come back when its lease expires, and
         // retry_limit bounds how often a failing message is retried before it
-        // goes to the dead-letter queue. The C++ QueueConfig is a struct, and an
-        // option it has no field for keeps the broker's default.
+        // goes to the dead-letter queue. An option left unset keeps the
+        // broker's default.
         queen::QueueConfig config;
         config.lease_time = 60;
         config.retry_limit = 3;
@@ -158,20 +155,15 @@ int main() {
         int sent = 0;
         for (int seq = 1; seq <= MESSAGES_PER_CONVERSATION; ++seq) {
             for (const Conversation& conv : CONVERSATIONS) {
-                // push() takes a vector of items because one call can carry a
-                // batch; the broker answers with one result per item, in order.
-                //
                 // The transaction id is the phone's own id for the message. A
                 // phone that retries a send it never saw answered writes nothing
                 // the second time, and gets the first message's id back.
-                client.queue(MESSAGES).partition(conv.id).push({
-                    json{{"transactionId", conv.id + "-" + std::to_string(seq)},
-                         {"data", {{"conversationId", conv.id},
-                                   {"seq", seq},
-                                   {"locale", conv.locale},
-                                   {"body", "message " + std::to_string(seq) +
-                                                " in " + conv.id}}}}
-                });
+                client.queue(MESSAGES).partition(conv.id).push(
+                    {{"conversationId", conv.id},
+                     {"seq", seq},
+                     {"locale", conv.locale},
+                     {"body", "message " + std::to_string(seq) + " in " + conv.id}},
+                    conv.id + "-" + std::to_string(seq));
                 ++sent;
             }
         }
@@ -179,16 +171,11 @@ int main() {
                   << " conversations" << std::endl;
 
         // The phone resends message 1 because the answer got lost on a bad
-        // network. push() hands back the broker's reply unwrapped, so the
-        // per-item verdict is read straight off the array.
-        json duplicate = client.queue(MESSAGES).partition("conv-en-1").push({
-            json{{"transactionId", "conv-en-1-1"},
-                 {"data", {{"conversationId", "conv-en-1"},
-                           {"seq", 1},
-                           {"body", "resent by the phone"}}}}
-        });
-        check(duplicate.is_array() && duplicate.size() == 1 &&
-                  duplicate[0]["status"] == "duplicate",
+        // network. push() answers one verdict per message.
+        auto duplicate = client.queue(MESSAGES).partition("conv-en-1").push(
+            {{"conversationId", "conv-en-1"}, {"seq", 1}, {"body", "resent by the phone"}},
+            "conv-en-1-1");
+        check(duplicate.size() == 1 && duplicate[0].status == queen::PushStatus::Duplicate,
               "a resent message was recognised and not stored twice");
 
         // ----------------------------------------------------------- delivering
@@ -205,29 +192,22 @@ int main() {
         // consume() blocks this thread until every worker has stopped, and
         // three settings bound it:
         //
+        //   limit()         counts across all the workers: the phase ends once
+        //                   every message has been handled.
         //   wait(false)     every pop answers at once, and a worker that found
-        //                   nothing sleeps briefly before the next one. This
-        //                   client has no setter for the long-poll timeout,
-        //                   which is 30 seconds, and the stop flag and the idle
-        //                   deadline are only consulted between pops.
+        //                   nothing sleeps briefly before the next one; the
+        //                   idle deadline is consulted between pops.
         //   idle_millis     the deadline: a lost message fails this run instead
         //                   of hanging it.
-        //   limit()         counts per worker: each worker keeps its own tally,
-        //                   so three workers sharing 18 messages never see one
-        //                   worker reach 18. It is only a backstop.
-        //
-        // What ends each phase is a shared counter, which raises the stop flag
-        // the moment every message has been handled.
         //
         // consume() also catches whatever the handler throws and turns it into
         // a negative acknowledgement, so an exception raised in there never
-        // reaches main() on its own: record it, raise the stop flag, and
-        // rethrow once consume() has returned.
+        // reaches main() on its own: record it, cancel the loop, and rethrow
+        // once consume() has returned.
         std::cout << "\ndelivering" << std::endl;
         std::mutex lock;
         std::map<std::string, std::vector<int>> delivered;
-        std::atomic<int> handled{0};
-        std::atomic<bool> stop{false};
+        queen::Cancel stop;
         std::exception_ptr handler_error;
 
         client.queue(MESSAGES)
@@ -235,28 +215,22 @@ int main() {
             .subscription_mode("all")
             .concurrency(3)
             .partitions(1)
-            .each()
             .limit(TOTAL_MESSAGES)
             .wait(false)
             .idle_millis(10000)
-            .consume([&](const json& msg) {
+            .cancel(stop)
+            .consume([&](const queen::Message& msg) {
                 try {
                     sleep_millis(10);
-                    {
-                        std::lock_guard<std::mutex> guard(lock);
-                        delivered[msg["data"]["conversationId"].get<std::string>()]
-                            .push_back(msg["data"]["seq"].get<int>());
-                    }
-                    // The acknowledgement of this message happens after the
-                    // handler returns, so the stop flag raised here still lets
-                    // the last message commit.
-                    if (++handled >= TOTAL_MESSAGES) stop = true;
+                    std::lock_guard<std::mutex> guard(lock);
+                    delivered[msg.data["conversationId"].get<std::string>()]
+                        .push_back(msg.data["seq"].get<int>());
                 } catch (...) {
                     std::lock_guard<std::mutex> guard(lock);
                     if (!handler_error) handler_error = std::current_exception();
-                    stop = true;
+                    stop.cancel();
                 }
-            }, &stop);
+            });
         if (handler_error) std::rethrow_exception(handler_error);
 
         int delivered_total = 0;
@@ -286,8 +260,6 @@ int main() {
         // translated.
         std::cout << "\nenriching" << std::endl;
         std::map<std::string, long long> finished_at;
-        handled = 0;
-        stop = false;
         auto started = std::chrono::steady_clock::now();
 
         client.queue(MESSAGES)
@@ -295,26 +267,22 @@ int main() {
             .subscription_mode("all")
             .concurrency(3)
             .partitions(1)
-            .each()
             .limit(TOTAL_MESSAGES)
             .wait(false)
             .idle_millis(15000)
-            .consume([&](const json& msg) {
+            .cancel(stop)
+            .consume([&](const queen::Message& msg) {
                 try {
-                    const std::string id =
-                        msg["data"]["conversationId"].get<std::string>();
+                    const std::string id = msg.data["conversationId"].get<std::string>();
                     sleep_millis(conversation_by_id(id).needs_translation ? 400 : 10);
-                    {
-                        std::lock_guard<std::mutex> guard(lock);
-                        finished_at[id] = millis_since(started);
-                    }
-                    if (++handled >= TOTAL_MESSAGES) stop = true;
+                    std::lock_guard<std::mutex> guard(lock);
+                    finished_at[id] = millis_since(started);
                 } catch (...) {
                     std::lock_guard<std::mutex> guard(lock);
                     if (!handler_error) handler_error = std::current_exception();
-                    stop = true;
+                    stop.cancel();
                 }
-            }, &stop);
+            });
         if (handler_error) std::rethrow_exception(handler_error);
 
         const long long slow = finished_at["conv-jp-1"];
@@ -341,22 +309,16 @@ int main() {
         // idle deadline with nothing scored.
         std::cout << "\nbackfilling a new group" << std::endl;
         std::atomic<int> scored{0};
-        handled = 0;
-        stop = false;
 
         client.queue(MESSAGES)
             .group("sentiment")
             .subscription_mode("all")
             .concurrency(3)
             .partitions(1)
-            .each()
             .limit(TOTAL_MESSAGES)
             .wait(false)
             .idle_millis(10000)
-            .consume([&](const json&) {
-                ++scored;
-                if (++handled >= TOTAL_MESSAGES) stop = true;
-            }, &stop);
+            .consume([&](const queen::Message&) { ++scored; });
 
         check(scored.load() == sent,
               "a group created now read the whole history (" +
@@ -373,9 +335,8 @@ int main() {
     }
 
     // close() flushes anything still sitting in the client-side push buffers
-    // and drops them along with their timer threads. It narrates its own
-    // shutdown on stdout, which is why the verdict is printed after it: PASS or
-    // FAIL stays the last line of a run.
+    // and closes the pooled connections. The verdict is printed after it, so
+    // PASS or FAIL stays the last line of a run.
     client.close();
 
     (failed ? std::cerr : std::cout) << verdict << std::endl;

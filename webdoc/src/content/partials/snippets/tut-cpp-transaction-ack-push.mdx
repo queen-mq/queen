@@ -20,11 +20,10 @@ description: "Verified snippet extracted from examples/tutorials/cpp/03-transact
 // the push of the output are one entry in the broker's replicated log. Both
 // land or neither does.
 //
-// Build it (see 01-hello-world.cpp for the two headers queen_client.hpp
-// expects but this repository does not vendor):
+// Build it (01-hello-world.cpp says why each flag is there):
 //   mkdir -p build
 //   g++ -std=c++17 -O2 -pthread \
-//       -I../../../clients/client-cpp -I../../../clients/server/vendor \
+//       -I../../../clients/client-cpp \
 //       -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
 //       03-transaction-ack-push.cpp -o build/03-transaction-ack-push \
 //       -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
@@ -35,7 +34,6 @@ description: "Verified snippet extracted from examples/tutorials/cpp/03-transact
 #include "queen_client.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <exception>
@@ -43,7 +41,6 @@ description: "Verified snippet extracted from examples/tutorials/cpp/03-transact
 #include <string>
 #include <vector>
 
-using queen::QueenClient;
 using json = nlohmann::json;
 
 static std::string run_id() {
@@ -87,7 +84,7 @@ int main() {
     const std::string INVOICES = "tut-cpp-tx-invoices-" + RUN;
     const std::string GROUP = "tut-cpp-invoicing";
 
-    QueenClient client(QUEEN_URL);
+    queen::Queen client(QUEEN_URL);
 
     std::string verdict;
     bool failed = false;
@@ -96,18 +93,15 @@ int main() {
         std::cout << "broker " << QUEEN_URL << std::endl;
 
         for (const Order& order : INPUT) {
-            client.queue(ORDERS).partition(order.customer).push({
-                json{{"data", {{"orderId", order.order_id},
-                               {"customer", order.customer},
-                               {"total", order.total}}}}
-            });
+            client.queue(ORDERS).partition(order.customer).push(
+                {{"orderId", order.order_id}, {"customer", order.customer}, {"total", order.total}});
         }
         std::cout << "pushed " << INPUT.size() << " orders" << std::endl;
 
         std::cout << "\ninvoicing" << std::endl;
         std::vector<std::string> invoiced;
         std::exception_ptr handler_error;
-        std::atomic<bool> stop{false};
+        queen::Cancel stop;
 
         // auto_ack(false) is what makes this tutorial possible: the loop must
         // not acknowledge behind your back, because the acknowledgement is part
@@ -115,73 +109,50 @@ int main() {
         client.queue(ORDERS)
             .group(GROUP)
             .subscription_mode("all")
-            .each()
             .auto_ack(false)
-            .limit(static_cast<int>(INPUT.size()))
+            .limit(static_cast<long long>(INPUT.size()))
             .wait(false)
             .idle_millis(5000)
-            .consume([&](const json& msg) {
+            .cancel(stop)
+            .consume([&](const queen::Message& msg) {
                 try {
-                    const json& data = msg["data"];
+                    const json& data = msg.data;
+                    const std::string id = data["orderId"].get<std::string>();
 
-                    // One commit carries both operations. The ack names the
-                    // consumer group explicitly: the broker does not read it off
-                    // the message, and an ack sent without it commits the wrong
-                    // cursor.
-                    //
-                    // Here the C++ client makes you drop to the wire.
-                    // client.transaction() builds exactly this request, but
-                    // its push sub-builder emits only queue, payload and
-                    // transactionId -- it has no partition() step, so it can
-                    // only ever write to a queue's Default lane. The invoices
-                    // here are partitioned per customer, so the request is
-                    // assembled by hand and sent through the client's own HTTP
-                    // transport rather than a second HTTP library.
-                    //
-                    // requiredLeases is what makes the commit fail if the lease
-                    // has expired, which is what stops a slow consumer from
-                    // acking work the broker has already handed to someone else.
-                    json push_item = {
-                        {"queue", INVOICES},
-                        {"partition", data["customer"]},
-                        {"payload", {{"invoiceId", "INV-" + data["orderId"].get<std::string>()},
-                                     {"orderId", data["orderId"]},
-                                     {"amount", data["total"]}}},
-                        {"transactionId", queen::util::generate_uuid_v7()},
-                    };
+                    // One commit carries both operations: the push of the
+                    // invoice into the customer's partition, and the ack of the
+                    // order. The ack takes the consumer group and the lease from
+                    // the message, and the lease is what makes the commit fail
+                    // if it has expired: that stops a slow consumer from acking
+                    // work the broker has already handed to someone else.
+                    queen::TransactionResult result =
+                        client.transaction()
+                            .queue(INVOICES)
+                            .partition(data["customer"].get<std::string>())
+                            .push({{"invoiceId", "INV-" + id},
+                                   {"orderId", data["orderId"]},
+                                   {"amount", data["total"]}},
+                                  "invoice-" + id)  // the dedup key: a retried step is a no-op
+                            .ack(msg)
+                            .commit();
 
-                    json transaction = {
-                        {"operations", json::array({
-                            json{{"type", "push"}, {"items", json::array({push_item})}},
-                            json{{"type", "ack"},
-                                 {"transactionId", msg["transactionId"]},
-                                 {"partitionId", msg["partitionId"]},
-                                 {"status", "completed"},
-                                 {"consumerGroup", GROUP}},
-                        })},
-                        {"requiredLeases", json::array({msg["leaseId"]})},
-                    };
-
-                    json result = client.get_http_client()->post("/api/v1/transaction",
-                                                                 transaction);
-
-                    // Check the transaction, not just the absence of an
-                    // exception.
-                    if (!result.value("success", false)) {
-                        throw std::runtime_error("transaction rejected: " +
-                                                 result.value("error", std::string("unknown")));
+                    // commit() throws when the broker rolls the step back; a
+                    // success false that comes back is a lost precondition,
+                    // which this step does not set.
+                    if (!result.success) {
+                        throw std::runtime_error("transaction rejected: " + result.error);
                     }
 
-                    invoiced.push_back(data["orderId"].get<std::string>());
-                    std::cout << "  " << data["orderId"].get<std::string>() << " -> INV-"
-                              << data["orderId"].get<std::string>() << std::endl;
+                    invoiced.push_back(id);
+                    std::cout << "  " << id << " -> INV-" << id << std::endl;
                 } catch (...) {
-                    // The consumer swallows handler exceptions, so carry the
-                    // error out by hand and stop the loop.
+                    // The consumer turns a handler's exception into a nack and
+                    // keeps going, so carry the error out by hand and stop the
+                    // loop.
                     if (!handler_error) handler_error = std::current_exception();
-                    stop = true;
+                    stop.cancel();
                 }
-            }, &stop);
+            });
         if (handler_error) std::rethrow_exception(handler_error);
 
         check(invoiced.size() == INPUT.size(), "every order was invoiced once");
@@ -192,14 +163,14 @@ int main() {
         // single partition unless you say otherwise: partitions(10) lets this
         // one call claim up to ten of them, with batch as the total budget
         // across all of them.
-        json invoices = client.queue(INVOICES).batch(10).partitions(10).wait(true).pop();
+        auto invoices = client.queue(INVOICES).batch(10).partitions(10).wait(true).pop();
 
         check(invoices.size() == INPUT.size(),
               std::to_string(INPUT.size()) + " invoices exist");
 
         std::vector<std::string> ids;
-        for (const json& invoice : invoices) {
-            ids.push_back(invoice["data"]["orderId"].get<std::string>());
+        for (const queen::Message& invoice : invoices) {
+            ids.push_back(invoice.data["orderId"].get<std::string>());
         }
         std::sort(ids.begin(), ids.end());
 
@@ -212,7 +183,7 @@ int main() {
         // And the input queue is committed for this group: the acks were part
         // of the same transactions that produced those invoices, so the two
         // states cannot disagree.
-        json leftovers = client.queue(ORDERS).group(GROUP).batch(10).wait(false).pop();
+        auto leftovers = client.queue(ORDERS).group(GROUP).batch(10).wait(false).pop();
         check(leftovers.empty(), "the source queue is committed for this group");
 
         client.queue(ORDERS).del();

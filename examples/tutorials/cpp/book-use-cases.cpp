@@ -7,14 +7,11 @@
 // says it does.
 //
 // The C++ client has no streams, so the trace merger (uc-trace) and the rate
-// limiter (uc-rate) are not here. uc-order sends its transaction to the
-// broker's HTTP API through the client's own HTTP layer, because a transaction
-// built with client.transaction() cannot give its push a partition.
+// limiter (uc-rate) are not here.
 //
 // Build it from this directory, as one command (01-hello-world.cpp says why
 // each flag is there):
-//   g++ -std=c++17 -O1 -pthread -I../../../clients/client-cpp
-//       -I../../../clients/server/vendor -I/opt/homebrew/include
+//   g++ -std=c++17 -O1 -pthread -I../../../clients/client-cpp -I/opt/homebrew/include
 //       -I"$(brew --prefix openssl)/include" book-use-cases.cpp -o build/book-use-cases
 //       -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
 //
@@ -72,7 +69,7 @@ static void note(const std::string& group, const json& order_id) {
 }
 
 int main() try {
-    queen::QueenClient client("http://localhost:6632");
+    queen::Queen client("http://localhost:6632");
     for (const char* q : {"thumbnails", "order-placed", "chat", "order-events", "shipping",
                           "availability", "review-reminders", "webhooks", "daily-reports"}) {
         try {
@@ -89,17 +86,16 @@ int main() try {
     // Twelve photos to resize, from four users.
     for (int i = 1; i <= 12; i++) {
         client.queue("thumbnails").partition("user-" + std::to_string(i % 4))
-            .push({{{"data", {{"photo", "p" + std::to_string(i) + ".jpg"}}}}});
+            .push({{"photo", "p" + std::to_string(i) + ".jpg"}});
     }
 
     // Three workers compete for the jobs: each job goes to exactly one of them.
     auto worker = [&](const std::string& name) {
         client.queue("thumbnails")
             .partitions(1)      // one user's photos at a time
-            .each()
             .idle_millis(1500)  // stop when there is nothing left
             .wait(false)        // short polls: the idle clock is read between them
-            .consume([&](const json& job) { resize(job["data"]["photo"], name); });
+            .consume([&](const queen::Message& job) { resize(job.data["photo"], name); });
     };
 
     std::thread w1(worker, "w1"), w2(worker, "w2"), w3(worker, "w3");
@@ -125,18 +121,17 @@ int main() try {
         client.queue("order-placed")
             .group(group)                  // each group gets every message
             .subscription_mode("all")
-            .each()
             .idle_millis(1000) // guide:hide
             .wait(false) // guide:hide
-            .consume([&](const json& event) {
-                note(group, event["data"]["orderId"]); // guide:hide
-                std::cout << group + " " + event["data"]["orderId"].dump() + "\n";
+            .consume([&](const queen::Message& event) {
+                note(group, event.data["orderId"]); // guide:hide
+                std::cout << group + " " + event.data["orderId"].dump() + "\n";
             });
     };
 
     for (int order_id : {3001, 3002, 3003}) {
         client.queue("order-placed").partition("order-" + std::to_string(order_id))
-            .push({{{"data", {{"orderId", order_id}}}}});
+            .push({{"orderId", order_id}});
     }
     std::thread billing(subscribe, "billing"), shipping(subscribe, "shipping");
     billing.join(); shipping.join();
@@ -152,7 +147,7 @@ int main() try {
                   std::string(group) + " got every order: " + json(got).dump());
         }
         // A group that does not ask for 'all' starts at the end of the queue.
-        json late = client.queue("order-placed").group("late").wait(false).batch(10).pop();
+        auto late = client.queue("order-placed").group("late").wait(false).batch(10).pop();
         check(late.empty(), "a new group without subscription_mode all skips the history");
         std::cout << "ok: uc-pubsub" << std::endl;
     }
@@ -170,7 +165,7 @@ int main() try {
 
     // The guest sends three messages in a row.
     for (const char* text : {"Hi!", "Is breakfast included?", "And is there parking?"}) {
-        client.queue("chat").partition("conv-42").push({{{"data", {{"text", text}}}}});
+        client.queue("chat").partition("conv-42").push({{"text", text}});
     }
 
     // The assistant answers the whole burst once.
@@ -179,12 +174,12 @@ int main() try {
         .subscription_mode("all")
         .batch(10)                         // the handler gets every message of the burst
         .limit(3) // guide:hide
-        .consume([&](const json& messages) {
+        .consume_batch([&](const std::vector<queen::Message>& messages) {
             calls++; // guide:hide
             question.clear();
-            for (const json& m : messages) {
+            for (const queen::Message& m : messages) {
                 if (!question.empty()) question += " ";
-                question += m["data"]["text"].get<std::string>();
+                question += m.data["text"].get<std::string>();
             }
             // Hi! Is breakfast included? And is there parking?
             std::cout << question << "\n";
@@ -202,20 +197,19 @@ int main() try {
     // --- 2. Order workflow: transitions that cannot race (expect) --------------
     client.kv("orders").put("order-2001", {{"status", "paid"}}, queen::KvTtl::seconds(30 * 86400));
     client.queue("order-events").partition("order-2001")
-        .push({{{"transactionId", "order-2001-paid"}, {"data", {{"orderId", "order-2001"}}}}});
+        .push({{"orderId", "order-2001"}}, "order-2001-paid");
     std::vector<bool> verdicts;
     // guide:start(uc-order)
     client.queue("order-events")
         .group("workflow")
         .subscription_mode("all")
         .auto_ack(false)
-        .each()
         .limit(1) // guide:hide
-        .consume([&](const json& msg) {
-            const std::string order_id = msg["data"]["orderId"];
+        .consume([&](const queen::Message& msg) {
+            const std::string order_id = msg.data["orderId"];
             json order = client.kv("orders").get(order_id);  // value: {"status":"paid"}
             if (order["value"]["status"] != "paid") {        // already moved: just ack
-                client.ack(msg, true, {{"group", "workflow"}});
+                client.ack(msg);
                 return;
             }
 
@@ -224,29 +218,14 @@ int main() try {
             queen::KvWriteOptions from_what_we_read;         // only from what we read
             from_what_we_read.expect = order["version"].get<long long>();
             from_what_we_read.required = true;
-            // client.transaction() cannot give its push a partition, so the step goes
-            // to the broker's transaction route through the client's own HTTP layer.
-            json step = {
-                {"operations", json::array({
-                    {{"type", "ack"}, {"status", "completed"},
-                     {"consumerGroup", "workflow"}, {"leaseId", msg["leaseId"]},
-                     {"transactionId", msg["transactionId"]},
-                     {"partitionId", msg["partitionId"]}},
-                    {{"type", "push"}, {"items", json::array({{
-                        {"queue", "shipping"}, {"partition", order_id},
-                        {"transactionId", "ship-" + order_id},
-                        {"payload", {{"orderId", order_id}}},
-                    }})}},
-                })},
-                {"requiredLeases", json::array({msg["leaseId"]})},
-                {"kv", json::array({queen::wire::kv_write_op("put", "orders", order_id,
-                    {{"status", "shipping"}}, queen::KvTtl::seconds(30 * 86400),
-                    from_what_we_read)})},
-            };
-            json result = client.get_http_client()->post("/api/v1/transaction", step);
-            bool committed = result.value("success", false);
-            verdicts.push_back(committed); // guide:hide
-            if (!committed) return;  // moved by someone else: nothing written
+            queen::TransactionResult result = client.transaction()
+                .ack(msg)
+                .kv("orders").put(order_id, {{"status", "shipping"}},
+                                  queen::KvTtl::seconds(30 * 86400), from_what_we_read)
+                .queue("shipping").partition(order_id).push({{"orderId", order_id}}, "ship-" + order_id)
+                .commit();
+            verdicts.push_back(result.success); // guide:hide
+            if (!result.success) return;  // moved by someone else: nothing written
         });
     // guide:end
     {
@@ -257,17 +236,13 @@ int main() try {
         queen::KvWriteOptions stale_version;
         stale_version.expect = order["version"].get<long long>() - 1;
         stale_version.required = true;
-        json stale = client.get_http_client()->post("/api/v1/transaction", {
-            {"operations", json::array({
-                {{"type", "push"}, {"items", json::array({{
-                    {"queue", "shipping"}, {"partition", "order-2001"},
-                    {"transactionId", "ship-again"}, {"payload", json::object()}}})}},
-            })},
-            {"kv", json::array({queen::wire::kv_write_op("put", "orders", "order-2001",
-                {{"status", "shipping"}}, queen::KvTtl::seconds(30 * 86400), stale_version)})},
-        });
-        check(stale.value("success", true) == false,
-              "a transition from a stale version rolls back: " + stale.dump());
+        queen::TransactionResult stale = client.transaction()
+            .queue("shipping").partition("order-2001").push(json::object(), "ship-again")
+            .kv("orders").put("order-2001", {{"status", "shipping"}},
+                              queen::KvTtl::seconds(30 * 86400), stale_version)
+            .commit();
+        check(!stale.success && stale.lost_precondition(),
+              "a transition from a stale version rolls back: " + stale.raw.dump());
         auto read = client.queue("shipping").fetch({"order-2001"});
         check(read["order-2001"].records.size() == 1, "one shipment, not two");
         std::cout << "ok: uc-order" << std::endl;
@@ -277,23 +252,22 @@ int main() try {
     // guide:start(uc-latest)
     // The availability of a hotel changes often; the screen needs only the last value.
     for (int rooms : {12, 11, 9}) {
-        client.queue("availability").partition("hotel-7")
-            .push({{{"data", {{"hotel", 7}, {"rooms", rooms}}}}});
+        client.queue("availability").partition("hotel-7").push({{"hotel", 7}, {"rooms", rooms}});
     }
 
-    json latest = client.queue("availability")
+    queen::Message latest = client.queue("availability")
         .group("screen")
         .subscription_mode("all")
         .conflation()  // the newest message of each hotel, the rest skipped
         .wait(false)
         .pop()
         .at(0);
-    std::cout << latest["data"] << "\n";   // {"hotel":7,"rooms":9}
-    client.ack(latest, true, {{"group", "screen"}});
+    std::cout << latest.data << "\n";   // {"hotel":7,"rooms":9}
+    client.ack(latest);
     // guide:end
     {
-        check(latest["data"] == json{{"hotel", 7}, {"rooms", 9}}, "the newest availability");
-        json again = client.queue("availability").group("screen").wait(false).pop();
+        check(latest.data == json{{"hotel", 7}, {"rooms", 9}}, "the newest availability");
+        auto again = client.queue("availability").group("screen").wait(false).pop();
         check(again.empty(), "the older values were skipped, not delivered later");
         std::cout << "ok: uc-latest" << std::endl;
     }
@@ -321,8 +295,7 @@ int main() try {
     {
         check(statuses == std::vector<std::string>{"scheduled", "rescheduled"},
               "scheduled, then rescheduled: " + json(statuses).dump());
-        // The C++ client has no peek: GET the timer's route.
-        json peek = client.get_http_client()->get("/api/v1/timers/review-reminders/review-2001");
+        json peek = client.timers().peek("review-reminders", "review-2001");
         check(peek["found"] == false, "the cancelled reminder is gone: " + peek.dump());
         // A timer fires as a real message of its queue.
         queen::TimerSchedule soon;
@@ -332,9 +305,9 @@ int main() try {
         soon.delay_millis = 200;
         client.timers().schedule(soon);
         json fired;
-        client.queue("review-reminders").group("mailer").subscription_mode("all").each().limit(1)
+        client.queue("review-reminders").group("mailer").subscription_mode("all").limit(1)
             .wait(false).idle_millis(10000)
-            .consume([&](const json& m) { fired = m["data"]; });
+            .consume([&](const queen::Message& m) { fired = m.data; });
         check(fired == json{{"orderId", 2002}}, "the timer fired as a message: " + fired.dump());
         std::cout << "ok: uc-reminder" << std::endl;
     }
@@ -411,12 +384,13 @@ int main() try {
     std::thread receiver_thread([&] { receiver.listen_after_bind(); });
     receiver.wait_until_ready();
     const std::string hook_url = "http://127.0.0.1:" + std::to_string(hook_port) + "/hooks";
-    client.get_http_client()->post("/api/v1/configure", {
-        {"queue", "webhooks"}, {"options", {{"retryLimit", 5}, {"retryDelay", 1000}}}});
-    client.queue("webhooks").partition("customer-42").push({{
-        {"transactionId", "evt-9001"},
-        {"data", {{"url", hook_url}, {"event", {{"type", "booking.confirmed"}, {"id", 9001}}}}},
-    }});
+    queen::QueueConfig webhooks;
+    webhooks.retry_limit = 5;
+    webhooks.retry_delay = 1000;
+    client.queue("webhooks").configure(webhooks);
+    client.queue("webhooks").partition("customer-42")
+        .push({{"url", hook_url}, {"event", {{"type", "booking.confirmed"}, {"id", 9001}}}},
+              "evt-9001");
     auto stop_when_received = [&] {
         for (;;) {
             {
@@ -428,27 +402,27 @@ int main() try {
         std::raise(SIGTERM);  // what a deploy sends
     };
     // guide:start(uc-webhook)
-    static std::atomic<bool> stop{false};            // static: a signal handler sees it
-    std::signal(SIGTERM, [](int) { stop = true; });  // a deploy stops the sender cleanly
+    queen::ClientConfig sender_config;
+    sender_config.handle_signals = true;  // SIGTERM (a deploy) stops the sender cleanly
+    queen::Queen sender("http://localhost:6632", sender_config);
     std::thread hook_watch(stop_when_received); // guide:hide
 
-    client.queue("webhooks")
+    sender.queue("webhooks")
         .group("sender")
         .subscription_mode("all")
-        .each()
-        .wait(false)  // short polls: the stop flag is read between them
-        .consume([](const json& msg) {
-            const std::string url = msg["data"]["url"];       // http://host:port/path
+        .wait(false)  // short polls: the stop is read between them
+        .consume([](const queen::Message& msg) {
+            const std::string url = msg.data["url"];          // http://host:port/path
             const size_t path = url.find('/', url.find("//") + 2);
             httplib::Client http(url.substr(0, path));
-            httplib::Headers headers = {
-                {"idempotency-key", msg["transactionId"].get<std::string>()}};
-            auto res = http.Post(url.substr(path), headers, msg["data"]["event"].dump(),
+            httplib::Headers headers = {{"idempotency-key", msg.transaction_id}};
+            auto res = http.Post(url.substr(path), headers, msg.data["event"].dump(),
                                  "application/json");
             if (!res || res->status / 100 != 2) {             // retried, then dead-lettered
                 throw std::runtime_error("HTTP " + std::to_string(res ? res->status : 0));
             }
-        }, &stop);
+        });
+    sender.close();
     // guide:end
     {
         hook_watch.join();
@@ -469,13 +443,13 @@ int main() try {
         // guide:start(uc-singleton)
         queen::Lock lock = client.lock("nightly-report", 30);
         if (!lock.acquire(1000)) return "skipped";  // another worker has it
-        json result;
+        queen::TransactionResult result;
         try {
             json report = {{"day", "2026-10-24"}, {"bookings", 412}};
             std::string id = "report-" + report["day"].get<std::string>();
             result = client.transaction()
                 .guard(lock)  // commits only while the lock is ours
-                .queue("daily-reports").push({{{"transactionId", id}, {"data", report}}})
+                .queue("daily-reports").push(report, id)
                 .commit();
             std::this_thread::sleep_for(1500ms); // guide:hide
         } catch (...) {
@@ -483,7 +457,7 @@ int main() try {
             throw;
         }
         lock.release();
-        return result.value("success", false) ? "done" : "lost the lock";
+        return result.success ? "done" : "lost the lock";
         // guide:end
     };
     {

@@ -24,11 +24,10 @@ description: "Verified snippet extracted from examples/tutorials/cpp/02-multi-qu
 //   shipping
 //     `-- group "warehouse"  -> ships
 //
-// Build it (see 01-hello-world.cpp for the two headers queen_client.hpp
-// expects but this repository does not vendor):
+// Build it (01-hello-world.cpp says why each flag is there):
 //   mkdir -p build
 //   g++ -std=c++17 -O2 -pthread \
-//       -I../../../clients/client-cpp -I../../../clients/server/vendor \
+//       -I../../../clients/client-cpp \
 //       -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
 //       02-multi-queue-flow.cpp -o build/02-multi-queue-flow \
 //       -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
@@ -38,7 +37,6 @@ description: "Verified snippet extracted from examples/tutorials/cpp/02-multi-qu
 
 #include "queen_client.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -47,7 +45,6 @@ description: "Verified snippet extracted from examples/tutorials/cpp/02-multi-qu
 #include <string>
 #include <vector>
 
-using queen::QueenClient;
 using json = nlohmann::json;
 
 static std::string run_id() {
@@ -92,7 +89,7 @@ int main() {
     const std::string ORDERS = "tut-cpp-orders-" + RUN;
     const std::string SHIPPING = "tut-cpp-shipping-" + RUN;
 
-    QueenClient client(QUEEN_URL);
+    queen::Queen client(QUEEN_URL);
 
     std::string verdict;
     bool failed = false;
@@ -106,18 +103,16 @@ int main() {
         // decision you make.
         std::cout << "\npushing" << std::endl;
         for (const Order& order : INPUT) {
-            client.queue(ORDERS).partition(order.customer).push({
-                json{{"data", {{"orderId", order.order_id},
-                               {"customer", order.customer},
-                               {"total", order.total}}}}
-            });
+            client.queue(ORDERS).partition(order.customer).push(
+                {{"orderId", order.order_id}, {"customer", order.customer}, {"total", order.total}});
             std::cout << "  " << order.order_id << " -> partition " << order.customer
                       << std::endl;
         }
 
         // consume() is synchronous in C++: it blocks this thread and runs
-        // concurrency() workers in a pool until limit() or idle_millis() ends
-        // the loop. Two settings below are what keep that loop honest:
+        // concurrency() workers, one thread each, until limit() or
+        // idle_millis() ends the loop. Two settings below are what keep that
+        // loop honest:
         //
         //   wait(false)      a long-polling pop parks server-side for up to 30
         //                    seconds, and the idle clock is only consulted
@@ -130,10 +125,10 @@ int main() {
         //
         // The consumer also catches whatever the handler throws and turns it
         // into a negative acknowledgement, so an exception raised in there
-        // never reaches main() on its own. Record it, raise the stop flag to
-        // break the loop, and rethrow once consume() has returned.
+        // never reaches main() on its own. Record it, cancel the loop, and
+        // rethrow once consume() has returned.
         std::exception_ptr handler_error;
-        std::atomic<bool> stop{false};
+        queen::Cancel stop;
 
         // Group one. It reads every order, charges it, and hands the paid ones
         // to the shipping queue. subscription_mode("all") matters: a group
@@ -144,13 +139,13 @@ int main() {
         client.queue(ORDERS)
             .group("tut-cpp-billing")
             .subscription_mode("all")
-            .each()
-            .limit(static_cast<int>(INPUT.size()))
+            .limit(static_cast<long long>(INPUT.size()))
             .wait(false)
             .idle_millis(5000)
-            .consume([&](const json& msg) {
+            .cancel(stop)
+            .consume([&](const queen::Message& msg) {
                 try {
-                    const json& data = msg["data"];
+                    const json& data = msg.data;
                     billed.push_back(data["orderId"].get<std::string>());
                     std::cout << "  charged " << data["orderId"].get<std::string>()
                               << " (" << data["total"].get<double>() << ")" << std::endl;
@@ -161,13 +156,12 @@ int main() {
                     // orders were charged.
                     client.queue(SHIPPING)
                         .partition(data["customer"].get<std::string>())
-                        .push({json{{"data", {{"orderId", data["orderId"]},
-                                              {"customer", data["customer"]}}}}});
+                        .push({{"orderId", data["orderId"]}, {"customer", data["customer"]}});
                 } catch (...) {
                     if (!handler_error) handler_error = std::current_exception();
-                    stop = true;
+                    stop.cancel();
                 }
-            }, &stop);
+            });
         if (handler_error) std::rethrow_exception(handler_error);
 
         check(billed.size() == INPUT.size(),
@@ -181,18 +175,18 @@ int main() {
         client.queue(ORDERS)
             .group("tut-cpp-analytics")
             .subscription_mode("all")
-            .each()
-            .limit(static_cast<int>(INPUT.size()))
+            .limit(static_cast<long long>(INPUT.size()))
             .wait(false)
             .idle_millis(5000)
-            .consume([&](const json& msg) {
+            .cancel(stop)
+            .consume([&](const queen::Message& msg) {
                 try {
-                    total += msg["data"]["total"].get<double>();
+                    total += msg.data["total"].get<double>();
                 } catch (...) {
                     if (!handler_error) handler_error = std::current_exception();
-                    stop = true;
+                    stop.cancel();
                 }
-            }, &stop);
+            });
         if (handler_error) std::rethrow_exception(handler_error);
 
         double expected = 0;
@@ -208,20 +202,20 @@ int main() {
             .partition("acme")
             .group("tut-cpp-warehouse")
             .subscription_mode("all")
-            .each()
             .limit(3)
             .wait(false)
             .idle_millis(5000)
-            .consume([&](const json& msg) {
+            .cancel(stop)
+            .consume([&](const queen::Message& msg) {
                 try {
-                    acme_shipments.push_back(msg["data"]["orderId"].get<std::string>());
-                    std::cout << "  shipping " << msg["data"]["orderId"].get<std::string>()
+                    acme_shipments.push_back(msg.data["orderId"].get<std::string>());
+                    std::cout << "  shipping " << msg.data["orderId"].get<std::string>()
                               << std::endl;
                 } catch (...) {
                     if (!handler_error) handler_error = std::current_exception();
-                    stop = true;
+                    stop.cancel();
                 }
-            }, &stop);
+            });
         if (handler_error) std::rethrow_exception(handler_error);
 
         check(acme_shipments == std::vector<std::string>({"A-1", "A-2", "A-3"}),

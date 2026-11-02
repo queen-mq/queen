@@ -161,8 +161,8 @@
     ],
     "severity": "breaks",
     "symptom": "Two workers handle the same message; after slow work your ack answers invalid or expired lease, or the transaction rolls back with rejected_ack.",
-    "cause": "A pop leases the batch for leaseSeconds if the pop sends it, else the queue's leaseTime: 60 s for a queue a push created, 300 s for one /configure created (the JS create() also sends 300). When the lease expires the batch goes to the next pop with deliveryAttempt + 1, and an expired lease cannot be renewed. In JS and Python, renewLease without an interval renews nothing, and the C++ consume loop ignores renew_lease().",
-    "fix": "Set leaseTime above the worst-case handler time, or renew before expiry: POST /api/v1/lease/:leaseId/extend with {\"seconds\": N}. JS: queen.renew(message), or .renewLease(true, intervalMs) on consume. Python: await queen.renew(message), or .renew_lease(True, interval_millis). Go: client.Renew(ctx, msg), or .RenewLease(true, intervalMillis). Rust: queen.renew(&msg, None), or .renew_lease(Duration). C++: call client.renew(message) yourself.",
+    "cause": "A pop leases the batch for leaseSeconds if the pop sends it, else the queue's leaseTime: 60 s for a queue a push created, 300 s for one /configure created (the JS create() also sends 300). When the lease expires the batch goes to the next pop with deliveryAttempt + 1, and an expired lease cannot be renewed. In JS and Python, renewLease without an interval renews nothing.",
+    "fix": "Set leaseTime above the worst-case handler time, or renew before expiry: POST /api/v1/lease/:leaseId/extend with {\"seconds\": N}. JS: queen.renew(message), or .renewLease(true, intervalMs) on consume. Python: await queen.renew(message), or .renew_lease(True, interval_millis). Go: client.Renew(ctx, msg), or .RenewLease(true, intervalMillis). Rust: queen.renew(&msg, None), or .renew_lease(Duration). C++: client.renew(message), or .renew_lease(true, interval_millis) on consume.",
     "code": {
       "js": "await queen.queue('reports').group('builders').renewLease(true, 10000).each()\n  .consume(async (message) => { await buildReport(message.data) })",
       "python": "await queen.queue('reports').group('builders').renew_lease(True, 10000).each().consume(build_report)",
@@ -174,7 +174,7 @@
       "https://queenmq.com/writing-applications/clients/",
       "clients/client-js/client-v2/consumer/ConsumerManager.js:207",
       "clients/client-py/queen/consumer/consumer_manager.py:251",
-      "clients/client-cpp/queen_client.hpp:4401"
+      "clients/client-cpp/queen_client.hpp:7621"
     ]
   },
   {
@@ -482,11 +482,10 @@
   },
   {
     "id": "pop-errors-look-empty",
-    "title": "JS, Python and C++ pop() return an empty result on errors, so a broken consumer looks like an empty queue",
+    "title": "JS and Python pop() return an empty result on errors, so a broken consumer looks like an empty queue",
     "applies": [
       "js",
-      "python",
-      "cpp"
+      "python"
     ],
     "severity": "surprise",
     "symptom": "pop() keeps returning nothing while the queue has messages (a revoked token, a 403, an exhausted 429 budget, a wrong URL).",
@@ -708,7 +707,7 @@
     "severity": "breaks",
     "symptom": "A job that must run in one place runs twice: after a pause, a long GC stop or a network cut, the old holder carries on while a new one already has the lock.",
     "cause": "A lock expires, and nobody tells its holder. A process that is paused or cut off keeps running past its lifetime while somebody else acquires the lock, so for a while two processes both believe they hold it. Holding the lock (lock.held) is a belief with a deadline, and by itself it stops no write.",
-    "fix": "Put the lock on the transaction that commits the work: .guard(lock) makes the acks, pushes, KV writes and timers commit only while the lock is still this holder's, in the same log entry. A replaced holder gets success: false with reason kv_precondition and writes nothing. For a resource outside Queen, send lock.token with the write and have the resource refuse a token lower than the highest it accepted. Stop the work when the handle reports the lock lost (lock.signal in JS, lock.lost in Python, lock.Lost() in Go, lock.lost() in Rust, a false keepAlive() in PHP and C++).",
+    "fix": "Put the lock on the transaction that commits the work: .guard(lock) makes the acks, pushes, KV writes and timers commit only while the lock is still this holder's, in the same log entry. A replaced holder gets success: false with reason kv_precondition and writes nothing. For a resource outside Queen, send lock.token with the write and have the resource refuse a token lower than the highest it accepted. Stop the work when the handle reports the lock lost (lock.signal in JS, lock.lost in Python, lock.Lost() in Go, lock.lost() in Rust, lock.is_lost() in C++, a false keepAlive() in PHP).",
     "code": {
       "js": "const lock = queen.lock('daily-report', { ttl: '30s' })\nif (!(await lock.acquire())) return\ntry {\n  const res = await queen.transaction()\n    .guard(lock)\n    .queue('reports').push([{ data: report }])\n    .commit()\n  if (res.success === false) return // replaced: nothing was written\n} finally {\n  await lock.release()\n}",
       "python": "res = await queen.transaction().guard(lock).queue(\"reports\").push([{\"data\": report}]).commit()\nif res.get(\"success\") is False:\n    return  # replaced: nothing was written",
@@ -743,23 +742,20 @@
   },
   {
     "id": "php-cpp-lock-needs-keepalive",
-    "title": "PHP and C++ locks are not renewed in the background: call keepAlive() in the work loop",
+    "title": "PHP locks are not renewed in the background: call keepAlive() in the work loop",
     "applies": [
-      "php",
-      "cpp"
+      "php"
     ],
     "severity": "breaks",
     "symptom": "A lock taken for long work expires in the middle of it: another worker acquires the same lock, and the first one's guarded commits start failing with kv_precondition.",
-    "cause": "The JavaScript, Python, Go and Rust handles renew from a background task. PHP and C++ have none, so their handle renews only when the code asks, and a lock nobody renews ends after its lifetime however busy its holder is.",
-    "fix": "Call $lock->keepAlive() (lock.keep_alive() in C++) at every checkpoint of the work loop. It renews once a third of the lifetime has passed, sends nothing before then, and returns false when the lock is lost: stop there. Choose a lifetime longer than the longest stretch between two checkpoints, and keep the guard on every commit.",
+    "cause": "The JavaScript, Python, Go, Rust and C++ handles renew from a background task. PHP has none, so its handle renews only when the code asks, and a lock nobody renews ends after its lifetime however busy its holder is.",
+    "fix": "Call $lock->keepAlive() at every checkpoint of the work loop. It renews once a third of the lifetime has passed, sends nothing before then, and returns false when the lock is lost: stop there. Choose a lifetime longer than the longest stretch between two checkpoints, and keep the guard on every commit.",
     "code": {
-      "php": "foreach ($pages as $page) {\n    if (!$lock->keepAlive()) {\n        break; // lost: stop\n    }\n    importPage($page);\n}",
-      "cpp": "for (const auto& page : pages) {\n    if (!lock.keep_alive()) break;   // lost: stop\n    import_page(page);\n}"
+      "php": "foreach ($pages as $page) {\n    if (!$lock->keepAlive()) {\n        break; // lost: stop\n    }\n    importPage($page);\n}"
     },
     "source": [
       "https://queenmq.com/writing-applications/kv-locks-timers/",
-      "clients/client-php/src/Lock.php:234",
-      "clients/client-cpp/queen_client.hpp:3204"
+      "clients/client-php/src/Lock.php:234"
     ]
   },
   {

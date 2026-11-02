@@ -1,84 +1,45 @@
 /**
  * Queen C++ Client - Basic Example
- * 
- * Demonstrates:
- * - Connecting to Queen server
- * - Creating a queue
- * - Pushing messages
- * - Consuming messages
+ *
+ * Push five orders into one partition, consume them, and close:
+ *
+ *   make example && ./bin/example_basic [broker-url]
  */
 
 #include "queen_client.hpp"
+
 #include <iostream>
-#include <thread>
-#include <chrono>
+#include <string>
 
-using namespace queen;
-using json = nlohmann::json;
+int main(int argc, char** argv) {
+    const std::string url = argc > 1 ? argv[1] : "http://localhost:6632";
 
-int main() {
-    std::cout << "========================================" << std::endl;
-    std::cout << "Queen C++ Client - Basic Example" << std::endl;
-    std::cout << "========================================\n" << std::endl;
-    
     try {
-        // Create client
-        QueenClient client("http://localhost:6632");
-        std::cout << "✓ Connected to Queen server" << std::endl;
-        
-        // Create queue
-        auto create_result = client.queue("cpp-example").create();
-        std::cout << "✓ Queue created: " << create_result.dump() << std::endl;
-        
-        // Push some messages
-        std::cout << "\nPushing messages..." << std::endl;
+        queen::Queen queen(url);
+
+        // One partition per entity: here, one customer.
         for (int i = 1; i <= 5; i++) {
-            auto result = client.queue("cpp-example").push({
-                {{"data", {
-                    {"message", "Hello from C++!"},
-                    {"index", i},
-                    {"timestamp", std::time(nullptr)}
-                }}}
-            });
-            std::cout << "  Message " << i << " pushed" << std::endl;
+            queen::PushItem order;
+            order.payload = {{"order", i}, {"total", 10.0 * i}};
+            order.transaction_id = "order-" + std::to_string(i);  // the dedup key
+            auto results = queen.queue("cpp-example").partition("customer-42").push_items({order});
+            std::cout << "order " << i << ": " << results[0].status_text << std::endl;
         }
-        
-        // Wait a moment
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        
-        // Consume messages
-        std::cout << "\nConsuming messages..." << std::endl;
-        
-        std::atomic<int> count{0};
-        
-        client.queue("cpp-example")
-            .batch(1)
-            .limit(5)
-            .auto_ack(true)
-            .consume([&](const json& msg) {
-                count++;
-                std::cout << "  [" << count << "] Received: " 
-                         << msg["data"]["message"].get<std::string>() 
-                         << " (index: " << msg["data"]["index"] << ")"
-                         << std::endl;
-            });
-        
-        std::cout << "\n✓ Successfully consumed " << count << " messages" << std::endl;
-        
-        // Cleanup
-        std::cout << "\nCleaning up..." << std::endl;
-        client.close();
-        std::cout << "✓ Client closed" << std::endl;
-        
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "Example completed successfully!" << std::endl;
-        std::cout << "========================================" << std::endl;
-        
+
+        // Acked when the handler returns, retried if it throws.
+        auto summary = queen.queue("cpp-example")
+                           .limit(5)            // stop after five messages...
+                           .idle_millis(3000)   // ...or three seconds without one
+                           .consume([](const queen::Message& message) {
+                               std::cout << "received " << message.data.dump() << std::endl;
+                           });
+
+        std::cout << "consumed " << summary.processed << " message(s), acked " << summary.acked
+                  << std::endl;
+        queen.close();
         return 0;
-        
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << "error: " << e.what() << std::endl;
         return 1;
     }
 }
-

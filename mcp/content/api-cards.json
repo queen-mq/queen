@@ -636,109 +636,124 @@
       "notes": "Writes are builders: nothing is sent until .send().await. The expiry is a positional Expiry (seconds / forever / until). In a transaction kv_put_if_absent is always required (it is the gate, unlike JS where required is opt-in); for incr, reads or a fenced put build the op with .operation()? and pass it to .kv(op). commit() is Ok(resp) for a lost gate: check resp.success or resp.lost_precondition(). No once() or list_all() helper. The transaction's ack reads the consumer group from the message."
     },
     "cpp": {
-      "status": "partial",
+      "status": "full",
       "calls": [
         {
-          "call": "QueenClient client(\"http://localhost:6632\")",
-          "does": "Build the client.",
-          "source": "clients/client-cpp/queen_client.hpp:3909"
+          "call": "queen::Queen client(\"http://localhost:6632\")",
+          "does": "Build the client (QueenClient is the 2.7.0 name, kept as an alias).",
+          "source": "clients/client-cpp/queen_client.hpp:7350"
         },
         {
           "call": "client.kv(ns)",
           "does": "KV bound to one namespace.",
-          "source": "clients/client-cpp/queen_client.hpp:3993"
+          "source": "clients/client-cpp/queen_client.hpp:7388"
         },
         {
           "call": "client.kv(ns).get(key)",
           "does": "Read one key: json {found, key, value, version, expiresAt, updatedAt}.",
-          "source": "clients/client-cpp/queen_client.hpp:2875"
+          "source": "clients/client-cpp/queen_client.hpp:5477"
+        },
+        {
+          "call": "client.kv(ns).get_many(keys)",
+          "does": "Read several keys in one round trip: json {rows, missing, truncated}.",
+          "source": "clients/client-cpp/queen_client.hpp:5486"
+        },
+        {
+          "call": "client.kv(ns).get_prefix(prefix, KvPrefixOptions{after, limit, keys_only})",
+          "does": "The keys under a prefix, a page at a time: json {rows, truncated, nextAfter}. Not inside a transaction.",
+          "source": "clients/client-cpp/queen_client.hpp:5496"
         },
         {
           "call": "client.kv(ns).put(key, value, KvTtl::seconds(60), opts)",
           "does": "Write a json value; the KvTtl is mandatory. Returns {applied, key, value, version, reason?}.",
-          "source": "clients/client-cpp/queen_client.hpp:2889"
+          "source": "clients/client-cpp/queen_client.hpp:5510"
         },
         {
           "call": "client.kv(ns).put_if_absent(key, value, ttl, opts)",
           "does": "Must not exist; a non-zero expect throws std::invalid_argument.",
-          "source": "clients/client-cpp/queen_client.hpp:2909"
+          "source": "clients/client-cpp/queen_client.hpp:5530"
         },
         {
           "call": "client.kv(ns).del(key, opts)",
           "does": "Delete (spelled del), optionally fenced with expect.",
-          "source": "clients/client-cpp/queen_client.hpp:2916"
+          "source": "clients/client-cpp/queen_client.hpp:5537"
         },
         {
           "call": "client.kv(ns).incr(key, delta, ttl, KvIncrOptions{min, max, required})",
           "does": "Atomic add; with max, applied is the admission decision.",
-          "source": "clients/client-cpp/queen_client.hpp:2933"
+          "source": "clients/client-cpp/queen_client.hpp:5573"
         },
         {
           "call": "KvTtl::seconds(n)",
           "does": "Expiry in whole seconds (> 0).",
-          "source": "clients/client-cpp/queen_client.hpp:1115"
+          "source": "clients/client-cpp/queen_client.hpp:1832"
         },
         {
           "call": "KvTtl::forever()",
           "does": "No expiry; must not be used in anything CI runs.",
-          "source": "clients/client-cpp/queen_client.hpp:1128"
+          "source": "clients/client-cpp/queen_client.hpp:1845"
         },
         {
           "call": "KvTtl::until(time_point)",
           "does": "Expiry at an instant, rounded up to seconds at send time.",
-          "source": "clients/client-cpp/queen_client.hpp:1135"
+          "source": "clients/client-cpp/queen_client.hpp:1852"
         },
         {
           "call": "KvWriteOptions{expect, required}",
           "does": "Options for put, put_if_absent and del (expect is std::optional<long long>).",
-          "source": "clients/client-cpp/queen_client.hpp:1170"
+          "source": "clients/client-cpp/queen_client.hpp:1887"
         },
         {
           "call": "KvIncrOptions{min, max, required}",
           "does": "Options for incr (no expect, by construction).",
-          "source": "clients/client-cpp/queen_client.hpp:1187"
+          "source": "clients/client-cpp/queen_client.hpp:1904"
         }
       ],
       "inTransaction": [
         {
           "call": "client.transaction()",
           "does": "Start a bundle.",
-          "source": "clients/client-cpp/queen_client.hpp:3961"
+          "source": "clients/client-cpp/queen_client.hpp:7379"
         },
         {
           "call": ".kv(ns).get(key)",
           "does": "Read inside the bundle.",
-          "source": "clients/client-cpp/queen_client.hpp:2622"
+          "source": "clients/client-cpp/queen_client.hpp:5203"
+        },
+        {
+          "call": ".kv(ns).get_many(keys)",
+          "does": "Read several keys inside the bundle.",
+          "source": "clients/client-cpp/queen_client.hpp:5208"
         },
         {
           "call": ".kv(ns).put(key, value, ttl, opts)",
           "does": "Write state with the ack; returns the TransactionBuilder&.",
-          "source": "clients/client-cpp/queen_client.hpp:2627"
+          "source": "clients/client-cpp/queen_client.hpp:5213"
         },
         {
           "call": ".kv(ns).put_if_absent(key, value, ttl, opts)",
           "does": "The gate; set opts.required = true so an existing key rolls back the bundle.",
-          "source": "clients/client-cpp/queen_client.hpp:2634"
+          "source": "clients/client-cpp/queen_client.hpp:5220"
         },
         {
           "call": ".kv(ns).del(key, opts)",
           "does": "Delete with the ack.",
-          "source": "clients/client-cpp/queen_client.hpp:2644"
+          "source": "clients/client-cpp/queen_client.hpp:5229"
         },
         {
           "call": ".kv(ns).incr(key, delta, ttl, opts)",
           "does": "Count with the ack.",
-          "source": "clients/client-cpp/queen_client.hpp:2650"
+          "source": "clients/client-cpp/queen_client.hpp:5247"
         },
         {
-          "call": ".ack(message, \"completed\", json{{\"consumerGroup\", group}})",
-          "does": "Ack under the delivery's lease; the group goes in the context json.",
-          "source": "clients/client-cpp/queen_client.hpp:2691"
+          "call": ".ack(message, AckStatus::Completed, reason = \"\")",
+          "does": "Ack under the delivery's lease; the consumer group and the lease come from the message.",
+          "source": "clients/client-cpp/queen_client.hpp:5292"
         },
         {
           "call": ".commit()",
           "does": "Send the bundle. A lost required precondition is RETURNED (success false, reason kv_precondition, kvReason, failedIndex); every other failure throws.",
-          "source": "clients/client-cpp/queen_client.hpp:2790"
+          "source": "clients/client-cpp/queen_client.hpp:5372"
         }
       ],
       "http": [
@@ -753,7 +768,7 @@
       ],
       "usage": "client.kv(\"saga\").put(\"order-1\", json{{\"state\", \"open\"}}, KvTtl::seconds(60));\njson row = client.kv(\"saga\").get(\"order-1\");         // row[\"found\"], row[\"value\"], row[\"version\"]\nKvWriteOptions opts;\nopts.expect = 7;                                        // the version you read\nclient.kv(\"saga\").put(\"order-1\", json{{\"state\", \"done\"}}, KvTtl::seconds(60), opts);\nclient.kv(\"saga\").put_if_absent(\"marker\", json{{\"seen\", true}}, KvTtl::seconds(3600));\nclient.kv(\"quota\").incr(\"acme:2026-08\", 1, KvTtl::seconds(3600));\nclient.kv(\"saga\").del(\"order-1\");\nclient.transaction()\n    .kv(\"saga\").put_if_absent(\"saga-1\", json{{\"state\", \"open\"}}, KvTtl::seconds(600))\n    .commit();",
       "usageTested": "clients/client-cpp/test_kv_timers.cpp",
-      "notes": "Missing: getMany, getPrefix and the once helper (the header says so); call POST /api/v1/kv directly for them (see http). delete is spelled del. Everything returns nlohmann::json: read row[\"found\"] / r[\"applied\"], never test the json for truthiness. KvWriteOptions.expect is a std::optional, so there is no 'explicitly undefined' guard: compute the version before you build the options. The transaction's ack takes the group in its context json; it is not read from the message. The usage block comes from a wire-contract test (in-process HTTP server, no broker)."
+      "notes": "No once helper: write the put_if_absent with required yourself (the same wire, one line longer). delete is spelled del. Results are nlohmann::json: read row[\"found\"] / r[\"applied\"], never test the json for truthiness. KvWriteOptions.expect is a std::optional, so there is no 'explicitly undefined' guard: compute the version before you build the options. commit() returns a TransactionResult: a lost gate is success false with reason \"kv_precondition\" (returned, not thrown); any other rollback throws queen::TransactionError. The transaction's ack reads the consumer group and the lease from the message. The usage block comes from a wire-contract test (in-process HTTP server, no broker)."
     }
   },
   "timers": {
@@ -1253,49 +1268,59 @@
       "notes": "Standalone schedule is a builder: .payload_json(&v)? (or .payload(bytes)), then .send().await. The transaction's .schedule takes the payload as raw bytes, not a Value. Delays are std::time::Duration. Same semantics as JS: relative delays only, 'absent' on cancel may mean already delivered, the standalone cancel is the never-blocked route."
     },
     "cpp": {
-      "status": "partial",
+      "status": "full",
       "calls": [
         {
           "call": "client.timers()",
           "does": "The timers API.",
-          "source": "clients/client-cpp/queen_client.hpp:4014"
+          "source": "clients/client-cpp/queen_client.hpp:7419"
         },
         {
           "call": "TimerSchedule{queue, timer_key, payload, delay_millis, partition, txn}",
           "does": "One timer: delay_millis is relative milliseconds; empty partition is 'Default'; an empty txn is minted.",
-          "source": "clients/client-cpp/queen_client.hpp:1213"
+          "source": "clients/client-cpp/queen_client.hpp:1930"
         },
         {
           "call": "client.timers().schedule(timer)",
-          "does": "Schedule (upsert): json {ok, status, queue, timerKey, txn, messageId, deliverAt}; status scheduled | rescheduled | too_late.",
-          "source": "clients/client-cpp/queen_client.hpp:2974"
+          "does": "Schedule (upsert): json {ok, status, queue, timerKey, txn, messageId, deliverAt}; status scheduled, rescheduled or too_late.",
+          "source": "clients/client-cpp/queen_client.hpp:5612"
         },
         {
           "call": "client.timers().cancel(queue, timer_key, txn = \"\")",
           "does": "Cancel on the never-blocked DELETE route.",
-          "source": "clients/client-cpp/queen_client.hpp:3005"
+          "source": "clients/client-cpp/queen_client.hpp:5643"
+        },
+        {
+          "call": "client.timers().peek(queue, timer_key)",
+          "does": "One pending timer as stored: json {found, deliverAt, payload (base64), encrypted, attempts, claimed, ...}.",
+          "source": "clients/client-cpp/queen_client.hpp:5659"
+        },
+        {
+          "call": "client.timers().list(queue, after = \"\", limit = 0)",
+          "does": "A queue's pending timers, a page at a time: json {rows, truncated, nextAfter}.",
+          "source": "clients/client-cpp/queen_client.hpp:5670"
         }
       ],
       "inTransaction": [
         {
           "call": "client.transaction()",
           "does": "Start a bundle.",
-          "source": "clients/client-cpp/queen_client.hpp:3961"
+          "source": "clients/client-cpp/queen_client.hpp:7379"
         },
         {
           "call": ".timers().schedule(timer)",
           "does": "Schedule with the bundle; timers() is not bound to a queue (the TimerSchedule carries it).",
-          "source": "clients/client-cpp/queen_client.hpp:2674"
+          "source": "clients/client-cpp/queen_client.hpp:5271"
         },
         {
           "call": ".timers().cancel(queue, timer_key, txn = \"\")",
           "does": "Cancel with the bundle (shares its fate and authorization).",
-          "source": "clients/client-cpp/queen_client.hpp:2679"
+          "source": "clients/client-cpp/queen_client.hpp:5276"
         },
         {
           "call": ".commit()",
           "does": "Send the bundle.",
-          "source": "clients/client-cpp/queen_client.hpp:2790"
+          "source": "clients/client-cpp/queen_client.hpp:5372"
         }
       ],
       "http": [
@@ -1310,7 +1335,7 @@
       ],
       "usage": "TimerSchedule timer;\ntimer.queue = \"compensation\";\ntimer.timer_key = \"saga-1\";\ntimer.payload = json{{\"undo\", true}};\ntimer.delay_millis = 30000;\nclient.transaction()\n    .timers().schedule(timer)\n    .commit();\nclient.timers().schedule(timer);                     // standalone: the same upsert on (queue, timer_key)\nclient.timers().cancel(\"compensation\", \"saga-1\");    // DELETE route, never blocked",
       "usageTested": "clients/client-cpp/test_kv_timers.cpp",
-      "notes": "Missing: peek and list (no read surface for timers); use the two GET routes (see http). A reschedule is schedule() again on the same key. Results are json: read r[\"ok\"] and r[\"status\"]. The usage block comes from a wire-contract test (in-process HTTP server, no broker)."
+      "notes": "A reschedule is schedule() again on the same key. Results are json: read r[\"ok\"] and r[\"status\"]. peek returns the payload as stored, base64. The usage block comes from a wire-contract test (in-process HTTP server, no broker)."
     }
   },
   "streams": {
@@ -2180,52 +2205,52 @@
         {
           "call": "client.ephemeral()",
           "does": "The ephemeral API (flat methods, no builder chain).",
-          "source": "clients/client-cpp/queen_client.hpp:4036"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         },
         {
           "call": "client.ephemeral().push(queue, messages, EphemeralPushOptions{partition})",
           "does": "Push a json value or array, all-or-nothing: {pushed}. Unbuffered only.",
-          "source": "clients/client-cpp/queen_client.hpp:3174"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         },
         {
           "call": "client.ephemeral().pop(queue, EphemeralPopOptions{partition, batch, wait, timeout_millis, group, auto_ack})",
           "does": "json {queue, messages}, messages [] when empty.",
-          "source": "clients/client-cpp/queen_client.hpp:3203"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         },
         {
           "call": "client.ephemeral().ack(queue, acks, EphemeralAckOptions{group, status, error})",
           "does": "Ack popped messages or ids: {results: [{id, outcome}]}.",
-          "source": "clients/client-cpp/queen_client.hpp:3271"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         },
         {
           "call": "client.ephemeral().ack(queue, acks, true, group)",
           "does": "Boolean sugar: true is completed, false is failed.",
-          "source": "clients/client-cpp/queen_client.hpp:3284"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         },
         {
           "call": "client.ephemeral().configure(queue, EphemeralOptions{max_bytes, max_length, policy, ttl_seconds, lease_seconds, retry_limit, window_buffer})",
           "does": "Declare bounds.",
-          "source": "clients/client-cpp/queen_client.hpp:3128"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         },
         {
           "call": "client.ephemeral().reset(queue)",
           "does": "Drop contents, leases and cursors.",
-          "source": "clients/client-cpp/queen_client.hpp:3145"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         },
         {
           "call": "client.ephemeral().del(queue)",
           "does": "Delete the queue and its configuration (spelled del).",
-          "source": "clients/client-cpp/queen_client.hpp:3156"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         },
         {
           "call": "client.ephemeral().queues()",
           "does": "List the tenant's ephemeral queues.",
-          "source": "clients/client-cpp/queen_client.hpp:3299"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         },
         {
           "call": "client.ephemeral().depth(queue)",
           "does": "Depth gauges; EphemeralQueueNotFoundError for a missing queue.",
-          "source": "clients/client-cpp/queen_client.hpp:3315"
+          "source": "clients/client-cpp/queen_client.hpp:7424"
         }
       ],
       "inTransaction": [],
@@ -2591,63 +2616,68 @@
         {
           "call": "Lock lock = client.lock(name, 30)",
           "does": "A lock handle: one holder at a time; the second argument is the lifetime in seconds. Creating it sends nothing. An optional LockOptions sets owner, retry_min_millis and retry_max_millis.",
-          "source": "clients/client-cpp/queen_client.hpp:4865"
+          "source": "clients/client-cpp/queen_client.hpp:7398"
         },
         {
           "call": "Lock permit = client.semaphore(name, limit, 120)",
           "does": "A handle on one permit of a semaphore of limit permits. Same class and methods as a lock.",
-          "source": "clients/client-cpp/queen_client.hpp:4876"
+          "source": "clients/client-cpp/queen_client.hpp:7408"
         },
         {
           "call": "lock.acquire(5000)",
-          "does": "Take the permit: true or false. The argument is how many milliseconds to keep trying; 0, the default, is one attempt.",
-          "source": "clients/client-cpp/queen_client.hpp:3151"
+          "does": "Take the permit: true or false. The argument is how many milliseconds to keep trying; 0, the default, is one attempt. On success the background renewal starts.",
+          "source": "clients/client-cpp/queen_client.hpp:4875"
         },
         {
           "call": "lock.keep_alive()",
-          "does": "NOTHING renews a lock in the background in C++. Call this at every checkpoint of long work: it renews once a third of the lifetime has passed and returns false when the lock is lost, which means stop.",
-          "source": "clients/client-cpp/queen_client.hpp:3204"
+          "does": "The handle renews in the background (LockOptions::auto_renew, on by default), so keep_alive() only reads held(). With auto_renew = false it is the renewal: call it at every checkpoint of long work; it renews once a third of the lifetime has passed and returns false once the lock is gone.",
+          "source": "clients/client-cpp/queen_client.hpp:4957"
+        },
+        {
+          "call": "lock.is_lost() / lock.wait_lost(ms)",
+          "does": "Whether the permit went away under the holder (the broker said so, or its lifetime ran out with no renew); wait_lost blocks until it does or the timeout passes.",
+          "source": "clients/client-cpp/queen_client.hpp:4998"
         },
         {
           "call": "lock.held() / lock.token() / lock.slot()",
           "does": "token() is the fencing token of the current lease period (0 when not held) and changes at every renew: read it when you send it.",
-          "source": "clients/client-cpp/queen_client.hpp:3125"
+          "source": "clients/client-cpp/queen_client.hpp:4835"
         },
         {
           "call": "lock.renew()",
           "does": "Extend the lease now: true with a new token, false when the permit is gone.",
-          "source": "clients/client-cpp/queen_client.hpp:3184"
+          "source": "clients/client-cpp/queen_client.hpp:4913"
         },
         {
           "call": "lock.release()",
-          "does": "Give the permit back: true when the broker removed it.",
-          "source": "clients/client-cpp/queen_client.hpp:3220"
+          "does": "Give the permit back: true when the broker removed it; the background renewal stops.",
+          "source": "clients/client-cpp/queen_client.hpp:4978"
         },
         {
           "call": "client.locks().get(name)",
           "does": "Who holds it, as json. client.locks() also has acquire, renew and release for a caller that carries the token itself.",
-          "source": "clients/client-cpp/queen_client.hpp:3013"
+          "source": "clients/client-cpp/queen_client.hpp:4574"
         },
         {
           "call": "client.kv(ns).check(key, version)",
           "does": "Assert that a key is at version (0: absent) and write nothing. This is the operation a guard is made of.",
-          "source": "clients/client-cpp/queen_client.hpp:3714"
+          "source": "clients/client-cpp/queen_client.hpp:5556"
         }
       ],
       "inTransaction": [
         {
           "call": ".guard(lock)",
           "does": "The transaction commits only while the lock is still this handle's, judged in the same log entry as everything else in it. commit() throws LockNotHeldError when the handle holds nothing, and the lock must outlive the commit.",
-          "source": "clients/client-cpp/queen_client.hpp:3500"
+          "source": "clients/client-cpp/queen_client.hpp:5345"
         },
         {
           "call": ".kv(ns).check(key, version)",
           "does": "Gate the transaction on a key it does not write. required defaults to true here.",
-          "source": "clients/client-cpp/queen_client.hpp:3363"
+          "source": "clients/client-cpp/queen_client.hpp:5241"
         }
       ],
       "usage": "Lock lock = client.lock(\"daily-report\", 30);       // 30 s lifetime\nif (!lock.acquire(5000)) return;                    // up to 5 s for our turn\nfor (const auto& page : pages) {\n    if (!lock.keep_alive()) break;                  // lost: stop\n    client.transaction()\n        .guard(lock)                                // commits only while the lock is ours\n        .kv(\"reports\").put(page.id, page.body, KvTtl::seconds(86400))\n        .commit();\n}\nlock.release();",
-      "notes": "It is a lease, not a mutex: it expires, and a holder that outlived it keeps running. Only the guard on the transaction (or the token, for a resource outside Queen) makes the work exclusive. The C++ handle has no background renewal: without keep_alive() in the work loop the lock expires after its lifetime. Choose a lifetime longer than the longest stretch between two checkpoints. A semaphore handle is ONE permit: make a handle per holder, and pass the same limit from every holder of one name (it is stored nowhere). Needs broker 2.1.0. The guard and kv check also need the cluster at format version 5, which it reaches by itself once every node runs 2.1.0; until then they answer 503 kv_check_needs_cluster_version_5 and acquire, renew and release already work."
+      "notes": "It is a lease, not a mutex: it expires, and a holder that outlived it keeps running. Only the guard on the transaction (or the token, for a resource outside Queen) makes the work exclusive. The C++ handle renews in the background every third of the lifetime (LockOptions::auto_renew, on by default) and is_lost() says when the permit is gone; a commit whose guard lost only to that renewal is sent again with the new token. With auto_renew = false, keep_alive() at the checkpoints is the renewal, so choose a lifetime longer than the longest stretch between two of them. The handle is move-only. A semaphore handle is ONE permit: make a handle per holder, and pass the same limit from every holder of one name (it is stored nowhere). Needs broker 2.1.0. The guard and kv check also need the cluster at format version 5, which it reaches by itself once every node runs 2.1.0; until then they answer 503 kv_check_needs_cluster_version_5 and acquire, renew and release already work."
     }
   },
   "client": {
@@ -2834,17 +2864,17 @@
         {
           "call": "ClientConfig config; config.binary_push = true;",
           "does": "A push travels as one length-prefixed binary body instead of a JSON document. Needs no zstd.",
-          "source": "clients/client-cpp/queen_client.hpp:163"
+          "source": "clients/client-cpp/queen_client.hpp:218"
         },
         {
           "call": "config.push_compression = true;",
           "does": "With binary_push: each partition's batch is framed as the broker stores it and compressed with zstd in the client. Compile with -DQUEEN_CLIENT_ZSTD and link -lzstd: zstd is opt-in at build time.",
-          "source": "clients/client-cpp/queen_client.hpp:170"
+          "source": "clients/client-cpp/queen_client.hpp:225"
         },
         {
           "call": "config.framed_pop = true;",
           "does": "Pops ask for the stored records (frames=true) and the client unpacks them into the same messages a JSON pop returns. Needs the same build flag and library.",
-          "source": "clients/client-cpp/queen_client.hpp:175"
+          "source": "clients/client-cpp/queen_client.hpp:230"
         }
       ],
       "notes": "All three are off by default, and with them off the client sends and reads JSON as before. They change how messages travel and nothing else: the calls, their results, deduplication and the delivery guarantees stay the same. Binary push and push compression need broker 2.3.0 on EVERY node: a broker up to 2.2.0 answers the binary bodies with 400 and the client does not fall back to JSON, so turn them on after the last node is upgraded. Framed pop is safe against any broker (an older one ignores the request and answers JSON). The client itself stays on JSON for a push that carries a trace id, for a transaction with no push or with a trace id on a push, for a pop of a conflating group, and for a pop that returns encrypted messages, which the broker answers in JSON (up to broker 2.3.0, every pop on a broker that runs with an encryption key). Turn them on when the broker's CPU or the network limits a high message rate; at a few hundred messages a second they change nothing you can measure."
@@ -2942,12 +2972,12 @@
         {
           "call": "auto read = client.queue(q).fetch({\"p1\", \"p2\"}, options);",
           "does": "Every record of the named partitions up to where each ended at the first read: std::map<std::string, FetchedPartition> { records (offset, transaction_id, payload json, ts), high_watermark, log_start_offset, next_offset }. FetchOptions has offsets (std::map) and max_bytes.",
-          "source": "clients/client-cpp/queen_client.hpp:5752"
+          "source": "clients/client-cpp/queen_client.hpp:7277"
         },
         {
           "call": "auto changed = client.queue(q).changed_since(since);",
           "does": "ChangedPartitions { partitions, safe_time }: since is an ISO string (empty = every partition) or a system_clock::time_point. With several URLs and no affinity strategy in C++, the requests of one read can reach different nodes.",
-          "source": "clients/client-cpp/queen_client.hpp:5766"
+          "source": "clients/client-cpp/queen_client.hpp:7288"
         }
       ],
       "notes": "Neither call takes a lease, moves a cursor or needs an ack: two readers asking the same question get the same answer, and no consumer group notices them. fetch reads each partition up to where it ended when the call first read it, asks for 1000 partitions per request and asks again until each one is read; a partition whose start retention deleted is read from its oldest kept record (the raw route answers an offset below logStartOffset with OFFSET_OUT_OF_RANGE and no records, so a hand-written loop from offset 0 reads nothing there). A partition nobody wrote, or of a queue that does not exist, answers no records and no partitions. safeTime is the broker's clock: pass it as the next since and never compare it with the local clock. Use these for replay, audit, rebuilding an entity from its partition, or a sink that keeps its own position; use pop or consume for work that must be done once."

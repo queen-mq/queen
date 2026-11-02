@@ -97,29 +97,42 @@ request does.
 </TabItem>
 <TabItem label="C++">
 
-The client is one header, `clients/client-cpp/queen_client.hpp`, used from a checkout of the
-repository: it includes the thread pool in `clients/server/include/` by a relative path, and
-`clients/server/vendor/` carries the nlohmann/json it needs. You install cpp-httplib 0.27.0 or later and OpenSSL
-(`brew install cpp-httplib openssl` on macOS).
+The client is one header, `clients/client-cpp/queen_client.hpp`, with nlohmann/json vendored
+beside it. With CMake, add the directory (or fetch it) and link the `queen::client` target; it
+finds cpp-httplib 0.27 or fetches it, and links OpenSSL.
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(queen
+    GIT_REPOSITORY https://github.com/queen-mq/queen.git
+    GIT_TAG        v2.7.1
+    SOURCE_SUBDIR  clients/client-cpp)
+FetchContent_MakeAvailable(queen)
+target_link_libraries(app PRIVATE queen::client)
+```
 
 ```cpp
 #include "queen_client.hpp"
 
-queen::QueenClient client("http://localhost:6632");
+queen::Queen queen("http://localhost:6632");
 // ...
-client.close();
+queen.close();
 ```
+
+Without CMake, install cpp-httplib and OpenSSL (`brew install cpp-httplib openssl` on macOS) and
+build with one command:
 
 ```bash
 g++ -std=c++17 -O2 -pthread \
-    -I clients/client-cpp -I clients/server/vendor \
+    -I clients/client-cpp \
     -I /opt/homebrew/include -I "$(brew --prefix openssl)/include" \
     app.cpp -o app \
     -L "$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
 ```
 
-C++17 or later. Link OpenSSL even over plain HTTP: the header turns on cpp-httplib's TLS support
-itself. Fluent consumers can enable dashboard observations with
+C++17 or later. Link OpenSSL even over plain HTTP: the header turns on cpp-httplib's TLS support,
+so an `https://` URL is HTTPS with the certificate verified (define `QUEEN_CLIENT_NO_TLS` to
+build without it). Fluent consumers can enable dashboard observations with
 `.supervision(queen::SupervisionConfig{"billing-production"})` before `.consume(...)`;
 they are off by default. The README describes worker counts, handler progress and publication
 timings. These observations do not restart or scale application processes.
@@ -153,7 +166,7 @@ you run Horizon today.
 </TabItem>
 </Tabs>
 
-The six clients are at 2.7.0 and talk to any 2.x broker. Locks need a 2.1 broker, and the binary forms a 2.3 one.
+The JavaScript, Python, Go, Rust and PHP clients are at 2.7.0, and the C++ client is at 2.7.1, whose API changed to match them (its README lists the changes). All six talk to any 2.x broker. Locks need a 2.1 broker, and the binary forms a 2.3 one.
 
 ## How each SDK names things
 
@@ -180,7 +193,7 @@ The core is the same everywhere: push, pop, consume, ack, transactions, KV, time
 | Stopping a consume loop | At once; unstarted messages go back with `retry` | After the current message; the rest wait for their lease. |
 | zstd for the binary forms | Built in | Python 3.14 or `queen-mq[zstd]`, PHP `ext-zstd`, C++ `-lzstd`; Go and Rust built in. |
 
-Where an SDK lacks a method, the route is still there over HTTP: the C++ code on these pages calls a few routes directly, and says why in a comment.
+Where an SDK lacks a method, the route is still there over HTTP.
 
 <Render file="sdk-capability-matrix" />
 

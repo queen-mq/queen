@@ -3,6 +3,31 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**C++ client 2.7.1: the API of the Go and Rust clients, a connection pool, and HTTPS.** A
+breaking change: the C++ client now has the shape of the other SDKs. `queen::Queen` (`QueenClient`
+stays as an alias) hands out typed values: `pop()` returns `std::vector<Message>`, `push()` takes
+one payload (`push(payload, transactionId)` with the dedup key, `push_many`, `push_items`) and
+answers one `PushResult` per message, and `ack(message)` reads the consumer group and the lease
+from the message and answers an `AckResult`, with `nack`, `ack_with(AckStatus::Retry | Dlq)` and
+`ack_all`. `consume()` hands over one message per call and `consume_batch()` the whole batch;
+`limit()` counts across the workers, `concurrency(n)` runs n threads (it was capped at the number
+of cores), a `Cancel` stops the loop, and it returns a `ConsumeSummary`. A transaction pushes to a
+partition and answers a `TransactionResult`. New: `admin()` (seek a group, retry a dead letter, the
+queue and group routes), every `QueueConfig` option (only the ones set are sent), KV `get_many` and
+`get_prefix`, timer `peek` and `list`, the `affinity` load balancing of the other SDKs (now the
+default), and locks that renew in the background (`is_lost()`). Fixed: an `https://` URL was sent
+as plain HTTP, bearer token included; every request opened a new TCP connection (now a keep-alive
+pool: half the time per call over a 1 ms network, and no accept and close per request on the
+broker); a timeout under one second failed every request; `pop()` and the dead-letter reader
+answered an empty result for any failure; and every client installed SIGINT and SIGTERM handlers
+that exited without flushing or ignored SIGTERM (now opt-in, `ClientConfig::handle_signals`).
+nlohmann/json is vendored in `clients/client-cpp/third_party/`, `clients/server/` is gone, and the
+CMake target `queen::client` finds or fetches cpp-httplib. The client's README lists every change.
+Why: the C++ client was the one SDK whose programs called raw routes for common steps, and it could
+not reach an HTTPS endpoint at all.
+
 ## 2.7.0 - 2026-10-31
 
 **Before upgrading: what 2.7.0 refuses, trims or removes that 2.6 kept.** Most of what 2.7.0 adds

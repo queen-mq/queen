@@ -168,7 +168,7 @@ bool eventually(std::function<bool()> pred, int timeout_millis = 3000) {
 }
 
 /// The payloads of every item in every DELIVERED (status 200) call, in wire
-/// order. Every push in this suite uses {"data": <int>}, so payloads are ints.
+/// order. Every push in this suite pushes ints, so payloads are ints.
 std::vector<int> delivered_payloads(const std::vector<RecordedCall>& calls) {
     std::vector<int> out;
     for (const auto& call : calls) {
@@ -187,10 +187,11 @@ std::vector<int> iota_vector(int count) {
     return out;
 }
 
-std::vector<json> data_items(int from, int count) {
+/// `count` payloads, the ints from `from` on, for push_many().
+std::vector<json> payloads(int from, int count) {
     std::vector<json> items;
     for (int i = 0; i < count; ++i) {
-        items.push_back({{"data", from + i}});
+        items.push_back(json(from + i));
     }
     return items;
 }
@@ -246,9 +247,12 @@ void test_count_threshold_triggers_flush() {
     opts.message_count = 3;
     opts.time_millis = 60000; // the timer must not be what flushes here
 
-    json result = client.queue("orders").buffer(opts).push(data_items(0, 3));
-    check(result["buffered"] == true && result["count"] == 3,
-          "a buffered push must keep its {buffered, count} API shape");
+    // Since 2.7.1 a push returns one PushResult per message; a buffered one
+    // returns none yet (before: {buffered:true, count:n}), its verdict being
+    // the flush's.
+    std::vector<PushResult> result = client.queue("orders").buffer(opts).push_many(payloads(0, 3));
+    check(result.empty(), "a buffered push returns no verdict yet, got " +
+          std::to_string(result.size()));
 
     check(eventually([&] { return server.count() >= 1; }),
           "reaching message_count must flush without waiting for the timer");
@@ -272,7 +276,7 @@ void test_timer_triggers_flush_below_threshold() {
     opts.message_count = 100; // never reached
     opts.time_millis = 40;
 
-    client.queue("orders").buffer(opts).push(data_items(0, 2));
+    client.queue("orders").buffer(opts).push_many(payloads(0, 2));
     check(eventually([&] { return server.count() >= 1; }),
           "the timer must flush a buffer that never reaches its count");
     check(delivered_payloads(server.calls()) == iota_vector(2),
@@ -286,7 +290,7 @@ void test_batches_are_message_count_sized_and_ordered() {
     opts.message_count = 4;
     opts.time_millis = 30;
 
-    client.queue("orders").buffer(opts).push(data_items(0, 10));
+    client.queue("orders").buffer(opts).push_many(payloads(0, 10));
     client.queue("orders").flush_buffer(); // no deadline: returns once everything LANDED
 
     auto calls = server.calls();
@@ -308,9 +312,9 @@ void test_buffers_are_keyed_per_queue_partition_address() {
     opts.message_count = 2;
     opts.time_millis = 60000;
 
-    client.queue("alpha").buffer(opts).push(data_items(0, 1));
-    client.queue("beta").buffer(opts).push(data_items(100, 1));
-    client.queue("alpha").buffer(opts).push(data_items(1, 1)); // alpha alone reaches its threshold
+    client.queue("alpha").buffer(opts).push(json(0));
+    client.queue("beta").buffer(opts).push(json(100));
+    client.queue("alpha").buffer(opts).push(json(1)); // alpha alone reaches its threshold
 
     check(eventually([&] { return server.count() >= 1; }), "alpha must flush on its own threshold");
     auto calls = server.calls();
@@ -352,7 +356,7 @@ void test_failed_batch_is_requeued_in_order_and_retried() {
     opts.time_millis = 60000;
     opts.retry_delay_millis = 5;
 
-    client.queue("orders").buffer(opts).push(data_items(0, 3));
+    client.queue("orders").buffer(opts).push_many(payloads(0, 3));
 
     check(eventually([&] {
         auto calls = server.calls();
@@ -387,9 +391,9 @@ void test_requeued_batch_stays_ahead_of_later_adds() {
     opts.max_size = 100;
     opts.retry_delay_millis = 5;
 
-    client.queue("orders").buffer(opts).push(data_items(0, 2)); // batch A: fails, requeues
+    client.queue("orders").buffer(opts).push_many(payloads(0, 2)); // batch A: fails, requeues
     check(eventually([&] { return server.count() >= 1; }), "batch A's first attempt must happen");
-    client.queue("orders").buffer(opts).push(data_items(2, 2)); // appended BEHIND the requeued A
+    client.queue("orders").buffer(opts).push_many(payloads(2, 2)); // appended BEHIND the requeued A
 
     healthy = true;
     client.queue("orders").flush_buffer();
@@ -414,7 +418,7 @@ void test_nothing_lost_across_intermittent_failures() {
     opts.retry_delay_millis = 2;
 
     for (int i = 0; i < 60; ++i) {
-        client.queue("orders").buffer(opts).push(data_items(i, 1));
+        client.queue("orders").buffer(opts).push(json(i));
     }
     client.queue("orders").flush_buffer();
 
@@ -446,18 +450,18 @@ void test_backpressure_blocks_add_at_bound_and_resumes() {
     opts.max_size = 2;
     opts.retry_delay_millis = 5;
 
-    client.queue("orders").buffer(opts).push(data_items(0, 2)); // taken by the drain, POST gated
+    client.queue("orders").buffer(opts).push_many(payloads(0, 2)); // taken by the drain, POST gated
     check(eventually([&] {
         return client.get_buffer_stats()["totalBufferedMessages"].get<int>() == 0;
     }), "the drain should have the first batch in flight");
 
-    client.queue("orders").buffer(opts).push(data_items(2, 2)); // refills to the bound
+    client.queue("orders").buffer(opts).push_many(payloads(2, 2)); // refills to the bound
 
     std::atomic<bool> parked_add_done{false};
     std::string parked_error;
     std::thread producer([&] {
         try {
-            client.queue("orders").buffer(opts).push(data_items(4, 1));
+            client.queue("orders").buffer(opts).push(json(4));
         } catch (const std::exception& e) {
             parked_error = e.what();
         }
@@ -541,7 +545,7 @@ void test_flush_deadline_is_loud_and_drops_nothing() {
     opts.time_millis = 60000;
     opts.retry_delay_millis = 5;
 
-    client.queue("orders").buffer(opts).push(data_items(0, 2));
+    client.queue("orders").buffer(opts).push_many(payloads(0, 2));
 
     bool threw = false;
     try {
@@ -574,7 +578,7 @@ void test_flush_with_zero_deadline_still_attempts_once() {
     opts.time_millis = 60000;
     opts.retry_delay_millis = 5;
 
-    client.queue("orders").buffer(opts).push(data_items(0, 1));
+    client.queue("orders").buffer(opts).push(json(0));
 
     bool threw = false;
     try {
@@ -603,8 +607,8 @@ void test_flush_all_attempts_every_address_and_rethrows() {
     opts.time_millis = 60000;
     opts.retry_delay_millis = 5;
 
-    client.queue("alpha").buffer(opts).push(data_items(0, 1));
-    client.queue("beta").buffer(opts).push(data_items(100, 1));
+    client.queue("alpha").buffer(opts).push(json(0));
+    client.queue("beta").buffer(opts).push(json(100));
 
     bool threw = false;
     try {
@@ -634,7 +638,7 @@ void test_close_flushes_then_refuses_new_pushes() {
     opts.message_count = 100; // below threshold, timer far away: only close() can flush this
     opts.time_millis = 60000;
 
-    client.queue("orders").buffer(opts).push(data_items(0, 3));
+    client.queue("orders").buffer(opts).push_many(payloads(0, 3));
     client.close();
 
     check(delivered_payloads(server.calls()) == iota_vector(3),
@@ -643,7 +647,7 @@ void test_close_flushes_then_refuses_new_pushes() {
     bool threw = false;
     std::string error_text;
     try {
-        client.queue("orders").buffer(opts).push(data_items(3, 1));
+        client.queue("orders").buffer(opts).push(json(3));
     } catch (const std::exception& e) {
         threw = true;
         error_text = e.what();

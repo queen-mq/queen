@@ -3,15 +3,11 @@
 // The homepage shows the regions between `guide:start(<step>)` and `guide:end`,
 // verbatim, minus lines ending in `guide:hide`. Everything outside them gives
 // the program a clean start and checks that each step did what the page says.
-// The C++ client has no streams, so this program skips that step. Two steps go
-// to the broker's HTTP API through the client's own HTTP layer, because the
-// client has no call for them: `configure` (QueueConfig has no retentionEnabled)
-// and `transaction` (a transaction's push cannot name a partition).
+// The C++ client has no streams, so this program skips that step.
 //
 // Build it from this directory, as one command (01-hello-world.cpp says why
 // each flag is there):
-//   g++ -std=c++17 -O1 -pthread -I../../../clients/client-cpp
-//       -I../../../clients/server/vendor -I/opt/homebrew/include
+//   g++ -std=c++17 -O1 -pthread -I../../../clients/client-cpp -I/opt/homebrew/include
 //       -I"$(brew --prefix openssl)/include" 00-five-minutes.cpp -o build/00-five-minutes
 //       -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
 //
@@ -40,7 +36,7 @@ static void check(bool ok, const std::string& what) {
 }
 
 int main() try {
-    queen::QueenClient admin("http://localhost:6632");
+    queen::Queen admin("http://localhost:6632");
     for (const char* q : {"orders", "shipments", "reminders", "reports"}) {
         try {
             admin.queue(q).del();
@@ -50,25 +46,19 @@ int main() try {
     admin.ephemeral().reset("price-requests");  // nothing left over from an earlier run
 
     // guide:start(configure)
-    queen::QueenClient client("http://localhost:6632");
+    queen::Queen client("http://localhost:6632");
 
-    // QueueConfig has no retentionEnabled, so the options go to the broker's
-    // configure route through the client's own HTTP layer.
-    client.get_http_client()->post("/api/v1/configure", {
-        {"queue", "orders"},
-        {"namespace", "shop"},              // groups queues in the dashboard
-        {"options", {
-            {"leaseTime", 30},              // seconds a worker holds a message,
-                                            // then it is redelivered
-            {"retryLimit", 3},              // failures before the message goes
-                                            // to the dead-letter queue
-            {"retentionEnabled", true},     // retention runs only when this is on
-            {"retentionSeconds", 86400},    // then messages older than a day are removed
-        }},
-    });
+    queen::QueueConfig options;
+    options.lease_time = 30;            // seconds a worker holds a message before it is redelivered
+    options.retry_limit = 3;            // failures before the message goes to the dead-letter queue
+    options.retention_enabled = true;   // retention runs only when this is on
+    options.retention_seconds = 86400;  // then messages older than a day are removed
+    client.queue("orders")
+        .namespace_name("shop")         // groups queues in the dashboard
+        .configure(options);
     // guide:end
     {
-        json queue = client.get_http_client()->get("/api/v1/resources/queues/orders");
+        json queue = client.admin().queue("orders");
         check(queue["namespace"] == "shop", "the queue is in the shop namespace");
         check(queue["options"]["leaseTime"] == 30, "leaseTime is 30 s");
         check(queue["options"]["retentionEnabled"] == true, "retention is on");
@@ -78,20 +68,17 @@ int main() try {
 
     // guide:start(push)
     client.queue("orders")
-        .partition("customer-42") // one ordered partition per customer, created by the push
-        .push({{
-            {"transactionId", "order-1001"},  // the dedup key: pushing it again is a no-op
-            {"data", {{"orderId", 1001}, {"customer", 42}, {"total", 59.9}}},
-        }});
+        .partition("customer-42")  // one ordered partition per customer, created by the push
+        .push({{"orderId", 1001}, {"customer", 42}, {"total", 59.9}},
+              "order-1001");       // the dedup key: pushing it again is a no-op
     // guide:end
     std::cout << "ok: push" << std::endl;
 
     // guide:start(consume)
     client.queue("orders")
-        .each()                        // the handler gets one message at a time
-        .limit(1)                      // stop after one message; a worker leaves this out
-        .consume([](const json& msg) { // acked when it returns, retried if it throws
-            std::cout << msg["data"] << std::endl;
+        .limit(1)                                 // stop after one message; a worker leaves this out
+        .consume([](const queen::Message& msg) {  // acked when it returns, retried if it throws
+            std::cout << msg.data << std::endl;
         });
     // guide:end
     check(client.queue("orders").wait(false).pop().empty(), "queue mode acked the order");
@@ -106,12 +93,14 @@ int main() try {
         .partitions(10)            // ...from up to 10 partitions
         .renew_lease(true, 2000)   // heartbeat every 2 s while the handler runs
         .auto_ack(false)           // the handler decides the outcome
-        .each()
         .limit(1)
-        .consume([&](const json& msg) {
-            bool ok = msg["data"]["total"].get<double>() > 0;
-            client.ack(msg, ok, {{"group", "billing"}});  // true: completed, false: failed
-            billed = msg["data"]["orderId"]; // guide:hide
+        .consume([&](const queen::Message& msg) {
+            if (msg.data["total"].get<double>() > 0) {
+                client.ack(msg);                  // the group and lease come with the message
+            } else {
+                client.nack(msg, "empty order");  // retried, then dead-lettered
+            }
+            billed = msg.data["orderId"]; // guide:hide
         });
     // guide:end
     check(billed == 1001, "the billing group read the order pushed before it existed");
@@ -122,49 +111,35 @@ int main() try {
         .group("fulfillment")
         .subscription_mode("all")
         .auto_ack(false)
-        .each()
         .limit(1)
-        .consume([&](const json& msg) {
-            const json& order = msg["data"];
-            const std::string id = std::to_string(order["orderId"].get<int>());
-            queen::TimerSchedule reminder;                       // a message tomorrow
+        .consume([&](const queen::Message& msg) {
+            const std::string id = std::to_string(msg.data["orderId"].get<int>());
+            queen::TimerSchedule reminder;                   // a message tomorrow
             reminder.queue = "reminders";
             reminder.timer_key = "review-" + id;
             reminder.delay_millis = 24 * 60 * 60 * 1000;
-            reminder.payload = {{"orderId", order["orderId"]},
-                                {"customer", order["customer"]}};
+            reminder.payload = {{"orderId", msg.data["orderId"]},
+                                {"customer", msg.data["customer"]}};
 
-            // client.transaction() cannot give its push a partition, so the step goes
-            // to the broker's transaction route through the client's own HTTP layer.
-            json step = {
-                {"operations", json::array({
-                    {{"type", "ack"}, {"status", "completed"},   // the input is done
-                     {"consumerGroup", "fulfillment"}, {"leaseId", msg["leaseId"]},
-                     {"transactionId", msg["transactionId"]},
-                     {"partitionId", msg["partitionId"]}},
-                    {{"type", "push"}, {"items", json::array({{  // the next event
-                        {"queue", "shipments"}, {"partition", msg["partition"]},
-                        {"transactionId", "ship-" + id},
-                        {"payload", {{"orderId", order["orderId"]}}},
-                    }})}},
-                })},
-                {"requiredLeases", json::array({msg["leaseId"]})},
-                {"kv", json::array({queen::wire::kv_write_op("put", "orders", "order-" + id,
-                    {{"status", "paid"}}, queen::KvTtl::seconds(7 * 86400), {})})},
-                {"timers", json::array({queen::wire::timer_schedule_op(reminder)})},
-            };
-            client.get_http_client()->post("/api/v1/transaction", step);
+            client.transaction()
+                .ack(msg)                                    // the input is done
+                .kv("orders").put("order-" + id, {{"status", "paid"}},  // the order's state
+                                  queen::KvTtl::seconds(7 * 86400))
+                .queue("shipments").partition(msg.partition) // the next event
+                    .push({{"orderId", msg.data["orderId"]}}, "ship-" + id)
+                .timers().schedule(reminder)
+                .commit();
         });
     // guide:end
     {
         json state = client.kv("orders").get("order-1001");
         check(state["found"] == true && state["value"]["status"] == "paid",
               "the KV write committed: " + state.dump());
-        json shipped = client.queue("shipments").wait(false).pop();
+        auto shipped = client.queue("shipments").wait(false).pop();
         check(shipped.size() == 1, "the shipment was pushed");
-        check(shipped[0]["partition"] == "customer-42", "into the same customer partition");
+        check(shipped[0].partition == "customer-42", "into the same customer partition");
         // The reminder is pending, a day from now.
-        json timer = client.get_http_client()->get("/api/v1/timers/reminders/review-1001");
+        json timer = client.timers().peek("reminders", "review-1001");
         check(timer["found"] == true, "the reminder is scheduled: " + timer.dump());
     }
     std::cout << "ok: transaction" << std::endl;
@@ -174,11 +149,10 @@ int main() try {
     client.queue("orders")
         .group("audit")                              // a new group, with its own cursor
         .subscription_from("2026-10-22T00:00:00Z")   // everything pushed from this time on
-        .each()
         .limit(1)
-        .consume([&](const json& msg) {
-            std::cout << "again: " << msg["data"] << std::endl;
-            replayed = msg["data"]["orderId"]; // guide:hide
+        .consume([&](const queen::Message& msg) {
+            std::cout << "again: " << msg.data << std::endl;
+            replayed = msg.data["orderId"]; // guide:hide
         });
     // guide:end
     check(replayed == 1001, "the audit group read the order again");
@@ -198,17 +172,16 @@ int main() try {
     std::cout << "ok: fetch" << std::endl;
 
     // guide:start(lock)
-    queen::Lock lock = client.lock("daily-report", 30);  // a lease with a fencing token
+    queen::Lock lock = client.lock("daily-report", 30);  // a lease with a fencing token, renewed
     if (lock.acquire()) {                                // false: another worker has it
         try {
             client.transaction()
-                .guard(lock)                   // commits only while the lock is ours
+                .guard(lock)                             // commits only while the lock is ours
                 .queue("reports")
-                .push({{{"transactionId", "report-2026-10-22"},
-                        {"data", {{"day", "2026-10-22"}}}}})
+                .push({{"day", "2026-10-22"}}, "report-2026-10-22")
                 .commit();
         } catch (...) {
-            lock.release();                    // given back when the commit throws, too
+            lock.release();                              // given back when the commit throws, too
             throw;
         }
         lock.release();

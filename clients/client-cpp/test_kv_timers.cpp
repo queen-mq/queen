@@ -342,6 +342,76 @@ void test_kv_incr_body() {
                "kv incr with min and max");
 }
 
+void test_kv_get_many_body() {
+    CaptureServer server;
+    QueenClient client({server.url()}, fast_config());
+
+    client.kv("orders").get_many({"9f1/items", "9f1/total"});
+    auto call = server.last();
+    check(call.method == "POST" && call.target == "/api/v1/kv",
+          "getMany goes through POST /api/v1/kv, got " + call.method + " " + call.target);
+    check_body(call, R"({"operations":[{"keys":["9f1/items","9f1/total"],"ns":"orders","op":"getMany"}]})",
+               "kv getMany body");
+
+    bool threw = false;
+    try {
+        client.kv("orders").get_many({});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "a getMany of no key is refused");
+    check(server.count() == 1, "and costs no round trip");
+}
+
+void test_kv_get_prefix_body() {
+    CaptureServer server;
+    QueenClient client({server.url()}, fast_config());
+
+    client.kv("orders").get_prefix("9f1/");
+    auto call = server.last();
+    check(call.method == "POST" && call.target == "/api/v1/kv",
+          "getPrefix goes through POST /api/v1/kv, got " + call.method + " " + call.target);
+    // Unset options are not sent: the broker's own page size applies.
+    check_body(call, R"({"operations":[{"ns":"orders","op":"getPrefix","prefix":"9f1/"}]})",
+               "kv getPrefix body, no options");
+
+    client.kv("orders").get_prefix("9f1/", KvPrefixOptions{"9f1/items", 50, true});
+    check_body(server.last(),
+               R"({"operations":[{"after":"9f1/items","keysOnly":true,"limit":50,"ns":"orders","op":"getPrefix","prefix":"9f1/"}]})",
+               "kv getPrefix with a cursor, a page size and keys only");
+
+    KvPrefixOptions only_limit;
+    only_limit.limit = 10;
+    client.kv("orders").get_prefix("9f1/", only_limit);
+    check_body(server.last(),
+               R"({"operations":[{"limit":10,"ns":"orders","op":"getPrefix","prefix":"9f1/"}]})",
+               "kv getPrefix with only a page size");
+}
+
+void test_get_many_and_get_prefix_hand_back_their_element() {
+    CaptureServer server([](const httplib::Request& req, httplib::Response& res) {
+        res.status = 200;
+        if (json::parse(req.body)["operations"][0]["op"] == "getMany") {
+            res.set_content(
+                R"({"results":[{"index":0,"op":"getMany","rows":[{"key":"a","value":{"n":1},"version":3}],"missing":["b"],"truncated":false}]})",
+                "application/json");
+        } else {
+            res.set_content(
+                R"({"results":[{"index":0,"op":"getPrefix","rows":[{"key":"p/a","version":1}],"truncated":true,"nextAfter":"p/a"}]})",
+                "application/json");
+        }
+    });
+    QueenClient client({server.url()}, fast_config());
+
+    json many = client.kv("n").get_many({"a", "b"});
+    check(many["rows"].size() == 1 && many["rows"][0]["key"] == "a" &&
+              many["rows"][0]["value"] == json{{"n", 1}} && many["missing"] == json::array({"b"}),
+          "getMany hands back its element, absence as a list of missing keys: " + many.dump());
+    json page = client.kv("n").get_prefix("p/");
+    check(page["rows"].size() == 1 && page["truncated"] == true && page["nextAfter"] == "p/a",
+          "getPrefix hands back its page and the cursor of the next one: " + page.dump());
+}
+
 void test_kv_reads_the_element_out_of_the_results_envelope() {
     CaptureServer server([](const httplib::Request&, httplib::Response& res) {
         res.status = 200;
@@ -516,6 +586,93 @@ void test_cancel_percent_encodes_a_slashed_timer_key() {
           "cancel must encode both segments, got " + server.last().target);
 }
 
+void test_timer_peek_and_list_paths() {
+    CaptureServer server;
+    QueenClient client({server.url()}, fast_config());
+
+    client.timers().peek("reminders", "order-1");
+    auto call = server.last();
+    check(call.method == "GET" && call.target == "/api/v1/timers/reminders/order-1",
+          "peek is GET /api/v1/timers/{queue}/{key}, got " + call.method + " " + call.target);
+    check(call.body.empty(), "peek carries no body");
+
+    client.timers().peek("re minders", "order/1");
+    check(server.last().target == "/api/v1/timers/re%20minders/order%2f1",
+          "peek encodes both segments, as cancel does, got " + server.last().target);
+
+    client.timers().list("reminders");
+    call = server.last();
+    check(call.method == "GET" && call.target == "/api/v1/timers/reminders",
+          "list is GET /api/v1/timers/{queue}, no query by default, got " + call.method + " " +
+              call.target);
+
+    client.timers().list("reminders", "order-1", 50);
+    check(server.last().target == "/api/v1/timers/reminders?after=order-1&limit=50",
+          "list with a cursor and a page size, got " + server.last().target);
+
+    client.timers().list("reminders", "", 10);
+    check(server.last().target == "/api/v1/timers/reminders?limit=10",
+          "list with only a page size, got " + server.last().target);
+}
+
+void test_timer_list_cursor_reaches_the_broker_as_written() {
+    // The query string is not this client's alone to spell: cpp-httplib parses
+    // it and encodes it again (a `/` travels raw, legal in a query). What has to
+    // hold is what the broker DECODES: the cursor, byte for byte, never split by
+    // an `&` or an `=` inside a timer key.
+    std::mutex mutex;
+    std::vector<std::pair<std::string, std::string>> seen;   // (after, limit)
+    CaptureServer server([&](const httplib::Request& req, httplib::Response& res) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            seen.emplace_back(req.get_param_value("after"), req.get_param_value("limit"));
+        }
+        default_responder(req, res);
+    });
+    QueenClient client({server.url()}, fast_config());
+
+    const std::vector<std::string> cursors = {"order/9", "a&b=c", "x y+z", "50%#off"};
+    for (const auto& cursor : cursors) {
+        client.timers().list("reminders", cursor, 5);
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    check(seen.size() == cursors.size(), "one list per cursor");
+    for (size_t i = 0; i < seen.size() && i < cursors.size(); ++i) {
+        check(seen[i].first == cursors[i] && seen[i].second == "5",
+              "the broker reads after='" + seen[i].first + "' limit='" + seen[i].second +
+                  "', sent after='" + cursors[i] + "' limit='5'");
+    }
+}
+
+void test_timer_peek_and_list_hand_back_the_brokers_answer() {
+    CaptureServer server([](const httplib::Request& req, httplib::Response& res) {
+        if (req.path == "/api/v1/timers/quiet") {
+            res.status = 204;
+            return;
+        }
+        res.status = 200;
+        if (req.path == "/api/v1/timers/reminders/order-1") {
+            res.set_content(
+                R"({"found":true,"queue":"reminders","timerKey":"order-1","txn":"t","payload":"eyJuIjoxfQ==","encrypted":false,"attempts":0,"claimed":false})",
+                "application/json");
+        } else {
+            res.set_content(R"({"rows":[{"timerKey":"order-1"}],"truncated":true,"nextAfter":"order-1"})",
+                            "application/json");
+        }
+    });
+    QueenClient client({server.url()}, fast_config());
+
+    json one = client.timers().peek("reminders", "order-1");
+    check(one["found"] == true && one["payload"] == "eyJuIjoxfQ==" && one["encrypted"] == false,
+          "peek hands back the timer, its payload as stored: " + one.dump());
+    json page = client.timers().list("reminders", "", 1);
+    check(page["rows"].size() == 1 && page["truncated"] == true && page["nextAfter"] == "order-1",
+          "list hands back the page and its cursor: " + page.dump());
+    json none = client.timers().list("quiet");
+    check(none == json::parse(R"({"rows":[],"truncated":false,"nextAfter":null})"),
+          "a bodiless answer is an empty page, never null: " + none.dump());
+}
+
 // ============================================================================
 // The transaction wire -- §6.3 and §10.4, the shape this whole feature turns on
 // ============================================================================
@@ -532,7 +689,7 @@ void test_kv_and_timers_are_top_level_and_never_operations() {
     timer.txn = "44444444-4444-7444-8444-444444444444";
 
     client.transaction()
-        .queue("out").push({json{{"data", json{{"n", 1}}}, {"transactionId", "55555555-5555-7555-8555-555555555555"}}})
+        .queue("out").push_items({TxPushItem{json{{"n", 1}}, "55555555-5555-7555-8555-555555555555", ""}})
         .kv("saga").put_if_absent("saga-1", json{{"state", "open"}}, KvTtl::seconds(600))
         .timers().schedule(timer)
         .commit();
@@ -582,12 +739,33 @@ void test_transaction_riders_are_byte_identical_to_the_standalone_ops() {
           alone.dump() + "\n      " + rider.dump());
 }
 
+void test_transaction_get_many_rides_the_kv_array() {
+    CaptureServer standalone_server;
+    CaptureServer bundle_server;
+    QueenClient standalone({standalone_server.url()}, fast_config());
+    QueenClient bundle({bundle_server.url()}, fast_config());
+
+    standalone.kv("saga").get_many({"a", "b"});
+    bundle.transaction()
+        .kv("saga").get_many({"a", "b"})
+        .kv("saga").put("c", json(1), KvTtl::seconds(60))
+        .commit();
+
+    json body = json::parse(bundle_server.last().body);
+    check(body["kv"].size() == 2 &&
+              body["kv"][0] == json::parse(R"({"keys":["a","b"],"ns":"saga","op":"getMany"})"),
+          "a getMany rides the kv array, in the order it was added: " + body["kv"].dump());
+    check(body["kv"][0] == json::parse(standalone_server.last().body)["operations"][0],
+          "and is byte-identical to the standalone op");
+    check(body["operations"].empty(), "a read is never an element of `operations`");
+}
+
 void test_a_bundle_without_riders_is_byte_identical_to_today() {
     CaptureServer server;
     QueenClient client({server.url()}, fast_config());
 
     client.transaction()
-        .queue("out").push({json{{"data", json{{"n", 1}}}, {"transactionId", "66666666-6666-7666-8666-666666666666"}}})
+        .queue("out").push_items({TxPushItem{json{{"n", 1}}, "66666666-6666-7666-8666-666666666666", ""}})
         .commit();
 
     // §6.3: zero cost for whoever does not use the feature. An absent array and
@@ -620,13 +798,15 @@ void test_an_entirely_empty_transaction_still_refuses_to_commit() {
     CaptureServer server;
     QueenClient client({server.url()}, fast_config());
 
+    // A misuse, refused before anything is sent: std::invalid_argument (before
+    // 2.7.1 a std::runtime_error).
     bool threw = false;
     try {
         client.transaction().commit();
-    } catch (const std::runtime_error&) {
+    } catch (const std::invalid_argument&) {
         threw = true;
     }
-    check(threw, "an empty transaction must still refuse");
+    check(threw, "an empty transaction must still refuse, as std::invalid_argument");
     check(server.count() == 0, "and must not reach the network");
 }
 
@@ -652,18 +832,23 @@ void test_every_ack_carries_the_lease_of_its_own_message() {
     CaptureServer server;
     QueenClient client({server.url()}, fast_config());
 
+    // The messages as a pop hands them over: the lease is the message's own.
     client.transaction()
-        .ack(json::array({
-            json{{"transactionId", "tx-1"}, {"partitionId", "p1"}, {"leaseId", "lease-1"}},
-            json{{"transactionId", "tx-2"}, {"partitionId", "p2"}, {"leaseId", "lease-2"}},
-            json{{"transactionId", "tx-3"}, {"partitionId", "p3"}}
-        }))
+        .ack_all({
+            Message::from_json(json{{"transactionId", "tx-1"}, {"partitionId", "p1"}, {"leaseId", "lease-1"}}),
+            Message::from_json(json{{"transactionId", "tx-2"}, {"partitionId", "p2"}, {"leaseId", "lease-2"}}),
+            Message::from_json(json{{"transactionId", "tx-3"}, {"partitionId", "p3"}})
+        })
         .commit();
 
     json body = json::parse(server.last().body);
     json ops = body["operations"];
     check(ops.size() == 3, "three acks should make three operations, got " + ops.dump());
     if (ops.size() != 3) return;
+
+    check(ops[0] == json::parse(
+              R"({"leaseId":"lease-1","partitionId":"p1","status":"completed","transactionId":"tx-1","type":"ack"})"),
+          "the ack operation, exactly, got " + ops[0].dump());
 
     // A Queen 2 broker fences an ACK with the lease the operation carries, and
     // lends it one from requiredLeases only when the bundle names a single
@@ -685,10 +870,10 @@ void test_a_null_or_empty_lease_puts_no_lease_on_the_ack() {
     QueenClient client({server.url()}, fast_config());
 
     client.transaction()
-        .ack(json::array({
-            json{{"transactionId", "tx-1"}, {"partitionId", "p1"}, {"leaseId", nullptr}},
-            json{{"transactionId", "tx-2"}, {"partitionId", "p2"}, {"leaseId", ""}}
-        }))
+        .ack_all({
+            Message::from_json(json{{"transactionId", "tx-1"}, {"partitionId", "p1"}, {"leaseId", nullptr}}),
+            Message::from_json(json{{"transactionId", "tx-2"}, {"partitionId", "p2"}, {"leaseId", ""}})
+        })
         .commit();
 
     json ops = json::parse(server.last().body)["operations"];
@@ -716,11 +901,11 @@ void test_commit_returns_on_a_lost_kv_precondition() {
     });
     QueenClient client({server.url()}, fast_config());
 
-    json out;
+    TransactionResult out;
     bool threw = false;
     try {
         out = client.transaction()
-            .queue("out").push({json{{"data", json{{"n", 1}}}}})
+            .queue("out").push(json{{"n", 1}})
             .kv("saga").put_if_absent("saga-1", json(1), KvTtl::seconds(60))
             .commit();
     } catch (const std::exception&) {
@@ -728,15 +913,16 @@ void test_commit_returns_on_a_lost_kv_precondition() {
     }
 
     check(!threw, "a lost KV precondition is a VERDICT and commit() must return it, not throw");
-    check(out.value("success", true) == false, "success:false should survive");
-    check(out.value("reason", std::string()) == "kv_precondition", "reason should survive");
+    check(!out.success, "success:false should survive");
+    check(out.reason == "kv_precondition" && out.lost_precondition(), "reason should survive");
+    check(out.transaction_id == "t1", "the transaction id should survive");
     // The five fields §8.3 adds, and the reason they are there: without them a
     // client would have to string-match the error message, which is forbidden
     // everywhere in this codebase.
-    check(out.value("failedIndex", -1) == 1, "failedIndex should survive, in the FLAT space");
-    check(out.value("kvReason", std::string()) == "exists", "kvReason should survive");
-    check(out.value("version", 0) == 90101, "version should survive");
-    check(out["value"] == json{{"owner", "a"}}, "the winner's value should survive");
+    check(out.failed_index == 1u, "failedIndex should survive, in the FLAT space");
+    check(out.kv_reason == "exists", "kvReason should survive");
+    check(out.version == 90101LL, "version should survive");
+    check(out.value == json{{"owner", "a"}}, "the winner's value should survive");
 }
 
 void test_commit_still_throws_on_every_other_failure() {
@@ -755,13 +941,17 @@ void test_commit_still_throws_on_every_other_failure() {
         });
         QueenClient client({server.url()}, fast_config());
 
+        // TransactionError since 2.7.1 (a std::runtime_error before), carrying
+        // the answer.
         bool threw = false;
         try {
             client.transaction().kv("saga").put("k", json(1), KvTtl::seconds(60)).commit();
-        } catch (const std::runtime_error&) {
+        } catch (const TransactionError& e) {
             threw = true;
+            check(!e.result().success && e.result().reason == reason,
+                  "the error carries the broker's answer, got " + e.result().raw.dump());
         }
-        check(threw, "reason '" + reason + "' must still throw");
+        check(threw, "reason '" + reason + "' must still throw, as TransactionError");
     }
 }
 
@@ -862,6 +1052,10 @@ int main() {
              test_put_if_absent_never_carries_a_contradictory_expect);
     run_test("kv delete body", test_kv_delete_body);
     run_test("kv incr body", test_kv_incr_body);
+    run_test("kv getMany body", test_kv_get_many_body);
+    run_test("kv getPrefix body", test_kv_get_prefix_body);
+    run_test("getMany and getPrefix hand back their element",
+             test_get_many_and_get_prefix_hand_back_their_element);
     run_test("kv reads the element out of the results envelope",
              test_kv_reads_the_element_out_of_the_results_envelope);
     run_test("a missing result is loud, not a silent absent",
@@ -876,11 +1070,17 @@ int main() {
     run_test("cancel echoes the expected txn", test_cancel_echoes_the_expected_txn);
     run_test("cancel percent-encodes a slashed timer key",
              test_cancel_percent_encodes_a_slashed_timer_key);
+    run_test("timer peek and list paths", test_timer_peek_and_list_paths);
+    run_test("timer list cursor reaches the broker as written",
+             test_timer_list_cursor_reaches_the_broker_as_written);
+    run_test("timer peek and list hand back the broker's answer",
+             test_timer_peek_and_list_hand_back_the_brokers_answer);
 
     run_test("kv and timers are TOP-LEVEL, never operations",
              test_kv_and_timers_are_top_level_and_never_operations);
     run_test("transaction riders are byte-identical to the standalone ops",
              test_transaction_riders_are_byte_identical_to_the_standalone_ops);
+    run_test("a transaction getMany rides the kv array", test_transaction_get_many_rides_the_kv_array);
     run_test("a bundle without riders is byte-identical to today",
              test_a_bundle_without_riders_is_byte_identical_to_today);
     run_test("a kv-only transaction is legal", test_a_kv_only_transaction_is_legal);

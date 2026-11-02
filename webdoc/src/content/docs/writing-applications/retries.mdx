@@ -29,6 +29,9 @@ sourceOfTruth:
   - clients/client-php/src/Consumer/ConsumerManager.php
   - clients/client-php/src/Consumer/Supervision.php
   - clients/client-cli/cmd/tail.go
+# sourceOfTruth re-read 2026-11-02 (C++ client 2.7.1): a C++ transaction ack with dlq sends its
+# reason, and the dead letter keeps it (checked on 2.7.0), so C++ leaves the sentence about lost
+# error text.
 verifiedBy:
   - examples/tutorials/run.sh
   - examples/tutorials/js/book-client-guide.mjs
@@ -74,7 +77,7 @@ A dead letter keeps the payload, the error the worker sent, the number of retrie
 
 <Why>a failure you cannot see is a failure you cannot fix. The dead-letter queue is where they wait for a person, or for a fix in the code.</Why>
 
-Some SDKs lose the error text on the way in 2.7.0: a Go or C++ transaction ack with `dlq`, and the automatic nack of PHP's consume loop, file the message as "Retries exhausted". Ack with `failed` or `dlq` and an `error` outside a transaction when the reason matters.
+Some SDKs lose the error text on the way in 2.7.0: a Go transaction ack with `dlq`, and the automatic nack of PHP's consume loop, file the message as "Retries exhausted". Ack with `failed` or `dlq` and an `error` outside a transaction when the reason matters.
 
 ## Read it
 

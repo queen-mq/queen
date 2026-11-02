@@ -32,6 +32,13 @@ cd /src/clients/client-cpp
 # against a responder the test controls. The live half is in test_client.
 ./bin/test_consumer
 
+# The push buffer (the blocking bound, a failed batch retried and never
+# dropped), ephemeral queues (one "upgrade" error for a pre-1.1 404, a missing
+# queue kept apart) and pop autopilot (what travels on the wire). Broker-free.
+./bin/test_buffer
+./bin/test_ephemeral
+./bin/test_autopilot
+
 # Locks, semaphores, `check` and guard(lock). The wire half is broker-free, for
 # the reason the KV/timer suite gives: a guard in the wrong place of a bundle
 # still commits against a live broker, it merely commits unguarded. Given the

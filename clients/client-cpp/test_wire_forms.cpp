@@ -19,6 +19,9 @@
  *      transaction body, and the broker lists the head's acks before the
  *      pushes: the caller must get the results back in the order of its own
  *      operations.
+ *   5. THE TRANSPORT UNDER ALL OF IT (2.7.1). Sequential requests share one
+ *      pooled keep-alive connection, and every request names its Content-Type
+ *      exactly once (2.7.0 sent a POST's twice).
  *
  * push_compression and framed_pop need zstd: this file builds without it too
  * (the Makefile adds -DQUEEN_CLIENT_ZSTD when the library is installed) and
@@ -70,8 +73,10 @@ struct RecordedCall {
     std::string method;
     std::string target;        // raw request target, query string included
     std::string content_type;
+    size_t content_type_count = 0;  // copies of the Content-Type header
     std::string body;          // as bytes: a binary push body is not text
     bool asked_frames = false; // the pop carried frames=true
+    int remote_port = -1;      // the client's end of the connection it came on
 };
 
 using Responder = std::function<void(const httplib::Request&, httplib::Response&)>;
@@ -121,8 +126,9 @@ public:
         auto handler = [this](const httplib::Request& req, httplib::Response& res) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                calls_.push_back({req.method, req.target, req.get_header_value("Content-Type"), req.body,
-                                  req.get_param_value("frames") == "true"});
+                calls_.push_back({req.method, req.target, req.get_header_value("Content-Type"),
+                                  req.get_header_value_count("Content-Type"), req.body,
+                                  req.get_param_value("frames") == "true", req.remote_port});
             }
             responder_(req, res);
         };
@@ -144,16 +150,22 @@ public:
 
     std::string url() const { return "http://127.0.0.1:" + std::to_string(port_); }
 
+    std::vector<RecordedCall> calls() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return calls_;
+    }
+
     std::vector<RecordedCall> pushes() const { return matching("POST", "/api/v1/push"); }
     std::vector<RecordedCall> transactions() const { return matching("POST", "/api/v1/transaction"); }
     std::vector<RecordedCall> pops() const { return matching("GET", "/api/v1/pop"); }
 };
 
-/// Raises a stop signal after a budget, so a consume loop that fails to stop on
-/// its own FAILS its test instead of hanging it.
+/// Cancels a consume loop after a budget, so a loop that fails to stop on its
+/// own FAILS its test instead of hanging it. Hand token() to the builder's
+/// cancel() before consume().
 class StopAfter {
 private:
-    std::atomic<bool> flag_{false};
+    Cancel token_;
     std::atomic<bool> done_{false};
     std::thread timer_;
 
@@ -165,7 +177,7 @@ public:
             while (!done_.load() && std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            flag_.store(true);
+            token_.cancel();
         });
     }
 
@@ -174,7 +186,7 @@ public:
         if (timer_.joinable()) timer_.join();
     }
 
-    std::atomic<bool>* signal() { return &flag_; }
+    const Cancel& token() const { return token_; }
 };
 
 // ============================================================================
@@ -226,6 +238,29 @@ ClientConfig config_with(bool binary_push, bool push_compression, bool framed_po
     config.push_compression = push_compression;
     config.framed_pop = framed_pop;
     return config;
+}
+
+/// A request's Content-Type, and that it travelled ONCE: 2.7.0 put a POST's in
+/// its own headers and httplib added a second copy.
+void check_content_type(const RecordedCall& call, const std::string& want) {
+    const std::string where = call.method + " " + call.target.substr(0, call.target.find('?'));
+    check(call.content_type == want, where + ": content type " + call.content_type + ", want " + want);
+    check(call.content_type_count == 1,
+          where + ": Content-Type sent " + std::to_string(call.content_type_count) + " times");
+}
+
+/// What a push answered, for a failure message.
+std::string statuses(const std::vector<PushResult>& results) {
+    std::string out = "[";
+    for (const auto& r : results) out += (out.size() > 1 ? "," : "") + r.status_text;
+    return out + "]";
+}
+
+/// Every field of each message, in order: all a consumer can tell apart.
+json fields_of(const std::vector<Message>& messages) {
+    json out = json::array();
+    for (const auto& m : messages) out.push_back(m.to_json());
+    return out;
 }
 
 // ============================================================================
@@ -330,28 +365,36 @@ void test_a_push_is_json_by_default() {
     StubServer server(queued());
     QueenClient client({server.url()}, config_with(false, false, false));
 
-    json result = client.queue("orders").partition("p1").push({{{"data", {{"a", 1}}}}});
+    // 2.7.1: push() takes the payload itself, sent as it is.
+    std::vector<PushResult> result = client.queue("orders").partition("p1").push(json{{"a", 1}});
 
-    check(result[0]["status"] == "queued", "the push answered " + result.dump());
+    check(result.size() == 1 && result[0].status == PushStatus::Queued && result[0].status_text == "queued",
+          "the push answered " + statuses(result));
     const auto sent = server.pushes();
     check(sent.size() == 1, "one push request");
-    check(sent[0].content_type == "application/json", "content type " + sent[0].content_type);
+    check_content_type(sent[0], "application/json");
     json body = json::parse(sent[0].body);
     check(body.size() == 1 && body.contains("items"), "the body is {items}");
     check(body["items"][0]["payload"] == json({{"a", 1}}), "the payload travels as JSON");
+    // An item is its queue, partition, payload and transaction id, and nothing
+    // else: since 2.7.1 a plain push carries no trace id.
+    const json& item = body["items"][0];
+    check(item.size() == 4 && item["queue"] == "orders" && item["partition"] == "p1" &&
+              item["transactionId"].is_string() && item["transactionId"].get<std::string>().size() == 36,
+          "the item: " + item.dump());
 }
 
 void test_binary_push_sends_the_binary_body_with_each_transaction_id() {
     StubServer server(queued());
     QueenClient client({server.url()}, config_with(true, false, false));
 
-    json result = client.queue("orders").partition("p1")
-        .push({{{"data", {{"a", 1}}}, {"transactionId", TXN}}});
+    std::vector<PushResult> result = client.queue("orders").partition("p1")
+        .push_items({PushItem{json{{"a", 1}}, TXN}});
 
-    check(result[0]["status"] == "queued", "the push answered " + result.dump());
+    check(result.size() == 1 && result[0].status == PushStatus::Queued, "the push answered " + statuses(result));
     const auto sent = server.pushes();
     check(sent.size() == 1, "one push request");
-    check(sent[0].content_type == "application/x-queen-push", "content type " + sent[0].content_type);
+    check_content_type(sent[0], "application/x-queen-push");
     check(sent[0].body.substr(0, 5) == std::string("QPB1\x04", 5), "a plain binary push body with transaction ids");
     const auto groups = plain_groups(sent[0].body.substr(5));
     check(groups.size() == 1 && groups[0].queue == "orders" && groups[0].partition == "p1",
@@ -384,10 +427,9 @@ void test_binary_push_carries_payloads_that_are_not_objects_and_non_ascii_text()
     QueenClient client({server.url()}, config_with(true, false, false));
     const std::vector<json> payloads = {
         "testo \"con\" virgolette\n", json::array({1, 2}), 7, nullptr, json{{"è", "€"}}};
-    std::vector<json> items;
-    for (const auto& payload : payloads) items.push_back({{"data", payload}});
 
-    client.queue("ordini").partition("città").push(items);
+    // One message per payload: the array is one message's payload here.
+    client.queue("ordini").partition("città").push_many(payloads);
 
     const auto groups = plain_groups(server.pushes()[0].body.substr(5));
     check(groups.size() == 1 && groups[0].partition == "città", "one group, its name in UTF-8");
@@ -398,15 +440,26 @@ void test_binary_push_carries_payloads_that_are_not_objects_and_non_ascii_text()
     }
 }
 
-void test_an_item_with_a_trace_id_stays_json() {
-    StubServer server(queued());
+/// Since 2.7.1 a plain push carries no trace id (the broker's push path cannot
+/// store one; a transaction's push can, see below). So a plain push is never
+/// held back to JSON by one, while the binary body still refuses an item that
+/// names one -- the rule a transaction's push relies on.
+void test_a_plain_push_carries_no_trace_id() {
+    StubServer server(queued(2));
     QueenClient client({server.url()}, config_with(true, false, false));
 
-    client.queue("orders").push({{{"data", {{"a", 1}}}, {"traceId", TRACE}}});
+    client.queue("orders").push_many({json{{"a", 1}}, json{{"a", 2}}});
 
     const auto sent = server.pushes();
-    check(sent[0].content_type == "application/json", "an item with a trace id travels as JSON");
-    check(json::parse(sent[0].body)["items"][0]["traceId"] == TRACE, "with its trace id");
+    check(sent.size() == 1, "one push request");
+    check_content_type(sent[0], "application/x-queen-push");
+    check(sent[0].body.substr(0, 5) == std::string("QPB1\x04", 5), "the binary body, with transaction ids");
+    const auto groups = plain_groups(sent[0].body.substr(5));
+    check(groups.size() == 1 && groups[0].partition == "Default" && groups[0].items.size() == 2,
+          "one group of two for orders/Default");
+    check(!wire::binary_push_body(
+              json::array({{{"queue", "q"}, {"partition", "p"}, {"payload", 1}, {"traceId", TRACE}}}), false),
+          "an item that names a trace id is left to the JSON body");
 }
 
 void test_an_item_the_binary_body_does_not_carry_leaves_the_push_to_json() {
@@ -428,12 +481,13 @@ void test_a_buffered_push_is_binary_too() {
     options.message_count = 10;
     options.time_millis = 60000;
 
-    client.queue("orders").partition("p1").buffer(options).push({{{"data", {{"a", 1}}}}});
+    const auto result = client.queue("orders").partition("p1").buffer(options).push(json{{"a", 1}});
+    check(result.empty(), "a buffered push has no verdict yet: it comes with the flush");
     client.flush_all_buffers();
 
     const auto sent = server.pushes();
     check(sent.size() == 1, "one push request");
-    check(sent[0].content_type == "application/x-queen-push", "content type " + sent[0].content_type);
+    check_content_type(sent[0], "application/x-queen-push");
     check(sent[0].body.substr(0, 5) == std::string("QPB1\x04", 5), "a plain binary push body");
     check(plain_groups(sent[0].body.substr(5))[0].items[0].second == R"({"a":1})", "the payload");
 }
@@ -467,13 +521,13 @@ void test_push_compression_sends_each_partition_as_one_zstd_frame_of_stored_fram
     StubServer server(queued(3));
     QueenClient client({server.url()}, config_with(true, true, false));
 
-    client.queue("orders").partition("p1").push({
-        {{"data", {{"a", 1}}}, {"transactionId", TXN}},
-        {{"data", {{"a", 2}}}},
-        {{"data", "x"}}});
+    client.queue("orders").partition("p1").push_items({
+        PushItem{json{{"a", 1}}, TXN},
+        PushItem{json{{"a", 2}}, ""},
+        PushItem{"x", ""}});
 
     const auto sent = server.pushes();
-    check(sent[0].content_type == "application/x-queen-push", "content type " + sent[0].content_type);
+    check_content_type(sent[0], "application/x-queen-push");
     check(sent[0].body.substr(0, 5) == std::string("QPB1\x08", 5), "a framed binary push body");
     const auto groups = framed_groups(sent[0].body.substr(5));
     check(groups.size() == 1 && groups[0].queue == "orders" && groups[0].partition == "p1" && groups[0].count == 3,
@@ -514,12 +568,17 @@ void test_a_frame_without_a_transaction_id_gets_the_text_of_its_id() {
 
 void test_the_zstd_options_say_what_they_need() {
     StubServer server(queued());
+    // What building a client with these options throws, "" when it builds. 2.7.1
+    // throws std::invalid_argument, its type for a misuse refused before
+    // anything is sent (2.7.0 threw std::runtime_error).
     auto build = [&server](bool binary_push, bool push_compression, bool framed_pop) {
         try {
             QueenClient client({server.url()}, config_with(binary_push, push_compression, framed_pop));
             return std::string();
-        } catch (const std::runtime_error& e) {
+        } catch (const std::invalid_argument& e) {
             return std::string(e.what());
+        } catch (const std::exception&) {
+            return std::string("<not std::invalid_argument>");
         }
     };
     // push_compression alone compresses nothing: it is binary_push that sends frames.
@@ -605,12 +664,14 @@ std::vector<bool> codecs() {
     return wire::zstd_available() ? std::vector<bool>{false, true} : std::vector<bool>{false};
 }
 
-/// What decode_pop_frames throws for `bytes`, or "" when it decodes.
+/// What decode_pop_frames throws for `bytes`, or "" when it decodes. 2.7.1
+/// throws queen::Error (a std::runtime_error), the client's base type; any
+/// other exception escapes and fails the case.
 std::string decode_error(const std::string& bytes) {
     try {
         wire::decode_pop_frames(bytes);
         return "";
-    } catch (const std::runtime_error& e) {
+    } catch (const Error& e) {
         return e.what();
     }
 }
@@ -692,27 +753,42 @@ void test_a_pop_sends_no_frames_parameter_by_default() {
     StubServer server(answer(TWO_MESSAGES_JSON));
     QueenClient client({server.url()}, config_with(false, false, false));
 
-    json messages = client.queue("orders").batch(2).wait(false).pop();
+    std::vector<Message> messages = client.queue("orders").batch(2).wait(false).pop();
 
     check(messages.size() == 2, "two messages");
-    check(!server.pops()[0].asked_frames, "the default pop carries no frames parameter");
+    const auto pops = server.pops();
+    check(!pops[0].asked_frames, "the default pop carries no frames parameter");
+    // A GET still names application/json, once.
+    check_content_type(pops[0], "application/json");
 }
 
 void test_a_framed_pop_gives_the_messages_of_the_json_answer() {
+    // 2.7.1 hands over typed messages: every field of each is compared, the
+    // delivery attempt and the offset included.
     StubServer json_server(answer(TWO_MESSAGES_JSON));
     QueenClient plain({json_server.url()}, config_with(false, false, false));
-    const json want = plain.queue("orders").batch(2).wait(false).pop();
+    const std::vector<Message> json_messages = plain.queue("orders").batch(2).wait(false).pop();
+    const json want = fields_of(json_messages);
+    check(json_messages.size() == 2 && json_messages[0].queue == "orders" &&
+              json_messages[1].transaction_id == "t-11" && json_messages[1].producer_sub == "svc" &&
+              json_messages[1].data == json({{"n", 11}, {"s", "x"}}) && json_messages[0].offset == 10LL &&
+              json_messages[1].offset == 11LL && json_messages[1].delivery_attempt == 3,
+          "the JSON answer's messages: " + want.dump());
 
     for (bool compress : {false, true}) {
         StubServer server(framed(framed_answer(R"({"frames":true})", 10, 11, compress, two_frames())));
         QueenClient client({server.url()}, config_with(false, false, true));
 
-        const json got = client.queue("orders").batch(2).wait(false).pop();
+        const std::vector<Message> messages = client.queue("orders").batch(2).wait(false).pop();
+        const json got = fields_of(messages);
 
         check(server.pops()[0].asked_frames, "the framed pop asks for frames");
         check(got.size() == 2, "two messages");
         check(got == want, std::string(compress ? "zstd" : "raw") + " record:\n      got:  " + got.dump() +
                                "\n      want: " + want.dump());
+        check(messages.size() == 2 && messages[0].offset == 10LL && messages[1].offset == 11LL &&
+                  messages[0].delivery_attempt == 3 && messages[1].delivery_attempt == 3,
+              "the offsets and the delivery attempt of the claim");
     }
 }
 
@@ -736,10 +812,10 @@ void test_a_framed_pop_reads_a_json_answer_as_always() {
     StubServer server(answer(TWO_MESSAGES_JSON));
     QueenClient client({server.url()}, config_with(false, false, true));
 
-    const json got = client.queue("orders").batch(2).wait(false).pop();
+    const std::vector<Message> got = client.queue("orders").batch(2).wait(false).pop();
 
-    check(got.size() == 2 && got[1]["transactionId"] == "t-11" && got[1]["data"]["s"] == "x",
-          "the JSON answer's messages: " + got.dump());
+    check(got.size() == 2 && got[1].transaction_id == "t-11" && got[1].data == json({{"n", 11}, {"s", "x"}}),
+          "the JSON answer's messages: " + fields_of(got).dump());
 }
 
 void test_a_framed_pop_of_nothing() {
@@ -786,13 +862,12 @@ void test_consume_with_framed_pops_hands_the_handler_the_claim_in_order() {
     std::mutex mutex;
     std::vector<std::string> seen;
 
-    client.queue("orders").batch(2).wait(false).auto_ack(false).each().limit(2)
-        .consume([&](const json& message) {
+    // consume() hands over one message per call (2.7.1: .each() is gone).
+    client.queue("orders").batch(2).wait(false).auto_ack(false).limit(2).cancel(budget.token())
+        .consume([&](const Message& message) {
             std::lock_guard<std::mutex> lock(mutex);
-            seen.push_back(message["transactionId"].get<std::string>() + "@" +
-                           message["partitionId"].get<std::string>() + "/" +
-                           message["leaseId"].get<std::string>());
-        }, budget.signal());
+            seen.push_back(message.transaction_id + "@" + message.partition_id + "/" + message.lease_id);
+        });
 
     check(seen == std::vector<std::string>({"t-10@7/lease-1", "t-11@7/lease-1"}),
           "the handler got the claim in order (" + std::to_string(seen.size()) + " messages)");
@@ -805,7 +880,11 @@ void test_consume_with_framed_pops_hands_the_handler_the_claim_in_order() {
 // Transaction
 // ============================================================================
 
-static const json POPPED = {{"transactionId", "in-1"}, {"partitionId", "7"}, {"leaseId", "lease-1"}};
+/// The message a transaction acks, as a pop handed it over (2.7.1: ack() takes a
+/// Message, and its lease and group come from it; this one is in no group).
+Message popped() {
+    return Message::from_json(json{{"transactionId", "in-1"}, {"partitionId", "7"}, {"leaseId", "lease-1"}});
+}
 
 inline Responder committed(const json& results) {
     return answer(json{{"transactionId", "tx"}, {"success", true}, {"results", results}}.dump());
@@ -837,14 +916,16 @@ void test_a_transaction_is_the_json_bundle_by_default() {
         StubServer server(committed(results));
         QueenClient client({server.url()}, config);
 
-        client.transaction().ack(POPPED).queue("out").push({{{"data", {{"n", 1}}}}}).commit();
+        client.transaction().ack(popped()).queue("out").push(json{{"n", 1}}).commit();
 
         const auto sent = server.transactions();
         check(sent.size() == 1, "one transaction request");
-        check(sent[0].content_type == "application/json", "content type " + sent[0].content_type);
+        check_content_type(sent[0], "application/json");
         const json body = json::parse(sent[0].body);
         check(body["operations"][0]["type"] == "ack" && body["operations"][1]["type"] == "push",
               "the JSON bundle, its operations as the caller added them");
+        check(body["operations"][1]["items"][0]["payload"] == json({{"n", 1}}),
+              "the payload travels as it is: " + body["operations"][1].dump());
     }
 }
 
@@ -856,18 +937,18 @@ void test_the_pushes_travel_as_frames_and_the_rest_as_the_json_head() {
         {{"index", 3}, {"type", "push"}, {"success", true}, {"transactionId", "c"}}})));
     QueenClient client({server.url()}, config_with(true, true, false));
 
-    // This client's transaction pushes go to a queue's default partition.
-    json result = client.transaction()
-        .ack(POPPED)
-        .queue("out").push({{{"data", {{"n", 1}}}}})
-        .queue("out").push({{{"data", {{"n", 2}}}, {"transactionId", "tx-b"}}})
-        .queue("other").push({{{"data", "text"}}})
+    // Pushes that name no partition go to the queue's default one.
+    TransactionResult result = client.transaction()
+        .ack(popped())
+        .queue("out").push(json{{"n", 1}})
+        .queue("out").push_items({TxPushItem{json{{"n", 2}}, "tx-b", ""}})
+        .queue("other").push("text")
         .commit();
 
-    check(result["success"] == true && result["results"].size() == 4, "the answer: " + result.dump());
+    check(result.success && result.results.size() == 4, "the answer: " + result.raw.dump());
     const auto sent = server.transactions();
     check(sent.size() == 1, "one transaction request");
-    check(sent[0].content_type == "application/x-queen-push", "content type " + sent[0].content_type);
+    check_content_type(sent[0], "application/x-queen-push");
     const auto body = transaction_body(sent[0].body);
     check(body.flags == 0, "no flags");
     // The head: the ack and the lease, and no push.
@@ -899,14 +980,14 @@ void test_the_results_come_back_in_the_order_of_the_callers_operations() {
         {{"index", 3}, {"type", "kv"}, {"opIndex", 0}, {"applied", true}}})));
     QueenClient client({server.url()}, config_with(true, true, false));
 
-    json result = client.transaction()
-        .queue("out").push({{{"data", 1}, {"transactionId", "first"}}})
-        .ack(POPPED)
-        .queue("out").push({{{"data", 2}, {"transactionId", "second"}}})
-        .kv("saga").put("k1", {{"step", 1}}, KvTtl::seconds(86400))
+    TransactionResult result = client.transaction()
+        .queue("out").push_items({TxPushItem{1, "first", ""}})
+        .ack(popped())
+        .queue("out").push_items({TxPushItem{2, "second", ""}})
+        .kv("saga").put("k1", json{{"step", 1}}, KvTtl::seconds(86400))
         .commit();
 
-    const json& results = result["results"];
+    const json& results = result.results;
     check(results.size() == 4, "four results");
     if (results.size() != 4) return;
     check(results[0]["index"] == 0 && results[0]["type"] == "push" && results[0]["transactionId"] == "first",
@@ -933,13 +1014,14 @@ void test_the_results_stay_as_they_are_when_the_acks_come_first_anyway() {
     StubServer server(committed(results));
     QueenClient client({server.url()}, config_with(true, true, false));
 
-    json result = client.transaction().ack(POPPED)
-        .queue("out").push({{{"data", 1}, {"transactionId", "a"}}}).commit();
+    TransactionResult result = client.transaction().ack(popped())
+        .queue("out").push_items({TxPushItem{1, "a", ""}}).commit();
 
-    check(result["results"] == results, "the results as the broker sent them: " + result["results"].dump());
+    check(result.results == results, "the results as the broker sent them: " + result.results.dump());
 }
 
 void test_a_rolled_back_bundle_comes_back_as_the_broker_answered_it() {
+    // A lost precondition is the verdict, RETURNED (2.7.1: typed, with the raw answer).
     const json lost = {{"transactionId", "tx"}, {"success", false}, {"reason", "kv_precondition"},
                        {"results", json::array()}, {"failedIndex", 2}, {"kvReason", "exists"}};
     StubServer server(answer(lost.dump()));
@@ -947,24 +1029,46 @@ void test_a_rolled_back_bundle_comes_back_as_the_broker_answered_it() {
     KvWriteOptions required;
     required.required = true;
 
-    json result = client.transaction()
-        .queue("out").push({{{"data", 1}}})
-        .ack(POPPED)
+    TransactionResult result = client.transaction()
+        .queue("out").push(1)
+        .ack(popped())
         .kv("idem").put_if_absent("order-1", true, KvTtl::seconds(86400), required)
         .commit();
 
-    check(result == lost, "the verdict as the broker sent it: " + result.dump());
+    check(result.raw == lost, "the verdict as the broker sent it: " + result.raw.dump());
+    check(!result.success && result.lost_precondition() && result.failed_index == size_t{2} &&
+              result.kv_reason == "exists",
+          "the verdict, read: reason '" + result.reason + "', kvReason '" + result.kv_reason + "'");
     check(server.transactions()[0].body.substr(0, 4) == "QTB1", "the bundle went out as the binary body");
+
+    // Any other rollback is THROWN since 2.7.1 (TransactionError), still carrying
+    // the broker's answer.
+    const json rejected = {{"transactionId", "tx"}, {"success", false}, {"reason", "rejected_ack"},
+                           {"error", "QTXN lease expired; the transaction rolled back"},
+                           {"results", json::array()}};
+    StubServer refusing(answer(rejected.dump()));
+    QueenClient other({refusing.url()}, config_with(true, true, false));
+    bool thrown = false;
+    try {
+        other.transaction().queue("out").push(1).ack(popped()).commit();
+    } catch (const TransactionError& e) {
+        thrown = true;
+        check(e.result().raw == rejected && e.result().reason == "rejected_ack",
+              "the rollback as the broker sent it: " + e.result().raw.dump());
+    }
+    check(thrown, "a rollback other than a lost precondition throws TransactionError");
+    check(refusing.transactions()[0].body.substr(0, 4) == "QTB1", "that bundle went out as the binary body too");
 }
 
 void test_a_bundle_whose_push_carries_a_trace_id_stays_json() {
     StubServer server(committed(json::array({{{"index", 0}, {"type", "push"}, {"success", true}}})));
     QueenClient client({server.url()}, config_with(true, true, false));
 
-    client.transaction().queue("out").push({{{"data", 1}, {"traceId", TRACE}}}).commit();
+    // A transaction's push is the one that can carry a trace id.
+    client.transaction().queue("out").push_items({TxPushItem{1, "", TRACE}}).commit();
 
     const auto sent = server.transactions();
-    check(sent[0].content_type == "application/json", "a push with a trace id travels as JSON");
+    check_content_type(sent[0], "application/json");
     check(json::parse(sent[0].body)["operations"][0]["items"][0]["traceId"] == TRACE, "with its trace id");
 }
 
@@ -973,10 +1077,11 @@ void test_a_bundle_without_pushes_stays_json() {
     StubServer server(committed(json::array({{{"index", 0}, {"type", "ack"}, {"success", true}}})));
     QueenClient client({server.url()}, config_with(true, true, false));
 
-    client.transaction().ack(POPPED).commit();
+    client.transaction().ack(popped()).commit();
 
     const auto sent = server.transactions();
-    check(sent[0].content_type == "application/json" && sent[0].body[0] == '{', "a bundle of acks travels as JSON");
+    check_content_type(sent[0], "application/json");
+    check(sent[0].body[0] == '{', "a bundle of acks travels as JSON");
 }
 
 void test_the_transaction_counts_flag_and_an_empty_head() {
@@ -1005,6 +1110,52 @@ void test_transaction_frames_needs_a_push_it_can_carry() {
 }
 
 // ============================================================================
+// Transport
+// ============================================================================
+
+/// 2.7.1 keeps its connections alive in a pool (2.7.0 opened one per request): a
+/// run of sequential requests -- pushes, a pop, a transaction, a delete --
+/// arrives on ONE connection, which then waits in the pool. And each names its
+/// Content-Type exactly once: a GET and a DELETE name application/json too.
+void test_sequential_requests_share_one_pooled_connection() {
+    StubServer server([](const httplib::Request& req, httplib::Response& res) {
+        res.status = 200;
+        if (req.path == "/api/v1/push") {
+            res.set_content(R"([{"status":"queued"}])", "application/json");
+        } else if (req.path == "/api/v1/transaction") {
+            res.set_content(R"({"transactionId":"tx","success":true,"results":[{"index":0,"type":"push","success":true}]})",
+                            "application/json");
+        } else if (req.path.rfind("/api/v1/pop", 0) == 0) {
+            res.set_content(TWO_MESSAGES_JSON, "application/json");
+        } else {
+            res.set_content(R"({"deleted":true})", "application/json");
+        }
+    });
+    QueenClient client({server.url()}, config_with(false, false, false));
+
+    client.queue("orders").partition("p1").push(json{{"a", 1}});
+    check(client.queue("orders").batch(2).wait(false).pop().size() == 2, "the pop's two messages");
+    client.transaction().queue("out").push(json{{"n", 1}}).commit();
+    client.queue("orders").partition("p1").push(json{{"a", 2}});
+    client.queue("orders").del();
+
+    const auto calls = server.calls();
+    check(calls.size() == 5, "five requests, got " + std::to_string(calls.size()));
+    std::set<int> connections;
+    for (const auto& call : calls) {
+        connections.insert(call.remote_port);
+        check_content_type(call, "application/json");
+    }
+    check(connections.size() == 1, std::to_string(calls.size()) + " sequential requests came on " +
+                                       std::to_string(connections.size()) + " connections, not one");
+    check(calls.size() == 5 && calls[0].method == "POST" && calls[1].method == "GET" &&
+              calls[2].method == "POST" && calls[3].method == "POST" && calls[4].method == "DELETE",
+          "a POST, a GET, a POST, a POST and a DELETE");
+    const size_t idle = client.get_http_client()->idle_connections();
+    check(idle == 1, "the connection waits in the pool afterwards: " + std::to_string(idle) + " idle");
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -1021,7 +1172,7 @@ int main() {
              test_consecutive_items_of_one_partition_share_a_group);
     run_test("binary_push carries payloads that are not objects, and non-ASCII text",
              test_binary_push_carries_payloads_that_are_not_objects_and_non_ascii_text);
-    run_test("an item with a trace id stays JSON", test_an_item_with_a_trace_id_stays_json);
+    run_test("a plain push carries no trace id", test_a_plain_push_carries_no_trace_id);
     run_test("an item the binary body does not carry leaves the push to JSON",
              test_an_item_the_binary_body_does_not_carry_leaves_the_push_to_json);
     run_test("a buffered push is binary too", test_a_buffered_push_is_binary_too);
@@ -1071,6 +1222,9 @@ int main() {
     run_zstd_test("the transaction counts flag, and an empty head",
                   test_the_transaction_counts_flag_and_an_empty_head);
     run_test("transaction_frames needs a push it can carry", test_transaction_frames_needs_a_push_it_can_carry);
+
+    run_test("sequential requests share one pooled connection, each naming its Content-Type once",
+             test_sequential_requests_share_one_pooled_connection);
 
     std::cout << std::endl;
     if (failures == 0) {

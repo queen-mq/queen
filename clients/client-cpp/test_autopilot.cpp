@@ -5,11 +5,14 @@
  * The four things a client can be wrong about here, and why each is asserted
  * against the WHOLE query string rather than against one parameter:
  *
- *   1. BOTH BUILDERS MUST AGREE. pop() and consume() assemble their query
- *      strings separately in this SDK -- the standing hazard PLAN_CONFLATION §4
- *      names by name -- so a rule implemented in one and not the other is the
- *      default failure, not an exotic one. Against a live broker the half that
- *      forgot simply gets a differently sized claim and passes.
+ *   1. BOTH ENTRY POINTS MUST AGREE. Before 2.7.1, pop() and consume() assembled
+ *      their query strings separately in this SDK -- the standing hazard
+ *      PLAN_CONFLATION §4 names by name -- so a rule implemented in one and not
+ *      the other was the default failure, not an exotic one. Since 2.7.1 both go
+ *      through one code path (detail::pop_once); every case still runs through
+ *      both, so a change that splits them again fails here. Against a live
+ *      broker the half that forgot simply gets a differently sized claim and
+ *      passes.
  *   2. NOT ENGAGING AUTOPILOT MUST BE BYTE-IDENTICAL TO THE OLD SDK. The escape
  *      hatch is only worth having if it is exact, and "exact" is not something a
  *      test of one parameter can show: a stray autopilot=true, or a batch that
@@ -161,11 +164,12 @@ public:
     }
 };
 
-/// Raises a stop signal after a budget, so a consume loop that fails to stop on
-/// its own FAILS its test instead of hanging it.
+/// Cancels a consume loop after a budget, so a loop that fails to stop on its
+/// own FAILS its test instead of hanging it. Hand token() to the builder's
+/// cancel() before consume().
 class StopAfter {
 private:
-    std::atomic<bool> flag_{false};
+    Cancel token_;
     std::atomic<bool> done_{false};
     std::thread timer_;
 
@@ -177,7 +181,7 @@ public:
             while (!done_.load() && std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            flag_.store(true);
+            token_.cancel();
         });
     }
 
@@ -186,7 +190,7 @@ public:
         if (timer_.joinable()) timer_.join();
     }
 
-    std::atomic<bool>* signal() { return &flag_; }
+    const Cancel& token() const { return token_; }
 };
 
 // ============================================================================
@@ -304,13 +308,15 @@ void test_consume_param_assembly() {
         StopAfter budget(3000);
 
         auto builder = client.queue("orders");
-        builder.group("workers").wait(false).limit(1);
+        builder.group("workers").wait(false).limit(1).cancel(budget.token());
         tc.build(builder);
-        builder.consume([](const json&) {}, budget.signal());
+        const ConsumeSummary summary = builder.consume([](const Message&) {});
 
         check(server.first_pop_query() == tc.want,
               "consume [" + tc.name + "]\n      got:  " + server.first_pop_query() +
                   "\n      want: " + tc.want);
+        check(summary.stopped_by == StopReason::Limit,
+              "consume [" + tc.name + "] did not stop at its limit");
     }
 }
 
@@ -429,14 +435,19 @@ void test_an_absent_echo_is_not_an_error() {
     check(!res.autopilot.present, "and says nothing about autopilot");
 }
 
-void test_pop_still_returns_a_bare_array() {
+void test_pop_still_returns_just_the_messages() {
     StubServer server(pop_with(R"(,"autopilot":{"partitions":8,"batch":200})"));
     QueenClient client({server.url()}, fast_config());
 
-    json messages = client.queue("orders").group("workers").wait(false).pop();
+    // 2.7.1: the messages are typed (Message); the echo is pop_result()'s.
+    std::vector<Message> messages = client.queue("orders").group("workers").wait(false).pop();
 
-    check(messages.is_array() && messages.size() == 1,
-          "pop() keeps its array contract whatever the response grew");
+    check(messages.size() == 1, "pop() keeps returning just the messages whatever the response grew");
+    if (messages.size() != 1) return;
+    const Message& m = messages[0];
+    check(m.id == "m1" && m.transaction_id == "t1" && m.data == json{{"n", 1}} &&
+              m.partition_id == "p1" && m.lease_id == "lease-1" && m.consumer_group == "workers",
+          "the message, its group from the answer around it: " + m.to_json().dump());
 }
 
 // ============================================================================
@@ -468,8 +479,8 @@ void test_the_advice_slows_the_empty_poll_loop() {
         StubServer server(empty_pop_with(extra));
         QueenClient client({server.url()}, fast_config());
         StopAfter budget(600);
-        client.queue("orders").group("workers").wait(false).consume([](const json&) {},
-                                                                    budget.signal());
+        client.queue("orders").group("workers").wait(false).cancel(budget.token())
+            .consume([](const Message&) {});
         return server.pop_count();
     };
 
@@ -513,6 +524,54 @@ void test_pop_sizing_rule() {
 }
 
 // ============================================================================
+// (f) Every key at once, autopilot off
+// ============================================================================
+
+/// The sizing cases set the sizing keys alone. With every other key a pop can
+/// carry set too, autopilot off still sends exactly the pre-autopilot set --
+/// and so does consume(), whose loop fills its own copy of the pop target from
+/// the consume options: a field forgotten on that road is a consumer that pops
+/// a different request than pop() does. (Key-sorted, as everywhere here; the
+/// values need no escaping, so what is pinned is the set, not httplib's.)
+static const std::string EVERY_KEY =
+    "batch=50&conflation=true&consumerGroup=workers&namespace=ns&partitions=4"
+    "&subscriptionFrom=2024-01-01T00:00:00Z&subscriptionMode=all&task=t&timeout=1500&wait=true";
+
+QueueBuilder& set_every_key(QueueBuilder& b) {
+    return b.group("workers").namespace_name("ns").task("t").autopilot(false).batch(50)
+        .partitions(4).wait(true).timeout_millis(1500).subscription_mode("all")
+        .subscription_from("2024-01-01T00:00:00Z").conflation(true);
+}
+
+void test_every_key_with_autopilot_off() {
+    {
+        // The conflation echo, or the pop rightly refuses the answer.
+        StubServer server(pop_with(R"(,"conflation":true)"));
+        QueenClient client({server.url()}, fast_config());
+
+        auto builder = client.queue("orders");
+        set_every_key(builder).commit_on_delivery(true).pop();
+
+        const std::string want = "autoAck=true&" + EVERY_KEY;
+        check(server.first_pop_query() == want,
+              "pop\n      got:  " + server.first_pop_query() + "\n      want: " + want);
+    }
+    {
+        // consume() always leases, so no autoAck.
+        StubServer server(pop_with(R"(,"conflation":true)"));
+        QueenClient client({server.url()}, fast_config());
+        StopAfter budget(3000);
+
+        auto builder = client.queue("orders");
+        set_every_key(builder).limit(1).cancel(budget.token());
+        builder.consume([](const Message&) {});
+
+        check(server.first_pop_query() == EVERY_KEY,
+              "consume\n      got:  " + server.first_pop_query() + "\n      want: " + EVERY_KEY);
+    }
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -534,13 +593,15 @@ int main() {
     run_test("pop_result() reports what the broker chose",
              test_pop_result_reports_what_the_broker_chose);
     run_test("an absent echo is not an error", test_an_absent_echo_is_not_an_error);
-    run_test("pop() keeps its array contract", test_pop_still_returns_a_bare_array);
+    run_test("pop() returns just the messages", test_pop_still_returns_just_the_messages);
 
     run_test("the empty-poll delay honours the advice", test_empty_poll_delay);
     run_test("the advice slows the real consume loop",
              test_the_advice_slows_the_empty_poll_loop);
 
     run_test("the sizing rule itself", test_pop_sizing_rule);
+    run_test("every key at once, autopilot off, from both entry points",
+             test_every_key_with_autopilot_off);
 
     std::cout << std::endl;
     if (failures == 0) {

@@ -12,6 +12,10 @@
  *   403                          {"error", "code": "cluster_suspended" | "storage_quota_exceeded"
  *                                                | "feature_gated" | "forbidden"}
  *
+ * Since 2.7.1 a pop THROWS what it cannot get past (an exhausted 429 budget, a
+ * 403) instead of logging it and returning [], so a throttled or suspended
+ * tenant no longer looks like an idle queue.
+ *
  * These run against an in-process httplib::Server on localhost -- no broker,
  * so the suite is self-contained:
  *
@@ -23,6 +27,7 @@
 #include <thread>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 #include <vector>
 #include <string>
 
@@ -48,7 +53,10 @@ struct RecordedHit {
     std::string method;
     std::string path;
     std::string authorization;
-    long long at_millis;                     // since server start
+    size_t authorization_count = 0;          // copies of the header on the request
+    std::string user_agent;
+    std::string tenant;                      // x-queen-tenant, from ClientConfig::headers
+    long long at_millis = 0;                 // since server start
 };
 
 inline PlannedResponse rate_limited_429(const std::string& retry_after = "") {
@@ -78,6 +86,9 @@ public:
                 planned = index_ < plan_.size() ? plan_[index_] : fallback_;
                 ++index_;
                 hits_.push_back({req.method, req.path, req.get_header_value("Authorization"),
+                                 req.get_header_value_count("Authorization"),
+                                 req.get_header_value("User-Agent"),
+                                 req.get_header_value("x-queen-tenant"),
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - start_).count()});
             }
@@ -118,6 +129,35 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return hits_.size();
     }
+};
+
+/// Cancels a consume loop after a budget, so a loop that fails to stop on its
+/// own FAILS its test instead of hanging it. Hand token() to the builder's
+/// cancel() before consume().
+class StopAfter {
+private:
+    Cancel token_;
+    std::atomic<bool> done_{false};
+    std::thread timer_;
+
+public:
+    explicit StopAfter(int budget_millis) {
+        timer_ = std::thread([this, budget_millis]() {
+            auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(budget_millis);
+            while (!done_.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            token_.cancel();
+        });
+    }
+
+    ~StopAfter() {
+        done_.store(true);
+        if (timer_.joinable()) timer_.join();
+    }
+
+    const Cancel& token() const { return token_; }
 };
 
 // ============================================================================
@@ -169,17 +209,26 @@ void test_bearer_token_on_every_request() {
 
     ClientConfig config;
     config.bearer_token = "test-token-123";
+    // 2.7.1: ClientConfig::headers ride every request too, beside the token.
+    config.headers = {{"x-queen-tenant", "acme"}};
     QueenClient client({server.url()}, config);
 
     client.queue("contract-queue").create();
     client.queue("contract-queue").batch(1).wait(false).pop();
     client.queue("contract-queue").del();
 
+    const std::string agent = std::string("queen-client-cpp/") + queen::version();
     auto hits = server.hits();
     check(hits.size() == 3, "expected 3 requests, got " + std::to_string(hits.size()));
     for (const auto& hit : hits) {
+        const std::string where = hit.method + " " + hit.path;
         check(hit.authorization == "Bearer test-token-123",
-              hit.method + " " + hit.path + " sent Authorization '" + hit.authorization + "'");
+              where + " sent Authorization '" + hit.authorization + "'");
+        check(hit.authorization_count == 1,
+              where + " sent Authorization " + std::to_string(hit.authorization_count) + " times");
+        check(hit.tenant == "acme", where + " dropped ClientConfig::headers (x-queen-tenant '" +
+                                        hit.tenant + "')");
+        check(hit.user_agent == agent, where + " sent User-Agent '" + hit.user_agent + "'");
     }
 }
 
@@ -244,9 +293,10 @@ void test_long_poll_pop_retries_past_the_ordinary_bound() {
     PlanServer server(plan, {200, R"({"messages":[{"id":"m1"}]})", ""});
 
     QueenClient client({server.url()}, fast_config());
-    json messages = client.queue("contract-queue").batch(1).wait(true).pop();
+    std::vector<Message> messages = client.queue("contract-queue").batch(1).wait(true).pop();
 
-    check(messages.size() == 1, "long-poll pop should eventually receive its message");
+    check(messages.size() == 1 && messages[0].id == "m1",
+          "long-poll pop should eventually receive its message");
     check(server.hit_count() == 15, "expected 15 attempts, got " + std::to_string(server.hit_count()));
 }
 
@@ -254,12 +304,64 @@ void test_non_waiting_pop_stays_bounded() {
     PlanServer server({}, rate_limited_429());
 
     QueenClient client({server.url()}, fast_config());
-    // pop() swallows errors and returns [] -- the attempt count is what proves
-    // a non-waiting pop uses the ordinary bounded policy.
-    json messages = client.queue("contract-queue").batch(1).wait(false).pop();
+    // The attempt count is what proves a non-waiting pop uses the ordinary
+    // bounded policy. Since 2.7.1 the spent budget is THROWN: 2.7.0 logged it and
+    // returned [], which a caller could not tell from an idle queue.
+    bool threw = false;
+    try {
+        client.queue("contract-queue").batch(1).wait(false).pop();
+    } catch (const HttpError& e) {
+        threw = true;
+        check(e.status_code() == 429, "status should be 429, got " + std::to_string(e.status_code()));
+        check(e.code() == "rate_limited", "code should be rate_limited, got '" + e.code() + "'");
+        check(e.is_rate_limited(), "is_rate_limited() should say so");
+    }
 
-    check(messages.empty(), "pop should swallow the exhausted 429 and return []");
+    check(threw, "a pop whose 429 budget is spent must throw HttpError, not return []");
     check(server.hit_count() == 10, "expected 10 attempts, got " + std::to_string(server.hit_count()));
+}
+
+void test_long_poll_pop_honours_an_explicit_bound() {
+    PlanServer server({}, rate_limited_429());
+
+    // retry_429.max_attempts set explicitly bounds a long-poll pop as well, and
+    // the pop then throws once it is spent.
+    QueenClient client({server.url()}, fast_config(3));
+
+    bool threw = false;
+    try {
+        client.queue("contract-queue").batch(1).wait(true).pop();
+    } catch (const HttpError& e) {
+        threw = true;
+        check(e.status_code() == 429, "status should be 429, got " + std::to_string(e.status_code()));
+    }
+
+    check(threw, "a long-poll pop whose explicit 429 budget is spent must throw HttpError");
+    check(server.hit_count() == 3, "expected 3 attempts, got " + std::to_string(server.hit_count()));
+}
+
+void test_pop_throws_a_terminal_403() {
+    for (bool wait : {false, true}) {
+        const std::string mode = wait ? "long-poll pop" : "non-waiting pop";
+        PlanServer server({}, {403, R"({"error":"cluster suspended","code":"cluster_suspended"})", ""});
+
+        QueenClient client({server.url()}, fast_config());
+
+        bool threw = false;
+        try {
+            client.queue("contract-queue").batch(1).wait(wait).pop();
+        } catch (const HttpError& e) {
+            threw = true;
+            check(e.status_code() == 403 && e.is_cluster_suspended() && e.is_terminal_refusal(),
+                  mode + ": the cluster_suspended 403 should round-trip, got " +
+                      std::to_string(e.status_code()) + " '" + e.code() + "'");
+            check(std::string(e.what()) == "cluster suspended", mode + ": what() should be the server message");
+        }
+
+        check(threw, mode + ": a 403 must throw HttpError, not return []");
+        check(server.hit_count() == 1, mode + ": a 403 must not be retried, got " +
+              std::to_string(server.hit_count()) + " hits");
+    }
 }
 
 void test_429_does_not_fail_over_to_another_backend() {
@@ -330,10 +432,11 @@ void test_consumer_stops_on_terminal_403() {
     PlanServer server({}, {403, R"({"error":"cluster suspended","code":"cluster_suspended"})", ""});
 
     QueenClient client({server.url()}, fast_config());
+    StopAfter budget(5000);  // a loop that keeps polling fails here, not hangs
 
     bool threw = false;
     try {
-        client.queue("contract-queue").wait(true).consume([](const json&) {});
+        client.queue("contract-queue").wait(true).cancel(budget.token()).consume([](const Message&) {});
     } catch (const HttpError& e) {
         threw = true;
         check(e.is_cluster_suspended(), "consume() should surface the cluster_suspended 403");
@@ -351,10 +454,15 @@ void test_consumer_backs_off_on_an_exhausted_429() {
     // max_attempts=1 disables the in-client retry, so the consumer loop's own
     // 429 fallback is what has to keep the poll alive.
     QueenClient client({server.url()}, fast_config(1));
-    client.queue("contract-queue").wait(true).limit(1).consume([](const json&) {});
+    StopAfter budget(5000);  // a loop that never gets past the 429s fails here, not hangs
+    ConsumeSummary summary = client.queue("contract-queue").wait(true).limit(1).cancel(budget.token())
+                                 .consume([](const Message&) {});
 
     check(server.hit_count() == 4, "consumer should poll through the 429s, got " +
           std::to_string(server.hit_count()) + " hits");
+    check(summary.processed == 1 && summary.stopped_by == StopReason::Limit,
+          "consumer should stop at its limit after handling the message, processed " +
+              std::to_string(summary.processed));
 }
 
 void test_backoff_is_exponential_capped_and_jittered() {
@@ -387,13 +495,15 @@ int main() {
     std::cout << "Queen C++ Client - Proxy Contract Tests" << std::endl;
     std::cout << "========================================\n" << std::endl;
 
-    run_test("Bearer token on every request", test_bearer_token_on_every_request);
+    run_test("Bearer token and extra headers on every request", test_bearer_token_on_every_request);
     run_test("No Authorization header without a token", test_no_authorization_header_without_token);
     run_test("429 then success is transparent", test_429_then_success_is_transparent);
     run_test("Retry-After wins over exponential backoff", test_retry_after_wins_over_exponential_backoff);
     run_test("Ordinary requests are bounded at 10 attempts", test_ordinary_requests_are_bounded_at_10);
     run_test("Long-poll pop retries past the ordinary bound", test_long_poll_pop_retries_past_the_ordinary_bound);
-    run_test("Non-waiting pop stays bounded", test_non_waiting_pop_stays_bounded);
+    run_test("Non-waiting pop stays bounded, then throws", test_non_waiting_pop_stays_bounded);
+    run_test("Long-poll pop honours an explicit bound, then throws", test_long_poll_pop_honours_an_explicit_bound);
+    run_test("Pop throws a terminal 403", test_pop_throws_a_terminal_403);
     run_test("429 does not fail over to another backend", test_429_does_not_fail_over_to_another_backend);
     run_test("Terminal 403 codes are surfaced", test_terminal_403_codes_are_surfaced);
     run_test("quota_exceeded 429 code is surfaced", test_quota_exceeded_429_code_is_surfaced);

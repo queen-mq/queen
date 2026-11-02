@@ -1,44 +1,46 @@
 /**
+ * Queen MQ client for C++ -- one header.
  *
- *           Message Queue Client - C++ Implementation            
- *                 Single Header Library                          
- *                                                                
- * 
- * Features:
- * - Fluent API matching Node.js client
- * - HTTP client with retry and failover
- * - Bearer-token auth, 429 backoff and terminal 403 codes (proxy contract)
- * - Load balancing (round-robin & session)
- * - Client-side buffering with time/count triggers, a blocking max_size
- *   bound, and lossless flush retry (1.0.6 buffer contract)
- * - Consumer groups and partitions
- * - Atomic transactions
- * - Lease renewal
- * - Dead Letter Queue (DLQ) queries
- * - Concurrent consumers using astp::ThreadPool
- * - Graceful shutdown
- * 
- * Dependencies:
- * - C++17 or later
- * - nlohmann/json
- * - cpp-httplib (header-only HTTP client)
- * - astp::ThreadPool
- * - zstd, only when built with -DQUEEN_CLIENT_ZSTD (and linked with -lzstd):
- *   the push_compression and framed_pop options of ClientConfig need it
- * 
+ * The same client as the JavaScript, Python, Go, Rust and PHP ones, in C++17:
+ *
+ * - Typed messages and results (Message, PushResult, AckResult,
+ *   TransactionResult); payloads stay nlohmann::json
+ * - Push, pop, consume (per message or per batch, any concurrency), ack with
+ *   every status, the ack reading its consumer group and lease from the message
+ * - Transactions: acks, pushes (to any partition), KV writes and timers in one
+ *   log entry, guarded by a lock
+ * - KV (the eight operations), timers (schedule, cancel, peek, list), locks
+ *   and semaphores with background renewal, ephemeral queues, reads by offset
+ * - admin(): the management and observability routes
+ * - Transport: keep-alive connection pool, HTTPS with certificate
+ *   verification, retry, 429 backoff, failover, affinity load balancing
+ * - Client-side push buffering with a blocking bound and lossless retry
+ * - Binary push body and framed pop (with zstd)
+ *
+ * Dependencies: C++17, cpp-httplib 0.27+, OpenSSL (for https://; define
+ * QUEEN_CLIENT_NO_TLS to build without it), nlohmann/json 3.11 (vendored in
+ * third_party/ when the program has none), zstd only with -DQUEEN_CLIENT_ZSTD
+ * (the push_compression and framed_pop options need it).
+ *
+ * With CMake: add_subdirectory(clients/client-cpp) or FetchContent, then
+ * target_link_libraries(app PRIVATE queen::client).
+ *
  * Usage:
  *   #include "queen_client.hpp"
- *   
- *   queen::QueenClient client("http://localhost:6632");
- *   client.queue("tasks").create();
- *   client.queue("tasks").push({{"data", {{"job", "test"}}}}});
- *   client.queue("tasks").consume([](const json& msg) {
- *       std::cout << "Processing: " << msg << std::endl;
- *   });
- *   client.close();
+ *
+ *   queen::Queen queen("http://localhost:6632");
+ *   queen.queue("orders").partition("customer-42").push({{"total", 19.99}});
+ *   queen.queue("orders").group("billing").batch(10).limit(100)
+ *        .consume([&](const queen::Message& m) { std::cout << m.data << "\n"; });
+ *   queen.close();
  */
 
 #pragma once
+
+#define QUEEN_CLIENT_VERSION "2.7.1"
+#define QUEEN_CLIENT_VERSION_MAJOR 2
+#define QUEEN_CLIENT_VERSION_MINOR 7
+#define QUEEN_CLIENT_VERSION_PATCH 1
 
 #include <string>
 #include <vector>
@@ -64,30 +66,34 @@
 #include <cstdlib>
 #include <limits>
 #include <regex>
-#include <future>
 #include <csignal>
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <tuple>
+#include <utility>
 #ifdef _WIN32
 #include <process.h>
 #else
 #include <unistd.h>
 #endif
 
-// JSON library (nlohmann)
-#include <json.hpp>
+// JSON: the program's own nlohmann/json when it has one (one copy per program),
+// else the one vendored beside this header.
+#if __has_include(<nlohmann/json.hpp>)
+#include <nlohmann/json.hpp>
+#else
+#include "third_party/nlohmann/json.hpp"
+#endif
 
-// HTTP library
-#ifndef CPPHTTPLIB_OPENSSL_SUPPORT
+// HTTP. TLS is on unless the build says QUEEN_CLIENT_NO_TLS: an https:// URL
+// needs it, and OpenSSL at link time.
+#if !defined(QUEEN_CLIENT_NO_TLS) && !defined(CPPHTTPLIB_OPENSSL_SUPPORT)
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #endif
 #include <httplib.h>
-
-// ThreadPool
-#include "../server/include/threadpool.hpp"
 
 // zstd, for the push_compression and framed_pop options. Opt-in: a build that
 // does not define QUEEN_CLIENT_ZSTD needs neither the header nor the library.
@@ -99,11 +105,14 @@ namespace queen {
 
 using json = nlohmann::json;
 
+/** This client's version: 2.7.1. */
+inline const char* version() { return QUEEN_CLIENT_VERSION; }
+
 // ============================================================================
 // Forward Declarations
 // ============================================================================
 
-class QueenClient;
+class Queen;
 class QueueBuilder;
 class TransactionBuilder;
 class HttpClient;
@@ -111,6 +120,7 @@ class LoadBalancer;
 class BufferManager;
 class MessageBuffer;
 class ConsumerManager;
+class Lock;
 
 // ============================================================================
 // Configuration Structures
@@ -129,7 +139,7 @@ enum class RetryKind {
 
 /**
  * Backoff policy applied when the server returns HTTP 429 (rate limited),
- * separate from the 5xx/network retry_attempts above. Zero-value fields fall
+ * separate from the 5xx/network retry_attempts. Zero-value fields fall
  * back to kind-based defaults:
  * - max_attempts: bounded (10 total attempts) for ordinary requests (push,
  *   admin calls, non-waiting pop); unbounded for a long-poll pop. Setting it
@@ -137,7 +147,6 @@ enum class RetryKind {
  * - base_millis: initial backoff absent a Retry-After header (default 500).
  * - cap_millis: ceiling for the exponential backoff (default 30000).
  * A Retry-After header (seconds) always wins over the computed delay.
- * See PLAN_QUEEN_PROXY_CLOUD.md §4/§9 (client 429 backoff, blocker B4).
  */
 struct Retry429Options {
     int max_attempts = 0;                    // 0 = kind-based default
@@ -145,15 +154,61 @@ struct Retry429Options {
     int cap_millis = 0;                      // 0 = 30000
 };
 
+/**
+ * How a request picks its backend when the client has more than one URL.
+ *
+ * Affinity, the default as in the JS, Python, Go and Rust clients, hashes the
+ * request's grouping key -- queue, partition and consumer group -- onto a ring,
+ * so the pops of one consumer group stay on one backend while it is healthy.
+ * RoundRobin spreads every request. Session picks one backend per client and
+ * keeps it until it fails.
+ */
+enum class LoadBalancing {
+    Affinity,
+    RoundRobin,
+    Session
+};
+
 struct ClientConfig {
     std::vector<std::string> urls;
+    /// Per request; a long-poll pop adds its own poll window to it.
     int timeout_millis = 30000;
+    /// Tries per request on one backend for a 5xx or a transport fault.
     int retry_attempts = 3;
+    /// The first pause between those tries; it doubles each time.
     int retry_delay_millis = 1000;
-    std::string load_balancing_strategy = "round-robin"; // "round-robin" or "session"
+    LoadBalancing load_balancing = LoadBalancing::Affinity;
+    /// Virtual nodes per backend on the affinity ring (128 in every SDK).
+    int affinity_hash_ring = 128;
+    /// How long a backend that failed stays out before it is tried again.
+    int health_retry_after_millis = 5000;
+    /// With several URLs, a 5xx or a transport fault moves to the next backend.
     bool enable_failover = true;
-    std::string bearer_token;                // sent as "Authorization: Bearer <token>"
+    /// Sent as "Authorization: Bearer <token>" (the proxy, Queen Cloud).
+    std::string bearer_token;
+    /// Extra headers on every request, e.g. {"x-queen-tenant", "acme"}.
+    std::vector<std::pair<std::string, std::string>> headers;
     Retry429Options retry_429;
+    /// Idle keep-alive connections kept per backend (as Go's MaxIdleConnsPerHost).
+    int max_idle_connections_per_host = 256;
+    /// An idle connection older than this is closed instead of reused (0 = never).
+    int idle_connection_timeout_millis = 60000;
+    /// Verify an https:// backend's certificate and host name. Turn off only
+    /// for a self-signed test broker.
+    bool tls_verify = true;
+    /// CA bundle file and/or directory for https://; empty = the system store.
+    std::string ca_cert_path;
+    std::string ca_cert_dir;
+    /**
+     * Install SIGINT/SIGTERM handlers. Off by default: a library has no
+     * business taking over process-wide signals unless the program asks, and
+     * the Rust client has the same rule. On, the first signal stops every
+     * consume() loop after its current message (StopReason::Cancelled) and
+     * makes Queen::wait_for_signal() return, so the program can close() --
+     * which flushes buffers -- and exit; a second signal ends the process the
+     * way the signal would have without these handlers.
+     */
+    bool handle_signals = false;
     // The three below need a broker that has the binary push body and the
     // framed pop answer. Off, the client sends and reads the JSON every broker
     // knows.
@@ -175,35 +230,106 @@ struct ClientConfig {
     bool framed_pop = false;
 };
 
+/**
+ * A queue's options for configure() / create(). Every field is optional and
+ * only the ones set are sent; the broker's default owns the rest (the table on
+ * the docs' Queues page). Names and units are the broker's, in this client's
+ * spelling: `retry_delay` is milliseconds, the others seconds unless named.
+ *
+ * configure() is a FULL upsert on the broker: an option left unset goes back
+ * to its default, it does not keep the value an earlier configure gave it.
+ */
 struct QueueConfig {
-    int lease_time = 300;                    // seconds
-    int retry_limit = 3;
-    int priority = 0;
-    int delayed_processing = 0;              // seconds
-    int window_buffer = 0;                   // seconds
-    int max_size = 0;
-    int retention_seconds = 0;
-    int completed_retention_seconds = 0;
-    bool encryption_enabled = false;
-    
+    std::optional<int> lease_time;                  // seconds, default 300 (60 for a queue made by push)
+    std::optional<int> retry_limit;                 // default 3
+    std::optional<int> retry_delay;                 // MILLISECONDS, default 1000
+    std::optional<bool> dead_letter_queue;          // default true
+    std::optional<bool> dlq_after_max_retries;      // default true
+    std::optional<int> priority;
+    std::optional<int> delayed_processing;          // seconds
+    std::optional<int> window_buffer;               // seconds
+    std::optional<int> max_size;
+    std::optional<int> ttl;                         // seconds
+    std::optional<int> dedup_window_seconds;        // default 3600; 0 turns dedup off
+    std::optional<bool> retention_enabled;          // must be true for the two below
+    std::optional<int> retention_seconds;
+    std::optional<int> completed_retention_seconds;
+    std::optional<int> max_wait_time_seconds;
+    std::optional<int> min_pop_wait_time;
+    std::optional<bool> encryption_enabled;
+    std::optional<std::string> retention_sink_hold;
+    std::optional<int> retention_sink_hold_max_seconds;
+
     json to_json() const {
-        return {
-            {"leaseTime", lease_time},
-            {"retryLimit", retry_limit},
-            {"priority", priority},
-            {"delayedProcessing", delayed_processing},
-            {"windowBuffer", window_buffer},
-            {"maxSize", max_size},
-            {"retentionSeconds", retention_seconds},
-            {"completedRetentionSeconds", completed_retention_seconds},
-            {"encryptionEnabled", encryption_enabled}
+        json out = json::object();
+        auto put = [&out](const char* key, const auto& value) {
+            if (value.has_value()) out[key] = *value;
         };
+        put("leaseTime", lease_time);
+        put("retryLimit", retry_limit);
+        put("retryDelay", retry_delay);
+        put("deadLetterQueue", dead_letter_queue);
+        put("dlqAfterMaxRetries", dlq_after_max_retries);
+        put("priority", priority);
+        put("delayedProcessing", delayed_processing);
+        put("windowBuffer", window_buffer);
+        put("maxSize", max_size);
+        put("ttl", ttl);
+        put("dedupWindowSeconds", dedup_window_seconds);
+        put("retentionEnabled", retention_enabled);
+        put("retentionSeconds", retention_seconds);
+        put("completedRetentionSeconds", completed_retention_seconds);
+        put("maxWaitTimeSeconds", max_wait_time_seconds);
+        put("minPopWaitTime", min_pop_wait_time);
+        put("encryptionEnabled", encryption_enabled);
+        put("retentionSinkHold", retention_sink_hold);
+        put("retentionSinkHoldMaxSeconds", retention_sink_hold_max_seconds);
+        return out;
     }
 };
 
 // Missing configuration is off: no reporter thread or KV traffic.
 struct SupervisionConfig { std::string group; };
 
+/**
+ * Stops a consume() loop from another thread: after the message it is on, or
+ * at once while it waits between polls. Copies share one flag, so hand a copy
+ * to the builder (QueueBuilder::cancel) and keep one to call cancel() on.
+ */
+class Cancel {
+private:
+    struct State {
+        std::mutex mutex;
+        std::condition_variable wake;
+        bool cancelled = false;
+    };
+    std::shared_ptr<State> state_ = std::make_shared<State>();
+
+public:
+    void cancel() {
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->cancelled = true;
+        }
+        state_->wake.notify_all();
+    }
+
+    bool is_cancelled() const {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        return state_->cancelled;
+    }
+
+    /** Sleep up to `duration`; true when cancelled before or during it. */
+    bool wait_for(std::chrono::milliseconds duration) const {
+        std::unique_lock<std::mutex> lock(state_->mutex);
+        return state_->wake.wait_for(lock, duration, [this] { return state_->cancelled; });
+    }
+};
+
+/**
+ * What a consume() loop runs with. QueueBuilder fills it; it is public for a
+ * caller that drives ConsumerManager itself.
+ */
 struct ConsumeOptions {
     std::optional<SupervisionConfig> supervision;
     std::string queue;
@@ -214,13 +340,12 @@ struct ConsumeOptions {
     int concurrency = 1;
     /**
      * The pop's message budget. 0 means UNSET -- the dimension pop autopilot
-     * lets the broker choose, from state no client can see. It used to mean the
-     * client-side default of 1, which is now applied only when autopilot is off,
-     * so that "never set a batch" and "set a batch of 1" stay distinguishable
-     * all the way to the wire. See util::pop_sizing.
+     * lets the broker choose, from state no client can see. See
+     * util::pop_sizing.
      */
     int batch = 0;
-    int limit = 0;                           // 0 = unlimited
+    /// Messages to handle before stopping, counted across ALL workers; 0 = unlimited.
+    long long limit = 0;
     int idle_millis = 0;                     // 0 = no idle timeout
     bool auto_ack = true;
     bool wait = true;
@@ -229,7 +354,6 @@ struct ConsumeOptions {
     int renew_lease_interval_millis = 60000;
     std::string subscription_mode;
     std::string subscription_from;
-    bool each = false;
     /// v4 multi-partition pop cap. 0 = unset, as for `batch` above.
     int max_partitions = 0;
     /**
@@ -239,21 +363,15 @@ struct ConsumeOptions {
      */
     std::optional<bool> autopilot;
     /**
-     * Last-value delivery for this consumer group on this queue
-     * (PLAN_CONFLATION.md §1.1): under backlog the group is served ONE message
-     * per partition, the newest, instead of the whole backlog.
-     *
-     * It is a property of the GROUP, not of the call: the first pop that
-     * registers the group persists it, and from then on the stored value wins
-     * for every consumer of that group. Declaring the opposite of what is stored
-     * does not flip anything -- it warns (§3.3).
-     *
-     * Requires a broker >= 1.1.0. An older one ignores the flag, which this
-     * client detects on the first response and refuses to continue past (§4);
-     * see ConflationUnsupportedError.
+     * Last-value delivery for this consumer group on this queue: under backlog
+     * the group is served ONE message per partition, the newest. A property of
+     * the GROUP, fixed by the first pop that registers it. Requires a broker
+     * >= 1.1.0; an older one is detected on the first response and refused
+     * (ConflationUnsupportedError).
      */
     bool conflation = false;
-    std::atomic<bool>* stop_signal = nullptr;
+    /// Set to stop the loop from another thread.
+    std::optional<Cancel> cancel;
 };
 
 struct BufferOptions {
@@ -304,6 +422,36 @@ inline BufferOptions resolve_buffer_options(const BufferOptions& options) {
 // ============================================================================
 
 /**
+ * The base of everything this client throws for a request that did not
+ * happen or did not succeed. A misuse -- a missing queue name, an ack of a
+ * message with no partition -- is std::invalid_argument instead, thrown before
+ * anything is sent.
+ */
+class Error : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+/**
+ * No answer: the connection could not be made, broke, or timed out. Always
+ * retryable -- and for a write its outcome is UNKNOWN: the broker may have
+ * committed it. Make every write safe to repeat (a transactionId derived from
+ * the work, a KV putIfAbsent gate).
+ */
+class NetworkError : public Error {
+private:
+    bool timed_out_ = false;
+
+public:
+    explicit NetworkError(const std::string& message, bool timed_out = false)
+        : Error(message), timed_out_(timed_out) {
+    }
+    /** The connection timed out (a read that timed out reads as a failed read). */
+    bool timed_out() const { return timed_out_; }
+    bool is_retryable() const { return true; }
+};
+
+/**
  * Thrown for any HTTP response with a >= 400 status. Derives from
  * std::runtime_error and keeps what() equal to the server's "error" message,
  * so existing catch (const std::exception&) sites are unaffected; the extra
@@ -314,10 +462,10 @@ inline BufferOptions resolve_buffer_options(const BufferOptions& options) {
  *                                                | "feature_gated" | "forbidden"}
  *
  * code() is empty when the body carries no such field (e.g. a broker that
- * predates the proxy contract). Transport failures (no response at all) still
- * surface as a plain std::runtime_error.
+ * predates the proxy contract). A transport failure (no response at all) is a
+ * NetworkError.
  */
-class HttpError : public std::runtime_error {
+class HttpError : public Error {
 private:
     int status_code_;
     std::string body_;
@@ -327,7 +475,7 @@ private:
 public:
     HttpError(int status_code, const std::string& message, const std::string& body,
               const std::string& code, std::optional<double> retry_after_seconds)
-        : std::runtime_error(message), status_code_(status_code), body_(body),
+        : Error(message), status_code_(status_code), body_(body),
           code_(code), retry_after_seconds_(retry_after_seconds) {
     }
 
@@ -347,6 +495,15 @@ public:
     bool is_cluster_suspended() const {
         return status_code_ == 403 && code_ == "cluster_suspended";
     }
+
+    /** 429: the backend is alive and shedding load. */
+    bool is_rate_limited() const { return status_code_ == 429; }
+
+    /** 403: a refusal no retry resolves (suspended, quota, gated, forbidden). */
+    bool is_terminal_refusal() const { return status_code_ == 403; }
+
+    /** Worth sending again: a 429 or a 5xx. Any other 4xx is the caller's. */
+    bool is_retryable() const { return status_code_ == 429 || status_code_ >= 500; }
 };
 
 /**
@@ -364,7 +521,7 @@ public:
  * Derives from std::runtime_error so existing catch (const std::exception&)
  * sites are unaffected.
  */
-class BufferFlushError : public std::runtime_error {
+class BufferFlushError : public Error {
 private:
     std::string queue_address_;
     int unflushed_count_;
@@ -372,7 +529,7 @@ private:
 public:
     BufferFlushError(const std::string& message, const std::string& queue_address,
                      int unflushed_count)
-        : std::runtime_error(message), queue_address_(queue_address),
+        : Error(message), queue_address_(queue_address),
           unflushed_count_(unflushed_count) {
     }
 
@@ -406,7 +563,7 @@ public:
  * still sees it; catch this type to tell "your broker is too old" apart from a
  * transport failure.
  */
-class ConflationUnsupportedError : public std::runtime_error {
+class ConflationUnsupportedError : public Error {
 private:
     std::string queue_;
     std::string group_;
@@ -417,7 +574,7 @@ public:
         // byte-identical across all seven SDKs so one grep finds every language;
         // the queue and group are appended because in C++ the accessors below
         // are rarely reached and what() is what ends up in the log.
-        : std::runtime_error(
+        : Error(
               "conflation was requested but this broker did not apply it \xE2\x80\x94 "
               "requires broker >= 1.1.0 (queue '" + queue + "', consumer group '" +
               group + "')"),
@@ -433,7 +590,7 @@ public:
  * ephemeral routes at all (EPHEMERAL_QUEUES.md §4, §8).
  *
  * No SDK in this product negotiates capabilities, so there is nothing to probe
- * and nothing to fall back to: the WHOLE /api/v1/ephemeral/* family answers 404
+ * and nothing to fall back to: the WHOLE /api/v1/ephemeral family answers 404
  * -- the broker because the routes were never registered, the proxy because an
  * unknown API path is `route_blocked` and it fails closed. Both are one verdict,
  * "upgrade".
@@ -596,52 +753,133 @@ inline std::string generate_uuid_v7() {
     return uuid_text(generate_uuid_v7_bytes().data());
 }
 
-/**
- * Validate UUID format
- */
+/** A canonical UUID: 8-4-4-4-12 hex digits, either case. */
 inline bool is_valid_uuid(const std::string& str) {
-    static std::regex uuid_regex(
-        "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-        std::regex::icase
-    );
-    return std::regex_match(str, uuid_regex);
-}
-
-/**
- * URL encode string
- */
-inline std::string url_encode(const std::string& value) {
-    std::ostringstream escaped;
-    escaped.fill('0');
-    escaped << std::hex;
-    
-    for (char c : value) {
-        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-            escaped << c;
-        } else {
-            escaped << '%' << std::setw(2) << int((unsigned char) c);
+    if (str.size() != 36) return false;
+    for (size_t i = 0; i < str.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(str[i]);
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != '-') return false;
+        } else if (!std::isxdigit(c)) {
+            return false;
         }
     }
-    
-    return escaped.str();
+    return true;
 }
 
 /**
- * Parse URL into components
+ * Percent-encode everything but the unreserved characters (RFC 3986), byte by
+ * byte, in lower-case hex: the spelling this client has always sent.
+ */
+inline std::string url_encode(const std::string& value) {
+    static const char* const HEX = "0123456789abcdef";
+    std::string out;
+    out.reserve(value.size() * 3);
+    for (char ch : value) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(HEX[c >> 4]);
+            out.push_back(HEX[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
+/**
+ * Split a broker URL into scheme, host and port: http(s)://host[:port], an
+ * IPv6 host in brackets. Throws std::invalid_argument for anything else -- a
+ * path included, since the client adds the API's own.
  */
 inline std::tuple<std::string, std::string, int> parse_url(const std::string& url) {
-    std::regex url_regex(R"(^(https?)://([^:/]+)(?::(\d+))?$)");
-    std::smatch match;
-    
-    if (!std::regex_match(url, match, url_regex)) {
-        throw std::invalid_argument("Invalid URL format: " + url);
+    auto invalid = [&url]() {
+        return std::invalid_argument(
+            "invalid broker URL '" + url + "': expected http(s)://host[:port], with no path");
+    };
+    const auto scheme_end = url.find("://");
+    if (scheme_end == std::string::npos) throw invalid();
+    const std::string scheme = url.substr(0, scheme_end);
+    if (scheme != "http" && scheme != "https") throw invalid();
+    const std::string rest = url.substr(scheme_end + 3);
+    std::string host;
+    std::string port_text;
+    if (!rest.empty() && rest[0] == '[') {
+        const auto close = rest.find(']');
+        if (close == std::string::npos) throw invalid();
+        host = rest.substr(0, close + 1);
+        const std::string after = rest.substr(close + 1);
+        if (!after.empty()) {
+            if (after[0] != ':') throw invalid();
+            port_text = after.substr(1);
+        }
+    } else {
+        const auto colon = rest.find(':');
+        host = rest.substr(0, colon);
+        if (colon != std::string::npos) port_text = rest.substr(colon + 1);
     }
-    
-    std::string scheme = match[1].str();
-    std::string host = match[2].str();
-    int port = match[3].str().empty() ? (scheme == "https" ? 443 : 80) : std::stoi(match[3].str());
-    
+    if (host.empty() || host.find('/') != std::string::npos || host.find('?') != std::string::npos) {
+        throw invalid();
+    }
+    int port = scheme == "https" ? 443 : 80;
+    if (!port_text.empty() || rest.find(':') != std::string::npos) {
+        if (port_text.empty() || port_text.size() > 5) throw invalid();
+        for (char c : port_text) {
+            if (!std::isdigit(static_cast<unsigned char>(c))) throw invalid();
+        }
+        port = std::stoi(port_text);
+        if (port < 1 || port > 65535) throw invalid();
+    }
     return {scheme, host, port};
+}
+
+/**
+ * FNV-1a, 32-bit: the affinity ring's hash. The same function over the same
+ * strings in every SDK, so every client maps a key to the same backend: part
+ * of the contract even though it never travels.
+ */
+inline uint32_t fnv1a(const std::string& s) {
+    uint32_t hash = 2166136261u;
+    for (char ch : s) {
+        hash ^= static_cast<unsigned char>(ch);
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+/** The partition a push names when it names none. */
+inline constexpr const char* DEFAULT_PARTITION = "Default";
+
+/** The consumer group of a pop that names none: queue mode. */
+inline constexpr const char* QUEUE_MODE_GROUP = "__QUEUE_MODE__";
+
+/**
+ * The broker's grouping of a pop -- `queue:partition:group`, `*` for any
+ * partition, or `namespace:task:group` for a discovery pop -- which is the
+ * affinity key. Empty when the request names neither (an admin call).
+ */
+inline std::string grouping_key(const std::string& queue, const std::string& partition,
+                                const std::string& namespace_name, const std::string& task,
+                                const std::string& group) {
+    const std::string g = group.empty() ? std::string(QUEUE_MODE_GROUP) : group;
+    if (!queue.empty()) {
+        return queue + ":" + (partition.empty() ? std::string("*") : partition) + ":" + g;
+    }
+    if (!namespace_name.empty() || !task.empty()) {
+        return (namespace_name.empty() ? std::string("*") : namespace_name) + ":" +
+               (task.empty() ? std::string("*") : task) + ":" + g;
+    }
+    return std::string();
+}
+
+/**
+ * A message's consumer group as an ack sends it: null for queue mode (no group,
+ * or the broker's "__QUEUE_MODE__"), which is what every 2.x broker has always
+ * been sent for it.
+ */
+inline json group_on_wire(const std::string& group) {
+    return group.empty() || group == QUEUE_MODE_GROUP ? json(nullptr) : json(group);
 }
 
 /**
@@ -810,9 +1048,8 @@ inline std::string pop_target_label(const std::string& queue, const std::string&
 }
 
 /**
- * The whole client-side conflation contract in one place, so `pop()` and
- * `consume()` -- two separate code paths in this SDK, which is the standing
- * hazard §4 opens with -- cannot drift apart on it.
+ * The whole client-side conflation contract in one place. pop() and every
+ * consume() worker reach it through the one pop path (detail::pop_once).
  *
  * No-op unless conflation was requested. Then:
  *   applied  -> nothing to say.
@@ -988,7 +1225,7 @@ inline long long ttl_seconds_from_millis(long long millis) {
 /**
  * The environment variable that disables pop autopilot for a whole process:
  * QUEEN_SDK_POP_AUTOPILOT=off restores the client-side defaults this SDK applied
- * before autopilot existed, byte for byte. It is read once, in the QueenClient
+ * before autopilot existed, byte for byte. It is read once, in the Queen
  * constructor, so a single deployment can be rolled back without touching code.
  */
 inline constexpr const char* ENV_POP_AUTOPILOT = "QUEEN_SDK_POP_AUTOPILOT";
@@ -1029,13 +1266,9 @@ struct PopSizing {
 /**
  * The batch/partitions/autopilot decision for one pop.
  *
- * IT EXISTS SO THERE IS EXACTLY ONE COPY OF THE EMISSION RULE. pop() and
- * consume() build their query strings separately in this SDK -- the standing
- * hazard PLAN_CONFLATION §4 names -- and a rule with three branches and a
- * per-dimension carve-out is precisely the kind that gets copied wrong. Both
- * builders call this and then only PLACE what it returns; where each key sits in
- * the query string stays with the builder, because the pre-autopilot key order
- * is part of what "byte-identical" means here.
+ * THE EMISSION RULE, in one copy: a rule with three branches and a
+ * per-dimension carve-out is precisely the kind that gets copied wrong.
+ * detail::pop_query calls this and only PLACES what it returns.
  *
  * `batch` and `max_partitions` are the USER's own values: 0 (or less) means the
  * setter was never called, which is what autopilot acts on. Note the case that
@@ -1123,115 +1356,6 @@ inline int empty_poll_delay_millis(const AutopilotDecision& decision) {
                                                         : EMPTY_POLL_BACKOFF_MILLIS;
 }
 
-// ---------------------------------------------------------------------------
-// Ack and lease-renewal answers
-// ---------------------------------------------------------------------------
-
-/**
- * Read the broker's answer to POST /api/v1/ack or /api/v1/ack/batch. Both
- * routes answer HTTP 200 with one item per acknowledgment, in request order:
- *
- *   [{index, transactionId, success, error, leaseReleased, dlq, noop}]
- *
- * A refused acknowledgment (its lease expired or was released, its message is
- * already settled) is an item with success:false, still under a 200, so the
- * per-item flag is the only signal that the broker settled anything. Returns
- * {success, result[, error]}: `result` is the answer as it came, `error` names
- * the first refusal. The same reading as the JS client's parseAckResults.
- */
-inline json ack_outcome(const json& answer, size_t expected) {
-    json out = {{"success", true}, {"result", answer}};
-    auto fail = [&out](const std::string& error) {
-        out["success"] = false;
-        out["error"] = error;
-        return out;
-    };
-    auto error_of = [](const json& item) -> std::string {
-        return item.contains("error") && item["error"].is_string()
-            ? item["error"].get<std::string>() : std::string();
-    };
-
-    if (!answer.is_array()) {
-        // A top-level error envelope: the whole request was refused.
-        if (answer.is_object() && !error_of(answer).empty()) {
-            return fail(error_of(answer));
-        }
-        return fail("Unexpected ack response format: missing per-item result array");
-    }
-    // A short or misaligned answer fails loudly instead of being read against
-    // the wrong message.
-    if (answer.size() != expected) {
-        return fail("Ack response has " + std::to_string(answer.size()) +
-                    " results, expected " + std::to_string(expected));
-    }
-
-    size_t refused = 0;
-    std::string first_error;
-    for (const auto& item : answer) {
-        if (!item.is_object()) {
-            return fail("Unexpected ack result item: " + item.dump());
-        }
-        std::string error = error_of(item);
-        bool success = error.empty() &&
-            !(item.contains("success") && item["success"].is_boolean() &&
-              !item["success"].get<bool>());
-        if (!success && refused++ == 0) {
-            first_error = error.empty() ? "Acknowledgment rejected by server" : error;
-        }
-    }
-    if (refused == 0) {
-        return out;
-    }
-    if (refused == 1) {
-        return fail(first_error);
-    }
-    return fail(std::to_string(refused) + " of " + std::to_string(answer.size()) +
-                " acknowledgments rejected: " + first_error);
-}
-
-/**
- * Read the broker's answer to POST /api/v1/lease/:leaseId/extend, which is
- * HTTP 200 whether or not anything was renewed:
- *
- *   {leaseId, success, renewed, newExpiresAt, expiresAt, lease_expires_at}
- *
- * success:false (renewed 0) means the lease is gone -- expired, released by an
- * ack or nack, or never there -- so nothing was extended, and its messages can
- * already be on their way to another consumer. Returns {leaseId, success,
- * newExpiresAt[, renewed][, error]}, the JS client's parseRenewResult reading.
- */
-inline json renew_outcome(const json& answer, const std::string& lease_id) {
-    const json& item = (answer.is_array() && !answer.empty()) ? answer[0] : answer;
-    if (!item.is_object()) {
-        return {{"leaseId", lease_id}, {"success", false}, {"newExpiresAt", nullptr},
-                {"error", "Unexpected lease renewal response"}};
-    }
-
-    json expires = nullptr;
-    for (const char* key : {"newExpiresAt", "expiresAt", "lease_expires_at"}) {
-        if (item.contains(key) && !item[key].is_null()) {
-            expires = item[key];
-            break;
-        }
-    }
-    bool success = (item.contains("success") && item["success"].is_boolean())
-        ? item["success"].get<bool>() : !expires.is_null();
-
-    json out = {{"leaseId", lease_id}, {"success", success}, {"newExpiresAt", expires}};
-    if (item.contains("renewed") && item["renewed"].is_number()) {
-        out["renewed"] = item["renewed"];
-    }
-    if (!success) {
-        bool has_error = item.contains("error") && item["error"].is_string() &&
-                         !item["error"].get<std::string>().empty();
-        out["error"] = has_error
-            ? item["error"].get<std::string>()
-            : std::string("Lease not renewed: it expired, was released by an ack or nack, "
-                          "or does not exist");
-    }
-    return out;
-}
-
 /// The longest handler error a nack carries: a message and the head of a
 /// trace. The broker keeps it with the dead letter, once per message.
 inline constexpr size_t MAX_NACK_ERROR_BYTES = 4096;
@@ -1253,6 +1377,252 @@ inline std::string nack_error_text(const std::string& what) {
 
 } // namespace util
 
+// ============================================================================
+// Typed values: messages, push, ack, renew and transaction results
+//
+// The same shapes as the Rust client's (crates/queen-protocol) and Go's
+// Message / PushResponse / AckResponse: the envelope is typed, the payload
+// (`data`) stays JSON.
+// ============================================================================
+
+/** How an ack settles a message. */
+enum class AckStatus {
+    /// Done: the group's cursor moves past it.
+    Completed,
+    /// Spends a retry: redelivered after retryDelay, dead-lettered past retryLimit.
+    Failed,
+    /// Redelivered without spending a retry.
+    Retry,
+    /// Dead-lettered now.
+    Dlq
+};
+
+inline const char* to_string(AckStatus status) {
+    switch (status) {
+    case AckStatus::Completed: return "completed";
+    case AckStatus::Failed: return "failed";
+    case AckStatus::Retry: return "retry";
+    case AckStatus::Dlq: return "dlq";
+    }
+    return "completed";
+}
+
+namespace util {
+
+/** A string field of a JSON object, "" when absent, null or not a string. A number is its text. */
+inline std::string text_of(const json& object, const char* key) {
+    if (!object.is_object()) return std::string();
+    auto it = object.find(key);
+    if (it == object.end() || it->is_null()) return std::string();
+    if (it->is_string()) return it->get<std::string>();
+    if (it->is_number()) return it->dump();
+    return std::string();
+}
+
+} // namespace util
+
+/**
+ * One delivered message, as a pop or a consume loop hands it over.
+ *
+ * Ack it with Queen::ack(message): the call reads the consumer group and the
+ * lease from the message itself, so a forgotten group cannot ack the wrong
+ * cursor (the queue-mode one), which is how a message used to come back.
+ */
+struct Message {
+    /// The broker's message id (a UUIDv7).
+    std::string id;
+    /// The producer's dedup key.
+    std::string transaction_id;
+    /// Empty when the message has none.
+    std::string trace_id;
+    /// The payload, as pushed.
+    json data;
+    /// Who pushed it, when the proxy stamped it; empty otherwise.
+    std::string producer_sub;
+    std::string created_at;
+    std::string queue;
+    std::string partition;
+    std::string partition_id;
+    /// Empty for a commit-on-delivery pop: there is nothing to ack.
+    std::string lease_id;
+    /// "__QUEUE_MODE__" when the pop named no group.
+    std::string consumer_group;
+    /// Which delivery this is: 1 the first time, more after a nack or an
+    /// expired lease. 0 when the broker did not say.
+    int delivery_attempt = 0;
+    /// The message's offset in its partition, when the broker sent it.
+    std::optional<long long> offset;
+
+    /**
+     * Read one message of a pop answer. `envelope` is the answer around it:
+     * a field the message lacks (queue, partition, lease, group) is taken from
+     * there, which is where a single-partition pop puts them.
+     */
+    static Message from_json(const json& item, const json& envelope = json()) {
+        auto field = [&](const char* key) {
+            std::string value = util::text_of(item, key);
+            return value.empty() ? util::text_of(envelope, key) : value;
+        };
+        Message m;
+        m.id = util::text_of(item, "id");
+        m.transaction_id = util::text_of(item, "transactionId");
+        m.trace_id = util::text_of(item, "traceId");
+        if (item.is_object() && item.contains("data")) {
+            m.data = item["data"];
+        } else if (item.is_object() && item.contains("payload")) {
+            m.data = item["payload"];
+        }
+        m.producer_sub = util::text_of(item, "producerSub");
+        m.created_at = util::text_of(item, "createdAt");
+        m.queue = field("queue");
+        m.partition = field("partition");
+        m.partition_id = field("partitionId");
+        m.lease_id = field("leaseId");
+        m.consumer_group = field("consumerGroup");
+        if (item.is_object() && item.contains("deliveryAttempt") &&
+            item["deliveryAttempt"].is_number_integer()) {
+            m.delivery_attempt = item["deliveryAttempt"].get<int>();
+        }
+        if (item.is_object() && item.contains("offset") && item["offset"].is_number_integer()) {
+            m.offset = item["offset"].get<long long>();
+        }
+        return m;
+    }
+
+    /** The broker's own shape, for logging or forwarding. */
+    json to_json() const {
+        auto opt = [](const std::string& value) { return value.empty() ? json(nullptr) : json(value); };
+        return {{"id", id},
+                {"transactionId", transaction_id},
+                {"traceId", opt(trace_id)},
+                {"data", data},
+                {"producerSub", opt(producer_sub)},
+                {"createdAt", created_at},
+                {"queue", queue},
+                {"partition", partition},
+                {"partitionId", partition_id},
+                {"leaseId", lease_id},
+                {"consumerGroup", consumer_group},
+                {"deliveryAttempt", delivery_attempt},
+                {"offset", offset ? json(*offset) : json(nullptr)}};
+    }
+};
+
+/**
+ * One message for QueueBuilder::push_items: a payload with its own dedup key.
+ * Give every message a transaction id derived from the work
+ * ("receipt-" + order_id): a repeat inside the queue's dedup window is then
+ * answered `duplicate` and writes nothing. Empty = minted here (a UUIDv7).
+ */
+struct PushItem {
+    json payload;
+    std::string transaction_id;
+};
+
+/** What the broker did with one pushed message. */
+enum class PushStatus {
+    Queued,
+    /// Its transaction id is already in the partition, inside the dedup window:
+    /// nothing written, and the step already happened.
+    Duplicate,
+    /// Refused; nothing written. `error` says why when the broker does.
+    Error,
+    /// Accepted by this client's push buffer; the verdict comes with the flush.
+    Buffered,
+    /// A 1.x status the 2.x broker never sends.
+    Failed,
+    /// A status this client does not know.
+    Unknown
+};
+
+struct PushResult {
+    size_t index = 0;
+    std::string message_id;
+    std::string transaction_id;
+    std::string queue_name;
+    PushStatus status = PushStatus::Unknown;
+    /// The status as the broker spelled it.
+    std::string status_text;
+    /// The message's offset in its partition (the pre-existing one for a duplicate).
+    std::optional<long long> offset;
+    std::string error;
+
+    /** Written, now or before: queued or duplicate. */
+    bool ok() const { return status == PushStatus::Queued || status == PushStatus::Duplicate; }
+
+    static PushResult from_json(const json& item, size_t fallback_index) {
+        PushResult r;
+        r.index = item.is_object() && item.contains("index") && item["index"].is_number_unsigned()
+            ? item["index"].get<size_t>() : fallback_index;
+        r.message_id = util::text_of(item, "message_id");
+        if (r.message_id.empty()) r.message_id = util::text_of(item, "messageId");
+        r.transaction_id = util::text_of(item, "transaction_id");
+        if (r.transaction_id.empty()) r.transaction_id = util::text_of(item, "transactionId");
+        r.queue_name = util::text_of(item, "queueName");
+        r.status_text = util::text_of(item, "status");
+        r.status = r.status_text == "queued"      ? PushStatus::Queued
+                 : r.status_text == "duplicate"   ? PushStatus::Duplicate
+                 : r.status_text == "error"       ? PushStatus::Error
+                 : r.status_text == "buffered"    ? PushStatus::Buffered
+                 : r.status_text == "failed"      ? PushStatus::Failed
+                                                  : PushStatus::Unknown;
+        if (item.is_object() && item.contains("offset") && item["offset"].is_number_integer()) {
+            r.offset = item["offset"].get<long long>();
+        }
+        r.error = util::text_of(item, "error");
+        return r;
+    }
+};
+
+/** The broker's verdict on one acknowledgment. A refusal is a value, not an exception. */
+struct AckResult {
+    size_t index = 0;
+    std::string transaction_id;
+    bool success = false;
+    /// Why it was refused: the lease expired or was released, the message is settled.
+    std::string error;
+    bool lease_released = false;
+    /// The ack filed the message in the dead-letter queue.
+    bool dlq = false;
+    /// Nothing to do: the message was already settled.
+    bool noop = false;
+    /// With conflation: how many older messages this ack settled with it.
+    std::optional<long long> conflated;
+
+    static AckResult from_json(const json& item, size_t fallback_index) {
+        AckResult r;
+        r.index = item.is_object() && item.contains("index") && item["index"].is_number_unsigned()
+            ? item["index"].get<size_t>() : fallback_index;
+        r.transaction_id = util::text_of(item, "transactionId");
+        r.error = util::text_of(item, "error");
+        // HTTP 200 also carries refusals: an item is a success only when it
+        // says so (or says nothing) and carries no error.
+        const bool flag = !(item.is_object() && item.contains("success") &&
+                            item["success"].is_boolean() && !item["success"].get<bool>());
+        r.success = flag && r.error.empty();
+        auto boolean = [&item](const char* key) {
+            return item.is_object() && item.contains(key) && item[key].is_boolean() &&
+                   item[key].get<bool>();
+        };
+        r.lease_released = boolean("leaseReleased");
+        r.dlq = boolean("dlq");
+        r.noop = boolean("noop");
+        if (item.is_object() && item.contains("conflated") && item["conflated"].is_number_integer()) {
+            r.conflated = item["conflated"].get<long long>();
+        }
+        return r;
+    }
+};
+
+/** The broker's answer to a lease renewal. */
+struct RenewResult {
+    std::string lease_id;
+    /// false: the lease is gone (expired, released by an ack or nack, or never there).
+    bool success = false;
+    std::string new_expires_at;
+    std::string error;
+};
+
 /**
  * What one pop returned, plus the broker's account of how it sized it.
  *
@@ -1261,9 +1631,177 @@ inline std::string nack_error_text(const std::string& what) {
  * non-conflating pop) with nowhere to carry the echo.
  */
 struct PopResult {
-    nlohmann::json messages = nlohmann::json::array();
+    std::vector<Message> messages;
     util::AutopilotDecision autopilot;
+    bool empty() const { return messages.empty(); }
 };
+
+/** Why a consume() loop stopped. */
+enum class StopReason {
+    /// The loop ended on its own (a terminal error is thrown instead).
+    Ended,
+    /// It handled `limit` messages.
+    Limit,
+    /// No message for `idle_millis`.
+    Idle,
+    /// A Cancel was triggered, or a signal arrived (ClientConfig::handle_signals).
+    Cancelled
+};
+
+/** What a consumer did before it stopped. The counters are the loop's decisions. */
+struct ConsumeSummary {
+    uint64_t processed = 0;
+    uint64_t acked = 0;
+    uint64_t nacked = 0;
+    StopReason stopped_by = StopReason::Ended;
+};
+
+/**
+ * The answer to a commit.
+ *
+ * `success` false with reason "kv_precondition" is a VALUE, returned and not
+ * thrown: a required KV precondition lost (the idempotency marker of a
+ * redelivered step doing its job, or a lock's guard), and nothing committed.
+ * Branch on failed_index, kv_reason, version and value. Every other rollback
+ * is thrown as TransactionError.
+ */
+struct TransactionResult {
+    bool success = false;
+    std::string transaction_id;
+    /// One result per operation, in a flat index space: every pushed item and
+    /// every ack in the order added, then the kv rider, then the timers.
+    json results = json::array();
+    std::string error;
+    std::string reason;
+    /// The flat index of the precondition that lost.
+    std::optional<size_t> failed_index;
+    std::string kv_reason;
+    std::optional<long long> version;
+    json value;
+    /// The answer as it came, for the fields above do not cover.
+    json raw;
+
+    bool lost_precondition() const { return !success && reason == "kv_precondition"; }
+
+    static TransactionResult from_json(const json& answer) {
+        TransactionResult r;
+        r.raw = answer;
+        if (!answer.is_object()) return r;
+        r.success = answer.contains("success") && answer["success"].is_boolean() &&
+                    answer["success"].get<bool>();
+        r.transaction_id = util::text_of(answer, "transactionId");
+        if (answer.contains("results") && answer["results"].is_array()) r.results = answer["results"];
+        r.error = util::text_of(answer, "error");
+        r.reason = util::text_of(answer, "reason");
+        if (answer.contains("failedIndex") && answer["failedIndex"].is_number_unsigned()) {
+            r.failed_index = answer["failedIndex"].get<size_t>();
+        }
+        r.kv_reason = util::text_of(answer, "kvReason");
+        if (answer.contains("version") && answer["version"].is_number_integer()) {
+            r.version = answer["version"].get<long long>();
+        }
+        if (answer.contains("value")) r.value = answer["value"];
+        return r;
+    }
+};
+
+/** A transaction the broker rolled back for a reason other than a lost precondition. */
+class TransactionError : public Error {
+private:
+    TransactionResult result_;
+
+public:
+    explicit TransactionError(TransactionResult result)
+        : Error("transaction rolled back: " +
+                (result.error.empty() ? std::string("no reason given") : result.error)),
+          result_(std::move(result)) {
+    }
+    const TransactionResult& result() const { return result_; }
+};
+
+namespace util {
+
+/** The messages of a pop answer (null for a bodiless 204). */
+inline std::vector<Message> messages_of(const json& answer) {
+    std::vector<Message> out;
+    if (!answer.is_object() || !answer.contains("messages") || !answer["messages"].is_array()) {
+        return out;
+    }
+    out.reserve(answer["messages"].size());
+    for (const auto& item : answer["messages"]) {
+        out.push_back(Message::from_json(item, answer));
+    }
+    return out;
+}
+
+/**
+ * The per-item verdicts of POST /api/v1/ack or /api/v1/ack/batch: HTTP 200 with
+ * one item per acknowledgment, in request order. A short or misaligned answer
+ * throws instead of being read against the wrong message.
+ */
+inline std::vector<AckResult> parse_ack_results(const json& answer, size_t expected) {
+    if (!answer.is_array()) {
+        if (answer.is_object() && !text_of(answer, "error").empty()) {
+            throw Error("ack refused: " + text_of(answer, "error"));
+        }
+        throw Error("ack: unexpected answer, no per-item result array");
+    }
+    if (answer.size() != expected) {
+        throw Error("ack returned " + std::to_string(answer.size()) + " results for " +
+                    std::to_string(expected) + " acknowledgments");
+    }
+    std::vector<AckResult> out;
+    out.reserve(answer.size());
+    for (size_t i = 0; i < answer.size(); ++i) {
+        out.push_back(AckResult::from_json(answer[i], i));
+    }
+    return out;
+}
+
+/** The verdicts of a push, in request order. */
+inline std::vector<PushResult> parse_push_results(const json& answer) {
+    std::vector<PushResult> out;
+    const json* items = &answer;
+    if (answer.is_object() && answer.contains("results") && answer["results"].is_array()) {
+        items = &answer["results"];
+    }
+    if (!items->is_array()) return out;
+    out.reserve(items->size());
+    for (size_t i = 0; i < items->size(); ++i) {
+        out.push_back(PushResult::from_json((*items)[i], i));
+    }
+    return out;
+}
+
+/**
+ * The answer to POST /api/v1/lease/:leaseId/extend, which is HTTP 200 whether
+ * or not anything was renewed: success false means the lease is gone, and its
+ * messages may already be on their way to another consumer.
+ */
+inline RenewResult parse_renew(const json& answer, const std::string& lease_id) {
+    const json& item = (answer.is_array() && !answer.empty()) ? answer[0] : answer;
+    RenewResult r;
+    r.lease_id = lease_id;
+    if (!item.is_object()) {
+        r.error = "unexpected lease renewal answer";
+        return r;
+    }
+    for (const char* key : {"newExpiresAt", "expiresAt", "lease_expires_at"}) {
+        r.new_expires_at = text_of(item, key);
+        if (!r.new_expires_at.empty()) break;
+    }
+    r.success = item.contains("success") && item["success"].is_boolean()
+        ? item["success"].get<bool>() : !r.new_expires_at.empty();
+    if (!r.success) {
+        r.error = text_of(item, "error");
+        if (r.error.empty()) {
+            r.error = "lease not renewed: it expired, was released by an ack or nack, or does not exist";
+        }
+    }
+    return r;
+}
+
+} // namespace util
 
 // ============================================================================
 // KV and timers - value types (PLAN_KV_TIMERS.md §5, §4)
@@ -1413,16 +1951,16 @@ inline long long kv_int64(const json& value) {
     if (value.is_number_unsigned()) {
         auto raw = value.get<unsigned long long>();
         if (raw > static_cast<unsigned long long>(std::numeric_limits<long long>::max())) {
-            throw std::runtime_error("kv_int64: counter is past int64 and cannot be represented");
+            throw Error("kv_int64: counter is past int64 and cannot be represented");
         }
         return static_cast<long long>(raw);
     }
     if (value.is_number_float()) {
-        throw std::runtime_error(
+        throw Error(
             "kv_int64: counter " + value.dump() +
             " is not an integer this client can represent exactly; read it as a string instead");
     }
-    throw std::runtime_error("kv_int64: expected a JSON number, got " + value.dump());
+    throw Error("kv_int64: expected a JSON number, got " + value.dump());
 }
 
 // ============================================================================
@@ -1505,10 +2043,37 @@ struct EphemeralAckOptions {
 // transaction. test_kv_timers.cpp asserts the two are byte-identical.
 // ============================================================================
 
+/** A prefix scan's options: an exclusive keyset cursor, a page size, keys without values. */
+struct KvPrefixOptions {
+    /// Resume after this key (exclusive); empty = from the start.
+    std::string after;
+    /// Keys per page; 0 = the broker's default. Clamped server-side, with
+    /// `truncated` saying what the clamp cost and `nextAfter` where to resume.
+    int limit = 0;
+    /// Keys and versions without values.
+    bool keys_only = false;
+};
+
 namespace wire {
 
 inline json kv_get_op(const std::string& ns, const std::string& key) {
     return json{{"op", "get"}, {"ns", ns}, {"key", key}};
+}
+
+inline json kv_get_many_op(const std::string& ns, const std::vector<std::string>& keys) {
+    if (keys.empty()) {
+        throw std::invalid_argument("getMany needs at least one key");
+    }
+    return json{{"op", "getMany"}, {"ns", ns}, {"keys", keys}};
+}
+
+inline json kv_get_prefix_op(const std::string& ns, const std::string& prefix,
+                             const KvPrefixOptions& options) {
+    json op = {{"op", "getPrefix"}, {"ns", ns}, {"prefix", prefix}};
+    if (!options.after.empty()) op["after"] = options.after;
+    if (options.limit > 0) op["limit"] = options.limit;
+    if (options.keys_only) op["keysOnly"] = true;
+    return op;
 }
 
 inline json kv_write_op(const std::string& op_name, const std::string& ns, const std::string& key,
@@ -1868,7 +2433,7 @@ inline json single_result(const json& response, const char* what) {
         !response["results"].empty()) {
         return response["results"][0];
     }
-    throw std::runtime_error(
+    throw Error(
         std::string(what) + ": the broker returned no result for the operation; this is an "
         "alignment failure, not an absent key");
 }
@@ -1959,13 +2524,13 @@ inline std::string zstd_compress(const std::string& raw) {
     std::string frame(ZSTD_compressBound(raw.size()), '\0');
     const size_t written = ZSTD_compress(frame.data(), frame.size(), raw.data(), raw.size(), 1);
     if (ZSTD_isError(written)) {
-        throw std::runtime_error(std::string("zstd: ") + ZSTD_getErrorName(written));
+        throw Error(std::string("zstd: ") + ZSTD_getErrorName(written));
     }
     frame.resize(written);
     return frame;
 #else
     (void)raw;
-    throw std::runtime_error("zstd is not in this build: compile with -DQUEEN_CLIENT_ZSTD and link -lzstd");
+    throw Error("zstd is not in this build: compile with -DQUEEN_CLIENT_ZSTD and link -lzstd");
 #endif
 }
 
@@ -1975,18 +2540,18 @@ inline std::string zstd_decompress(const std::string& frame) {
     constexpr unsigned long long MAX_RECORD_BYTES = 1ULL << 30;
     const unsigned long long size = ZSTD_getFrameContentSize(frame.data(), frame.size());
     if (size == ZSTD_CONTENTSIZE_ERROR || size == ZSTD_CONTENTSIZE_UNKNOWN || size > MAX_RECORD_BYTES) {
-        throw std::runtime_error("zstd: a frame without a plausible content size");
+        throw Error("zstd: a frame without a plausible content size");
     }
     std::string raw(static_cast<size_t>(size), '\0');
     const size_t written = ZSTD_decompress(raw.data(), raw.size(), frame.data(), frame.size());
     if (ZSTD_isError(written) || written != raw.size()) {
-        throw std::runtime_error(std::string("zstd: ") +
+        throw Error(std::string("zstd: ") +
             (ZSTD_isError(written) ? ZSTD_getErrorName(written) : "a frame shorter than its content size"));
     }
     return raw;
 #else
     (void)frame;
-    throw std::runtime_error("zstd is not in this build: compile with -DQUEEN_CLIENT_ZSTD and link -lzstd");
+    throw Error("zstd is not in this build: compile with -DQUEEN_CLIENT_ZSTD and link -lzstd");
 #endif
 }
 
@@ -2319,7 +2884,7 @@ public:
 
     const unsigned char* take(size_t length) {
         if (left_ < length) {
-            throw std::runtime_error("framed pop answer: " + short_);
+            throw Error("framed pop answer: " + short_);
         }
         const unsigned char* piece = at_;
         at_ += length;
@@ -2349,7 +2914,8 @@ inline std::string iso_from_micros(int64_t micros) {
 #else
     gmtime_r(&seconds, &parts);
 #endif
-    char text[40];
+    // Room for the widest ints, so no compiler can call the format truncated.
+    char text[96];
     std::snprintf(text, sizeof(text), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
                   parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday,
                   parts.tm_hour, parts.tm_min, parts.tm_sec,
@@ -2373,7 +2939,7 @@ inline std::string iso_from_micros(int64_t micros) {
  */
 inline json decode_pop_frames(const std::string& bytes) {
     if (!is_pop_frames(bytes)) {
-        throw std::runtime_error("framed pop answer: not a framed pop answer");
+        throw Error("framed pop answer: not a framed pop answer");
     }
     FrameReader answer(bytes.data() + 4, bytes.size() - 4);
     const int version = answer.u8();
@@ -2384,11 +2950,11 @@ inline json decode_pop_frames(const std::string& bytes) {
             try {
                 own = json::parse(text);
             } catch (const json::exception& error) {
-                throw std::runtime_error(std::string("framed pop answer: its own keys: ") + error.what());
+                throw Error(std::string("framed pop answer: its own keys: ") + error.what());
             }
         }
     } else if (version != 0) {
-        throw std::runtime_error("framed pop answer: unknown version " + std::to_string(version));
+        throw Error("framed pop answer: unknown version " + std::to_string(version));
     }
 
     const std::string queue = answer.text();
@@ -2420,10 +2986,10 @@ inline json decode_pop_frames(const std::string& bytes) {
                 try {
                     raw = zstd_decompress(raw);
                 } catch (const std::runtime_error& error) {
-                    throw std::runtime_error(std::string("framed pop answer: ") + error.what());
+                    throw Error(std::string("framed pop answer: ") + error.what());
                 }
             } else if (codec != 0) {
-                throw std::runtime_error("framed pop answer: unknown codec " + std::to_string(codec));
+                throw Error("framed pop answer: unknown codec " + std::to_string(codec));
             }
             FrameReader frames(raw.data(), raw.size(),
                                "a record is shorter than its " + std::to_string(count) + " frames");
@@ -2440,7 +3006,7 @@ inline json decode_pop_frames(const std::string& bytes) {
                     producer_sub = frame.text();
                 }
                 if (flags & 4) {
-                    throw std::runtime_error("framed pop answer: a frame is encrypted");
+                    throw Error("framed pop answer: a frame is encrypted");
                 }
                 const uint64_t offset = base + i;
                 if (offset < start || offset > end) {
@@ -2452,7 +3018,7 @@ inline json decode_pop_frames(const std::string& bytes) {
                     try {
                         data = json::parse(payload);
                     } catch (const json::exception& error) {
-                        throw std::runtime_error(std::string("framed pop answer: a payload: ") + error.what());
+                        throw Error(std::string("framed pop answer: a payload: ") + error.what());
                     }
                 }
                 messages.push_back({
@@ -2497,443 +3063,650 @@ inline json decode_pop_frames(const std::string& bytes) {
 } // namespace wire
 
 // ============================================================================
-// LoadBalancer - Distributes requests across multiple servers
+// LoadBalancer - backend selection across broker replicas
 // ============================================================================
 
+/**
+ * Picks a backend per request and tracks which ones are answering. A port of
+ * the Rust client's balancer (clients/client-rust/src/lb.rs), which is itself
+ * the JS/Go/Python one: same strategies, same ring, same hash.
+ *
+ * Brokers are interchangeable, so any of them can serve any request -- but
+ * consumers should not bounce between them. Two replicas polling the same
+ * partition for the same group contend for one claim. LoadBalancing::Affinity
+ * hashes the request's grouping key (util::grouping_key, the broker's own
+ * grouping) onto a ring of `replicas` virtual nodes per backend, so each
+ * (queue, partition, group) stays on one replica for as long as it is healthy.
+ * The hash is FNV-1a over the same strings as the other SDKs, so every client
+ * maps a key to the same backend.
+ *
+ * Health: a 5xx or a transport fault marks a backend down (never a 4xx, the
+ * caller's mistake, and never a 429, a backend that answered). It comes back
+ * after `retry_after_millis`, or as soon as it answers. When every backend is
+ * down one is picked anyway: refusing to send is worse than sending to a
+ * backend that may have recovered.
+ *
+ * Thread-safe.
+ */
 class LoadBalancer {
 private:
+    using Clock = std::chrono::steady_clock;
+
+    struct Health {
+        bool healthy = true;
+        uint32_t failures = 0;
+        std::optional<Clock::time_point> last_failure;
+    };
+    struct VNode {
+        uint32_t hash;
+        size_t server;
+    };
+
     std::vector<std::string> urls_;
-    std::string strategy_;
-    std::atomic<size_t> current_index_{0};
-    std::mutex session_mutex_;
-    std::unordered_map<std::string, size_t> session_map_;
-    std::string session_id_;
-    
+    LoadBalancing strategy_;
+    size_t replicas_;
+    std::chrono::milliseconds retry_after_;
+
+    mutable std::mutex mutex_;
+    std::vector<Health> health_;
+    std::vector<VNode> ring_;
+    size_t next_ = 0;
+    std::optional<size_t> session_;
+
+    std::vector<VNode> build_ring(const std::vector<size_t>& servers) const {
+        std::vector<VNode> ring;
+        ring.reserve(servers.size() * replicas_);
+        for (size_t s : servers) {
+            for (size_t i = 0; i < replicas_; ++i) {
+                ring.push_back({util::fnv1a(urls_[s] + "#vnode" + std::to_string(i)), s});
+            }
+        }
+        std::sort(ring.begin(), ring.end(),
+                  [](const VNode& a, const VNode& b) { return a.hash < b.hash; });
+        return ring;
+    }
+
+    std::vector<size_t> live_locked() const {
+        std::vector<size_t> live;
+        for (size_t i = 0; i < urls_.size(); ++i) {
+            if (health_[i].healthy) live.push_back(i);
+        }
+        return live;
+    }
+
 public:
-    LoadBalancer(const std::vector<std::string>& urls, const std::string& strategy = "round-robin")
-        : urls_(urls), strategy_(strategy) {
-        if (urls_.empty()) {
-            throw std::invalid_argument("URLs vector cannot be empty");
+    LoadBalancer(std::vector<std::string> urls, LoadBalancing strategy = LoadBalancing::Affinity,
+                 int replicas = 128, int retry_after_millis = 5000)
+        : strategy_(strategy), replicas_(replicas > 0 ? static_cast<size_t>(replicas) : 1),
+          retry_after_(std::max(0, retry_after_millis)) {
+        if (urls.empty()) {
+            throw std::invalid_argument("at least one broker URL is required");
         }
-        
-        // Remove trailing slashes
-        for (auto& url : urls_) {
-            if (!url.empty() && url.back() == '/') {
-                url.pop_back();
+        for (auto& url : urls) {
+            while (!url.empty() && url.back() == '/') url.pop_back();
+            urls_.push_back(url);
+        }
+        health_.resize(urls_.size());
+        std::vector<size_t> all(urls_.size());
+        for (size_t i = 0; i < all.size(); ++i) all[i] = i;
+        ring_ = build_ring(all);
+    }
+
+    const std::vector<std::string>& urls() const { return urls_; }
+    LoadBalancing strategy() const { return strategy_; }
+
+    /** The backend index for a request with this affinity key ("" = none). */
+    size_t pick(const std::string& affinity_key = "") {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A backend that failed long enough ago goes back in the pool; without
+        // this a transient blip would take a replica out for good.
+        const auto now = Clock::now();
+        bool readmitted = false;
+        for (auto& h : health_) {
+            if (!h.healthy && h.last_failure && now - *h.last_failure >= retry_after_) {
+                h.healthy = true;
+                readmitted = true;
             }
         }
-        
-        // Generate session ID
-        session_id_ = "session_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-    }
-    
-    std::string get_next_url(const std::string& session_key = "") {
-        const std::string& key = session_key.empty() ? session_id_ : session_key;
-        
-        if (strategy_ == "session") {
-            // Session affinity: stick to the same server per session
-            std::lock_guard<std::mutex> lock(session_mutex_);
-            
-            if (session_map_.find(key) == session_map_.end()) {
-                size_t assigned_index = current_index_.fetch_add(1) % urls_.size();
-                session_map_[key] = assigned_index;
-            }
-            
-            return urls_[session_map_[key]];
+        const auto live = live_locked();
+        if (live.empty()) {
+            const size_t i = next_ % urls_.size();
+            ++next_;
+            return i;
         }
-        
-        // Round robin: cycle through URLs
-        size_t index = current_index_.fetch_add(1) % urls_.size();
-        return urls_[index];
+        if (readmitted) {
+            ring_ = build_ring(live);
+        }
+        switch (strategy_) {
+        case LoadBalancing::Affinity:
+            if (!affinity_key.empty() && !ring_.empty()) {
+                const uint32_t target = util::fnv1a(affinity_key);
+                // The first virtual node clockwise from the key's position.
+                size_t start = static_cast<size_t>(
+                    std::lower_bound(ring_.begin(), ring_.end(), target,
+                                     [](const VNode& v, uint32_t t) { return v.hash < t; }) -
+                    ring_.begin());
+                if (start >= ring_.size()) start = ring_.size() - 1;
+                for (size_t off = 0; off < ring_.size(); ++off) {
+                    const VNode& v = ring_[(start + off) % ring_.size()];
+                    if (health_[v.server].healthy) return v.server;
+                }
+                return live[0];
+            }
+            // No key (an admin call, say): nothing to be sticky about.
+            break;
+        case LoadBalancing::Session:
+            if (session_ && health_[*session_].healthy) return *session_;
+            session_ = live[next_ % live.size()];
+            ++next_;
+            return *session_;
+        case LoadBalancing::RoundRobin:
+            break;
+        }
+        const size_t i = live[next_ % live.size()];
+        ++next_;
+        return i;
     }
-    
-    std::vector<std::string> get_all_urls() const {
-        return urls_;
+
+    /** A backend answered: clear its failures, and put it back on the ring if it was out. */
+    void mark_healthy(size_t index) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (index >= health_.size()) return;
+        const bool was_down = !health_[index].healthy;
+        health_[index] = Health{};
+        if (was_down) ring_ = build_ring(live_locked());
     }
-    
-    std::string get_strategy() const {
-        return strategy_;
+
+    /** A backend failed in a way that says it is down: a 5xx or a transport fault. */
+    void mark_unhealthy(size_t index) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (index >= health_.size()) return;
+        auto& h = health_[index];
+        h.healthy = false;
+        ++h.failures;
+        h.last_failure = Clock::now();
+        ring_ = build_ring(live_locked());
     }
-    
-    void reset() {
-        current_index_ = 0;
-        std::lock_guard<std::mutex> lock(session_mutex_);
-        session_map_.clear();
+
+    size_t healthy_count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return live_locked().size();
     }
+
+    /** The URL pick() chooses. */
+    std::string get_next_url(const std::string& affinity_key = "") {
+        return urls_[pick(affinity_key)];
+    }
+
+    std::vector<std::string> get_all_urls() const { return urls_; }
 };
 
 // ============================================================================
-// HttpClient - HTTP client with retry, failover support
+// HttpClient - transport: a keep-alive connection pool, TLS, retry, failover
 // ============================================================================
 
+/**
+ * Per-request knobs. Zero values mean "the client's".
+ */
+struct RequestOptions {
+    /// Overrides the client timeout. A long-poll pop needs its own, longer than
+    /// the poll window.
+    int timeout_millis = 0;
+    /// Which 429 policy applies (RetryKind::Pop for a long-poll pop).
+    RetryKind retry_kind = RetryKind::Default;
+    /// Pins this request to a backend on the affinity ring; empty = none.
+    std::string affinity_key;
+    /// One attempt on one backend (429s are still waited out): for a write
+    /// whose verdict the caller has to read, which a blind resend would hide.
+    bool no_retry = false;
+};
+
+/**
+ * The transport every other class uses. Three retry mechanisms sit on top of
+ * each other and are kept apart, as in the Rust client:
+ *
+ *   1. 429 in place: the backend is alive and shedding load. Retried against
+ *      the same backend with backoff (Retry-After when sent, jittered).
+ *   2. Failover: a 5xx or a transport fault marks the backend down and the
+ *      next one is tried, once each, when there is more than one URL.
+ *   3. Retry: with one backend (or failover off) the same URL is retried
+ *      retry_attempts times with exponential backoff.
+ *
+ * A 4xx other than 429 triggers none of them: it is the caller's mistake.
+ *
+ * CONNECTIONS ARE REUSED. Every backend has a pool of idle keep-alive
+ * connections (up to ClientConfig::max_idle_connections_per_host); a request
+ * takes one, or opens one, and gives it back when the answer has been read.
+ * A connection that failed is closed instead. Before 2.7.1 this client opened a
+ * TCP connection per request: one extra round trip on every call, and on the
+ * broker an accept and a close per request.
+ *
+ * HTTPS IS HTTPS. A URL's scheme decides: https:// is TLS, with the server's
+ * certificate and host name verified against the system's CA store (or
+ * ClientConfig::ca_cert_path). Before 2.7.1 an https:// URL was sent as plain
+ * HTTP, bearer token included.
+ *
+ * Thread-safe: share one per process (Queen does).
+ */
 class HttpClient {
-private:
-    std::string base_url_;
-    std::shared_ptr<LoadBalancer> load_balancer_;
-    int timeout_millis_;
-    int retry_attempts_;
-    int retry_delay_millis_;
-    bool enable_failover_;
-    std::string bearer_token_;
-    Retry429Options retry_429_;
-    // The binary push body and the framed pop answer (namespace wire). All
-    // three off by default: the client then sends and reads the JSON every
-    // broker knows.
-    bool binary_push_ = false;
-    bool push_compression_ = false;
-    bool framed_pop_ = false;
-    
-    struct HttpResponse {
-        int status_code = 0;
+public:
+    /** An answer with its status, before any status is turned into an exception. */
+    struct Response {
+        int status = 0;
         std::string body;
-        bool success = false;
-        std::string error_message;
-        std::string error_code;                     // proxy contract "code" field
+        std::string content_type;
         std::optional<double> retry_after_seconds;  // 429 only
     };
 
-    struct Retry429Policy {
-        int max_attempts;                           // 0 = unbounded
-        int base_millis;
-        int cap_millis;
-    };
-    
-    HttpResponse execute_request(const std::string& url, const std::string& method,
-                                 const std::string& path, const json& body = nullptr,
-                                 int request_timeout_millis = 0, bool observation = false) {
-        try {
-            auto [scheme, host, port] = util::parse_url(url);
-            
-            int timeout_sec = (request_timeout_millis > 0 ? request_timeout_millis : timeout_millis_) / 1000;
-            
-            // The observation path preserves the configured HTTPS scheme.
-            auto transport = observation ? std::make_unique<httplib::Client>(url)
-                                         : std::make_unique<httplib::Client>(host, port);
-            auto& client = *transport;
-            client.set_connection_timeout(timeout_sec);
-            client.set_read_timeout(timeout_sec);
-            client.set_write_timeout(timeout_sec);
-            if (observation) client.set_max_timeout(2000);
-            
-            // A binary value is a body already encoded (the binary push body):
-            // sent as it is.
-            const char* content_type = body.is_binary() ? wire::PUSH_BINARY_CONTENT_TYPE
-                                                        : "application/json";
-            httplib::Headers headers = {
-                {"Content-Type", content_type}
-            };
-            if (!bearer_token_.empty()) {
-                headers.emplace("Authorization", "Bearer " + bearer_token_);
-            }
-            
-            httplib::Result res;
-            
-            if (method == "GET") {
-                res = client.Get(path.c_str(), headers);
-            } else if (method == "POST") {
-                std::string body_str;
-                if (body.is_binary()) {
-                    const auto& bytes = body.get_binary();
-                    body_str.assign(bytes.begin(), bytes.end());
-                } else if (!body.is_null()) {
-                    body_str = body.dump();
-                }
-                res = client.Post(path.c_str(), headers, body_str, content_type);
-            } else if (method == "PUT") {
-                std::string body_str = body.is_null() ? "" : body.dump();
-                res = client.Put(path.c_str(), headers, body_str, "application/json");
-            } else if (method == "DELETE") {
-                res = client.Delete(path.c_str(), headers);
-            } else {
-                return {0, "", false, "Unsupported HTTP method: " + method, "", std::nullopt};
-            }
-            
-            if (!res) {
-                return {0, "", false, "HTTP request failed: " + httplib::to_string(res.error()), "", std::nullopt};
-            }
-            
-            // Handle 204 No Content
-            if (res->status == 204) {
-                return {204, "", true, "", "", std::nullopt};
-            }
-            
-            // Handle errors
-            if (res->status >= 400) {
-                std::string error_msg = "HTTP " + std::to_string(res->status);
-                std::string error_code;
-                try {
-                    if (!res->body.empty()) {
-                        json error_body = json::parse(res->body);
-                        if (error_body.contains("error")) {
-                            error_msg = error_body["error"].get<std::string>();
-                        }
-                        if (error_body.contains("code") && error_body["code"].is_string()) {
-                            error_code = error_body["code"].get<std::string>();
-                        }
-                    }
-                } catch (...) {
-                    // Ignore JSON parse errors
-                }
+private:
+    using Clock = std::chrono::steady_clock;
 
-                std::optional<double> retry_after;
-                if (res->status == 429) {
-                    retry_after = parse_retry_after(res->get_header_value("Retry-After"));
-                }
-                return {res->status, res->body, false, error_msg, error_code, retry_after};
+    ClientConfig config_;
+    std::shared_ptr<LoadBalancer> load_balancer_;
+    httplib::Headers base_headers_;
+
+    struct Idle {
+        std::unique_ptr<httplib::Client> client;
+        Clock::time_point since;
+    };
+    mutable std::mutex pool_mutex_;
+    std::unordered_map<std::string, std::vector<Idle>> idle_;
+
+    // The binary push body and the framed pop answer (namespace wire). Off by
+    // default: the client then sends and reads the JSON every broker knows.
+    bool binary_push_ = false;
+    bool push_compression_ = false;
+    bool framed_pop_ = false;
+
+    static bool is_https(const std::string& base_url) {
+        return base_url.rfind("https://", 0) == 0;
+    }
+
+    std::unique_ptr<httplib::Client> make_connection(const std::string& base_url) const {
+        // Built from the full URL, so its scheme picks plain or TLS.
+        auto client = std::make_unique<httplib::Client>(base_url);
+        client->set_keep_alive(true);
+        client->set_tcp_nodelay(true);
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+        if (is_https(base_url)) {
+            client->enable_server_certificate_verification(config_.tls_verify);
+            client->enable_server_hostname_verification(config_.tls_verify);
+            if (!config_.ca_cert_path.empty() || !config_.ca_cert_dir.empty()) {
+                client->set_ca_cert_path(config_.ca_cert_path, config_.ca_cert_dir);
             }
-            
-            return {res->status, res->body, true, "", "", std::nullopt};
-            
-        } catch (const std::exception& e) {
-            return {0, "", false, std::string("Exception: ") + e.what(), "", std::nullopt};
+        }
+#endif
+        return client;
+    }
+
+    std::unique_ptr<httplib::Client> acquire(const std::string& base_url) {
+        const auto now = Clock::now();
+        const auto max_idle = std::chrono::milliseconds(config_.idle_connection_timeout_millis);
+        std::vector<Idle> stale;
+        {
+            std::lock_guard<std::mutex> lock(pool_mutex_);
+            auto& idle = idle_[base_url];
+            while (!idle.empty()) {
+                Idle entry = std::move(idle.back());
+                idle.pop_back();
+                if (config_.idle_connection_timeout_millis <= 0 || now - entry.since < max_idle) {
+                    return std::move(entry.client);
+                }
+                // Idle too long: a proxy or the broker may have dropped it.
+                stale.push_back(std::move(entry));
+            }
+        }
+        return make_connection(base_url);  // `stale` closes outside the lock
+    }
+
+    void release(const std::string& base_url, std::unique_ptr<httplib::Client> client) {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        auto& idle = idle_[base_url];
+        if (static_cast<int>(idle.size()) < config_.max_idle_connections_per_host) {
+            idle.push_back({std::move(client), Clock::now()});
         }
     }
-    
-    /** Retry-After header value (seconds) -> number; empty when non-numeric. */
+
     static std::optional<double> parse_retry_after(const std::string& value) {
-        if (value.empty()) {
-            return std::nullopt;
-        }
+        if (value.empty()) return std::nullopt;
         try {
             size_t consumed = 0;
             double seconds = std::stod(value, &consumed);
-            if (consumed != value.size() || seconds < 0) {
-                return std::nullopt;
-            }
+            if (consumed != value.size() || seconds < 0) return std::nullopt;
             return seconds;
         } catch (...) {
             return std::nullopt;
         }
     }
 
+    /**
+     * One HTTP exchange on one backend. Any status comes back as a Response;
+     * only a transport fault throws (NetworkError), and only then is the
+     * connection closed instead of going back to the pool.
+     */
+    Response execute_once(const std::string& base_url, const std::string& method,
+                          const std::string& path, const std::string& body,
+                          const char* content_type, int timeout_millis) {
+        auto connection = acquire(base_url);
+        const auto timeout = std::chrono::milliseconds(
+            timeout_millis > 0 ? timeout_millis : config_.timeout_millis);
+        connection->set_connection_timeout(timeout);
+        connection->set_read_timeout(timeout);
+        connection->set_write_timeout(timeout);
+
+        httplib::Headers headers = base_headers_;
+
+        // A body's Content-Type travels as httplib's content-type argument,
+        // which adds the header itself: putting it in `headers` as well would
+        // send it twice. A GET or DELETE carries it as a plain header.
+        httplib::Result result;
+        if (method == "GET") {
+            headers.emplace("Content-Type", content_type);
+            result = connection->Get(path, headers);
+        } else if (method == "POST") {
+            result = connection->Post(path, headers, body, content_type);
+        } else if (method == "PUT") {
+            result = connection->Put(path, headers, body, content_type);
+        } else if (method == "DELETE") {
+            headers.emplace("Content-Type", content_type);
+            result = connection->Delete(path, headers);
+        } else {
+            throw std::invalid_argument("unsupported HTTP method: " + method);
+        }
+
+        if (!result) {
+            const auto error = result.error();
+            const bool timed_out = error == httplib::Error::ConnectionTimeout;
+            throw NetworkError(method + " " + base_url + path + ": " + httplib::to_string(error),
+                               timed_out);
+        }
+
+        Response response;
+        response.status = result->status;
+        response.body = std::move(result->body);
+        response.content_type = result->get_header_value("Content-Type");
+        if (response.status == 429) {
+            response.retry_after_seconds = parse_retry_after(result->get_header_value("Retry-After"));
+        }
+        // The answer was read whole, so the connection is clean: keep it,
+        // unless the server said it is closing it.
+        if (result->get_header_value("Connection") != "close") {
+            release(base_url, std::move(connection));
+        }
+        return response;
+    }
+
+    /** An HTTP status of 400 or more as the exception callers see. */
+    [[noreturn]] static void throw_status(const Response& response) {
+        std::string message = "HTTP " + std::to_string(response.status);
+        std::string code;
+        try {
+            if (!response.body.empty()) {
+                json error_body = json::parse(response.body);
+                if (error_body.is_object()) {
+                    if (error_body.contains("error") && error_body["error"].is_string()) {
+                        message = error_body["error"].get<std::string>();
+                    }
+                    if (error_body.contains("code") && error_body["code"].is_string()) {
+                        code = error_body["code"].get<std::string>();
+                    }
+                }
+            }
+        } catch (...) {
+            // Not JSON: the status line is the message.
+        }
+        throw HttpError(response.status, message, response.body, code,
+                        response.retry_after_seconds);
+    }
+
+    struct Retry429Policy {
+        int max_attempts;  // 0 = unbounded
+        int base_millis;
+        int cap_millis;
+    };
+
     Retry429Policy retry429_policy_for(RetryKind retry_kind) const {
         Retry429Policy policy;
-        policy.base_millis = retry_429_.base_millis > 0 ? retry_429_.base_millis : 500;
-        policy.cap_millis = retry_429_.cap_millis > 0 ? retry_429_.cap_millis : 30000;
-
-        if (retry_429_.max_attempts > 0) {
-            policy.max_attempts = retry_429_.max_attempts; // explicit override applies to both kinds
+        policy.base_millis = config_.retry_429.base_millis > 0 ? config_.retry_429.base_millis : 500;
+        policy.cap_millis = config_.retry_429.cap_millis > 0 ? config_.retry_429.cap_millis : 30000;
+        if (config_.retry_429.max_attempts > 0) {
+            policy.max_attempts = config_.retry_429.max_attempts;  // applies to both kinds
         } else {
             policy.max_attempts = (retry_kind == RetryKind::Pop) ? 0 : 10;
         }
-
         return policy;
     }
 
     /**
-     * One logical request against a single URL, transparently retrying HTTP 429
-     * with backoff until the policy for retry_kind is exhausted (or never, for
-     * an unbounded pop policy). Every other outcome is returned immediately:
-     * 429 is the only status this layer treats as retryable, 5xx/network retry
-     * and cross-backend failover are the callers' job.
+     * One logical request against one backend, waiting out HTTP 429 with
+     * backoff until the policy for the request's kind is spent (never, for a
+     * long-poll pop). Throws HttpError for any status of 400 or more, and
+     * NetworkError for a transport fault.
      */
-    HttpResponse execute_with_retry429(const std::string& url, const std::string& method,
-                                       const std::string& path, const json& body,
-                                       int request_timeout_millis, RetryKind retry_kind) {
-        Retry429Policy policy = retry429_policy_for(retry_kind);
+    Response attempt_with_429(const std::string& base_url, const std::string& method,
+                              const std::string& path, const std::string& body,
+                              const char* content_type, const RequestOptions& options) {
+        const Retry429Policy policy = retry429_policy_for(options.retry_kind);
         int tries = 0;
-
-        while (true) {
+        for (;;) {
             ++tries;
-            HttpResponse response = execute_request(url, method, path, body, request_timeout_millis);
-
-            if (response.status_code != 429) {
+            Response response = execute_once(base_url, method, path, body, content_type,
+                                             options.timeout_millis);
+            if (response.status != 429) {
+                if (response.status >= 400) throw_status(response);
                 return response;
             }
-
             if (policy.max_attempts > 0 && tries >= policy.max_attempts) {
                 util::log_error("HttpClient.retry429", method + " " + path +
-                    " max 429 attempts exhausted after " + std::to_string(tries) +
-                    " (code=" + response.error_code + ")");
-                return response;
+                    " max 429 attempts exhausted after " + std::to_string(tries));
+                throw_status(response);
             }
-
-            int delay = util::compute_retry429_delay_millis(tries - 1, response.retry_after_seconds,
-                                                            policy.base_millis, policy.cap_millis);
+            const int delay = util::compute_retry429_delay_millis(
+                tries - 1, response.retry_after_seconds, policy.base_millis, policy.cap_millis);
             util::log_warn("HttpClient.retry429", method + " " + path + " attempt " +
-                std::to_string(tries) + ", retrying in " + std::to_string(delay) +
-                "ms (code=" + response.error_code + ")");
+                std::to_string(tries) + ", retrying in " + std::to_string(delay) + "ms");
             std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         }
     }
-    
-    HttpResponse request_with_retry(const std::string& method, const std::string& path,
-                                    const json& body = nullptr, int request_timeout_millis = 0,
-                                    RetryKind retry_kind = RetryKind::Default) {
-        HttpResponse last_response;
-        
-        for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
-            std::string url = get_url();
-            last_response = execute_with_retry429(url, method, path, body,
-                                                  request_timeout_millis, retry_kind);
-            
-            if (last_response.success) {
-                return last_response;
+
+    /** One backend, retry_attempts tries with exponential backoff on 5xx and transport faults. */
+    Response attempt_with_retry(const std::string& base_url, const std::string& method,
+                                const std::string& path, const std::string& body,
+                                const char* content_type, const RequestOptions& options) {
+        const int attempts = std::max(1, config_.retry_attempts);
+        for (int attempt = 0;; ++attempt) {
+            try {
+                return attempt_with_429(base_url, method, path, body, content_type, options);
+            } catch (const HttpError& e) {
+                if (!e.is_retryable() || e.status_code() == 429 || attempt + 1 >= attempts) throw;
+            } catch (const NetworkError&) {
+                if (attempt + 1 >= attempts) throw;
             }
-            
-            // Don't retry on client errors (4xx)
-            if (last_response.status_code >= 400 && last_response.status_code < 500) {
-                return last_response;
-            }
-            
-            // Wait before retry (except on last attempt)
-            if (attempt < retry_attempts_ - 1) {
-                int delay = retry_delay_millis_ * (1 << attempt); // Exponential backoff
-                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-            }
+            const long long delay = static_cast<long long>(config_.retry_delay_millis) << attempt;
+            util::log_warn("HttpClient.retry", method + " " + path + " attempt " +
+                std::to_string(attempt + 1) + " failed, retrying in " + std::to_string(delay) + "ms");
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         }
-        
-        return last_response;
     }
-    
-    HttpResponse request_with_failover(const std::string& method, const std::string& path,
-                                       const json& body = nullptr, int request_timeout_millis = 0,
-                                       RetryKind retry_kind = RetryKind::Default) {
-        if (!load_balancer_ || !enable_failover_) {
-            return request_with_retry(method, path, body, request_timeout_millis, retry_kind);
-        }
-        
-        auto urls = load_balancer_->get_all_urls();
-        std::unordered_set<std::string> attempted_urls;
-        HttpResponse last_response;
-        
-        for (size_t i = 0; i < urls.size(); ++i) {
-            std::string url = load_balancer_->get_next_url();
-            
-            if (attempted_urls.count(url)) {
+
+    /** Failover across backends, retry within one, 429 in place. */
+    Response send(const std::string& method, const std::string& path, const std::string& body,
+                  const char* content_type, const RequestOptions& options) {
+        const size_t n = load_balancer_->urls().size();
+        const bool use_failover = config_.enable_failover && n > 1 && !options.no_retry;
+        const size_t rounds = use_failover ? n : 1;
+
+        std::vector<size_t> attempted;
+        std::exception_ptr last;
+        for (size_t round = 0; round < rounds; ++round) {
+            const size_t backend = load_balancer_->pick(options.affinity_key);
+            if (use_failover &&
+                std::find(attempted.begin(), attempted.end(), backend) != attempted.end()) {
                 continue;
             }
-            
-            attempted_urls.insert(url);
-            // 429s are retried in place (same backend, backoff-paced) inside
-            // execute_with_retry429: rate limiting is a tenant-quota signal, not
-            // a backend-health one, so an exhausted 429 falls into the 4xx
-            // short-circuit below instead of failing over to another backend.
-            last_response = execute_with_retry429(url, method, path, body,
-                                                  request_timeout_millis, retry_kind);
-            
-            if (last_response.success) {
-                return last_response;
-            }
-            
-            // Don't retry on client errors (4xx)
-            if (last_response.status_code >= 400 && last_response.status_code < 500) {
-                return last_response;
+            attempted.push_back(backend);
+            const std::string& base_url = load_balancer_->urls()[backend];
+            try {
+                // Failover already moves elsewhere, so one attempt per backend.
+                Response response = (use_failover || options.no_retry)
+                    ? attempt_with_429(base_url, method, path, body, content_type, options)
+                    : attempt_with_retry(base_url, method, path, body, content_type, options);
+                load_balancer_->mark_healthy(backend);
+                return response;
+            } catch (const HttpError& e) {
+                // A 4xx (an exhausted 429 included) is the caller's, or the
+                // backend answering: not a health signal, and not retried.
+                if (e.status_code() < 500) throw;
+                load_balancer_->mark_unhealthy(backend);
+                last = std::current_exception();
+            } catch (const NetworkError&) {
+                load_balancer_->mark_unhealthy(backend);
+                last = std::current_exception();
             }
         }
-        
-        return last_response;
-    }
-    
-    std::string get_url() const {
-        if (load_balancer_) {
-            return load_balancer_->get_next_url();
-        }
-        return base_url_;
+        if (last) std::rethrow_exception(last);
+        throw NetworkError("no backend available");
     }
 
-    /**
-     * Turn a failed response into the exception callers see. A response that
-     * carries an HTTP status becomes an HttpError (status/body/code, plus
-     * Retry-After on a 429); a transport failure has no status and stays a
-     * plain runtime_error.
-     */
-    [[noreturn]] static void throw_response_error(const HttpResponse& response) {
-        if (response.status_code > 0) {
-            throw HttpError(response.status_code, response.error_message, response.body,
-                            response.error_code, response.retry_after_seconds);
+    static json parse_body(const Response& response) {
+        if (response.status == 204 || response.body.empty()) return nullptr;
+        try {
+            return json::parse(response.body);
+        } catch (const json::exception& e) {
+            throw Error(std::string("the broker's answer is not JSON: ") + e.what());
         }
-        throw std::runtime_error(response.error_message);
     }
-    
+
+    static std::string body_text(const json& body) {
+        if (body.is_binary()) {
+            const auto& bytes = body.get_binary();
+            return std::string(bytes.begin(), bytes.end());
+        }
+        return body.is_null() ? std::string() : body.dump();
+    }
+
+    static const char* content_type_of(const json& body) {
+        // A binary value is a body already encoded (the binary push and the
+        // binary transaction body), sent as it is.
+        return body.is_binary() ? wire::PUSH_BINARY_CONTENT_TYPE : "application/json";
+    }
+
+    void init() {
+        if (config_.urls.empty()) {
+            throw std::invalid_argument("at least one broker URL is required");
+        }
+        for (auto& url : config_.urls) {
+            while (!url.empty() && url.back() == '/') url.pop_back();
+            util::parse_url(url);  // throws std::invalid_argument for a malformed URL
+#ifndef CPPHTTPLIB_OPENSSL_SUPPORT
+            if (is_https(url)) {
+                throw std::invalid_argument(
+                    "an https:// URL needs TLS, and this build has none: include "
+                    "queen_client.hpp without QUEEN_CLIENT_NO_TLS and link OpenSSL");
+            }
+#endif
+        }
+        load_balancer_ = std::make_shared<LoadBalancer>(
+            config_.urls, config_.load_balancing, config_.affinity_hash_ring,
+            config_.health_retry_after_millis);
+
+        base_headers_.emplace("User-Agent", std::string("queen-client-cpp/") + QUEEN_CLIENT_VERSION);
+        if (!config_.bearer_token.empty()) {
+            base_headers_.emplace("Authorization", "Bearer " + config_.bearer_token);
+        }
+        for (const auto& header : config_.headers) {
+            base_headers_.emplace(header.first, header.second);
+        }
+        set_wire_forms(config_.binary_push, config_.push_compression, config_.framed_pop);
+    }
+
 public:
-    HttpClient(const std::string& base_url, int timeout_millis = 30000,
-               int retry_attempts = 3, int retry_delay_millis = 1000,
-               const std::string& bearer_token = "",
-               const Retry429Options& retry_429 = Retry429Options())
-        : base_url_(base_url), timeout_millis_(timeout_millis),
-          retry_attempts_(retry_attempts), retry_delay_millis_(retry_delay_millis),
-          enable_failover_(false), bearer_token_(bearer_token), retry_429_(retry_429) {
-        // Remove trailing slash
-        if (!base_url_.empty() && base_url_.back() == '/') {
-            base_url_.pop_back();
-        }
-    }
-    
-    HttpClient(std::shared_ptr<LoadBalancer> load_balancer, int timeout_millis = 30000,
-               int retry_attempts = 3, int retry_delay_millis = 1000, bool enable_failover = true,
-               const std::string& bearer_token = "",
-               const Retry429Options& retry_429 = Retry429Options())
-        : load_balancer_(load_balancer), timeout_millis_(timeout_millis),
-          retry_attempts_(retry_attempts), retry_delay_millis_(retry_delay_millis),
-          enable_failover_(enable_failover), bearer_token_(bearer_token), retry_429_(retry_429) {
-    }
-    
-    /**
-     * retry_kind: pass RetryKind::Pop for long-poll (wait=true) pop requests to
-     * get the unbounded-with-backoff 429 policy; leave it defaulted for
-     * everything else (push, admin calls, non-waiting pop), which gets the
-     * bounded 10-attempt budget.
-     */
-    json get(const std::string& path, int request_timeout_millis = 0,
-             RetryKind retry_kind = RetryKind::Default) {
-        // A pop route asks for the stored records when framed_pop is on.
-        const bool framed = framed_pop_ && path.rfind("/api/v1/pop", 0) == 0;
-        auto response = request_with_failover(
-            "GET",
-            framed ? path + (path.find('?') == std::string::npos ? "?" : "&") + "frames=true" : path,
-            nullptr, request_timeout_millis, retry_kind);
-        
-        if (!response.success) {
-            throw_response_error(response);
-        }
-        
-        if (response.body.empty() || response.status_code == 204) {
-            return nullptr;
-        }
-
-        // The framed pop answer: unpacked into the json the JSON answer parses
-        // to, so its readers do not tell the two apart. A broker that does not
-        // know the parameter answered JSON.
-        if (framed && wire::is_pop_frames(response.body)) {
-            return wire::decode_pop_frames(response.body);
-        }
-        
-        return json::parse(response.body);
+    explicit HttpClient(const ClientConfig& config) : config_(config) {
+        init();
     }
 
+    /** One broker, the common case; the knobs a test or a script reaches for. */
+    HttpClient(const std::string& base_url, int timeout_millis = 30000, int retry_attempts = 3,
+               int retry_delay_millis = 1000, const std::string& bearer_token = "",
+               const Retry429Options& retry_429 = Retry429Options()) {
+        config_.urls = {base_url};
+        config_.timeout_millis = timeout_millis;
+        config_.retry_attempts = retry_attempts;
+        config_.retry_delay_millis = retry_delay_millis;
+        config_.bearer_token = bearer_token;
+        config_.retry_429 = retry_429;
+        init();
+    }
+
+    HttpClient(const HttpClient&) = delete;
+    HttpClient& operator=(const HttpClient&) = delete;
+
+    const ClientConfig& config() const { return config_; }
+
     /**
-     * Turn on the binary push body and the framed pop answer (ClientConfig::
-     * binary_push, push_compression, framed_pop). Throws when an option needs
-     * zstd and this build has none: better at construction than at the first
-     * compressed record.
+     * Turn on the binary push body and the framed pop answer. Throws when an
+     * option needs zstd and this build has none: better at construction than
+     * at the first compressed record.
      */
     void set_wire_forms(bool binary_push, bool push_compression, bool framed_pop) {
         if (((binary_push && push_compression) || framed_pop) && !wire::zstd_available()) {
-            throw std::runtime_error(
+            throw std::invalid_argument(
                 "push_compression and framed_pop need zstd: compile with -DQUEEN_CLIENT_ZSTD and link -lzstd");
         }
         binary_push_ = binary_push;
         push_compression_ = push_compression;
         framed_pop_ = framed_pop;
     }
-    
-    // One best-effort publication; never inherit unbounded 429/failover retries.
-    json post_observation(const std::string& path, const json& body) {
-        auto response = execute_request(get_url(), "POST", path, body, 2000, true);
-        if (!response.success) throw_response_error(response);
-        return json::parse(response.body);
+
+    /** The answer of any method, any status, with the retries above. Throws for a status >= 400. */
+    Response request(const std::string& method, const std::string& path,
+                     const std::string& body = std::string(),
+                     const char* content_type = "application/json",
+                     const RequestOptions& options = RequestOptions()) {
+        return send(method, path, body, content_type, options);
     }
 
-    json post(const std::string& path, const json& body = nullptr, int request_timeout_millis = 0,
-              RetryKind retry_kind = RetryKind::Default) {
+    json get(const std::string& path, const RequestOptions& options) {
+        // A pop route asks for the stored records when framed_pop is on.
+        const bool framed = framed_pop_ && path.rfind("/api/v1/pop", 0) == 0;
+        const std::string target = framed
+            ? path + (path.find('?') == std::string::npos ? "?" : "&") + "frames=true"
+            : path;
+        Response response = send("GET", target, std::string(), "application/json", options);
+        if (response.status == 204 || response.body.empty()) return nullptr;
+        // The framed answer, unpacked into the json the JSON answer parses to,
+        // so its readers do not tell the two apart. A broker that does not know
+        // the parameter answered JSON.
+        if (framed && wire::is_pop_frames(response.body)) {
+            return wire::decode_pop_frames(response.body);
+        }
+        return parse_body(response);
+    }
+
+    /**
+     * retry_kind: RetryKind::Pop for a long-poll pop (unbounded 429 backoff);
+     * the default for everything else (10 attempts).
+     */
+    json get(const std::string& path, int request_timeout_millis = 0,
+             RetryKind retry_kind = RetryKind::Default) {
+        RequestOptions options;
+        options.timeout_millis = request_timeout_millis;
+        options.retry_kind = retry_kind;
+        return get(path, options);
+    }
+
+    /** A GET whose answer is text (GET /metrics). */
+    std::string get_text(const std::string& path, const RequestOptions& options = RequestOptions()) {
+        return send("GET", path, std::string(), "application/json", options).body;
+    }
+
+    json post(const std::string& path, const json& body, const RequestOptions& options) {
         if (binary_push_ && path == "/api/v1/push" && body.is_object() && body.contains("items")) {
             // Encoded once, before any retry: every attempt sends the same
             // bytes (with push_compression, the same message ids). Nothing =
             // an item the binary body does not carry, and the push stays JSON.
             if (auto encoded = wire::binary_push_body(body["items"], push_compression_)) {
-                return post(path, json::binary(std::vector<std::uint8_t>(encoded->begin(), encoded->end())),
-                            request_timeout_millis, retry_kind);
+                return parse_body(send("POST", path, *encoded, wire::PUSH_BINARY_CONTENT_TYPE, options));
             }
         }
         if (binary_push_ && push_compression_ && path == "/api/v1/transaction") {
@@ -2941,61 +3714,91 @@ public:
             // rest of it as the JSON head in front of them. Nothing = no push,
             // or one the binary body does not carry: the bundle stays JSON.
             if (auto framed = wire::transaction_frames(body)) {
-                json answer = post(path,
-                                   json::binary(std::vector<std::uint8_t>(framed->body.begin(), framed->body.end())),
-                                   request_timeout_millis, retry_kind);
+                json answer = parse_body(
+                    send("POST", path, framed->body, wire::PUSH_BINARY_CONTENT_TYPE, options));
                 // The broker answers the head's operations before the pushes:
-                // the caller gets the results in the order of its own
-                // operations.
+                // the caller gets the results in the order of its own operations.
                 wire::restore_result_order(answer, framed->order);
                 return answer;
             }
         }
-        auto response = request_with_failover("POST", path, body, request_timeout_millis, retry_kind);
-        
-        if (!response.success) {
-            throw_response_error(response);
-        }
-        
-        if (response.body.empty() || response.status_code == 204) {
-            return nullptr;
-        }
-        
-        return json::parse(response.body);
+        return parse_body(send("POST", path, body_text(body), content_type_of(body), options));
     }
-    
+
+    json post(const std::string& path, const json& body = nullptr, int request_timeout_millis = 0,
+              RetryKind retry_kind = RetryKind::Default) {
+        RequestOptions options;
+        options.timeout_millis = request_timeout_millis;
+        options.retry_kind = retry_kind;
+        return post(path, body, options);
+    }
+
+    json put(const std::string& path, const json& body, const RequestOptions& options) {
+        return parse_body(send("PUT", path, body_text(body), content_type_of(body), options));
+    }
+
     json put(const std::string& path, const json& body = nullptr, int request_timeout_millis = 0,
              RetryKind retry_kind = RetryKind::Default) {
-        auto response = request_with_failover("PUT", path, body, request_timeout_millis, retry_kind);
-        
-        if (!response.success) {
-            throw_response_error(response);
-        }
-        
-        if (response.body.empty() || response.status_code == 204) {
-            return nullptr;
-        }
-        
-        return json::parse(response.body);
+        RequestOptions options;
+        options.timeout_millis = request_timeout_millis;
+        options.retry_kind = retry_kind;
+        return put(path, body, options);
     }
-    
+
+    json del(const std::string& path, const RequestOptions& options) {
+        return parse_body(send("DELETE", path, std::string(), "application/json", options));
+    }
+
     json del(const std::string& path, int request_timeout_millis = 0,
              RetryKind retry_kind = RetryKind::Default) {
-        auto response = request_with_failover("DELETE", path, nullptr, request_timeout_millis, retry_kind);
-        
-        if (!response.success) {
-            throw_response_error(response);
-        }
-        
-        if (response.body.empty() || response.status_code == 204) {
-            return nullptr;
-        }
-        
-        return json::parse(response.body);
+        RequestOptions options;
+        options.timeout_millis = request_timeout_millis;
+        options.retry_kind = retry_kind;
+        return del(path, options);
     }
-    
-    std::shared_ptr<LoadBalancer> get_load_balancer() const {
-        return load_balancer_;
+
+    /**
+     * One best-effort publication (the consumer status reports): one attempt,
+     * two seconds at most, no 429 or failover retries, on a connection of its
+     * own so its time limit never sticks to a pooled one.
+     */
+    json post_observation(const std::string& path, const json& body) {
+        const std::string& base_url = load_balancer_->urls()[load_balancer_->pick()];
+        auto connection = make_connection(base_url);
+        connection->set_connection_timeout(std::chrono::milliseconds(2000));
+        connection->set_read_timeout(std::chrono::milliseconds(2000));
+        connection->set_write_timeout(std::chrono::milliseconds(2000));
+        connection->set_max_timeout(std::chrono::milliseconds(2000));
+        connection->set_keep_alive(false);
+        httplib::Headers headers = base_headers_;
+        auto result = connection->Post(path, headers, body.dump(), "application/json");
+        if (!result) {
+            throw NetworkError("POST " + base_url + path + ": " + httplib::to_string(result.error()));
+        }
+        Response response;
+        response.status = result->status;
+        response.body = result->body;
+        if (response.status >= 400) throw_status(response);
+        return parse_body(response);
+    }
+
+    std::shared_ptr<LoadBalancer> get_load_balancer() const { return load_balancer_; }
+
+    /** Idle pooled connections, over every backend. */
+    size_t idle_connections() const {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        size_t total = 0;
+        for (const auto& entry : idle_) total += entry.second.size();
+        return total;
+    }
+
+    /** Close every idle connection. */
+    void close_idle_connections() {
+        std::unordered_map<std::string, std::vector<Idle>> doomed;
+        {
+            std::lock_guard<std::mutex> lock(pool_mutex_);
+            doomed.swap(idle_);
+        }
     }
 };
 
@@ -3056,6 +3859,8 @@ private:
     std::condition_variable drain_progress_; // flush_until() callers, between drain events
 
     std::deque<json> messages_;
+    // The batch the flusher is sending, out of messages_ while its request runs.
+    size_t in_flight_ = 0;
     Clock::time_point first_message_time_{};
     bool has_first_message_ = false;
     bool flush_requested_ = false;           // an add or a flush caller wants a drain now
@@ -3101,6 +3906,7 @@ private:
                 has_first_message_ = false;
             }
 
+            in_flight_ = batch_size;
             lock.unlock();
             bool sent = false;
             std::string error_text;
@@ -3111,6 +3917,7 @@ private:
                 error_text = e.what();
             }
             lock.lock();
+            in_flight_ = 0;
 
             if (sent) {
                 // Capacity is freed only when the batch is definitively gone.
@@ -3147,6 +3954,10 @@ private:
                 flush_deadline_ = Clock::time_point::max();
                 ++give_up_count_;
                 next_drain_at_ = now + std::chrono::milliseconds(options_.time_millis);
+                // A flush request armed while this batch was in flight is spent
+                // too: honouring it would start the next drain at once, with no
+                // pause, against a broker that is failing.
+                flush_requested_ = false;
                 break;
             }
             auto wake_at = now + std::chrono::milliseconds(options_.retry_delay_millis);
@@ -3245,7 +4056,7 @@ public:
         }
 
         if (stopped_) {
-            throw std::runtime_error("Queen buffer " + queue_address_ +
+            throw Error("Queen buffer " + queue_address_ +
                 " is stopped (client closed): message not buffered");
         }
 
@@ -3290,27 +4101,36 @@ public:
             }
             // Give up only once the DRAIN has: a bumped give_up_count_ means a
             // real attempt failed at or after the (tightened) deadline. Keying
-            // on the counter instead of on catching the flusher idle matters
-            // -- the flusher can hold the mutex from one drain straight into
-            // the next, so "idle" may never be observable from here.
-            if (give_up_count_ > give_ups_before && !messages_.empty() &&
-                Clock::now() >= deadline) {
-                const int count = static_cast<int>(messages_.size());
-                const std::string reason =
-                    last_flush_error_.empty() ? "buffer flush deadline expired"
-                                              : last_flush_error_;
-                throw BufferFlushError(reason + " (" + std::to_string(count) +
-                    " message(s) still buffered for " + queue_address_ + ", not sent)",
-                    queue_address_, count);
+            // on the counter instead of on catching the flusher idle matters --
+            // the flusher can hold the mutex from one drain straight into the
+            // next, so "idle" may never be observable from here. What is left
+            // counts the batch in flight: a failed one goes back to the front.
+            const bool gave_up = give_up_count_ > give_ups_before;
+            if (gave_up && Clock::now() >= deadline) {
+                const size_t left = messages_.size() + in_flight_;
+                if (left > 0) {
+                    const int count = static_cast<int>(left);
+                    const std::string reason =
+                        last_flush_error_.empty() ? "buffer flush deadline expired"
+                                                  : last_flush_error_;
+                    throw BufferFlushError(reason + " (" + std::to_string(count) +
+                        " message(s) still buffered for " + queue_address_ + ", not sent)",
+                        queue_address_, count);
+                }
             }
+            // Arm a drain -- but not again once a give-up has happened past
+            // this caller's deadline: an expired deadline re-armed makes the
+            // flusher give up at its first failure with no pause, and around
+            // again, a storm of requests against a broker that is failing.
             // Tighten, not replace: the shortest patience of any concurrent
-            // flush caller wins, otherwise a shutdown could be held open by a
-            // background retry loop that was started with none.
-            if (deadline < flush_deadline_) {
-                flush_deadline_ = deadline;
+            // flush caller wins.
+            if (!gave_up || Clock::now() < deadline) {
+                if (deadline < flush_deadline_) {
+                    flush_deadline_ = deadline;
+                }
+                flush_requested_ = true;
+                flusher_wake_.notify_all();
             }
-            flush_requested_ = true;
-            flusher_wake_.notify_all();
             drain_progress_.wait(lock);
         }
     }
@@ -3378,7 +4198,7 @@ class ConsumerSupervision {
     static json scope(const std::string& value) { return value.empty() ? json(nullptr) : json(value); }
     void publish(const char* state) {
         const auto raw = document(state).dump();
-        if (raw.size() > 45000) throw std::runtime_error("consumer status exceeds one chunk");
+        if (raw.size() > 45000) throw Error("consumer status exceeds one chunk");
         const auto write = identifier(), slot = options_.supervision->group + "/" + id_;
         json operations = json::array({
             {{"op","put"},{"ns","queen-supervisor"},{"key",slot+"/head"},{"ttlSeconds",60},
@@ -3388,9 +4208,9 @@ class ConsumerSupervision {
         });
         auto response = http_->post_observation("/api/v1/kv", {{"operations",operations}});
         if (!response.contains("results") || !response["results"].is_array() || response["results"].size() != 2)
-            throw std::runtime_error("consumer status publication was not applied");
+            throw Error("consumer status publication was not applied");
         for (const auto& result : response["results"]) if (result.value("applied", false) != true)
-            throw std::runtime_error("consumer status publication was not applied");
+            throw Error("consumer status publication was not applied");
     }
     void run() noexcept {
         bool failing = false;
@@ -3519,7 +4339,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (stopped_) {
-                throw std::runtime_error(
+                throw Error(
                     "Queen client is closed: message not buffered for " + queue_address);
             }
             auto it = buffers_.find(queue_address);
@@ -3669,7 +4489,7 @@ inline const char* const LOCK_NAMESPACE = "queen-locks";
 
 /**
  * How a Lock behaves. The lifetime is not here: it is mandatory and is an
- * argument of QueenClient::lock.
+ * argument of Queen::lock.
  */
 struct LockOptions {
     /// The holder's identity, instead of the one minted per handle. Two handles
@@ -3679,11 +4499,17 @@ struct LockOptions {
     /// half as long again each time up to retry_max_millis, with jitter.
     int retry_min_millis = 100;
     int retry_max_millis = 1000;
+    /// Renew in the background while the permit is held, as the JS, Python,
+    /// Go and Rust handles do. false = renew yourself: keep_alive() at the
+    /// checkpoints of the work, or renew().
+    bool auto_renew = true;
+    /// The background renew period; 0 = a third of the lifetime.
+    int renew_every_millis = 0;
 };
 
 /**
  * The four lock operations as the broker speaks them, with no state kept: the
- * caller carries the token. QueenClient::lock is what most code wants; this is
+ * caller carries the token. Queen::lock is what most code wants; this is
  * for `get` (who holds it?) and for a caller with its own loop.
  */
 class LocksBuilder {
@@ -3700,15 +4526,16 @@ public:
      * the wire::lock_*_op functions). One result per operation, in order; they
      * are independent, nothing here is all-or-nothing.
      */
-    json batch(const json& operations) {
+    json batch(const json& operations, const RequestOptions& options = RequestOptions()) {
         if (!operations.is_array() || operations.empty()) {
             throw std::invalid_argument("a locks call needs at least one operation");
         }
-        json response = http_client_->post("/api/v1/locks", json{{"operations", operations}});
+        json response =
+            http_client_->post("/api/v1/locks", json{{"operations", operations}}, options);
         if (!response.is_object() || !response.contains("results") ||
             !response["results"].is_array() ||
             response["results"].size() != operations.size()) {
-            throw std::runtime_error(
+            throw Error(
                 "locks: the broker did not answer one result per operation; this is an "
                 "alignment failure, not a verdict");
         }
@@ -3729,9 +4556,13 @@ public:
     /** Extend a permit: {renewed, slot, token, guard} with a NEW token, or
      *  {renewed:false, reason:"lost", holders}. */
     json renew(const std::string& name, long long token, long long ttl_seconds, int slot = 0,
-               const std::string& owner = "") {
-        return batch(json::array({wire::lock_renew_op(name, token, ttl_seconds, slot, owner)}))[0];
+               const std::string& owner = "", const RequestOptions& options = RequestOptions()) {
+        return batch(json::array({wire::lock_renew_op(name, token, ttl_seconds, slot, owner)}),
+                     options)[0];
     }
+
+    /** The client's per-request timeout, in milliseconds. */
+    int timeout_millis() const { return http_client_->config().timeout_millis; }
 
     /** Give a permit back: {released}; false with reason "lost" when the token
      *  is no longer the row's. */
@@ -3746,56 +4577,80 @@ public:
 };
 
 /** Thrown where something needed a held lock and the handle holds none. */
-class LockNotHeldError : public std::runtime_error {
+class LockNotHeldError : public Error {
 public:
-    explicit LockNotHeldError(const std::string& message) : std::runtime_error(message) {
+    explicit LockNotHeldError(const std::string& message) : Error(message) {
     }
 };
 
 /**
  * One holder's hold on one lock, or on one permit of a semaphore.
  *
- *     auto lock = client.lock("daily-report", 30);
+ *     auto lock = queen.lock("daily-report", 30);
  *     if (!lock.acquire()) return;                  // somebody else has it
- *     client.transaction()
+ *     queen.transaction()
  *         .guard(lock)                              // commits only while it is ours
- *         .queue("reports").push({{{"data", report}}})
+ *         .queue("reports").push(report)
  *         .commit();
  *     lock.release();
  *
- * NOTHING RENEWS THIS IN THE BACKGROUND. The lifetime has to cover the work,
- * or the work calls keep_alive() at its checkpoints: it renews once a third of
- * the lifetime has passed and costs nothing before that. A handle whose
- * lifetime ran out on this machine's clock says held() == false, and its next
- * guarded step is refused by the broker.
+ * IT RENEWS ITSELF. While the permit is held a background thread renews it
+ * every third of the lifetime (LockOptions::auto_renew, on by default), and
+ * is_lost() / wait_lost() say when it is gone: the broker said so, or the
+ * lifetime passed on this machine's clock with no renew having succeeded -- a
+ * client that cannot reach the broker has to assume the worst. With
+ * auto_renew off, call keep_alive() at the checkpoints of the work instead.
  *
  * THE TOKEN CHANGES AT EVERY RENEW. The handle keeps the current one: read
- * token() and guard() when you use them.
+ * token() and guard() when you use them. TransactionBuilder::guard reads them
+ * when the bundle is sent, and sends the bundle again when it lost only to
+ * this handle's own renewal.
  *
  * THE OWNER is the holder's identity, minted per handle. With it a call is safe
  * to send again when its answer was lost: the broker answers the permit the
  * first attempt took.
  *
- * Not thread-safe: one handle, one thread at a time.
+ * Movable, not copyable; the background renewal ends with the handle (the
+ * permit then expires by itself). Its methods may be called from any thread.
  */
 class Lock {
 private:
     using Clock = std::chrono::steady_clock;
 
-    LocksBuilder locks_;
-    std::string name_;
-    long long ttl_seconds_;
-    int limit_;
-    LockOptions options_;
-    std::string owner_;
+    struct State {
+        LocksBuilder locks;
+        std::string name;
+        long long ttl_seconds;
+        int limit;
+        LockOptions options;
+        std::string owner;
 
-    long long token_ = 0;
-    int slot_ = -1;
-    // The broker's own guard of the current lease period, kept as answered:
-    // where a permit's row lives is the broker's rule, written once, there.
-    json guard_;
-    Clock::time_point valid_until_{};
-    Clock::time_point renewed_at_{};
+        mutable std::mutex mutex;
+        std::condition_variable wake;      // the renewer's sleep; wait_lost()
+        std::condition_variable settled;   // a renew in flight finished
+        long long token = 0;
+        int slot = -1;
+        // The broker's own guard of the current lease period, kept as answered:
+        // where a permit's row lives is the broker's rule, written once, there.
+        json guard;
+        Clock::time_point valid_until{};
+        Clock::time_point renewed_at{};
+        bool lost = false;
+        bool renewing = false;
+        bool stopping = false;
+        // Bumped at every acquire, release and loss, so a renewer or a renew
+        // in flight knows when its permit is no longer the handle's.
+        uint64_t epoch = 0;
+        std::thread renewer;
+
+        State(std::shared_ptr<HttpClient> http, std::string n, long long ttl, int lim,
+              LockOptions opts, std::string own)
+            : locks(std::move(http)), name(std::move(n)), ttl_seconds(ttl), limit(lim),
+              options(std::move(opts)), owner(std::move(own)) {
+        }
+    };
+
+    std::unique_ptr<State> s_;
 
     static std::string mint_owner() {
         // Same sources as the consumer's status report: no socket header for a
@@ -3815,36 +4670,161 @@ private:
         return out.str();
     }
 
-    void take(const json& result, Clock::time_point sent_at) {
-        token_ = result.at("token").get<long long>();
-        slot_ = result.at("slot").get<int>();
-        guard_ = result.at("guard");
+    // Called with the mutex held.
+    static void take(State& s, const json& result, Clock::time_point sent_at) {
+        s.token = result.at("token").get<long long>();
+        s.slot = result.at("slot").get<int>();
+        s.guard = result.at("guard");
         // Counted from when the request was SENT, so it is never later than the
         // broker's own deadline.
-        valid_until_ = sent_at + std::chrono::seconds(ttl_seconds_);
-        renewed_at_ = sent_at;
+        s.valid_until = sent_at + std::chrono::seconds(s.ttl_seconds);
+        s.renewed_at = sent_at;
+        s.lost = false;
     }
 
-    void drop() {
-        token_ = 0;
-        slot_ = -1;
-        guard_ = nullptr;
-        valid_until_ = Clock::time_point{};
+    // Called with the mutex held. `lost`: the permit went away under the
+    // holder (as opposed to a release).
+    static void drop(State& s, bool lost) {
+        const bool had = s.token != 0;
+        s.token = 0;
+        s.slot = -1;
+        s.guard = nullptr;
+        s.valid_until = Clock::time_point{};
+        ++s.epoch;
+        if (lost && had) s.lost = true;
+        s.wake.notify_all();
+    }
+
+    static Clock::duration renew_period(const State& s) {
+        if (s.options.renew_every_millis > 0) {
+            return std::chrono::milliseconds(s.options.renew_every_millis);
+        }
+        return std::chrono::milliseconds(std::max<long long>(s.ttl_seconds, 1) * 1000 / 3);
+    }
+
+    /**
+     * The background of one hold. It calls the permit lost when its lifetime
+     * runs out on this machine's clock, and with auto_renew it renews every
+     * period before that. A renew is one request, cut off at the permit's
+     * deadline: a broker that does not answer cannot hide the loss. A manual
+     * renew (renew(), keep_alive()) moves the schedule.
+     */
+    static void renew_loop(State* s, uint64_t epoch) {
+        try {
+            std::unique_lock<std::mutex> lock(s->mutex);
+            std::optional<Clock::time_point> retry_at;  // after a renew that could not be made
+            while (!s->stopping && s->epoch == epoch && s->token != 0) {
+                const bool automatic = s->options.auto_renew;
+                const Clock::time_point renewed_before = s->renewed_at;
+                const Clock::time_point due = retry_at ? *retry_at : s->renewed_at + renew_period(*s);
+                const Clock::time_point wake_at = automatic ? std::min(due, s->valid_until)
+                                                            : s->valid_until;
+                s->wake.wait_until(lock, wake_at, [&] {
+                    return s->stopping || s->epoch != epoch || s->renewed_at != renewed_before;
+                });
+                if (s->stopping || s->epoch != epoch) return;
+                if (s->renewed_at != renewed_before) {
+                    retry_at.reset();  // renewed elsewhere: a new schedule
+                    continue;
+                }
+                const auto now = Clock::now();
+                if (now >= s->valid_until) {
+                    util::log_warn("Lock.renew", "lock '" + s->name + "': lifetime ran out with no renew");
+                    drop(*s, true);
+                    return;
+                }
+                if (!automatic || now < due) continue;
+
+                const long long token = s->token;
+                const int slot = s->slot;
+                RequestOptions once;
+                once.no_retry = true;
+                once.timeout_millis = static_cast<int>(std::max<long long>(1, std::min<long long>(
+                    s->locks.timeout_millis(),
+                    std::chrono::duration_cast<std::chrono::milliseconds>(s->valid_until - now).count())));
+                s->renewing = true;
+                lock.unlock();
+                const auto sent_at = Clock::now();
+                json result;
+                std::string failure;
+                try {
+                    result = s->locks.renew(s->name, token, s->ttl_seconds, slot, s->owner, once);
+                } catch (const std::exception& e) {
+                    failure = e.what();
+                }
+                lock.lock();
+                s->renewing = false;
+                s->settled.notify_all();
+                if (s->stopping || s->epoch != epoch) return;
+                if (failure.empty()) {
+                    if (!result.value("renewed", false)) {
+                        util::log_warn("Lock.renew", "lock '" + s->name + "' is lost: " +
+                                       result.value("reason", std::string("not renewed")));
+                        drop(*s, true);
+                        return;
+                    }
+                    take(*s, result, sent_at);
+                    retry_at.reset();
+                } else {
+                    // The broker could not be asked: neither renewed nor known
+                    // lost. Try again soon, until the lifetime decides.
+                    util::log_warn("Lock.renew", "lock '" + s->name + "': renew failed: " + failure);
+                    retry_at = Clock::now() + std::min<Clock::duration>(std::chrono::seconds(1),
+                                                                         renew_period(*s));
+                }
+            }
+        } catch (...) {
+            // Nothing may leave a std::thread; the lifetime still decides.
+        }
+    }
+
+    // Called with the mutex released.
+    void join_renewer() {
+        if (s_ && s_->renewer.joinable() && s_->renewer.get_id() != std::this_thread::get_id()) {
+            s_->renewer.join();
+        }
+    }
+
+    void shutdown() {
+        if (!s_) return;
+        {
+            std::lock_guard<std::mutex> lock(s_->mutex);
+            s_->stopping = true;
+        }
+        s_->wake.notify_all();
+        join_renewer();
+    }
+
+    State& state() const {
+        if (!s_) throw std::logic_error("this Lock was moved from");
+        return *s_;
     }
 
 public:
     Lock(std::shared_ptr<HttpClient> http_client, const std::string& name, long long ttl_seconds,
-         int limit, const LockOptions& options)
-        : locks_(std::move(http_client)), name_(name), ttl_seconds_(ttl_seconds), limit_(limit),
-          options_(options), owner_(options.owner.empty() ? mint_owner() : options.owner) {
+         int limit, const LockOptions& options) {
+        const std::string owner = options.owner.empty() ? mint_owner() : options.owner;
         // Validated here, so a bad name or lifetime surfaces where the handle
         // is made and not at the first acquire.
-        (void)wire::lock_acquire_op(name_, ttl_seconds_, owner_, limit_);
+        (void)wire::lock_acquire_op(name, ttl_seconds, owner, limit);
+        s_ = std::make_unique<State>(std::move(http_client), name, ttl_seconds, limit, options, owner);
     }
 
-    const std::string& name() const { return name_; }
-    const std::string& owner() const { return owner_; }
-    int limit() const { return limit_; }
+    Lock(Lock&& other) noexcept = default;
+    Lock& operator=(Lock&& other) noexcept {
+        if (this != &other) {
+            shutdown();
+            s_ = std::move(other.s_);
+        }
+        return *this;
+    }
+    Lock(const Lock&) = delete;
+    Lock& operator=(const Lock&) = delete;
+    ~Lock() { shutdown(); }
+
+    const std::string& name() const { return state().name; }
+    const std::string& owner() const { return state().owner; }
+    int limit() const { return state().limit; }
 
     /**
      * Whether this handle holds a permit, as far as it can know: the broker
@@ -3852,13 +4832,25 @@ public:
      * machine's clock. A belief with a deadline, not a proof -- the proof is
      * the guard on the transaction.
      */
-    bool held() const { return token_ != 0 && Clock::now() < valid_until_; }
+    bool held() const {
+        State& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        return s.token != 0 && Clock::now() < s.valid_until;
+    }
 
     /** The fencing token of the current lease period; 0 when not held. */
-    long long token() const { return held() ? token_ : 0; }
+    long long token() const {
+        State& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        return s.token != 0 && Clock::now() < s.valid_until ? s.token : 0;
+    }
 
     /** The semaphore slot this handle holds (0 for a lock); -1 when not held. */
-    int slot() const { return held() ? slot_ : -1; }
+    int slot() const {
+        State& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        return s.token != 0 && Clock::now() < s.valid_until ? s.slot : -1;
+    }
 
     /**
      * The KV operation that holds while the permit is this handle's: a `check`
@@ -3867,42 +4859,49 @@ public:
      * batch yourself, at the moment you send.
      */
     json guard() const {
-        if (!held()) {
-            throw LockNotHeldError("lock '" + name_ + "' is not held; there is nothing to guard with");
+        State& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.token == 0 || Clock::now() >= s.valid_until) {
+            throw LockNotHeldError("lock '" + s.name + "' is not held; there is nothing to guard with");
         }
-        return guard_;
+        return s.guard;
     }
 
     /**
      * Take the permit. With wait_millis it keeps trying until the permit is
      * free or the wait is over, coming back every 100 ms to 1 s with jitter,
-     * and BLOCKS for that long.
+     * and BLOCKS for that long. On success the background renewal starts.
      */
     bool acquire(int wait_millis = 0) {
-        if (held()) {
-            return true;
-        }
-        auto deadline = Clock::now() + std::chrono::milliseconds(wait_millis);
-        double pause = options_.retry_min_millis;
+        State& s = state();
+        if (held()) return true;
+        const auto deadline = Clock::now() + std::chrono::milliseconds(wait_millis);
+        double pause = s.options.retry_min_millis;
         std::mt19937 rng{std::random_device{}()};
         std::uniform_real_distribution<double> jitter(0.75, 1.0);
         for (;;) {
-            auto sent_at = Clock::now();
-            json result = locks_.acquire(name_, ttl_seconds_, owner_, limit_);
+            const auto sent_at = Clock::now();
+            json result = s.locks.acquire(s.name, s.ttl_seconds, s.owner, s.limit);
             if (result.value("acquired", false)) {
-                take(result, sent_at);
+                uint64_t epoch;
+                {
+                    std::lock_guard<std::mutex> lock(s.mutex);
+                    take(s, result, sent_at);
+                    epoch = ++s.epoch;
+                }
+                // The watcher runs on every hold: it renews with auto_renew,
+                // and in either mode calls the permit lost at its deadline.
+                join_renewer();  // a previous hold's watcher, already ending
+                s.renewer = std::thread(&Lock::renew_loop, &s, epoch);
                 return true;
             }
-            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - Clock::now()).count();
-            if (left <= 0) {
-                return false;
-            }
+            if (left <= 0) return false;
             // A random quarter off, so a crowd of waiters spreads.
-            auto nap = static_cast<long long>(pause * jitter(rng));
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(std::min<long long>(nap, left)));
-            pause = std::min<double>(pause * 1.5, options_.retry_max_millis);
+            const auto nap = static_cast<long long>(pause * jitter(rng));
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min<long long>(nap, left)));
+            pause = std::min<double>(pause * 1.5, s.options.retry_max_millis);
         }
     }
 
@@ -3912,32 +4911,61 @@ public:
      * is then neither renewed nor known lost, and its deadline stands.
      */
     bool renew() {
-        if (token_ == 0) {
-            return false;
+        State& s = state();
+        long long token;
+        int slot;
+        uint64_t epoch;
+        {
+            std::unique_lock<std::mutex> lock(s.mutex);
+            s.settled.wait(lock, [&] { return !s.renewing; });
+            if (s.token == 0) return false;
+            token = s.token;
+            slot = s.slot;
+            epoch = s.epoch;
+            s.renewing = true;
         }
-        auto sent_at = Clock::now();
-        json result = locks_.renew(name_, token_, ttl_seconds_, slot_, owner_);
+        const auto sent_at = Clock::now();
+        json result;
+        try {
+            result = s.locks.renew(s.name, token, s.ttl_seconds, slot, s.owner);
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(s.mutex);
+            s.renewing = false;
+            s.settled.notify_all();
+            throw;
+        }
+        std::lock_guard<std::mutex> lock(s.mutex);
+        s.renewing = false;
+        s.settled.notify_all();
+        if (s.epoch != epoch) return s.token != 0;
         if (!result.value("renewed", false)) {
-            drop();
+            drop(s, true);
             return false;
         }
-        take(result, sent_at);
+        take(s, result, sent_at);
+        s.wake.notify_all();  // the watcher re-reads its schedule from the new renewal
         return true;
     }
 
     /**
-     * Renew if it is due: once a third of the lifetime has passed since the
-     * permit was taken or last renewed. Call it at the checkpoints of long
-     * work; it sends nothing before then. false means stop: the permit expired
-     * here, or the broker says it is somebody else's.
+     * The checkpoint of long work when auto_renew is off: renews once a third
+     * of the lifetime has passed since the permit was taken or last renewed,
+     * and sends nothing before then. With auto_renew on it only reads held().
+     * false means stop: the permit expired here, or the broker says it is
+     * somebody else's.
      */
     bool keep_alive() {
-        if (!held()) {
-            drop();
-            return false;
-        }
-        if (Clock::now() - renewed_at_ < std::chrono::milliseconds(ttl_seconds_ * 1000 / 3)) {
-            return true;
+        State& s = state();
+        {
+            std::lock_guard<std::mutex> lock(s.mutex);
+            if (s.token == 0 || Clock::now() >= s.valid_until) {
+                drop(s, true);
+                return false;
+            }
+            if (s.options.auto_renew ||
+                Clock::now() - s.renewed_at < std::chrono::milliseconds(s.ttl_seconds * 1000 / 3)) {
+                return true;
+            }
         }
         return renew();
     }
@@ -3948,22 +4976,67 @@ public:
      * holds nothing afterwards and can acquire again.
      */
     bool release() {
-        if (token_ == 0) {
-            return false;
+        State& s = state();
+        long long token;
+        int slot;
+        {
+            std::unique_lock<std::mutex> lock(s.mutex);
+            s.settled.wait(lock, [&] { return !s.renewing; });
+            if (s.token == 0) return false;
+            token = s.token;
+            slot = s.slot;
+            drop(s, false);
         }
-        long long token = token_;
-        int slot = slot_;
-        drop();
-        return locks_.release(name_, token, slot).value("released", false);
+        join_renewer();
+        return s.locks.release(s.name, token, slot).value("released", false);
+    }
+
+    /**
+     * Whether the permit this handle held went away under it: the broker said
+     * so, or its lifetime ran out with no renew. Reset by the next acquire().
+     */
+    bool is_lost() const {
+        State& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        return s.lost;
+    }
+
+    /** Block until the permit is lost or `timeout` passes; true when it was lost. */
+    bool wait_lost(std::chrono::milliseconds timeout) const {
+        State& s = state();
+        std::unique_lock<std::mutex> lock(s.mutex);
+        return s.wake.wait_for(lock, timeout, [&] { return s.lost; });
+    }
+
+    /** Wait for a renew in flight to finish, so token() and guard() are settled. */
+    void settle() const {
+        State& s = state();
+        std::unique_lock<std::mutex> lock(s.mutex);
+        s.settled.wait(lock, [&] { return !s.renewing; });
     }
 
     /** The broker said the permit is not this handle's (TransactionBuilder::guard). */
-    void mark_lost() { drop(); }
+    void mark_lost() {
+        State& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        drop(s, true);
+    }
 };
 
 // ============================================================================
-// TransactionBuilder - Atomic transactions
+// TransactionBuilder - one step, all or nothing
 // ============================================================================
+
+/**
+ * One message pushed inside a transaction. Unlike a plain push, a `trace_id`
+ * set here is stored and comes back at delivery; it must be a UUID. Empty
+ * fields are not sent (an empty transaction_id is minted here).
+ */
+struct TxPushItem {
+    json payload;
+    std::string transaction_id;
+    std::string trace_id;
+};
 
 class TransactionBuilder {
 private:
@@ -3979,56 +5052,127 @@ private:
     // between here and there changes it. Each must outlive the commit.
     std::vector<Lock*> guards_;
 
+    void add_ack(const Message& message, AckStatus status, const std::string& reason) {
+        if (message.partition_id.empty()) {
+            throw std::invalid_argument(
+                "cannot ack a message with no partition id: a transactionId alone is not unique "
+                "across partitions, so this could commit a cursor for a message you never saw");
+        }
+        if (message.transaction_id.empty()) {
+            throw std::invalid_argument("cannot ack a message with no transaction id");
+        }
+        json op = {
+            {"type", "ack"},
+            {"transactionId", message.transaction_id},
+            {"partitionId", message.partition_id},
+            {"status", to_string(status)}
+        };
+        // The group comes from the message: the pop that delivered it named it.
+        // Queue mode sends none, as it always has.
+        json group = util::group_on_wire(message.consumer_group);
+        if (!group.is_null()) {
+            op["consumerGroup"] = std::move(group);
+        }
+        if (!message.lease_id.empty()) {
+            // Each ack names its own lease. A Queen 2 broker fences an ack with
+            // the lease the operation carries, and lends it one from
+            // requiredLeases only when the bundle names a single lease: in a
+            // bundle spanning two leases, an ack without its own would be
+            // applied whoever holds its partition now.
+            op["leaseId"] = message.lease_id;
+            required_leases_.push_back(message.lease_id);
+        }
+        if (!reason.empty()) {
+            op["error"] = util::nack_error_text(reason);
+        }
+        operations_.push_back(std::move(op));
+    }
+
+    void add_push(const std::string& queue, const std::string& partition,
+                  const std::vector<TxPushItem>& items) {
+        if (queue.empty()) {
+            throw std::invalid_argument("a transaction push needs a queue name");
+        }
+        json push_items = json::array();
+        for (const auto& item : items) {
+            // The transactionId is what makes a retried transaction idempotent
+            // inside the dedup window, so it has to reach the wire: minted here
+            // when absent rather than left to the broker.
+            json formatted = {
+                {"queue", queue},
+                {"payload", item.payload},
+                {"transactionId", item.transaction_id.empty() ? util::generate_uuid_v7()
+                                                              : item.transaction_id}
+            };
+            if (!partition.empty()) {
+                formatted["partition"] = partition;
+            }
+            if (!item.trace_id.empty()) {
+                if (!util::is_valid_uuid(item.trace_id)) {
+                    throw std::invalid_argument(
+                        "traceId must be a UUID (the broker drops anything else silently), got '" +
+                        item.trace_id + "'");
+                }
+                formatted["traceId"] = item.trace_id;
+            }
+            push_items.push_back(std::move(formatted));
+        }
+        if (push_items.empty()) return;
+        operations_.push_back({{"type", "push"}, {"items", std::move(push_items)}});
+    }
+
+public:
+    /** The pushes of a bundle to one queue: `.queue(q).partition(p).push(payload)`. */
     class QueuePushBuilder {
     private:
         TransactionBuilder* parent_;
-        std::string queue_name_;
-        
+        std::string queue_;
+        std::string partition_;
+
     public:
-        QueuePushBuilder(TransactionBuilder* parent, const std::string& queue_name)
-            : parent_(parent), queue_name_(queue_name) {
+        QueuePushBuilder(TransactionBuilder* parent, const std::string& queue)
+            : parent_(parent), queue_(queue) {
         }
-        
-        TransactionBuilder& push(const std::vector<json>& items) {
-            json push_items = json::array();
-            
-            for (const auto& item : items) {
-                json payload;
-                if (item.contains("data")) {
-                    payload = item["data"];
-                } else if (item.contains("payload")) {
-                    payload = item["payload"];
-                } else {
-                    payload = item;
-                }
-                
-                // Same contract as QueueBuilder::push: the caller's transactionId
-                // is what makes a retried transaction idempotent inside the dedup
-                // window, so it has to reach the wire. Absent, mint one here
-                // rather than leaving the broker to do it.
-                json formatted = {
-                    {"queue", queue_name_},
-                    {"payload", payload},
-                    {"transactionId", item.contains("transactionId")
-                        ? item["transactionId"].get<std::string>()
-                        : util::generate_uuid_v7()}
-                };
 
-                if (item.contains("traceId") && item["traceId"].is_string()) {
-                    std::string trace_id = item["traceId"].get<std::string>();
-                    if (util::is_valid_uuid(trace_id)) {
-                        formatted["traceId"] = trace_id;
-                    }
-                }
+        /** The partition the pushes go to (the entity's lane). Unset = "Default". */
+        QueuePushBuilder& partition(const std::string& name) {
+            partition_ = name;
+            return *this;
+        }
 
-                push_items.push_back(formatted);
+        /** One message; the payload travels as it is. */
+        TransactionBuilder& push(const json& payload) {
+            if (payload.is_array()) {
+                throw std::invalid_argument(
+                    "push() takes ONE payload; for several messages call push_many(), and to send "
+                    "an array as one payload wrap it: push_many({payload})");
             }
-            
-            parent_->operations_.push_back({
-                {"type", "push"},
-                {"items", push_items}
-            });
-            
+            parent_->add_push(queue_, partition_, {TxPushItem{payload, "", ""}});
+            return *parent_;
+        }
+
+        /** One message with its own transaction id (the dedup key). */
+        TransactionBuilder& push(const json& payload, const std::string& transaction_id) {
+            if (payload.is_array()) {
+                throw std::invalid_argument(
+                    "push() takes ONE payload; for several messages call push_items()");
+            }
+            parent_->add_push(queue_, partition_, {TxPushItem{payload, transaction_id, ""}});
+            return *parent_;
+        }
+
+        /** Several messages, one per payload. */
+        TransactionBuilder& push_many(const std::vector<json>& payloads) {
+            std::vector<TxPushItem> items;
+            items.reserve(payloads.size());
+            for (const auto& payload : payloads) items.push_back(TxPushItem{payload, "", ""});
+            parent_->add_push(queue_, partition_, items);
+            return *parent_;
+        }
+
+        /** Messages with their own transaction id (the dedup key) and trace id. */
+        TransactionBuilder& push_items(const std::vector<TxPushItem>& items) {
+            parent_->add_push(queue_, partition_, items);
             return *parent_;
         }
     };
@@ -4036,15 +5180,15 @@ private:
     /**
      * KV writes and reads that ride this bundle, bound to one namespace.
      *
-     * Every method returns the TransactionBuilder, exactly like
-     * QueuePushBuilder::push, so a bundle reads as one chain.
-     *
-     * THE POINT OF PUTTING KV HERE INSTEAD OF CALLING client.kv() SEPARATELY
-     * (§5.2): the ack transaction is the primary fence and `expect` is the
-     * secondary assertion. A state write that shares the transaction with the
-     * ack is undone when an expired lease makes the ack fail -- something a
+     * THE POINT OF PUTTING KV HERE INSTEAD OF CALLING queen.kv() SEPARATELY:
+     * the ack transaction is the primary fence and `expect` is the secondary
+     * assertion. A state write that shares the transaction with the ack is
+     * undone when an expired lease makes the ack fail -- something a
      * compare-and-set cannot do, because an `expect` on a version that still
      * matches succeeds even from a zombie consumer.
+     *
+     * getPrefix is not here: the broker refuses it inside a transaction, its
+     * cost not being bounded by the caller.
      */
     class TxKvBuilder {
     private:
@@ -4058,6 +5202,11 @@ private:
 
         TransactionBuilder& get(const std::string& key) {
             parent_->kv_ops_.push_back(wire::kv_get_op(namespace_, key));
+            return *parent_;
+        }
+
+        TransactionBuilder& get_many(const std::vector<std::string>& keys) {
+            parent_->kv_ops_.push_back(wire::kv_get_many_op(namespace_, keys));
             return *parent_;
         }
 
@@ -4076,8 +5225,7 @@ private:
             return *parent_;
         }
 
-        // `del`, not `delete`: the keyword is taken, and it is the same spelling
-        // QueueBuilder and HttpClient already use.
+        // `del`, not `delete`: the keyword is taken.
         TransactionBuilder& del(const std::string& key,
                                 const KvWriteOptions& options = KvWriteOptions()) {
             parent_->kv_ops_.push_back(wire::kv_delete_op(namespace_, key, options));
@@ -4108,9 +5256,9 @@ private:
      * Timers that ride this bundle.
      *
      * A cancel sent here rides the bundle's own authorization, unlike the
-     * standalone client.timers().cancel(), which has a route that is never
-     * blockable (§9.6). Use the standalone one when the cancel must land
-     * regardless; use this one when the cancel must be atomic with the ack.
+     * standalone queen.timers().cancel(), whose route is never blockable. Use
+     * the standalone one when the cancel must land regardless; this one when
+     * the cancel must be atomic with the ack.
      */
     class TxTimersBuilder {
     private:
@@ -4132,70 +5280,34 @@ private:
         }
     };
 
-public:
-    TransactionBuilder(std::shared_ptr<HttpClient> http_client)
-        : http_client_(http_client) {
+    explicit TransactionBuilder(std::shared_ptr<HttpClient> http_client)
+        : http_client_(std::move(http_client)) {
     }
 
-    TransactionBuilder& ack(const json& message, const std::string& status = "completed", const json& context = json::object()) {
-        std::vector<json> messages;
-        if (message.is_array()) {
-            messages = message.get<std::vector<json>>();
-        } else {
-            messages.push_back(message);
-        }
-        
-        for (const auto& msg : messages) {
-            std::string transaction_id;
-            if (msg.is_string()) {
-                transaction_id = msg.get<std::string>();
-            } else if (msg.contains("transactionId")) {
-                transaction_id = msg["transactionId"].get<std::string>();
-            } else if (msg.contains("id")) {
-                transaction_id = msg["id"].get<std::string>();
-            } else {
-                throw std::runtime_error("Message must have transactionId or id property");
-            }
-            
-            if (!msg.is_object() || !msg.contains("partitionId")) {
-                throw std::runtime_error("Message must have partitionId property to ensure message uniqueness");
-            }
-            
-            std::string partition_id = msg["partitionId"].get<std::string>();
-            
-            json ack_op = {
-                {"type", "ack"},
-                {"transactionId", transaction_id},
-                {"partitionId", partition_id},
-                {"status", status}
-            };
-            
-            // Add consumerGroup if provided in context
-            if (context.contains("consumerGroup") && !context["consumerGroup"].is_null()) {
-                ack_op["consumerGroup"] = context["consumerGroup"].get<std::string>();
-            }
-            
-            if (msg.contains("leaseId") && !msg["leaseId"].is_null()) {
-                std::string lease_id = msg["leaseId"].get<std::string>();
-                required_leases_.push_back(lease_id);
-
-                // Each ACK names its own lease. A Queen 2 broker fences an ACK
-                // with the lease the operation carries, and lends it one from
-                // requiredLeases only when the bundle names a single lease: in a
-                // bundle spanning two leases, an ACK without its own would be
-                // applied whoever holds its partition now. 1.x brokers read the
-                // operation's lease before requiredLeases too.
-                if (!lease_id.empty()) {
-                    ack_op["leaseId"] = lease_id;
-                }
-            }
-            
-            operations_.push_back(ack_op);
-        }
-        
+    /**
+     * Settle a delivered message in this bundle. The consumer group and the
+     * lease come from the message; `reason` travels as the ack's error (kept
+     * on the dead-letter row when a failure files it there).
+     */
+    TransactionBuilder& ack(const Message& message, AckStatus status = AckStatus::Completed,
+                            const std::string& reason = "") {
+        add_ack(message, status, reason);
         return *this;
     }
-    
+
+    /** ack(message, AckStatus::Failed, reason): spends a retry. */
+    TransactionBuilder& nack(const Message& message, const std::string& reason) {
+        add_ack(message, AckStatus::Failed, reason);
+        return *this;
+    }
+
+    TransactionBuilder& ack_all(const std::vector<Message>& messages,
+                                AckStatus status = AckStatus::Completed,
+                                const std::string& reason = "") {
+        for (const auto& message : messages) add_ack(message, status, reason);
+        return *this;
+    }
+
     QueuePushBuilder queue(const std::string& queue_name) {
         return QueuePushBuilder(this, queue_name);
     }
@@ -4221,7 +5333,10 @@ public:
      *
      * The token is read when commit() sends. A guard that loses is the verdict,
      * returned like any lost required precondition (`reason:"kv_precondition"`),
-     * and the handle then holds nothing.
+     * and the handle then holds nothing -- unless it lost only to the handle's
+     * own background renewal, which moved the token while the bundle was in
+     * flight: the bundle is then sent again with the new token (nothing
+     * committed, so it is the same step, not a second one).
      *
      * commit() throws LockNotHeldError when the handle holds nothing: a step
      * that asked for a guard must not go out without one. `lock` must outlive
@@ -4235,100 +5350,80 @@ public:
     /**
      * Commit the bundle.
      *
-     * WHERE THE TWO RIDER ARRAYS GO, AND WHY IT IS NOT NEGOTIABLE
-     * (PLAN_KV_TIMERS.md §6.3, §8.2, §10.4). `kv` and `timers` are TOP-LEVEL
-     * fields of the request body, beside `operations` and never inside it. The
-     * reason is a silent failure in another client that this wire is shared
-     * with: two Go struct fields carrying the same JSON key at the same level
-     * are BOTH dropped by encoding/json, with no error and no warning. Growing
-     * `operations` a `kv` leg would therefore let a body go out with ZERO KV
-     * operations while the broker committed the transaction WITHOUT THE GATE --
-     * the putIfAbsent the bundle existed for would simply never have happened,
-     * and nothing anywhere would say so. C++ has no such failure mode, but the
-     * shape is not this client's to choose.
+     * WHERE THE TWO RIDER ARRAYS GO, AND WHY IT IS NOT NEGOTIABLE. `kv` and
+     * `timers` are TOP-LEVEL fields of the request body, beside `operations`
+     * and never inside it: two Go struct fields carrying the same JSON key at
+     * the same level are BOTH dropped by encoding/json, with no error, so a
+     * `kv` leg inside `operations` could go out with zero KV operations while
+     * the broker committed without the gate. The arrays are omitted entirely
+     * when empty, never sent as `[]`.
      *
-     * The arrays are omitted entirely when empty, never sent as `[]`: a bundle
-     * that uses neither feature must be byte-identical to what this client sent
-     * before the feature existed (§6.3).
+     * `results` is a FLAT index space with an append-only layout: the
+     * operations first (one slot per pushed item and per ack), then the KV
+     * array, then the timers.
      *
-     * `results[]` is a FLAT index space with an append-only layout: the
-     * operations first, exactly as today, then the KV array, then the timers.
-     * A push or an ack never changes index because a rider is present.
-     *
-     * WHAT THIS RETURNS INSTEAD OF THROWING (§8.3). A lost `required` KV
-     * precondition comes back as HTTP 200 with `success:false` and
-     * `reason:"kv_precondition"`, and this method RETURNS it. That outcome is
-     * the expected result of every legitimate redelivery -- it is the
-     * idempotency marker doing its job -- and turning it into an exception
-     * would put the single most frequent outcome of this product inside every
-     * caller's error path, its retry policy and its error metrics. The body
-     * carries `failedIndex` (in the flat space), `kvReason`, `version` and
-     * `value`, so branch on those; never string-match the message.
-     *
-     * Every other failure still throws, and a refusal by the ladder (403/429)
-     * still arrives as an HttpError from the transport layer.
+     * A lost `required` KV precondition is RETURNED (success false, reason
+     * "kv_precondition"), not thrown: it is the expected result of every
+     * legitimate redelivery -- the idempotency marker doing its job. Branch on
+     * failed_index, kv_reason, version and value; never string-match the
+     * message. Every other rollback throws TransactionError, and a refusal by
+     * the proxy (403/429) an HttpError.
      */
-    json commit() {
+    TransactionResult commit() {
         if (operations_.empty() && kv_ops_.empty() && timer_ops_.empty() && guards_.empty()) {
-            throw std::runtime_error("Transaction has no operations to commit");
+            throw std::invalid_argument("a transaction needs at least one operation");
         }
 
-        // Remove duplicate leases
-        std::sort(required_leases_.begin(), required_leases_.end());
-        required_leases_.erase(std::unique(required_leases_.begin(), required_leases_.end()),
-                              required_leases_.end());
+        std::vector<std::string> leases = required_leases_;
+        std::sort(leases.begin(), leases.end());
+        leases.erase(std::unique(leases.begin(), leases.end()), leases.end());
 
-        json request = {
-            {"operations", operations_},
-            {"requiredLeases", required_leases_}
-        };
-        // The guards go first in `kv`: guard i is op i of the rider.
-        // Lock::guard() throws for a handle that holds nothing, before
-        // anything is sent.
-        json kv = json::array();
-        for (Lock* lock : guards_) {
-            kv.push_back(lock->guard());
-        }
-        for (const auto& op : kv_ops_) {
-            kv.push_back(op);
-        }
-        if (!kv.empty()) {
-            request["kv"] = kv;
-        }
-        if (!timer_ops_.empty()) {
-            request["timers"] = timer_ops_;
+        // Where the kv rider starts in the flat results space.
+        size_t flat_operations = 0;
+        for (const auto& op : operations_) {
+            flat_operations += (op.value("type", std::string()) == "push" && op.contains("items"))
+                                   ? op["items"].size() : 1;
         }
 
-        json result = http_client_->post("/api/v1/transaction", request);
+        for (int attempt = 0;; ++attempt) {
+            json request = {
+                {"operations", operations_},
+                {"requiredLeases", leases}
+            };
+            // The guards go first in `kv`: guard i is op i of the rider. A
+            // handle that holds nothing throws before anything is sent.
+            json kv = json::array();
+            for (Lock* lock : guards_) {
+                lock->settle();
+                kv.push_back(lock->guard());
+            }
+            for (const auto& op : kv_ops_) kv.push_back(op);
+            if (!kv.empty()) request["kv"] = std::move(kv);
+            if (!timer_ops_.empty()) request["timers"] = timer_ops_;
 
-        if (!result.contains("success") || !result["success"].get<bool>()) {
-            if (result.is_object() && result.value("reason", std::string()) == "kv_precondition") {
-                // The guard of one of this bundle's locks: the permit expired,
-                // was released, or is somebody else's. The handle says so.
-                // `failedIndex` is in the FLAT result space: every pushed item
-                // and every ack first, then the kv rider.
-                if (!guards_.empty() && result.contains("failedIndex") &&
-                    result["failedIndex"].is_number_integer()) {
-                    long long flat_operations = 0;
-                    for (const auto& op : operations_) {
-                        flat_operations += (op.value("type", std::string()) == "push" &&
-                                            op.contains("items"))
-                                               ? static_cast<long long>(op["items"].size())
-                                               : 1;
-                    }
-                    long long at = result["failedIndex"].get<long long>() - flat_operations;
-                    if (at >= 0 && at < static_cast<long long>(guards_.size())) {
-                        guards_[static_cast<size_t>(at)]->mark_lost();
-                    }
-                }
+            TransactionResult result =
+                TransactionResult::from_json(http_client_->post("/api/v1/transaction", request));
+
+            if (result.success) return result;
+            if (!result.lost_precondition()) throw TransactionError(std::move(result));
+
+            // A guard that lost: which lock, and was it only our own renewal?
+            Lock* lost_lock = nullptr;
+            if (result.failed_index && *result.failed_index >= flat_operations &&
+                *result.failed_index - flat_operations < guards_.size()) {
+                lost_lock = guards_[*result.failed_index - flat_operations];
+            }
+            if (!lost_lock) return result;  // the caller's own precondition
+            const bool own_renewal = result.kv_reason == "version" && result.value.is_object() &&
+                                     util::text_of(result.value, "owner") == lost_lock->owner();
+            if (!own_renewal) {
+                // Expired, released, or another holder's: the lock is gone.
+                lost_lock->mark_lost();
                 return result;
             }
-            std::string error = result.contains("error") ?
-                result["error"].get<std::string>() : "Transaction failed";
-            throw std::runtime_error(error);
+            lost_lock->settle();
+            if (attempt >= 3 || !lost_lock->held()) return result;
         }
-
-        return result;
     }
 };
 
@@ -4344,13 +5439,11 @@ public:
 // the round trip to the broker, since there is no cache in front of the KV
 // and there will not be one (§8.5).
 //
-// WHAT THIS CLIENT DOES NOT HAVE, stated rather than implied (§10.2 gives the
-// C++ client get / put / putIfAbsent / delete / incr and nothing else):
-//   * `getMany` and `getPrefix`. Both exist on the broker's POST /api/v1/kv.
-//     getPrefix is refused inside a transaction by design, since its cost is
-//     not bounded by the caller.
-//   * the `once` helper client-js has.
-// Use the HTTP surface directly if you need them.
+// The eight operations: get, getMany, getPrefix, put, putIfAbsent, delete,
+// incr and check. getPrefix is refused inside a transaction by design, since
+// its cost is not bounded by the caller. There is no `once` helper (client-js
+// and client-py have one): write the putIfAbsent with `required` yourself,
+// which is the same wire and one line longer.
 //
 // STATUS CODES ARE NOT VERDICTS (§8.1). An absent key, a lost putIfAbsent race
 // and a delete that hit nothing are all HTTP 200 with an explicit field, so
@@ -4383,6 +5476,25 @@ public:
      */
     json get(const std::string& key) {
         return apply(wire::kv_get_op(namespace_, key), "kv get");
+    }
+
+    /**
+     * Read several keys in one round trip. Returns {rows, missing, truncated}:
+     * absence comes back as a list of missing keys, not as a gap the caller
+     * works out by subtraction.
+     */
+    json get_many(const std::vector<std::string>& keys) {
+        return apply(wire::kv_get_many_op(namespace_, keys), "kv getMany");
+    }
+
+    /**
+     * The keys that start with `prefix`, a page at a time, in byte order:
+     * {rows, truncated, nextAfter}. Pass `nextAfter` back as options.after for
+     * the following page. Each page is its own snapshot. Only here, never
+     * inside a transaction (the broker refuses it there).
+     */
+    json get_prefix(const std::string& prefix, const KvPrefixOptions& options = KvPrefixOptions()) {
+        return apply(wire::kv_get_prefix_op(namespace_, prefix, options), "kv getPrefix");
     }
 
     /**
@@ -4467,10 +5579,8 @@ public:
 // ============================================================================
 // TimersBuilder - the standalone timer surface (PLAN_KV_TIMERS.md §4, §8.1)
 //
-// WHAT THIS CLIENT DOES NOT HAVE (§10.2 gives C++ schedule and cancel):
-//   * `peek` (GET /api/v1/timers/:queue/{timerKey}) and `list`
-//     (GET /api/v1/timers/:queue). Both exist on the broker.
-//   * there is no separate `reschedule()`: schedule() IS the upsert, and the
+// schedule, cancel, peek and list. There is no separate `reschedule()`:
+//   schedule() IS the upsert, and the
 //     returned `status` tells you which happened, "scheduled" or "rescheduled".
 //     A rescheduled timer is a NEW timer under an old name -- its retry budget
 //     resets, and it gets a new txn.
@@ -4538,6 +5648,35 @@ public:
             path += "?txn=" + util::url_encode(txn);
         }
         return http_client_->del(path);
+    }
+
+    /**
+     * Read one pending timer: {found, queue, timerKey, txn, deliverAt,
+     * partition, payload, encrypted, attempts, claimed, ...}. The payload comes
+     * back AS STORED, base64: if the queue encrypts at rest it is the envelope,
+     * and `encrypted` says so.
+     */
+    json peek(const std::string& queue, const std::string& timer_key) {
+        return http_client_->get("/api/v1/timers/" + util::url_encode(queue) + "/" +
+                                 util::url_encode(timer_key));
+    }
+
+    /**
+     * A queue's pending timers, a page at a time: {rows, truncated, nextAfter}.
+     * `after` resumes after that timer key (exclusive, byte order); `limit` is
+     * clamped server-side. There is no tenant-wide list: the queue is
+     * mandatory.
+     */
+    json list(const std::string& queue, const std::string& after = "", int limit = 0) {
+        std::string path = "/api/v1/timers/" + util::url_encode(queue);
+        std::string query;
+        if (!after.empty()) query += "after=" + util::url_encode(after);
+        if (limit > 0) query += (query.empty() ? "" : "&") + std::string("limit=") + std::to_string(limit);
+        if (!query.empty()) path += "?" + query;
+        json out = http_client_->get(path);
+        return out.is_null()
+            ? json{{"rows", json::array()}, {"truncated", false}, {"nextAfter", nullptr}}
+            : out;
     }
 };
 
@@ -4956,7 +6095,7 @@ inline std::string iso_from_micros(int64_t micros) {
     const int64_t m = mp < 10 ? mp + 3 : mp - 9;
     const int64_t y = yoe + era * 400 + (m <= 2 ? 1 : 0);
     const int64_t secs = rem / 1000000;
-    char text[40];
+    char text[96];  // room for the widest ints, so no compiler calls the format truncated
     std::snprintf(text, sizeof(text), "%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%06lldZ",
                   static_cast<long long>(y), static_cast<long long>(m), static_cast<long long>(d),
                   static_cast<long long>(secs / 3600), static_cast<long long>((secs / 60) % 60),
@@ -5012,7 +6151,7 @@ inline std::map<std::string, FetchedPartition> fetch(HttpClient& http, const std
             const size_t asked = end_of_chunk - i;
             if (!answer.is_object() || !answer.contains("entries") || !answer["entries"].is_array() ||
                 answer["entries"].size() != asked) {
-                throw std::runtime_error("fetch " + queue + ": the broker answered " +
+                throw Error("fetch " + queue + ": the broker answered " +
                                          std::to_string(answer.is_object() && answer.contains("entries") &&
                                                                 answer["entries"].is_array()
                                                             ? answer["entries"].size()
@@ -5048,7 +6187,7 @@ inline std::map<std::string, FetchedPartition> fetch(HttpClient& http, const std
                     if (error == "OFFSET_OUT_OF_RANGE" || error == "UNKNOWN_TOPIC_OR_PARTITION") {
                         continue;
                     }
-                    throw std::runtime_error("fetch " + queue + "/" + name + ": the broker answered " + error);
+                    throw Error("fetch " + queue + "/" + name + ": the broker answered " + error);
                 }
                 if (!s.has_end) {
                     s.has_end = true;
@@ -5103,7 +6242,7 @@ inline ChangedPartitions changed_since(HttpClient& http, const std::string& queu
         }
         json answer = http.post("/api/v1/partitions/changed", {{"entries", json::array({entry})}});
         if (!answer.is_object()) {
-            throw std::runtime_error("changed_since " + queue + ": the broker answered no entry");
+            throw Error("changed_since " + queue + ": the broker answered no entry");
         }
         // Pages served by different nodes: the smallest is the one that holds
         // for all of them. The broker spells every one the same way, so the
@@ -5114,7 +6253,7 @@ inline ChangedPartitions changed_since(HttpClient& http, const std::string& queu
         }
         const json results = answer.value("entries", json::array());
         if (!results.is_array() || results.empty()) {
-            throw std::runtime_error("changed_since " + queue + ": the broker answered no entry");
+            throw Error("changed_since " + queue + ": the broker answered no entry");
         }
         const json& result = results[0];
         const std::string error = string_of(result.value("error", json()));
@@ -5122,7 +6261,7 @@ inline ChangedPartitions changed_since(HttpClient& http, const std::string& queu
             return out;
         }
         if (!error.empty()) {
-            throw std::runtime_error("changed_since " + queue + ": the broker answered " + error);
+            throw Error("changed_since " + queue + ": the broker answered " + error);
         }
         for (const auto& p : result.value("partitions", json::array())) {
             ChangedPartition partition;
@@ -5206,43 +6345,473 @@ public:
             params << "&to=" << util::url_encode(to_);
         }
         
-        try {
-            json result = http_client_->get("/api/v1/dlq" + params.str());
-            if (result.is_null()) {
-                return {{"messages", json::array()}, {"total", 0}};
-            }
-            return result;
-        } catch (const std::exception& e) {
-            util::log_error("DLQBuilder.get", std::string("Error: ") + e.what());
+        // A failure throws: an empty dead-letter queue and an unreachable
+        // broker are not the same answer.
+        json result = http_client_->get("/api/v1/dlq" + params.str());
+        if (result.is_null()) {
             return {{"messages", json::array()}, {"total", 0}};
         }
+        return result;
     }
 };
 
 // ============================================================================
-// ConsumerManager - Manages concurrent workers using ThreadPool
+// Admin - the management and observability routes
 // ============================================================================
 
-class ConsumerManager {
+/** Query parameters, in order: {{"limit", "10"}, {"search", "orders"}}. */
+using Query = std::vector<std::pair<std::string, std::string>>;
+
+/** Where seek_consumer_group moves a group's cursor: past the end, or to a time. */
+struct SeekOptions {
+    /// Past every message there now: the group skips the backlog.
+    bool to_end = false;
+    /// An ISO-8601 instant; used when to_end is false.
+    std::string timestamp;
+};
+
+/**
+ * The broker's management and observability routes, as the JS, Python, Go,
+ * Rust and PHP clients have them. Answers are the broker's JSON as it comes;
+ * a failure throws (HttpError, NetworkError).
+ *
+ * Writes that change what consumers see (retry_message, delete_message,
+ * seek_*) are sent once, without the transport's 5xx/network resend: their
+ * verdict is the caller's to read, and a blind resend would hide it.
+ */
+class Admin {
 private:
-    std::shared_ptr<HttpClient> http_client_;
-    QueenClient* queen_;
-    astp::ThreadPool thread_pool_;
-    
-    void enhance_message_with_trace(json& message, const std::string& consumer_group) {
-        // Note: In C++, we can't add methods to json objects like in JavaScript
-        // Instead, we provide a separate trace function that takes the message
-        // The user would call: queen.trace(message, trace_config)
+    std::shared_ptr<HttpClient> http_;
+
+    static std::string with_query(const std::string& path, const Query& params) {
+        if (params.empty()) return path;
+        std::string out = path + "?";
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (i > 0) out += "&";
+            out += util::url_encode(params[i].first) + "=" + util::url_encode(params[i].second);
+        }
+        return out;
+    }
+
+    static RequestOptions once() {
+        RequestOptions options;
+        options.no_retry = true;
+        return options;
+    }
+
+    static std::string enc(const std::string& value) { return util::url_encode(value); }
+
+public:
+    explicit Admin(std::shared_ptr<HttpClient> http) : http_(std::move(http)) {
+    }
+
+    // ------------------------------------------------------------ resources
+
+    json overview() { return http_->get("/api/v1/resources/overview"); }
+    json namespaces() { return http_->get("/api/v1/resources/namespaces"); }
+    json tasks() { return http_->get("/api/v1/resources/tasks"); }
+
+    /** Filters: namespace, task, search, limit, offset. */
+    json list_queues(const Query& params = {}) {
+        return http_->get(with_query("/api/v1/resources/queues", params));
+    }
+
+    /** One queue: its options, namespace, task and counts. */
+    json queue(const std::string& name) {
+        return http_->get("/api/v1/resources/queues/" + enc(name));
+    }
+
+    /** Pending messages, for one group or every group. */
+    json queue_depth(const std::string& name, const std::string& group = "") {
+        Query params;
+        if (!group.empty()) params.push_back({"group", group});
+        return http_->get(with_query("/api/v1/resources/queues/" + enc(name) + "/depth", params));
+    }
+
+    json partitions(const Query& params = {}) {
+        return http_->get(with_query("/api/v1/resources/partitions", params));
+    }
+
+    // ------------------------------------------------------------- messages
+
+    json list_messages(const Query& params = {}) {
+        return http_->get(with_query("/api/v1/messages", params));
+    }
+
+    json message(const std::string& partition_id, const std::string& transaction_id) {
+        return http_->get("/api/v1/messages/" + enc(partition_id) + "/" + enc(transaction_id));
+    }
+
+    json delete_message(const std::string& partition_id, const std::string& transaction_id) {
+        return http_->del("/api/v1/messages/" + enc(partition_id) + "/" + enc(transaction_id), once());
     }
 
     /**
-     * Run the handler on one message or one batch, and say how it failed if it
-     * did. A handler can throw anything, not only a std::exception, and every
-     * throw is a failed message: none may escape into the worker, where it
-     * would end the loop with the message unsettled.
+     * Put a dead-lettered message back into its partition (and out of the
+     * dead-letter queue). The copy lands at the partition's TAIL, so it is out
+     * of order with respect to its own key.
      */
-    static std::optional<std::string> run_handler(const std::function<void(const json&)>& handler,
-                                                  const json& input) {
+    json retry_message(const std::string& partition_id, const std::string& transaction_id) {
+        return http_->post("/api/v1/messages/" + enc(partition_id) + "/" + enc(transaction_id) +
+                           "/retry", json::object(), once());
+    }
+
+    /** The dead-letter queue: filters queue, consumerGroup, limit, offset. */
+    json dlq(const Query& params = {}) {
+        json out = http_->get(with_query("/api/v1/dlq", params));
+        return out.is_null() ? json{{"messages", json::array()}, {"total", 0}} : out;
+    }
+
+    // --------------------------------------------------------------- traces
+
+    /** Record a trace event: {transactionId, partitionId, consumerGroup, traceName?, eventType?, data}. */
+    json record_trace(const json& trace) { return http_->post("/api/v1/traces", trace); }
+
+    json trace_names(const Query& params = {}) {
+        return http_->get(with_query("/api/v1/traces/names", params));
+    }
+
+    json traces_by_name(const std::string& name, const Query& params = {}) {
+        return http_->get(with_query("/api/v1/traces/by-name/" + enc(name), params));
+    }
+
+    json traces_for_message(const std::string& partition_id, const std::string& transaction_id) {
+        return http_->get("/api/v1/traces/" + enc(partition_id) + "/" + enc(transaction_id));
+    }
+
+    // ------------------------------------------------------ consumer groups
+
+    json list_consumer_groups() { return http_->get("/api/v1/consumer-groups"); }
+
+    json consumer_group(const std::string& name) {
+        return http_->get("/api/v1/consumer-groups/" + enc(name));
+    }
+
+    json lagging_consumers(long long min_lag_seconds) {
+        return http_->get("/api/v1/consumer-groups/lagging?minLagSeconds=" +
+                          std::to_string(min_lag_seconds));
+    }
+
+    json delete_consumer_group(const std::string& group, bool delete_metadata = false) {
+        return http_->del("/api/v1/consumer-groups/" + enc(group) +
+                          "?deleteMetadata=" + (delete_metadata ? "true" : "false"), once());
+    }
+
+    json delete_consumer_group_for_queue(const std::string& group, const std::string& queue,
+                                         bool delete_metadata = false) {
+        return http_->del("/api/v1/consumer-groups/" + enc(group) + "/queues/" + enc(queue) +
+                          "?deleteMetadata=" + (delete_metadata ? "true" : "false"), once());
+    }
+
+    /**
+     * Move a group's cursor on a queue: past the end (to_end), or to a time.
+     * This is how a group that already exists is replayed -- subscription_mode
+     * only applies to a group's first pop.
+     */
+    json seek_consumer_group(const std::string& group, const std::string& queue,
+                             const SeekOptions& seek) {
+        json body = json::object();
+        if (seek.to_end) {
+            body["toEnd"] = true;
+        } else if (!seek.timestamp.empty()) {
+            body["timestamp"] = seek.timestamp;
+        } else {
+            throw std::invalid_argument("seek needs to_end or a timestamp");
+        }
+        return http_->post("/api/v1/consumer-groups/" + enc(group) + "/queues/" + enc(queue) +
+                           "/seek", body, once());
+    }
+
+    /** Move one partition of a group's cursor past its end. */
+    json seek_consumer_group_partition(const std::string& group, const std::string& queue,
+                                       const std::string& partition) {
+        return http_->post("/api/v1/consumer-groups/" + enc(group) + "/queues/" + enc(queue) +
+                           "/partitions/" + enc(partition) + "/seek", json::object(), once());
+    }
+
+    /** Where a group that has not popped yet starts (an ISO-8601 instant). */
+    json set_subscription_timestamp(const std::string& group, const std::string& timestamp) {
+        return http_->post("/api/v1/consumer-groups/" + enc(group) + "/subscription",
+                           json{{"subscriptionTimestamp", timestamp}});
+    }
+
+    json refresh_consumer_stats() { return http_->post("/api/v1/stats/refresh", json::object()); }
+
+    /** Extend a lease by `seconds` (0 = the broker's default). */
+    json renew_lease(const std::string& lease_id, int seconds = 0) {
+        json body = json::object();
+        if (seconds > 0) body["seconds"] = seconds;
+        return http_->post("/api/v1/lease/" + enc(lease_id) + "/extend", body);
+    }
+
+    // --------------------------------------------------------------- status
+
+    json status(const Query& params = {}) { return http_->get(with_query("/api/v1/status", params)); }
+
+    json queue_stats(const Query& params = {}) {
+        return http_->get(with_query("/api/v1/status/queues", params));
+    }
+
+    json queue_detail(const std::string& name, const Query& params = {}) {
+        return http_->get(with_query("/api/v1/status/queues/" + enc(name), params));
+    }
+
+    json analytics(const Query& params = {}) {
+        return http_->get(with_query("/api/v1/status/analytics", params));
+    }
+
+    json system_metrics(const Query& params = {}) {
+        return http_->get(with_query("/api/v1/analytics/system-metrics", params));
+    }
+
+    json worker_metrics(const Query& params = {}) {
+        return http_->get(with_query("/api/v1/analytics/worker-metrics", params));
+    }
+
+    json health() { return http_->get("/health"); }
+
+    /** The Prometheus text of GET /metrics. */
+    std::string metrics() { return http_->get_text("/metrics"); }
+};
+
+// ============================================================================
+// The pop - one code path for pop(), pop_result() and every consume() worker
+// ============================================================================
+
+namespace detail {
+
+/** Everything one pop request is made of. */
+struct PopTarget {
+    std::string queue;
+    std::string partition;          // empty = any partition of the queue
+    std::string namespace_name;
+    std::string task;
+    std::string group;
+    int batch = 0;                  // 0 = unset (autopilot's to choose)
+    int max_partitions = 0;         // 0 = unset
+    bool autopilot = true;
+    bool wait = true;
+    int timeout_millis = 30000;
+    std::string subscription_mode;
+    std::string subscription_from;
+    bool conflation = false;
+    bool commit_on_delivery = false;
+};
+
+inline std::string pop_path(const PopTarget& t) {
+    if (!t.queue.empty()) {
+        if (!t.partition.empty()) {
+            return "/api/v1/pop/queue/" + util::url_encode(t.queue) + "/partition/" +
+                   util::url_encode(t.partition);
+        }
+        return "/api/v1/pop/queue/" + util::url_encode(t.queue);
+    }
+    if (!t.namespace_name.empty() || !t.task.empty()) {
+        return "/api/v1/pop";
+    }
+    throw std::invalid_argument("a pop needs a queue, or a namespace/task to discover one");
+}
+
+/**
+ * The query string: the keys this SDK has always sent, and with autopilot off
+ * the same keys and values as before autopilot. (cpp-httplib re-sorts the keys
+ * when it sends, so it is the set that is pinned, not the order.)
+ */
+inline std::string pop_query(const PopTarget& t) {
+    // Batch, partitions and the autopilot flag: THE RULE lives in one place.
+    const util::PopSizing sizing = util::pop_sizing(t.batch, t.max_partitions, 1, t.autopilot);
+    std::string q = "?";
+    if (sizing.autopilot) q += "autopilot=true&";
+    if (sizing.has_batch) q += "batch=" + std::to_string(sizing.batch) + "&";
+    q += std::string("wait=") + (t.wait ? "true" : "false");
+    q += "&timeout=" + std::to_string(t.timeout_millis);
+    if (!t.group.empty()) q += "&consumerGroup=" + util::url_encode(t.group);
+    if (!t.namespace_name.empty()) q += "&namespace=" + util::url_encode(t.namespace_name);
+    if (!t.task.empty()) q += "&task=" + util::url_encode(t.task);
+    if (!t.subscription_mode.empty()) q += "&subscriptionMode=" + util::url_encode(t.subscription_mode);
+    if (!t.subscription_from.empty()) q += "&subscriptionFrom=" + util::url_encode(t.subscription_from);
+    // v4 multi-partition pop. Under autopilot a pinned width travels even when
+    // it is 1, because 1 is then a decision and not the absence of one.
+    if (sizing.has_partitions) q += "&partitions=" + std::to_string(sizing.partitions);
+    // Emitted only when true: `conflation=false` would read as "turn the
+    // group's policy off", which a pop may not do.
+    if (t.conflation) q += "&conflation=true";
+    // Commit at delivery: no lease, nothing to ack. `autoAck` is the name every
+    // 2.x broker reads.
+    if (t.commit_on_delivery) q += "&autoAck=true";
+    return q;
+}
+
+inline std::string affinity_key(const PopTarget& t) {
+    return util::grouping_key(t.queue, t.partition, t.namespace_name, t.task, t.group);
+}
+
+/**
+ * One pop round trip. Throws on failure -- a 403, an exhausted retry budget,
+ * a network fault -- because an empty result has to mean an empty queue and
+ * nothing else (before 2.7.1 this SDK logged the failure and returned [], so
+ * revoked credentials looked like an idle queue).
+ */
+inline PopResult pop_once(HttpClient& http, const PopTarget& t) {
+    RequestOptions options;
+    // Five seconds of slack, so the broker's long-poll timer fires before the
+    // client's and a quiet queue reads as an empty poll, not a timeout.
+    options.timeout_millis = t.wait ? t.timeout_millis + 5000 : t.timeout_millis;
+    options.retry_kind = t.wait ? RetryKind::Pop : RetryKind::Default;
+    options.affinity_key = affinity_key(t);
+
+    json answer = http.get(pop_path(t) + pop_query(t), options);
+
+    // Degrade loudly (conflation): BEFORE the empty-answer return, because an
+    // old broker answers an idle queue with a bodiless 204, the likeliest first
+    // contact, and the check has to fire on it.
+    util::enforce_conflation_contract(t.conflation, answer,
+                                      util::pop_target_label(t.queue, t.namespace_name, t.task),
+                                      t.group);
+    if (answer.is_object() && answer.contains("success") && answer["success"].is_boolean() &&
+        !answer["success"].get<bool>()) {
+        const std::string error = util::text_of(answer, "error");
+        throw Error("pop failed: " + (error.empty() ? std::string("no reason given") : error));
+    }
+    PopResult out;
+    out.autopilot = util::parse_autopilot_decision(answer);
+    out.messages = util::messages_of(answer);
+    // Every 2.x broker names the group on each message; when an answer does
+    // not (a proxy, a stub), the message takes the group this pop asked for,
+    // so its ack never falls back to the queue-mode cursor.
+    for (auto& message : out.messages) {
+        if (message.consumer_group.empty() && !t.group.empty()) message.consumer_group = t.group;
+        if (message.queue.empty()) message.queue = t.queue;
+    }
+    return out;
+}
+
+/** Signals, when ClientConfig::handle_signals asked for them. */
+inline std::atomic<int>& signal_count() {
+    static std::atomic<int> count{0};
+    return count;
+}
+
+inline void on_signal(int sig) {
+    // The first signal asks the program to stop; a second one does what the
+    // signal would have done without these handlers.
+    if (signal_count().fetch_add(1) >= 1) {
+        std::signal(sig, SIG_DFL);
+        std::raise(sig);
+    }
+}
+
+inline void install_signal_handlers() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        signal_count();  // initialized before a handler can run
+        std::signal(SIGINT, on_signal);
+        std::signal(SIGTERM, on_signal);
+    });
+}
+
+} // namespace detail
+
+class Queen;
+
+// ============================================================================
+// ConsumerManager - the consume() loop
+// ============================================================================
+
+/**
+ * Runs `concurrency` workers, one thread each, that pop, hand messages to the
+ * handler and settle them. QueueBuilder::consume and consume_batch are what
+ * most code wants; this is public for a caller that builds ConsumeOptions
+ * itself.
+ *
+ * A handler signals failure by throwing (anything). With auto_ack (the
+ * default) a message whose handler returned is acked, one whose handler threw
+ * is nacked with the exception's text -- which spends a retry and, past
+ * retryLimit, files the message in the dead-letter queue with that text. With
+ * auto_ack(false) nothing is sent: the handler settles messages itself, and a
+ * failed one comes back when its lease expires.
+ *
+ * ORDERING AFTER A FAILURE (per-message mode). A nack releases the failed
+ * message's PARTITION and leaves its cursor at that message, so the later
+ * messages of the same partition in this batch are redelivered: the loop skips
+ * them instead of handling messages whose acks the broker would refuse. The
+ * other partitions of a multi-partition pop are handled. With auto_ack(false)
+ * the loop abandons the rest of the batch after a failure, since the handler's
+ * ack of a later message could commit the failed one.
+ */
+class ConsumerManager {
+public:
+    using Handler = std::function<void(const Message&)>;
+    using BatchHandler = std::function<void(const std::vector<Message>&)>;
+
+private:
+    std::shared_ptr<HttpClient> http_client_;
+    Queen* queen_;
+
+    struct Shared {
+        ConsumeOptions options;
+        detail::PopTarget target;
+        std::shared_ptr<ConsumerSupervision> supervision;
+        std::atomic<uint64_t> processed{0};
+        std::atomic<uint64_t> acked{0};
+        std::atomic<uint64_t> nacked{0};
+        std::atomic<bool> stop{false};
+        std::mutex mutex;
+        StopReason reason = StopReason::Ended;
+        std::exception_ptr error;
+    };
+
+    using Process = std::function<void(Shared&, std::vector<Message>&)>;
+
+    void stop_with(Shared& shared, StopReason reason) {
+        if (!shared.stop.exchange(true)) {
+            std::lock_guard<std::mutex> lock(shared.mutex);
+            shared.reason = reason;
+        }
+    }
+
+    void record_error(Shared& shared) {
+        {
+            std::lock_guard<std::mutex> lock(shared.mutex);
+            if (!shared.error) shared.error = std::current_exception();
+        }
+        stop_with(shared, StopReason::Ended);
+    }
+
+    bool cancelled(const Shared& shared) const;   // defined after Queen
+
+    bool should_stop(const Shared& shared) const {
+        return shared.stop.load() || cancelled(shared);
+    }
+
+    bool limit_reached(const Shared& shared) const {
+        return shared.options.limit > 0 &&
+               shared.processed.load() >= static_cast<uint64_t>(shared.options.limit);
+    }
+
+    /** Sleep, waking early when the loop is cancelled; true = stop now. */
+    bool pause(const Shared& shared, int millis) const {
+        if (shared.options.cancel) {
+            if (shared.options.cancel->wait_for(std::chrono::milliseconds(millis))) return true;
+            return should_stop(shared);
+        }
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(millis);
+        while (std::chrono::steady_clock::now() < until) {
+            if (should_stop(shared)) return true;
+            const auto left = until - std::chrono::steady_clock::now();
+            std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(
+                left, std::chrono::milliseconds(100)));
+        }
+        return should_stop(shared);
+    }
+
+    /**
+     * Run the handler and say how it failed, if it did. A handler can throw
+     * anything, not only a std::exception, and every throw is a failed message:
+     * none may escape into the worker.
+     */
+    template <typename F, typename Arg>
+    static std::optional<std::string> run_handler(const F& handler, const Arg& input) {
         try {
             handler(input);
             return std::nullopt;
@@ -5253,25 +6822,22 @@ private:
         }
     }
 
-    // Settle what a handler was given, with auto_ack: ack it after a success,
-    // nack it after a failure. Without auto_ack a failure is only logged.
-    // Defined after QueenClient, whose ack() they call.
-    void ack_handled(const json& messages, const ConsumeOptions& options, const char* where);
-    void handle_failure(const json& messages, const std::string& reason,
-                        const ConsumeOptions& options, const char* where);
+    bool settle(Shared& shared, const Message& message, const std::optional<std::string>& failure);
+    void settle_batch(Shared& shared, const std::vector<Message>& messages,
+                      const std::optional<std::string>& failure);
+    void worker(int id, Shared& shared, const Process& process);
+    ConsumeSummary run_loop(ConsumeOptions options, Process process);
 
 public:
-    ConsumerManager(std::shared_ptr<HttpClient> http_client, QueenClient* queen,
-                   int pool_size = std::thread::hardware_concurrency())
-        : http_client_(http_client), queen_(queen), thread_pool_(pool_size) {
+    ConsumerManager(std::shared_ptr<HttpClient> http_client, Queen* queen)
+        : http_client_(std::move(http_client)), queen_(queen) {
     }
-    
-    ~ConsumerManager() {
-        thread_pool_.wait();
-    }
-    
-    void start(std::function<void(const json&)> handler, const ConsumeOptions& options);
-    // Implementation will be defined after QueenClient declaration
+
+    /** One message per handler call. */
+    ConsumeSummary run(Handler handler, const ConsumeOptions& options);
+
+    /** A whole claimed batch per handler call, settled with one request. */
+    ConsumeSummary run_batch(BatchHandler handler, const ConsumeOptions& options);
 };
 
 // ============================================================================
@@ -5280,7 +6846,7 @@ public:
 
 class QueueBuilder {
 private:
-    QueenClient* queen_;
+    Queen* queen_;
     std::shared_ptr<HttpClient> http_client_;
     std::shared_ptr<BufferManager> buffer_manager_;
     std::string queue_name_;
@@ -5289,18 +6855,14 @@ private:
     std::string task_;
     std::string group_;
     QueueConfig config_;
-    
-    // Consume options.
-    //
-    // batch_ / max_partitions_ hold the USER's value, and 0 means the setter was
-    // never called -- which is the dimension pop autopilot gets to choose. The
-    // client-side defaults are applied at emission time (util::pop_sizing), not
-    // here, because filling them in here would erase the difference between
-    // "never called batch()" and "called batch(1)".
+
+    // Consume options. batch_ / max_partitions_ hold the USER's value, and 0
+    // means the setter was never called -- which is the dimension pop
+    // autopilot gets to choose (util::pop_sizing).
     std::optional<SupervisionConfig> supervision_;
     int concurrency_ = 1;
     int batch_ = 0;
-    int limit_ = 0;
+    long long limit_ = 0;
     int idle_millis_ = 0;
     bool auto_ack_ = true;
     bool commit_on_delivery_ = false;
@@ -5310,424 +6872,222 @@ private:
     int renew_lease_interval_millis_ = 60000;
     std::string subscription_mode_;
     std::string subscription_from_;
-    bool each_ = false;
     int max_partitions_ = 0;
     bool conflation_ = false;
     /// Per-builder override: unset = the client default.
     std::optional<bool> autopilot_;
+    std::optional<Cancel> cancel_;
 
-    // Buffer options
     std::optional<BufferOptions> buffer_options_;
-    
-public:
-    QueueBuilder(QueenClient* queen, std::shared_ptr<HttpClient> http_client,
-                std::shared_ptr<BufferManager> buffer_manager, const std::string& queue_name = "")
-        : queen_(queen), http_client_(http_client), buffer_manager_(buffer_manager),
-          queue_name_(queue_name) {
+
+    void require_queue(const char* what) const {
+        if (queue_name_.empty()) {
+            throw std::invalid_argument(std::string("a queue name is required for ") + what);
+        }
     }
-    
-    // Queue configuration methods
+
+    std::string partition_or_empty() const {
+        return partition_ == util::DEFAULT_PARTITION ? std::string() : partition_;
+    }
+
+    detail::PopTarget pop_target(bool commit_on_delivery) const {
+        detail::PopTarget t;
+        t.queue = queue_name_;
+        t.partition = partition_or_empty();
+        t.namespace_name = namespace_;
+        t.task = task_;
+        t.group = group_;
+        t.batch = batch_;
+        t.max_partitions = max_partitions_;
+        t.autopilot = autopilot_enabled();
+        t.wait = wait_;
+        t.timeout_millis = timeout_millis_;
+        t.subscription_mode = subscription_mode_;
+        t.subscription_from = subscription_from_;
+        t.conflation = conflation_;
+        t.commit_on_delivery = commit_on_delivery;
+        return t;
+    }
+
+    ConsumeOptions consume_options() const {
+        if (commit_on_delivery_) {
+            throw std::invalid_argument(
+                "commit_on_delivery() is a pop() option; consume() always leases its messages");
+        }
+        ConsumeOptions options;
+        options.supervision = supervision_;
+        options.queue = queue_name_;
+        options.partition = partition_or_empty();
+        options.namespace_name = namespace_;
+        options.task = task_;
+        options.group = group_;
+        options.concurrency = concurrency_;
+        options.batch = batch_;
+        options.limit = limit_;
+        options.idle_millis = idle_millis_;
+        options.auto_ack = auto_ack_;
+        options.wait = wait_;
+        options.timeout_millis = timeout_millis_;
+        options.renew_lease = renew_lease_;
+        options.renew_lease_interval_millis = renew_lease_interval_millis_;
+        options.subscription_mode = subscription_mode_;
+        options.subscription_from = subscription_from_;
+        options.max_partitions = max_partitions_;
+        options.conflation = conflation_;
+        // Resolved here, so the loop sees a decision and not an empty optional.
+        options.autopilot = autopilot_enabled();
+        options.cancel = cancel_;
+        return options;
+    }
+
+public:
+    QueueBuilder(Queen* queen, std::shared_ptr<HttpClient> http_client,
+                 std::shared_ptr<BufferManager> buffer_manager, const std::string& queue_name = "")
+        : queen_(queen), http_client_(std::move(http_client)),
+          buffer_manager_(std::move(buffer_manager)), queue_name_(queue_name) {
+    }
+
+    const std::string& name() const { return queue_name_; }
+
+    /** The affinity key of this builder's requests: the broker's grouping. */
+    std::string affinity_key() const {
+        return util::grouping_key(queue_name_, partition_or_empty(), namespace_, task_, group_);
+    }
+
+    // ------------------------------------------------------------- naming
+
     QueueBuilder& namespace_name(const std::string& name) {
         namespace_ = name;
         return *this;
     }
-    
+
     QueueBuilder& task(const std::string& name) {
         task_ = name;
         return *this;
     }
-    
-    QueueBuilder& config(const QueueConfig& cfg) {
-        config_ = cfg;
-        return *this;
-    }
-    
-    json create() {
-        json payload = {
-            {"queue", queue_name_},
-            {"namespace", namespace_},
-            {"task", task_},
-            {"options", config_.to_json()}
-        };
-        
-        return http_client_->post("/api/v1/configure", payload);
-    }
-    
-    json del() {
-        if (queue_name_.empty()) {
-            throw std::runtime_error("Queue name is required for delete operation");
-        }
-        
-        std::string path = "/api/v1/resources/queues/" + util::url_encode(queue_name_);
-        return http_client_->del(path);
-    }
-    
-    // Push methods
+
+    /** The partition: one per entity (an order, a customer), created by the first push. */
     QueueBuilder& partition(const std::string& name) {
-        partition_ = name;
+        partition_ = name.empty() ? std::string(util::DEFAULT_PARTITION) : name;
         return *this;
     }
-    
-    QueueBuilder& buffer(const BufferOptions& options) {
-        buffer_options_ = options;
-        return *this;
-    }
-    
-    json push(const std::vector<json>& payload) {
-        if (queue_name_.empty()) {
-            throw std::runtime_error("Queue name is required for push operation");
-        }
-        
-        json formatted_items = json::array();
-        
-        for (const auto& item : payload) {
-            json payload_value;
-            if (item.contains("data")) {
-                payload_value = item["data"];
-            } else if (item.contains("payload")) {
-                payload_value = item["payload"];
-            } else {
-                payload_value = item;
-            }
-            
-            json formatted = {
-                {"queue", queue_name_},
-                {"partition", partition_},
-                {"payload", payload_value},
-                {"transactionId", item.contains("transactionId") ? 
-                    item["transactionId"].get<std::string>() : util::generate_uuid_v7()}
-            };
-            
-            if (item.contains("traceId") && item["traceId"].is_string()) {
-                std::string trace_id = item["traceId"].get<std::string>();
-                if (util::is_valid_uuid(trace_id)) {
-                    formatted["traceId"] = trace_id;
-                }
-            }
-            
-            formatted_items.push_back(formatted);
-        }
-        
-        // Client-side buffering
-        if (buffer_options_.has_value()) {
-            for (const auto& item : formatted_items) {
-                std::string queue_address = queue_name_ + "/" + partition_;
-                buffer_manager_->add_message(queue_address, item, buffer_options_.value());
-            }
-            
-            return {
-                {"buffered", true},
-                {"count", formatted_items.size()}
-            };
-        }
-        
-        // Immediate push
-        json request = {{"items", formatted_items}};
-        return http_client_->post("/api/v1/push", request);
-    }
-    
-    // Consume configuration methods
+
+    /** The consumer group. None = queue mode: each message goes to one worker. */
     QueueBuilder& group(const std::string& name) {
         group_ = name;
         return *this;
     }
-    
-    QueueBuilder& supervision(std::optional<SupervisionConfig> config = std::nullopt) {
-        supervision_ = std::move(config);
-        return *this;
-    }
 
-    QueueBuilder& concurrency(int count) {
-        concurrency_ = std::max(1, count);
-        return *this;
-    }
-    
-    // Pin the message budget for one pop. Leave it unset and the broker sizes it
-    // (see autopilot below), where it used to mean the client-side default of 1.
-    // batch(0) is not "a batch of zero" and never was: it is the absence of an
-    // opinion, so it reads as unset.
-    QueueBuilder& batch(int size) {
-        batch_ = size > 0 ? size : 0;
-        return *this;
-    }
+    // ------------------------------------------------------------ lifecycle
 
-    // v4 multi-partition pop: claim up to N partitions per call. With
-    // partitions(N), batch(B) becomes a global cap on total messages
-    // returned across all claimed partitions. All N share one leaseId,
-    // so a single renew() call extends them all atomically.
-    // Leave it unset and the broker chooses the sweep width (see autopilot
-    // below); partitions(1) pins the legacy single-partition behaviour, which is
-    // a decision the broker is told about and never overrides.
-    QueueBuilder& partitions(int n) {
-        max_partitions_ = n > 0 ? n : 0;
+    /** The options create() sends. */
+    QueueBuilder& config(const QueueConfig& cfg) {
+        config_ = cfg;
         return *this;
     }
 
     /**
-     * Turn broker-side pop sizing on or off for this builder.
-     *
-     * On (the default) the broker chooses batch and partitions for the pops of
-     * this builder, per pop, from state this client cannot see. Even then, a
-     * knob set explicitly travels on the wire as it always did and is never
-     * second-guessed: autopilot only ever fills the knobs left unset.
-     *
-     * autopilot(false) restores this SDK's pre-1.2 behaviour byte for byte: the
-     * client-side defaults come back (batch 1, partitions 1) and no autopilot
-     * parameter is sent. QUEEN_SDK_POP_AUTOPILOT=off does the same for a whole
-     * process; an explicit call here outranks the environment in both
-     * directions.
-     *
-     * Setting BOTH batch and partitions leaves autopilot nothing to decide, so
-     * no autopilot parameter is sent in that case either, whatever this says.
+     * Create or reconfigure the queue with these options. A full upsert: an
+     * option left unset goes back to the broker's default. The namespace and
+     * task set on this builder go with it.
      */
-    QueueBuilder& autopilot(bool enabled = true) {
-        autopilot_ = enabled;
-        return *this;
-    }
-    
-    QueueBuilder& limit(int count) {
-        limit_ = count;
-        return *this;
-    }
-    
-    QueueBuilder& idle_millis(int millis) {
-        idle_millis_ = millis;
-        return *this;
-    }
-    
-    /**
-     * Ack after the consume() handler returns: each message with each(),
-     * otherwise the batch. Client side and consume() only: it has no effect on
-     * pop(). With it, a handler that throws is nacked; without it, the failure
-     * is logged and nothing is sent.
-     */
-    QueueBuilder& auto_ack(bool enabled) {
-        auto_ack_ = enabled;
-        return *this;
-    }
-    
-    /**
-     * Commit at delivery on pop(): the broker moves the group's cursor past the
-     * messages as it hands them out. No lease, nothing to ack, at-most-once: a
-     * message lost after the pop is not delivered again. pop() and pop_result()
-     * only: consume() always leases its messages and throws
-     * std::invalid_argument. The broker refuses it with conflation() (a 400).
-     */
-    QueueBuilder& commit_on_delivery(bool enabled = true) {
-        commit_on_delivery_ = enabled;
-        return *this;
-    }
-    
-    QueueBuilder& renew_lease(bool enabled, int interval_millis = 60000) {
-        renew_lease_ = enabled;
-        if (interval_millis > 0) {
-            renew_lease_interval_millis_ = interval_millis;
+    json configure(const QueueConfig& cfg) {
+        require_queue("configure");
+        json body = {{"queue", queue_name_}, {"options", cfg.to_json()}};
+        if (!namespace_.empty()) body["namespace"] = namespace_;
+        if (!task_.empty()) body["task"] = task_;
+        json out = http_client_->post("/api/v1/configure", body);
+        // A configure failure can come back inside a 200 body.
+        if (out.is_object() && !util::text_of(out, "error").empty()) {
+            throw Error("configure failed: " + util::text_of(out, "error"));
         }
-        return *this;
+        return out;
     }
-    
-    QueueBuilder& subscription_mode(const std::string& mode) {
-        subscription_mode_ = mode;
-        return *this;
+
+    /** configure() with the options set by config() (none = every default). */
+    json create() { return configure(config_); }
+
+    /** Drop the queue and everything in it. */
+    json del() {
+        require_queue("delete");
+        return http_client_->del("/api/v1/resources/queues/" + util::url_encode(queue_name_));
     }
-    
-    QueueBuilder& subscription_from(const std::string& from) {
-        subscription_from_ = from;
+
+    // ----------------------------------------------------------------- push
+
+    /** Buffer this builder's pushes on the client (see BufferOptions). */
+    QueueBuilder& buffer(const BufferOptions& options) {
+        buffer_options_ = options;
         return *this;
     }
 
     /**
-     * Last-value delivery for this consumer group (PLAN_CONFLATION.md §1.1):
-     * under backlog the group is served ONE message per partition -- the newest
-     * -- instead of the whole backlog. Sits beside subscription_mode() because
-     * it is the same kind of fact: a delivery policy of the GROUP, fixed when
-     * the group is first registered and never re-negotiated by a later pop.
+     * Push one message to this queue and partition; the payload travels as it
+     * is. Its transaction id is minted here (a UUIDv7): use push_items() to
+     * give it one derived from the work, which is what makes a retried push a
+     * `duplicate` instead of a second message.
      *
-     *   client.queue("recompute").group("workers").conflation().consume(handler);
-     *
-     * Requires a broker >= 1.1.0: an older one ignores the flag and delivers the
-     * whole backlog, which pop() and consume() detect on the first response and
-     * refuse to continue past (ConflationUnsupportedError).
-     *
-     * NEEDS group(). Conflation is a policy of a consumer group, and a group-less
-     * pop is queue mode, which has no group identity to hang one on -- the broker
-     * refuses that combination with a 400 (§3.3).
-     *
-     * Composes with this client's auto_ack(), which defaults to true. The
-     * combination §3.3 refuses is the broker-side `autoAck` query param, which
-     * commits at delivery with no lease -- this SDK sends it only for
-     * commit_on_delivery(), on pop(). auto_ack() here means "ack after the
-     * handler returns", i.e. the leased at-least-once shape conflation is built
-     * on, so the §1.3 guarantee holds.
+     * Returns one PushResult per message: read `status` (queued, duplicate,
+     * error) -- the broker answers HTTP 201 even when it refuses items. A
+     * buffered push returns nothing yet: its verdict comes with the flush.
      */
-    QueueBuilder& conflation(bool enabled = true) {
-        conflation_ = enabled;
-        return *this;
-    }
-
-    QueueBuilder& each() {
-        each_ = true;
-        return *this;
-    }
-    
-    // Consume method
-    void consume(std::function<void(const json&)> handler, std::atomic<bool>* stop_signal = nullptr);
-
-    /**
-     * This builder's resolved autopilot decision: its own flag when set,
-     * otherwise the client-wide default settled in the QueenClient constructor.
-     * Defined out of line, below QueenClient, because it reads the client.
-     */
-    bool autopilot_enabled() const;
-    // Implementation will be defined after QueenClient declaration
-    
-    // Pop methods
-    QueueBuilder& wait(bool enabled) {
-        wait_ = enabled;
-        return *this;
-    }
-    
-    json pop() {
-        return pop_with_decision().messages;
+    std::vector<PushResult> push(const json& payload) {
+        if (payload.is_array()) {
+            throw std::invalid_argument(
+                "push() takes ONE payload; for several messages call push_many(), and to send an "
+                "array as one payload wrap it: push_many({payload})");
+        }
+        return push_items({PushItem{payload, ""}});
     }
 
     /**
-     * Claim messages and report what the broker chose for this pop.
-     *
-     * The same call as pop() -- this is the shape that also carries the additive
-     * `autopilot` echo:
-     *
-     *   auto res = client.queue("events").group("workers").pop_result();
-     *   if (res.autopilot.present) {
-     *       std::cout << res.autopilot.partitions << " partitions, batch "
-     *                 << res.autopilot.batch << "\n";
-     *   }
+     * One message with its own transaction id: the dedup key, derived from the
+     * work ("order-" + id), so pushing it again inside the queue's dedup window
+     * is answered `duplicate` and writes nothing.
      */
-    PopResult pop_result() {
-        return pop_with_decision();
+    std::vector<PushResult> push(const json& payload, const std::string& transaction_id) {
+        if (payload.is_array()) {
+            throw std::invalid_argument(
+                "push() takes ONE payload; for several messages call push_items()");
+        }
+        return push_items({PushItem{payload, transaction_id}});
     }
 
-private:
-    PopResult pop_with_decision() {
-        std::stringstream path;
-        
-        if (!queue_name_.empty()) {
-            if (partition_ != "Default") {
-                path << "/api/v1/pop/queue/" << util::url_encode(queue_name_)
-                     << "/partition/" << util::url_encode(partition_);
-            } else {
-                path << "/api/v1/pop/queue/" << util::url_encode(queue_name_);
+    /** Several messages, one per payload, in order. */
+    std::vector<PushResult> push_many(const std::vector<json>& payloads) {
+        std::vector<PushItem> items;
+        items.reserve(payloads.size());
+        for (const auto& payload : payloads) items.push_back(PushItem{payload, ""});
+        return push_items(items);
+    }
+
+    /** Messages with their own transaction ids (the dedup key). */
+    std::vector<PushResult> push_items(const std::vector<PushItem>& items) {
+        require_queue("push");
+        if (items.empty()) return {};
+        json formatted = json::array();
+        for (const auto& item : items) {
+            formatted.push_back({
+                {"queue", queue_name_},
+                {"partition", partition_},
+                {"payload", item.payload},
+                {"transactionId", item.transaction_id.empty() ? util::generate_uuid_v7()
+                                                              : item.transaction_id}
+            });
+        }
+        if (buffer_options_.has_value()) {
+            const std::string address = queue_name_ + "/" + partition_;
+            for (const auto& item : formatted) {
+                buffer_manager_->add_message(address, item, *buffer_options_);
             }
-        } else if (!namespace_.empty() || !task_.empty()) {
-            path << "/api/v1/pop";
-        } else {
-            throw std::runtime_error("Must specify queue, namespace, or task for pop operation");
+            return {};
         }
-        
-        // Batch, partitions and with them the autopilot flag. The RULE for which
-        // of the three travel lives in one place (util::pop_sizing) because
-        // consume() builds its query string separately; only the PLACEMENT is
-        // here, and it is the pre-autopilot placement so an autopilot-off request
-        // is byte-identical to the one this SDK used to send.
-        const util::PopSizing sizing =
-            util::pop_sizing(batch_, max_partitions_, 1, autopilot_enabled());
-
-        std::stringstream params;
-        params << "?";
-        if (sizing.autopilot) {
-            params << "autopilot=true&";
-        }
-        if (sizing.has_batch) {
-            params << "batch=" << sizing.batch << "&";
-        }
-        params << "wait=" << (wait_ ? "true" : "false");
-        params << "&timeout=" << timeout_millis_;
-        
-        if (!group_.empty()) {
-            params << "&consumerGroup=" << util::url_encode(group_);
-        }
-        if (!namespace_.empty()) {
-            params << "&namespace=" << util::url_encode(namespace_);
-        }
-        if (!task_.empty()) {
-            params << "&task=" << util::url_encode(task_);
-        }
-        if (!subscription_mode_.empty()) {
-            params << "&subscriptionMode=" << util::url_encode(subscription_mode_);
-        }
-        if (!subscription_from_.empty()) {
-            params << "&subscriptionFrom=" << util::url_encode(subscription_from_);
-        }
-        // v4 multi-partition pop: drain up to N sparse partitions per call. Under
-        // autopilot a pinned width travels even when it is 1, because 1 is then a
-        // decision and not the absence of one.
-        if (sizing.has_partitions) {
-            params << "&partitions=" << sizing.partitions;
-        }
-        // PLAN_CONFLATION §3.1: emitted ONLY when true. `conflation=false` is
-        // never sent -- it would read as "turn this group's policy off", which a
-        // pop is not allowed to do (the stored setting wins), and against a
-        // conflating group it would merely book a conflict.
-        if (conflation_) {
-            params << "&conflation=true";
-        }
-        // Commit at delivery: no lease, nothing to ack, at-most-once. `autoAck`
-        // is the name every 2.x broker reads.
-        if (commit_on_delivery_) {
-            params << "&autoAck=true";
-        }
-
-        try {
-            int client_timeout = wait_ ? timeout_millis_ + 5000 : timeout_millis_;
-            // A waiting pop backs off indefinitely through a 429 rather than
-            // giving up after a handful of tries.
-            json result = http_client_->get(path.str() + params.str(), client_timeout,
-                                            wait_ ? RetryKind::Pop : RetryKind::Default);
-
-            // PLAN_CONFLATION §4, degrade loudly. BEFORE the empty-response
-            // return: an old broker answers an idle queue with a bodiless 204,
-            // and that is the likeliest first contact -- returning [] there
-            // would hide the version mismatch until the queue happened to have
-            // a backlog, i.e. until it did damage.
-            util::enforce_conflation_contract(
-                conflation_, result,
-                util::pop_target_label(queue_name_, namespace_, task_), group_);
-
-            // The broker's own account of how it sized this pop, when the
-            // request engaged autopilot and the answer had a body to carry it (a
-            // bodiless 204 cannot, so an empty short pop reports nothing).
-            PopResult out;
-            out.autopilot = util::parse_autopilot_decision(result);
-
-            if (result.is_null() || !result.contains("messages")) {
-                return out;
-            }
-
-            out.messages = result["messages"];
-            return out;
-        } catch (const ConflationUnsupportedError&) {
-            // Deliberately NOT swallowed into the [] contract below. This method
-            // returns [] for anything the caller can retry through; a broker that
-            // cannot conflate is not that -- every [] returned here would be a
-            // backlog silently drained one message at a time (§4).
-            throw;
-        } catch (const HttpError& e) {
-            // Also covers a 429 whose retry429 budget was exhausted and a
-            // terminal 403 (e.g. cluster_suspended): both are logged with their
-            // code rather than thrown, matching this method's swallow-to-[]
-            // contract.
-            util::log_error("QueueBuilder.pop", std::string("Error: ") + e.what() +
-                " (status=" + std::to_string(e.status_code()) + ", code=" + e.code() + ")");
-            return PopResult{};
-        } catch (const std::exception& e) {
-            util::log_error("QueueBuilder.pop", std::string("Error: ") + e.what());
-            return PopResult{};
-        }
+        RequestOptions options;
+        options.affinity_key = affinity_key();
+        return util::parse_push_results(
+            http_client_->post("/api/v1/push", json{{"items", std::move(formatted)}}, options));
     }
 
-public:
-    
-    // Buffer management
     /**
      * Flush this builder's queue/partition buffer. With no deadline (the
      * default) a failing batch is retried until it lands or the client
@@ -5735,38 +7095,198 @@ public:
      * many messages are still buffered (none dropped).
      */
     void flush_buffer(int deadline_millis = -1) {
-        if (queue_name_.empty()) {
-            throw std::runtime_error("Queue name is required for buffer flush");
-        }
-        std::string queue_address = queue_name_ + "/" + partition_;
-        buffer_manager_->flush_buffer(queue_address, deadline_millis);
+        require_queue("flush_buffer");
+        buffer_manager_->flush_buffer(queue_name_ + "/" + partition_, deadline_millis);
     }
-    
+
+    // -------------------------------------------------------- pop / consume
+
+    QueueBuilder& supervision(std::optional<SupervisionConfig> config = std::nullopt) {
+        supervision_ = std::move(config);
+        return *this;
+    }
+
+    /** consume(): workers polling in parallel, one thread each. */
+    QueueBuilder& concurrency(int count) {
+        concurrency_ = std::max(1, count);
+        return *this;
+    }
+
+    /**
+     * Pin the message budget of one pop. Unset, the broker sizes it
+     * (autopilot). batch(0) is the absence of an opinion and reads as unset.
+     */
+    QueueBuilder& batch(int size) {
+        batch_ = size > 0 ? size : 0;
+        return *this;
+    }
+
+    /**
+     * Multi-partition pop: claim up to N partitions per call; batch() is then a
+     * cap on the messages across all of them, which share one lease. Unset, the
+     * broker chooses the width; partitions(1) pins one partition per pop.
+     */
+    QueueBuilder& partitions(int n) {
+        max_partitions_ = n > 0 ? n : 0;
+        return *this;
+    }
+
+    /**
+     * Broker-side pop sizing for this builder. On (the default) the broker
+     * chooses the batch and partitions left unset, per pop, from state this
+     * client cannot see; a knob set explicitly is never second-guessed.
+     * autopilot(false) restores the pre-1.2 client-side defaults (batch 1,
+     * partitions 1) byte for byte; QUEEN_SDK_POP_AUTOPILOT=off does the same
+     * for a whole process, and this call outranks it in both directions.
+     */
+    QueueBuilder& autopilot(bool enabled = true) {
+        autopilot_ = enabled;
+        return *this;
+    }
+
+    /**
+     * consume(): stop after this many messages, counted across all workers.
+     * A soft cap, as in the Rust client: a worker finishes the message it is
+     * handling (with consume_batch, the batch), so a loop can end up to
+     * concurrency - 1 messages past it, or a batch past it.
+     */
+    QueueBuilder& limit(long long count) {
+        limit_ = count;
+        return *this;
+    }
+
+    /** consume(): stop after this long without a message. */
+    QueueBuilder& idle_millis(int millis) {
+        idle_millis_ = millis;
+        return *this;
+    }
+
+    /**
+     * consume(): ack after the handler returns, nack when it throws (the
+     * default). Off, the handler settles its messages itself and a failure is
+     * only logged. No effect on pop().
+     */
+    QueueBuilder& auto_ack(bool enabled) {
+        auto_ack_ = enabled;
+        return *this;
+    }
+
+    /**
+     * pop(): the broker moves the group's cursor past the messages as it hands
+     * them out. No lease, nothing to ack, at-most-once. consume() refuses it:
+     * it always leases. The broker refuses it with conflation() (a 400).
+     */
+    QueueBuilder& commit_on_delivery(bool enabled = true) {
+        commit_on_delivery_ = enabled;
+        return *this;
+    }
+
+    /** Long-poll (the default): an empty pop waits on the broker up to timeout_millis. */
+    QueueBuilder& wait(bool enabled) {
+        wait_ = enabled;
+        return *this;
+    }
+
+    /** The long-poll window of a waiting pop, in milliseconds (default 30000). */
+    QueueBuilder& timeout_millis(int millis) {
+        timeout_millis_ = millis > 0 ? millis : 30000;
+        return *this;
+    }
+
+    /** consume(): renew the batch's lease every interval while the handler runs. */
+    QueueBuilder& renew_lease(bool enabled, int interval_millis = 60000) {
+        renew_lease_ = enabled;
+        if (interval_millis > 0) renew_lease_interval_millis_ = interval_millis;
+        return *this;
+    }
+
+    /**
+     * Where a NEW group starts: "new" (the default: messages pushed after its
+     * first pop), "all" (from the oldest kept). Fixed at the group's first pop;
+     * move an existing group with admin().seek_consumer_group().
+     */
+    QueueBuilder& subscription_mode(const std::string& mode) {
+        subscription_mode_ = mode;
+        return *this;
+    }
+
+    /** Where a NEW group starts, as an ISO-8601 instant. */
+    QueueBuilder& subscription_from(const std::string& from) {
+        subscription_from_ = from;
+        return *this;
+    }
+
+    /**
+     * Last-value delivery for this consumer group: under backlog the group is
+     * served ONE message per partition, the newest. A policy of the GROUP,
+     * fixed when it is first registered. Needs group(); needs a broker >= 1.1.0,
+     * and an older one is refused on the first answer
+     * (ConflationUnsupportedError).
+     */
+    QueueBuilder& conflation(bool enabled = true) {
+        conflation_ = enabled;
+        return *this;
+    }
+
+    /** consume(): stop the loop from another thread with cancel.cancel(). */
+    QueueBuilder& cancel(const Cancel& token) {
+        cancel_ = token;
+        return *this;
+    }
+
+    /**
+     * This builder's resolved autopilot decision: its own flag when set,
+     * otherwise the client-wide default. Defined below Queen, which it reads.
+     */
+    bool autopilot_enabled() const;
+
+    /**
+     * Claim messages once. They are leased: ack them (Queen::ack), or they come
+     * back when the lease expires. With commit_on_delivery() there is nothing
+     * to ack.
+     *
+     * Throws on failure (HttpError, NetworkError, ConflationUnsupportedError):
+     * an empty vector means an empty queue.
+     */
+    std::vector<Message> pop() { return pop_result().messages; }
+
+    /** pop(), plus the broker's account of how it sized the pop (autopilot). */
+    PopResult pop_result() {
+        return detail::pop_once(*http_client_, pop_target(commit_on_delivery_));
+    }
+
+    /**
+     * Consume one message per handler call until a stop condition: limit(),
+     * idle_millis(), cancel(), a handled signal. Returns what the loop did;
+     * throws the first terminal error (a 403, a 4xx on the pop, a conflation
+     * fault) once every worker has stopped.
+     */
+    ConsumeSummary consume(std::function<void(const Message&)> handler);
+
+    /** Consume a whole claimed batch per handler call; one ack (or nack) covers it. */
+    ConsumeSummary consume_batch(std::function<void(const std::vector<Message>&)> handler);
+
+    // ---------------------------------------------------------------- reads
+
     /**
      * Every record of these partitions, read by offset: no lease, no cursor,
      * nothing to ack. From each partition's offset in options.offsets (default
      * 0, the oldest record still kept) up to where the partition ended when it
-     * was first read. One FetchedPartition per partition named; a partition
-     * nobody has written, or of a queue that does not exist, has no records.
+     * was first read. One FetchedPartition per partition named.
      */
     std::map<std::string, FetchedPartition> fetch(const std::vector<std::string>& partitions,
                                                   const FetchOptions& options = FetchOptions()) {
-        if (queue_name_.empty()) {
-            throw std::runtime_error("Queue name is required for fetch");
-        }
+        require_queue("fetch");
         return reads::fetch(*http_client_, queue_name_, partitions, options);
     }
 
     /**
      * The partitions written at or after `since` (an ISO-8601 string; empty
      * lists them all), in the order they were created, and the answer's
-     * safe_time: pass it as the next `since`. A queue that does not exist has
-     * none.
+     * safe_time: pass it as the next `since`.
      */
     ChangedPartitions changed_since(const std::string& since = "") {
-        if (queue_name_.empty()) {
-            throw std::runtime_error("Queue name is required for changed_since");
-        }
+        require_queue("changed_since");
         return reads::changed_since(*http_client_, queue_name_, since);
     }
 
@@ -5775,131 +7295,95 @@ public:
             std::chrono::duration_cast<std::chrono::microseconds>(since.time_since_epoch()).count()));
     }
 
-    // DLQ methods
+    /** The dead-letter queue of this queue (and this builder's partition, if any). */
     DLQBuilder dlq(const std::string& consumer_group = "") {
-        if (queue_name_.empty()) {
-            throw std::runtime_error("Queue name is required for DLQ operations");
-        }
-        return DLQBuilder(http_client_, queue_name_, consumer_group, 
-                         partition_ != "Default" ? partition_ : "");
+        require_queue("dlq");
+        return DLQBuilder(http_client_, queue_name_, consumer_group, partition_or_empty());
     }
 };
 
 // ============================================================================
-// QueenClient - Main client class
+// Queen - the client
 // ============================================================================
 
-class QueenClient {
+/**
+ * A connected client: one connection pool, one load balancer and one set of
+ * push buffers. Create it once per process and share it; it is thread-safe.
+ *
+ *     queen::Queen queen("http://localhost:6632");
+ *     queen.queue("orders").partition("customer-42").push({{"total", 19.99}});
+ *     queen.queue("orders").group("billing").batch(10)
+ *          .consume([](const queen::Message& m) { std::cout << m.data << "\n"; });
+ *     queen.close();
+ *
+ * Opens no connection until the first request.
+ */
+class Queen {
 private:
     ClientConfig config_;
     std::shared_ptr<HttpClient> http_client_;
     std::shared_ptr<BufferManager> buffer_manager_;
     std::atomic<bool> shutdown_requested_{false};
-    // Process-wide kill switch for pop autopilot, settled at construction from
-    // QUEEN_SDK_POP_AUTOPILOT. Read ONCE rather than on every pop: it is a
-    // deployment-level rollback, and re-reading it per request would let a
-    // running process change wire shape halfway through. A per-builder
-    // .autopilot(..) still outranks it.
+    // Process-wide kill switch for pop autopilot, read ONCE: re-reading it per
+    // request would let a running process change wire shape halfway through.
     bool autopilot_off_ = util::autopilot_disabled_by_env();
-    
-    void setup_graceful_shutdown() {
-        // Register signal handlers
-        std::signal(SIGINT, [](int) {
-            std::cout << "\nReceived SIGINT, shutting down gracefully..." << std::endl;
-            // Note: In production, you'd need a global instance pointer or better signal handling
-            exit(0);
-        });
-        
-        std::signal(SIGTERM, [](int) {
-            std::cout << "\nReceived SIGTERM, shutting down gracefully..." << std::endl;
-        });
-    }
-    
-public:
-    QueenClient(const std::string& url) {
-        config_.urls = {url};
-        config_.timeout_millis = 30000;
-        config_.retry_attempts = 3;
-        config_.retry_delay_millis = 1000;
-        config_.load_balancing_strategy = "round-robin";
-        config_.enable_failover = true;
-        
-        http_client_ = std::make_shared<HttpClient>(url, config_.timeout_millis,
-            config_.retry_attempts, config_.retry_delay_millis);
-        
+
+    void init() {
+        http_client_ = std::make_shared<HttpClient>(config_);
         buffer_manager_ = std::make_shared<BufferManager>(http_client_);
-        
-        setup_graceful_shutdown();
+        if (config_.handle_signals) detail::install_signal_handlers();
     }
-    
-    // Authenticated (proxy/cloud) use goes through this constructor:
-    //   ClientConfig config; config.bearer_token = "...";
-    //   QueenClient client({"https://cell.example"}, config);
-    QueenClient(const std::vector<std::string>& urls, const ClientConfig& config = ClientConfig())
+
+    static void require_ackable(const Message& message) {
+        if (message.partition_id.empty()) {
+            throw std::invalid_argument(
+                "cannot ack a message with no partition id: a transactionId alone is not unique "
+                "across partitions, so this could commit a cursor for a message you never saw");
+        }
+        if (message.transaction_id.empty()) {
+            throw std::invalid_argument("cannot ack a message with no transaction id");
+        }
+    }
+
+public:
+    /** One broker. */
+    explicit Queen(const std::string& url) {
+        config_.urls = {url};
+        init();
+    }
+
+    /** One broker, with options (bearer token, timeouts, TLS, wire forms). */
+    Queen(const std::string& url, const ClientConfig& config) : config_(config) {
+        config_.urls = {url};
+        init();
+    }
+
+    /** Several brokers (one cluster): load-balanced, with failover. */
+    Queen(const std::vector<std::string>& urls, const ClientConfig& config = ClientConfig())
         : config_(config) {
         config_.urls = urls;
-        
-        if (urls.size() == 1) {
-            http_client_ = std::make_shared<HttpClient>(urls[0], config_.timeout_millis,
-                config_.retry_attempts, config_.retry_delay_millis,
-                config_.bearer_token, config_.retry_429);
-        } else {
-            auto load_balancer = std::make_shared<LoadBalancer>(urls, config_.load_balancing_strategy);
-            http_client_ = std::make_shared<HttpClient>(load_balancer, config_.timeout_millis,
-                config_.retry_attempts, config_.retry_delay_millis, config_.enable_failover,
-                config_.bearer_token, config_.retry_429);
-        }
-        http_client_->set_wire_forms(config_.binary_push, config_.push_compression, config_.framed_pop);
-        
-        buffer_manager_ = std::make_shared<BufferManager>(http_client_);
-        
-        setup_graceful_shutdown();
+        init();
     }
-    
+
+    Queen(const Queen&) = delete;
+    Queen& operator=(const Queen&) = delete;
+
+    const ClientConfig& config() const { return config_; }
+
+    /** Start a call chain on a queue (empty: a discovery pop by namespace/task). */
     QueueBuilder queue(const std::string& name = "") {
         return QueueBuilder(this, http_client_, buffer_manager_, name);
     }
 
-    /**
-     * Whether pop autopilot is off for this client because the environment
-     * asked (util::ENV_POP_AUTOPILOT). Read by the builders; a per-call
-     * .autopilot(..) still outranks it.
-     */
-    bool is_autopilot_off() const {
-        return autopilot_off_;
-    }
-    
+    /** One step, all or nothing: acks, pushes, KV writes and timers in one log entry. */
     TransactionBuilder transaction() {
         return TransactionBuilder(http_client_);
     }
 
     /**
-     * The transactional key/value surface, bound to one namespace
-     * (PLAN_KV_TIMERS.md §5).
-     *
-     * A namespace is `^[a-z0-9][a-z0-9._-]{0,63}$` and is NOT a table to
-     * enumerate: there is no listing without a prefix, and this client has no
-     * prefix read at all.
-     *
-     * THE RULE THAT DECIDES EVERYTHING ELSE (§5.2): a read-modify-write across
-     * two calls is safe ONLY when the KV key derives from the partition key.
-     * Then the lanes serialize and the key has no other writer inside that
-     * consumer group -- two different groups on the same partition still race.
-     * When it does not derive, use the atomics (`incr`) or the precondition
-     * (`expect`). And put `expect` in even when you believe the lane serializes
-     * you: if it never fails it cost nothing, and the day it fails you have
-     * just discovered that two consumers are serving one partition, with a
-     * verdict instead of a wrong total.
-     *
-     * This surface is on every cell. There is nothing to switch on before
-     * using it and nothing to probe for: KV is part of the engine, like push
-     * and pop, and the broker has no boot flag that could leave it out.
-     *
-     * An operator can still PAUSE it during an incident (the runtime kill
-     * switch), and that is a different thing from an absent feature: the
-     * routes answer **503** with `Retry-After` -- temporary, come back -- and
-     * inside `transaction()` the kv rider is refused permanently with a 403.
-     * Both arrive as an HttpError. Nothing answers 404 for being switched off.
+     * Key/value state in the same broker as the queue, bound to one namespace
+     * (`^[a-z0-9][a-z0-9._-]{0,63}$`). To write state atomically with an ack,
+     * which is what it is for, use the riders on transaction().
      */
     KvBuilder kv(const std::string& ns) {
         return KvBuilder(http_client_, ns);
@@ -5907,16 +7391,9 @@ public:
 
     /**
      * A lock: one holder at a time, held as a lease of `ttl_seconds`, with a
-     * fencing token.
-     *
-     *     auto lock = client.lock("daily-report", 30);
-     *     if (!lock.acquire()) return;          // somebody else has it
-     *
-     * Creating the handle sends nothing. It is a lease, not a mutex: it
-     * expires, and a holder that outlived it keeps running.
-     * TransactionBuilder::guard is what makes the WORK exclusive; read the
-     * note on the Lock class once, including the part about keep_alive() --
-     * nothing renews a lock in the background.
+     * fencing token. Creating the handle sends nothing; acquire() takes it and
+     * starts its background renewal. It is a lease, not a mutex:
+     * TransactionBuilder::guard is what makes the WORK exclusive.
      */
     Lock lock(const std::string& name, long long ttl_seconds,
               const LockOptions& options = LockOptions()) {
@@ -5926,222 +7403,137 @@ public:
     /**
      * A semaphore: at most `limit` holders at a time. One handle is ONE
      * permit; make a handle per holder. Every holder of one name passes the
-     * same limit -- it is the caller's and is stored nowhere, so while a limit
-     * is being changed the larger one rules.
+     * same limit -- it is stored nowhere.
      */
     Lock semaphore(const std::string& name, int limit, long long ttl_seconds,
                    const LockOptions& options = LockOptions()) {
         return Lock(http_client_, name, ttl_seconds, limit, options);
     }
 
-    /**
-     * The four lock operations as the broker speaks them, with no state kept:
-     * for `get` (who holds it?) and for a caller that carries the token itself.
-     */
+    /** The four lock operations with no state kept: `get` (who holds it?) and hand-rolled loops. */
     LocksBuilder locks() {
         return LocksBuilder(http_client_);
     }
 
-    /**
-     * The scheduled-message surface (PLAN_KV_TIMERS.md §4).
-     *
-     * A timer is a promise to push a message into a queue later. `deliverAt` is
-     * "NOT BEFORE", never "exactly at". Two timers on the same queue and
-     * partition that mature in the same batch enter the log in order of
-     * EXPIRY, not in order of scheduling.
-     *
-     * Billing follows the promise, not the delivery: a schedule counts one
-     * message, a reschedule counts another, a cancel counts zero and is not
-     * refunded, and the fire counts zero.
-     *
-     * Like `kv()`, this surface is on every cell and needs nothing turned on
-     * first. An operator's runtime kill switch can pause the SCHEDULE (503 on
-     * the routes, 403 on a transaction rider, both HttpError); cancels are
-     * never blocked, and timers already scheduled still fire.
-     */
+    /** Scheduled deliveries: a message that becomes real later. */
     TimersBuilder timers() {
         return TimersBuilder(http_client_);
     }
 
-    /**
-     * RAM-class queues (EPHEMERAL_QUEUES.md §1, §3.1).
-     *
-     * Read the note on EphemeralBuilder once: the contents survive NOTHING --
-     * treat a failover like a Redis restart -- while a declared configuration is
-     * durable and comes back EMPTY. Consumption semantics come from the pop's
-     * `group`, exactly as on the durable engine; there is no queue-level mode.
-     *
-     * Unlike kv() and timers(), this surface has a VERSION FLOOR. A broker or
-     * proxy older than 1.1 has no such routes and answers 404 on every one of
-     * them, which this surface maps to EphemeralUnsupportedError -- there is no
-     * capability negotiation anywhere in this SDK, so the refusal is the only
-     * signal there is.
-     *
-     * One 404 is NOT that: `depth` answers `ephemeral_queue_not_found` for a
-     * queue that is not there, and that arrives as EphemeralQueueNotFoundError.
-     * The two are told apart by the body's code, never by the status they share.
-     */
+    /** RAM-class queues whose contents survive nothing (read EphemeralBuilder first). */
     EphemeralBuilder ephemeral() {
         return EphemeralBuilder(http_client_);
     }
 
-    json ack(const json& message, bool status = true, const json& context = json::object()) {
-        bool is_batch = message.is_array();
-        
-        if (is_batch) {
-            auto messages = message.get<std::vector<json>>();
-            if (messages.empty()) {
-                return {{"processed", 0}, {"results", json::array()}};
-            }
-            
-            json acknowledgments = json::array();
-            std::string status_str = status ? "completed" : "failed";
-            
-            for (const auto& msg : messages) {
-                std::string transaction_id;
-                if (msg.is_string()) {
-                    transaction_id = msg.get<std::string>();
-                } else if (msg.contains("transactionId")) {
-                    transaction_id = msg["transactionId"].get<std::string>();
-                } else if (msg.contains("id")) {
-                    transaction_id = msg["id"].get<std::string>();
-                } else {
-                    throw std::runtime_error("Message must have transactionId or id property");
-                }
-                
-                if (!msg.is_object() || !msg.contains("partitionId")) {
-                    throw std::runtime_error("Message must have partitionId property");
-                }
-                
-                std::string partition_id = msg["partitionId"].get<std::string>();
-                
-                json ack = {
-                    {"transactionId", transaction_id},
-                    {"partitionId", partition_id},
-                    {"status", status_str},
-                    {"error", context.contains("error") ? context["error"] : nullptr}
-                };
-                
-                if (msg.contains("leaseId") && !msg["leaseId"].is_null()) {
-                    ack["leaseId"] = msg["leaseId"];
-                }
-                
-                acknowledgments.push_back(ack);
-            }
-            
-            json request = {
-                {"acknowledgments", acknowledgments},
-                {"consumerGroup", context.contains("group") ? context["group"] : nullptr}
-            };
-            
-            try {
-                json result = http_client_->post("/api/v1/ack/batch", request);
-                // HTTP 200 also carries refusals: read the per-item flags.
-                return util::ack_outcome(result, acknowledgments.size());
-            } catch (const std::exception& e) {
-                return {{"success", false}, {"error", e.what()}};
-            }
-        }
-        
-        // Single message
-        std::string transaction_id;
-        std::string partition_id;
-        
-        if (message.is_string()) {
-            transaction_id = message.get<std::string>();
-        } else if (message.contains("transactionId")) {
-            transaction_id = message["transactionId"].get<std::string>();
-        } else if (message.contains("id")) {
-            transaction_id = message["id"].get<std::string>();
-        } else {
-            return {{"success", false}, {"error", "Message must have transactionId or id property"}};
-        }
-        
-        if (!message.is_object() || !message.contains("partitionId")) {
-            return {{"success", false}, {"error", "Message must have partitionId property"}};
-        }
-        
-        partition_id = message["partitionId"].get<std::string>();
-        
-        std::string status_str = status ? "completed" : "failed";
-        
+    /** Management and observability routes. */
+    Admin admin() {
+        return Admin(http_client_);
+    }
+
+    // --------------------------------------------------------------- acking
+
+    /**
+     * Settle a message. The consumer group and the lease come from the message
+     * itself. A refusal (the lease expired or was released, the message is
+     * already settled) is a value -- AckResult::success false -- not an
+     * exception; a call that could not be made throws.
+     */
+    AckResult ack_with(const Message& message, AckStatus status, const std::string& reason = "") {
+        require_ackable(message);
         json body = {
-            {"transactionId", transaction_id},
-            {"partitionId", partition_id},
-            {"status", status_str},
-            {"error", context.contains("error") ? context["error"] : nullptr},
-            {"consumerGroup", context.contains("group") ? context["group"] : nullptr}
+            {"transactionId", message.transaction_id},
+            {"partitionId", message.partition_id},
+            {"status", to_string(status)},
+            {"error", reason.empty() ? json(nullptr) : json(util::nack_error_text(reason))},
+            {"consumerGroup", util::group_on_wire(message.consumer_group)}
         };
-        
-        if (message.contains("leaseId") && !message["leaseId"].is_null()) {
-            body["leaseId"] = message["leaseId"];
-        }
-        
-        try {
-            json result = http_client_->post("/api/v1/ack", body);
-            // HTTP 200 also carries a refusal: read the item's flag.
-            return util::ack_outcome(result, 1);
-        } catch (const std::exception& e) {
-            return {{"success", false}, {"error", e.what()}};
-        }
+        if (!message.lease_id.empty()) body["leaseId"] = message.lease_id;
+        return util::parse_ack_results(http_client_->post("/api/v1/ack", body), 1)[0];
     }
-    
-    json renew(const json& message_or_lease_id) {
-        std::vector<std::string> lease_ids;
-        
-        if (message_or_lease_id.is_string()) {
-            lease_ids.push_back(message_or_lease_id.get<std::string>());
-        } else if (message_or_lease_id.is_array()) {
-            for (const auto& item : message_or_lease_id) {
-                if (item.is_string()) {
-                    lease_ids.push_back(item.get<std::string>());
-                } else if (item.contains("leaseId")) {
-                    lease_ids.push_back(item["leaseId"].get<std::string>());
-                }
-            }
-        } else if (message_or_lease_id.is_object() && message_or_lease_id.contains("leaseId")) {
-            lease_ids.push_back(message_or_lease_id["leaseId"].get<std::string>());
-        }
-        
-        if (lease_ids.empty()) {
-            return {{"success", false}, {"error", "No valid lease IDs found for renewal"}};
-        }
 
-        // Dedupe: with v4 multi-partition pop, all messages in one batch
-        // share the same leaseId (one renew call extends the lease of every
-        // claimed partition). Without this dedupe, callers
-        // passing the full message vector would issue N redundant identical
-        // HTTP calls. Preserve insertion order for deterministic output.
-        {
-            std::unordered_set<std::string> seen;
-            std::vector<std::string> deduped;
-            deduped.reserve(lease_ids.size());
-            for (const auto& id : lease_ids) {
-                if (seen.insert(id).second) {
-                    deduped.push_back(id);
-                }
-            }
-            lease_ids.swap(deduped);
-        }
-
-        json results = json::array();
-        for (const auto& lease_id : lease_ids) {
-            try {
-                json result = http_client_->post("/api/v1/lease/" + lease_id + "/extend", json::object());
-                // Always HTTP 200: the body says whether anything was renewed.
-                results.push_back(util::renew_outcome(result, lease_id));
-            } catch (const std::exception& e) {
-                results.push_back({
-                    {"leaseId", lease_id},
-                    {"success", false},
-                    {"error", e.what()}
-                });
-            }
-        }
-        
-        return message_or_lease_id.is_array() ? results : results[0];
+    /** Mark a message completed: its group's cursor moves past it. */
+    AckResult ack(const Message& message) {
+        return ack_with(message, AckStatus::Completed);
     }
-    
+
+    /**
+     * Mark a message failed: it is redelivered until the queue's retryLimit is
+     * spent, then dead-lettered; `reason` is kept on the dead-letter row.
+     */
+    AckResult nack(const Message& message, const std::string& reason) {
+        return ack_with(message, AckStatus::Failed, reason);
+    }
+
+    /**
+     * Settle several messages in one request. The batch route carries one
+     * consumer group, so every message must belong to the same one.
+     */
+    std::vector<AckResult> ack_all_with(const std::vector<Message>& messages, AckStatus status,
+                                        const std::string& reason = "") {
+        if (messages.empty()) return {};
+        const std::string& group = messages[0].consumer_group;
+        json acknowledgments = json::array();
+        for (const auto& message : messages) {
+            require_ackable(message);
+            if (message.consumer_group != group) {
+                throw std::invalid_argument(
+                    "cannot batch-ack across consumer groups: the batch carries one group, but got "
+                    "both '" + group + "' and '" + message.consumer_group + "'");
+            }
+            json item = {
+                {"transactionId", message.transaction_id},
+                {"partitionId", message.partition_id},
+                {"status", to_string(status)},
+                {"error", reason.empty() ? json(nullptr) : json(util::nack_error_text(reason))}
+            };
+            if (!message.lease_id.empty()) item["leaseId"] = message.lease_id;
+            acknowledgments.push_back(std::move(item));
+        }
+        json body = {
+            {"acknowledgments", std::move(acknowledgments)},
+            {"consumerGroup", util::group_on_wire(group)}
+        };
+        return util::parse_ack_results(http_client_->post("/api/v1/ack/batch", body), messages.size());
+    }
+
+    std::vector<AckResult> ack_all(const std::vector<Message>& messages) {
+        return ack_all_with(messages, AckStatus::Completed);
+    }
+
+    std::vector<AckResult> nack_all(const std::vector<Message>& messages, const std::string& reason) {
+        return ack_all_with(messages, AckStatus::Failed, reason);
+    }
+
+    /**
+     * Extend a lease by the broker's default (60 s). Every message of one pop
+     * shares its lease, a multi-partition claim included, so one call covers
+     * the batch. success false: the lease is gone.
+     */
+    RenewResult renew(const std::string& lease_id) {
+        if (lease_id.empty()) {
+            throw std::invalid_argument("renew needs a lease id (a commit-on-delivery pop has none)");
+        }
+        json answer = http_client_->post("/api/v1/lease/" + util::url_encode(lease_id) + "/extend",
+                                         json::object());
+        return util::parse_renew(answer, lease_id);
+    }
+
+    RenewResult renew(const Message& message) { return renew(message.lease_id); }
+
+    /** One renewal per distinct lease among `messages`, in first-seen order. */
+    std::vector<RenewResult> renew(const std::vector<Message>& messages) {
+        std::vector<RenewResult> out;
+        std::unordered_set<std::string> seen;
+        for (const auto& message : messages) {
+            if (!message.lease_id.empty() && seen.insert(message.lease_id).second) {
+                out.push_back(renew(message.lease_id));
+            }
+        }
+        return out;
+    }
+
+    // -------------------------------------------------------------- buffers
+
     /**
      * Flush every buffer. deadline_millis < 0 (the default) retries failing
      * batches until they land; see BufferManager::flush_all_buffers.
@@ -6155,39 +7547,61 @@ public:
     }
 
     /**
-     * How long close() keeps retrying failing flush batches before giving up.
-     * The flusher retries forever while the process is running, which is
-     * wrong on the way out: a SIGTERM grace period is finite, so shutdown
-     * stops after this deadline and reports what is left instead of hanging
-     * until the runtime is killed. Same value as the JS SDK's close deadline.
+     * How long close() keeps retrying failing flush batches before giving up:
+     * a SIGTERM grace period is finite, so shutdown stops after this deadline
+     * and reports what is left instead of hanging.
      */
     static constexpr int CLOSE_FLUSH_DEADLINE_MILLIS = 30000;
 
+    /** Flush the push buffers (30 s at most), stop them, and close idle connections. */
     void close() {
-        std::cout << "Closing Queen client..." << std::endl;
         shutdown_requested_ = true;
-
         try {
             buffer_manager_->flush_all_buffers(CLOSE_FLUSH_DEADLINE_MILLIS);
-            std::cout << "All buffers flushed" << std::endl;
         } catch (const std::exception& e) {
-            // BufferFlushError::what() carries the unflushed count; cleanup()
-            // below logs the discard as well. Loud, not silent.
-            std::cerr << "Error flushing buffers: " << e.what() << std::endl;
+            // BufferFlushError::what() carries the unflushed count. Loud.
+            util::log_warn_always("Queen.close", std::string("buffers not flushed: ") + e.what());
         }
-
         buffer_manager_->cleanup();
-        std::cout << "Queen client closed" << std::endl;
+        http_client_->close_idle_connections();
     }
-    
+
+    /** close() was called, or a handled signal arrived (ClientConfig::handle_signals). */
     bool is_shutdown_requested() const {
-        return shutdown_requested_;
+        return shutdown_requested_.load() ||
+               (config_.handle_signals && detail::signal_count().load() > 0);
     }
-    
+
+    /**
+     * Block until SIGINT or SIGTERM arrives (ClientConfig::handle_signals) or
+     * close() is called -- then call close() to flush, and return from main.
+     * Throws std::logic_error without handle_signals: it would block forever.
+     */
+    void wait_for_signal() const {
+        if (!config_.handle_signals) {
+            throw std::logic_error("wait_for_signal() needs ClientConfig::handle_signals = true");
+        }
+        while (!is_shutdown_requested()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    /**
+     * Whether pop autopilot is off for this client because the environment
+     * asked (util::ENV_POP_AUTOPILOT). A per-builder autopilot(..) outranks it.
+     */
+    bool is_autopilot_off() const {
+        return autopilot_off_;
+    }
+
+    /** The transport, for a route this client has no call for. */
     std::shared_ptr<HttpClient> get_http_client() const {
         return http_client_;
     }
 };
+
+/** The 2.7.0 name of Queen. */
+using QueenClient = Queen;
 
 // ============================================================================
 // LeaseRenewal - keeps one popped batch's lease alive while it is handled
@@ -6195,12 +7609,10 @@ public:
 
 /**
  * consume()'s renew_lease(): while a popped batch is handled, renew its lease
- * every interval, as the JS (setInterval), Go (ticker) and Rust (spawned task)
- * consumers do. One POST /api/v1/lease/:leaseId/extend per DISTINCT leaseId per
- * tick: every message of a pop shares its leaseId, a multi-partition claim
- * included, so a batch is one request and not one per message. The broker
- * extends by its default (60 s), so the interval has to be shorter than that
- * and than the queue's leaseTime for renewal to keep anything alive.
+ * every interval. One request per DISTINCT lease per tick: every message of a
+ * pop shares its lease, a multi-partition claim included. The broker extends
+ * by its default (60 s), so the interval has to be shorter than that and than
+ * the queue's leaseTime for renewal to keep anything alive.
  *
  * Scoped: the destructor stops the timer and joins it, so renewal ends with the
  * batch, after its ack or nack, however the processing block is left. A failed
@@ -6208,53 +7620,41 @@ public:
  */
 class LeaseRenewal {
 private:
-    QueenClient* queen_;
-    json lease_ids_ = json::array();
+    Queen* queen_;
+    std::vector<std::string> lease_ids_;
     std::chrono::milliseconds interval_;
     std::mutex mutex_;
     std::condition_variable wake_;
     bool stopped_ = false;
     std::thread thread_;
 
-    // Runs on the renewal thread, so nothing may leave it: an exception that
-    // escapes a std::thread ends the process.
+    // Runs on the renewal thread, so nothing may leave it.
     void renew_once() noexcept {
-        try {
-            json results = queen_->renew(lease_ids_);
-            for (const auto& result : results) {
-                if (result.value("success", false)) {
-                    continue;
+        for (const auto& lease_id : lease_ids_) {
+            try {
+                RenewResult result = queen_->renew(lease_id);
+                if (!result.success) {
+                    util::log_error("ConsumerManager.leaseRenewal", "lease " + lease_id + ": " + result.error);
                 }
-                std::string error = result.contains("error") && result["error"].is_string()
-                    ? result["error"].get<std::string>() : std::string("not renewed");
-                util::log_error("ConsumerManager.leaseRenewal",
-                                "lease " + result.value("leaseId", std::string()) + ": " + error);
+            } catch (const std::exception& e) {
+                util::log_error("ConsumerManager.leaseRenewal", e.what());
+            } catch (...) {
+                util::log_error("ConsumerManager.leaseRenewal", "renewal failed");
             }
-        } catch (const std::exception& e) {
-            util::log_error("ConsumerManager.leaseRenewal", e.what());
-        } catch (...) {
-            util::log_error("ConsumerManager.leaseRenewal", "renewal failed");
         }
     }
 
 public:
-    LeaseRenewal(QueenClient* queen, const json& messages, int interval_millis)
+    LeaseRenewal(Queen* queen, const std::vector<Message>& messages, int interval_millis)
         : queen_(queen), interval_(interval_millis) {
         std::unordered_set<std::string> seen;
         for (const auto& message : messages) {
-            // An autoAck delivery carries an empty leaseId: nothing to renew.
-            if (!message.is_object() || !message.contains("leaseId") ||
-                !message["leaseId"].is_string()) {
-                continue;
-            }
-            std::string lease_id = message["leaseId"].get<std::string>();
-            if (!lease_id.empty() && seen.insert(lease_id).second) {
-                lease_ids_.push_back(lease_id);
+            // A commit-on-delivery message has no lease: nothing to renew.
+            if (!message.lease_id.empty() && seen.insert(message.lease_id).second) {
+                lease_ids_.push_back(message.lease_id);
             }
         }
-        if (lease_ids_.empty() || interval_millis <= 0) {
-            return;
-        }
+        if (lease_ids_.empty() || interval_millis <= 0) return;
         try {
             thread_ = std::thread([this]() {
                 try {
@@ -6265,13 +7665,12 @@ public:
                         lock.lock();
                     }
                 } catch (...) {
-                    // A failed lock or wait: stop renewing, never the process.
                     util::log_error("ConsumerManager.leaseRenewal", "renewal stopped");
                 }
             });
         } catch (const std::exception& e) {
-            // No thread to renew with (std::system_error): handle the batch
-            // without renewal rather than stop the consumer over it.
+            // No thread to renew with: handle the batch without renewal rather
+            // than stop the consumer over it.
             util::log_error("ConsumerManager.leaseRenewal",
                             std::string("renewal not started for this batch: ") + e.what());
         }
@@ -6283,9 +7682,7 @@ public:
             stopped_ = true;
         }
         wake_.notify_all();
-        if (thread_.joinable()) {
-            thread_.join();
-        }
+        if (thread_.joinable()) thread_.join();
     }
 
     LeaseRenewal(const LeaseRenewal&) = delete;
@@ -6293,460 +7690,325 @@ public:
 };
 
 // ============================================================================
-// ConsumerManager Implementation (after QueenClient is defined)
+// ConsumerManager implementation (after Queen is defined)
 // ============================================================================
 
-inline void ConsumerManager::ack_handled(const json& messages, const ConsumeOptions& options,
-                                         const char* where) {
-    json context = options.group.empty() ? json::object() : json{{"group", options.group}};
-    try {
-        json result = queen_->ack(messages, true, context);
-        if (!result.value("success", false)) {
-            // The lease ran out under the handler, or the handler settled the
-            // message itself: the broker keeps or redelivers it, and says why.
-            util::log_error(where, "ack rejected: " + result.value("error", std::string()));
-        }
-    } catch (const std::exception& e) {
-        // A message this client cannot address (no partitionId) cannot be acked;
-        // its lease expires and the broker redelivers it. Not a reason to stop.
-        util::log_error(where, std::string("ack failed: ") + e.what());
-    }
+inline bool ConsumerManager::cancelled(const Shared& shared) const {
+    return (shared.options.cancel && shared.options.cancel->is_cancelled()) ||
+           (queen_ && queen_->is_shutdown_requested());
 }
 
 /**
- * A handler threw. With auto_ack, nack what it was given, with the error, and
- * let the worker keep consuming: the nack spends the queue's retry budget, and
- * the message is filed in the DLQ once retryLimit is spent.
- *
- * With auto_ack(false) the handler settles its messages itself, so nothing is
- * sent, by design: the failure is logged, and the message comes back when its
- * lease expires.
+ * Ack or nack one message after its handler ran; returns whether the handler
+ * succeeded. With auto_ack off nothing is sent. The broker refuses an ack with
+ * HTTP 200 and success false on the item, so the verdict is read and a refusal
+ * logged; the counters record what the loop decided.
  */
-inline void ConsumerManager::handle_failure(const json& messages, const std::string& raw_reason,
-                                            const ConsumeOptions& options, const char* where) {
-    // Capped and valid UTF-8, so the handler's message can never be what stops
-    // the nack from being sent.
-    const std::string reason = util::nack_error_text(raw_reason);
-    if (!options.auto_ack) {
-        util::log_error(where, "handler failed (auto_ack off, not nacked; the broker delivers it "
-                               "again when its lease expires): " + reason);
-        return;
+inline bool ConsumerManager::settle(Shared& shared, const Message& message,
+                                    const std::optional<std::string>& failure) {
+    if (!shared.options.auto_ack) {
+        if (failure) {
+            util::log_error("ConsumerManager", "handler failed (auto_ack off, not nacked; the "
+                            "broker delivers it again when its lease expires): " +
+                            util::nack_error_text(*failure));
+        }
+        return !failure;
     }
-    util::log_error(where, "handler failed: " + reason);
-
-    json context = {{"error", reason}};
-    if (!options.group.empty()) {
-        context["group"] = options.group;
+    if (!failure) {
+        try {
+            AckResult result = queen_->ack(message);
+            if (!result.success) {
+                util::log_error("ConsumerManager", "ack of " + message.transaction_id +
+                                " refused by the broker: " + result.error);
+            }
+        } catch (const std::exception& e) {
+            // Not delivered: the lease expires and the broker redelivers it.
+            util::log_error("ConsumerManager", "ack of " + message.transaction_id + " failed: " + e.what());
+        }
+        shared.acked++;
+        return true;
     }
+    const std::string reason = util::nack_error_text(*failure);
+    util::log_error("ConsumerManager", "handler failed: " + reason);
     try {
-        json result = queen_->ack(messages, false, context);
-        if (!result.value("success", false)) {
-            // The lease ran out under the handler.
-            util::log_error(where, "nack rejected: " + result.value("error", std::string()));
+        AckResult result = queen_->nack(message, reason);
+        if (!result.success) {
+            util::log_error("ConsumerManager", "nack of " + message.transaction_id +
+                            " refused by the broker: " + result.error);
         }
     } catch (const std::exception& e) {
-        // Not addressable (no partitionId): its lease expires and the broker
-        // redelivers it. Never a reason to stop the consumer.
-        util::log_error(where, std::string("nack failed: ") + e.what());
+        util::log_error("ConsumerManager", "nack of " + message.transaction_id + " failed: " + e.what());
     }
+    shared.nacked++;
+    return false;
 }
 
-inline void ConsumerManager::start(std::function<void(const json&)> handler,
-                                   const ConsumeOptions& options) {
-    // Build the path
-    std::string path;
-    if (!options.queue.empty()) {
-        if (!options.partition.empty()) {
-            path = "/api/v1/pop/queue/" + util::url_encode(options.queue) +
-                   "/partition/" + util::url_encode(options.partition);
-        } else {
-            path = "/api/v1/pop/queue/" + util::url_encode(options.queue);
+/** Settle a whole batch with one request. The same rules as settle(). */
+inline void ConsumerManager::settle_batch(Shared& shared, const std::vector<Message>& messages,
+                                          const std::optional<std::string>& failure) {
+    if (messages.empty()) return;
+    if (!shared.options.auto_ack) {
+        if (failure) {
+            util::log_error("ConsumerManager", "batch handler failed (auto_ack off, not nacked): " +
+                            util::nack_error_text(*failure));
         }
-    } else if (!options.namespace_name.empty() || !options.task.empty()) {
-        path = "/api/v1/pop";
+        return;
+    }
+    const AckStatus status = failure ? AckStatus::Failed : AckStatus::Completed;
+    const std::string reason = failure ? util::nack_error_text(*failure) : std::string();
+    if (failure) util::log_error("ConsumerManager", "batch handler failed: " + reason);
+    try {
+        auto results = queen_->ack_all_with(messages, status, reason);
+        size_t refused = 0;
+        std::string first;
+        for (const auto& r : results) {
+            if (!r.success && refused++ == 0) first = r.error;
+        }
+        if (refused > 0) {
+            util::log_error("ConsumerManager", std::to_string(refused) + " of " +
+                            std::to_string(results.size()) + " settled messages refused by the broker: " +
+                            first);
+        }
+    } catch (const std::exception& e) {
+        util::log_error("ConsumerManager", std::string("batch settle failed: ") + e.what());
+    }
+    if (failure) {
+        shared.nacked += messages.size();
     } else {
-        throw std::runtime_error("Must specify queue, namespace, or task");
+        shared.acked += messages.size();
     }
-    
-    // Build params. Batch, partitions and with them the autopilot flag: 0 means
-    // the user set nothing (QueueBuilder leaves it that way on purpose), which is
-    // the dimension the broker gets to choose. THE RULE lives in one place
-    // (util::pop_sizing) precisely because this is the SECOND parameter builder;
-    // only the placement of the keys is here, and it is the pre-autopilot
-    // placement so an autopilot-off request is byte-identical.
-    const util::PopSizing sizing = util::pop_sizing(
-        options.batch, options.max_partitions, 1,
-        options.autopilot.value_or(!queen_->is_autopilot_off()));
+}
 
-    std::stringstream params;
-    params << "?";
-    if (sizing.autopilot) {
-        params << "autopilot=true&";
-    }
-    if (sizing.has_batch) {
-        params << "batch=" << sizing.batch << "&";
-    }
-    params << "wait=" << (options.wait ? "true" : "false");
-    params << "&timeout=" << options.timeout_millis;
-    
-    if (!options.group.empty()) {
-        params << "&consumerGroup=" << util::url_encode(options.group);
-    }
-    if (!options.namespace_name.empty()) {
-        params << "&namespace=" << util::url_encode(options.namespace_name);
-    }
-    if (!options.task.empty()) {
-        params << "&task=" << util::url_encode(options.task);
-    }
-    if (!options.subscription_mode.empty()) {
-        params << "&subscriptionMode=" << util::url_encode(options.subscription_mode);
-    }
-    if (!options.subscription_from.empty()) {
-        params << "&subscriptionFrom=" << util::url_encode(options.subscription_from);
-    }
-    // v4 multi-partition pop: drain up to N sparse partitions per call. Under
-    // autopilot a pinned width travels even when it is 1, because 1 is then a
-    // decision and not the absence of one.
-    if (sizing.has_partitions) {
-        params << "&partitions=" << sizing.partitions;
-    }
-    // PLAN_CONFLATION §3.1, emitted only when true. This is the SECOND place the
-    // flag has to be spelled onto the wire in this SDK: consume() and pop() build
-    // their query strings independently, and an option wired into one and not the
-    // other is the standing failure this feature was warned about (§4).
-    if (options.conflation) {
-        params << "&conflation=true";
-    }
-
-    std::string full_url = path + params.str();
-    
-    // Workers run inside packaged_tasks whose futures are only wait()ed on, so
-    // a thrown exception would be discarded. An error that stops a worker (a
-    // 403, a conflation fault, any other 4xx on a pop) is recorded here instead
-    // and rethrown to the caller once every worker has stopped.
-    struct TerminalError {
-        std::mutex mutex;
-        std::exception_ptr error;
-    };
-    auto terminal_error = std::make_shared<TerminalError>();
-    // Called from inside a catch block: keeps the first error of any worker.
-    auto record_current_error = [terminal_error]() {
-        std::lock_guard<std::mutex> lock(terminal_error->mutex);
-        if (!terminal_error->error) {
-            terminal_error->error = std::current_exception();
+inline void ConsumerManager::worker(int id, Shared& shared, const Process& process) {
+    struct Observation {
+        std::shared_ptr<ConsumerSupervision> reporter;
+        explicit Observation(std::shared_ptr<ConsumerSupervision> r) : reporter(std::move(r)) {
+            if (reporter) reporter->worker_started();
         }
-    };
+        ~Observation() {
+            if (reporter) reporter->worker_exited();
+        }
+    } observation(shared.supervision);
 
-    // Names this consumer's target in a conflation warning, and keys the
-    // once-per-(target, group) rule (§3.3). Computed once: it cannot change
-    // across a run.
-    const std::string conflation_target =
-        util::pop_target_label(options.queue, options.namespace_name, options.task);
+    const std::string who = "Worker " + std::to_string(id);
+    auto last_message = std::chrono::steady_clock::now();
 
-    std::shared_ptr<ConsumerSupervision> supervision;
+    while (true) {
+        if (shared.stop.load()) break;
+        if (cancelled(shared)) {
+            stop_with(shared, StopReason::Cancelled);
+            break;
+        }
+        if (limit_reached(shared)) {
+            stop_with(shared, StopReason::Limit);
+            break;
+        }
+        if (shared.options.idle_millis > 0 &&
+            std::chrono::steady_clock::now() - last_message >=
+                std::chrono::milliseconds(shared.options.idle_millis)) {
+            stop_with(shared, StopReason::Idle);
+            break;
+        }
+
+        PopResult popped;
+        const auto polled_at = std::chrono::steady_clock::now();
+        try {
+            popped = detail::pop_once(*http_client_, shared.target);
+        } catch (const ConflationUnsupportedError& e) {
+            // Terminal, like a 403: retrying cannot make an old broker
+            // conflate, and every further poll would hand the handler another
+            // message off a backlog the caller believes is conflated away.
+            util::log_error("ConsumerManager", who + " stopping: " + e.what());
+            record_error(shared);
+            break;
+        } catch (const HttpError& e) {
+            if (e.status_code() == 403) {
+                // cluster_suspended, storage_quota_exceeded, feature_gated,
+                // forbidden: none resolves itself.
+                util::log_error("ConsumerManager", who + " forbidden (code=" + e.code() + "): " + e.what());
+                record_error(shared);
+                break;
+            }
+            if (e.is_retryable()) {
+                // A 429 whose budget was spent, or a 5xx the transport's own
+                // retries did not outlast (a broker restarting, an election).
+                const int delay = e.status_code() == 429 && e.retry_after_seconds()
+                    ? static_cast<int>(*e.retry_after_seconds() * 1000) : 1000;
+                util::log_warn("ConsumerManager", who + " pop failed (status=" +
+                               std::to_string(e.status_code()) + "): " + e.what() +
+                               ", retrying in " + std::to_string(delay) + "ms");
+                if (pause(shared, delay)) {
+                    if (!shared.stop.load()) stop_with(shared, StopReason::Cancelled);
+                    break;
+                }
+                continue;
+            }
+            // Any other 4xx: a request the broker will never serve.
+            util::log_error("ConsumerManager", who + " pop refused (status=" +
+                            std::to_string(e.status_code()) + "): " + e.what());
+            record_error(shared);
+            break;
+        } catch (const NetworkError& e) {
+            util::log_warn("ConsumerManager", who + " pop failed: " + std::string(e.what()) +
+                           ", retrying in 1000ms");
+            if (pause(shared, 1000)) {
+                if (!shared.stop.load()) stop_with(shared, StopReason::Cancelled);
+                break;
+            }
+            continue;
+        } catch (...) {
+            record_error(shared);
+            break;
+        }
+
+        if (popped.messages.empty()) {
+            // A waiting pop parks on the broker, so it needs no pause of its
+            // own -- unless it came back empty long before its window (a proxy
+            // that does not hold the long poll), which would make the loop spin.
+            const auto waited = std::chrono::steady_clock::now() - polled_at;
+            const bool answered_early =
+                waited < std::chrono::milliseconds(std::min(1000, shared.target.timeout_millis / 2));
+            if (!shared.target.wait || answered_early) {
+                // The broker's advised pacing when this pop engaged autopilot,
+                // otherwise the historical 100 ms.
+                if (pause(shared, util::empty_poll_delay_millis(popped.autopilot))) {
+                    if (!shared.stop.load()) stop_with(shared, StopReason::Cancelled);
+                    break;
+                }
+            }
+            continue;
+        }
+
+        last_message = std::chrono::steady_clock::now();
+
+        // Keep the claim alive while the handler runs; scoped to this batch.
+        std::optional<LeaseRenewal> renewal;
+        if (shared.options.renew_lease && shared.options.renew_lease_interval_millis > 0) {
+            renewal.emplace(queen_, popped.messages, shared.options.renew_lease_interval_millis);
+        }
+        try {
+            process(shared, popped.messages);
+        } catch (...) {
+            record_error(shared);
+            break;
+        }
+    }
+}
+
+inline ConsumeSummary ConsumerManager::run_loop(ConsumeOptions options, Process process) {
+    if (options.queue.empty() && options.namespace_name.empty() && options.task.empty()) {
+        throw std::invalid_argument("consume needs a queue, or a namespace/task to discover one");
+    }
+    Shared shared;
+    shared.options = options;
+    shared.target.queue = options.queue;
+    shared.target.partition = options.partition == util::DEFAULT_PARTITION ? std::string()
+                                                                           : options.partition;
+    shared.target.namespace_name = options.namespace_name;
+    shared.target.task = options.task;
+    shared.target.group = options.group;
+    shared.target.batch = options.batch;
+    shared.target.max_partitions = options.max_partitions;
+    shared.target.autopilot = options.autopilot.value_or(!(queen_ && queen_->is_autopilot_off()));
+    shared.target.wait = options.wait;
+    shared.target.timeout_millis = options.timeout_millis;
+    shared.target.subscription_mode = options.subscription_mode;
+    shared.target.subscription_from = options.subscription_from;
+    shared.target.conflation = options.conflation;
+    shared.target.commit_on_delivery = false;  // consume always leases
+    (void)detail::pop_path(shared.target);     // a bad target throws here, not in a worker
+
     if (options.supervision) {
-        supervision = std::make_shared<ConsumerSupervision>(http_client_, options);
-        auto original = handler;
-        handler = [supervision, original](const json& input) {
-            auto id = supervision->begin_handler();
-            try { original(input); }
-            catch (...) { supervision->end_handler(id, false); throw; }
-            supervision->end_handler(id, true);
-        };
-        supervision->start();
+        shared.supervision = std::make_shared<ConsumerSupervision>(http_client_, options);
+        shared.supervision->start();
     }
 
-    // Worker function
-    auto worker = [this, handler, full_url, options, record_current_error,
-                   conflation_target, supervision](int worker_id) {
-        struct Observation {
-            std::shared_ptr<ConsumerSupervision> reporter;
-            explicit Observation(std::shared_ptr<ConsumerSupervision> r) : reporter(std::move(r)) { if (reporter) reporter->worker_started(); }
-            ~Observation() { if (reporter) reporter->worker_exited(); }
-        } observation(supervision);
-        int processed_count = 0;
-        auto last_message_time = std::chrono::steady_clock::now();
-        
-        while (true) {
-            // Check stop signal
-            if (options.stop_signal && options.stop_signal->load()) {
-                break;
-            }
-            if (queen_->is_shutdown_requested()) {
-                break;
-            }
-            
-            // Check limit
-            if (options.limit > 0 && processed_count >= options.limit) {
-                break;
-            }
-            
-            // Check idle timeout
-            if (options.idle_millis > 0) {
-                auto now = std::chrono::steady_clock::now();
-                auto idle_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - last_message_time).count();
-                if (idle_time >= options.idle_millis) {
-                    break;
-                }
-            }
-            
+    const int workers = std::max(1, options.concurrency);
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<size_t>(workers));
+    for (int i = 0; i < workers; ++i) {
+        threads.emplace_back([this, i, &shared, &process]() {
             try {
-                int client_timeout = options.wait ? options.timeout_millis + 5000 : options.timeout_millis;
-                json result = http_client_->get(full_url, client_timeout,
-                                                options.wait ? RetryKind::Pop : RetryKind::Default);
-
-                // PLAN_CONFLATION §4, degrade loudly. Placed BEFORE the
-                // empty-response continue on purpose: the check has to fire on
-                // the first round trip, and against an old broker the first
-                // round trip on an idle queue is a bodiless 204 that the
-                // continue below would swallow into an eternal poll.
-                util::enforce_conflation_contract(options.conflation, result,
-                                                  conflation_target, options.group);
-
-                if (result.is_null() || !result.contains("messages") ||
-                    result["messages"].empty()) {
-                    if (options.wait) {
-                        continue; // Long polling timeout, retry
-                    } else {
-                        // The broker's advised pacing when this pop engaged
-                        // autopilot and the broker had an opinion (it knows the
-                        // arrival rate on this queue and this client does not),
-                        // otherwise the historical 100ms.
-                        std::this_thread::sleep_for(std::chrono::milliseconds(
-                            util::empty_poll_delay_millis(
-                                util::parse_autopilot_decision(result))));
-                        continue;
-                    }
-                }
-                
-                json messages = result["messages"];
-                if (messages.empty()) {
-                    continue;
-                }
-                
-                last_message_time = std::chrono::steady_clock::now();
-
-                // renew_lease(): keep this batch's lease alive until it is
-                // settled. Scoped to this iteration, so the timer stops after
-                // the ack or nack below, however the block is left.
-                std::optional<LeaseRenewal> renewal;
-                if (options.renew_lease && options.renew_lease_interval_millis > 0) {
-                    renewal.emplace(queen_, messages, options.renew_lease_interval_millis);
-                }
-
-                // Process messages
-                if (options.each) {
-                    // After a failure, the later messages of the same partition
-                    // are not handled. With auto_ack, the nack released that
-                    // PARTITION's lease and left its cursor at the failed message
-                    // (server/src/rsm/consume/ack.rs): they are redelivered, and
-                    // an ack for one of them under this lease is refused. Without
-                    // auto_ack, an ack of a later message by the handler would
-                    // move the cursor past the failed one, which would be lost.
-                    // The other partitions of a multi-partition pop are handled.
-                    std::unordered_set<std::string> failed_partitions;
-                    size_t skipped = 0;
-                    for (const auto& msg : messages) {
-                        if (options.stop_signal && options.stop_signal->load()) break;
-
-                        const std::string partition = msg.is_object() && msg.contains("partitionId")
-                            ? msg["partitionId"].dump() : std::string();
-                        if (failed_partitions.count(partition) > 0) {
-                            ++skipped;
-                            continue;
-                        }
-
-                        auto failure = run_handler(handler, msg);
-                        if (failure) {
-                            handle_failure(msg, *failure, options, "ConsumerManager.processMessage");
-                            failed_partitions.insert(partition);
-                        } else if (options.auto_ack) {
-                            ack_handled(msg, options, "ConsumerManager.processMessage");
-                        }
-                        processed_count++;
-
-                        if (options.limit > 0 && processed_count >= options.limit) break;
-                    }
-                    if (skipped > 0) {
-                        util::log_warn("ConsumerManager.worker", std::string("Worker ") +
-                                      std::to_string(worker_id) + " left " +
-                                      std::to_string(skipped) + " message(s) behind a failed "
-                                      "message in their partition; the broker delivers them again");
-                    }
-                } else {
-                    // Process as batch
-                    auto failure = run_handler(handler, messages);
-                    if (failure) {
-                        handle_failure(messages, *failure, options, "ConsumerManager.processBatch");
-                    } else if (options.auto_ack) {
-                        ack_handled(messages, options, "ConsumerManager.processBatch");
-                    }
-                    processed_count += messages.size();
-                }
-                
-            } catch (const ConflationUnsupportedError& e) {
-                // PLAN_CONFLATION §4. Terminal, and terminal in the same way a
-                // 403 is: retrying cannot make an old broker conflate, and every
-                // further poll would hand the handler another message off a
-                // backlog the caller believes is being conflated away. Recorded
-                // rather than rethrown here because a worker runs inside a
-                // packaged_task whose future is only wait()ed on -- a throw
-                // would be discarded, and the loop would look like it simply
-                // ended.
-                util::log_error("ConsumerManager.worker", std::string("Worker ") +
-                              std::to_string(worker_id) + " stopping: " + e.what());
-                record_current_error();
-                break;
-            } catch (const HttpError& e) {
-                // 429 (rate limited): HttpClient already retries this internally
-                // with backoff (unbounded for a wait=true pop). This branch is a
-                // defensive fallback for the case where an explicit
-                // retry_429.max_attempts override got exhausted -- back off and
-                // keep polling instead of hot-looping.
-                if (e.status_code() == 429) {
-                    int delay = e.retry_after_seconds().has_value()
-                        ? static_cast<int>(*e.retry_after_seconds() * 1000) : 1000;
-                    util::log_warn("ConsumerManager.worker", std::string("Worker ") +
-                                  std::to_string(worker_id) + " rate-limited (code=" + e.code() +
-                                  "), retrying in " + std::to_string(delay) + "ms");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-                    continue;
-                }
-
-                // 403 (forbidden): terminal. cluster_suspended in particular can
-                // never resolve itself, and none of the other proxy codes
-                // (storage_quota_exceeded / feature_gated / forbidden) are worth
-                // hot-looping either -- stop this worker and surface the error
-                // to the caller instead of retrying.
-                if (e.status_code() == 403) {
-                    util::log_error("ConsumerManager.worker", std::string("Worker ") +
-                                  std::to_string(worker_id) + " forbidden (code=" + e.code() +
-                                  "): " + e.what());
-                    record_current_error();
-                    break;
-                }
-
-                // 5xx that HttpClient's own retries did not outlast: a broker
-                // restarting or electing a leader. Transient, like a network
-                // fault: wait and poll again. A 4xx below stops the worker.
-                if (e.status_code() >= 500) {
-                    util::log_warn("ConsumerManager.worker", std::string("Worker ") +
-                                  std::to_string(worker_id) + " pop failed (status=" +
-                                  std::to_string(e.status_code()) + "): " + e.what() +
-                                  ", retrying in 1000ms");
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                    continue;
-                }
-
-                // Any other 4xx (a refused pop, e.g. a 400 for a request the
-                // broker will never serve): stop this worker and hand the error
-                // to the caller. A bare `throw;` here would end in the
-                // discarded future.
-                util::log_error("ConsumerManager.worker", std::string("Worker ") +
-                              std::to_string(worker_id) + " error: " + e.what() +
-                              " (status=" + std::to_string(e.status_code()) + ")");
-                record_current_error();
-                break;
-            } catch (const std::exception& e) {
-                // Check if timeout error (expected for long polling)
-                std::string error_msg = e.what();
-                if (error_msg.find("timeout") != std::string::npos && options.wait) {
-                    continue; // Retry on timeout
-                }
-                
-                // Network error - wait before retry. "timed out" is httplib's
-                // connection timeout, a network fault like the other two.
-                if (error_msg.find("Connection refused") != std::string::npos ||
-                    error_msg.find("connect") != std::string::npos ||
-                    error_msg.find("timed out") != std::string::npos) {
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                    continue;
-                }
-                
-                // Other errors: stop this worker and hand the error to the
-                // caller, as above.
-                util::log_error("ConsumerManager.worker", std::string("Worker ") + 
-                              std::to_string(worker_id) + " error: " + e.what());
-                record_current_error();
-                break;
-            }
-        }
-    };
-    
-    // Start workers in thread pool
-    std::vector<std::future<void>> futures;
-    for (int i = 0; i < options.concurrency; ++i) {
-        // Whatever still escapes a worker is recorded too: the future below is
-        // only wait()ed on, so a throw left in it would never be seen.
-        futures.push_back(thread_pool_.future_from_push([worker, i, record_current_error]() {
-            try {
-                worker(i);
+                worker(i, shared, process);
             } catch (...) {
-                record_current_error();
+                record_error(shared);
             }
-        }));
+        });
     }
-    
-    // Wait for all workers to complete
-    for (auto& future : futures) {
-        future.wait();
-    }
+    for (auto& t : threads) t.join();
+    if (shared.supervision) shared.supervision->stop();
 
-    if (supervision) supervision->stop();
+    if (shared.error) std::rethrow_exception(shared.error);
+    ConsumeSummary summary;
+    summary.processed = shared.processed.load();
+    summary.acked = shared.acked.load();
+    summary.nacked = shared.nacked.load();
+    summary.stopped_by = shared.reason;
+    return summary;
+}
 
-    if (terminal_error->error) {
-        std::rethrow_exception(terminal_error->error);
-    }
+inline ConsumeSummary ConsumerManager::run(Handler handler, const ConsumeOptions& options) {
+    return run_loop(options, [this, handler](Shared& shared, std::vector<Message>& messages) {
+        std::unordered_set<std::string> failed_partitions;
+        size_t skipped = 0;
+        for (const auto& message : messages) {
+            if (should_stop(shared)) break;
+            if (failed_partitions.count(message.partition_id) > 0) {
+                ++skipped;
+                continue;
+            }
+            uint64_t observed = 0;
+            if (shared.supervision) observed = shared.supervision->begin_handler();
+            auto failure = run_handler(handler, message);
+            if (shared.supervision) shared.supervision->end_handler(observed, !failure);
+            const bool ok = settle(shared, message, failure);
+            shared.processed++;
+            if (!ok && !shared.options.auto_ack) {
+                util::log_warn("ConsumerManager", "handler failed; abandoning the rest of this "
+                               "batch (it will be redelivered)");
+                break;
+            }
+            if (!ok) failed_partitions.insert(message.partition_id);
+            if (limit_reached(shared)) break;
+        }
+        if (skipped > 0) {
+            util::log_warn("ConsumerManager", std::to_string(skipped) + " message(s) left behind "
+                           "a failed message in their partition; the broker delivers them again");
+        }
+    });
+}
+
+inline ConsumeSummary ConsumerManager::run_batch(BatchHandler handler, const ConsumeOptions& options) {
+    return run_loop(options, [this, handler](Shared& shared, std::vector<Message>& messages) {
+        uint64_t observed = 0;
+        if (shared.supervision) observed = shared.supervision->begin_handler();
+        auto failure = run_handler(handler, messages);
+        if (shared.supervision) shared.supervision->end_handler(observed, !failure);
+        settle_batch(shared, messages, failure);
+        shared.processed += messages.size();
+    });
 }
 
 // ============================================================================
-// QueueBuilder::consume Implementation (after ConsumerManager is defined)
+// QueueBuilder implementation (after Queen and ConsumerManager)
 // ============================================================================
-
-inline void QueueBuilder::consume(std::function<void(const json&)> handler,
-                                  std::atomic<bool>* stop_signal) {
-    if (commit_on_delivery_) {
-        throw std::invalid_argument(
-            "commit_on_delivery() is a pop() option; consume() always leases its messages");
-    }
-
-    ConsumeOptions options;
-    options.supervision = supervision_;
-    options.queue = queue_name_;
-    options.partition = partition_ != "Default" ? partition_ : "";
-    options.namespace_name = namespace_;
-    options.task = task_;
-    options.group = group_;
-    options.concurrency = concurrency_;
-    options.batch = batch_;
-    options.limit = limit_;
-    options.idle_millis = idle_millis_;
-    options.auto_ack = auto_ack_;
-    options.wait = wait_;
-    options.timeout_millis = timeout_millis_;
-    options.renew_lease = renew_lease_;
-    options.renew_lease_interval_millis = renew_lease_interval_millis_;
-    options.subscription_mode = subscription_mode_;
-    options.subscription_from = subscription_from_;
-    options.each = each_;
-    options.max_partitions = max_partitions_;
-    options.conflation = conflation_;
-    // Resolved here so ConsumerManager sees a decision and not an empty
-    // optional. batch and max_partitions keep their 0 when autopilot is on, and
-    // that 0 has to survive all the way to the param builder: it is the ONLY
-    // record that the user said nothing about that dimension.
-    options.autopilot = autopilot_enabled();
-    options.stop_signal = stop_signal;
-    
-    ConsumerManager consumer_manager(http_client_, queen_);
-    consumer_manager.start(handler, options);
-}
 
 inline bool QueueBuilder::autopilot_enabled() const {
     if (autopilot_.has_value()) return *autopilot_;
     return queen_ == nullptr || !queen_->is_autopilot_off();
 }
 
-} // namespace queen
+inline ConsumeSummary QueueBuilder::consume(std::function<void(const Message&)> handler) {
+    ConsumeOptions options = consume_options();
+    ConsumerManager manager(http_client_, queen_);
+    return manager.run(std::move(handler), options);
+}
 
+inline ConsumeSummary QueueBuilder::consume_batch(
+    std::function<void(const std::vector<Message>&)> handler) {
+    ConsumeOptions options = consume_options();
+    ConsumerManager manager(http_client_, queen_);
+    return manager.run_batch(std::move(handler), options);
+}
+
+} // namespace queen

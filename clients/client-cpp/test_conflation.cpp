@@ -9,11 +9,14 @@
  * Three things, none of which an end-to-end run against a live broker can see:
  *
  *   1. `conflation=true` reaches the wire from BOTH `pop()` and `consume()`.
- *      Those are two separate param builders in this SDK -- the standing hazard
- *      called out at client-js/.../QueueBuilder.js:395-402, left behind by a bug
- *      of exactly this shape -- so an option wired into one and not the other is
- *      the default failure, not an exotic one. Against a live broker the half
- *      that forgot the flag simply delivers whole batches and passes.
+ *      Before 2.7.1 those were two separate param builders in this SDK -- the
+ *      standing hazard called out at client-js/.../QueueBuilder.js:395-402, left
+ *      behind by a bug of exactly this shape -- so an option wired into one and
+ *      not the other was the default failure, not an exotic one. Since 2.7.1 pop()
+ *      and every consume() worker share one request path (detail::pop_once);
+ *      the checks stay, and one more pins that both send the same request.
+ *      Against a live broker the half that forgot the flag simply delivers
+ *      whole batches and passes.
  *
  *   2. Degrade-loudly (§4, the blockquote). A new SDK against a broker that
  *      predates 1.1.0 sends `conflation=true`, the broker ignores the unknown
@@ -170,7 +173,7 @@ public:
     }
 };
 
-/// Raises a stop signal after a budget, so a consume loop that fails to stop on
+/// Cancels the consume loop after a budget, so a loop that fails to stop on
 /// its own FAILS its test instead of hanging it. Not a nicety: the two
 /// degrade-loudly consume tests are exactly the tests whose broken state is an
 /// endless poll, and a suite that hangs reports nothing at all -- no failure
@@ -179,8 +182,9 @@ public:
 /// ignores both because it never stops polling.
 class StopAfter {
 private:
-    std::atomic<bool> flag_{false};
+    Cancel token_;
     std::atomic<bool> done_{false};
+    std::atomic<bool> fired_{false};
     std::thread timer_;
 
 public:
@@ -191,7 +195,10 @@ public:
             while (!done_.load() && std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            flag_.store(true);
+            if (!done_.load()) {
+                fired_.store(true);
+                token_.cancel();
+            }
         });
     }
 
@@ -202,8 +209,9 @@ public:
         }
     }
 
-    std::atomic<bool>* signal() { return &flag_; }
-    bool fired() const { return flag_.load(); }
+    /// Hand to the builder: `.cancel(watchdog.token())`.
+    const Cancel& token() const { return token_; }
+    bool fired() const { return fired_.load(); }
 };
 
 /// Redirects std::cerr for the duration of the scope. The conflict warning is
@@ -295,19 +303,25 @@ void test_consume_sends_conflation_when_declared() {
     StubServer server(conflating_message);
     QueenClient client({server.url()}, fast_config());
 
-    client.queue("cfl-consume-on")
+    StopAfter watchdog(3000);
+    ConsumeSummary summary = client.queue("cfl-consume-on")
           .group("workers")
           .conflation(true)
           .wait(false)
           .limit(1)
-          .consume([](const json&) {});
+          .cancel(watchdog.token())
+          .consume_batch([](const std::vector<Message>&) {});
 
     check(server.count() >= 1, "consume() should make at least one request");
+    if (server.count() < 1) return;
     check(server.calls().front().target.find("conflation=true") != std::string::npos,
           "consume() must carry conflation=true, got: " + server.calls().front().target);
     check(server.calls().front().target.find("consumerGroup=workers") != std::string::npos,
           "consume() must still carry the consumer group, got: " +
           server.calls().front().target);
+    check(summary.stopped_by == StopReason::Limit && summary.processed == 1,
+          "the loop must end on limit(1) after the one message, processed " +
+          std::to_string(summary.processed));
 }
 
 void test_pop_omits_conflation_when_not_declared() {
@@ -326,9 +340,13 @@ void test_consume_omits_conflation_when_not_declared() {
     StubServer server(old_broker_message);
     QueenClient client({server.url()}, fast_config());
 
+    StopAfter watchdog(3000);
     client.queue("cfl-consume-off").group("workers").wait(false).limit(1)
-          .consume([](const json&) {});
+          .cancel(watchdog.token())
+          .consume_batch([](const std::vector<Message>&) {});
 
+    check(server.count() >= 1, "consume() should make at least one request");
+    if (server.count() < 1) return;
     check(server.calls().front().target.find("conflation") == std::string::npos,
           "an undeclared consume must not mention conflation, got: " +
           server.calls().front().target);
@@ -359,19 +377,54 @@ void test_builder_copies_conflation_into_consume_options() {
     StubServer server(conflating_message);
     QueenClient client({server.url()}, fast_config());
 
+    StopAfter watchdog(3000);
     ConsumeOptions options;
     options.queue = "cfl-options";
     options.group = "workers";
     options.conflation = true;
     options.wait = false;
     options.limit = 1;
+    options.cancel = watchdog.token();
 
     ConsumerManager manager(client.get_http_client(), &client);
-    manager.start([](const json&) {}, options);
+    manager.run_batch([](const std::vector<Message>&) {}, options);
 
+    check(server.count() >= 1, "the manager should make at least one request");
+    if (server.count() < 1) return;
     check(server.calls().front().target.find("conflation=true") != std::string::npos,
           "ConsumeOptions.conflation must reach the wire, got: " +
           server.calls().front().target);
+}
+
+void test_pop_and_consume_send_the_same_request() {
+    // Since 2.7.1 pop() and every consume() worker build their request in one
+    // place (detail::pop_once), which is what makes the two-builder hazard of
+    // (a) impossible rather than merely tested for. Pinned so it stays that
+    // way: the same builder settings send the same request target, whichever
+    // of the two sends it -- the path and every parameter with its value.
+    // (Not the order the client writes them in: httplib's client re-sorts the
+    // query before sending, see test_consumer.cpp's query_of.)
+    StubServer server(conflating_message);
+    QueenClient client({server.url()}, fast_config());
+
+    auto configure = [&client]() {
+        return client.queue("cfl-same").partition("p-7").group("workers").conflation(true)
+                     .batch(5).partitions(2).subscription_mode("all").wait(false);
+    };
+    configure().pop();
+    StopAfter watchdog(3000);
+    configure().limit(1).cancel(watchdog.token()).consume([](const Message&) {});
+
+    auto calls = server.calls();
+    check(calls.size() >= 2, "expected a pop and a consume poll, got " +
+          std::to_string(calls.size()) + " request(s)");
+    if (calls.size() < 2) return;
+    check(calls[0].target.rfind("/api/v1/pop/queue/cfl-same/partition/p-7?", 0) == 0 &&
+          calls[0].target.find("conflation=true") != std::string::npos,
+          "pop() must address the partition and carry conflation=true, got: " + calls[0].target);
+    check(calls[1].target == calls[0].target,
+          "consume() must send exactly what pop() sends, got:\n      pop     " + calls[0].target +
+          "\n      consume " + calls[1].target);
 }
 
 // ============================================================================
@@ -427,11 +480,13 @@ void test_pop_is_quiet_when_the_broker_echoes_conflation() {
     StubServer server(conflating_message);
     QueenClient client({server.url()}, fast_config());
 
-    json messages = client.queue("cfl-echo-ok").group("workers")
-                          .conflation(true).wait(false).pop();
+    std::vector<Message> messages = client.queue("cfl-echo-ok").group("workers")
+                                          .conflation(true).wait(false).pop();
 
-    check(messages.is_array() && messages.size() == 1,
-          "an echoed conflating pop must return its message");
+    check(messages.size() == 1, "an echoed conflating pop must return its message");
+    check(messages.size() == 1 && messages[0].transaction_id == "t1" &&
+          messages[0].data == json{{"n", 1}} && messages[0].queue == "q",
+          "the message must be the one the broker sent");
 }
 
 void test_pop_is_quiet_when_conflation_was_never_requested() {
@@ -441,10 +496,27 @@ void test_pop_is_quiet_when_conflation_was_never_requested() {
     StubServer server(old_broker_204);
     QueenClient client({server.url()}, fast_config());
 
-    json messages = client.queue("cfl-noask").group("workers").wait(false).pop();
+    std::vector<Message> messages = client.queue("cfl-noask").group("workers").wait(false).pop();
 
-    check(messages.is_array() && messages.empty(),
-          "an undeclared pop against a 204 must return [] and not raise");
+    check(messages.empty(), "an undeclared pop against a 204 must return [] and not raise");
+}
+
+/// consume() hands over one message per call, consume_batch() a whole batch:
+/// the two shapes of the loop, both run by the degrade-loudly tests below.
+/// `handled` counts MESSAGES either way.
+enum class Shape { PerMessage, Batch };
+
+const char* shape_name(Shape shape) {
+    return shape == Shape::PerMessage ? "consume()" : "consume_batch()";
+}
+
+ConsumeSummary consume_counting(QueueBuilder& builder, Shape shape, std::atomic<int>& handled) {
+    if (shape == Shape::PerMessage) {
+        return builder.consume([&handled](const Message&) { handled++; });
+    }
+    return builder.consume_batch([&handled](const std::vector<Message>& batch) {
+        handled += static_cast<int>(batch.size());
+    });
 }
 
 void test_consume_stops_on_a_broker_that_does_not_conflate() {
@@ -452,56 +524,64 @@ void test_consume_stops_on_a_broker_that_does_not_conflate() {
     // backlog one message at a time. Same shape as the terminal-403 test in
     // test_retry429.cpp -- the error has to survive the worker thread and reach
     // the caller of consume().
-    StubServer server(old_broker_message);
-    QueenClient client({server.url()}, fast_config());
+    for (Shape shape : {Shape::Batch, Shape::PerMessage}) {
+        const std::string name = shape_name(shape);
+        StubServer server(old_broker_message);
+        QueenClient client({server.url()}, fast_config());
 
-    std::atomic<int> handled{0};
-    bool threw = false;
-    StopAfter watchdog(3000);
-    try {
-        // limit(3) bounds a loop that keeps handling messages; the watchdog
-        // bounds one that would poll for ever. Neither is reached by a correct
-        // client: the error fires on the first response.
-        client.queue("cfl-degrade-consume").group("workers").conflation(true)
-              .wait(false).limit(3)
-              .consume([&handled](const json&) { handled++; }, watchdog.signal());
-    } catch (const ConflationUnsupportedError& e) {
-        threw = true;
-        check(std::string(e.what()).find("1.1.0") != std::string::npos,
-              "the error must name the required broker version, got: " +
-              std::string(e.what()));
+        std::atomic<int> handled{0};
+        bool threw = false;
+        StopAfter watchdog(3000);
+        try {
+            // limit(3) bounds a loop that keeps handling messages; the watchdog
+            // bounds one that would poll for ever. Neither is reached by a
+            // correct client: the error fires on the first response.
+            auto builder = client.queue("cfl-degrade-consume").group("workers").conflation(true)
+                                 .wait(false).limit(3).cancel(watchdog.token());
+            consume_counting(builder, shape, handled);
+        } catch (const ConflationUnsupportedError& e) {
+            threw = true;
+            check(std::string(e.what()).find("1.1.0") != std::string::npos,
+                  name + ": the error must name the required broker version, got: " +
+                  std::string(e.what()));
+        }
+
+        check(threw, name + " must stop and rethrow when the broker does not conflate");
+        check(handled.load() == 0,
+              name + ": not one message may be handled before the loop stops, handled " +
+              std::to_string(handled.load()));
+        check(server.count() == 1, name + ": the loop must not re-poll, got " +
+              std::to_string(server.count()) + " requests");
     }
-
-    check(threw, "consume() must stop and rethrow when the broker does not conflate");
-    check(handled.load() == 0,
-          "not one message may be handled before the loop stops, handled " +
-          std::to_string(handled.load()));
-    check(server.count() == 1, "the loop must not re-poll, got " +
-          std::to_string(server.count()) + " requests");
 }
 
 void test_consume_stops_on_an_old_brokers_204() {
     // An idle queue is the likeliest first contact, and the 204 path is where a
     // consume loop would otherwise spin forever without ever noticing.
-    StubServer server(old_broker_204);
-    QueenClient client({server.url()}, fast_config());
+    for (Shape shape : {Shape::Batch, Shape::PerMessage}) {
+        const std::string name = shape_name(shape);
+        StubServer server(old_broker_204);
+        QueenClient client({server.url()}, fast_config());
 
-    bool threw = false;
-    StopAfter watchdog(3000);
-    try {
-        // An empty response never counts towards limit(), so idle_millis is what
-        // bounds this loop; the watchdog covers the case where even that is not
-        // reached. Neither is reached by a correct client.
-        client.queue("cfl-degrade-consume-204").group("workers").conflation(true)
-              .wait(false).idle_millis(600)
-              .consume([](const json&) {}, watchdog.signal());
-    } catch (const ConflationUnsupportedError&) {
-        threw = true;
+        std::atomic<int> handled{0};
+        bool threw = false;
+        StopAfter watchdog(3000);
+        try {
+            // An empty response never counts towards limit(), so idle_millis is
+            // what bounds this loop; the watchdog covers the case where even that
+            // is not reached. Neither is reached by a correct client.
+            auto builder = client.queue("cfl-degrade-consume-204").group("workers")
+                                 .conflation(true).wait(false).idle_millis(600)
+                                 .cancel(watchdog.token());
+            consume_counting(builder, shape, handled);
+        } catch (const ConflationUnsupportedError&) {
+            threw = true;
+        }
+
+        check(threw, name + ": an idle old broker must stop the consume loop on the first poll");
+        check(server.count() == 1, name + ": the loop must not re-poll, got " +
+              std::to_string(server.count()) + " requests");
     }
-
-    check(threw, "an idle old broker must stop the consume loop on the first poll");
-    check(server.count() == 1, "the loop must not re-poll, got " +
-          std::to_string(server.count()) + " requests");
 }
 
 // ============================================================================
@@ -561,11 +641,10 @@ void test_conflict_does_not_raise_the_version_error() {
     QueenClient client({server.url()}, fast_config());
 
     CerrCapture capture;
-    json messages = client.queue("cfl-conflict-c").group("workers")
-                          .conflation(true).wait(false).pop();
+    std::vector<Message> messages = client.queue("cfl-conflict-c").group("workers")
+                                          .conflation(true).wait(false).pop();
 
-    check(messages.is_array() && messages.size() == 1,
-          "a conflicting pop still delivers its messages");
+    check(messages.size() == 1, "a conflicting pop still delivers its messages");
 }
 
 void test_no_warning_when_the_broker_applied_conflation() {
@@ -592,9 +671,10 @@ void test_conflict_warning_reaches_the_consume_loop_too() {
     std::string captured;
     {
         CerrCapture capture;
+        StopAfter watchdog(3000);
         client.queue("cfl-conflict-consume").group("workers").conflation(true)
-              .wait(false).limit(1)
-              .consume([](const json&) {});
+              .wait(false).limit(1).cancel(watchdog.token())
+              .consume_batch([](const std::vector<Message>&) {});
         captured = capture.text();
     }
 
@@ -617,6 +697,8 @@ int main() {
     run_test("conflation(false) is not sent", test_conflation_false_is_not_sent);
     run_test("the builder copies it into ConsumeOptions",
              test_builder_copies_conflation_into_consume_options);
+    run_test("pop() and consume() send the same request",
+             test_pop_and_consume_send_the_same_request);
 
     run_test("pop() raises when the echo is missing",
              test_pop_raises_when_the_broker_does_not_echo_conflation);

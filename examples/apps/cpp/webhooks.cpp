@@ -15,14 +15,13 @@
 //     `-- group "sender"  POSTs each delivery; a nack spends one retry
 //           `-- retryLimit spent -> dead-letter queue, with the error
 //
-// Build it. queen_client.hpp needs json.hpp and threadpool.hpp, which this
-// repository carries under clients/server, and cpp-httplib, which it does not
-// (Homebrew puts httplib.h under /opt/homebrew/include). The client switches on
-// cpp-httplib's OpenSSL support, so -lssl -lcrypto are needed even over plain
-// http.
+// Build it. queen_client.hpp carries its nlohmann/json beside it; the one
+// header to install is cpp-httplib's (Homebrew puts httplib.h under
+// /opt/homebrew/include). The client switches on cpp-httplib's OpenSSL support
+// for https://, so -lssl -lcrypto are needed even over plain http.
 //   mkdir -p build
 //   c++ -std=c++17 -O1 -pthread \
-//       -I../../../clients/client-cpp -I../../../clients/server/vendor \
+//       -I../../../clients/client-cpp \
 //       -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
 //       webhooks.cpp -o build/webhooks \
 //       -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
@@ -32,7 +31,6 @@
 
 #include "queen_client.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <exception>
@@ -43,7 +41,6 @@
 #include <string>
 #include <vector>
 
-using queen::QueenClient;
 using json = nlohmann::json;
 
 static std::string run_id() {
@@ -124,7 +121,7 @@ int main() {
     const std::string QUEEN_URL = env_url ? env_url : "http://localhost:6632";
     const std::string DELIVERIES = "app-cpp-webhooks-" + run_id();
 
-    QueenClient client(QUEEN_URL);
+    queen::Queen client(QUEEN_URL);
 
     std::string verdict;
     bool failed = false;
@@ -139,17 +136,11 @@ int main() {
         // checks at the end depend on it. leaseTime is how long the broker
         // waits for a sender that took a delivery and never came back before
         // it hands the delivery to another sender.
-        //
-        // The C++ QueueConfig struct has no dlqAfterMaxRetries field, so the
-        // options are assembled by hand and posted through the client's own
-        // HTTP transport, which keeps the base URL, the retries and the 429
-        // backoff that every other call in this file uses.
-        json configured = client.get_http_client()->post(
-            "/api/v1/configure",
-            json{{"queue", DELIVERIES},
-                 {"options", {{"leaseTime", 30},
-                              {"retryLimit", RETRY_LIMIT},
-                              {"dlqAfterMaxRetries", true}}}});
+        queen::QueueConfig options;
+        options.lease_time = 30;
+        options.retry_limit = RETRY_LIMIT;
+        options.dlq_after_max_retries = true;
+        json configured = client.queue(DELIVERIES).configure(options);
         if (!configured.value("configured", false)) {
             throw std::runtime_error("the broker did not configure the queue");
         }
@@ -165,14 +156,12 @@ int main() {
             for (const Endpoint& endpoint : ENDPOINTS) {
                 // The event id. An application that retries its own emit does
                 // not create a second delivery.
-                client.queue(DELIVERIES).partition(endpoint.host).push({
-                    json{{"transactionId",
-                          endpoint.host + "-evt-" + std::to_string(seq)},
-                         {"data", {{"endpoint", endpoint.host},
-                                   {"seq", seq},
-                                   {"type", "invoice.paid"},
-                                   {"invoiceId", "INV-" + std::to_string(seq)}}}}
-                });
+                client.queue(DELIVERIES).partition(endpoint.host).push(
+                    {{"endpoint", endpoint.host},
+                     {"seq", seq},
+                     {"type", "invoice.paid"},
+                     {"invoiceId", "INV-" + std::to_string(seq)}},
+                    endpoint.host + "-evt-" + std::to_string(seq));
             }
         }
         std::cout << "  " << EVENTS_PER_ENDPOINT * ENDPOINTS.size()
@@ -195,23 +184,21 @@ int main() {
         // popped under it, so a worker holding more than the failed delivery
         // could not acknowledge the rest.
         //
-        //   wait(false)     every pop answers at once. This client has no
-        //                   setter for the long-poll timeout, which is 30
-        //                   seconds, and the stop flag and the idle deadline
-        //                   are only consulted between pops.
+        //   wait(false)     every pop answers at once; the stop and the idle
+        //                   deadline are consulted between pops.
         //   idle_millis     the deadline. A delivery that never comes back
         //                   fails this run instead of hanging it.
-        //   limit()         counts per worker, so it is only a backstop. The
-        //                   stop flag ends the loop, and it is raised on the
+        //   limit()         every attempt the run should make, counted across
+        //                   the workers. What ends the loop first is the
         //                   outcome: every healthy delivery sent and every dead
-        //                   one dead-lettered.
+        //                   one dead-lettered cancels it.
         std::cout << "\nsending" << std::endl;
         std::mutex lock;
         std::map<std::string, std::vector<int>> delivered_to;
         std::map<std::string, int> attempts;
         int dead_lettered = 0;
         int delivered_total = 0;
-        std::atomic<bool> stop{false};
+        queen::Cancel stop;
         std::exception_ptr handler_error;
 
         client.queue(DELIVERIES)
@@ -220,15 +207,15 @@ int main() {
             .concurrency(3)
             .partitions(1)
             .batch(1)
-            .each()
             .auto_ack(false)
             .limit(EXPECTED_ATTEMPTS)
             .wait(false)
             .idle_millis(6000)
-            .consume([&](const json& msg) {
+            .cancel(stop)
+            .consume([&](const queen::Message& msg) {
                 try {
-                    const std::string host = msg["data"]["endpoint"].get<std::string>();
-                    const int seq = msg["data"]["seq"].get<int>();
+                    const std::string host = msg.data["endpoint"].get<std::string>();
+                    const int seq = msg.data["seq"].get<int>();
 
                     std::string error;
                     try {
@@ -250,38 +237,32 @@ int main() {
                         } else {
                             std::cout << "  " << host << " <- event " << seq
                                       << " failed on attempt "
-                                      << msg.value("deliveryAttempt", 0) << ": "
+                                      << msg.delivery_attempt << ": "
                                       << error << std::endl;
                         }
                     }
 
-                    // The ack names the consumer group: without it the broker
-                    // looks for the lease on the queue's own cursor and refuses
-                    // the ack. A failure carries its error, which is what the
+                    // The ack takes the consumer group and the lease from the
+                    // message. A failure carries its error, which is what the
                     // dead letter keeps once the budget is spent.
-                    json context = {{"group", GROUP}};
-                    if (!error.empty()) context["error"] = error;
-                    json ack = client.ack(msg, error.empty(), context);
+                    queen::AckResult ack = error.empty() ? client.ack(msg) : client.nack(msg, error);
 
                     // A refused acknowledgement still arrives as HTTP 200 with
-                    // success: false on the item. ack() reads the item, so its
-                    // outer "success" is false too.
-                    if (!ack.value("success", false) || !ack["result"].is_array() ||
-                        ack["result"].empty() ||
-                        !ack["result"][0].value("success", false)) {
+                    // success: false on the item, and ack() returns it as a value.
+                    if (!ack.success) {
                         throw std::runtime_error("the broker refused the acknowledgement for " +
-                                                 host + "/" + std::to_string(seq));
+                                                 host + "/" + std::to_string(seq) + ": " + ack.error);
                     }
 
                     std::lock_guard<std::mutex> guard(lock);
-                    if (ack["result"][0].value("dlq", false)) {
+                    if (ack.dlq) {
                         // This failure spent the last of the retry budget, and
                         // the delivery is now a dead letter.
                         ++dead_lettered;
                     }
                     if (delivered_total >= HEALTHY_DELIVERIES &&
                         dead_lettered >= DEAD_DELIVERIES) {
-                        stop = true;
+                        stop.cancel();
                     }
                 } catch (...) {
                     // auto_ack is off, so nothing acknowledges behind this
@@ -289,9 +270,9 @@ int main() {
                     // leased until it expires. Carry the error out and stop.
                     std::lock_guard<std::mutex> guard(lock);
                     if (!handler_error) handler_error = std::current_exception();
-                    stop = true;
+                    stop.cancel();
                 }
-            }, &stop);
+            });
         if (handler_error) std::rethrow_exception(handler_error);
 
         // ------------------------------------------------------------- checking
@@ -321,10 +302,7 @@ int main() {
         // The dead letters are records you can query. Each one keeps the
         // payload, so it names the endpoint and the invoice, and the last error,
         // which is what answers "why did this customer not get the webhook".
-        //
-        // dlq().get() answers a transport failure with an empty page and does
-        // not throw, so an unreachable broker shows up here as the next check
-        // failing.
+        // dlq().get() throws when the broker cannot be asked.
         json dlq = client.queue(DELIVERIES).dlq().limit(50).get();
         const json& letters = dlq["messages"];
 

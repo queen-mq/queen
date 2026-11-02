@@ -26,6 +26,8 @@ sourceOfTruth:
   - server/src/rsm/batcher.rs
   - server/src/switches.rs
   - clients/client-js/client-v2/builders/TimerBuilder.js
+# sourceOfTruth re-read 2026-11-02 (C++ client 2.7.1): the C++ Lock renews in the background, so it
+# joins the line on background renewal.
 verifiedBy:
   - examples/tutorials/run.sh
   - examples/tutorials/js/00-five-minutes.mjs
@@ -97,7 +99,7 @@ A lock is a lease: one holder at a time, for a lifetime the holder declares and 
 
 - **A lock expires without telling its holder.** A paused or slow process can carry on after another one took the lock. Fence the work: `.guard(lock)` on the transaction inside Queen, or the lock's token outside it (a resource that refuses a token lower than the highest it has seen).
 - **The token changes at every renew.** Use the token of the last answer; the SDK handles do.
-- **The JavaScript, Python, Go and Rust handles renew in the background**, every third of the lifetime, and tell you when the lock is lost.
+- **The JavaScript, Python, Go, Rust and C++ handles renew in the background**, every third of the lifetime, and tell you when the lock is lost. The PHP handle renews when its `keepAlive()` is called.
 
 <Why>no lock service can stop two processes from both believing they hold a lock for a moment. What Queen stops is both of them doing the work.</Why>
 

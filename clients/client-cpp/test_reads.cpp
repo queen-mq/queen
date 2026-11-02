@@ -566,8 +566,8 @@ void live_fetch_reads_every_record_by_offset() {
     const int per_partition = 3;
     for (int n = 0; n < per_partition; ++n) {
         for (const auto& p : partitions) {
-            client.queue(queue).partition(p).push(std::vector<json>{
-                json{{"transactionId", p + "-" + std::to_string(n)}, {"data", json{{"p", p}, {"n", n}}}}});
+            client.queue(queue).partition(p).push_items(
+                {PushItem{json{{"p", p}, {"n", n}}, p + "-" + std::to_string(n)}});
         }
     }
     auto read = client.queue(queue).fetch(partitions);
@@ -584,7 +584,7 @@ void live_fetch_reads_every_record_by_offset() {
     }
     check(exact, "every record, in order, with its offset");
 
-    client.queue(queue).partition("entity-7").push(std::vector<json>{json{{"data", json{{"late", true}}}}});
+    client.queue(queue).partition("entity-7").push(json{{"late", true}});
     FetchOptions options;
     options.offsets["entity-7"] = read["entity-7"].next_offset;
     options.offsets["entity-8"] = read["entity-8"].next_offset;
@@ -605,7 +605,7 @@ void live_changed_since_lists_the_written_partitions() {
     auto before = std::chrono::system_clock::now() - std::chrono::minutes(1);
     std::vector<std::string> names;
     for (int i = 0; i < 1100; ++i) names.push_back("c-" + std::to_string(i));
-    for (const auto& p : names) client.queue(queue).partition(p).push(std::vector<json>{json{{"data", json{{"p", p}}}}});
+    for (const auto& p : names) client.queue(queue).partition(p).push(json{{"p", p}});
 
     auto first = client.queue(queue).changed_since(before);
     std::vector<std::string> listed;
@@ -616,7 +616,7 @@ void live_changed_since_lists_the_written_partitions() {
     check(listed == want, "every written partition, over two pages");
     check(!first.safe_time.empty(), "a safe time");
 
-    client.queue(queue).partition("c-42").push(std::vector<json>{json{{"data", json{{"again", true}}}}});
+    client.queue(queue).partition("c-42").push(json{{"again", true}});
     auto next = client.queue(queue).changed_since(first.safe_time);
     bool found = false, none_before = true;
     for (const auto& p : next.partitions) {
