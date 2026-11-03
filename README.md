@@ -144,6 +144,17 @@ for (const record of read.get('customer-42').records) {
 The [full guide](https://queenmq.com/#guide) goes on with locks, stream windows and request/reply
 over in-memory queues, in every language.
 
+## What else it does
+
+- **Streams with windows.** Tumbling, sliding and session windows over any queue, in JavaScript, Python, Go and Rust. The ack, the state and the output commit together. [Streams](https://queenmq.com/writing-applications/streams/)
+- **Conflation.** A conflating consumer group gets only the newest message of each partition, for values where only the latest matters. [Last value](https://queenmq.com/patterns/last-value/)
+- **Ephemeral queues.** In memory, outside the log, for request/reply: fast, and lost on a crash by design. [Ephemeral queues](https://queenmq.com/writing-applications/ephemeral/)
+- **KV, locks and timers.** State per entity, one worker at a time, and messages scheduled for later, all inside your transactions. [KV, locks and timers](https://queenmq.com/writing-applications/kv-locks-timers/)
+- **Retries and dead letters.** A failed message comes back after a delay, a few times, then goes to the dead-letter queue and its partition moves on. Replay it once fixed. [Retries](https://queenmq.com/writing-applications/retries/)
+- **Kafka clients.** Unchanged Kafka producers and consumers work against Queen's Kafka port. [Kafka](https://queenmq.com/integrations/kafka/)
+- **PostgreSQL and S3, run by the broker.** A table into a queue, a queue into a table, and queues into an S3 bucket as JSONL or Parquet, with no other process to run. [PostgreSQL](https://queenmq.com/integrations/postgres/) · [S3](https://queenmq.com/integrations/s3/)
+- **Tenants and standby.** Many tenants on one cluster behind the built-in proxy, and a standby cluster that takes over with one call. [Tenants](https://queenmq.com/manage/tenants/) · [Standby](https://queenmq.com/manage/standby/)
+
 ## Numbers
 
 Three GCP nodes, 24 vCPU each, local NVMe. A write is confirmed only after two nodes have written
