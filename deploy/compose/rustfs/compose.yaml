@@ -48,7 +48,7 @@ services:
         [ "$$code" = 200 ] || [ "$$code" = 409 ]
 
   queen:
-    image: ghcr.io/queen-mq/queen:2.7.0
+    image: ghcr.io/queen-mq/queen:2.7.1
     depends_on:
       bucket:
         condition: service_completed_successfully

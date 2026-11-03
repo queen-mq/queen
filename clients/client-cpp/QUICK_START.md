@@ -5,7 +5,7 @@ Five minutes from a checkout to a consumer. The [README](README.md) has everythi
 ## 1. Start a broker
 
 ```bash
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.0
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.1
 ```
 
 ## 2. Install the one dependency

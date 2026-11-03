@@ -3,7 +3,15 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.7.1 - 2026-11-03
+
+**Upgrading from 2.7.0: a rolling restart, nothing else.** Nothing on disk or on the wire changes
+(cluster version 7), so 2.7.0 and 2.7.1 nodes run side by side during the roll. The leader exports
+five more Prometheus families, the consumer group lag below; on a cluster whose groups hold more
+than 200,000 partition positions in all, they stay off (`queen_consumer_group_lag_complete 0`)
+until `QUEEN_METRICS_GROUP_LAG_MAX_CURSORS` is raised. The C++ client 2.7.1 changes its API (its
+README maps each 2.7.0 call to its new form); the JavaScript, Python, Go, Rust and PHP clients stay
+at 2.7.0, and queenctl moves to 2.7.1 for `dlq redrive` (next section).
 
 **Console: Refresh now, the Raft term and the store on Cluster, Expand all, and pages that fit a
 phone.** The band has a Refresh now button beside the time window (or press R): every read on the
@@ -37,18 +45,11 @@ than a part. `deploy/grafana/queen-consumer-lag.json` is a board on these series
 needs you, five minutes failing). Why: teams coming from Kafka watch consumer lag every day, and
 until now nothing could alert on a group's backlog.
 
-**`queenctl dlq redrive`: replay many dead letters with one command (queen-mq/queen#147).** It takes
-the filters of `dlq drain` (`--queue`, `--cg`, `--partition`, `--from`, `--to`), reads every
-match first, then replays each row by its id, as the console's Replay does: each partition's
-messages go back oldest first, one at a time, so they keep their order among themselves, and
-partitions run side by side (`--parallel`, 4). `--dry-run` prints the plan, `--yes` is required,
-and it refuses more than `--max` rows (10,000). A second run replays only what the first left
-(each replay is `dlq:<row id>`), a message several groups dead-lettered needs `--cg` (one replay
-reaches every group), and it stops at the first refusal that would repeat (401, 403, 429). The
-console's Replay now sends rows in the same order; it sent four at a time, so one partition's
-replays could land out of order. Why: after an incident a team replays hundreds of messages, and
-`dlq retry` takes one; the reason given for leaving bulk replay out (the route was not idempotent)
-no longer held.
+**The console replays a partition's dead letters in order (queen-mq/queen#147).** Replay on Dead
+letters sends each partition's rows oldest first, one at a time, with partitions side by side; it
+sent four rows at a time, so one partition's replays could land out of order. `queenctl dlq
+redrive` (queenctl 2.7.1, next section) replays the same way, many rows at once. Why: a partition
+is one entity's order, and a replay that shuffles it breaks what the queue promised.
 
 **The console lists the PostgreSQL connectors (queen-mq/queen#155).** A Connectors page, after
 Streams in the rail: every source and sink with its state (Streaming, Snapshot, Running, Standby
@@ -84,6 +85,22 @@ nlohmann/json is vendored in `clients/client-cpp/third_party/`, `clients/server/
 CMake target `queen::client` finds or fetches cpp-httplib. The client's README lists every change.
 Why: the C++ client was the one SDK whose programs called raw routes for common steps, and it could
 not reach an HTTPS endpoint at all.
+
+## queenctl 2.7.1 - 2026-11-03
+
+**`queenctl dlq redrive`: replay many dead letters with one command (queen-mq/queen#147).** It takes
+the filters of `dlq drain` (`--queue`, `--cg`, `--partition`, `--from`, `--to`), reads every
+match first, then replays each row by its id, as the console's Replay does: each partition's
+messages go back oldest first, one at a time, so they keep their order among themselves, and
+partitions run side by side (`--parallel`, 4). `--dry-run` prints the plan, `--yes` is required,
+and it refuses more than `--max` rows (10,000). A second run replays only what the first left
+(each replay is `dlq:<row id>`), a message several groups dead-lettered needs `--cg` (one replay
+reaches every group), and it stops at the first refusal that would repeat (401, 403, 429).
+queenctl 2.7.1 is built against Go client 2.6.1, like 2.6.1, and its archives for Linux and macOS
+(x86_64 and arm64) and Windows (x86_64) are on the GitHub release
+[queenctl 2.7.1](https://github.com/queen-mq/queen/releases/tag/clients/client-cli/v2.7.1). Why:
+after an incident a team replays hundreds of messages, and `dlq retry` takes one; the reason given
+for leaving bulk replay out (the route was not idempotent) no longer held.
 
 ## 2.7.0 - 2026-10-31
 
