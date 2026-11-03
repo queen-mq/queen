@@ -34,7 +34,7 @@ The broker can copy its queues into an S3 bucket, as JSONL or Parquet files in f
 
 ## Turn it on
 
-Any S3-compatible service works. Our test used a versitygw gateway named `s3` on the same Docker network:
+Any S3-compatible service works: we test the sink against versitygw and [RustFS](#rustfs). This example uses a versitygw gateway named `s3` on the same Docker network:
 
 ```bash
 docker run -d --name queen --network lake -p 6632:6632 \
@@ -104,6 +104,30 @@ Every node runs the sink, but only one node writes a queue: the one that holds t
 | `QUEEN_S3_TARGET_MB` | 128 | Uncompressed megabytes that close a window. |
 | `QUEEN_S3_MAX_WINDOW_MS` | 300000 | The longest a window stays open. |
 | `QUEEN_S3_SSE` | unset | `AES256` or `aws:kms`: encryption of the files in the bucket. |
+
+## RustFS
+
+[RustFS](https://rustfs.com) works as it is. The sink's tests against a real S3 server pass on RustFS 1.0.4 as they do on versitygw, and a window lands byte for byte: its file's SHA-256 is the one its manifest records. The repository has a Compose file that starts RustFS, creates the bucket `lake` and starts a broker that copies the queue `orders` into it as Parquet:
+
+```bash
+docker compose -f deploy/compose/rustfs/compose.yaml up -d
+curl -s -X POST localhost:6632/api/v1/push -H 'content-type: application/json' -d '{"items":[
+  {"queue":"orders","partition":"cust-1","payload":{"order":1,"status":"new","total":42.00}},
+  {"queue":"orders","partition":"cust-2","payload":{"order":2,"status":"new","total":17.50}}
+]}' >/dev/null
+```
+
+Ten seconds later the window is in the bucket, as the data and its manifest:
+
+```text
+queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/dt=2026-11-03/hour=07/
+  w-0000000001-1793689200000000-1793691426796945.parquet
+queen/_queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/windows/0000000001.json
+```
+
+Against RustFS the settings are the ones of the first example, with its address: `QUEEN_S3_ENDPOINT=http://rustfs:9000` and `QUEEN_S3_PATH_STYLE=true`.
+
+RustFS also has S3 Tables, an Apache Iceberg catalog that it marks as a preview. The sink does not write to it: it writes plain Parquet files, and a file uploaded to a bucket does not become a table. Read the files where they are, with DuckDB or Spark and hive partitioning (the folders are the columns `tenant`, `queue`, `dt` and `hour`), or append them to an Iceberg table with an Iceberg client such as PyIceberg or Spark.
 
 ## Four things to know
 

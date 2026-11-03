@@ -1,0 +1,74 @@
+# Queen copying a queue into a RustFS bucket as Parquet (queen-mq/queen#144).
+#
+#   docker compose -f deploy/compose/rustfs/compose.yaml up -d
+#
+# RustFS serves S3 on localhost:9000 (its console on :9001), the `bucket`
+# step creates the bucket `lake` once, and the broker (localhost:6632) copies
+# the queue `orders` into it: Parquet files under
+# queen/tenant=<id>/queue=orders/dt=<day>/hour=<h>/, one per window, with a
+# manifest per window under queen/_queen/. A window closes after 10 s here
+# (QUEEN_S3_MAX_WINDOW_MS), five minutes by default.
+#
+# The keys are a demo's: set your own in RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
+# and the two QUEEN_S3_* that repeat them. Another port on the host:
+# QUEEN_PORT=7632 RUSTFS_PORT=9100 docker compose ... up -d
+#
+# Guide: https://queenmq.com/integrations/s3/#rustfs
+name: queen-rustfs
+
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    environment:
+      RUSTFS_ACCESS_KEY: queen
+      RUSTFS_SECRET_KEY: queen-secret-key
+    ports:
+      - "127.0.0.1:${RUSTFS_PORT:-9000}:9000"
+      - "127.0.0.1:${RUSTFS_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
+      interval: 2s
+      retries: 30
+
+  # CreateBucket, signed with the same keys; 409 means it is there already.
+  bucket:
+    image: rustfs/rustfs:1.0.4
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        code=$$(curl -s -o /dev/null -w '%{http_code}' -X PUT
+        --aws-sigv4 aws:amz:us-east-1:s3 --user queen:queen-secret-key
+        http://rustfs:9000/lake);
+        echo "CreateBucket lake: $$code";
+        [ "$$code" = 200 ] || [ "$$code" = 409 ]
+
+  queen:
+    image: ghcr.io/queen-mq/queen:2.7.0
+    depends_on:
+      bucket:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${QUEEN_PORT:-6632}:6632"
+    environment:
+      QUEEN_S3_EMBEDDED: "true"
+      QUEEN_S3_QUEUES: orders
+      QUEEN_S3_ENDPOINT: http://rustfs:9000
+      QUEEN_S3_REGION: us-east-1
+      QUEEN_S3_PATH_STYLE: "true"
+      QUEEN_S3_BUCKET: lake
+      QUEEN_S3_ACCESS_KEY: queen
+      QUEEN_S3_SECRET_KEY: queen-secret-key
+      QUEEN_S3_FORMAT: parquet
+      QUEEN_S3_START: earliest
+      QUEEN_S3_MAX_WINDOW_MS: "10000"
+    volumes:
+      - queen-data:/var/lib/queen/raft
+
+volumes:
+  rustfs-data:
+  queen-data:

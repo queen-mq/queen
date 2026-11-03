@@ -57,6 +57,11 @@ and its last commit; a row opens its error and what it says, its slot and pointe
 mode, and its document as stored, never the password. Read-only, from `GET /api/v1/connectors`;
 behind the proxy it needs the admin role. Why: a connector was visible only through the API.
 
+**RustFS for the S3 sink (queen-mq/queen#144).** The sink's tests against a real S3 server pass on
+RustFS 1.0.4, and `deploy/compose/rustfs/compose.yaml` starts RustFS, creates a bucket and copies
+a queue into it as Parquet; the S3 page says how, and what RustFS's S3 Tables (Iceberg) are not.
+No code changed. Why: teams moving off MinIO asked whether Queen's lake works on RustFS.
+
 **C++ client 2.7.1: the API of the Go and Rust clients, a connection pool, and HTTPS.** A
 breaking change: the C++ client now has the shape of the other SDKs. `queen::Queen` (`QueenClient`
 stays as an alias) hands out typed values: `pop()` returns `std::vector<Message>`, `push()` takes
