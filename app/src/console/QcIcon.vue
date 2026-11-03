@@ -64,6 +64,10 @@ defineProps({ name: { type: String, required: true }, size: { type: Number, defa
     <template v-else-if="name === 'chevron'">
       <polyline points="5,7 9,11 13,7" />
     </template>
+    <template v-else-if="name === 'refresh'">
+      <path d="M15 9a6 6 0 1 1-6-6c1.68 0 3.29.67 4.5 1.83L15 6.3" />
+      <polyline points="15,2.5 15,6.3 11.2,6.3" />
+    </template>
   </svg>
 </template>
 

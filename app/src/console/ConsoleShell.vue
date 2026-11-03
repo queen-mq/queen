@@ -3,7 +3,7 @@
 // account) and one band (where you are, search, the cluster, the time
 // window, the shortcuts). A page fills the rest.
 import './console.css'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import logoRaw from '@/assets/q.svg?raw'
 import { useUiStore } from '@/stores/ui'
@@ -58,6 +58,20 @@ const userOpen = ref(false)
 const helpOpen = ref(false)
 const searchOpen = ref(false)
 
+// ---- Refresh now: every read on screen again (App.vue's registry), past every cache ----
+const refreshNow = inject('refreshNow', null)
+const refreshing = ref(false)
+const refreshedAt = ref(0)
+async function refresh() {
+  if (!refreshNow || refreshing.value) return
+  refreshing.value = true
+  const t0 = Date.now()
+  try { await refreshNow() } catch { /* each read says its own failure */ }
+  // long enough to be seen turning, even when the answers are instant
+  setTimeout(() => { refreshing.value = false; refreshedAt.value = Date.now() }, Math.max(0, 500 - (Date.now() - t0)))
+}
+const refreshTitle = computed(() => (refreshedAt.value ? `Refresh now (R). Last refreshed at ${clock(refreshedAt.value, true)}.` : 'Refresh now (R). Every page also refreshes itself every 30 s.'))
+
 // ---- keyboard: ⌘K, G then a letter, L, ? ----
 let gAt = 0
 function typing(e) {
@@ -77,6 +91,7 @@ function onKey(e) {
   }
   if (k === 'g') { gAt = Date.now(); return }
   if (k === 'l') { live(); return }
+  if (k === 'r') { refresh(); return }
   if (e.key === '?') { helpOpen.value = !helpOpen.value }
 }
 onMounted(() => document.addEventListener('keydown', onKey))
@@ -125,7 +140,7 @@ const initials = computed(() => {
         </template>
       </template>
       <div style="flex: 1 1 0" />
-      <RouterLink :to="frame.paths.settings" class="qn-ri" :class="{ on: here === 'settings' }" :aria-current="here === 'settings' ? 'page' : undefined" aria-label="Settings">
+      <RouterLink :to="frame.paths.settings" class="qn-ri qn-ri-settings" :class="{ on: here === 'settings' }" :aria-current="here === 'settings' ? 'page' : undefined" aria-label="Settings">
         <QcIcon name="settings" />
         <span class="qn-tip">Settings <span class="qn-kbd">⌘ ,</span></span>
       </RouterLink>
@@ -161,36 +176,44 @@ const initials = computed(() => {
             <span v-else :aria-current="i === path.length - 1 ? 'page' : undefined" :class="p.mono ? 'qn-mono' : ''" style="font-weight: 500">{{ p.label }}</span>
           </template>
         </nav>
-        <div style="flex: 1 1 0" />
+        <div class="qn-gap" />
         <button type="button" class="qn-field qn-find" aria-haspopup="dialog" @click="searchOpen = true">
           <QcIcon name="search" :size="14" />
           <span style="flex: 1 1 0; text-align: left">Search</span>
           <span class="qn-kbd qn-key">⌘K</span>
         </button>
-        <ClusterChip
-          :name="frame.cluster.value.name"
-          :mark="frame.cell.value.mark"
-          :summary="frame.cell.value.summary"
-          :nodes="frame.cell.value.nodes"
-          :issues="frame.cell.value.issues"
-          :metrics="frame.cell.value.metrics"
-          :clusters="frame.clusters.value"
-          @switch="frame.switchCluster"
-        />
-        <TimeChip />
-        <LookChip />
-        <QcPopover v-model:open="helpOpen" side="bottom-end" :width="300" label="Keyboard shortcuts" :focus-first="false">
-          <template #trigger="{ toggle }">
-            <button type="button" class="qn-chip qn-keys" aria-haspopup="dialog" :aria-expanded="helpOpen" aria-label="Keyboard shortcuts" style="width: 32px; justify-content: center; padding: 0" @click="toggle">?</button>
-          </template>
-          <div class="qn-help">
-            <span>Search</span><span class="qn-kbd">⌘ K</span>
-            <span>Go to a section</span><span class="qn-kbd">G, then its letter</span>
-            <span>Back to live</span><span class="qn-kbd">L</span>
-            <span>Settings</span><span class="qn-kbd">⌘ ,</span>
-            <span>Close</span><span class="qn-kbd">Esc</span>
-          </div>
-        </QcPopover>
+        <div class="qn-tools">
+          <ClusterChip
+            class="qn-cluster"
+            :name="frame.cluster.value.name"
+            :mark="frame.cell.value.mark"
+            :summary="frame.cell.value.summary"
+            :nodes="frame.cell.value.nodes"
+            :issues="frame.cell.value.issues"
+            :metrics="frame.cell.value.metrics"
+            :clusters="frame.clusters.value"
+            @switch="frame.switchCluster"
+          />
+          <TimeChip />
+          <button
+            v-if="refreshNow" type="button" class="qn-chip qn-sq qn-refresh" :class="{ busy: refreshing }"
+            :aria-busy="refreshing" :aria-label="refreshing ? 'Refreshing' : 'Refresh now'" :title="refreshTitle" @click="refresh"
+          ><QcIcon name="refresh" :size="16" /></button>
+          <LookChip />
+          <QcPopover v-model:open="helpOpen" class="qn-helpwrap" side="bottom-end" :width="300" label="Keyboard shortcuts" :focus-first="false">
+            <template #trigger="{ toggle }">
+              <button type="button" class="qn-chip qn-sq qn-keys" aria-haspopup="dialog" :aria-expanded="helpOpen" aria-label="Keyboard shortcuts" @click="toggle">?</button>
+            </template>
+            <div class="qn-help">
+              <span>Search</span><span class="qn-kbd">⌘ K</span>
+              <span>Go to a section</span><span class="qn-kbd">G, then its letter</span>
+              <span>Back to live</span><span class="qn-kbd">L</span>
+              <span>Refresh now</span><span class="qn-kbd">R</span>
+              <span>Settings</span><span class="qn-kbd">⌘ ,</span>
+              <span>Close</span><span class="qn-kbd">Esc</span>
+            </div>
+          </QcPopover>
+        </div>
       </header>
       <p v-if="offline" class="qn-banner" role="alert">
         <span class="qn-mark red" aria-hidden="true" />
@@ -252,6 +275,12 @@ const initials = computed(() => {
   min-height: 52px; padding: 8px 24px; border-bottom: 1px solid var(--line);
 }
 .qn-path { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.qn-gap { flex: 1 1 0; }
+.qn-tools { display: flex; align-items: center; gap: 10px; }
+.qn-sq { width: 32px; justify-content: center; padding: 0; }
+.qn-refresh.busy :deep(.qn-ico) { animation: qn-turn .8s linear infinite; }
+@keyframes qn-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .qn-refresh.busy :deep(.qn-ico) { animation: none; opacity: .45; } }
 .qn-find { width: 240px; cursor: pointer; }
 .qn-find:hover { border-color: var(--text3); }
 .qn-key { padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px; }
@@ -263,11 +292,23 @@ const initials = computed(() => {
   .qn-shell { flex-direction: column; }
   .qn-rail { height: auto; flex: 0 0 auto; flex-direction: row; overflow-x: auto; padding: 6px 8px; border-right: 0; border-bottom: 1px solid var(--line); }
   .qn-body { height: auto; flex: 1 1 0; min-height: 0; }
-  .qn-logo { align-self: auto; height: 44px; flex: 0 0 44px; width: 44px; margin: 0 4px 0 0; }
-  .qn-sep { width: 1px; height: 24px; margin: 0 6px; }
+  /* The rail is a top bar of icons that share the width. The logo goes (the
+     Overview icon is the way home), and Settings lives in the account menu. */
+  .qn-rail { gap: 2px; }
+  .qn-logo, .qn-ri-settings { display: none; }
+  .qn-ri { width: auto; height: 40px; flex: 0 1 40px; min-width: 30px; }
+  .qn-sep { width: 1px; height: 24px; margin: 0 3px; flex: 0 0 1px; }
   .qn-tip { display: none; }
-  .qn-band { position: static; padding: 8px 16px; }
+  /* Two rows, the same on every page: where you are and Search, then the
+     cluster, the time, Refresh and the theme. A long name is cut, never pushed out. */
+  .qn-band { position: static; padding: 8px 16px; gap: 8px; }
+  .qn-path { flex: 1 1 0; flex-wrap: nowrap; overflow: hidden; }
+  .qn-path > * { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qn-path > [aria-hidden] { flex: none; }
+  .qn-gap { display: none; }
+  .qn-tools { flex: 1 1 100%; min-width: 0; gap: 8px; }
+  .qn-tools > .qn-cluster { flex: 0 1 auto; min-width: 0; }
   /* keyboard shortcuts: nothing to press on a phone */
-  .qn-keys { display: none; }
+  .qn-helpwrap { display: none; }
 }
 </style>

@@ -11,6 +11,7 @@ import { useClusterPage } from '@/console/useClusterPage'
 import ClusterNodes from '@/console/cluster/ClusterNodes.vue'
 import ClusterNode from '@/console/cluster/ClusterNode.vue'
 import ClusterCharts from '@/console/cluster/ClusterCharts.vue'
+import ClusterStore from '@/console/cluster/ClusterStore.vue'
 import ClusterOps from '@/console/cluster/ClusterOps.vue'
 import { segments } from '@/console/cluster/clusterViews'
 
@@ -81,6 +82,9 @@ const gateLine = computed(() => (c.gate.value != null ? ` A node stops taking wr
             <ClusterNode :detail="detail" :name="picked" :versions="c.versions.value.mixed" @close="pick('')" />
           </div>
 
+          <!-- each node's log and store -->
+          <ClusterStore v-if="c.store.value.length" class="cp-store" :rows="c.store.value" :picked="picked" @pick="pick" />
+
           <!-- each node over the window -->
           <ClusterCharts class="cp-charts" :model="c.charts.value" :win="win" :loaded="!!c.metrics.value" :error="c.metricsError.value" @zoom="range" />
 
@@ -109,17 +113,19 @@ const gateLine = computed(() => (c.gate.value != null ? ` A node stops taking wr
    the charts and the operations, and stays in view while the page scrolls. */
 .cp-grid { display: grid; grid-template-columns: minmax(0, 1fr); column-gap: 28px; margin-top: 22px; }
 /* The last row takes what the drawer adds, so nothing above it moves when it opens. */
-.cp-grid.open { grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: auto auto 1fr; }
+.cp-grid.open { grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: auto auto auto 1fr; }
 .cp-nodes { grid-column: 1; grid-row: 1; min-width: 0; }
-.cp-drawer { grid-column: 2; grid-row: 1 / span 3; align-self: start; position: sticky; top: 68px; max-height: calc(100vh - 84px); overflow-y: auto; }
-.cp-charts { grid-column: 1; grid-row: 2; min-width: 0; margin-top: 36px; }
-.cp-ops { grid-column: 1; grid-row: 3; min-width: 0; margin-top: 40px; align-self: start; }
+.cp-drawer { grid-column: 2; grid-row: 1 / span 4; align-self: start; position: sticky; top: 68px; max-height: calc(100vh - 84px); overflow-y: auto; }
+.cp-store { grid-column: 1; grid-row: 2; min-width: 0; margin-top: 36px; }
+.cp-charts { grid-column: 1; grid-row: 3; min-width: 0; margin-top: 36px; }
+.cp-ops { grid-column: 1; grid-row: 4; min-width: 0; margin-top: 40px; align-self: start; }
 
 @media (max-width: 1100px) {
   .cp-grid.open { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
   .cp-drawer { grid-column: 1; grid-row: 2; position: static; max-height: none; overflow: visible; margin-top: 18px; }
-  .cp-charts { grid-row: 3; }
-  .cp-ops { grid-row: 4; }
+  .cp-grid.open .cp-store { grid-row: 3; }
+  .cp-grid.open .cp-charts { grid-row: 4; }
+  .cp-grid.open .cp-ops { grid-row: 5; }
 }
 @media (max-width: 640px) { .cp { padding: 18px 16px 40px; } .cp-title { font-size: 19px; } }
 </style>

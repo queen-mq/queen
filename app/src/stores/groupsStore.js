@@ -21,6 +21,7 @@ import { ref } from 'vue'
 
 import { consumers as consumersApi } from '@/api'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
+import { readSinceRefresh } from '@/composables/useRefresh'
 
 const DEFAULT_TTL_MS = 60_000
 
@@ -31,7 +32,7 @@ let inflight = null
 let inflightEpoch = -1
 
 const fetchGroups = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
-  const fresh = groups.value !== null && Date.now() - lastFetched.value < ttlMs
+  const fresh = groups.value !== null && Date.now() - lastFetched.value < ttlMs && readSinceRefresh(lastFetched.value)
   if (!force && fresh) return groups.value
   if (inflight && inflightEpoch === currentEpoch()) return inflight
 

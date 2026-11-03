@@ -28,6 +28,7 @@ import { gatedVerdict } from '@/composables/useGatedVerdict'
 import { SETTINGS_KEY, SETTINGS_NS, readSettings, resolveLines } from '@/composables/settingsDoc'
 import { THRESHOLDS, setLinesReader } from '@/composables/useSeverity'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
+import { readSinceRefresh } from '@/composables/useRefresh'
 
 const DEFAULT_TTL_MS = 60_000
 
@@ -65,7 +66,7 @@ const take = (answer) => {
 }
 
 const fetchSettings = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
-  const fresh = lastFetched.value > 0 && Date.now() - lastFetched.value < ttlMs
+  const fresh = lastFetched.value > 0 && Date.now() - lastFetched.value < ttlMs && readSinceRefresh(lastFetched.value)
   if (!force && fresh) return state.value
   if (inflight && inflightEpoch === currentEpoch()) return inflight
 

@@ -35,6 +35,7 @@ import { useRoute } from 'vue-router'
 
 import mark from '@/assets/q.svg?raw'
 import { toast } from '@/console/toasts'
+import { markRefreshNow } from '@/composables/useRefresh'
 import { useIdentity } from '@/stores/identity'
 import { useUiStore } from '@/stores/ui'
 
@@ -73,11 +74,22 @@ provide('registerRefreshCallback', registerRefreshCallback)
 provide('unregisterRefreshCallback', unregisterRefreshCallback)
 
 const fire = (onlyAuto) => {
+  const runs = []
   for (const entry of refreshCallbacks.values()) {
     if (onlyAuto && !entry.auto) continue
-    try { entry.callback() } catch (e) { console.error('[refresh] callback failed', e) }
+    try { runs.push(entry.callback()) } catch (e) { console.error('[refresh] callback failed', e) }
   }
+  return runs
 }
+
+// "Refresh now" (the band's button, or R): everything on screen reads again,
+// past every time to live (markRefreshNow). Settles when the reads the pages
+// hand back have settled, so the button can say it is working.
+const refreshNow = () => {
+  markRefreshNow()
+  return Promise.allSettled(fire(false))
+}
+provide('refreshNow', refreshNow)
 
 // A cluster switch invalidates everything on screen. The stores have already
 // cleared themselves (identity's reset hooks); this pulls the new tenant's

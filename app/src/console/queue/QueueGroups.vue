@@ -94,4 +94,9 @@ const cols = computed(() => (withReaders.value
 <style scoped>
 .qg { margin-top: 6px; overflow-x: auto; }
 .qg [role='table'] { min-width: 860px; }
+/* a phone: the group, its state and what waits; Every consumer group has the rest */
+@media (max-width: 640px) {
+  .qg [role='table'] { min-width: 0; --cols: minmax(0, 1fr) auto 64px !important; }
+  .qg .qn-tr > :nth-child(n+4) { display: none; }
+}
 </style>

@@ -36,7 +36,7 @@ const tz = timeZone()
   <QcPopover v-model:open="open" side="bottom-end" :width="300" label="Time window">
     <template #trigger="{ toggle }">
       <button type="button" class="qn-chip" aria-haspopup="dialog" :aria-expanded="open" aria-label="Time window" @click="toggle">
-        <template v-if="win.id === '1h'"><span>Live</span><span class="qn-num qn-t3">{{ clock(nowMs, true) }}</span></template>
+        <template v-if="win.id === '1h'"><span>Live</span><span class="qn-num qn-t3 qn-clock">{{ clock(nowMs, true) }}</span></template>
         <span v-else class="qn-num">{{ win.label }}</span>
         <QcIcon name="chevron" :size="12" />
       </button>
@@ -69,3 +69,8 @@ const tz = timeZone()
   </QcPopover>
   <button v-if="win.id !== '1h'" type="button" class="qn-chip" @click="live()">Back to live</button>
 </template>
+
+<style scoped>
+/* a phone: "Live" alone, the band's second row is narrow */
+@media (max-width: 640px) { .qn-clock { display: none; } }
+</style>

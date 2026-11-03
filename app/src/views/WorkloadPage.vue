@@ -1,17 +1,19 @@
 <script setup>
 // Workload, in the new console: who does the work, how much, and what is
 // stuck, for the tenant, by namespace, task or queue. The fixed list on the
-// left picks one namespace (or task), and the rows become its queues; a
-// queue's row opens its consumer groups on the right; the deeper layer is
-// read when asked. The address keeps it all (?wby= ?wkey= ?wq= ?wm= ?wt=
-// ?wvs= ?wdeep=), with the window as the band sets it (?range=, ?from=&to=).
+// left lists namespaces (or tasks, its switch): its first two lines are the
+// whole tenant, a row per namespace or a row per queue ("All queues"), and a
+// namespace picked makes the rows its queues; a queue's row opens its
+// consumer groups on the right; the deeper layer is read when asked. The
+// address keeps it all (?wby= ?wlist= ?wkey= ?wq= ?wm= ?wt= ?wvs= ?wdeep=),
+// with the window as the band sets it (?range=, ?from=&to=).
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ConsoleShell from '@/console/ConsoleShell.vue'
 import { useWindow, clock } from '@/console/useWindow'
 import { useConsoleFrame } from '@/console/useConsoleFrame'
 import { useWorkloadPage, FALLBACK_TITLE } from '@/console/useWorkloadPage'
-import { COMPARE, MEASURES, TABS, emptyName, parts, readCall, rootName, scopeOf } from '@/console/workload/workloadViews'
+import { COMPARE, GROUP_BY, MEASURES, TABS, emptyName, parts, readCall, rootName, scopeOf } from '@/console/workload/workloadViews'
 import WlSide from '@/console/workload/WlSide.vue'
 import WlCounts from '@/console/workload/WlCounts.vue'
 import WlWork from '@/console/workload/WlWork.vue'
@@ -28,9 +30,10 @@ const frame = useConsoleFrame()
 // ---- the address -------------------------------------------------------------------
 const one = (v) => (Array.isArray(v) ? v[0] : v)
 const arg = (k) => { const v = one(route.query[k]); return typeof v === 'string' ? v : null }
+// by: namespace | task (what the list lists), or queue (every queue, one row each; ?wlist=task keeps the list on tasks)
 const by = computed(() => (arg('wby') === 'task' || arg('wby') === 'queue' ? arg('wby') : 'namespace'))
 const key = computed(() => arg('wkey')) // null: every one; '': the queues without one
-const scope = computed(() => scopeOf(by.value, key.value))
+const scope = computed(() => scopeOf(by.value, key.value, arg('wlist')))
 const measure = computed(() => (MEASURES.some((m) => m.id === arg('wm')) ? arg('wm') : 'pop'))
 const tab = computed(() => (TABS.some((t) => t.id === arg('wt')) ? arg('wt') : 'work'))
 const compare = computed(() => (COMPARE.includes(arg('wvs')) ? arg('wvs') : 'previous'))
@@ -41,12 +44,25 @@ const search = ref('')
 const w = useWorkloadPage({ win, scope, measure, compare, deep, picked, search })
 
 function put(next) { router.replace({ query: { ...route.query, ...next } }) }
-function setBy(v) {
-  if (v === by.value) return
+const byOf = (listBy) => (listBy === 'task' ? 'task' : undefined) // namespace is the address's default
+/** The switch: what the list lists. On All queues the rows stay every queue. */
+function setList(v) {
+  if (v === scope.value.listBy) return
   search.value = ''
-  put({ wby: v === 'namespace' ? undefined : v, wkey: undefined, wq: undefined })
+  if (by.value === 'queue' && key.value === null) put({ wlist: v === 'task' ? 'task' : undefined, wq: undefined })
+  else put({ wby: byOf(v), wlist: undefined, wkey: undefined, wq: undefined })
 }
-function pick(k) { put({ wkey: k === null ? undefined : k, wq: undefined }) }
+/** The list's first two lines: the whole tenant, a row per namespace (or task) or a row per queue. */
+function pickAll(rows) {
+  const lb = scope.value.listBy
+  if (rows === 'queue') put({ wby: 'queue', wlist: lb === 'task' ? 'task' : undefined, wkey: undefined, wq: undefined })
+  else put({ wby: byOf(lb), wlist: undefined, wkey: undefined, wq: undefined })
+}
+/** A namespace (or task) of the list: its queues. null is the whole tenant as it was. */
+function pick(k) {
+  if (k === null) return pickAll(by.value === 'queue' ? 'queue' : 'group')
+  put({ wby: byOf(scope.value.listBy), wlist: undefined, wkey: k, wq: undefined })
+}
 function openQueue(q) { put({ wq: q && q !== picked.value ? q : undefined }) }
 /** A row clicked anywhere on the page: look inside a group, or open a queue's groups. */
 function openRow(k) {
@@ -99,8 +115,11 @@ const drawer = computed(() => !!picked.value)
 const deadOf = computed(() => w.pickedRow.value?.now?.deadLetter || 0)
 
 // ---- a phone: one picker instead of the list ------------------------------------------
-const pickValue = computed(() => (key.value === null ? '*' : `k:${key.value}`))
-function pickFrom(value) { pick(value === '*' ? null : value.slice(2)) }
+const pickValue = computed(() => (key.value !== null ? `k:${key.value}` : by.value === 'queue' ? '*q' : '*'))
+function pickFrom(value) {
+  if (value === '*' || value === '*q') pickAll(value === '*q' ? 'queue' : 'group')
+  else pick(value.slice(2))
+}
 </script>
 
 <template>
@@ -113,20 +132,21 @@ function pickFrom(value) { pick(value === '*' ? null : value.slice(2)) }
 
       <div class="wl-cols">
         <WlSide
-          class="wl-side" :by="by" :pick="key" :list="w.list.value" :listed="w.listed.value" :error="w.listError.value"
-          :search="search" @by="setBy" @pick="pick" @update:search="search = $event"
+          class="wl-side" :by="by" :list-by="scope.listBy" :pick="key" :list="w.list.value" :listed="w.listed.value" :error="w.listError.value"
+          :search="search" @by="setList" @pick="pick" @all="pickAll" @update:search="search = $event"
         />
 
         <div class="wl-main">
           <!-- a phone: Group by and one picker -->
           <div class="wl-pickm">
             <div class="qn-seg" role="group" aria-label="Group by">
-              <button v-for="o in [{ value: 'namespace', label: 'Namespace' }, { value: 'task', label: 'Task' }, { value: 'queue', label: 'Queue' }]" :key="o.value" type="button" :aria-pressed="by === o.value" @click="setBy(o.value)">{{ o.label }}</button>
+              <button v-for="o in GROUP_BY" :key="o.value" type="button" :aria-pressed="scope.listBy === o.value" @click="setList(o.value)">{{ o.label }}</button>
             </div>
             <label class="qn-field">
               <span class="qn-t3" style="font-size: 12px">Show</span>
               <select :value="pickValue" aria-label="Which group" @change="pickFrom($event.target.value)">
-                <option value="*">{{ rootName(by) }}</option>
+                <option value="*">{{ rootName(scope.listBy) }}</option>
+                <option value="*q">{{ rootName('queue') }}</option>
                 <option v-for="r in w.list.value.rows" :key="r.key" :value="`k:${r.key}`">{{ r.key || emptyName(scope.listBy) }}</option>
               </select>
             </label>

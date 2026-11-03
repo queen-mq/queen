@@ -1,35 +1,38 @@
 <script setup>
-// The fixed list on the left: Group by, then the whole tenant and every
-// namespace (or task), one line each, by name, the empty group last
-// (workloadSide.workloadList). A click picks one: the highlight and the right
-// side change, never the list. Grouped by queue, the list still names the
-// namespaces: a pick narrows the queues to one of them. A group's mark is the
-// worst of its queues by the console's one rule (useAttention queueAttention).
+// The fixed list on the left. Its switch says what it lists: namespaces or
+// tasks. Then the whole tenant two ways, one row per namespace (or task) or
+// one row per queue ("All queues"), then every namespace (or task), one line
+// each, by name, the empty group last (workloadSide.workloadList). A pick's
+// rows are its queues. A click picks one: the highlight and the right side
+// change, never the list. A group's mark is the worst of its queues by the
+// console's one rule (useAttention queueAttention).
 import { computed } from 'vue'
 import QcSeg from '../QcSeg.vue'
 import { GROUP_BY, emptyName, plural, rootName } from './workloadViews'
 
 const props = defineProps({
-  by: { type: String, default: 'namespace' },
-  pick: { type: String, default: null },        // the key picked; null is the whole tenant
-  list: { type: Object, required: true },       // workloadList()
-  listed: { type: Boolean, default: false },    // the queue list has loaded once
+  by: { type: String, default: 'namespace' },     // namespace | task | queue (every queue, one row each)
+  listBy: { type: String, default: 'namespace' }, // what the list lists: namespace | task
+  pick: { type: String, default: null },          // the key picked; null is the whole tenant
+  list: { type: Object, required: true },         // workloadList()
+  listed: { type: Boolean, default: false },      // the queue list has loaded once
   error: { type: String, default: '' },
   search: { type: String, default: '' },
 })
-const emit = defineEmits(['by', 'pick', 'update:search'])
+const emit = defineEmits(['by', 'pick', 'all', 'update:search'])
 
-const listBy = computed(() => (props.by === 'task' ? 'task' : 'namespace'))
-const word = computed(() => (listBy.value === 'task' ? 'Tasks' : 'Namespaces'))
+const word = computed(() => (props.listBy === 'task' ? 'Tasks' : 'Namespaces'))
 const many = computed(() => props.list.groups > 10 || !!props.search)
 const TONE = { bad: 'red', warn: 'amber' }
-const label = (r) => (r.key ? r.key : emptyName(listBy.value))
+const label = (r) => (r.key ? r.key : emptyName(props.listBy))
 const title = (r) => [label(r), plural(r.count, 'queue'), r.why || null].filter(Boolean).join(' · ')
+const groupsOn = computed(() => props.pick === null && props.by !== 'queue')
+const queuesOn = computed(() => props.pick === null && props.by === 'queue')
 </script>
 
 <template>
   <nav class="wls" :aria-label="`Workload by ${listBy}`">
-    <QcSeg :model-value="by" :options="GROUP_BY" label="Group by" class="wls-seg" @update:model-value="emit('by', $event)" />
+    <QcSeg :model-value="listBy" :options="GROUP_BY" label="Group by" class="wls-seg" @update:model-value="emit('by', $event)" />
 
     <label v-if="many" class="qn-field wls-find">
       <svg width="14" height="14" viewBox="0 0 18 18" aria-hidden="true" style="fill: none; stroke: currentColor; stroke-width: 1.4"><circle cx="7.5" cy="7.5" r="5" /><line x1="11.3" y1="11.3" x2="15.5" y2="15.5" /></svg>
@@ -38,12 +41,20 @@ const title = (r) => [label(r), plural(r.count, 'queue'), r.why || null].filter(
     </label>
 
     <button
-      type="button" class="wls-li" :class="{ on: pick === null }" :aria-current="pick === null ? 'true' : undefined"
-      :title="listed ? `The whole tenant: ${plural(list.queues, 'queue')} in ${plural(list.groups, listBy)}` : undefined"
-      @click="emit('pick', null)"
+      type="button" class="wls-li" :class="{ on: groupsOn }" :aria-current="groupsOn ? 'true' : undefined"
+      :title="listed ? `The whole tenant, a row for each ${listBy}: ${plural(list.queues, 'queue')} in ${plural(list.groups, listBy)}` : undefined"
+      @click="emit('all', 'group')"
     >
       <span class="wls-mark" aria-hidden="true" />
-      <span class="wls-name">{{ rootName(by) }}</span>
+      <span class="wls-name">{{ rootName(listBy) }}</span>
+    </button>
+    <button
+      type="button" class="wls-li" :class="{ on: queuesOn }" :aria-current="queuesOn ? 'true' : undefined"
+      :title="listed ? `The whole tenant, a row for each queue: ${plural(list.queues, 'queue')}` : undefined"
+      @click="emit('all', 'queue')"
+    >
+      <span class="wls-mark" aria-hidden="true" />
+      <span class="wls-name">{{ rootName('queue') }}</span>
     </button>
 
     <p class="wls-h">{{ word }}</p>

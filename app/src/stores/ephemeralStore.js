@@ -39,6 +39,7 @@ import { computed, ref } from 'vue'
 import { ephemeral as ephemeralApi } from '@/api'
 import { toNum } from '@/composables/useApi'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
+import { readSinceRefresh } from '@/composables/useRefresh'
 
 const DEFAULT_TTL_MS = 30_000
 // After a TRANSIENT failure the 2s poll would re-fail on the same cadence.
@@ -187,7 +188,7 @@ const fetchQueues = async ({ force = false, probe = false, ttlMs = DEFAULT_TTL_M
   if (support.value === 'absent' || support.value === 'gated') return queues.value
   if (!probe && cooldownUntil > Date.now()) return queues.value
 
-  const fresh = lastFetched.value > 0 && Date.now() - lastFetched.value < ttlMs
+  const fresh = lastFetched.value > 0 && Date.now() - lastFetched.value < ttlMs && readSinceRefresh(lastFetched.value)
   if (!force && !probe && fresh) return queues.value
   if (inflight && inflightEpoch === currentEpoch()) return inflight
 

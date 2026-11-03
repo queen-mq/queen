@@ -124,7 +124,7 @@
   --r-pop: 12px;
 }
 .qn.tone .qn-rail { background: var(--zone); }
-.qn.tone .qn-card { background: var(--card); padding: 16px 18px; --bg2: var(--well); }
+.qn.tone .qn-card { background: var(--card); padding: 16px 18px; border-radius: var(--r-card); --bg2: var(--well); }
 .qn.tone .qn-card .qn-row:hover { background: var(--ctl); }
 .qn.tone .qn-chip,
 .qn.tone .qn-btn2 { background: var(--ctl); }
@@ -253,6 +253,8 @@
 .qn .qn-tr.click:hover { background: var(--bg2); }
 .qn .qn-tr.on, .qn .qn-tr.on:hover { background: var(--bg3); }
 .qn.tone .qn-tr.head { border-bottom-color: var(--bg3); }
+/* tone: a filled row (hovered, picked) is rounded like every other filled area */
+.qn.tone .qn-tr.click, .qn.tone .qn-tr.on { border-radius: var(--r-ctl); }
 .qn .qn-tr .wrap { white-space: normal; }
 
 /* Tabs: words with a line under the picked one. */

@@ -77,7 +77,7 @@ const sizeLine = computed(() => {
   const r = q.row.value
   if (!r) return ''
   const m = r.messages || {}
-  return `${fmt(r.partitions)} partitions, ${fmt(m.total)} messages (${fmt(m.pending)} waiting) and ${q.groups.value.length} consumer group${q.groups.value.length === 1 ? '' : 's'}`
+  return `${fmt(r.partitions)} partition${Number(r.partitions) === 1 ? '' : 's'}, ${fmt(m.total)} message${Number(m.total) === 1 ? '' : 's'} (${fmt(m.pending)} waiting) and ${q.groups.value.length} consumer group${q.groups.value.length === 1 ? '' : 's'}`
 })
 </script>
 

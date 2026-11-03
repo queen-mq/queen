@@ -12,7 +12,7 @@
 import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { dlq as dlqApi, system } from '@/api'
 import { describeApiError } from '@/api/errors'
-import { useAutoRefresh } from '@/composables/useRefresh'
+import { readSinceRefresh, useAutoRefresh } from '@/composables/useRefresh'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { buildCauses, mergeSeen, rankNew, rowsOf, SAMPLE } from './deadletters/dlCauses'
@@ -91,7 +91,7 @@ export function useDeadLetters(focus) {
 
   async function readSig(name, force, epoch) {
     const cur = sigs.value.get(name)
-    if (!force && cur?.at && Date.now() - cur.at < SIG_MS) return
+    if (!force && cur?.at && readSinceRefresh(cur.at) && Date.now() - cur.at < SIG_MS) return
     try {
       const r = await system.getDlqSignatures({ queue: name }, { quiet: true, probe: true })
       if (epoch === currentEpoch()) put(sigs, name, { data: r.data, error: null, at: Date.now() })
@@ -102,7 +102,7 @@ export function useDeadLetters(focus) {
   function readRows(name, limit, maxAge, force, epoch) {
     if (!limit) return Promise.resolve()
     const cur = read.value.get(name)
-    if (!force && cur && cur.limit >= limit && Date.now() - cur.at < maxAge) return Promise.resolve()
+    if (!force && cur && cur.limit >= limit && readSinceRefresh(cur.at) && Date.now() - cur.at < maxAge) return Promise.resolve()
     const key = `${name}|${limit}`
     if (inflight.has(key)) return inflight.get(key)
     const p = (async () => {

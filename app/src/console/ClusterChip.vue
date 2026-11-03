@@ -23,9 +23,9 @@ const others = computed(() => props.clusters.filter((c) => !c.on))
 <template>
   <QcPopover v-model:open="open" side="bottom-end" :width="560" label="Cluster" :focus-first="false">
     <template #trigger="{ toggle }">
-      <button type="button" class="qn-chip" aria-haspopup="dialog" :aria-expanded="open" :aria-label="`Cluster ${name}: its nodes${clusters.length > 1 ? ', change cluster' : ''}`" @click="toggle">
+      <button type="button" class="qn-chip qn-cc" aria-haspopup="dialog" :aria-expanded="open" :aria-label="`Cluster ${name}: its nodes${clusters.length > 1 ? ', change cluster' : ''}`" :title="name" @click="toggle">
         <span v-if="mark" class="qn-mark" :class="mark.tone" aria-hidden="true" />
-        <span class="qn-mono" style="font-weight: 500">{{ name }}</span>
+        <span class="qn-mono qn-cc-name" style="font-weight: 500">{{ name }}</span>
         <span v-if="mark && mark.words" :class="mark.tone" style="font-size: 12px">{{ mark.words }}</span>
         <span v-if="metrics.length" class="qn-cms">
           <span v-for="m in metrics" :key="m.id" class="qn-cm" :title="m.title"><span class="qn-t3">{{ m.label }}</span><span class="qn-num" :class="m.tone">{{ m.value }}</span></span>
@@ -76,6 +76,15 @@ const others = computed(() => props.clusters.filter((c) => !c.on))
 .qn-cm { display: inline-flex; align-items: baseline; gap: 5px; }
 :global(.qn.tone .qn-cms) { border-left-color: var(--bg3); }
 @media (max-width: 1180px) { .qn-cms { display: none; } }
+/* a phone: the chip shares its row, so a long name is cut; the panel's
+   table keeps one line a node, Behind is on the Cluster page */
+@media (max-width: 640px) {
+  .qn-cc { max-width: 100%; }
+  .qn-cc-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .qn-nodes-row { grid-template-columns: minmax(0, 1.5fr) .5fr 1.4fr .5fr; gap: 0 8px; }
+  .qn-nodes-row > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .qn-nodes-row > :nth-child(5) { display: none; }
+}
 .qn-nodes { margin-top: 10px; font-size: 12.5px; }
 .qn-nodes-row { display: grid; grid-template-columns: minmax(0, 1.8fr) 0.6fr 1.2fr 0.6fr 0.7fr; gap: 0 10px; align-items: center; height: 32px; border-bottom: 1px solid var(--line2); }
 .qn-nodes-head { height: 26px; font-size: 11.5px; color: var(--text3); border-bottom-color: var(--line); }

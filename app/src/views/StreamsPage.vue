@@ -124,5 +124,11 @@ const overdueMin = computed(() => Math.round(s.overdueAfterMs.value / 60000))
 .st-why { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin-top: 12px; max-width: 900px; }
 .st-why .qn-mark { align-self: center; }
 .st-dl { margin-top: 12px; max-width: 760px; }
-@media (max-width: 640px) { .st { padding: 18px 16px 40px; } }
+@media (max-width: 640px) {
+  .st { padding: 18px 16px 40px; }
+  /* a phone: the stream and how far behind it is */
+  .st-table { --cols: minmax(0, 1fr) auto !important; }
+  .st-table [role='row'] { min-width: 0; }
+  .st-table [role='row'] > :nth-child(2), .st-table [role='row'] > :nth-child(n+4) { display: none; }
+}
 </style>

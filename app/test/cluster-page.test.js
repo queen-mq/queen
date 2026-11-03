@@ -9,7 +9,7 @@ import { brokerStatus, cellIssues } from '../src/composables/useBrokerStatus.js'
 import { clusterView } from '../src/composables/useRaftCluster.js'
 import {
   chartsOf, duration, linkModel, niceTop, nodeDetail, nodeRows,
-  pct, ratePair, segments, sharedGate, size, verdictOf, versionsOf, hostLabel,
+  pct, ratePair, segments, sharedGate, size, storeRows, verdictOf, versionsOf, hostLabel,
 } from '../src/console/cluster/clusterViews.js'
 
 const GiB = 1024 ** 3
@@ -109,8 +109,31 @@ test('the verdict when all is well: who votes and who leads, and what one loss d
   const v = verdictOf({ status, view, issues })
   assert.equal(v.tone, '')
   assert.equal(v.badge, 'Healthy')
-  assert.equal(v.text, 'All 3 nodes are voting; `queen-mq-v2-2` leads.')
+  assert.equal(v.text, 'All 3 nodes are voting; `queen-mq-v2-2` leads in term 123.')
   assert.equal(v.sub, 'Writes go on with one node down.')
+})
+
+test('each node\'s log and store: the entry applied, the log on its disk, the store\'s map, its readers', () => {
+  const down = { nodeId: 2, role: 'voter', reachable: false, state: 'unreachable', raftAddr: 'q2:7400', httpAddr: 'q2:6632', error: 'connection refused' }
+  const { status, view } = read(stage({ members: [member(3), down, member(1, { store: { mapBytes: 64 * GiB, mapUsedPct: 86.2, maxReaders: 1024, readersInUse: 5, usedBytes: 59 * GiB } })] }))
+  const rows = storeRows(status, view)
+  assert.deepEqual(rows.map((r) => r.name), ['queen-mq-v2-0', 'q2', 'queen-mq-v2-2'])
+  const l = rows[2]
+  assert.equal(l.applied, '120,022,615')
+  assert.equal(l.appliedNote, '14 not durable yet')
+  assert.equal(l.log, '190 MB')
+  assert.equal(l.files, '526 files')
+  assert.equal(l.map, '0.99%')
+  assert.equal(l.mapOf, 'of 64 GB')
+  assert.equal(l.mapTone, '')
+  assert.equal(l.used, '649 MB')
+  assert.equal(l.readers, '21 of 1,024')
+  // past the 85% gate: the node refuses writes, and the share says so in red
+  assert.equal(rows[0].map, '86.2%')
+  assert.equal(rows[0].mapTone, 'red')
+  assert.equal(rows[1].unreachable, true)
+  assert.equal(rows[1].error, 'connection refused')
+  assert.equal(rows[1].applied, undefined)
 })
 
 test('the verdict while reading, when the route is missing, when the read failed', () => {
@@ -180,6 +203,7 @@ const point = (ts, over = {}) => ({
     disk: { used_bytes: { avg: 1011499008 }, total_bytes: { avg: 52521566208 } },
     network: { received_bytes_per_sec: { avg: 305453 }, sent_bytes_per_sec: { avg: 170340 } },
     raft_traffic: { received_bytes_per_sec: { avg: 245482 }, sent_bytes_per_sec: { avg: 75005 } },
+    raft: { log_bytes: { avg: 228282071 }, log_files: { avg: 544 }, map_used_pct: { avg: 0.9902119636535645 } },
     ...over,
   },
 })
@@ -195,7 +219,7 @@ test('the charts: a line per node, styled by node order, CPU as a share of its c
   assert.deepEqual(m.legend.map((l) => [l.name, l.ink, l.dashed]), [
     ['queen-mq-v2-0', 'in', false], ['queen-mq-v2-1', 'out', false], ['queen-mq-v2-2', 'in', true],
   ])
-  assert.deepEqual(m.charts.map((c) => c.id), ['cpu', 'memory', 'disk', 'network', 'raft'])
+  assert.deepEqual(m.charts.map((c) => c.id), ['cpu', 'memory', 'disk', 'network', 'raft', 'log', 'store'])
   const cpu = m.charts[0]
   assert.equal(cpu.sub, 'share of its cores')
   assert.ok(Math.abs(cpu.series[0].points[0][1] - 28.93 / 8) < 1e-9)
@@ -206,6 +230,9 @@ test('the charts: a line per node, styled by node order, CPU as a share of its c
   assert.equal(m.charts[1].topText, '0 to 1 GB')
   assert.equal(m.charts[2].topText, '0 to 10%')
   assert.equal(m.charts[3].topText, '0 to 500 KB/s')
+  assert.equal(m.charts[5].topText, '0 to 250 MB')   // the log on its disk
+  assert.equal(m.charts[6].topText, '0 to 10%')      // the store's map, a percentage already
+  assert.ok(Math.abs(m.charts[6].series[0].points[0][1] - 0.99) < 0.01)
   assert.ok(m.charts.every((c) => c.has))
 })
 

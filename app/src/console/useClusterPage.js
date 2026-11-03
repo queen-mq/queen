@@ -12,14 +12,14 @@ import { computed, onUnmounted, ref, shallowRef, watch } from 'vue'
 import client from '@/api/client'
 import { operator } from '@/api'
 import { useApi } from '@/composables/useApi'
-import { useAutoRefresh } from '@/composables/useRefresh'
+import { readSinceRefresh, useAutoRefresh } from '@/composables/useRefresh'
 import { brokerStatus, cellIssues } from '@/composables/useBrokerStatus'
 import { clusterView } from '@/composables/useRaftCluster'
 import { currentEpoch, onClusterChange, useIdentity } from '@/stores/identity'
 import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
 import { stamp } from './useWindow'
 import {
-  chartsOf, linkModel, nodeDetail, nodeRows, sharedGate, verdictOf, versionsOf,
+  chartsOf, linkModel, nodeDetail, nodeRows, sharedGate, storeRows, verdictOf, versionsOf,
 } from './cluster/clusterViews'
 
 const getLink = routeSupport.guard('system-link', (config) => client.get('/api/v1/system/link', config))
@@ -52,7 +52,7 @@ export function useClusterPage(frame, win) {
   async function readMetrics(force = false) {
     const w = win.value
     const key = winKey()
-    if (!force && metrics.value && key === metricsKey && (w.custom || Date.now() - metricsAt < 55_000)) return
+    if (!force && metrics.value && key === metricsKey && readSinceRefresh(metricsAt) && (w.custom || Date.now() - metricsAt < 55_000)) return
     const seq = ++metricsSeq
     const epoch = currentEpoch()
     try {
@@ -104,6 +104,7 @@ export function useClusterPage(frame, win) {
 
   // ---- what the page draws ----
   const rows = computed(() => nodeRows(status.value, view.value))
+  const store = computed(() => storeRows(status.value, view.value))
   const versions = computed(() => versionsOf(view.value))
   const gate = computed(() => sharedGate(status.value))
   const columns = computed(() => ({
@@ -121,7 +122,7 @@ export function useClusterPage(frame, win) {
 
   return {
     canOperate, shared, payload, status, view, issues, absent, membersError,
-    rows, versions, gate, columns, verdict, detail,
+    rows, store, versions, gate, columns, verdict, detail,
     metrics, metricsError, charts,
     link, linkRow,
     refresh, reread,

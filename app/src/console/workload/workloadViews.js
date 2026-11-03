@@ -122,24 +122,28 @@ export const toneOf = (sev) => (sev === 'bad' ? 'red' : sev === 'warn' ? 'amber'
 
 // ---- the scope: group by, and the one picked ----------------------------------
 
+/** The side list's switch: what the list lists. */
 export const GROUP_BY = [
   { value: 'namespace', label: 'Namespace' },
   { value: 'task', label: 'Task' },
-  { value: 'queue', label: 'Queue' },
 ]
+// What a scope's `by` may be: the switch's two, or every queue at once.
+const BY = ['namespace', 'task', 'queue']
 
 /**
- * What the rows are. `by` is the control; `key` the namespace (or task) picked
- * in the side list, null for all of them ('' is the real group of the queues
- * without one). Grouped by queue, the side list still lists namespaces: a pick
- * narrows the queues to one of them.
+ * What the rows are. `by` is namespace or task (what the side list lists, its
+ * switch), or queue: every queue of the tenant, one row each (the list's
+ * "All queues"). `key` is the namespace (or task) picked in the list, null
+ * for none ('' is the real group of the queues without one): a pick's rows
+ * are its queues. By queue, `list` is what the list beside it lists
+ * (namespace, the default, or task); a pick narrows by that.
  *
  * @returns {{ by, listBy, key, level, sig }}
  *   `level` is what one row is: the group, or a queue once one is picked.
  */
-export function scopeOf(by, key) {
-  const b = GROUP_BY.some((g) => g.value === by) ? by : 'namespace'
-  const listBy = b === 'task' ? 'task' : 'namespace'
+export function scopeOf(by, key, list = null) {
+  const b = BY.includes(by) ? by : 'namespace'
+  const listBy = b === 'task' || (b === 'queue' && list === 'task') ? 'task' : 'namespace'
   const k = key === null || key === undefined ? null : String(key)
   return { by: b, listBy, key: k, level: k === null ? b : 'queue', sig: `${b}|${k === null ? '\u0000' : k}` }
 }

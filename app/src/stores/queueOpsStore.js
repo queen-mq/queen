@@ -20,6 +20,7 @@ import { ref, shallowRef } from 'vue'
 import { system } from '@/api'
 import { opsByQueue, seriesByQueue } from '@/composables/queueOps'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
+import { readSinceRefresh } from '@/composables/useRefresh'
 
 const DEFAULT_TTL_MS = 30_000
 
@@ -33,7 +34,7 @@ let inflight = null
 let inflightEpoch = -1
 
 const fetchOps = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
-  const fresh = lastFetched.value > 0 && Date.now() - lastFetched.value < ttlMs
+  const fresh = lastFetched.value > 0 && Date.now() - lastFetched.value < ttlMs && readSinceRefresh(lastFetched.value)
   if (!force && fresh) return ops.value
   if (inflight && inflightEpoch === currentEpoch()) return inflight
 

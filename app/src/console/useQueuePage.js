@@ -10,7 +10,7 @@
 import { computed, ref, shallowRef, watch } from 'vue'
 import { queues as queuesApi, system } from '@/api'
 import { describeApiError } from '@/api/errors'
-import { useAutoRefresh } from '@/composables/useRefresh'
+import { readSinceRefresh, useAutoRefresh } from '@/composables/useRefresh'
 import { queueAttention, groupAttention } from '@/composables/useAttention'
 import { rollupQueueOps } from '@/composables/overviewViews'
 import { trimIncompleteBuckets } from '@/composables/useApi'
@@ -90,7 +90,7 @@ export function useQueuePage(name, win) {
       try { await queuesApi.get(q, { quiet: true, probe: true }); missing.value = false } catch (e) { missing.value = e?.status === 404 || e?.response?.status === 404 || /404|not found/i.test(String(e?.message)) }
     } else missing.value = false
     // The causes of its dead letters, at most once a minute.
-    if ((row.value?.messages?.deadLetter || 0) > 0 && Date.now() - sigAt.value > 60_000) {
+    if ((row.value?.messages?.deadLetter || 0) > 0 && (Date.now() - sigAt.value > 60_000 || !readSinceRefresh(sigAt.value))) {
       sigAt.value = Date.now()
       system.getDlqSignatures({ queue: q }, { quiet: true, probe: true }).then((r) => { if (q === name.value) sig.value = r.data }).catch(() => {})
     }

@@ -119,6 +119,14 @@ test('the scope: a pick is groupBy=queue with the namespace (or task) as a filte
   assert.deepEqual(readParams(q, iso2), { ...iso2, groupBy: 'queue', namespace: 'smartpms' })
   assert.equal(scopeName(scopeOf('queue', null)), 'All queues')
   assert.equal(scopeOf('bogus', null).by, 'namespace')
+
+  // All queues beside a list of tasks: every queue a row, the list stays on tasks
+  const all = scopeOf('queue', null, 'task')
+  assert.equal(all.level, 'queue')
+  assert.equal(all.listBy, 'task')
+  assert.deepEqual(readParams(all, iso2), { ...iso2, groupBy: 'queue' })
+  assert.equal(scopeOf('queue', null).listBy, 'namespace')
+  assert.equal(scopeOf('namespace', null, 'task').listBy, 'namespace') // only All queues takes the list's word
 })
 
 test('the window in words, and the one compared with moved back by its span, a day or a week', () => {

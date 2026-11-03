@@ -82,6 +82,12 @@ export function useQueuesPage() {
     ? (fopen.has(g.ns) ? fopen.get(g.ns) : true)
     : (opened.has(g.ns) ? opened.get(g.ns) : false))
   function toggle(g) { (narrowed.value ? fopen : opened).set(g.ns, !isOpen(g)) }
+  // Expand all / Collapse all: every namespace shown, as one click on each.
+  const allOpen = computed(() => groups.value.length > 0 && groups.value.every((g) => isOpen(g)))
+  function setAll(open) {
+    const m = narrowed.value ? fopen : opened
+    for (const g of groups.value) m.set(g.ns, open)
+  }
 
   // ---- order ----
   function sortBy(key) {
@@ -143,7 +149,7 @@ export function useQueuesPage() {
 
   return {
     find, show, seg, narrowed, segments, facts, verdict, rows, groups, judged, loaded,
-    isOpen, toggle, sort, sortBy, visited, reveal,
+    isOpen, toggle, allOpen, setAll, sort, sortBy, visited, reveal,
     listError, stale, groupsError, noTraffic,
     ephemeral: es, namespaces, tasks, refresh,
   }

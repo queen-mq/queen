@@ -5,6 +5,23 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Console: Refresh now, the Raft term and the store on Cluster, Expand all, and pages that fit a
+phone.** The band has a Refresh now button beside the time window (or press R): every read on the
+page runs again at once, past the 25 to 60 s a read is kept, where before only the 30 s tick
+refreshed a page. Cluster says which node leads in which term, and a Log and store table lists each
+node's last applied entry, its Raft log (size and files), how much of its store's map is used (from
+85% a node refuses writes) and its readers; the charts add the log's size and the map's use. Queues
+and Consumer groups have Expand all and Collapse all for the namespaces. Workload's switch is
+Namespace or Task, and the whole tenant is the first two lines of its list, All namespaces (or All
+tasks) and All queues: the Queue option they replace showed the same list as Namespace, and the same
+rows once a namespace was picked. In the Tone look, the Overview's cards and a hovered or picked
+row are rounded like every other area. On a phone, the account, time window, cluster and theme
+panels open inside the screen, the band keeps the same two rows on every page, the rail fits without
+scrolling (Settings moves to the account menu), and the Cluster, Streams and queue tables show the
+columns that fit. Why: there was no way to ask for fresh numbers now, the term and the store were a
+click per node away (the 2.6 System page showed them), and on a phone the account menu, so Sign
+out, opened off the screen.
+
 **C++ client 2.7.1: the API of the Go and Rust clients, a connection pool, and HTTPS.** A
 breaking change: the C++ client now has the shape of the other SDKs. `queen::Queen` (`QueenClient`
 stays as an alias) hands out typed values: `pop()` returns `std::vector<Message>`, `push()` takes

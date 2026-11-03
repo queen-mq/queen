@@ -37,6 +37,7 @@ import { ref, computed } from 'vue'
 import { queues as queuesApi } from '@/api'
 import { toNum } from '@/composables/useApi'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
+import { readSinceRefresh } from '@/composables/useRefresh'
 
 // Default cache TTL — long enough that incidental view-switching is free,
 // short enough that a stale list doesn't deceive the operator. Nothing
@@ -107,7 +108,7 @@ const applyUsage = (payload) => {
 // Fetch with TTL + de-duplication.
 // ---------------------------------------------------------------------------
 const fetchQueues = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
-  const fresh = queues.value.length > 0 && Date.now() - lastFetched.value < ttlMs
+  const fresh = queues.value.length > 0 && Date.now() - lastFetched.value < ttlMs && readSinceRefresh(lastFetched.value)
   if (!force && fresh) return queues.value
   if (inflight && inflightEpoch === currentEpoch()) return inflight
 

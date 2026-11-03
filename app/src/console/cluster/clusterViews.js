@@ -214,10 +214,47 @@ export function verdictOf({ status, view, issues = [], error = null, absent = fa
   const voters = status.raft.voters || status.nodes.length
   const learners = q?.learners || 0
   const who = learners ? `All ${voters} voters are voting` : `All ${voters} nodes are voting`
-  const text = leader ? `${who}; \`${leader}\` leads.` : `${who}; no node leads.`
+  const term = num(view?.term) ?? num(status.raft.term)
+  const inTerm = term != null ? ` in term ${count(term)}` : ''
+  const text = leader ? `${who}; \`${leader}\` leads${inTerm}.` : `${who}; no node leads${inTerm}.`
   const sub = [spareLine(q), learners ? `${inWords(learners)} ${plural(learners, 'learner gets', 'learners get')} the log without voting.` : '']
     .filter(Boolean).join(' ')
   return { tone: '', badge: 'Healthy', text, sub, list: [] }
+}
+
+// ---- each node's log and store ----------------------------------------------
+
+/**
+ * Each node's replicated log and its store (LMDB), one row each in node-id
+ * order, from the same members read as the table above: the last entry it
+ * applied (how much is committed or durable behind it goes in `appliedNote`),
+ * the log on its disk, and how much of the store's map is used (from 85% the
+ * node refuses new writes). The term is the verdict's; the drawer says the
+ * same for one node, in sentences.
+ */
+export function storeRows(status, view) {
+  if (!status) return []
+  return status.nodes.map((n, i) => {
+    const r = view?.rows?.[i] || {}
+    const name = nameOf(n, r)
+    const row = { key: n.nodeId ?? name, name, leader: !!n.isLeader, unreachable: !!n.unreachable }
+    if (n.unreachable) return { ...row, error: r.error || null }
+    const ahead = r.committed != null && r.applied != null && r.committed > r.applied ? r.committed - r.applied : 0
+    const notDurable = r.durable != null && r.applied != null && r.durable < r.applied ? r.applied - r.durable : 0
+    return {
+      ...row,
+      applied: r.applied == null ? '–' : formatIndex(r.applied),
+      appliedNote: [ahead ? `${count(ahead)} committed, not applied yet` : '', notDurable ? `${count(notDurable)} not durable yet` : '']
+        .filter(Boolean).join(' · ') || (r.applied == null ? '' : 'Committed and durable'),
+      log: r.logBytes == null ? '–' : size(r.logBytes),
+      files: r.logFiles == null ? '' : `${count(r.logFiles)} ${r.logFiles === 1 ? 'file' : 'files'}`,
+      map: r.mapPct == null ? '–' : formatMapPct(r.mapPct),
+      mapOf: r.mapBytes == null ? '' : `of ${size(r.mapBytes)}`,
+      mapTone: toneOf(r.mapSeverity),
+      used: r.mapUsed == null ? '–' : size(r.mapUsed),
+      readers: r.readers == null ? '–' : r.maxReaders != null ? `${count(r.readers)} of ${count(r.maxReaders)}` : count(r.readers),
+    }
+  })
 }
 
 // ---- one node, in the drawer -------------------------------------------------
@@ -419,6 +456,12 @@ export function chartsOf(metrics, status, { from, to, view = null } = {}) {
       id: 'raft', title: 'Raft port', sub: 'in and out', unit: 'rate',
       value: (m) => sumOf(leafOf(m, ['raft_traffic', 'received_bytes_per_sec']), leafOf(m, ['raft_traffic', 'sent_bytes_per_sec'])),
       none: status?.raft?.single ? 'One node: nothing crosses the Raft port.' : 'Not recorded by this broker.',
+    },
+    { id: 'log', title: 'Raft log', sub: 'size on its disk', unit: 'bytes', value: (m) => leafOf(m, ['raft', 'log_bytes']), none: 'No log samples in this window.' },
+    {
+      // `map_used_pct` is a percentage already: 0.99 is 0.99 %
+      id: 'store', title: 'Store', sub: "used of the store's map", floor: 10, unit: 'pct',
+      value: (m) => leafOf(m, ['raft', 'map_used_pct']), none: 'No store samples in this window.',
     },
   ]
 

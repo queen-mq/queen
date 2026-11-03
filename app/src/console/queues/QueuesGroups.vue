@@ -37,6 +37,7 @@ import { useGroupsStore } from '@/stores/groupsStore'
 import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import QcSeg from '../QcSeg.vue'
+import QcFoldAll from '../QcFoldAll.vue'
 import { fmt } from '../useQueuePage'
 import { span } from '../useOverview'
 import { clock } from '../useWindow'
@@ -149,6 +150,12 @@ const fopen = reactive(new Map())
 watch([find, seg], () => fopen.clear())
 const openNs = (ns) => (narrowed.value ? (fopen.has(ns) ? fopen.get(ns) : true) : (opened.has(ns) ? opened.get(ns) : false))
 function toggle(ns) { (narrowed.value ? fopen : opened).set(ns, !openNs(ns)) }
+// Expand all / Collapse all: every namespace shown, as one click on each.
+const allOpen = computed(() => nsList.value.length > 0 && nsList.value.every((n) => openNs(n.ns)))
+function setAll(open) {
+  const m = narrowed.value ? fopen : opened
+  for (const n of nsList.value) m.set(n.ns, open)
+}
 
 // ---- order: a header click sorts inside each namespace, frozen until the next one ----
 function sortBy(key) {
@@ -314,6 +321,7 @@ async function acted({ call, ok }) {
         </label>
         <QcSeg v-model="show" :options="segments" label="Show" />
         <span class="qn-t3 cg-sortline">{{ sortLine }}</span>
+        <QcFoldAll v-if="nsList.length > 1" :open="allOpen" @set="setAll" />
       </div>
       <p v-if="stale" class="qn-t2 cg-note"><span class="qn-mark amber" aria-hidden="true" />The last read failed ({{ stale.error }}); this is the list from {{ clock(stale.at) }}.</p>
 

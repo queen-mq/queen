@@ -1,5 +1,14 @@
 import { inject, onMounted, onUnmounted } from 'vue'
 
+// The moment of the last "Refresh now" (the band's button, or R). A read
+// made before it is not fresh, whatever its time to live: the stores and the
+// pages' own caches ask `readSinceRefresh(at)` before they skip a read, so
+// the click re-reads everything on screen, not only what is past its TTL.
+let refreshedAt = 0
+export function markRefreshNow(at = Date.now()) { refreshedAt = at }
+/** A read made at `at` (epoch ms) still counts: it was made after the last Refresh now. */
+export const readSinceRefresh = (at) => Number(at) >= refreshedAt
+
 /**
  * Register a callback with the shell's refresh registry.
  *

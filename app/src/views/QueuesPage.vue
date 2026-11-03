@@ -10,6 +10,7 @@ import { useIdentity } from '@/stores/identity'
 import ConsoleShell from '@/console/ConsoleShell.vue'
 import QcSeg from '@/console/QcSeg.vue'
 import QcSpark from '@/console/QcSpark.vue'
+import QcFoldAll from '@/console/QcFoldAll.vue'
 import { useConsoleFrame } from '@/console/useConsoleFrame'
 import { useQueuesPage } from '@/console/useQueuesPage'
 import { fmt } from '@/console/useQueuePage'
@@ -30,7 +31,7 @@ const frame = useConsoleFrame()
 const where = computed(() => frame.cluster.value.name)
 const {
   find, show, seg, narrowed, segments, facts, verdict, rows, groups, judged, loaded,
-  isOpen, toggle, sort, sortBy, visited, reveal,
+  isOpen, toggle, allOpen, setAll, sort, sortBy, visited, reveal,
   listError, stale, groupsError, noTraffic, ephemeral, namespaces, tasks,
 } = useQueuesPage()
 
@@ -215,6 +216,7 @@ function created({ name, ns }) { reveal(name, ns) }
         </label>
         <QcSeg v-model="show" :options="segments" label="Show" />
         <span v-if="sortLine" class="qn-t3 qs-sortline">{{ sortLine }}</span>
+        <QcFoldAll v-if="seg !== 'eph' && table.length > 1" :open="allOpen" @set="setAll" />
       </div>
 
       <QueuesEphemeral v-if="seg === 'eph'" :store="ephemeral" :find="find" :where="where" @clear="find = ''" />

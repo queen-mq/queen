@@ -1,7 +1,8 @@
 <script setup>
 // Each node over the window: the machine (CPU, memory, disk) on one row, what
-// moves (the network, the Raft port) on the next. A line per node, white and
-// grey told apart by dash; dragging across any chart zooms the whole console.
+// moves (the network, the Raft port) on the next, then what the log and the
+// store hold. A line per node, white and grey told apart by dash; dragging
+// across any chart zooms the whole console.
 import { computed } from 'vue'
 import QcChart from '../QcChart.vue'
 import { describeApiError } from '@/api/errors'
@@ -70,11 +71,11 @@ const every = computed(() => {
 .cc-state { margin-top: 14px; }
 .cc-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 26px 32px; margin-top: 16px; }
 .cc-chart { grid-column: span 2; min-width: 0; }
-.cc-chart.cc-network, .cc-chart.cc-raft { grid-column: span 3; }
+.cc-chart.cc-network, .cc-chart.cc-raft, .cc-chart.cc-log, .cc-chart.cc-store { grid-column: span 3; }
 .cc-chart-head { display: flex; align-items: baseline; gap: 8px; font-size: 12px; margin-bottom: 8px; white-space: nowrap; }
 .cc-chart-title { flex: none; font-weight: 500; color: var(--text); }
 .cc-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cc-top { flex: none; margin-left: auto; font-size: 11px; }
 .cc-none { height: 96px; display: flex; align-items: center; font-size: 12.5px; border-bottom: 1px solid var(--line); }
-@media (max-width: 900px) { .cc-chart, .cc-chart.cc-network, .cc-chart.cc-raft { grid-column: span 6; } }
+@media (max-width: 900px) { .cc-chart, .cc-chart.cc-network, .cc-chart.cc-raft, .cc-chart.cc-log, .cc-chart.cc-store { grid-column: span 6; } }
 </style>

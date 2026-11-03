@@ -18,7 +18,7 @@
 import { computed, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { analytics, system } from '@/api'
 import { describeApiError } from '@/api/errors'
-import { useAutoRefresh } from '@/composables/useRefresh'
+import { readSinceRefresh, useAutoRefresh } from '@/composables/useRefresh'
 import { enrichRows, fetchedOf, readsOf, rollupFromQueueOps, tenantTotals, trimOpenBucket } from '@/composables/useWorkload'
 import { missingNodes } from '@/composables/usePartial'
 import { workloadList } from '@/composables/workloadSide'
@@ -155,7 +155,7 @@ export function useWorkloadPage({ win, scope, measure, compare, deep, picked, se
     const cw = compareWindow(win.value, mode)
     if (!cw) return
     const sig = `${mode}|${s.sig}|${winKey()}`
-    if (!force && sig === prevSig && Date.now() - prevAt < 300_000) return
+    if (!force && sig === prevSig && readSinceRefresh(prevAt) && Date.now() - prevAt < 300_000) return
     prevSig = sig
     prevAt = Date.now()
     const my = ++prevSeq
