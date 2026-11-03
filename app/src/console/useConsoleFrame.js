@@ -19,6 +19,7 @@ import { queueAttention } from '@/composables/useAttention'
 export const PATHS = {
   queues: '/queues',
   streams: '/streams',
+  connectors: '/connectors',
   dlq: '/dlq',
   workload: '/workload',
   entities: '/entities',
@@ -167,6 +168,7 @@ export function useConsoleFrame() {
     { label: 'Messages', sub: 'Queues', to: { path: '/queues', query: { view: 'messages' } } },
     { label: 'Dead letters', to: '/dlq' },
     { label: 'Streams', to: '/streams' },
+    { label: 'Connectors', sub: 'PostgreSQL sources and sinks', to: '/connectors' },
     { label: 'Workload', to: '/workload' },
     { label: 'Ephemeral queues', sub: 'Queues', to: { path: '/queues', query: { show: 'eph' } } },
     { label: 'Workers', sub: 'supervisor pools, Queues', to: { path: '/queues', query: { view: 'workers' } } },

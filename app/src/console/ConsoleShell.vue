@@ -41,6 +41,7 @@ const RAIL = [
   [
     { id: 'queues', label: 'Queues', key: 'Q', to: '/queues' },
     { id: 'streams', label: 'Streams', key: 'S', to: frame.paths.streams },
+    { id: 'connectors', label: 'Connectors', key: 'N', to: frame.paths.connectors },
     { id: 'dlq', label: 'Dead letters', key: 'D', to: frame.paths.dlq },
     { id: 'workload', label: 'Workload', key: 'W', to: frame.paths.workload },
   ],
@@ -296,8 +297,8 @@ const initials = computed(() => {
      Overview icon is the way home), and Settings lives in the account menu. */
   .qn-rail { gap: 2px; }
   .qn-logo, .qn-ri-settings { display: none; }
-  .qn-ri { width: auto; height: 40px; flex: 0 1 40px; min-width: 30px; }
-  .qn-sep { width: 1px; height: 24px; margin: 0 3px; flex: 0 0 1px; }
+  .qn-ri { width: auto; height: 40px; flex: 0 1 40px; min-width: 28px; }
+  .qn-sep { width: 1px; height: 24px; margin: 0 2px; flex: 0 0 1px; }
   .qn-tip { display: none; }
   /* Two rows, the same on every page: where you are and Search, then the
      cluster, the time, Refresh and the theme. A long name is cut, never pushed out. */

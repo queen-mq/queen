@@ -64,6 +64,13 @@ defineProps({ name: { type: String, required: true }, size: { type: Number, defa
     <template v-else-if="name === 'chevron'">
       <polyline points="5,7 9,11 13,7" />
     </template>
+    <template v-else-if="name === 'connectors'">
+      <ellipse cx="6" cy="4.6" rx="3.6" ry="1.6" />
+      <path d="M2.4 4.6v6.8c0 .9 1.6 1.6 3.6 1.6s3.6-.7 3.6-1.6V4.6" />
+      <path d="M2.4 8c0 .9 1.6 1.6 3.6 1.6s3.6-.7 3.6-1.6" />
+      <path d="M9.6 9h3.4a2.5 2.5 0 0 1 2.5 2.5V15" />
+      <polyline points="13.6,13.4 15.5,15.3 17.4,13.4" />
+    </template>
     <template v-else-if="name === 'refresh'">
       <path d="M15 9a6 6 0 1 1-6-6c1.68 0 3.29.67 4.5 1.83L15 6.3" />
       <polyline points="15,2.5 15,6.3 11.2,6.3" />

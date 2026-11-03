@@ -189,6 +189,17 @@ const routes = [
       requires: 'read', scope: 'tenant', console: true, section: 'streams',
     }
   },
+  {
+    // The new console's Connectors: every PostgreSQL source and sink, read-only
+    // (GET /api/v1/connectors, ?name=). queen-mq/queen#155.
+    path: '/connectors',
+    name: 'ConnectorsPage',
+    component: () => import('@/views/ConnectorsPage.vue'),
+    meta: {
+      title: 'Connectors', subtitle: 'Does every source and sink run?',
+      requires: 'read', scope: 'tenant', console: true, section: 'connectors',
+    }
+  },
   // The old design is gone: its addresses open the new console.
   { path: '/classic/:rest(.*)*', redirect: (to) => ({ path: '/' + [].concat(to.params.rest || []).join('/'), query: to.query }) },
   {

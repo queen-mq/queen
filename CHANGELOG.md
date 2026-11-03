@@ -35,6 +35,13 @@ replays could land out of order. Why: after an incident a team replays hundreds 
 `dlq retry` takes one; the reason given for leaving bulk replay out (the route was not idempotent)
 no longer held.
 
+**The console lists the PostgreSQL connectors (queen-mq/queen#155).** A Connectors page, after
+Streams in the rail: every source and sink with its state (Streaming, Snapshot, Running, Standby
+and the node that runs it, Failing), what it moves where, what it has moved, a source's slot lag
+and its last commit; a row opens its error and what it says, its slot and pointer or its group and
+mode, and its document as stored, never the password. Read-only, from `GET /api/v1/connectors`;
+behind the proxy it needs the admin role. Why: a connector was visible only through the API.
+
 **C++ client 2.7.1: the API of the Go and Rust clients, a connection pool, and HTTPS.** A
 breaking change: the C++ client now has the shape of the other SDKs. `queen::Queen` (`QueenClient`
 stays as an alias) hands out typed values: `pop()` returns `std::vector<Message>`, `push()` takes
