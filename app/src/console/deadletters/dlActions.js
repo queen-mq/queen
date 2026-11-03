@@ -2,7 +2,8 @@
 //
 //   replay   POST /api/v1/dlq/{id}/replay {}, one per row: the old page's move
 //            (lock, push, delete in one transaction, as dlq:<row id>), so a
-//            second replay of the same row writes nothing
+//            second replay of the same row writes nothing; each partition's
+//            rows go back oldest first, one at a time (replayOrder)
 //   discard  DELETE /api/v1/dlq?queue= when every dead letter of the queue is
 //            the cause; else DELETE /api/v1/messages/{partitionId}/{transactionId},
 //            one per message (it takes every consumer group's row of it)
@@ -12,6 +13,7 @@
 import { dlq as dlqApi } from '@/api'
 import { describeApiError } from '@/api/errors'
 import { replayVerdict } from '@/composables/useDlqReplay'
+import { replayOrder } from './replayOrder'
 import { formatDlqMarkdown } from '@/composables/useDlqMarkdown'
 
 // Answers that say the next call fails the same way: stop sending.
@@ -24,29 +26,40 @@ async function pool(items, fn) {
   await Promise.all(Array.from({ length: Math.min(PARALLEL, queue.length) }, run))
 }
 
-/** Replay each row where it failed. → { asked, moved, duplicate, gone, failed, first, stopped } */
+/**
+ * Replay each row where it failed: partitions side by side, each partition's
+ * rows one at a time in replayOrder. A partition stops at its first failure
+ * (the rows after it would land before it); after an answer that says the
+ * next call fails the same way, nothing more is sent. `notSent` counts both.
+ * → { asked, moved, duplicate, gone, failed, notSent, first, stopped }
+ */
 export async function replayRows(rows, onProgress) {
   const list = (rows || []).filter((m) => m?.id)
-  const out = { asked: list.length, moved: 0, duplicate: 0, gone: 0, failed: 0, first: null, stopped: false }
+  const out = { asked: list.length, moved: 0, duplicate: 0, gone: 0, failed: 0, notSent: 0, first: null, stopped: false }
   let done = 0
-  await pool(list, async (m) => {
-    if (out.stopped) return
-    let v; let status = 200
-    try {
-      v = replayVerdict(await dlqApi.replay(m.id, {}, { probe: true, quiet: true }))
-    } catch (e) {
-      v = replayVerdict(e)
-      status = Number.isFinite(e?.status) ? e.status : 0
+  await pool(replayOrder(list), async (part) => {
+    for (let i = 0; i < part.length; i++) {
+      if (out.stopped) { out.notSent += part.length - i; return }
+      const m = part[i]
+      let v; let status = 200
+      try {
+        v = replayVerdict(await dlqApi.replay(m.id, {}, { probe: true, quiet: true }))
+      } catch (e) {
+        v = replayVerdict(e)
+        status = Number.isFinite(e?.status) ? e.status : 0
+      }
+      onProgress?.(++done, list.length)
+      if (v.kind === 'success') out.moved++
+      else if (v.removeRow) out.gone++
+      else if (v.kind === 'warning' && v.target) out.duplicate++
+      else {
+        out.failed++
+        if (!out.first) out.first = v.detail || v.title
+        if (v.unavailable || STOP.has(status)) out.stopped = true
+        out.notSent += part.length - i - 1
+        return
+      }
     }
-    if (v.kind === 'success') out.moved++
-    else if (v.removeRow) out.gone++
-    else if (v.kind === 'warning' && v.target) out.duplicate++
-    else {
-      out.failed++
-      if (!out.first) out.first = v.detail || v.title
-      if (v.unavailable || STOP.has(status)) out.stopped = true
-    }
-    onProgress?.(++done, list.length)
   })
   return out
 }

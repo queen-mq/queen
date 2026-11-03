@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -296,4 +297,70 @@ func listDLQRows(t *testing.T, queue string) []map[string]any {
 		t.Fatalf("decode dlq list: %v\nbody: %s", err, out)
 	}
 	return rows
+}
+
+// TestDLQ_RedriveReplaysOldestFirst: three messages of one partition reach the
+// DLQ; `dlq redrive` puts them back in the order they were first written, and
+// a second run finds nothing left (queen-mq/queen#147).
+func TestDLQ_RedriveReplaysOldestFirst(t *testing.T) {
+	q := uniqueQueue(t, "dlq-redrive")
+	runOK(t, "queue", "configure", q, "--retry-limit", "1", "--lease-time", "5")
+	for i := 0; i < 3; i++ {
+		pushOne(t, q, "p1", map[string]any{"n": i})
+	}
+
+	// Fail every message until all three are dead-lettered.
+	retry(t, 20*time.Second, func() error {
+		for _, m := range popN(t, q, 10, "--cg", "ct-redrive", "--from-mode", "all", "--timeout", "2s") {
+			run("ack", m.TransactionID,
+				"--partition-id", m.PartitionID, "--lease-id", m.LeaseID,
+				"--cg", "ct-redrive", "--failed", "--error", "forced into the DLQ",
+			)
+		}
+		if n := len(listDLQRows(t, q)); n != 3 {
+			return fmtErr("DLQ has %d rows, want 3", n)
+		}
+		return nil
+	})
+
+	// The guard fires before anything is sent, and a dry run sends nothing.
+	if _, _, code := run("dlq", "redrive", "--queue", q); code != 1 {
+		t.Errorf("dlq redrive without --yes -> exit %d, want 1", code)
+	}
+	runOK(t, "dlq", "redrive", "--queue", q, "--dry-run")
+	if n := len(listDLQRows(t, q)); n != 3 {
+		t.Fatalf("the dry run changed the DLQ: %d rows", n)
+	}
+
+	out := runOK(t, "dlq", "redrive", "--queue", q, "--yes")
+	if !strings.Contains(out, "replayed=3") {
+		t.Fatalf("redrive summary: %s", out)
+	}
+	retry(t, 5*time.Second, func() error {
+		if n := len(listDLQRows(t, q)); n != 0 {
+			return fmtErr("DLQ still has %d rows", n)
+		}
+		return nil
+	})
+
+	// Back on the queue, in the order they were first written.
+	var got []int
+	retry(t, 10*time.Second, func() error {
+		for _, m := range popN(t, q, 10, "--cg", "ct-redrive", "--timeout", "2s", "--commit-on-delivery") {
+			n, _ := m.Data["n"].(float64)
+			got = append(got, int(n))
+		}
+		if len(got) < 3 {
+			return fmtErr("popped %v so far", got)
+		}
+		return nil
+	})
+	if fmt.Sprint(got) != "[0 1 2]" {
+		t.Fatalf("replays came back as %v, want [0 1 2]", got)
+	}
+
+	// Nothing is left, so a second run says so (exit 4, Empty).
+	if _, _, code := run("dlq", "redrive", "--queue", q, "--yes"); code != 4 {
+		t.Errorf("second redrive -> exit %d, want 4 (nothing matched)", code)
+	}
 }

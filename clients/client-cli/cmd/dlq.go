@@ -177,10 +177,9 @@ var dlqDrainCmd = &cobra.Command{
 and deletes each matched row. Pass --dry-run to print what would happen
 without sending requests.
 
-Note: this command only deletes, and a drained row is gone. To replay a
-message instead, use 'dlq retry <partitionId> <transactionId>' before
-draining -- there is no bulk replay, deliberately, because the underlying
-route is not idempotent (see 'dlq retry --help').`,
+Note: this command only deletes, and a drained row is gone. To replay the
+messages instead, run 'dlq redrive' with the same filters (or 'dlq retry
+<partitionId> <transactionId>' for one) before draining.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if !dlqYes && !dlqDryRun {
 			return clierr.Userf("refusing to drain without --yes (use --dry-run for a preview)")

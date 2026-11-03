@@ -106,14 +106,14 @@ Google or GitHub sign-in lasts 15 minutes, so for CI use an API key, which does 
 | Data | `push`, `pop`, `tail`, `ack`, `tx -f`, `lease extend` |
 | Queues | `queue list\|describe\|configure\|delete\|depth\|stats`, `partition list\|describe\|seek`, `namespace list`, `task list`, `apply -f` |
 | Consumer groups | `cg list\|describe\|lag\|seek\|delete\|refresh-stats`, `lag`, `replay` |
-| Messages and DLQ | `messages list\|get\|delete\|traces`, `dlq list\|describe\|retry\|drain`, `traces names\|by-name\|by-message` |
+| Messages and DLQ | `messages list\|get\|delete\|traces`, `dlq list\|describe\|retry\|redrive\|drain`, `traces names\|by-name\|by-message` |
 | Ephemeral queues | `ephemeral push\|pop\|ack\|configure\|reset\|delete\|queues\|depth` |
 | Node | `ping`, `version`, `status`, `metrics [--prometheus]`, `analytics overview\|queue-lag\|queue-ops\|queue-parked\|retention\|system\|worker`, `bench` |
 | Plumbing | `config view\|current-context\|get-contexts\|set-context\|use-context\|delete-context`, `login`, `logout`, `completion`, `docs` |
 
 `queenctl <command> --help` lists every flag. The commands that remove data (`queue delete`,
-`cg delete`, `messages delete`, `dlq retry`, `dlq drain`, `ephemeral reset`, `ephemeral delete`)
-refuse to run without `--yes`. `push`, `tx`, `apply`, `replay`, `cg seek`, `dlq retry` and
+`cg delete`, `messages delete`, `dlq retry`, `dlq redrive`, `dlq drain`, `ephemeral reset`, `ephemeral delete`)
+refuse to run without `--yes`. `push`, `tx`, `apply`, `replay`, `cg seek`, `dlq retry`, `dlq redrive` and
 `dlq drain` take `--dry-run`, which prints what would happen and needs no `--yes`.
 
 ## Examples
@@ -133,9 +133,11 @@ queenctl status orders
 queenctl replay orders --cg analyzer --to '15m ago'
 queenctl lag --min-seconds 30
 
-# Look at the dead letters of a queue and put one back
+# Look at the dead letters of a queue and put one back, then all of last night's
 queenctl dlq list --queue orders
 queenctl dlq retry <partitionId> <transactionId> --yes
+queenctl dlq redrive --queue orders --from '12h ago' --dry-run
+queenctl dlq redrive --queue orders --from '12h ago' --yes
 
 # Declare a queue from a manifest
 cat <<EOF | queenctl apply -f -

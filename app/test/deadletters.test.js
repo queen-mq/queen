@@ -6,6 +6,7 @@
 // causes, two of them "POST …/rate-plans [<n>]: …".
 
 import { test } from 'node:test'
+import { replayOrder } from '../src/console/deadletters/replayOrder.js'
 import assert from 'node:assert/strict'
 
 import {
@@ -182,4 +183,17 @@ test('files: names safe everywhere, Markdown fences that hold any error', () => 
   assert.match(head, /^# Dead letters of q\n/)
   assert.match(head, /3 dead letters with one cause/)
   assert.match(head, /```text\nboom <n>\n```/)
+})
+
+test('a bulk replay goes back a partition at a time, oldest first (queen-mq/queen#147)', () => {
+  const row = (id, partitionId, offset, failedAt = '2026-11-03T10:00:00Z') => ({ id, partitionId, offset, failedAt })
+  // listed newest first, as the page lists them
+  const parts = replayOrder([
+    row('a3', 'p1', 30), row('b2', 'p2', 7), row('a1', 'p1', 10),
+    row('a0', 'p1', null, '2026-11-03T09:00:00Z'), row('a2', 'p1', '20'), row('b1', 'p2', 3),
+  ])
+  assert.deepEqual(parts.map((p) => p.map((r) => r.id)), [['a1', 'a2', 'a3', 'a0'], ['b1', 'b2']])
+  // no offset at all: by failure time
+  assert.deepEqual(replayOrder([row('x2', 'p', null, '2026-11-03T10:00:02Z'), row('x1', 'p', null, '2026-11-03T10:00:01Z')])[0].map((r) => r.id), ['x1', 'x2'])
+  assert.deepEqual(replayOrder([]), [])
 })

@@ -183,7 +183,10 @@ async function doReplay() {
     if (r.gone) also.push(`${fmt(r.gone)} were already gone`)
     if (r.duplicate) also.push(`${fmt(r.duplicate)} were already in the queue under their replay id, so they stay`)
     if (r.failed) {
-      toast(`Replayed ${fmt(r.moved)} of ${fmt(r.asked)} on ${props.where}`, `${r.first}${r.stopped ? ' The rest were not sent.' : ''}`, 'red')
+      const rest = r.stopped
+        ? ' The rest were not sent.'
+        : r.notSent ? ` ${fmt(r.notSent)} later in the same partition ${r.notSent === 1 ? 'was' : 'were'} not sent, to keep the order; replay again to send ${r.notSent === 1 ? 'it' : 'them'}.` : ''
+      toast(`Replayed ${fmt(r.moved)} of ${fmt(r.asked)} on ${props.where}`, `${r.first}${rest}`, 'red')
     } else {
       toast(`Replayed ${fmt(r.moved)} on ${props.where}`, `The broker moved ${r.moved === 1 ? 'it' : 'them'} back into ${x.queue}${also.length ? `; ${also.join('; ')}` : ''}.`)
     }
@@ -327,7 +330,7 @@ async function download(kind) {
           <span class="qn-t2">Dead letters with this cause</span><span>{{ countText(c) }} → {{ after(c) }}</span>
           <span class="qn-t2">Waiting in <span class="qn-mono">{{ c.queue }}</span></span><span>{{ fmt(pending) }} → {{ fmt(pending + n) }}</span>
         </div>
-        <p class="qn-t2" style="margin-top: 12px">Each goes back into <span class="qn-mono">{{ c.queue }}</span>, in its own partition, as <span class="qn-mono dl-keep">dlq:&lt;row id&gt;</span>: a second replay of the same row writes nothing.<template v-if="partial"> These are the newest {{ fmt(n) }}; the older ones stay dead-lettered.</template></p>
+        <p class="qn-t2" style="margin-top: 12px">Each goes back into <span class="qn-mono">{{ c.queue }}</span>, at the end of its own partition, as <span class="qn-mono dl-keep">dlq:&lt;row id&gt;</span>: a second replay of the same row writes nothing. A partition's replays go back oldest first, one at a time, so they keep their order.<template v-if="partial"> These are the newest {{ fmt(n) }}; the older ones stay dead-lettered.</template></p>
         <p v-if="live" style="margin-top: 10px"><span class="red dl-inline"><span class="qn-mark red" aria-hidden="true" />Still happening,</span> the last one {{ ago(c.newest) }}: a replay now will most likely fail the same way.</p>
         <p v-if="progress" class="qn-num" style="margin-top: 10px">{{ progress }}</p>
       </template>

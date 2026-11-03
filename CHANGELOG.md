@@ -22,6 +22,19 @@ columns that fit. Why: there was no way to ask for fresh numbers now, the term a
 click per node away (the 2.6 System page showed them), and on a phone the account menu, so Sign
 out, opened off the screen.
 
+**`queenctl dlq redrive`: replay many dead letters with one command (queen-mq/queen#147).** It takes
+the filters of `dlq drain` (`--queue`, `--cg`, `--partition`, `--from`, `--to`), reads every
+match first, then replays each row by its id, as the console's Replay does: each partition's
+messages go back oldest first, one at a time, so they keep their order among themselves, and
+partitions run side by side (`--parallel`, 4). `--dry-run` prints the plan, `--yes` is required,
+and it refuses more than `--max` rows (10,000). A second run replays only what the first left
+(each replay is `dlq:<row id>`), a message several groups dead-lettered needs `--cg` (one replay
+reaches every group), and it stops at the first refusal that would repeat (401, 403, 429). The
+console's Replay now sends rows in the same order; it sent four at a time, so one partition's
+replays could land out of order. Why: after an incident a team replays hundreds of messages, and
+`dlq retry` takes one; the reason given for leaving bulk replay out (the route was not idempotent)
+no longer held.
+
 **C++ client 2.7.1: the API of the Go and Rust clients, a connection pool, and HTTPS.** A
 breaking change: the C++ client now has the shape of the other SDKs. `queen::Queen` (`QueenClient`
 stays as an alias) hands out typed values: `pop()` returns `std::vector<Message>`, `push()` takes
