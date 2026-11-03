@@ -22,6 +22,21 @@ columns that fit. Why: there was no way to ask for fresh numbers now, the term a
 click per node away (the 2.6 System page showed them), and on a phone the account menu, so Sign
 out, opened off the screen.
 
+**Consumer group lag in Prometheus, with a Grafana board and alert rules (queen-mq/queen#146).**
+At every metrics bucket (`METRICS_FLUSH_MS`, 60 s) the raft leader exports, per queue and consumer
+group, `queen_consumer_group_lag_messages` (what the group has not consumed),
+`queen_consumer_group_lag_seconds` (how old the oldest of those is) and
+`queen_consumer_group_partitions_behind`. A group counts on every partition of its queue from its
+subscription start, also on a partition it has never read, so a new entity's messages while every
+consumer is down are lag, and messages from before the group subscribed are not (the consumer
+groups list counts only the partitions a group has read from). One pass over every group's
+position per bucket, capped by `QUEEN_METRICS_GROUP_LAG_MAX_CURSORS` (200,000; 0 turns it off):
+past it the leader exports `queen_consumer_group_lag_complete 0` and no per-group series rather
+than a part. `deploy/grafana/queen-consumer-lag.json` is a board on these series and
+`deploy/prometheus/queen-consumer-lag.rules.yml` three alerts, at the console's lines (one minute
+needs you, five minutes failing). Why: teams coming from Kafka watch consumer lag every day, and
+until now nothing could alert on a group's backlog.
+
 **`queenctl dlq redrive`: replay many dead letters with one command (queen-mq/queen#147).** It takes
 the filters of `dlq drain` (`--queue`, `--cg`, `--partition`, `--from`, `--to`), reads every
 match first, then replays each row by its id, as the console's Replay does: each partition's

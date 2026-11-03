@@ -115,6 +115,11 @@ sourceOfTruth:
 # credential (QUEEN_EDGE_ANON_RPS_PER_IP), and refuses the address 429 once it is spent. The anonymous-limit row now says so.
 # sourceOfTruth re-read 2026-10-31 (97b0f2f8e): streams.rs reads at most 200,000 state rows per
 # GET /streams/v1/queries and marks a stream cut short exact: false; the Streams table says so.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
+# rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector; phase2.rs
+# reads that lag for the collector (group_lags_of); phase2/reads.rs walks every group's positions
+# for it (group_lags); handlers/raft.rs adds the queen_consumer_group_lag_* families to
+# /metrics/prometheus. Nothing this page states changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling

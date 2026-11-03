@@ -39,6 +39,108 @@ pub type RaftGauges = Arc<dyn Fn() -> Option<[f64; 5]> + Send + Sync>;
 /// groups ack each message once each.
 pub type BacklogSampler = Arc<dyn Fn(i64) -> Option<Vec<(String, String, i64, i64)>> + Send + Sync>;
 
+/// One consumer group's lag on one queue, summed over the queue's partitions:
+/// the figures `GET /api/v1/consumer-groups` answers (`totalLag`,
+/// `maxTimeLag`, `partitionsWithLag`), for `/metrics/prometheus`
+/// (queen-mq/queen#146). Queue mode is the group `__QUEUE_MODE__`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupLag {
+    pub tenant: String,
+    pub queue: String,
+    pub group: String,
+    /// Messages its cursors have not consumed.
+    pub pending: u64,
+    /// The age of the oldest message it has not consumed, in seconds; 0 when
+    /// it has consumed everything.
+    pub lag_seconds: i64,
+    /// Partitions where it has messages left to consume.
+    pub partitions_behind: u64,
+}
+
+/// One facade's group lag reading at `now_us`, walking at most `budget`
+/// cursors: `(groups, cursors walked)`, the groups `None` past the budget;
+/// `None` altogether when this node does not read it (it does not lead the
+/// group, or the facade is gone).
+pub type GroupLagSampler =
+    Arc<dyn Fn(i64, usize) -> Option<(Option<Vec<GroupLag>>, usize)> + Send + Sync>;
+
+/// The last flush's group lag, as `/metrics/prometheus` exports it.
+#[derive(Clone, Debug, Default)]
+pub struct GroupLagSample {
+    /// Every group on every queue, by tenant, queue and group.
+    pub groups: Vec<GroupLag>,
+    /// Cursors walked to read them.
+    pub cursors: usize,
+    /// False when the cursor budget stopped the walk: `groups` is then empty.
+    pub complete: bool,
+}
+
+static GROUP_LAG_SAMPLERS: std::sync::Mutex<Vec<GroupLagSampler>> =
+    std::sync::Mutex::new(Vec::new());
+static LAST_GROUP_LAG: std::sync::Mutex<Option<GroupLagSample>> = std::sync::Mutex::new(None);
+
+/// Add a facade's group lag sampler (whether or not it started the collector).
+pub fn register_group_lag_sampler(f: GroupLagSampler) {
+    GROUP_LAG_SAMPLERS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(f);
+}
+
+/// The most cursors one flush walks for the group lag gauges,
+/// `QUEEN_METRICS_GROUP_LAG_MAX_CURSORS` (default 200,000; 0 turns the gauges off).
+fn group_lag_budget() -> usize {
+    std::env::var("QUEEN_METRICS_GROUP_LAG_MAX_CURSORS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(200_000)
+}
+
+/// Read every facade's group lag into [`LAST_GROUP_LAG`]; a node that reads
+/// none (a follower) keeps none, so only the leader exports the families.
+fn sample_group_lag(now_us: i64) {
+    let budget = group_lag_budget();
+    let next = if budget == 0 {
+        None
+    } else {
+        let samplers = GROUP_LAG_SAMPLERS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut out: Option<GroupLagSample> = None;
+        let mut left = budget;
+        for f in &samplers {
+            let Some((groups, walked)) = f(now_us, left) else {
+                continue;
+            };
+            let s = out.get_or_insert_with(|| GroupLagSample {
+                complete: true,
+                ..Default::default()
+            });
+            s.cursors += walked;
+            left = left.saturating_sub(walked);
+            match groups {
+                Some(g) if s.complete => s.groups.extend(g),
+                Some(_) => {}
+                None => {
+                    s.complete = false;
+                    s.groups.clear();
+                }
+            }
+        }
+        out
+    };
+    *LAST_GROUP_LAG.lock().unwrap_or_else(|p| p.into_inner()) = next;
+}
+
+/// The last flush's group lag, or `None` where this node read none.
+pub(crate) fn last_group_lag() -> Option<GroupLagSample> {
+    LAST_GROUP_LAG
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Every facade's sampler: a process runs one facade per raft group, and a
@@ -323,6 +425,9 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
 
         // Close the partition-churn minutes apply recorded (RAM until then).
         crate::rsm::local_metrics::flush_all_churn(now);
+
+        // Each consumer group's lag, for /metrics/prometheus (leader only).
+        sample_group_lag(now);
 
         store.append(Flush {
             worker: vec![worker],

@@ -388,7 +388,7 @@ pub(super) fn backlogs<R: TypedReads + ?Sized>(
 }
 
 /// Every (tenant, queue) of the store, a tenant's queues side by side.
-fn all_queues<R: Reads + ?Sized>(r: &R) -> Result<Vec<(String, String)>, StoreError> {
+pub(super) fn all_queues<R: Reads + ?Sized>(r: &R) -> Result<Vec<(String, String)>, StoreError> {
     let mut queues: Vec<(String, String)> = Vec::new();
     r.scan_raw(Keyspace::Queues, &[], &[], usize::MAX, &mut |k, _| {
         if let Some((tenant, at)) = keys::read_name(k, 0) {

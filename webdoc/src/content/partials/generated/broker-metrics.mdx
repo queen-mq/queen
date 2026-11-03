@@ -15,7 +15,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
       - server/src/rsm/facade/real/phase2/link.rs
 */}
 
-`GET /metrics/prometheus` exposes **135 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing, admission and forwarding families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default. The per-queue families are written only for queues that have something to report. 27 families are declared but not written by this release; their Help says so.
+`GET /metrics/prometheus` exposes **140 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing, admission and forwarding families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default. The per-queue families are written only for queues that have something to report. 27 families are declared but not written by this release; their Help says so.
 
 ### Process (this broker instance)
 
@@ -203,6 +203,11 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_consume_cold_claims_total` | counter | Claims of messages whose index row had left the store: their frames were read from the queue log, with no consume lock held |
 | `queen_consume_engine` | gauge | What the consumption engine holds in memory (only the leader holds any): groups, (group, partition) parts, partitions |
 | `queen_consume_parts_total` | counter | Parts the engine loaded (first contacts and loads back) and unloaded (idle) |
+| `queen_consumer_group_lag_complete` | gauge | 1 when the last metrics bucket (METRICS_FLUSH_MS) read every consumer group's cursors; 0 when QUEEN_METRICS_GROUP_LAG_MAX_CURSORS stopped the read and the per-group families are left out (exported by the raft leader only) |
+| `queen_consumer_group_lag_cursors` | gauge | Cursors (one per consumer group and partition) read for the per-group families at the last metrics bucket (exported by the raft leader only) |
+| `queen_consumer_group_lag_messages` | gauge | Messages a consumer group has not consumed on a queue, summed over the queue's partitions, at the last metrics bucket (exported by the raft leader only) |
+| `queen_consumer_group_lag_seconds` | gauge | Age of the oldest message a consumer group has not consumed on a queue, 0 when it is caught up, at the last metrics bucket (exported by the raft leader only) |
+| `queen_consumer_group_partitions_behind` | gauge | Partitions of a queue where a consumer group has messages left to consume, at the last metrics bucket (exported by the raft leader only) |
 | `queen_locks_op_duration_milliseconds` | gauge | Lock operation latency |
 | `queen_locks_ops_total` | counter | Lock operations by kind and outcome (rejected = held by another, or a token that is no longer the row's) |
 | `queen_network_bytes_total` | counter | Bytes received and sent on this node's network interfaces since they came up (in a container its own; loopback, bridges, veth pairs and tunnels left out) |

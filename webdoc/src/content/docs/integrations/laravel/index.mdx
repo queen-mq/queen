@@ -129,6 +129,9 @@ sourceOfTruth:
 # partition, and nothing it states changes.
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): proxy routes.rs,
 # rsm/facade/real.rs reformatted, line wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
+# rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector. Nothing this
+# page states changes.
 ---
 
 QueenMQ can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and running the workers, which Horizon's master does. Your job classes stay ordinary Laravel jobs, and `queue:work` stays the worker.

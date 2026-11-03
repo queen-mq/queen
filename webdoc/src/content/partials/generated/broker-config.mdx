@@ -29,7 +29,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/s3_inproc.rs
 */}
 
-The broker is configured entirely through environment variables: 119 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 120 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set.
 
@@ -84,6 +84,7 @@ The broker is configured entirely through environment variables: 119 of them, li
 | `QUEEN_DASH_MAX_QUEUE_ROWS` | integer | `500000` |  |
 | `QUEEN_DASH_NODE_RETENTION_H` | integer | `168` |  |
 | `QUEEN_DASH_QUEUE_RETENTION_H` | integer | `24` |  |
+| `QUEEN_METRICS_GROUP_LAG_MAX_CURSORS` | integer | `200000 (0 turns the consumer group lag gauges off)` |  |
 | `QUEEN_PARTITION_CLEANUP_ENABLED` | boolean | `true` |  |
 | `QUEEN_RAFT_RETENTION_VISIT` | integer | `8192` |  |
 | `QUEEN_RAFT_ROWS_WINDOW` | boolean | `true` |  |

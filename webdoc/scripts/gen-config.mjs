@@ -142,7 +142,7 @@ const GROUPS = [
     n.startsWith("RETENTION") || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" ||
     n === "QUEEN_RAFT_RETENTION_VISIT" || n === "QUEEN_RAFT_TXN_WINDOW_MIN_S" || n === "QUEEN_RAFT_TRACE_RETENTION_S" ||
     n === "QUEEN_RAFT_ROWS_WINDOW" ||
-    n.startsWith("METRICS_") || n.startsWith("QUEEN_DASH_")],
+    n.startsWith("METRICS_") || n.startsWith("QUEEN_METRICS_") || n.startsWith("QUEEN_DASH_")],
   ["Storage and replication", (n) =>
     n.startsWith("QUEEN_RAFT_") || n === "QUEEN_QLOG_SHARDS" || n === "QUEEN_QLOG_DIRX" || n === "QUEEN_QLOG_HASH_SIDECARS" || n === "QUEEN_TENANT_GROUPS"],
   // A standby cluster and the source it replays (operate/standby).
@@ -443,6 +443,13 @@ const EXTRA_VARS = [
     name: "METRICS_FLUSH_MS",
     type: "integer",
     def: "60000 (at least 1000)",
+    aliases: [],
+    source: "server/src/rsm/dashboard/collector.rs",
+  },
+  {
+    name: "QUEEN_METRICS_GROUP_LAG_MAX_CURSORS",
+    type: "integer",
+    def: "200000 (0 turns the consumer group lag gauges off)",
     aliases: [],
     source: "server/src/rsm/dashboard/collector.rs",
   },

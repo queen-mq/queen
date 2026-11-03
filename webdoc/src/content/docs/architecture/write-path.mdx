@@ -31,6 +31,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): handlers/raft.rs,
 # rsm/consume/txn.rs, rsm/facade/real.rs, rsm/facade/remote.rs reformatted, line wrapping only.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
+# rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector;
+# handlers/raft.rs adds the queen_consumer_group_lag_* families to /metrics/prometheus. Nothing this
+# page states changes.
 ---
 
 A write goes through four steps.

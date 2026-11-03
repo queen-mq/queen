@@ -61,6 +61,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): handlers/raft.rs,
 # rsm/facade/real.rs, rsm/facade/real/phase2/admin.rs reformatted, line wrapping only. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
+# rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector;
+# handlers/raft.rs adds the queen_consumer_group_lag_* families to /metrics/prometheus. Nothing this
+# page states changes.
 ---
 
 Every `failed` ack spends one retry. The message comes back after the queue's `retryDelay`, and its partition waits with it, for that consumer group. After `retryLimit` failures, the message goes to the dead-letter queue and the group moves on. You set both on the queue (see [Create and configure queues](/writing-applications/queues/)).

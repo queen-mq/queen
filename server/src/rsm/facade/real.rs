@@ -1105,6 +1105,31 @@ impl RaftFacade {
                         }
                     },
                 ));
+                // Each consumer group's lag, for /metrics/prometheus: the
+                // leader's walk of every cursor, within the collector's budget.
+                let (repl_g, store_g) = (Arc::downgrade(&repl), Arc::downgrade(&store));
+                let (reader_g, qlog_g) = (reader.clone(), qlog_reader.clone());
+                crate::rsm::dashboard::collector::register_group_lag_sampler(Arc::new(
+                    move |now_us, budget| {
+                        let (repl, store) = (repl_g.upgrade()?, store_g.upgrade()?);
+                        if !repl.role().is_leader() {
+                            return None;
+                        }
+                        match phase2::group_lags_of(
+                            &store,
+                            qlog_g.as_ref(),
+                            &reader_g,
+                            now_us,
+                            budget,
+                        ) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                tracing::warn!(target: "metrics", error = %e, "group lag sample unreadable");
+                                None
+                            }
+                        }
+                    },
+                ));
             }
             Err(e) => tracing::warn!(
                 target: "rsm",
@@ -1789,6 +1814,26 @@ impl RaftFacade {
                 Ok(out)
             })
             .expect("read dlq rows")
+    }
+
+    /// Test-only: what the dashboard's group lag sampler reads on this node,
+    /// at most `budget` cursors.
+    #[cfg(test)]
+    pub(crate) fn group_lags_for_test(
+        &self,
+        budget: usize,
+    ) -> (
+        Option<Vec<crate::rsm::dashboard::collector::GroupLag>>,
+        usize,
+    ) {
+        phase2::group_lags_of(
+            &self.store,
+            self.qlog_reader.as_ref(),
+            &self.reader,
+            wall_micros(),
+            budget,
+        )
+        .expect("read group lags")
     }
 
     /// Test-only: what the dashboard's backlog sampler reads on this node.

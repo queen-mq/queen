@@ -104,6 +104,10 @@ sourceOfTruth:
 # credential gets 401 where it got 403 feature_gated. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-31 (97b0f2f8e): phase2.rs routes, and auth.rs classifies, (no new error code) the read-only GET /streams/v1/queries,
 # which lists a tenant's streams for the console. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
+# rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector; phase2.rs
+# reads that lag for the collector (group_lags_of); handlers/raft.rs adds the
+# queen_consumer_group_lag_* families to /metrics/prometheus. Nothing this page states changes.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code

@@ -42,6 +42,9 @@ sourceOfTruth:
 # reformatted, line wrapping only. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): ephemeral.rs,
 # rsm/facade/real.rs reformatted, line wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
+# rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector. Nothing this
+# page states changes.
 ---
 
 A broker that promises "all or nothing" has to keep the promise exactly when something breaks. We test QueenMQ with Jepsen on five nodes, under kill -9, network partitions, paused processes, clock jumps, power loss and corrupted files. This page says what each API guarantees, what an answered write means, and where the guarantees stop.

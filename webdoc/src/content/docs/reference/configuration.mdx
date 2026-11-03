@@ -98,6 +98,9 @@ sourceOfTruth:
 # a request whose credential is refused 401 to the per-address budget for requests with no
 # credential (QUEEN_EDGE_ANON_RPS_PER_IP), and refuses the address 429 once it is spent. Nothing this page states changes; the
 # HSTS row now says when `auto` sends the header.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
+# rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector; the
+# generated table gains QUEEN_METRICS_GROUP_LAG_MAX_CURSORS. Nothing else this page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

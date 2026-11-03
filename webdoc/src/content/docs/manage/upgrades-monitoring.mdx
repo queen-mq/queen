@@ -70,6 +70,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-03 (queen-mq/queen#155): router/index.js adds /connectors and
 # useConsoleFrame.js names the Connectors page in the rail and the search. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146): handlers/raft.rs exports the consumer group
+# lag gauges, which real.rs samples on the leader; the metrics table names
+# queen_consumer_group_lag_seconds.
 ---
 
 ## Upgrade one node at a time
@@ -179,6 +182,7 @@ On a healthy cluster it answers in a few tens of milliseconds. The key expires a
 | `queen_raft_index` | committed $-$ applied keeps growing | The node applies the log slower than the cluster commits it. |
 | `queen_raft_admit_total` | `refused` rises | Writes are refused because the node is overloaded (429). |
 | `queen_dlq_depth_by_queue` | rises | Messages are piling up in a dead-letter queue. |
+| `queen_consumer_group_lag_seconds` | above 300 for 5 minutes | A consumer group stopped or cannot keep up ([the rules in the repository](/reference/metrics/#consumer-group-lag)). |
 | `queen_queue_pop_lag_milliseconds` | high | Consumers are behind. |
 | `queen_uptime_seconds` | &lt; 300 | The node restarted. |
 | `queen_raft_traffic_bytes_total` | `channel="snapshot"`, `direction="sent"` rises | A member is being sent the whole store: minutes of the network. |

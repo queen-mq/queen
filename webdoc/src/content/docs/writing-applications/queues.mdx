@@ -45,6 +45,9 @@ verifiedBy:
 # states changes.
 # sourceOfTruth re-read 2026-10-31 (97b0f2f8e): phase2.rs routes the read-only GET /streams/v1/queries,
 # which lists a tenant's streams for the console. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
+# rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector; phase2.rs
+# reads that lag for the collector (group_lags_of). Nothing this page states changes.
 ---
 
 A queue is a named set of partitions that share one configuration. You never have to create one: the first push that names a queue creates it, with the defaults. Configure it when you want other settings.

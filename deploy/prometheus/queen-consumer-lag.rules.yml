@@ -1,0 +1,51 @@
+# Prometheus alert rules on Queen's consumer group lag (queen-mq/queen#146).
+#
+# The broker's raft leader exports queen_consumer_group_lag_* at every metrics
+# bucket (METRICS_FLUSH_MS, 60 s); the other nodes export none, so `max by`
+# reads one series per group wherever the leader is. The lines are the
+# console's defaults (Settings › Alerts): a group behind by more than a minute
+# needs you, by more than five minutes it is failing.
+#
+#   rule_files:
+#     - queen-consumer-lag.rules.yml
+#
+# Reference: https://queenmq.com/reference/metrics/#consumer-group-lag
+groups:
+  - name: queen-consumer-lag
+    rules:
+      - alert: QueenConsumerGroupBehind
+        expr: max by (tenant, queue, group) (queen_consumer_group_lag_seconds) > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.group }} is behind on {{ $labels.queue }}"
+          description: >-
+            The oldest message consumer group {{ $labels.group }} has not consumed on
+            {{ $labels.queue }} is {{ $value | humanizeDuration }} old, for 5 minutes.
+            Its consumers are slow, failing, or not running.
+
+      - alert: QueenConsumerGroupFailing
+        expr: max by (tenant, queue, group) (queen_consumer_group_lag_seconds) > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.group }} is more than 5 minutes behind on {{ $labels.queue }}"
+          description: >-
+            The oldest message consumer group {{ $labels.group }} has not consumed on
+            {{ $labels.queue }} is {{ $value | humanizeDuration }} old. Check that its
+            consumers run, and the queue's dead letters for a message that fails every time.
+
+      - alert: QueenConsumerGroupLagNotRead
+        expr: max(queen_consumer_group_lag_complete) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queen stopped reading consumer group lag"
+          description: >-
+            The cluster holds more consumer positions than QUEEN_METRICS_GROUP_LAG_MAX_CURSORS
+            ({{ with query "max(queen_consumer_group_lag_cursors)" }}{{ . | first | value }}{{ end }}
+            read), so the leader skips the per-group lag series and the two alerts above cannot
+            fire. Raise the limit, or watch the groups with queenctl.

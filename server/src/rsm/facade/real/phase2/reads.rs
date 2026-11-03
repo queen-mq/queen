@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use super::json_out::{push_object, Field};
 use super::{query_map, read_error, ApiOut, ApiReq, Effect, RaftFacade, ReqCtx, RsmError};
 use crate::frames::{unpack_frames_ref, uuid_bytes_to_string, uuid_string_to_bytes};
+use crate::rsm::dashboard::collector::GroupLag;
 use crate::rsm::effect::{Pid, TraceEvent};
 use crate::rsm::facade::{ChangedAnswer, ChangedAsk, ChangedPartition, PartitionsChanged};
 use crate::rsm::planner::bucket_of;
@@ -2581,6 +2582,158 @@ fn cursor_lags<R: Reads + ?Sized>(
         }
     }
     Ok(out)
+}
+
+/// [`GroupLag`] for every group on every queue of every tenant, walking at
+/// most `budget` (partition, group) pairs. Past the budget the answer is
+/// `None`, never a part: a figure for some groups and none for the others
+/// would read as "the others are caught up". The second value is the number
+/// of pairs walked.
+///
+/// A group counts on every partition of the queue, not only where it has a
+/// cursor: where it has none, what its first read would take, from the
+/// instant its subscription starts (`GroupCfg::seed_instant`: all, the
+/// registration for `new`, the timestamp for `subscriptionFrom`). So a
+/// partition the group has never read (an entity's first message while its
+/// consumers are down) is lag, and the messages from before the group
+/// subscribed are not. `GET /api/v1/consumer-groups` counts only the
+/// partitions with a cursor.
+pub(crate) fn group_lags<R: Reads + ?Sized>(
+    r: &R,
+    qlog: Option<&QLogReader>,
+    reader: &crate::rsm::segments::Reader,
+    now: i64,
+    budget: usize,
+) -> crate::rsm::store::Result<(Option<Vec<GroupLag>>, usize)> {
+    use crate::rsm::effect::SubscriptionMode;
+    let mut agg: std::collections::BTreeMap<(String, String, String), GroupLag> =
+        std::collections::BTreeMap::new();
+    let mut walked = 0usize;
+    for (tenant, queue) in super::stats::all_queues(r)? {
+        // The groups registered on the queue, each with the instant its first
+        // read of a partition starts from (`None`: the partition's floor).
+        let mut registered: Vec<(String, Option<i64>)> = Vec::new();
+        r.scan_groups(&tenant, &queue, usize::MAX, &mut |g, row| {
+            let seed = match row.meta.mode {
+                SubscriptionMode::All => None,
+                SubscriptionMode::New => Some(row.meta.registered_at_us),
+                SubscriptionMode::Timestamp => Some(row.meta.subscription_timestamp_us),
+            };
+            registered.push((g.to_string(), seed));
+            true
+        })?;
+        let mut pids = Vec::new();
+        r.scan_queue_partitions(&tenant, &queue, None, usize::MAX, &mut |pid| {
+            pids.push(pid);
+            true
+        })?;
+        for pid in pids {
+            let Some(p) = r.partition(pid)? else { continue };
+            let mut cursors: std::collections::BTreeMap<String, i64> =
+                std::collections::BTreeMap::new();
+            r.scan_cursors(pid, usize::MAX, &mut |g, c| {
+                cursors.insert(g.to_string(), c.committed);
+                true
+            })?;
+            let unread: Vec<&(String, Option<i64>)> = registered
+                .iter()
+                .filter(|(g, _)| !cursors.contains_key(g))
+                .collect();
+            walked += cursors.len() + unread.len();
+            if walked > budget {
+                return Ok((None, walked));
+            }
+            let sealed = || {
+                let mut files = Vec::new();
+                let _ = r.scan_partition_files(pid, usize::MAX, &mut |f| {
+                    files.push(f);
+                    true
+                });
+                files
+            };
+            // The stamp of the first live message at or after offset `k`.
+            let stamp_at =
+                |k: i64| oldest_unconsumed_us(qlog, reader, &tenant, pid, &p, &sealed, k - 1);
+            let mut add = |group: &str, pending: u64, oldest_us: Option<i64>| {
+                let a = agg
+                    .entry((tenant.clone(), queue.clone(), group.to_string()))
+                    .or_insert_with(|| GroupLag {
+                        tenant: tenant.clone(),
+                        queue: queue.clone(),
+                        group: group.to_string(),
+                        pending: 0,
+                        lag_seconds: 0,
+                        partitions_behind: 0,
+                    });
+                if pending == 0 {
+                    return;
+                }
+                a.pending += pending;
+                a.partitions_behind += 1;
+                if let Some(t) = oldest_us {
+                    let secs = ((now - t) as f64 / 1_000_000.0).round() as i64;
+                    a.lag_seconds = a.lag_seconds.max(secs.max(0));
+                }
+            };
+            for (group, committed) in &cursors {
+                let pending = p.pending_from(*committed);
+                let oldest = if pending > 0 {
+                    stamp_at(committed + 1)
+                } else {
+                    None
+                };
+                add(group, pending, oldest);
+            }
+            for (group, seed) in unread {
+                let (pending, oldest) = unread_from_seed(&p, *seed, &stamp_at);
+                add(group, pending, oldest);
+            }
+        }
+    }
+    Ok((Some(agg.into_values().collect()), walked))
+}
+
+/// What a group's first read of `p` would take, starting at `seed` (`None`:
+/// from the floor): `(messages, the oldest one's stamp)`. Stamps only grow
+/// along a partition, so the first message at or after `seed` is found by
+/// halving the live offsets, about 20 reads for a million.
+fn unread_from_seed(
+    p: &PartitionRow,
+    seed: Option<i64>,
+    stamp_at: &dyn Fn(i64) -> Option<i64>,
+) -> (u64, Option<i64>) {
+    let all = p.pending_from(-1);
+    if all == 0 {
+        return (0, None);
+    }
+    let first = p.floor() + 1;
+    let oldest = || stamp_at(first);
+    let Some(t) = seed else {
+        return (all, oldest());
+    };
+    // Nothing written since the subscription started: nothing to read.
+    if p.last_created_at_us < t {
+        return (0, None);
+    }
+    if let Some(o) = oldest() {
+        if o >= t {
+            return (all, Some(o));
+        }
+    }
+    // The partition straddles the instant: the first offset stamped at or after it.
+    let (mut lo, mut hi) = (first, p.last_offset);
+    if !stamp_at(hi).is_some_and(|s| s >= t) {
+        return (0, None);
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if stamp_at(mid).is_some_and(|s| s >= t) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    (p.pending_from(lo - 1), stamp_at(lo))
 }
 
 /// `subscriptionTimestamp`: mode `all` registers at the epoch, which the

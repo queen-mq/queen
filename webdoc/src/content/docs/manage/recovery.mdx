@@ -48,6 +48,10 @@ digest: >-
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): ephemeral.rs,
 # handlers/ephemeral.rs, handlers/raft.rs, main.rs, rsm/apply.rs, rsm/facade/real.rs reformatted,
 # line wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
+# rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector;
+# handlers/raft.rs adds the queen_consumer_group_lag_* families to /metrics/prometheus. Nothing this
+# page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes catches up from the leader when it starts again. A leader that gets SIGTERM hands its job to a peer before it stops. A node that was away too long gets a snapshot from the leader, exits with code 75, and loads it when it starts again. This section is for the rest: a lost disk, a lost majority, a full disk, a bad day.

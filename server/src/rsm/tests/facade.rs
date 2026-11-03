@@ -2461,6 +2461,146 @@ async fn a_transaction_and_a_stream_cycle_count_what_they_store_and_settle() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The Prometheus group lag gauges (queen-mq/queen#146): a group counts on
+/// every partition of the queue, by its subscription; where it has a cursor the
+/// figures are the consumer-groups list's; a walk past its budget answers
+/// nothing rather than a part.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_group_lag_sample_counts_every_partition_by_its_subscription() {
+    let dir = scratch("grouplag");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let push = |items: &'static [u8]| {
+        facade.push(
+            ctx(),
+            PushReq {
+                raw: items.to_vec(),
+            },
+        )
+    };
+    push(
+        br#"{"items":[
+        {"queue":"lag-q","partition":"a","payload":1,"transactionId":"l1"},
+        {"queue":"lag-q","partition":"a","payload":2,"transactionId":"l2"},
+        {"queue":"lag-q","partition":"a","payload":3,"transactionId":"l3"},
+        {"queue":"lag-q","partition":"b","payload":4,"transactionId":"l4"},
+        {"queue":"lag-q","partition":"b","payload":5,"transactionId":"l5"}
+    ]}"#,
+    )
+    .await
+    .expect("push");
+    let pop = |group: &'static str, mode: &'static str| {
+        facade.pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "lag-q".into(),
+                group: Some(group.into()),
+                batch: 10,
+                auto_ack: true,
+                wait: false,
+                timeout_ms: 1_000,
+                options: crate::rsm::facade::PopOptions {
+                    subscription_mode: mode.into(),
+                    ..Default::default()
+                },
+            },
+        )
+    };
+    // g1 (from the start) takes one partition's batch and commits it; g2
+    // subscribes now ("new") and finds nothing.
+    let popped = pop("g1", "all").await.expect("pop g1");
+    let first = parse(&popped.body);
+    let taken = first["messages"].as_array().map(Vec::len).unwrap_or(0) as u64;
+    let read = first["partition"].as_str().unwrap_or_default().to_string();
+    assert!(
+        taken == 3 || taken == 2,
+        "one partition's batch: {}",
+        popped.body
+    );
+    let other = if read == "a" { "b" } else { "a" };
+    let other_count: u64 = if other == "a" { 3 } else { 2 };
+    let none = pop("g2", "new").await.expect("pop g2");
+    assert_eq!(
+        parse(&none.body)["messages"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0),
+        0,
+        "{}",
+        none.body
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // One message after g2 subscribed, on the partition g1 has not read.
+    if other == "b" {
+        push(br#"{"items":[{"queue":"lag-q","partition":"b","payload":6,"transactionId":"l6"}]}"#)
+            .await
+            .expect("push 6");
+    } else {
+        push(br#"{"items":[{"queue":"lag-q","partition":"a","payload":6,"transactionId":"l6"}]}"#)
+            .await
+            .expect("push 6");
+    }
+
+    let (sample, walked) = facade.group_lags_for_test(1_000);
+    let sample = sample.expect("within the budget");
+    let of = |g: &str| {
+        sample
+            .iter()
+            .find(|l| {
+                l.tenant == crate::config::DEFAULT_TENANT && l.queue == "lag-q" && l.group == g
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("{g} in {sample:?}"))
+    };
+    // g1: nothing left where it read; everything on the partition it has not.
+    let g1 = of("g1");
+    assert_eq!(
+        (g1.pending, g1.partitions_behind),
+        (other_count + 1, 1),
+        "{sample:?}"
+    );
+    assert!(g1.lag_seconds >= 0, "{sample:?}");
+    // g2: only what came after it subscribed, on a partition that straddles it.
+    let g2 = of("g2");
+    assert_eq!((g2.pending, g2.partitions_behind), (1, 1), "{sample:?}");
+    assert_eq!(walked, 4, "two partitions, two groups each");
+
+    // Where g1 has a cursor, the consumer-groups list says the same.
+    let list = facade
+        .api(
+            ctx(),
+            ApiReq {
+                method: "GET".into(),
+                path: "/api/v1/consumer-groups".into(),
+                query: None,
+                body: Vec::new(),
+            },
+        )
+        .await
+        .expect("groups");
+    let rows = parse(&list.body);
+    let listed = rows
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|r| r["name"] == "g1" && r["queueName"] == "lag-q")
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("g1 in {}", list.body));
+    assert_eq!(
+        listed["totalLag"].as_i64(),
+        Some(0),
+        "the list counts only where g1 read: {listed}"
+    );
+
+    // Past the budget: no figures at all, and how far the walk got.
+    let (cut, at) = facade.group_lags_for_test(1);
+    assert!(cut.is_none(), "a cut walk answers nothing: {cut:?}");
+    assert!(at > 1, "pairs walked before the cut: {at}");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn the_backlog_sample_is_what_the_overview_reports() {
     let dir = scratch("backlog");
