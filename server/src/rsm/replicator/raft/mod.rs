@@ -486,6 +486,10 @@ impl Notify for RaftNotify {
         self.waker.appended(tenant, queue, partition);
     }
 
+    fn appended_any(&self) {
+        self.waker.appended_any();
+    }
+
     fn engine(&self) -> Option<Arc<crate::rsm::consume::Engine>> {
         self.waker.engine()
     }

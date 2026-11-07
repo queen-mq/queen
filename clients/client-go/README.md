@@ -706,6 +706,196 @@ Offsets decode as `int64` all the way, not through `float64`.
 `SafeTime` is the broker's time up to which every write is counted in the
 answer: pass it as the next `since`, and never compare it with your own clock.
 
+## The Tenant Feed
+
+Every push to the tenant's queues, in the order the broker's log committed them
+(`POST /api/v1/feed`). Each entry carries its `Position`: one number across every queue, shared by
+the pushes of one transaction. Nothing is leased or acked, and every consumer group still gets its
+messages. Followers serve it: when the client reaches the leader, it moves to a follower by itself.
+
+```go
+// A question: what happened to one booking in the last day, then stop.
+follow := false
+reader, err := q.Feed(queen.FeedOptions{Partitions: []string{"booking-9137"}, Since: "1d", Follow: &follow})
+if err != nil {
+    log.Fatal(err)
+}
+for e, err := range reader.Entries(ctx) {
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(e.Position, e.Queue, e.Partition, e.Data)
+}
+
+// Live: every Italian order from now on, filtered by the broker.
+live, _ := q.Feed(queen.FeedOptions{
+    Queues: []string{"orders"},
+    Where:  []queen.FeedCondition{{Field: "data.country", Op: "=", Value: "IT"}},
+})
+defer live.Close()
+```
+
+| Option | Meaning |
+|---|---|
+| `Queues` | Names or patterns (`orders*`); every queue when nil |
+| `Partitions` | Partition names |
+| `Where` | Conditions the broker checks: fields `queue`, `partition`, `transactionId`, `offset`, `position`, `data.<path>`; ops `= != < <= > >= in exists prefix !prefix` |
+| `From` | A position, `"now"` (default) or `"earliest"` (default with `Since`) |
+| `Since` | `"15m"`, `"1d"`, a `time.Time`, epoch ms or an ISO time: only messages created since then |
+| `Follow` | nil or `true` keeps waiting for new entries; `false` stops once caught up |
+| `FollowerURLs` | Nodes to read from first |
+
+`reader.Read(ctx, nil)` answers one page (`Entries`, `Next`, `CaughtUp`, `ResolvedTS`, `Applied`)
+and moves the reader to `Next`.
+
+### Streams from the feed
+
+```go
+handle, err := streams.FromFeed(q, streams.FeedSource{Queues: []string{"orders"}}).
+    Where("data.country", "=", "IT").                             // sent to the broker, filtered there
+    Filter(func(m interface{}, _ streams.EmitCtx) (bool, error) { // your code, runs here
+        total, _ := data(m)["total"].(float64)
+        return total >= 10, nil
+    }).
+    To(q.Queue("orders-it")).
+    RunFeed(ctx, streams.FeedRunOptions{QueryID: "orders-it"})
+if err != nil {
+    log.Fatal(err)
+}
+defer handle.Stop(ctx)
+```
+
+A feed message is a `map[string]interface{}` with the JS fields (`position`, `queue`, `partition`,
+`transactionId`, `data`, `ts`, ...), and numbers in it are `float64`. (`data` and `queueOf` in
+these examples are two-line helpers: `m["data"]` as a map, and `m["queue"]`.) The stream keeps its
+position in KV (`queen-feed` / queryId) and commits it with its outputs in one transaction: a
+restart carries on where it stopped, with no duplicates. The state of its windows and patterns is not written at every commit:
+now and then a snapshot, and a restart reads the feed again from the snapshot to the committed
+position, sending nothing. One process runs a `QueryID` (or a shard of it) at a time: another one
+with the same `QueryID` waits, and takes over when the first stops or dies. The KV records, the
+snapshots and the output ids are the same as the JS SDK's: a stream started in JS can go on in Go,
+and back.
+
+```go
+// Routing: a function picks the queue (or a list, or a streams.Target, or nil for nowhere).
+streams.FromFeed(q, streams.FeedSource{Queues: []string{"orders"}}).
+    ToFunc(func(order, _ interface{}) (interface{}, error) {
+        return fmt.Sprintf("orders-%v", order.(map[string]interface{})["country"]), nil
+    })
+
+// Windows on the log's clock, one for every queue: a quiet feed still closes them on time.
+streams.FromFeed(q, streams.FeedSource{Queues: []string{"orders", "payments"}}).
+    WindowTumbling(60).
+    AggregateFields(
+        streams.AggregateField{Name: "count", Fn: func(interface{}) (interface{}, error) { return 1, nil }},
+        streams.AggregateField{Name: "sum", Fn: func(e interface{}) (interface{}, error) { return e.(map[string]interface{})["total"], nil }},
+    ).
+    To(q.Queue("per-minute"))
+
+// An order, then its payment within 15 minutes; a reminder when none comes.
+streams.FromFeed(q, streams.FeedSource{Queues: []string{"orders", "payments"}}).
+    Pattern(streams.PatternOptions{
+        Start:  func(m interface{}) (bool, error) { return queueOf(m) == "orders", nil },
+        Then:   func(m interface{}) (bool, error) { return queueOf(m) == "payments", nil },
+        Within: "15m",
+        OnMatch: func(order, payment interface{}) (interface{}, error) {
+            return map[string]interface{}{"order": data(order)["id"], "paid": data(payment)["amount"]}, nil
+        },
+        OnTimeout: func(order interface{}) (interface{}, error) {
+            return map[string]interface{}{"order": data(order)["id"], "remind": true}, nil
+        },
+    }).
+    To(q.Queue("order-followups"))
+
+// A join of three queues; the missing sides named at the deadline.
+streams.FromFeed(q, streams.FeedSource{Queues: []string{"orders", "payments", "shipments"}}).
+    JoinSides(streams.JoinSidesOptions{
+        Sides:  []streams.Part{{Name: "order", Queue: "orders"}, {Name: "paid", Queue: "payments"}, {Name: "sent", Queue: "shipments"}},
+        Within: "2d",
+        Select: func(got interface{}, order string) (interface{}, error) {
+            return map[string]interface{}{"order": order, "carrier": data(got.(map[string]interface{})["sent"])["carrier"]}, nil
+        },
+        OnTimeout: func(got, missing interface{}, order string) (interface{}, error) {
+            return map[string]interface{}{"order": order, "missing": missing}, nil
+        },
+    })
+
+// The latest row of a table queue, as of each message's own position.
+streams.FromFeed(q, streams.FeedSource{Queues: []string{"bookings"}}).
+    JoinTable(streams.TableOptions{
+        Queue: "property-settings",
+        On:    func(m, _ interface{}) (interface{}, error) { return data(m)["propertyId"], nil },
+        Select: func(booking, settings, _ interface{}) (interface{}, error) {
+            currency := interface{}(nil)
+            if s, ok := settings.(map[string]interface{}); ok {
+                currency = s["currency"]
+            }
+            return map[string]interface{}{"booking": booking, "currency": currency}, nil
+        },
+    })
+
+// Steps in a chain: a per-minute count, then a pattern over the counts.
+streams.FromFeed(q, streams.FeedSource{Queues: []string{"clicks"}}).
+    WindowTumbling(60).
+    AggregateFields(streams.AggregateField{Name: "clicks", Fn: func(interface{}) (interface{}, error) { return 1, nil }}).
+    Name("perMinute").
+    Pattern(streams.PatternOptions{
+        Start:  func(m interface{}) (bool, error) { c, _ := data(m)["clicks"].(float64); return c >= 100, nil },
+        Then:   func(m interface{}) (bool, error) { c, _ := data(m)["clicks"].(float64); return c < 100, nil },
+        Within: "10m",
+    })
+
+// Event time: history imported today, or producers that send late. The step takes its
+// messages in event-time order (each waits AllowedLateness), and Idle lets a quiet feed
+// move the watermark on. A step after it runs on event time too, and follows its watermark.
+streams.FromFeed(q, streams.FeedSource{Queues: []string{"gh-issues", "gh-comments"}, From: "earliest"}).
+    Pattern(streams.PatternOptions{
+        Start: func(m interface{}) (bool, error) { return queueOf(m) == "gh-issues", nil },
+        Then:  func(m interface{}) (bool, error) { return queueOf(m) == "gh-comments", nil },
+        Key: func(m, _ interface{}) (interface{}, error) {
+            return fmt.Sprintf("%v#%v", m.(map[string]interface{})["partition"], data(m)["number"]), nil
+        },
+        Within: "1h",
+        StepTime: streams.StepTime{
+            EventTime:       func(m interface{}) (interface{}, error) { return data(m)["created_at"], nil },
+            AllowedLateness: "5m",
+            Idle:            "1m",
+        },
+        OnTimeout: func(issue interface{}) (interface{}, error) {
+            return map[string]interface{}{"repo": issue.(map[string]interface{})["partition"], "issue": data(issue)["number"]}, nil
+        },
+    })
+
+// A message whose function keeps failing (3 retries): "stop" (default), "skip", or a queue.
+streams.FeedRunOptions{QueryID: "enrich", OnPoison: "enrich-dlq"}
+
+// Shards: each reads its partitions (filtered by the broker), with its own position and lock.
+streams.FeedRunOptions{QueryID: "per-minute", Shards: 4}
+
+// The live state, from any process.
+view, _ := streams.View(q, "bursts", streams.ViewOptions{})
+got, _ := view.Get(ctx, "perMinute", "tenant-42") // got["found"], got["value"]
+```
+
+`.Join(streams.JoinOptions{Left, Right, Within, Select})` pairs two messages of an entity in either
+order; `.JoinSides` joins named sides, `.Gather` collects the parts of a run. The entity is the
+partition name by default (`Key` or `KeyBy()` to choose). Windows take the feed options
+`streams.WithIdle`, `streams.WithEventTimeOf`, `streams.WithEventTimeOff` and
+`streams.WithAllowedLatenessSpan` next to the queue-stream ones; patterns, joins and gathers take
+a `StepTime` (`EventTime`, `EventTimeOff`, `AllowedLateness`, `OnLate`, `Idle`). A function answers
+`streams.Undefined` for "nothing", as `undefined` does in JS. `handle.Metrics().Steps` shows each
+step's clock, watermark and the messages it holds. `FeedRunOptions`: `Exclusive` (true), `LockTTL`
+(15 s), `OnPoison` ("stop"), `Retries` (3), `CommitEveryMillis` (1000), `MaxPendingOutputs`
+(5000), `SnapshotEveryMillis` (60000), `SnapshotMaxEntries` (200000), `Shards` / `Shard` /
+`ShardBy`, `ServeState` (true), `Reset` (or `ResetToken`, to start over once). The options whose
+zero is a value are pointers: `CommitEveryMillis: streams.Int(0)`, `Exclusive: streams.Bool(false)`.
+The handle has `Stop(ctx)`, `Metrics()` (with `Role`: active or standby), `State(step)` and
+`Done()`. `Metrics()` and `Done()` never wait for the runner: a stream function may call them (a
+foreach that logs progress); `Metrics()` is a snapshot, at most a millisecond old while the stream
+works. `State(step).Get` and `List` read the live state while the runner waits on the network, so
+they wait for that: never call them, or `Stop`, from inside a stream function, which would wait for
+itself.
+
 ## Dead Letter Queue
 
 ```go

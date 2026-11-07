@@ -1,0 +1,193 @@
+{
+  "name": "et-chain-two-windows",
+  "about": "a window after an event-time window runs on event time too (the results carry their window end) and follows its watermark",
+  "source": {
+    "queues": [
+      "c-readings"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60,
+        "eventTime": {
+          "$get": "0.data.at"
+        }
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 180
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "max": {
+          "$get": "0.count"
+        },
+        "sum": {
+          "$get": "0.count"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-et-chain-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:00:10.000Z",
+                "v": 1
+              },
+              "transactionId": "e1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:00:20.000Z",
+                "v": 1
+              },
+              "transactionId": "e2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:01:10.000Z",
+                "v": 1
+              },
+              "transactionId": "e3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:02:10.000Z",
+                "v": 1
+              },
+              "transactionId": "e4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:02:15.000Z",
+                "v": 1
+              },
+              "transactionId": "e5"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:06.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:02:16.000Z",
+                "v": 1
+              },
+              "transactionId": "e6"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:07.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:03:20.000Z",
+                "v": 1
+              },
+              "transactionId": "e7"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:08.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:06:40.000Z",
+                "v": 1
+              },
+              "transactionId": "e8"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-et-chain-two-windows"
+  },
+  "mode": "fake"
+}

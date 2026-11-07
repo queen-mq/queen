@@ -1,0 +1,120 @@
+{
+  "outputs": [
+    {
+      "queue": "c-grace-out",
+      "partition": "h",
+      "data": {
+        "key": "h",
+        "start": "2026-11-06T09:00:00.000Z",
+        "count": 1
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-grace-out",
+      "partition": "h",
+      "data": {
+        "key": "h",
+        "start": "2026-11-06T09:00:30.000Z",
+        "count": 1
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-window-grace": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "06c9a29d77969f69",
+      "clock": 1793955676000,
+      "units": 2,
+      "readTo": 1793955676000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 2,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-window-grace": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-window-grace",
+    "hash": "06c9a29d77969f69",
+    "reads": {
+      "queues": [
+        "c-hits"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 30,
+          "gracePeriod": 15,
+          "idleFlushMs": 5000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count"
+          ]
+        },
+        "clock": "feed"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-grace-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "before-grace": {
+      "outputs": 0
+    },
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

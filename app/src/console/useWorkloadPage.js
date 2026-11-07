@@ -202,7 +202,7 @@ export function useWorkloadPage({ win, scope, measure, compare, deep, picked, se
   })
   const queueMeta = computed(() => {
     const m = new Map()
-    for (const [name, q] of qs.queueMeta.value) m.set(name, { namespace: q.namespace, task: q.task, kafkaTopic: q.kafkaTopic === true })
+    for (const [name, q] of qs.queueMeta.value) m.set(name, { namespace: q.namespace, task: q.task, kafkaTopic: q.kafkaTopic === true, feedRead: Array.isArray(q.feedReaders) && q.feedReaders.some((r) => !['gone', 'failed', 'quiet', 'never'].includes(r.status)) })
     return m
   })
 

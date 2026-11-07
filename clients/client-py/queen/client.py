@@ -14,6 +14,7 @@ from .buffer.buffer_manager import BufferManager
 from .builders.queue_builder import QueueBuilder
 from .builders.transaction_builder import TransactionBuilder
 from .ephemeral.ephemeral import Ephemeral
+from .feed.feed import FeedReader
 from .http.http_client import HttpClient
 from .http.load_balancer import LoadBalancer
 from .kv.kv import KV
@@ -501,6 +502,36 @@ class Queen:
     # ===========================
     # Transaction API
     # ===========================
+
+    # ===========================
+    # Tenant feed
+    # ===========================
+
+    def feed(self, options: Optional[Dict[str, Any]] = None, **kwargs: Any) -> FeedReader:
+        """Every push to the tenant's queues, in log order (``POST /api/v1/feed``)::
+
+            async for e in client.feed(queues=["orders*"], from_="earliest", follow=False):
+                ...
+
+        See queen/feed/feed.py for the options. Followers serve it; a leader's
+        421 sends the reader to the followers it names.
+        """
+        urls = self._config.get("urls") or [""]
+        scheme = "https" if (urls[0] or "").startswith("https://") else "http"
+        return FeedReader(self._http_client, self._node_client, scheme, options, **kwargs)
+
+    def _node_client(self, base_url: str) -> HttpClient:
+        """A client to one node, with this client's credentials and timeouts."""
+        return HttpClient(
+            base_url=validate_url(base_url),
+            timeout_millis=self._config["timeout_millis"],
+            retry_attempts=self._config["retry_attempts"],
+            retry_delay_millis=self._config["retry_delay_millis"],
+            bearer_token=self._config.get("bearer_token"),
+            headers=self._config.get("headers") or {},
+            retry_429=self._config.get("retry_429"),
+            transport=self._config.get("transport"),
+        )
 
     def transaction(self) -> TransactionBuilder:
         """

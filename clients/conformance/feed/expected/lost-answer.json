@@ -1,0 +1,81 @@
+{
+  "outputs": [
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "n": 1
+      },
+      "from": "S3.1/c-in/p#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "n": 2
+      },
+      "from": "S3.2/c-in/p#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "n": 3
+      },
+      "from": "S5.1/c-in/p#0"
+    }
+  ],
+  "records": {
+    "c-lost-answer": {
+      "position": "end",
+      "epoch": 0,
+      "readTo": 1793955603000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-lost-answer": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-lost-answer",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {}
+  },
+  "problems": []
+}

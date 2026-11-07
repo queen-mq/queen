@@ -1,5 +1,5 @@
 (ns jepsen.queen.synthetic-test
-  "Synthetic histories for the checkers of W3-W6 and W11: one clean history
+  "Synthetic histories for the checkers of W3-W6, W11, W12 and W13: one clean history
   each, and one per anomaly the checker must flag. Run with `lein test` (no
   cluster)."
   (:require [clojure.test :refer :all]
@@ -16,6 +16,7 @@
             [jepsen.queen.workload [dedup :as dedup]
                                    [elle :as elle]
                                    [failover :as failover]
+                                   [feed :as feed]
                                    [locks :as locks]
                                    [pipeline :as pipeline]
                                    [register :as register]]))
@@ -734,3 +735,225 @@
       (is (= {:voters [1 2 3 4 5]} (:member-final r)))
       (is (= [{:why "FATAL: raft store: CORRUPT"}] (:corrupt-late-exits r)))
       (is (= {true 1} (:corrupt-late-rejoined r))))))
+
+;; ---------------------------------------------------------------------------
+;; W13: the tenant feed
+
+(defn w13-checker [] (feed/feed-checker))
+
+(def w13-fence
+  "The fence at position 5: one message per fence partition."
+  (vec (map-indexed (fn [i [p v]] [5 v p (+ 5000 i)]) feed/fence-values)))
+
+(def w13-log
+  "The committed feed: [position value partition stamp-us]."
+  (into [[1 1 "k0" 1000]
+         [2 2 "k1" 2000] [2 3 "k2" 2001]
+         [3 4 "k3" 3000]
+         [4 6 "k5" 4000] [4 7 "k5" 4001]]
+        w13-fence))
+
+(defn- w13-send
+  [p mode type kvs]
+  [(inv p :send kvs :mode mode)
+   ((case type :ok ok :fail fail :info info) p :send kvs :mode mode)])
+
+(defn- w13-writes
+  "v1 a push; v2 and v3 one transaction; v4 a push of unknown outcome; v5 a
+  push that failed; v6 and v7 one batch."
+  [& {:keys [txn] :or {txn :ok}}]
+  (concat (w13-send 0 :push :ok [[0 1]])
+          (w13-send 1 :txn txn [[1 2] [2 3]])
+          (w13-send 2 :push :info [[3 4]])
+          (w13-send 3 :push :fail [[4 5]])
+          (w13-send 4 :batch :ok [[5 6] [5 7]])))
+
+(defn- w13-fence-ops
+  [type]
+  (let [vs (vec (vals feed/fence-values))]
+    [(inv 0 :fence vs) ((case type :ok ok :fail fail) 0 :fence vs)]))
+
+(defn w13-pages
+  "A reader's honest answers over `log`: its selection, `per` positions an
+  answer, `next` one past an answer's last position (past the log on the
+  last one), and a resolvedTs below every later stamp."
+  [log shard per]
+  (let [sel    (filter (fn [[_ _ part]] (feed/selects? shard part)) log)
+        groups (vec (partition-all per (partition-by first sel)))
+        top    (inc (reduce max (map first log)))
+        below  (fn [n] (dec (reduce min Long/MAX_VALUE
+                                    (keep (fn [[p _ _ ts]] (when (>= p n) ts)) log))))]
+    (loop [i 0, from nil, out []]
+      (if (= i (count groups))
+        out
+        (let [es    (vec (apply concat (nth groups i)))
+              last? (= i (dec (count groups)))
+              nxt   (if last? top (inc (first (peek es))))
+              res   (if last? (+ 10 (reduce max (map peek log))) (below nxt))]
+          (recur (inc i) nxt
+                 (conj out {:from from, :next nxt, :value es, :resolved res
+                            :caught-up? last?})))))))
+
+(defn- w13-reader-ops
+  "Process p's ops for reader r's answers; a page's :before ops come before
+  it, its other keys override the answer's."
+  [p r node shard pages]
+  (let [n (count pages)]
+    (mapcat (fn [i pg]
+              (concat
+                (:before pg)
+                [(inv p :feed nil)
+                 (apply ok p :feed (:value pg)
+                        (apply concat
+                               (merge {:reader r, :seq i, :node node, :shard shard
+                                       :from (:from pg), :next (:next pg)
+                                       :resolved (:resolved pg), :caught-up? (:caught-up? pg)}
+                                      (when (= i (dec n)) {:done? true})
+                                      (dissoc pg :before :from :next :value :resolved
+                                              :caught-up?))))]))
+            (range) pages)))
+
+(def w13-readers
+  "[process reader node shard positions-an-answer]"
+  [[5 0 "n1" nil 1] [6 1 "n2" nil 2]
+   [7 5 "n3" [2 0] 1] [8 6 "n4" [2 1] 3]
+   [9 7 "n5" [3 0] 1] [10 8 "n1" [3 1] 2] [11 9 "n2" [3 2] 1]])
+
+(defn w13
+  "A W13 history: the writes, the fence, and every reader's answers over its
+  log; (change reader pages) alters one reader's answers."
+  [& {:keys [log log-of writes fence change]
+      :or   {log w13-log, fence :ok, change (fn [_ pages] pages)}}]
+  (let [log-of (or log-of (constantly log))]
+    (concat (or writes (w13-writes))
+            (w13-fence-ops fence)
+            (mapcat (fn [[p r node shard per]]
+                      (w13-reader-ops p r node shard (change r (w13-pages (log-of r) shard per))))
+                    w13-readers))))
+
+(defn- w13-without [v] (vec (remove #(= v (second %)) w13-log)))
+
+(defn- w13-only [r f] (fn [r' pages] (if (= r r') (f pages) pages)))
+
+(defn- anomaly-types [res] (set (map :type (:answer-anomalies res))))
+
+(deftest w13-feed
+  (testing "clean"
+    (is (true? (:valid? (run (w13-checker) (w13))))))
+  (testing "the fence partitions cover every shard"
+    (is (every? (fn [[n ix]] (some #(= ix (feed/shard-of % n)) feed/fence-partitions))
+                feed/shard-specs))
+    (is (= 0xbf9cf968 (feed/fnv1a32 "foobar"))))
+  (testing "an acknowledged push no reader read"
+    (let [r (run (w13-checker) (w13 :log (w13-without 6)))]
+      (is (false? (:valid? r)))
+      (is (= [6] (map :value (:lost r))))))
+  (testing "a message read twice in one answer"
+    (let [r (run (w13-checker)
+                 (w13 :change (w13-only 0 #(update-in % [0 :value] (fn [es] (into es es))))))]
+      (is (false? (:valid? r)))
+      (is (seq (:read-twice r)))))
+  (testing "a push that failed, read"
+    (let [r (run (w13-checker) (w13 :log (vec (sort-by first (conj w13-log [3 5 "k4" 3001])))))]
+      (is (false? (:valid? r)))
+      (is (= [5] (:failed-but-read r)))))
+  (testing "a message no push sent"
+    (let [r (run (w13-checker) (w13 :log (vec (sort-by first (conj w13-log [3 99 "k9" 3001])))))]
+      (is (false? (:valid? r)))
+      (is (= [99] (:never-sent r)))))
+  (testing "part of a position in one answer"
+    (let [r (run (w13-checker) (w13 :log-of #(if (= 1 %) (w13-without 3) w13-log)))]
+      (is (false? (:valid? r)))
+      (is (seq (:split-positions r)))))
+  (testing "a hole: one reader skips a message the others read"
+    (let [r (run (w13-checker) (w13 :log-of #(if (= 1 %) (w13-without 4) w13-log)))]
+      (is (false? (:valid? r)))
+      (is (= [[1 4 :hole]] (map (juxt :reader :value :type) (:holes r))))
+      (is (empty? (:lost r)))))
+  (testing "half a transaction of unknown outcome"
+    (let [r (run (w13-checker) (w13 :writes (w13-writes :txn :info) :log (w13-without 3)))]
+      (is (false? (:valid? r)))
+      (is (contains? (set (map :type (:holes r))) :partial-transaction))))
+  (testing "a late stamp: resolvedTs at a later message's stamp"
+    (let [r (run (w13-checker) (w13 :change (w13-only 0 #(assoc-in % [0 :resolved] 2000))))]
+      (is (false? (:valid? r)))
+      (is (= [[0 2 2000]] (map (juxt :reader :next :resolved) (:resolved-unsafe r))))))
+  (testing "stamps going back with position"
+    (let [r (run (w13-checker) (w13 :log (assoc-in w13-log [3 3] 1500)))]
+      (is (false? (:valid? r)))
+      (is (= [2] (map :position (:stamps-not-rising r))))))
+  (testing "a shard reader reading another shard"
+    (let [r (run (w13-checker)
+                 (w13 :change (w13-only 5 (fn [_] (w13-pages w13-log nil 1)))))]
+      (is (false? (:valid? r)))
+      (is (contains? (anomaly-types r) :wrong-shard))))
+  (testing "an entry at or past its answer's next"
+    (let [r (run (w13-checker) (w13 :change (w13-only 0 #(assoc-in % [0 :next] 1))))]
+      (is (false? (:valid? r)))
+      (is (contains? (anomaly-types r) :entry-out-of-range))))
+  (testing "a reader whose answers do not chain"
+    (let [r (run (w13-checker)
+                 (w13 :change (w13-only 0 #(vec (concat (take 1 %) (drop 2 %))))))]
+      (is (false? (:valid? r)))
+      (is (seq (:chain-anomalies r)))))
+  (testing "a message at two positions"
+    (let [r (run (w13-checker)
+                 (w13 :log-of #(if (= 1 %)
+                                 (vec (sort-by first (conj (w13-without 4) [4 4 "k3" 3000])))
+                                 w13-log)))]
+      (is (false? (:valid? r)))
+      (is (= [4] (map :value (:moved r))))))
+  (testing "a push acknowledged first, at the later position"
+    (let [r (run (w13-checker)
+                 (w13 :log (into [[1 2 "k1" 1000] [1 3 "k2" 1001] [2 1 "k0" 2000]]
+                                 (drop 3 w13-log))))]
+      (is (false? (:valid? r)))
+      (is (seq (:realtime-order r)))))
+  (testing "resolvedTs back between two answers of one node"
+    (let [back #(-> % (assoc-in [0 :resolved] 1500) (assoc-in [1 :resolved] 1200))
+          r    (run (w13-checker) (w13 :change (w13-only 0 back)))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:resolved-back-count r)))))
+  (testing "resolvedTs back across a kill is listed, not judged"
+    (let [kill [{:process :nemesis, :type :info, :f :kill, :value ["n1"]}
+                {:process :nemesis, :type :info, :f :kill, :value ["n1"]}]
+          back #(-> % (assoc-in [0 :resolved] 1500) (assoc-in [1 :resolved] 1200)
+                    (assoc-in [1 :before] kill))
+          r    (run (w13-checker) (w13 :change (w13-only 0 back)))]
+      (is (true? (:valid? r)))
+      (is (= 1 (:resolved-back-listed r)))))
+  (testing "with --feed-relay: a clean history is valid"
+    (let [r (run (w13-checker) (w13 :change (fn [_ pages] (mapv #(assoc % :relay? true) pages))))]
+      (is (true? (:valid? r)))
+      (is (= 0 (:resolved-back-relayed r)))))
+  (testing "with --feed-relay: resolvedTs back between two answers of one node is listed, not judged"
+    (let [back #(-> % (assoc-in [0 :resolved] 1500) (assoc-in [1 :resolved] 1200)
+                    (assoc-in [0 :relay?] true) (assoc-in [1 :relay?] true))
+          r    (run (w13-checker) (w13 :change (w13-only 0 back)))]
+      (is (true? (:valid? r)))
+      (is (= 0 (:resolved-back-count r)))
+      (is (= 1 (:resolved-back-listed r)))
+      (is (= 1 (:resolved-back-relayed r)))
+      (is (= [0 [1500 1200]] ((juxt :reader :resolved) (first (:resolved-back-relayed-sample r)))))))
+  (testing "with --feed-relay: a lost push and an unsafe resolvedTs are still violations"
+    (let [relay (fn [r pages]
+                  (cond-> (mapv #(assoc % :relay? true) pages)
+                    (= r 0) (assoc-in [0 :resolved] 2000)))
+          r     (run (w13-checker) (w13 :log (w13-without 6) :change relay))]
+      (is (false? (:valid? r)))
+      (is (= [6] (map :value (:lost r))))
+      (is (= [[0 2 2000]] (map (juxt :reader :next :resolved) (:resolved-unsafe r))))))
+  (testing "a reader that never reached the fence"
+    (let [r (run (w13-checker)
+                 (w13 :change (w13-only 1 #(assoc-in % [(dec (count %)) :done?] false))))]
+      (is (false? (:valid? r)))
+      (is (= [1] (:unfinished r)))))
+  (testing "no fence: unknown"
+    (let [r (run (w13-checker)
+                 (w13 :fence :fail
+                      :log (vec (remove #(neg? (second %)) w13-log))
+                      :change (fn [_ pages]
+                                (if (seq pages)
+                                  (assoc-in pages [(dec (count pages)) :done?] false)
+                                  pages))))]
+      (is (= :unknown (:valid? r))))))

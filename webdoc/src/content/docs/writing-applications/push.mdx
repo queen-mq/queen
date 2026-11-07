@@ -56,6 +56,12 @@ verifiedBy:
 # sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
 # rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector; phase2.rs
 # reads that lag for the collector (group_lags_of). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): phase2.rs routes POST /api/v1/feed to the new phase2/feed.rs. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (JS push across partitions, buffer per queue): QueueBuilder.js lets an item name its own partition (itemPartition) and buffers by queue; TransactionBuilder.js lets a pushed item name its own partition. This page: the JavaScript client's push across partitions and its per-queue buffer, client-wide bound and refused-item retry.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up every customer that shares its partition. Here a partition is one entity: a customer, an order, a conversation. The push that names it creates it, order holds inside it, and one queue has held ten million.
@@ -65,6 +71,8 @@ The `transactionId` makes a retry safe: the same id within the dedup window (an 
 <SdkCode id="push" />
 
 <Why>order matters per entity (an order's events must be handled in sequence), not across the whole queue. One partition per entity keeps that order without one slow entity holding up the others. A push with no partition goes to a partition called `Default`.</Why>
+
+In the JavaScript client one push can carry messages for many partitions: give an item its own `partition` beside its `data` (`{ partition: 'hotel-1', data: { ... } }`). An item without one takes the builder's `.partition()`, or `Default`. Only an item with `data` or `payload` is read this way; a bare object is its own payload, `partition` field and all.
 
 ## Every message gets its own answer
 
@@ -83,6 +91,8 @@ Each push is one HTTP request. A producer that pushes thousands of small message
 <SdkCode id="push-buffer" />
 
 A buffer is sent when it holds `messageCount` messages or when `timeMillis` has passed, whichever comes first. If the producer gets far ahead of the network (four times `messageCount` waiting), a buffered push waits instead of letting memory grow.
+
+In the JavaScript client a buffer holds a whole queue: each message keeps its partition, and one batch carries every partition, each in its own order. The whole client holds at most `bufferMaxMessages` (100,000) before a buffered push waits, however many queues it buffers for, and a buffered push gives the event loop a turn now and then, so a `while (true)` producer cannot keep the batches from being sent. A message the broker refuses inside a batch is sent again, up to five times, then dropped and reported to `onBufferError` (else on the console).
 
 <Fig id="push-buffer" caption="Client buffering: many small pushes, a few requests." />
 

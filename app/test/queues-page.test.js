@@ -92,8 +92,31 @@ test('stateOf: behind while draining is "Behind"; no traffic to judge is no clai
 test('perSecond and sparkValues leave out the minute still filling', () => {
   assert.equal(perSecond([null, 60, 60, 60, 60, 60, 6000]), 1)
   assert.equal(perSecond([null]), null)
+  // A quiet minute counts as 0 once the series has begun: a burst fades out in
+  // five minutes, and a queue quiet for an hour reads 0, not its last busy rate.
+  assert.equal(perSecond([60, 6000, null, null, null, null, 5]), 20)
+  assert.equal(perSecond([600, ...Array(50).fill(null), 1]), 0)
+  // A broker two minutes old averages its two minutes, not five.
+  assert.equal(perSecond([null, null, null, null, 34_100 * 60 / 60, 80_700, null]), (34_100 + 80_700) / 2 / 60)
   assert.deepEqual(sparkValues([null, null, 3, null, 5, 99]), [3, 0, 5])
   assert.deepEqual(sparkValues([]), [])
+})
+
+test('a queue only feed streams read says who reads it, and has nothing waiting', () => {
+  const queues = [
+    { name: 'feed-0', messages: { pending: 115_000 }, feedReaders: [{ name: 'copy', status: 'running', needs: '' }] },
+    { name: 'spool', messages: { pending: 9 } },
+  ]
+  const rows = queueRows({ queues, groups: [], ops: new Map(), series: new Map() })
+  const feed = rows.find((r) => r.name === 'feed-0')
+  assert.deepEqual([feed.state.kind, feed.state.word, feed.state.tone, feed.feedOnly], ['feed', 'Feed stream', '', true])
+  assert.match(feed.state.title, /^Read by the feed stream copy\. It reads without a consumer group, so nothing here is acked: the queue holds 115,000 messages/)
+  assert.equal(feed.sev, null, 'not a queue that needs you')
+  const spool = rows.find((r) => r.name === 'spool')
+  assert.deepEqual([spool.state.kind, spool.feedOnly], ['noReader', false])
+  // With a consumer group too, the group's rules decide.
+  const both = queueRows({ queues: [queues[0]], groups: [g('feed-0', 'billing')], ops: new Map(), series: new Map() })[0]
+  assert.equal(both.feedOnly, false)
 })
 
 test('readerOf names the group that stands for a queue', () => {
@@ -114,7 +137,7 @@ test('namespaces by name, the default one last; a filter hides the empty ones', 
   const all = namespaceGroups(rows)
   assert.deepEqual(all.map((x) => x.ns), ['channel', 'smartpms', 'traceflow', ''])
   assert.deepEqual(all[0].rows.map((r) => r.name), ['channel.metric_sample', 'channel.opsync_fetch'])
-  assert.deepEqual(all[0].counts, { failing: 1, behind: 0, noReader: 0, catching: 0 })
+  assert.deepEqual(all[0].counts, { failing: 1, behind: 0, noReader: 0, feedDown: 0, catching: 0 })
   // A term matches a name, a namespace or a task (navigation.queueMatches).
   const byTask = namespaceGroups(rows, { find: 'iot' })
   assert.deepEqual(byTask.map((x) => [x.ns, x.rows.length, x.total]), [['smartpms', 1, 2]])
@@ -211,4 +234,34 @@ test('newQueueDraft sends every other option only when it differs from the defau
   const bad = newQueueDraft({ name: 'x', leaseTime: '300', retryLimit: '3', dedupWindowSeconds: '1.5' }, known)
   assert.equal(bad.ok, false)
   assert.ok(bad.errors.dedupWindowSeconds)
+})
+
+test('windowMean: a chart window\'s mean counts the buckets with nothing as 0', async () => {
+  const { windowMean } = await import('../src/console/words.js')
+  const from = Date.parse('2026-11-07T13:00:00Z')
+  const to = from + 3600_000
+  // Two one-minute buckets of a burst in an hour: the hour's mean, not the burst's.
+  const pts = [[from + 30_000, 568], [from + 90_000, 1345]]
+  assert.equal(windowMean(pts, { from, to, bucketMs: 60_000, now: to }), (568 + 1345) / 60)
+  // Ten minutes into the window, ten complete buckets.
+  assert.equal(windowMean(pts, { from, to, bucketMs: 60_000, now: from + 600_000 }), (568 + 1345) / 10)
+  assert.equal(windowMean([], { from, to, bucketMs: 60_000, now: to }), 0)
+  assert.equal(windowMean([], {}), null)
+})
+
+test('liveMean: a live chart\'s "In a second" is the rate of its last five complete minutes', async () => {
+  const { liveMean } = await import('../src/console/words.js')
+  const M = 60_000
+  const now = Date.parse('2026-11-07T14:10:30Z') // 30 s into the minute still filling
+  const mid = (minutesAgo) => Math.floor(now / M) * M - minutesAgo * M + M / 2
+  // Pushing 1,500 a second for the last twelve minutes of an hour: 1,500, not the hour's mean.
+  const steady = Array.from({ length: 12 }, (_, i) => [mid(12 - i), 1500])
+  assert.equal(liveMean(steady, { bucketMs: M, now }), 1500)
+  // A burst twenty minutes ago, quiet since: 0.
+  assert.equal(liveMean([[mid(20), 9000], [mid(19), 9000]], { bucketMs: M, now }), 0)
+  // A queue two minutes old averages its two complete minutes, not five.
+  assert.equal(liveMean([[mid(2), 600], [mid(1), 1200]], { bucketMs: M, now }), 900)
+  // A minute with nothing inside the span counts as 0.
+  assert.equal(liveMean([[mid(6), 10], [mid(5), 1000], [mid(3), 1000]], { bucketMs: M, now }), 400)
+  assert.equal(liveMean([], { bucketMs: M, now }), null)
 })

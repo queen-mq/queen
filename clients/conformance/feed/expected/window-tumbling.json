@@ -1,0 +1,238 @@
+{
+  "outputs": [
+    {
+      "queue": "c-minute-totals",
+      "partition": "u1",
+      "data": {
+        "key": "u1",
+        "start": "2026-11-06T09:00:00.000Z",
+        "end": 1793955660000,
+        "value": {
+          "count": 3,
+          "sum": 9,
+          "max": 10,
+          "min": -4,
+          "avg": 3
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-minute-totals",
+      "partition": "u2",
+      "data": {
+        "key": "u2",
+        "start": "2026-11-06T09:00:00.000Z",
+        "end": 1793955660000,
+        "value": {
+          "count": 1,
+          "sum": 7,
+          "max": 7,
+          "min": 7,
+          "avg": 7
+        }
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-window-tumbling": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "44414b1ef623feac",
+      "clock": 1793955670000,
+      "units": 2,
+      "readTo": 1793955670000,
+      "caughtUp": true,
+      "open": {
+        "step1": 2
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 2,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-window-tumbling": [
+      {
+        "kind": "window",
+        "entries": [
+          [
+            "w\u001f1793955660000\u001fu1",
+            {
+              "key": "u1",
+              "start": 1793955660000,
+              "end": 1793955720000,
+              "due": 1793955720000,
+              "acc": {
+                "count": 1,
+                "sum": 100,
+                "max": 100,
+                "min": 100,
+                "__avg_sum": 100,
+                "__avg_count": 1,
+                "avg": 100
+              }
+            }
+          ],
+          [
+            "w\u001f1793955660000\u001fu3",
+            {
+              "key": "u3",
+              "start": 1793955660000,
+              "end": 1793955720000,
+              "due": 1793955720000,
+              "acc": {
+                "count": 1,
+                "sum": 0,
+                "max": null,
+                "min": null,
+                "__avg_sum": 0,
+                "__avg_count": 0,
+                "avg": 0
+              }
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-window-tumbling",
+    "hash": "44414b1ef623feac",
+    "reads": {
+      "queues": [
+        "c-orders",
+        "c-refunds"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count",
+            "sum",
+            "max",
+            "min",
+            "avg"
+          ]
+        },
+        "clock": "feed"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-minute-totals"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "u1-open": {
+      "found": true,
+      "value": {
+        "key": "u1",
+        "windows": [
+          {
+            "start": "2026-11-06T09:00:00.000Z",
+            "end": "2026-11-06T09:01:00.000Z",
+            "closesAt": "2026-11-06T09:01:00.000Z",
+            "value": {
+              "count": 3,
+              "sum": 9,
+              "max": 10,
+              "min": -4,
+              "avg": 3
+            }
+          }
+        ]
+      }
+    },
+    "open-list": {
+      "items": [
+        {
+          "key": "u1",
+          "windows": [
+            {
+              "start": "2026-11-06T09:01:00.000Z",
+              "end": "2026-11-06T09:02:00.000Z",
+              "closesAt": "2026-11-06T09:02:00.000Z",
+              "value": {
+                "count": 1,
+                "sum": 100,
+                "max": 100,
+                "min": 100,
+                "avg": 100
+              }
+            }
+          ]
+        },
+        {
+          "key": "u3",
+          "windows": [
+            {
+              "start": "2026-11-06T09:01:00.000Z",
+              "end": "2026-11-06T09:02:00.000Z",
+              "closesAt": "2026-11-06T09:02:00.000Z",
+              "value": {
+                "count": 1,
+                "sum": 0,
+                "max": null,
+                "min": null,
+                "avg": 0
+              }
+            }
+          ]
+        }
+      ],
+      "truncated": false,
+      "total": 2
+    },
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

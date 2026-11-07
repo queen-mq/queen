@@ -1,0 +1,180 @@
+{
+  "name": "et-takeover-stop",
+  "about": "event-time windows across a stop: the next process (another SDK with --cross) loads the snapshot the first wrote and closes every window once",
+  "mode": "both",
+  "source": {
+    "queues": [
+      "c-readings"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60,
+        "eventTime": {
+          "$get": "0.data.at"
+        }
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.v"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-et-out"
+    }
+  ],
+  "compareMetrics": [],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:00:10.000Z",
+                "v": 1
+              },
+              "transactionId": "e1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:00:20.000Z",
+                "v": 2
+              },
+              "transactionId": "e2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:01:10.000Z",
+                "v": 4
+              },
+              "transactionId": "e3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:01:20.000Z",
+                "v": 8
+              },
+              "transactionId": "e4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:02:10.000Z",
+                "v": 16
+              },
+              "transactionId": "e5"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:06.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:03:20.000Z",
+                "v": 32
+              },
+              "transactionId": "e6"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:07.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:06:40.000Z",
+                "v": 64
+              },
+              "transactionId": "e7"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "B"
+    },
+    {
+      "idle": "B",
+      "timeoutMs": 30000
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "run": {
+    "queryId": "c-et-takeover-stop"
+  }
+}

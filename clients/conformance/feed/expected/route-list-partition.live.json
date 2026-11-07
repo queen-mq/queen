@@ -1,0 +1,102 @@
+{
+  "outputs": [
+    {
+      "queue": "c-copy-1",
+      "partition": "eu",
+      "data": {
+        "region": "eu",
+        "n": 1
+      }
+    },
+    {
+      "queue": "c-copy-1",
+      "partition": "eu",
+      "data": {
+        "region": "eu",
+        "n": 3
+      }
+    },
+    {
+      "queue": "c-copy-1",
+      "partition": "us",
+      "data": {
+        "region": "us",
+        "n": 2
+      }
+    },
+    {
+      "queue": "c-copy-2",
+      "partition": "eu",
+      "data": {
+        "region": "eu",
+        "n": 1
+      }
+    },
+    {
+      "queue": "c-copy-2",
+      "partition": "eu",
+      "data": {
+        "region": "eu",
+        "n": 3
+      }
+    },
+    {
+      "queue": "c-copy-2",
+      "partition": "us",
+      "data": {
+        "region": "us",
+        "n": 2
+      }
+    }
+  ],
+  "record": {
+    "epoch": 0,
+    "caughtUp": true
+  },
+  "about": {
+    "exclusive": true,
+    "hash": "4f53cda18c2baa0c",
+    "lockTtl": "5s",
+    "onPoison": "stop",
+    "positionCommitMillis": 0,
+    "reads": {
+      "partitions": null,
+      "queues": [
+        "c-events"
+      ],
+      "where": []
+    },
+    "shards": null,
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-copy-1",
+        "c-copy-2"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "v": 1
+  },
+  "foreach": [],
+  "errors": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 3,
+      "outputs": 6,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

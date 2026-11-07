@@ -645,6 +645,7 @@ impl QueueBuilder {
                     .unwrap_or_else(|| "pop failed without a reason".into()),
                 code: None,
                 retry_after_seconds: None,
+                body: None,
             });
         }
         // Before the messages are handed over, never after: the whole point is

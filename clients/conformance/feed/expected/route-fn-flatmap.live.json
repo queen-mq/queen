@@ -1,0 +1,98 @@
+{
+  "outputs": [
+    {
+      "queue": "c-out-a",
+      "partition": "1",
+      "data": {
+        "kind": "a",
+        "id": 1
+      }
+    },
+    {
+      "queue": "c-out-a",
+      "partition": "5.5",
+      "data": {
+        "kind": "a",
+        "id": 5.5
+      }
+    },
+    {
+      "queue": "c-out-all",
+      "partition": "x",
+      "data": {
+        "kind": "b",
+        "id": 2
+      }
+    },
+    {
+      "queue": "c-out-all",
+      "partition": "x",
+      "data": {
+        "kind": "b",
+        "id": 4
+      }
+    },
+    {
+      "queue": "c-out-b",
+      "partition": "p1",
+      "data": {
+        "kind": "b",
+        "id": 2
+      }
+    },
+    {
+      "queue": "c-out-b",
+      "partition": "p2",
+      "data": {
+        "kind": "b",
+        "id": 4
+      }
+    }
+  ],
+  "record": {
+    "epoch": 0,
+    "caughtUp": true
+  },
+  "about": {
+    "exclusive": true,
+    "hash": "4f53cda18c2baa0c",
+    "lockTtl": "5s",
+    "onPoison": "stop",
+    "positionCommitMillis": 0,
+    "reads": {
+      "partitions": null,
+      "queues": [
+        "c-baskets"
+      ],
+      "where": []
+    },
+    "shards": null,
+    "sink": {
+      "kind": "route"
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "flatMap"
+        ]
+      }
+    ],
+    "v": 1
+  },
+  "foreach": [],
+  "errors": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 5,
+      "outputs": 6,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

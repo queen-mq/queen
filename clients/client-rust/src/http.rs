@@ -125,6 +125,27 @@ impl HttpClient {
         })
     }
 
+    /// A client to one node, with this client's credentials, timeouts and
+    /// retry policy (the JS client's `#nodeClient`): no Host override and the
+    /// plain JSON wire, so it speaks to that node exactly as configured.
+    pub fn for_node(&self, base_url: &str) -> Result<HttpClient> {
+        let mut config = self.config.clone();
+        config.urls = vec![base_url.to_string()];
+        config.host_header = None;
+        config.binary_push = false;
+        config.push_compression = false;
+        config.framed_pop = false;
+        HttpClient::new(config)
+    }
+
+    /// `https` when the first configured URL is, else `http`.
+    pub fn scheme(&self) -> &'static str {
+        match self.config.urls.first() {
+            Some(u) if u.starts_with("https://") => "https",
+            _ => "http",
+        }
+    }
+
     /// The URL a request to `backend` should carry.
     ///
     /// With a Host override this is the *virtual* authority; the connection
@@ -361,6 +382,11 @@ impl HttpClient {
 
             let bytes = resp.bytes().await.unwrap_or_default();
             let parsed: Option<ErrorBody> = serde_json::from_slice(&bytes).ok();
+            // The whole answer too, for a caller that reads more than the code.
+            let body: Option<Box<serde_json::Value>> = serde_json::from_slice(&bytes)
+                .ok()
+                .filter(|v: &serde_json::Value| v.is_object())
+                .map(Box::new);
             let (message, code) = match parsed {
                 Some(b) => (
                     b.error.unwrap_or_else(|| {
@@ -379,6 +405,7 @@ impl HttpClient {
                 message,
                 code,
                 retry_after_seconds: retry_after,
+                body,
             });
         }
 
@@ -415,6 +442,19 @@ impl HttpClient {
             .send(reqwest::Method::POST, path, Some(bytes), opts)
             .await?;
         decode(out)
+    }
+
+    /// [`Self::post_json`] whose answer is left as its bytes, for a caller
+    /// that decodes it its own way (a feed page: in one pass, or in parts).
+    pub(crate) async fn post_bytes<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        opts: &Opts,
+    ) -> Result<Option<Vec<u8>>> {
+        let bytes = serde_json::to_vec(body)?;
+        self.send(reqwest::Method::POST, path, Some(bytes), opts)
+            .await
     }
 
     /// `POST /api/v1/push`.

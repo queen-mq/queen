@@ -1,0 +1,57 @@
+{
+  "outputs": [],
+  "record": {
+    "epoch": 0,
+    "caughtUp": true
+  },
+  "about": {
+    "exclusive": true,
+    "hash": "4f53cda18c2baa0c",
+    "lockTtl": "5s",
+    "onPoison": "stop",
+    "positionCommitMillis": 0,
+    "reads": {
+      "partitions": null,
+      "queues": [
+        "c-ticks"
+      ],
+      "where": []
+    },
+    "shards": null,
+    "sink": {
+      "kind": "foreach"
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "v": 1
+  },
+  "foreach": [
+    {
+      "n": 1,
+      "q": "c-ticks"
+    },
+    {
+      "n": 2,
+      "q": "c-ticks"
+    },
+    {
+      "n": 3,
+      "q": "c-ticks"
+    }
+  ],
+  "errors": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 3,
+      "effects": 3,
+      "outputs": 0
+    }
+  },
+  "problems": []
+}

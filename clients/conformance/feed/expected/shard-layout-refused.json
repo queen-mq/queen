@@ -1,0 +1,115 @@
+{
+  "outputs": [
+    {
+      "queue": "c-out",
+      "partition": "p0",
+      "data": {
+        "n": 1,
+        "p": "p0"
+      },
+      "from": "S1.1/c-in/p0#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p0",
+      "data": {
+        "n": 1,
+        "p": "p0"
+      },
+      "from": "S1.1/c-in/p0#0"
+    }
+  ],
+  "records": {
+    "c-shard-layout-refused": {
+      "position": "R",
+      "epoch": 0,
+      "readTo": 1793955601000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    },
+    "c-shard-layout-refused#shard1of2": {
+      "position": "end",
+      "epoch": 0,
+      "shard": {
+        "index": 1,
+        "count": 2
+      },
+      "readTo": 1793955601000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    },
+    "c-shard-layout-refused#shard0of2": {
+      "position": "end",
+      "epoch": 0,
+      "shard": {
+        "index": 0,
+        "count": 2
+      },
+      "readTo": 1793955601000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-shard-layout-refused": null,
+    "c-shard-layout-refused#shard1of2": null,
+    "c-shard-layout-refused#shard0of2": null
+  },
+  "layout": {
+    "shards": 2,
+    "shardBy": "partition"
+  },
+  "about": {
+    "v": 1,
+    "queryId": "c-shard-layout-refused",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": {
+      "count": 2,
+      "by": "partition"
+    },
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [
+    {
+      "runner": "B",
+      "code": "feed_layout_changed"
+    }
+  ],
+  "recorded": {
+    "A.stopped": {},
+    "C.stopped": {}
+  },
+  "problems": []
+}

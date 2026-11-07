@@ -115,6 +115,9 @@ pub trait Waker: Send + Sync {
     /// See `apply::Notify::appended`.
     fn appended(&self, _tenant: &str, _queue: &str, _partition: &str) {}
 
+    /// See `apply::Notify::appended_any`.
+    fn appended_any(&self) {}
+
     /// An append for `(tenant, queue)` reached `group`'s parked pops (see
     /// `apply::Notify::wake_append`). By default the plain wake; a waker that
     /// wakes pops when an append is PLANNED (the leader's facade) can tell the
@@ -235,6 +238,10 @@ impl Notify for ReplNotify {
 
     fn appended(&self, tenant: &str, queue: &str, partition: &str) {
         self.waker.appended(tenant, queue, partition);
+    }
+
+    fn appended_any(&self) {
+        self.waker.appended_any();
     }
 
     fn engine(&self) -> Option<Arc<crate::rsm::consume::Engine>> {

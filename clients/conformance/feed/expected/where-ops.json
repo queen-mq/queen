@@ -1,0 +1,111 @@
+{
+  "outputs": [
+    {
+      "queue": "c-where-out",
+      "partition": "eu-1",
+      "data": {
+        "id": 1
+      },
+      "from": "S1.1/c-sales/eu-1#0"
+    },
+    {
+      "queue": "c-where-out",
+      "partition": "eu-3",
+      "data": {
+        "id": 9
+      },
+      "from": "S1.2/c-sales/eu-3#0"
+    }
+  ],
+  "records": {
+    "c-where-ops": {
+      "position": "end",
+      "epoch": 0,
+      "readTo": 1793955602000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-where-ops": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-where-ops",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-sales"
+      ],
+      "partitions": null,
+      "where": [
+        {
+          "field": "data.total",
+          "op": ">",
+          "value": 10
+        },
+        {
+          "field": "partition",
+          "op": "prefix",
+          "value": "eu-"
+        },
+        {
+          "field": "data.kind",
+          "op": "in",
+          "value": [
+            "x",
+            "y"
+          ]
+        },
+        {
+          "field": "data.tags",
+          "op": "exists"
+        },
+        {
+          "field": "data.status",
+          "op": "!=",
+          "value": "void"
+        }
+      ]
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "filter",
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-where-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

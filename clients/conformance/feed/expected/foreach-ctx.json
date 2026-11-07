@@ -1,0 +1,103 @@
+{
+  "outputs": [],
+  "records": {
+    "c-foreach-ctx": {
+      "position": "end",
+      "epoch": 0,
+      "readTo": 1793955602000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-foreach-ctx": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-foreach-ctx",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-ticks"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "foreach"
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [
+    {
+      "runner": "A",
+      "value": {
+        "n": 1,
+        "q": "c-ticks"
+      },
+      "ctx": {
+        "position": "S1.1",
+        "queue": "c-ticks",
+        "partition": "p1",
+        "partitionId": "pid:c-ticks/p1",
+        "offset": 1,
+        "transactionId": "t1"
+      }
+    },
+    {
+      "runner": "A",
+      "value": {
+        "n": 2,
+        "q": "c-ticks"
+      },
+      "ctx": {
+        "position": "S1.2",
+        "queue": "c-ticks",
+        "partition": "p2",
+        "partitionId": "pid:c-ticks/p2",
+        "offset": 1,
+        "transactionId": "t2"
+      }
+    },
+    {
+      "runner": "A",
+      "value": {
+        "n": 3,
+        "q": "c-ticks"
+      },
+      "ctx": {
+        "position": "S1.2",
+        "queue": "c-ticks",
+        "partition": "p1",
+        "partitionId": "pid:c-ticks/p1",
+        "offset": 2,
+        "transactionId": "t3"
+      }
+    }
+  ],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 3,
+      "effects": 3,
+      "outputs": 0
+    }
+  },
+  "problems": []
+}

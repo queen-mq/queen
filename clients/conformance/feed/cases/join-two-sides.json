@@ -1,0 +1,132 @@
+{
+  "name": "join-two-sides",
+  "about": "a join pairs a left and a right in either order within 2 days; one left alone times out with its side",
+  "source": {
+    "queues": [
+      "c-orders",
+      "c-shipments"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "join",
+      "opts": {
+        "left": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-orders"
+          ]
+        },
+        "right": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-shipments"
+          ]
+        },
+        "within": "2d",
+        "select": {
+          "order": {
+            "$get": "0.data.id"
+          },
+          "carrier": {
+            "$get": "1.data.carrier"
+          }
+        },
+        "onTimeout": {
+          "key": {
+            "$get": "0.partition"
+          },
+          "side": {
+            "$get": "1"
+          }
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-joined"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-shipments",
+              "partition": "o-1",
+              "data": {
+                "carrier": "dhl"
+              },
+              "transactionId": "s1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "o-1",
+              "data": {
+                "id": 1
+              },
+              "transactionId": "o1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:20.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "o-2",
+              "data": {
+                "id": 2
+              },
+              "transactionId": "o2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:30.000Z",
+          "push": [
+            {
+              "queue": "c-shipments",
+              "partition": "o-3",
+              "data": {
+                "carrier": "ups"
+              },
+              "transactionId": "s3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-08T09:00:31.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-join-two-sides"
+  },
+  "mode": "fake"
+}

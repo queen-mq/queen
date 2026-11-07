@@ -1008,3 +1008,52 @@ with one ID per scheduler lifetime, stable worker pool names and counters across
 turns. The fluent supervision option does not share a reporter or override its
 instance ID. Preserve limits used for fairness, the shared worker budget and
 existing ACK/NACK, lease renewal and cancellation behavior.
+
+## Feed streams (`Stream.from_feed`)
+
+The tenant feed (`POST /api/v1/feed`) is every push to a tenant's queues, in
+the order the broker's log committed them. `client.feed(...)` reads it;
+`Stream.from_feed(client, ...)` runs a stream on it. This is the same engine
+as the JavaScript SDK's `Stream.fromFeed`, with the same records in KV: a
+stream started by a JS process can be continued by a Python one with the
+same query id, and the other way round.
+
+```python
+from queen import Queen, Stream
+
+client = Queen("http://localhost:6632")
+
+# Read: what happened to one booking today, then stop.
+async for e in client.feed(partitions=["booking-9137"], since="1d", follow=False):
+    print(e["position"], e["queue"], e["partition"], e["data"])
+
+# Run: a window per customer across two queues, committed with its position.
+runner = await (
+    Stream.from_feed(client, queues=["orders", "payments"], from_="earliest")
+    .where("data.country", "=", "IT")              # filtered by the broker
+    .window_tumbling(seconds=60)
+    .aggregate({"count": lambda v: 1, "sum": lambda v: v["total"]})
+    .name("perCustomer")
+    .to(client.queue("per-minute"))
+    .run(query_id="per-minute")
+)
+await runner.stop()
+```
+
+The chain takes `where`, `filter`, `map`, `flat_map`, `key_by`, any number of
+stateful steps in any order (`window_tumbling` / `window_sliding` /
+`window_session` / `window_cron` with `reduce` or `aggregate`, `pattern`,
+`join` with two sides or `sides=...`, `gather`, `join_table`), `name`, and
+ends with `.to(...)` (a queue, a list of queues, or a function that picks) or
+`.foreach(fn)`. Event time: `event_time=`, `allowed_lateness=`, `on_late=`,
+`idle=` on a step; a step after a step on event time follows its watermark.
+`run(query_id=..., ...)` takes the JS options in snake_case (`on_poison`,
+`retries`, `lock_ttl`, `shards`, `shard_by`, `snapshot_every_millis`,
+`max_pending_outputs`, `reset`, `exclusive`, ...) or in camelCase, with the
+same defaults. `Stream.view(client, query_id)` asks a running stream (of any
+SDK) about its live state.
+
+Python and JavaScript values: `None` is JSON `null`; a function that should
+answer JavaScript's `undefined` (a field left out) answers
+`queen.streams.UNDEFINED`. User functions may be sync or async and
+take as many of their arguments as they declare.

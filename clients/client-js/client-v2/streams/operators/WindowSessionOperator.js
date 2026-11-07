@@ -31,7 +31,7 @@
  * (ISO string). sessionEnd is included on the emit envelope as windowEnd.
  */
 
-import { extractEventTime, normaliseLateOpts, MS_PER_SEC } from './_windowCommon.js'
+import { extractEventTime, normaliseLateOpts, feedTimeOptions, windowLatenessMs, MS_PER_SEC } from './_windowCommon.js'
 
 export class WindowSessionOperator {
   constructor({
@@ -40,7 +40,8 @@ export class WindowSessionOperator {
     idleFlushMs   = 1000,
     eventTime,
     allowedLateness = 0,
-    onLate
+    onLate,
+    idle
   } = {}) {
     if (typeof gap !== 'number' || gap <= 0) {
       throw new Error('windowSession requires { gap: <positive number> }')
@@ -51,7 +52,7 @@ export class WindowSessionOperator {
     this.gracePeriodMs    = Math.max(0, Math.floor(gracePeriod * MS_PER_SEC))
     this.idleFlushMs      = Math.max(0, Math.floor(idleFlushMs))
     this.eventTimeFn      = typeof eventTime === 'function' ? eventTime : null
-    this.allowedLatenessMs = Math.max(0, Math.floor(allowedLateness * MS_PER_SEC))
+    this.allowedLatenessMs = windowLatenessMs(allowedLateness, 'windowSession')
     this.onLatePolicy     = normaliseLateOpts(onLate)
     this.operatorTag      = `sess:${gap}`
     this.config           = {
@@ -63,6 +64,7 @@ export class WindowSessionOperator {
       allowedLateness,
       onLate:           this.onLatePolicy
     }
+    feedTimeOptions(this, { eventTime, idle }, 'windowSession')
   }
 
   /**

@@ -1,0 +1,109 @@
+{
+  "name": "et-idle",
+  "about": "idle: after a quiet minute on the feed clock the watermark moves on with it, so the last window closes with no new message",
+  "source": {
+    "queues": [
+      "c-readings"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60,
+        "eventTime": {
+          "$get": "0.data.at"
+        },
+        "idle": "1m"
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.v"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-et-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:00:05.000Z",
+                "v": 1
+              },
+              "transactionId": "e1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:00:20.000Z",
+                "v": 2
+              },
+              "transactionId": "e2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "metrics": "A",
+      "as": "before-idle",
+      "keys": [
+        "outputs"
+      ]
+    },
+    {
+      "clock": "2026-11-06T09:01:43.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-et-idle"
+  },
+  "mode": "fake"
+}

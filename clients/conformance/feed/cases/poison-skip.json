@@ -1,0 +1,152 @@
+{
+  "name": "poison-skip",
+  "about": "onPoison 'skip' leaves the message out; a stateful stream remembers the skip, so a replay leaves out the same one",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "$if": [
+          {
+            "$get": "0.data.bad"
+          },
+          {
+            "$throw": "bad message"
+          },
+          {
+            "n": {
+              "$get": "0.data.n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.n"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "run": {
+    "onPoison": "skip",
+    "retries": 0,
+    "queryId": "c-poison-skip"
+  },
+  "compareMetrics": [],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "bad": true
+              },
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "i3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "metrics": "A",
+      "as": "a",
+      "keys": [
+        "skipped",
+        "poisoned"
+      ]
+    },
+    {
+      "kill": "A"
+    },
+    {
+      "start": "B"
+    },
+    {
+      "idle": "B",
+      "timeoutMs": 30000
+    },
+    {
+      "metrics": "B",
+      "as": "b",
+      "keys": [
+        "replaySkipped"
+      ]
+    },
+    {
+      "clock": "2026-11-06T09:01:01.000Z"
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "mode": "fake"
+}

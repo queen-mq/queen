@@ -76,6 +76,7 @@ function stateTitle(r) {
   if (s.kind === 'acks') return `${acksText(r.issue?.ops)} in the last hour.`.replace(/^./, (c) => c.toUpperCase())
   if (s.kind === 'lag') return `${who} is ${span(r.issue?.lag || r.lag || 0)} behind, with ${fmt(r.pending)} waiting.`
   if (s.kind === 'noReader') return `${fmt(r.pending)} waiting, and no consumer group reads it.`
+  if (s.kind === 'feed' || s.kind === 'feedDown') return s.title
   return `${fmt(r.pending)} waiting; at this pace it clears in ${s.eta < 60 ? 'under a minute' : `about ${span(s.eta)}`}.`
 }
 const cells = (r) => ({
@@ -85,7 +86,8 @@ const cells = (r) => ({
   state: r.state?.word || '',
   stateClass: r.state ? (r.state.tone || 'qn-t2') : '',
   stateTitle: stateTitle(r),
-  waiting: count(r.pending),
+  // A queue only feed streams read has nothing waiting: no group acks it.
+  waiting: r.feedOnly ? dim('–') : count(r.pending),
   oldest: r.lag ? { text: span(r.lag), dim: false } : dim('–'),
   in: perS(r.inHour),
   acked: perS(r.ackHour),
@@ -103,6 +105,7 @@ function summary(g) {
   if (g.counts.failing) out.push({ text: `${g.counts.failing} failing`, tone: toneIn('acks') })
   if (g.counts.behind) out.push({ text: `${g.counts.behind} behind`, tone: toneIn('lag') })
   if (g.counts.noReader) out.push({ text: `${g.counts.noReader} without a reader`, tone: 'amber' })
+  if (g.counts.feedDown) out.push({ text: `${g.counts.feedDown} whose feed stream is down`, tone: 'amber' })
   if (g.counts.catching) out.push({ text: `${g.counts.catching} catching up`, tone: '' })
   return out
 }

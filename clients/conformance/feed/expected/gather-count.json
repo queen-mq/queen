@@ -1,0 +1,113 @@
+{
+  "outputs": [
+    {
+      "queue": "c-batches",
+      "partition": "b1",
+      "data": {
+        "batch": "b1",
+        "n": 3
+      },
+      "from": "S1.4/c-parts/c#0"
+    },
+    {
+      "queue": "c-batches",
+      "partition": "b2",
+      "data": {
+        "batch": "b2",
+        "missing": 2,
+        "n": 2
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-batches",
+      "partition": "b3",
+      "data": {
+        "batch": "b3",
+        "missing": null,
+        "n": 1
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-gather-count": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "1b2f322cfdc07464",
+      "clock": 1793956211000,
+      "units": 2,
+      "readTo": 1793956211000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 2,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-gather-count": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-gather-count",
+    "hash": "1b2f322cfdc07464",
+    "reads": {
+      "queues": [
+        "c-parts"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "gather",
+        "name": "step1",
+        "config": {
+          "kind": "gather",
+          "within": 600000,
+          "parts": null,
+          "count": true,
+          "onRepeat": "keep",
+          "timeout": true
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-batches"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 3,
+      "outputs": 3,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

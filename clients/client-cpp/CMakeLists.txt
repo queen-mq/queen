@@ -15,7 +15,7 @@
 # framed_pop (QUEEN_CLIENT_ZSTD). nlohmann/json is the program's own when
 # find_package finds one, else the copy in third_party/.
 cmake_minimum_required(VERSION 3.16)
-project(queen_client VERSION 2.7.1 LANGUAGES CXX)
+project(queen_client VERSION 2.8.0 LANGUAGES CXX)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(QUEEN_CLIENT_TOP_LEVEL ON)

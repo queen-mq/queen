@@ -12,13 +12,46 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 
+class _NoInitial:
+    """``.reduce(fn)`` without an initial value (JS: ``initial === undefined``)."""
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return "<no initial>"
+
+
+NO_INITIAL = _NoInitial()
+
+
 class ReduceOperator:
     kind = "reduce"
 
-    def __init__(self, fn: Callable, initial: Any = None):
+    def __init__(self, fn: Callable, initial: Any = NO_INITIAL):
+        from ..util.js import UNDEFINED
+
+        # Whether the caller gave an initial value at all: JS `initial !== undefined`,
+        # so `.reduce(fn, None)` (null) has one. The queue runner keeps its own
+        # reading (`initial is not None`) in `config`; the feed's chain hash uses this.
+        self.initial_given = initial is not NO_INITIAL and initial is not UNDEFINED
         self.fn = fn
-        self.initial = initial
-        self.config: dict = {"hasInitial": initial is not None}
+        self.initial = initial if self.initial_given else None
+        self.config: dict = {"hasInitial": self.initial is not None}
+        self.feed_config: dict = {"hasInitial": self.initial_given}
+
+    async def feed_fold(self, acc: Any, value: Any) -> Any:
+        """One fold step of a window on a feed: the user's function, sync or async."""
+        from ..util.js import call_user
+
+        return await call_user(self.fn, acc, value)
+
+    def feed_initial(self) -> Any:
+        """``_initial()`` of the JS SDK: UNDEFINED without an initial value, else a fresh copy (a JSON round trip)."""
+        from ..util.js import UNDEFINED, js_normalize
+
+        if not self.initial_given:
+            return UNDEFINED
+        if not isinstance(self.initial, (dict, list)):
+            return self.initial
+        return js_normalize(self.initial)
 
     async def run(
         self,

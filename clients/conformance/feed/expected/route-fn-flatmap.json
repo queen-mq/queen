@@ -1,0 +1,117 @@
+{
+  "outputs": [
+    {
+      "queue": "c-out-a",
+      "partition": "1",
+      "data": {
+        "kind": "a",
+        "id": 1
+      },
+      "from": "S1.1/c-baskets/p1#0"
+    },
+    {
+      "queue": "c-out-a",
+      "partition": "5.5",
+      "data": {
+        "kind": "a",
+        "id": 5.5
+      },
+      "from": "S1.2/c-baskets/p2#2"
+    },
+    {
+      "queue": "c-out-all",
+      "partition": "x",
+      "data": {
+        "kind": "b",
+        "id": 2
+      },
+      "from": "S1.1/c-baskets/p1#2"
+    },
+    {
+      "queue": "c-out-all",
+      "partition": "x",
+      "data": {
+        "kind": "b",
+        "id": 4
+      },
+      "from": "S1.2/c-baskets/p2#1"
+    },
+    {
+      "queue": "c-out-b",
+      "partition": "p1",
+      "data": {
+        "kind": "b",
+        "id": 2
+      },
+      "from": "S1.1/c-baskets/p1#1"
+    },
+    {
+      "queue": "c-out-b",
+      "partition": "p2",
+      "data": {
+        "kind": "b",
+        "id": 4
+      },
+      "from": "S1.2/c-baskets/p2#0"
+    }
+  ],
+  "records": {
+    "c-route-fn-flatmap": {
+      "position": "end",
+      "epoch": 0,
+      "readTo": 1793955603000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-route-fn-flatmap": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-route-fn-flatmap",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-baskets"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "flatMap"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "route"
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 5,
+      "outputs": 6,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

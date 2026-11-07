@@ -58,6 +58,10 @@ var (
 type Stream struct {
 	source    Source
 	operators []util.Operator
+	// feed is the source of a stream built by FromFeed.
+	feed *feedSource
+	// err is the first option error of the chain: Run, RunFeed and Compile answer it.
+	err error
 }
 
 // From builds a Stream sourced from a Queen queue (anything implementing
@@ -68,7 +72,16 @@ func From(src Source) *Stream {
 }
 
 func (s *Stream) extend(op util.Operator) *Stream {
-	return &Stream{source: s.source, operators: append(append([]util.Operator{}, s.operators...), op)}
+	return &Stream{source: s.source, feed: s.feed, err: s.err, operators: append(append([]util.Operator{}, s.operators...), op)}
+}
+
+// fail records the first option error of the chain.
+func (s *Stream) fail(err error) *Stream {
+	out := &Stream{source: s.source, feed: s.feed, err: s.err, operators: append([]util.Operator{}, s.operators...)}
+	if out.err == nil {
+		out.err = err
+	}
+	return out
 }
 
 // Map appends a stateless transformation.
@@ -178,6 +191,15 @@ func (s *Stream) Run(ctx context.Context, opts RunOptions) (*Runner, error) {
 	if opts.QueryID == "" {
 		return nil, fmt.Errorf("Run requires QueryID")
 	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.feed != nil {
+		return nil, fmt.Errorf("Stream.fromFeed: a stream on the feed runs with RunFeed")
+	}
+	if err := s.queueOnlyCheck(); err != nil {
+		return nil, err
+	}
 	compiled, err := s.compile()
 	if err != nil {
 		return nil, err
@@ -190,7 +212,12 @@ func (s *Stream) Run(ctx context.Context, opts RunOptions) (*Runner, error) {
 }
 
 // Compile exposes the compiled chain (mainly for tests).
-func (s *Stream) Compile() (*runtime.CompiledStream, error) { return s.compile() }
+func (s *Stream) Compile() (*runtime.CompiledStream, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.compile()
+}
 
 func (s *Stream) compile() (*runtime.CompiledStream, error) {
 	var sink util.Operator

@@ -1,0 +1,50 @@
+# 2026-11-07 srf-sdk (uncommitted): the tenant feed (W13) and a short regression set, on the broker of
+# the working tree: shard reads through the .qidx index, the long-poll wake (apply.rs appended_any),
+# the stream engine's snapshots. W13 first, then log, queue, pipeline and streams under the faults
+# that move leaders and restart nodes.
+w13-kill                --workload feed --nemesis kill --time-limit 300 --rate 200 --concurrency 3n
+w13-lz-kill             --workload feed --lazyfs --nemesis kill --time-limit 300 --rate 200 --concurrency 3n
+w13-part                --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n
+w13-pause               --workload feed --nemesis pause --time-limit 300 --rate 200 --concurrency 3n
+w13-clock               --workload feed --nemesis clock --time-limit 300 --rate 200 --concurrency 3n
+w13-leader-deaf         --workload feed --nemesis leader-deaf --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-restart             --workload feed --nemesis restart --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-membership          --workload feed --nemesis membership --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-part-kill           --workload feed --nemesis part-kill --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-pause-kill          --workload feed --nemesis pause-kill --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-bridge              --workload feed --nemesis bridge --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+# Small sealed files, so most reads go through the .qidx index of a sealed file.
+w13-idx-kill            --workload feed --nemesis kill --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+w13-idx-lz-kill         --workload feed --lazyfs --nemesis kill --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+w13-idx-part            --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+# Four queue logs per node: a read merges them by position.
+w13-shards4-kill        --workload feed --nemesis kill --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_QLOG_SHARDS=4
+w13-shards4-part        --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_QLOG_SHARDS=4
+# The leader serves the feed too.
+w13-onleader-part       --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_FEED_ON_LEADER=true
+w13-onleader-deaf       --workload feed --nemesis leader-deaf --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20 --env QUEEN_FEED_ON_LEADER=true
+# Regression: what the broker changes touch (pops woken by a feed watch, forwarding, the read path).
+r-w1-kill               --workload log --nemesis kill --time-limit 300 --rate 200
+r-w1-part               --workload log --nemesis partition --time-limit 300 --rate 200
+r-w1-pause              --workload log --nemesis pause --time-limit 300 --rate 200
+r-w1-clock              --workload log --nemesis clock --time-limit 300 --rate 200
+r-w1-leader-deaf        --workload log --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+r-w1-restart            --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+r-w2-kill               --workload queue --nemesis kill --time-limit 300 --rate 200
+r-w2-part               --workload queue --nemesis partition --time-limit 300 --rate 200
+r-w2-pause              --workload queue --nemesis pause --time-limit 300 --rate 200
+r-w2-clock              --workload queue --nemesis clock --time-limit 300 --rate 200
+r-w2-leader-deaf        --workload queue --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+r-w2-restart            --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+r-w5-kill               --workload pipeline --nemesis kill --time-limit 300 --rate 200
+r-w5-part               --workload pipeline --nemesis partition --time-limit 300 --rate 200
+r-w5-pause              --workload pipeline --nemesis pause --time-limit 300 --rate 200
+r-w5-clock              --workload pipeline --nemesis clock --time-limit 300 --rate 200
+r-w5-leader-deaf        --workload pipeline --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+r-w5-restart            --workload pipeline --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+r-w9-kill               --workload streams --nemesis kill --time-limit 300 --rate 200
+r-w9-part               --workload streams --nemesis partition --time-limit 300 --rate 200
+r-w9-pause              --workload streams --nemesis pause --time-limit 300 --rate 200
+r-w9-clock              --workload streams --nemesis clock --time-limit 300 --rate 200
+r-w9-leader-deaf        --workload streams --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+r-w9-restart            --workload streams --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20

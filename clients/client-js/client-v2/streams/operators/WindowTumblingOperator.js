@@ -39,7 +39,7 @@
  *                    (Date.now() on a broker without claims)
  */
 
-import { extractEventTime, normaliseLateOpts, MS_PER_SEC } from './_windowCommon.js'
+import { extractEventTime, normaliseLateOpts, feedTimeOptions, windowLatenessMs, MS_PER_SEC } from './_windowCommon.js'
 
 export class WindowTumblingOperator {
   constructor({
@@ -48,7 +48,8 @@ export class WindowTumblingOperator {
     idleFlushMs   = 5000,
     eventTime,
     allowedLateness = 0,
-    onLate
+    onLate,
+    idle
   } = {}) {
     if (typeof seconds !== 'number' || seconds <= 0) {
       throw new Error('windowTumbling requires { seconds: <positive number> }')
@@ -59,7 +60,7 @@ export class WindowTumblingOperator {
     this.gracePeriodMs    = Math.max(0, Math.floor(gracePeriod * MS_PER_SEC))
     this.idleFlushMs      = Math.max(0, Math.floor(idleFlushMs))
     this.eventTimeFn      = typeof eventTime === 'function' ? eventTime : null
-    this.allowedLatenessMs = Math.max(0, Math.floor(allowedLateness * MS_PER_SEC))
+    this.allowedLatenessMs = windowLatenessMs(allowedLateness, 'windowTumbling')
     this.onLatePolicy     = normaliseLateOpts(onLate)
     this.operatorTag      = `tumb:${seconds}`
     this.config           = {
@@ -71,6 +72,7 @@ export class WindowTumblingOperator {
       allowedLateness,
       onLate:           this.onLatePolicy
     }
+    feedTimeOptions(this, { eventTime, idle }, 'windowTumbling')
   }
 
   /**

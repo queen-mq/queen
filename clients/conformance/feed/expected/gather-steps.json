@@ -1,0 +1,166 @@
+{
+  "outputs": [
+    {
+      "queue": "c-gathered",
+      "partition": "r1",
+      "data": {
+        "order": "r1",
+        "got": [
+          "c-pay",
+          "c-ship",
+          "c-stock"
+        ]
+      },
+      "from": "S1.4/c-ship/z#0"
+    },
+    {
+      "queue": "c-gathered",
+      "partition": "r2",
+      "data": {
+        "order": "r2",
+        "missing": [
+          "c-ship"
+        ],
+        "got": [
+          "c-pay",
+          "c-stock"
+        ]
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-gather-steps": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "65bd30251d40b083",
+      "clock": 1793955921000,
+      "units": 1,
+      "readTo": 1793955921000,
+      "caughtUp": true,
+      "open": {
+        "runs": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 1,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-gather-steps": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-gather-steps",
+    "hash": "65bd30251d40b083",
+    "reads": {
+      "queues": [
+        "c-pay",
+        "c-stock",
+        "c-ship"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "gather",
+        "name": "runs",
+        "config": {
+          "kind": "gather",
+          "within": 300000,
+          "parts": [
+            "c-pay",
+            "c-stock",
+            "c-ship"
+          ],
+          "count": false,
+          "onRepeat": "keep",
+          "timeout": true
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-gathered"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "r1-done": {
+      "found": true,
+      "value": {
+        "key": "r1",
+        "done": true,
+        "until": "2026-11-06T09:05:00.000Z"
+      }
+    },
+    "r2-open": {
+      "found": true,
+      "value": {
+        "key": "r2",
+        "got": {
+          "c-pay": {
+            "position": "S1.3",
+            "queue": "c-pay",
+            "partition": "x",
+            "partitionId": "pid:c-pay/x",
+            "offset": 2,
+            "id": "id:S1.3/c-pay/x/2",
+            "transactionId": "g3",
+            "ts": "2026-11-06T09:00:20.000Z",
+            "createdAt": "2026-11-06T09:00:20.000Z",
+            "data": {
+              "orderId": "r2"
+            }
+          },
+          "c-stock": {
+            "position": "S1.6",
+            "queue": "c-stock",
+            "partition": "y",
+            "partitionId": "pid:c-stock/y",
+            "offset": 2,
+            "id": "id:S1.6/c-stock/y/2",
+            "transactionId": "g6",
+            "ts": "2026-11-06T09:00:50.000Z",
+            "createdAt": "2026-11-06T09:00:50.000Z",
+            "data": {
+              "orderId": "r2"
+            }
+          }
+        },
+        "missing": [
+          "c-ship"
+        ],
+        "deadline": "2026-11-06T09:05:20.000Z"
+      }
+    },
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

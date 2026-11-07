@@ -16,6 +16,7 @@
 import { computed, ref, shallowRef, watch } from 'vue'
 import { resources, system, queues as queuesApi, kv } from '@/api'
 import { describeApiError } from '@/api/errors'
+import { liveMean, perSecond, windowMean } from './words'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { queueAttention, groupAttention } from '@/composables/useAttention'
 import { rollupQueueOps } from '@/composables/overviewViews'
@@ -51,13 +52,7 @@ const clip = (s, n = 120) => (s && s.length > n ? s.slice(0, n - 1).trimEnd() + 
 const enc = encodeURIComponent
 const toMs = (b) => (typeof b === 'number' ? (b < 1e12 ? b * 1000 : b) : Date.parse(b))
 
-// The last `n` complete minutes' mean of a per-minute count, as a rate a second.
-function perSecond(minutes, n = 5) {
-  const done = (minutes || []).slice(0, -1).filter((v) => v != null)
-  const last = done.slice(-n)
-  if (!last.length) return null
-  return last.reduce((a, b) => a + b, 0) / last.length / 60
-}
+// The last `n` complete minutes' mean of a per-minute count, as a rate a second: words.js.
 
 // The first minute of the run of non-zero minutes that ends now (a gap of
 // up to two quiet minutes keeps the run going). null: nothing now.
@@ -301,6 +296,20 @@ export function useOverview(win, frame) {
         ],
       }
     }
+    if (a.reason === 'feedDown') {
+      const names = (a.readers || []).map((r) => r.name)
+      const who = names.length === 1 ? `its feed stream ${names[0]}` : `its ${names.length} feed streams`
+      return {
+        ...base, badge: 'Feed down', group: '',
+        sentence: `${fmt(a.pending)} message${a.pending === 1 ? '' : 's'} held, and ${who} ${names.length === 1 ? 'has' : 'have'} no runner.`,
+        detail: 'A feed stream reads without a consumer group: start it again. The Streams page says why it stopped.',
+        spark: minutes ? { kind: 'line', values: minutes.push.slice(0, -1).map((v) => v ?? 0), caption: 'arriving a minute, last hour' } : null,
+        actions: [
+          { label: 'Open Streams', to: names.length === 1 ? { path: '/streams', query: { name: `feed:${names[0]}` } } : { path: '/streams' } },
+          { label: 'Open the queue', to: `/queues/${enc(name)}` },
+        ],
+      }
+    }
     // noReader
     return {
       ...base, badge: 'No reader', group: '',
@@ -357,7 +366,12 @@ export function useOverview(win, frame) {
       : []
     const inPts = rows.map((r) => [Date.parse(r.bucket) + (bm * 60_000) / 2, r.pushPerSecond])
     const ackPts = rows.map((r) => [Date.parse(r.bucket) + (bm * 60_000) / 2, r.ackSuccess / (bm * 60)])
-    const avg = (pts) => (pts.length ? pts.reduce((s, p) => s + (p[1] || 0), 0) / pts.length : null)
+    // "In a second": on a live window the rate now (the last five minutes,
+    // words.liveMean); on a past one the window's mean (words.windowMean).
+    // Both count the buckets with nothing as 0.
+    const avg = (pts) => (win.value.live
+      ? liveMean(pts, { bucketMs: bm * 60_000 })
+      : windowMean(pts, { from: win.value.from, to: win.value.to, bucketMs: bm * 60_000 }))
     const created = rows.reduce((s, r) => s + (r.partitionsCreated || 0), 0)
     const deleted = rows.reduce((s, r) => s + (r.partitionsDeleted || 0), 0)
     return {

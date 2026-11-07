@@ -5,7 +5,7 @@ its data in its own replicated log.
 
 ```toml
 [dependencies]
-queen-mq = "2.7.0"
+queen-mq = "2.8.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
 ```
@@ -520,3 +520,157 @@ with one ID per scheduler lifetime, stable worker pool names and counters across
 turns. The fluent supervision option does not share a reporter or override its
 instance ID. Preserve limits used for fairness, the shared worker budget and
 existing ACK/NACK, lease renewal and cancellation behavior.
+
+## The tenant feed and feed streams (broker built with the feed)
+
+Every push to the tenant's queues, in the order the broker's log committed them
+(`POST /api/v1/feed`). Each entry carries its `position`: one number across every queue, shared by
+the pushes of one transaction. Nothing is leased or acked, and every consumer group still gets its
+messages. Followers serve it: when the client reaches the leader, it moves to the followers the
+leader names (a 421), by itself.
+
+```rust
+use queen_mq::feed::FeedOptions;
+use serde_json::json;
+
+// A question: what happened to one booking in the last day, then stop.
+let mut reader = queen.feed(FeedOptions::new().partitions(["booking-9137"]).since("1d").follow(false))?;
+while let Some(e) = reader.next_entry().await? {
+    println!("{} {} {} {}", e.position, e.queue, e.partition, e.data);
+}
+
+// Live: every Italian order from now on, filtered by the broker.
+let mut live = queen.feed(FeedOptions::new().queues(["orders"]).where_("data.country", "=", json!("IT")))?;
+```
+
+`FeedOptions` takes `queues` (names or patterns, `orders*`), `partitions`, `where_` (fields `queue`,
+`partition`, `transactionId`, `offset`, `position`, `data.<path>`; ops `= != < <= > >= in exists
+prefix !prefix`), `from` (`FeedFrom::Position(n)`, `Now` by default, `Earliest` by default with
+`since`), `since` (`"15m"`, `"1d"`, an ISO time, a `SystemTime` or epoch milliseconds), `follow`
+(true: keep waiting) and `follower_urls`. `reader.read(wait)` answers one page (`entries`, `next`,
+`caught_up`, `resolved_ts`, `applied`) and moves the reader to `next`.
+
+### Streams from the feed
+
+```rust
+use queen_mq::streams::feed::{FeedRunOptions, FeedSource};
+use queen_mq::streams::Stream;
+
+let handle = Stream::from_feed(&queen, FeedSource::new().queues(["orders"]))
+    .where_("data.country", "=", json!("IT")) // sent to the broker, filtered there
+    .filter(|m, _| m["data"]["total"].as_f64().unwrap_or(0.0) >= 10.0) // your code, runs here
+    .to("orders-it")
+    .run(FeedRunOptions::new("orders-it"))
+    .await?;
+```
+
+The same engine as the JS SDK's `Stream.fromFeed`, and the same records in KV: a stream started in
+one SDK can be stopped and started again in the other, and carries on. The stream keeps its
+position in KV (`queen-feed` / queryId) and commits it with its outputs in one transaction: a
+restart carries on where it stopped, with no duplicates. Its windows and patterns are not written
+at every commit: now and then a snapshot (layers, in pieces), and a restart reads the feed again
+from the snapshot to the committed position, sending nothing. One process runs a `queryId` (or a
+shard of it) at a time: another one with the same `queryId` waits, and takes over when the first
+stops or dies.
+
+```rust
+use queen_mq::streams::feed::{FeedAggregate, FeedSink, Gather, Join, Pattern, Poison, TableJoin, ViewOptions};
+
+// Routing: a function picks the queue (or a list, or { queue, partition }, or null).
+feed.to(FeedSink::route(|order: Option<Value>, _msg: Value| async move {
+    json!(format!("orders-{}", order.unwrap_or_default()["country"].as_str().unwrap_or("xx")))
+}));
+
+// Windows on the log's clock, one for every queue: a quiet feed still closes them on time.
+feed.map(|m, _| m["data"].clone())
+    .window_tumbling(60.0)
+    .aggregate(FeedAggregate::new().count("count").field("sum", |e: &Value| e["total"].clone()))
+    .to("per-minute");
+
+// An order, then its payment within 15 minutes; a reminder when none comes.
+feed.pattern(
+    Pattern::new(|m| m["queue"] == "orders", |m| m["queue"] == "payments", "15m")
+        .on_match(|order, payment| json!({ "order": order["data"]["id"], "paid": payment["data"]["amount"] }))
+        .on_timeout(|order| json!({ "order": order["data"]["id"], "remind": true })),
+);
+
+// A join of three queues; the missing sides named at the deadline.
+feed.join(
+    Join::sides("2d")
+        .side_queue("order", "orders").side_queue("paid", "payments").side_queue("sent", "shipments")
+        .select_all(|got, order| json!({ "order": order, "carrier": got["sent"]["data"]["carrier"] }))
+        .on_timeout_all(|_got, missing, order| json!({ "order": order, "missing": missing })),
+);
+
+// The parts of a run: as many as the messages say.
+feed.gather(
+    Gather::count("10m", |m, _| m["data"]["of"].clone())
+        .key(|m, _| m["data"]["batch"].clone())
+        .on_complete(|got, batch| json!({ "batch": batch, "parts": got.as_array().map_or(0, |g| g.len()) })),
+);
+
+// The latest row of a table queue, as of each message's own position.
+feed.join_table(TableJoin::new("property-settings", |m, _| m["data"]["propertyId"].clone()).select(
+    |booking, settings, _| {
+        let mut out = booking.cloned().unwrap_or_default();
+        out["currency"] = settings.map_or(Value::Null, |s| s["currency"].clone());
+        out
+    },
+));
+
+// Event time: the step takes its messages in event-time order (each waits allowed_lateness),
+// and idle lets a quiet feed move the watermark on. A step after it follows its watermark.
+feed.pattern(
+    Pattern::new(|m| m["queue"] == "gh-issues", |m| m["queue"] == "gh-comments", "1h")
+        .key(|m, _| json!(format!("{}#{}", m["partition"].as_str().unwrap_or(""), m["data"]["number"])))
+        .event_time(|m| m["data"]["created_at"].clone())
+        .allowed_lateness("5m")
+        .idle("1m")
+        .on_timeout(|issue| json!({ "repo": issue["partition"], "issue": issue["data"]["number"] })),
+);
+
+// A function may fail: an Err (or a panic) is retried, then meets the poison policy.
+feed.map(|m, _| -> Result<Value, String> {
+        let total = m["data"]["total"].as_f64().ok_or("no total")?;
+        Ok(json!({ "total": total }))
+    })
+    .to("enriched")
+    .run(FeedRunOptions::new("enrich").on_poison(Poison::DeadLetter("enrich-dlq".into())))
+    .await?;
+
+// Shards: each reads its partitions (filtered by the broker), with its own position and lock.
+feed.to("copy").run(FeedRunOptions::new("per-minute").shards(4)).await?;
+
+// The live state, from any process: { found, value }.
+let got = Stream::view(&queen, "bursts", ViewOptions::default())?.get("perMinute", "tenant-42").await?;
+```
+
+`FeedRunOptions` has the JS options and defaults, in snake case: `exclusive` (true), `lock_ttl`
+("15s"), `on_poison` (`Poison::Stop`, `Skip` or `DeadLetter(queue)`), `retries` (3),
+`commit_every_millis` (1000), `position_commit_millis` (5000), `max_pending_outputs` (5000),
+`snapshot_every_millis` (60000), `snapshot_max_entries` (200000), `shards` / `shard` / `shard_by`,
+`serve_state` (true), `reset` (`Reset::No`, `Always`, or `Token(s)` to start over once), `on_error`
+and `now`. The handle has `stop()`, `done()`, `metrics()` (with `role`: active or standby) and
+`state(step)`.
+
+Where Rust differs:
+
+| | Here | JS |
+|---|---|---|
+| A user function that fails | returns `Err` (any `Display`), or panics | throws |
+| A chain that cannot run | `run()` fails, with the JS message | the call throws |
+| `.foreach()` and a routing function | async closures | async or not |
+| A queue source with routing, a pattern or a join | does not compile (`Stream::from` has none of them) | `run()` fails |
+| The keys of a JSON object written to KV | sorted (serde_json) | in the order they were set |
+| A date-time without an offset (`event_time`, `since`) | UTC | local time |
+
+The conformance runner of `clients/conformance/feed` is `examples/feed_conformance.rs`:
+
+```bash
+cargo build --example feed_conformance                  # in clients/client-rust
+node clients/conformance/feed/harness.mjs --sdk rust    # in the repo root
+```
+
+`tests/feed_reader.rs`, `tests/feed_runner.rs` and `tests/feed_state.rs` run against the kit's
+fake broker (it needs `node`); `tests/feed_live.rs` runs on a broker built with the feed and skips
+unless `QUEEN_FEED_TEST_URL` is set (`QUEEN_FEED_TEST_NODES`: the nodes of a cluster).

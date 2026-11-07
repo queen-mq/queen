@@ -35,6 +35,11 @@ use queen_mq::streams::Every;
 use queen_mq::streams::{GateCtx, Record};
 // guide:end
 
+use queen_mq::feed::{FeedFrom, FeedOptions};
+use queen_mq::streams::feed::{
+    FeedAggregate, FeedHandle, FeedRunOptions, FeedSink, FeedSource, Gather, Join, Pattern, ShardBy,
+    TableJoin, ViewOptions,
+};
 use queen_mq::streams::{RunOptions, Stream};
 use queen_mq::{
     AckStatus, Config, KvReason, Message, PushItem, Queen, QueueOptions, SubscriptionMode,
@@ -53,6 +58,53 @@ fn check(ok: bool, what: &str) {
         eprintln!("FAIL: {what}");
         std::process::exit(1);
     }
+}
+
+// Test bookkeeping for the feed streams.
+const FEED_QUERIES: [&str; 10] = [
+    "orders-it", "orders-by-country", "per-minute", "order-followups", "order-status", "batches",
+    "bookings-priced", "bursts", "gh-unanswered", "clicks-per-tenant",
+];
+
+async fn feed_push(queen: &Queen, queue: &str, partition: &str, data: Value) -> Result<(), Box<dyn Error>> {
+    let id = format!("{queue}-{partition}-{}", queen_mq::uuid::uuidv7());
+    queen
+        .queue(queue)
+        .push_items(vec![PushItem::new(queue, data).partition(partition).transaction_id(id)])
+        .await?;
+    Ok(())
+}
+
+/// The messages of a queue, read back through the feed; waits for `n` of them.
+async fn messages_of(queen: &Queen, queue: &str, n: usize) -> Result<Vec<Value>, Box<dyn Error>> {
+    let mut i = 0;
+    loop {
+        let mut reader = queen.feed(FeedOptions::new().queues([queue]).from(FeedFrom::Earliest).follow(false))?;
+        let mut got = Vec::new();
+        while let Some(e) = reader.next_entry().await? {
+            got.push(e.data.clone());
+        }
+        if got.len() >= n || i >= 100 {
+            return Ok(got);
+        }
+        i += 1;
+        sleep_ms(100).await;
+    }
+}
+
+async fn until(what: &str, cond: impl Fn() -> bool) {
+    for _ in 0..100 {
+        if cond() {
+            return;
+        }
+        sleep_ms(100).await;
+    }
+    check(false, &format!("timed out waiting for {what}"));
+}
+
+/// The value of the first open window of `key` in a stream's step.
+fn window_value(h: &FeedHandle, step: &str, key: &str) -> Value {
+    h.state(step).get(key)["value"]["windows"][0]["value"].clone()
 }
 
 async fn sleep_ms(ms: u64) {
@@ -211,6 +263,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "jobs", "emails", "events", "reviews", "prices", "metrics", "tasks", "payments",
         "logins", "login-rate", "clicks", "sales", "sales-per-hour", "outgoing-sms",
         "invoices",
+        // the feed streams' (end of this program)
+        "orders", "orders-it", "orders-IT", "orders-FR", "per-minute", "order-followups", "shipments",
+        "order-status", "parts", "batches", "bookings", "property-settings", "bookings-priced", "bursts",
+        "gh-issues", "gh-comments", "gh-unanswered", "clicks-per-tenant",
     ];
     for q in queues {
         let _ = queen.queue(q).delete().await;
@@ -829,6 +885,233 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let sent = SENT_SMS.lock().unwrap().len();
     check(sent == 3, &format!("the gate let the first three messages through ({sent})"));
     println!("ok: stream-gate");
+
+    // --- Streams from the tenant feed (broker 2.8.0) --------------------------------
+    // A feed stream keeps its position and state in KV (`queen-feed`, under its
+    // queryId): an earlier run's go first, so every run starts the same way.
+    for id in FEED_QUERIES {
+        let page = queen.kv().get_prefix("queen-feed", id).keys_only().limit(1000).send().await?;
+        for row in page.rows() {
+            queen.kv().delete("queen-feed", &row.key).send().await?;
+        }
+    }
+
+    // guide:start(feed-route)
+    let orders_it = Stream::from_feed(&queen, FeedSource::new().queues(["orders"]))
+        .where_("data.country", "=", json!("IT"))
+        .filter(|m, _| m["data"]["total"].as_f64().unwrap_or(0.0) >= 10.0)
+        .to(queen.queue("orders-it"))
+        .run(FeedRunOptions::new("orders-it"))
+        .await?;
+    // guide:end
+    feed_push(&queen, "orders", "order-1", json!({ "id": 1, "country": "IT", "total": 20 })).await?;
+    feed_push(&queen, "orders", "order-2", json!({ "id": 2, "country": "IT", "total": 5 })).await?;
+    feed_push(&queen, "orders", "order-3", json!({ "id": 3, "country": "DE", "total": 30 })).await?;
+    let got = messages_of(&queen, "orders-it", 1).await?;
+    check(got == vec![json!({ "id": 1, "country": "IT", "total": 20 })], &format!("only the Italian order of 10 or more: {got:?}"));
+    orders_it.stop().await;
+    println!("ok: feed-route");
+
+    // guide:start(feed-routing)
+    let by_country = Stream::from_feed(&queen, FeedSource::new().queues(["orders"]))
+        .to(FeedSink::route(|order: Option<Value>, _msg: Value| async move {
+            json!(format!("orders-{}", order.unwrap_or_default()["country"].as_str().unwrap_or("xx")))
+        }))
+        .run(FeedRunOptions::new("orders-by-country"))
+        .await?;
+    // guide:end
+    feed_push(&queen, "orders", "order-4", json!({ "id": 4, "country": "IT", "total": 12 })).await?;
+    feed_push(&queen, "orders", "order-5", json!({ "id": 5, "country": "FR", "total": 8 })).await?;
+    check(messages_of(&queen, "orders-IT", 1).await? == vec![json!({ "id": 4, "country": "IT", "total": 12 })], "routed to orders-IT");
+    check(messages_of(&queen, "orders-FR", 1).await? == vec![json!({ "id": 5, "country": "FR", "total": 8 })], "routed to orders-FR");
+    by_country.stop().await;
+    println!("ok: feed-routing");
+
+    // guide:start(feed-window)
+    let per_minute = Stream::from_feed(&queen, FeedSource::new().queues(["orders", "payments"]))
+        .window_tumbling(60.0)
+        .aggregate(FeedAggregate::new().count("count").field("sum", |e: &Value| e["total"].clone()))
+        .map(|totals, w| {
+            let mut out = totals.clone();
+            out["customer"] = w.map_or(Value::Null, |w| w["key"].clone());
+            out["minute"] = w.map_or(Value::Null, |w| w["windowKey"].clone());
+            out
+        })
+        .to(queen.queue("per-minute"))
+        .run(FeedRunOptions::new("per-minute"))
+        .await?;
+    // guide:end
+    feed_push(&queen, "orders", "customer-1", json!({ "total": 10 })).await?;
+    feed_push(&queen, "payments", "customer-1", json!({ "total": 5 })).await?;
+    // The window closes at the end of its minute; until then the stream shows it open.
+    until("the open window", || window_value(&per_minute, "step1", "customer-1")["count"] == 2).await;
+    check(window_value(&per_minute, "step1", "customer-1") == json!({ "count": 2, "sum": 15 }), "the window's totals");
+    per_minute.stop().await;
+    println!("ok: feed-window");
+
+    // guide:start(feed-pattern)
+    let followups = Stream::from_feed(&queen, FeedSource::new().queues(["orders", "payments"]))
+        .pattern(
+            Pattern::new(|m| m["queue"] == "orders", |m| m["queue"] == "payments", "15m")
+                .on_match(|order, payment| json!({ "order": order["data"]["id"], "paid": payment["data"]["amount"] }))
+                .on_timeout(|order| json!({ "order": order["data"]["id"], "remind": true })),
+        )
+        .to(queen.queue("order-followups"))
+        .run(FeedRunOptions::new("order-followups"))
+        .await?;
+    // guide:end
+    feed_push(&queen, "orders", "order-7", json!({ "id": 7 })).await?;
+    feed_push(&queen, "payments", "order-7", json!({ "amount": 30 })).await?;
+    check(messages_of(&queen, "order-followups", 1).await? == vec![json!({ "order": 7, "paid": 30 })], "the order and its payment matched");
+    followups.stop().await;
+    println!("ok: feed-pattern");
+
+    // guide:start(feed-join)
+    let order_status = Stream::from_feed(&queen, FeedSource::new().queues(["orders", "payments", "shipments"]))
+        .join(
+            Join::sides("2d")
+                .side_queue("order", "orders")
+                .side_queue("paid", "payments")
+                .side_queue("sent", "shipments")
+                .select_all(|got, order| json!({ "order": order, "carrier": got["sent"]["data"]["carrier"] }))
+                .on_timeout_all(|_got, missing, order| json!({ "order": order, "missing": missing })),
+        )
+        .to(queen.queue("order-status"))
+        .run(FeedRunOptions::new("order-status"))
+        .await?;
+    // guide:end
+    feed_push(&queen, "orders", "order-9", json!({ "id": 9 })).await?;
+    feed_push(&queen, "payments", "order-9", json!({ "amount": 5 })).await?;
+    feed_push(&queen, "shipments", "order-9", json!({ "carrier": "dhl" })).await?;
+    check(messages_of(&queen, "order-status", 1).await? == vec![json!({ "order": "order-9", "carrier": "dhl" })], "the three sides joined");
+    order_status.stop().await;
+    println!("ok: feed-join");
+
+    // guide:start(feed-gather)
+    let batches = Stream::from_feed(&queen, FeedSource::new().queues(["parts"]))
+        .gather(
+            Gather::count("10m", |m, _| m["data"]["of"].clone())
+                .key(|m, _| m["data"]["batch"].clone())
+                .on_complete(|got, batch| json!({ "batch": batch, "parts": got.as_array().map_or(0, |g| g.len()) }))
+                .on_timeout(|_got, missing, batch| json!({ "batch": batch, "missing": missing })),
+        )
+        .to(queen.queue("batches"))
+        .run(FeedRunOptions::new("batches"))
+        .await?;
+    // guide:end
+    for i in 0..3 {
+        feed_push(&queen, "parts", &format!("part-{i}"), json!({ "batch": "b-1", "of": 3 })).await?;
+    }
+    check(messages_of(&queen, "batches", 1).await? == vec![json!({ "batch": "b-1", "parts": 3 })], "the batch is complete");
+    batches.stop().await;
+    println!("ok: feed-gather");
+
+    feed_push(&queen, "property-settings", "p-1", json!({ "currency": "EUR" })).await?;
+    // guide:start(feed-table)
+    let priced = Stream::from_feed(&queen, FeedSource::new().queues(["bookings"]))
+        .join_table(TableJoin::new("property-settings", |m, _| m["data"]["propertyId"].clone()).select(
+            |booking, settings, _| {
+                let mut out = booking.cloned().unwrap_or_default();
+                out["currency"] = settings.map_or(Value::Null, |s| s["currency"].clone());
+                out
+            },
+        ))
+        .to(queen.queue("bookings-priced"))
+        .run(FeedRunOptions::new("bookings-priced"))
+        .await?;
+    // guide:end
+    feed_push(&queen, "bookings", "booking-1", json!({ "id": "booking-1", "propertyId": "p-1" })).await?;
+    feed_push(&queen, "bookings", "booking-2", json!({ "id": "booking-2", "propertyId": "p-2" })).await?;
+    check(
+        messages_of(&queen, "bookings-priced", 2).await?
+            == vec![
+                json!({ "id": "booking-1", "propertyId": "p-1", "currency": "EUR" }),
+                json!({ "id": "booking-2", "propertyId": "p-2", "currency": null }),
+            ],
+        "each booking with its property's currency, as of the booking",
+    );
+    priced.stop().await;
+    println!("ok: feed-table");
+
+    // guide:start(feed-steps)
+    let bursts = Stream::from_feed(&queen, FeedSource::new().queues(["clicks"]))
+        .window_tumbling(60.0)
+        .aggregate(FeedAggregate::new().count("clicks"))
+        .name("perMinute")
+        .pattern(
+            Pattern::new(
+                |m| m["data"]["clicks"].as_f64().unwrap_or(0.0) >= 100.0,
+                |m| m["data"]["clicks"].as_f64().unwrap_or(0.0) < 100.0,
+                "10m",
+            )
+            .on_match(|burst, _calm| json!({ "tenant": burst["partition"], "peak": burst["data"]["clicks"] })),
+        )
+        .to(queen.queue("bursts"))
+        .run(FeedRunOptions::new("bursts"))
+        .await?;
+    // guide:end
+    for _ in 0..3 {
+        feed_push(&queen, "clicks", "tenant-42", json!({ "page": "/" })).await?;
+    }
+    until("three clicks in the minute", || window_value(&bursts, "perMinute", "tenant-42")["clicks"] == 3).await;
+    println!("ok: feed-steps");
+
+    // guide:start(feed-event-time)
+    let unanswered = Stream::from_feed(&queen, FeedSource::new().queues(["gh-issues", "gh-comments"]).from(FeedFrom::Earliest))
+        .pattern(
+            Pattern::new(|m| m["queue"] == "gh-issues", |m| m["queue"] == "gh-comments", "1h")
+                .key(|m, _| json!(format!("{}#{}", m["partition"].as_str().unwrap_or(""), m["data"]["number"])))
+                .event_time(|m| m["data"]["created_at"].clone())
+                .allowed_lateness("5m")
+                .idle("1m")
+                .on_match(|_issue, _comment| None::<Value>) // an answered issue sends nothing
+                .on_timeout(|issue| json!({ "repo": issue["partition"], "issue": issue["data"]["number"] })),
+        )
+        .to(queen.queue("gh-unanswered"))
+        .run(FeedRunOptions::new("gh-unanswered"))
+        .await?;
+    // guide:end
+    {
+        // Event times as epoch milliseconds here (an ISO string or a Date works too).
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+        // The comment arrives first; on event time it still answers the issue.
+        feed_push(&queen, "gh-comments", "queen-mq/queen", json!({ "number": 1, "created_at": now + 60_000 })).await?;
+        feed_push(&queen, "gh-issues", "queen-mq/queen", json!({ "number": 1, "created_at": now })).await?;
+        // Both wait in the step, in event-time order, for allowed_lateness.
+        until("the two held messages", || unanswered.metrics()["steps"][0]["held"] == 2).await;
+    }
+    unanswered.stop().await;
+    println!("ok: feed-event-time");
+
+    // guide:start(feed-shards)
+    let per_tenant = Stream::from_feed(&queen, FeedSource::new().queues(["clicks"]))
+        .key_by(|m| m["data"]["tenant"].clone())
+        .window_tumbling(60.0)
+        .aggregate(FeedAggregate::new().count("clicks"))
+        .to(queen.queue("clicks-per-tenant"))
+        .run(FeedRunOptions::new("clicks-per-tenant").shards(4).shard_by(ShardBy::key(|m| m["data"]["tenant"].clone())))
+        .await?;
+    // guide:end
+    check(per_tenant.metrics()["running"] == 4, "four shards, all in this process");
+    for tenant in ["acme", "globex", "acme"] {
+        feed_push(&queen, "clicks", &format!("visitor-{tenant}"), json!({ "tenant": tenant })).await?;
+    }
+    until("a window per tenant", || per_tenant.metrics()["open"] == 2).await;
+    per_tenant.stop().await;
+    println!("ok: feed-shards");
+
+    // guide:start(feed-view)
+    let view = Stream::view(&queen, "bursts", ViewOptions::default())?;
+    let answer = view.get("perMinute", "tenant-42").await?; // { found, value, shard, position }
+    let page = view.list("perMinute", 50).await?; // { items, truncated }
+    let shards = view.status().await?; // role, position, lag and open state per shard
+    // guide:end
+    check(answer["found"] == true, &format!("the view found the window: {answer}"));
+    check(answer["value"]["windows"][0]["value"] == json!({ "clicks": 3 }), "the live window, asked from outside the process");
+    check(page["items"].as_array().map_or(0, |i| i.len()) >= 1, "the view listed the step");
+    check(shards.len() == 1 && shards[0]["role"] == "active", &format!("one active runner: {shards:?}"));
+    bursts.stop().await;
+    println!("ok: feed-view");
 
     queen.close().await?;
     println!("\nPASS");

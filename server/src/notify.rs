@@ -325,6 +325,27 @@ impl Notifier {
         }
     }
 
+    /// Wake every partition and topic watch on this node once. Apply calls it
+    /// for an entry that appended while it collected no partition to wake:
+    /// it began before the first watch was armed ([`Self::watches_partitions`]
+    /// read `false`), and a watch armed before it was applied would otherwise
+    /// sleep to its cap. A watch woken for nothing reads again. Rare (the
+    /// count of watches went from none to some during one entry), so the cost
+    /// of visiting every gate does not matter.
+    pub fn wake_all_partitions(&self) {
+        if !self.watches_partitions() {
+            return;
+        }
+        // The gates first, then each one's watchers, never both locks at once.
+        let gates: Vec<Arc<QueueGate>> = self.gates.lock_unpoisoned().values().cloned().collect();
+        for gate in gates {
+            let w = gate.watchers.lock().unwrap();
+            for n in w.values().flatten() {
+                n.notify_one();
+            }
+        }
+    }
+
     /// Register a Kafka Fetch on every partition of each queue it reads: an
     /// append to ANY partition of one of them is a permit on the watch's
     /// `Notify`. A fetch parked on quiet partitions uses it to answer early
@@ -596,6 +617,31 @@ mod tests {
         let t = std::time::Instant::now();
         assert!(w.wait(Duration::from_secs(5)).await);
         assert!(t.elapsed() < Duration::from_millis(500));
+    }
+
+    /// The wake apply sends when it cannot say which partitions an entry
+    /// appended to reaches every partition and topic watch, of every queue.
+    #[tokio::test]
+    async fn a_wake_of_every_partition_reaches_every_watch() {
+        let n = Notifier::new(false);
+        // Nothing to wake: nothing happens.
+        n.wake_all_partitions();
+        let own = n.watch_partitions(&[("q".into(), "1".into())]);
+        let topic = n.watch_topics(&["r".to_string()]);
+        let both = n.watch_partitions(&[("q".into(), "2".into()), ("r".into(), "2".into())]);
+        n.wake_all_partitions();
+        for (name, w) in [
+            ("partition", &own),
+            ("topic", &topic),
+            ("two queues", &both),
+        ] {
+            assert!(
+                w.wait(Duration::from_millis(500)).await,
+                "the {name} watch was not woken"
+            );
+        }
+        // One wake each: a watch on two queues holds one permit, not two.
+        assert!(!both.wait(Duration::from_millis(30)).await);
     }
 
     /// Dropping a watch deregisters it, and with none left the apply thread

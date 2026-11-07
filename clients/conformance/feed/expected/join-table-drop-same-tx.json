@@ -1,0 +1,111 @@
+{
+  "outputs": [
+    {
+      "queue": "c-priced",
+      "partition": "b",
+      "data": {
+        "booking": 1,
+        "currency": "CHF",
+        "pos": 1
+      },
+      "from": "S1.1/c-bookings/b#0"
+    }
+  ],
+  "records": {
+    "c-join-table-drop-same-tx": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "d54e818331f5dac0",
+      "clock": 1793955601000,
+      "units": 0,
+      "readTo": 1793955601000,
+      "caughtUp": true,
+      "open": {
+        "step1": 1
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 0,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-join-table-drop-same-tx": [
+      {
+        "kind": "table",
+        "entries": [
+          [
+            "t\u001fprop-9",
+            {
+              "v": {
+                "currency": "CHF"
+              },
+              "p": "S1.1"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-join-table-drop-same-tx",
+    "hash": "d54e818331f5dac0",
+    "reads": {
+      "queues": [
+        "c-bookings"
+      ],
+      "partitions": null,
+      "where": [],
+      "tables": [
+        "c-settings"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "table",
+        "name": "step1",
+        "config": {
+          "kind": "table",
+          "queues": [
+            "c-settings"
+          ],
+          "key": false,
+          "value": false
+        }
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-priced"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 1,
+      "outputs": 1,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

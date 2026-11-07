@@ -22,18 +22,14 @@ import { useGroupsStore } from '@/stores/groupsStore'
 import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { rate, span } from './useOverview'
+import { liveMean, perSecond, windowMean } from './words'
+import { feedQueueState } from './streams/feedStreams'
 
 export const QUEUE_MODE = '__QUEUE_MODE__'
 export const fmt = (n) => (n == null || !Number.isFinite(Number(n)) ? '–' : Math.round(Number(n)).toLocaleString('en-US'))
 export const tone = (sev) => (sev === SEV_BAD ? 'red' : sev === SEV_WARN ? 'amber' : '')
 export const groupLabel = (name) => (name === QUEUE_MODE ? 'queue mode' : name)
 
-function perSecond(minutes, n = 5) {
-  const done = (minutes || []).slice(0, -1).filter((v) => v != null)
-  const last = done.slice(-n)
-  if (!last.length) return null
-  return last.reduce((a, b) => a + b, 0) / last.length / 60
-}
 
 export function useQueuePage(name, win) {
   const qs = useQueuesStore()
@@ -55,6 +51,8 @@ export function useQueuePage(name, win) {
   const groups = computed(() => (gs.groups.value || []).filter((g) => g.queueName === name.value))
   const hour = computed(() => os.ops.value?.get(name.value) || null)
   const minutes = computed(() => os.series.value?.get(name.value) || null)
+  // Read by feed streams and by no consumer group: what it holds waits for nobody.
+  const feedOnly = computed(() => groups.value.length === 0 && Array.isArray(row.value?.feedReaders) && row.value.feedReaders.length > 0)
   const issue = computed(() => {
     if (!row.value || gs.groups.value == null) return null
     return queueAttention([row.value], gs.groups.value, linesFor, os.ops.value)[0] || null
@@ -115,7 +113,12 @@ export function useQueuePage(name, win) {
     const failPts = rows.map((r) => [mid(r.bucket), r.ackFailed / (bm * 60)])
     const anyFail = failPts.some((p) => p[1] > 0)
     const backlog = (d?.backlog || []).filter((b) => inside(b.bucket)).map((b) => [mid(b.bucket), b.pending == null ? null : Number(b.pending)])
-    const avg = (pts) => (pts.length ? pts.reduce((s, p) => s + (p[1] || 0), 0) / pts.length : null)
+    // "In a second": on a live window the rate now (the last five minutes,
+    // words.liveMean); on a past one the window's mean (words.windowMean).
+    // Both count the buckets with nothing as 0.
+    const avg = (pts) => (win.value.live
+      ? liveMean(pts, { bucketMs: bm * 60_000 })
+      : windowMean(pts, { from: win.value.from, to: win.value.to, bucketMs: bm * 60_000 }))
     const series = [
       { id: 'in', label: 'In', ink: 'in', area: true, points: inPts },
       { id: 'acked', label: 'Acked', ink: 'out', points: ackPts },
@@ -161,6 +164,9 @@ export function useQueuePage(name, win) {
     if (i?.reason === 'noReader') {
       return { tone: 'amber', badge: 'No reader', text: `${fmt(pending)} waiting, and no consumer group reads it.` }
     }
+    // Read by feed streams and no consumer group: nothing is acked, nothing waits.
+    const feed = groups.value.length === 0 ? feedQueueState(r.feedReaders, pending) : null
+    if (feed) return { tone: feed.tone, badge: feed.word, text: feed.title, feed: r.feedReaders }
     if (pending > 0 && inS != null && outS != null && outS > inS) {
       const eta = pending / (outS - inS)
       return { tone: '', badge: 'Draining', text: `${fmt(pending)} waiting, ${eta < 60 ? 'clears in under a minute' : `clears in about ${span(eta)}`}.` }
@@ -219,6 +225,14 @@ export function useQueuePage(name, win) {
         rows: list.slice(0, 5),
       }
     }
+    if (i.reason === 'feedDown') {
+      const names = (i.readers || []).map((x) => x.name)
+      return {
+        kind: 'feedDown', tone: 'amber', title: names.length === 1 ? `Its feed stream ${names[0]} does not run` : 'Its feed streams do not run',
+        line: `${names.length === 1 ? 'A feed stream reads this queue' : `${names.length} feed streams read this queue`} without a consumer group, and nothing runs ${names.length === 1 ? 'it' : 'them'} now: start ${names.length === 1 ? 'it' : 'them'} again. The Streams page says why ${names.length === 1 ? 'it' : 'they'} stopped.`,
+        streams: names,
+      }
+    }
     return {
       kind: 'noReader', tone: 'amber', title: 'Nobody reads it',
       line: i.deadOnly
@@ -239,11 +253,13 @@ export function useQueuePage(name, win) {
     else if (groups.value.length) out.push('queue mode')
     if (o.leaseTime != null) out.push(`lease ${o.leaseTime} s`)
     if (r.kafkaTopic) out.push('Kafka topic')
+    const fr = Array.isArray(r.feedReaders) ? r.feedReaders : []
+    if (fr.length) out.push(fr.length === 1 ? `read by feed stream ${fr[0].name}` : `read by ${fr.length} feed streams`)
     return out
   })
 
   return {
-    row, groups, hour, minutes, issue, verdict, caughtUp, why, facts, traffic, parts, sig,
+    row, groups, hour, minutes, issue, verdict, caughtUp, why, facts, traffic, parts, sig, feedOnly,
     loading, failed, missing, refresh, linesFor,
   }
 }

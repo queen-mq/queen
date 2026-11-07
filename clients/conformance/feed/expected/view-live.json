@@ -1,0 +1,190 @@
+{
+  "outputs": [],
+  "records": {
+    "c-view-live": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "634560a4c52c906c",
+      "clock": 1793955603000,
+      "units": 0,
+      "readTo": 1793955603000,
+      "caughtUp": true,
+      "open": {
+        "perUser": 2
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 0,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-view-live": [
+      {
+        "kind": "window",
+        "entries": [
+          [
+            "w\u001f1793955600000\u001fann",
+            {
+              "key": "ann",
+              "start": 1793955600000,
+              "end": 1793955660000,
+              "due": 1793955660000,
+              "acc": {
+                "count": 2
+              }
+            }
+          ],
+          [
+            "w\u001f1793955600000\u001fbob",
+            {
+              "key": "bob",
+              "start": 1793955600000,
+              "end": 1793955660000,
+              "due": 1793955660000,
+              "acc": {
+                "count": 1
+              }
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-view-live",
+    "hash": "634560a4c52c906c",
+    "reads": {
+      "queues": [
+        "c-visits"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "keyBy"
+        ]
+      },
+      {
+        "kind": "window",
+        "name": "perUser",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count"
+          ]
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "view-ann": {
+      "found": true,
+      "value": {
+        "key": "ann",
+        "windows": [
+          {
+            "start": "2026-11-06T09:00:00.000Z",
+            "end": "2026-11-06T09:01:00.000Z",
+            "closesAt": "2026-11-06T09:01:00.000Z",
+            "value": {
+              "count": 2
+            }
+          }
+        ]
+      },
+      "shard": 0,
+      "position": "end"
+    },
+    "view-nobody": {
+      "found": false,
+      "answered": 1
+    },
+    "view-list": {
+      "items": [
+        {
+          "key": "ann",
+          "windows": [
+            {
+              "start": "2026-11-06T09:00:00.000Z",
+              "end": "2026-11-06T09:01:00.000Z",
+              "closesAt": "2026-11-06T09:01:00.000Z",
+              "value": {
+                "count": 2
+              }
+            }
+          ]
+        },
+        {
+          "key": "bob",
+          "windows": [
+            {
+              "start": "2026-11-06T09:00:00.000Z",
+              "end": "2026-11-06T09:01:00.000Z",
+              "closesAt": "2026-11-06T09:01:00.000Z",
+              "value": {
+                "count": 1
+              }
+            }
+          ]
+        }
+      ],
+      "truncated": false,
+      "answered": 1
+    },
+    "view-bad-step": {
+      "failed": true
+    },
+    "view-status": [
+      {
+        "shard": 0,
+        "shards": 1,
+        "role": "active"
+      }
+    ],
+    "A.stopped": {
+      "emitted": 0,
+      "outputs": 0,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

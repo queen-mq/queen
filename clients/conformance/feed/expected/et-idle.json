@@ -1,0 +1,120 @@
+{
+  "outputs": [
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 3
+        }
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-et-idle": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "959a40410ddd55b3",
+      "clock": 1793955703000,
+      "units": 1,
+      "readTo": 1793955703000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 1,
+      "metas": [
+        {
+          "n": 0,
+          "w": 1793955620000,
+          "t": 1793955602000,
+          "s": 1793955702000
+        }
+      ]
+    }
+  },
+  "states": {
+    "c-et-idle": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-et-idle",
+    "hash": "959a40410ddd55b3",
+    "reads": {
+      "queues": [
+        "c-readings"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": true,
+          "allowedLateness": 0,
+          "onLate": "drop",
+          "idle": 60000
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count",
+            "sum"
+          ]
+        },
+        "clock": "event"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-et-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "before-idle": {
+      "outputs": 0
+    },
+    "A.stopped": {
+      "emitted": 1,
+      "outputs": 1,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

@@ -1,0 +1,2 @@
+# 2026-11-07 W13 smoke: the feed workload end to end, no faults, 60 s.
+w13-smoke               --workload feed --nemesis none --time-limit 60 --rate 200 --concurrency 3n

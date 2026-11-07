@@ -25,6 +25,25 @@ import * as logger from '../utils/logger.js'
 // this client cannot read is not a message it can report as stored.
 const ACCEPTED_PUSH_STATUSES = new Set(['queued', 'buffered'])
 
+/**
+ * The partition one pushed item goes to: its own `partition` when the item is
+ * an envelope (`{ partition, data }` or `{ partition, payload }`), else the
+ * builder's (`.partition(p)`, `Default` when none). One push may so carry
+ * messages for many partitions; the broker groups them per partition.
+ *
+ * Only an ENVELOPE's partition routes: a bare object is its own payload, and a
+ * payload that happens to have a `partition` field must not start moving
+ * between partitions because this client learned to read one.
+ */
+export function itemPartition(item, envelope, fallback) {
+  if (!envelope || item.partition === undefined || item.partition === null) return fallback
+  if (typeof item.partition === 'number' && Number.isFinite(item.partition)) return String(item.partition)
+  if (typeof item.partition !== 'string' || item.partition.length === 0) {
+    throw new Error(`push: an item's partition must be a non-empty string, got ${JSON.stringify(item.partition)}`)
+  }
+  return item.partition
+}
+
 // What consume() throws when the builder carries commitOnDelivery(): the loop
 // always pops leased and acks after the handler, so it cannot honour a commit
 // at delivery, and silently leasing would not be what the caller asked for.
@@ -204,6 +223,7 @@ export class QueueBuilder {
     const formattedItems = items.map(item => {
       // Determine the payload - check if property exists, not just truthy
       let payloadValue
+      const envelope = 'data' in item || 'payload' in item
       if ('data' in item) {
         payloadValue = item.data
       } else if ('payload' in item) {
@@ -214,7 +234,7 @@ export class QueueBuilder {
 
       const result = {
         queue: this.#queueName,
-        partition: this.#partition,
+        partition: itemPartition(item, envelope, this.#partition),
         payload: payloadValue,
         transactionId: item.transactionId || generateUUID()
       }
@@ -628,7 +648,8 @@ export class QueueBuilder {
     if (!this.#queueName) {
       throw new Error('Queue name is required for buffer flush')
     }
-    const queueAddress = durableAddress(this.#queueName, this.#partition)
+    // One buffer per queue: flushing it sends every partition's messages.
+    const queueAddress = durableAddress(this.#queueName)
     logger.log('QueueBuilder.flushBuffer', { queueAddress })
     await this.#bufferManager.flushBuffer(queueAddress)
   }
@@ -900,8 +921,9 @@ class PushBuilder {
     if (this.#bufferOptions) {
       // No destination: the durable push is the default sink, so this address's
       // buffer drains to POST /api/v1/push with a `{items}` body exactly as it
-      // did before sinks existed (buffer/sinks.js).
-      const queueAddress = durableAddress(this.#queueName, this.#partition)
+      // did before sinks existed (buffer/sinks.js). The address is the queue:
+      // each item carries its own partition, so one buffer serves them all.
+      const queueAddress = durableAddress(this.#queueName)
       const accepted = []
 
       try {

@@ -1,0 +1,175 @@
+{
+  "name": "window-snapshot-layers",
+  "about": "a snapshot at every commit: a full layer, then deltas; the next process loads every layer in order",
+  "source": {
+    "queues": [
+      "c-visits"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.n"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-visits-out"
+    }
+  ],
+  "timing": {
+    "snapshotEveryMillis": 0
+  },
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "a",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "v1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "b",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "v2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "a",
+              "data": {
+                "n": 4
+              },
+              "transactionId": "v3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "c",
+              "data": {
+                "n": 8
+              },
+              "transactionId": "v4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    },
+    {
+      "start": "B"
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "c",
+              "data": {
+                "n": 16
+              },
+              "transactionId": "v5"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "clock": "2026-11-06T09:01:01.000Z"
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "run": {
+    "queryId": "c-window-snapshot-layers"
+  },
+  "mode": "fake"
+}

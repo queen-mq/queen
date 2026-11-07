@@ -1,0 +1,140 @@
+{
+  "outputs": [
+    {
+      "queue": "c-cron-out",
+      "partition": "s1",
+      "data": {
+        "sensor": "s1",
+        "minute": "2026-11-06T09:00:00.000Z",
+        "acc": {
+          "n": 2,
+          "last": 21
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-cron-out",
+      "partition": "s1",
+      "data": {
+        "sensor": "s1",
+        "minute": "2026-11-06T09:01:00.000Z",
+        "acc": {
+          "n": 1,
+          "last": 22
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-cron-out",
+      "partition": "s2",
+      "data": {
+        "sensor": "s2",
+        "minute": "2026-11-06T09:00:00.000Z",
+        "acc": {
+          "n": 1,
+          "last": 5
+        }
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-window-cron": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "57e6e4ee211dc816",
+      "clock": 1793955725000,
+      "units": 3,
+      "readTo": 1793955725000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 3,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-window-cron": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-window-cron",
+    "hash": "57e6e4ee211dc816",
+    "reads": {
+      "queues": [
+        "c-temps"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "keyBy"
+        ]
+      },
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-cron",
+          "every": "minute",
+          "gracePeriod": 0,
+          "idleFlushMs": 30000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "reduce",
+          "hasInitial": true
+        },
+        "clock": "feed"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-cron-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 3,
+      "outputs": 3,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

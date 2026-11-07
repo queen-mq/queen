@@ -20,6 +20,10 @@ sourceOfTruth:
 # idle for 7 days. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-30 (rustfmt, 645be744e): the queen-kafka files this page names were
 # reformatted, line wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 For building applications, QueenMQ is the better choice: services that handle events per customer, order or conversation, microservices that hand work to each other, and steps that have to commit whole. The exception is a firehose of millions of messages a second on up to some thousands of partitions, where Kafka and Pulsar are ahead.

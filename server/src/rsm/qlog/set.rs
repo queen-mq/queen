@@ -2826,6 +2826,24 @@ impl QLogReader {
             .cloned()
     }
 
+    /// The open logs that hold queue `queue_id`'s message records, with their
+    /// log ids: its shared log when the directory has shards (which holds
+    /// other queues' records too), else each of its lane logs that exists.
+    /// What a feed read walks for the queue ([`super::QLog::feed_plan`]).
+    pub fn queue_logs(&self, queue_id: u64) -> Vec<(u64, Arc<RwLock<QLog>>)> {
+        let shards = self.shards();
+        let ids: Vec<u64> = if shards > 0 {
+            vec![shard_log_id(queue_id % shards)]
+        } else {
+            (0..self.lanes().max(1))
+                .map(|lane| lane_log_id(queue_id, lane))
+                .collect()
+        };
+        ids.into_iter()
+            .filter_map(|id| self.log(id).map(|log| (id, log)))
+            .collect()
+    }
+
     /// TEMPORARY diagnostic: [`QLog::describe`] of the log holding `pid`.
     pub fn describe(&self, queue_id: u64, pid: u64, offset: u64) -> String {
         let id = self.log_id_for(queue_id, pid);

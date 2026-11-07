@@ -446,6 +446,13 @@ pub const RAFT_TOKEN_HEADER: &str = "x-queen-raft-token";
 /// `FORWARDED_HEADER`): a request carrying it is served on the node it lands
 /// on instead of being sent on to the leader. Only a follower may set it.
 pub const RAFT_FORWARDED_HEADER: &str = "x-queen-forwarded";
+/// The broker's "relay this feed read to a follower" request
+/// (server/src/handlers/raft.rs `FEED_RELAY_HEADER`). A cluster's leader serves
+/// no feed read: it answers 421 and names its followers, which a caller behind
+/// this proxy cannot reach. The gateway sets it on every `POST /api/v1/feed` it
+/// relays, so a read that lands on the leader is served by a follower through
+/// it. A client may send it too: it asks for that relay and nothing else.
+pub const FEED_RELAY_HEADER: &str = "x-queen-feed-relay";
 /// What brokers say to EACH OTHER, which a client must never be able to say.
 /// `gateway::handle` removes every one of these from the client's request
 /// before relaying it, to the HTTP upstream and to the in-process router alike.

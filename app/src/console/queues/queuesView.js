@@ -8,6 +8,8 @@
 // stage-shaped answers. Numbers stay numbers here; the page words them with
 // the console's helpers (fmt, rate, span).
 import { queueAttention, groupAttention } from '../../composables/useAttention.js'
+import { perSecond } from '../words.js'
+import { feedQueueState } from '../streams/feedStreams.js'
 import { ackFailureSeverity, SEV_BAD, SEV_WARN } from '../../composables/useSeverity.js'
 import { queueMatches } from '../../composables/navigation.js'
 import {
@@ -27,13 +29,8 @@ const RANK = { [SEV_BAD]: 2, [SEV_WARN]: 1 }
 export const toneOf = (sev) => (sev === SEV_BAD ? 'red' : sev === SEV_WARN ? 'amber' : '')
 const byLag = (a, b) => (num(b.maxTimeLag) || 0) - (num(a.maxTimeLag) || 0)
 
-/** The last `n` complete minutes' mean a second (the Overview's rule): the last minute is still filling. */
-export function perSecond(minutes, n = 5) {
-  const done = (minutes || []).slice(0, -1).filter((v) => v != null)
-  const last = done.slice(-n)
-  if (!last.length) return null
-  return last.reduce((a, b) => a + b, 0) / last.length / 60
-}
+/** The last `n` complete minutes' mean a second, quiet minutes as 0 (words.js, every page's rule). */
+export { perSecond }
 
 /** A minute series for a small line: complete minutes only, leading gaps dropped, other gaps as 0. */
 export function sparkValues(minutes) {
@@ -57,18 +54,20 @@ export function readerOf(all = [], live = []) {
 
 /**
  * What a row's State cell says, or null when there is nothing to say.
- *   { kind: 'acks'|'lag'|'noReader'|'catching', word, tone, eta? }
+ *   { kind: 'acks'|'lag'|'noReader'|'feed'|'catching', word, tone, eta?, title? }
  * A queue behind whose readers take less than arrives is "Not draining";
  * one draining faster than it fills, with nothing flagged, is "Catching up"
- * (eta: seconds to empty at that pace).
+ * (eta: seconds to empty at that pace). `feed` is what a queue that only feed
+ * streams read says instead (feedStreams.feedQueueState).
  */
-export function stateOf({ issue = null, pending = 0, inS = null, outS = null } = {}) {
+export function stateOf({ issue = null, pending = 0, inS = null, outS = null, feed = null } = {}) {
   if (issue?.reason === 'acks') return { kind: 'acks', word: 'Failing', tone: toneOf(issue.sev) }
   if (issue?.reason === 'lag') {
     const growing = inS != null && outS != null && outS < inS
     return { kind: 'lag', word: growing ? 'Not draining' : 'Behind', tone: toneOf(issue.sev) }
   }
   if (issue?.reason === 'noReader') return { kind: 'noReader', word: 'No reader', tone: 'amber' }
+  if (feed) return feed
   if ((pending || 0) > 0 && inS != null && outS != null && outS > inS) {
     return { kind: 'catching', word: 'Catching up', tone: '', eta: pending / (outS - inS) }
   }
@@ -106,6 +105,9 @@ export function queueRows({ queues = [], groups = null, ops = null, series = nul
     const inS = minutes ? perSecond(minutes.push) : null
     const outS = minutes ? perSecond(minutes.pop) : null
     const lag = worst ? num(worst.maxTimeLag) : null
+    // Read by feed streams and by no consumer group: nothing here is acked,
+    // so nothing waits either; the State cell says who reads it.
+    const feed = all.length === 0 ? feedQueueState(q.feedReaders, pending) : null
     out.push({
       name: q.name,
       ns: typeof q.namespace === 'string' ? q.namespace : '',
@@ -123,7 +125,9 @@ export function queueRows({ queues = [], groups = null, ops = null, series = nul
       spark: minutes ? sparkValues(minutes.push) : null,
       sev: issue?.sev || null,
       issue,
-      state: stateOf({ issue, pending, inS, outS }),
+      state: stateOf({ issue, pending, inS, outS, feed }),
+      feedOnly: feed !== null,
+      feedReaders: Array.isArray(q.feedReaders) ? q.feedReaders : [],
       reader: all.length ? readerOf(all, live) : null,
       inS,
       outS,
@@ -211,7 +215,7 @@ const byRank = (rank) => (a, b) => {
  * The rows by namespace: namespaces by name, the default one ('') last; inside
  * each, the frozen order (`rank`) or names. While a filter or a segment
  * narrows them, a namespace with nothing left is not shown.
- *   [{ ns, rows, total, counts: { failing, behind, noReader, catching } }]
+ *   [{ ns, rows, total, counts: { failing, behind, noReader, feedDown, catching } }]
  */
 export function namespaceGroups(rows = [], { find = '', seg = 'all', rank = null } = {}) {
   const narrowed = !!String(find || '').trim() || (seg && seg !== 'all')
@@ -228,12 +232,13 @@ export function namespaceGroups(rows = [], { find = '', seg = 'all', rank = null
       .filter((r) => inSegment(r, seg) && queueMatches({ name: r.name, namespace: r.ns, task: r.task }, find))
       .sort(byRank(rank))
     if (narrowed && !shown.length) continue
-    const counts = { failing: 0, behind: 0, noReader: 0, catching: 0 }
+    const counts = { failing: 0, behind: 0, noReader: 0, feedDown: 0, catching: 0 }
     for (const r of shown) {
       const k = r.state?.kind
       if (k === 'acks') counts.failing++
       else if (k === 'lag') counts.behind++
       else if (k === 'noReader') counts.noReader++
+      else if (k === 'feedDown') counts.feedDown++
       else if (k === 'catching') counts.catching++
     }
     out.push({ ns, rows: shown, total: mine.length, counts, flagged: shown.some((r) => r.sev) })

@@ -1,0 +1,127 @@
+{
+  "outputs": [
+    {
+      "queue": "c-followups",
+      "partition": "order-1",
+      "data": {
+        "order": 1,
+        "paid": 30,
+        "at": "2026-11-06T09:05:00.000Z"
+      },
+      "from": "S1.4/c-payments/order-1#0"
+    },
+    {
+      "queue": "c-followups",
+      "partition": "order-2",
+      "data": {
+        "order": 2,
+        "remind": true
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-pattern-match-timeout": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "3c3026b89c4f2374",
+      "clock": 1793956561000,
+      "units": 1,
+      "readTo": 1793956561000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 1,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-pattern-match-timeout": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-pattern-match-timeout",
+    "hash": "3c3026b89c4f2374",
+    "reads": {
+      "queues": [
+        "c-orders",
+        "c-payments"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "pattern",
+        "name": "step1",
+        "config": {
+          "kind": "pattern",
+          "within": 900000,
+          "onRepeat": "keep",
+          "timeout": true
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-followups"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "waiting-2": {
+      "found": true,
+      "value": {
+        "key": "order-2",
+        "waiting": [
+          {
+            "msg": {
+              "position": "S1.2",
+              "queue": "c-orders",
+              "partition": "order-2",
+              "partitionId": "pid:c-orders/order-2",
+              "offset": 1,
+              "id": "id:S1.2/c-orders/order-2/1",
+              "transactionId": "o2",
+              "ts": "2026-11-06T09:01:00.000Z",
+              "createdAt": "2026-11-06T09:01:00.000Z",
+              "data": {
+                "id": 2
+              }
+            },
+            "deadline": "2026-11-06T09:16:00.000Z"
+          }
+        ]
+      }
+    },
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

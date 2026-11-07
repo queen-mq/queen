@@ -1,0 +1,112 @@
+{
+  "outputs": [
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "n": 1
+      },
+      "from": "S1.1/c-in/p#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "n": 2
+      },
+      "from": "S1.2/c-in/p#0"
+    }
+  ],
+  "records": {
+    "c-poison-stop": {
+      "position": "S1.3",
+      "epoch": 0,
+      "readTo": 1793955602000,
+      "caughtUp": false,
+      "stopped": {
+        "reason": "poison",
+        "error": true,
+        "attempts": 2,
+        "position": "S1.3",
+        "queue": "c-in",
+        "partition": "p",
+        "offset": 3,
+        "transactionId": "i3"
+      }
+    }
+  },
+  "states": {
+    "c-poison-stop": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-poison-stop",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [
+    {
+      "runner": "A",
+      "phase": "poison",
+      "action": "stopped",
+      "code": "feed_poison"
+    },
+    {
+      "runner": "B",
+      "phase": "poison",
+      "action": "stopped",
+      "code": "feed_poison"
+    }
+  ],
+  "failed": [],
+  "recorded": {
+    "A.done": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 1,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    },
+    "B.done": {
+      "emitted": 0,
+      "outputs": 0,
+      "effects": 0,
+      "poisoned": 1,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

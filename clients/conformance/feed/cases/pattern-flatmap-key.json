@@ -1,0 +1,156 @@
+{
+  "name": "pattern-flatmap-key",
+  "about": "after a flatMap the key sees each item: one order waits once per item; key(msg, value) picks the entity",
+  "source": {
+    "queues": [
+      "c-orders",
+      "c-stock"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "flatMap",
+      "fn": {
+        "$if": [
+          {
+            "$eq": [
+              {
+                "$get": "0.queue"
+              },
+              "c-orders"
+            ]
+          },
+          {
+            "$get": "0.data.items"
+          },
+          [
+            {
+              "$get": "0.data"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "op": "pattern",
+      "opts": {
+        "start": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-orders"
+          ]
+        },
+        "then": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-stock"
+          ]
+        },
+        "key": {
+          "$get": "1.sku"
+        },
+        "within": "10m",
+        "onMatch": {
+          "sku": {
+            "$get": "1.data.sku"
+          },
+          "order": {
+            "$get": "0.data.id"
+          },
+          "qty": {
+            "$get": "1.data.qty"
+          }
+        },
+        "onTimeout": {
+          "order": {
+            "$get": "0.data.id"
+          },
+          "noStock": true
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-stock-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "o-1",
+              "data": {
+                "id": 1,
+                "items": [
+                  {
+                    "sku": "A"
+                  },
+                  {
+                    "sku": "B"
+                  }
+                ]
+              },
+              "transactionId": "o1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:30.000Z",
+          "push": [
+            {
+              "queue": "c-stock",
+              "partition": "w1",
+              "data": {
+                "sku": "B",
+                "qty": 3
+              },
+              "transactionId": "s1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:40.000Z",
+          "push": [
+            {
+              "queue": "c-stock",
+              "partition": "w1",
+              "data": {
+                "sku": "Z",
+                "qty": 1
+              },
+              "transactionId": "s2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:10:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-pattern-flatmap-key"
+  },
+  "mode": "fake"
+}

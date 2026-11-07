@@ -93,7 +93,11 @@ const AUTH = "server/src/auth.rs";
 // position the Rust evaluates it: `GET /streams/v1/queries` (the list) is
 // read-only, right after the two state reads; the POST on the same path (the
 // register) keeps the family's read-write.
-const ACCESS_FINGERPRINT = "69617ce1f8bd3a0b";
+// 2026-11-06: re-read for the tenant feed. One new rule, in the position the
+// Rust evaluates it: `POST /api/v1/feed` (every push of the tenant's queues in
+// log order) is read-only, right after the fetch arm whose records it reads,
+// and outside the `m === "GET"` block for the same reason (a body request).
+const ACCESS_FINGERPRINT = "52ced24484907d2d";
 
 /** PLAN_PG_CONNECTORS.md — the connectors config surface (feature `pg`). */
 function isConnectorsPath(path) {
@@ -146,6 +150,10 @@ function accessLevel(method, path) {
   // PLAN_QUEEN_KAFKA.md C2: a pure read that takes no lease and moves no
   // cursor. Outside the GET block because the batch request is a body.
   if (m === "POST" && path === "/api/v1/fetch") return "read-only";
+
+  // The tenant feed: the fetch arm's records in log order across queues.
+  // Nothing leased, nothing moved; method- and path-exact.
+  if (m === "POST" && path === "/api/v1/feed") return "read-only";
 
   // The fetch arm's other twin: the offset a partition's log had reached at a
   // time. Nothing leased, nothing moved; method- and path-exact.
@@ -245,7 +253,8 @@ const GROUPS = [
   ["Operator surfaces", (p) => p.startsWith("/api/v1/system")],
   ["Cluster (raft)", (p) => p.startsWith("/api/v1/raft/")],
   ["Reads by offset", (p) =>
-    p === "/api/v1/fetch" || p === "/api/v1/fetch/offsets" || p === "/api/v1/partitions/changed"],
+    p === "/api/v1/fetch" || p === "/api/v1/fetch/offsets" || p === "/api/v1/partitions/changed" ||
+    p === "/api/v1/feed"],
   // PLAN_PG_CONNECTORS.md — the connectors config surface (feature `pg`).
   // Without this entry the family lands in "Ungrouped".
   ["Connectors", (p) => p === "/api/v1/connectors" || p.startsWith("/api/v1/connectors/")],

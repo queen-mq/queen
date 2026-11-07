@@ -1,0 +1,91 @@
+{
+  "name": "route-list-partition",
+  "about": "a list of queues gets every record; the sink partition option is a function of the value",
+  "mode": "both",
+  "source": {
+    "queues": [
+      "c-events"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "region": {
+          "$get": "0.data.region"
+        },
+        "n": {
+          "$get": "0.data.n"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": [
+        "c-copy-1",
+        "c-copy-2"
+      ],
+      "partition": {
+        "fn": {
+          "$get": "0.region"
+        }
+      }
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-events",
+              "partition": "p1",
+              "data": {
+                "region": "eu",
+                "n": 1
+              },
+              "transactionId": "e1"
+            },
+            {
+              "queue": "c-events",
+              "partition": "p2",
+              "data": {
+                "region": "us",
+                "n": 2
+              },
+              "transactionId": "e2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-events",
+              "partition": "p1",
+              "data": {
+                "region": "eu",
+                "n": 3
+              },
+              "transactionId": "e3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-route-list-partition"
+  }
+}

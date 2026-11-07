@@ -1,0 +1,182 @@
+{
+  "outputs": [
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 1
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 4
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:01:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 2
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 16
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:02:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 8
+        }
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-et-window-include": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "9718a103ffbc3d07",
+      "clock": 1793955606000,
+      "units": 5,
+      "readTo": 1793955606000,
+      "caughtUp": true,
+      "open": {
+        "step1": 1
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 5,
+      "metas": [
+        {
+          "n": 0,
+          "w": 1793955890000,
+          "t": 1793955606000,
+          "s": 1793955606000
+        }
+      ]
+    }
+  },
+  "states": {
+    "c-et-window-include": [
+      {
+        "kind": "window",
+        "entries": [
+          [
+            "w\u001f1793955900000\u001fr",
+            {
+              "key": "r",
+              "start": 1793955900000,
+              "end": 1793955960000,
+              "due": 1793955960000,
+              "acc": {
+                "count": 1,
+                "sum": 32
+              }
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-et-window-include",
+    "hash": "9718a103ffbc3d07",
+    "reads": {
+      "queues": [
+        "c-readings"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": true,
+          "allowedLateness": 10,
+          "onLate": "include"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count",
+            "sum"
+          ]
+        },
+        "clock": "event"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-et-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 5,
+      "outputs": 5,
+      "late": 2
+    }
+  },
+  "problems": []
+}

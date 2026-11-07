@@ -454,6 +454,10 @@ impl Rsm for GroupRouter {
         self.pick(tenant).leads(tenant)
     }
 
+    fn feed_followers(&self, tenant: &str) -> Vec<String> {
+        self.pick(tenant).feed_followers(tenant)
+    }
+
     fn leader_node(&self, tenant: &str) -> Option<u64> {
         self.pick(tenant).leader_node(tenant)
     }

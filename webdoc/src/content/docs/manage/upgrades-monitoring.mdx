@@ -73,6 +73,13 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146): handlers/raft.rs exports the consumer group
 # lag gauges, which real.rs samples on the leader; the metrics table names
 # queen_consumer_group_lag_seconds.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (console feed readers): useOverview.js gives a queue whose feed streams are all
+# down a "Feed down" card instead of "No reader", and its traffic legend averages the whole window. Nothing
+# this page states changes.
 ---
 
 ## Upgrade one node at a time

@@ -1,0 +1,135 @@
+{
+  "name": "window-session",
+  "about": "sessions with a 20 s gap per user: a message exactly the gap later stays in the session; quiet sessions close on the clock",
+  "source": {
+    "queues": [
+      "c-clicks"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "keyBy",
+      "fn": {
+        "$get": "0.data.user"
+      }
+    },
+    {
+      "op": "windowSession",
+      "opts": {
+        "gap": 20
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.n"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "user": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowStart"
+        },
+        "end": {
+          "$get": "1.windowEnd"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-sessions"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-clicks",
+              "partition": "p1",
+              "data": {
+                "user": "u1",
+                "n": 1
+              },
+              "transactionId": "c1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-clicks",
+              "partition": "p2",
+              "data": {
+                "user": "u2",
+                "n": 10
+              },
+              "transactionId": "c2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:20.000Z",
+          "push": [
+            {
+              "queue": "c-clicks",
+              "partition": "p1",
+              "data": {
+                "user": "u1",
+                "n": 2
+              },
+              "transactionId": "c3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:45.000Z",
+          "push": [
+            {
+              "queue": "c-clicks",
+              "partition": "p3",
+              "data": {
+                "user": "u1",
+                "n": 4
+              },
+              "transactionId": "c4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:01:30.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-window-session"
+  },
+  "mode": "fake"
+}

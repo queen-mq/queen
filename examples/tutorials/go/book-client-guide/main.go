@@ -64,6 +64,78 @@ func stopWhen(done func() bool, stop func()) {
 	stop()
 }
 
+// The two helpers the feed examples read messages with: a message's payload
+// as a map, and its queue.
+func data(m interface{}) map[string]interface{} {
+	msg, _ := m.(map[string]interface{})
+	d, _ := msg["data"].(map[string]interface{})
+	return d
+}
+
+func queueOf(m interface{}) string {
+	msg, _ := m.(map[string]interface{})
+	q, _ := msg["queue"].(string)
+	return q
+}
+
+// Test bookkeeping for the feed streams.
+var feedQueries = []string{"orders-it", "orders-by-country", "per-minute", "order-followups", "order-status",
+	"batches", "bookings-priced", "bursts", "gh-unanswered", "clicks-per-tenant"}
+
+func feedPush(ctx context.Context, client *queen.Queen, queue, partition string, payload map[string]interface{}) {
+	_, err := client.Queue(queue).Partition(partition).Push(payload).
+		TransactionID(fmt.Sprintf("%s-%s-%d", queue, partition, time.Now().UnixNano())).Execute(ctx)
+	check(err == nil, fmt.Sprint("push to ", queue, ": ", err))
+}
+
+// messagesOf reads a queue's messages back through the feed, waiting for n of them.
+func messagesOf(ctx context.Context, client *queen.Queen, queue string, n int) []interface{} {
+	for i := 0; ; i++ {
+		follow := false
+		reader, err := client.Feed(queen.FeedOptions{Queues: []string{queue}, From: "earliest", Follow: &follow})
+		check(err == nil, fmt.Sprint("feed: ", err))
+		var got []interface{}
+		for e, err := range reader.Entries(ctx) {
+			check(err == nil, fmt.Sprint("feed read: ", err))
+			got = append(got, e.Data)
+		}
+		reader.Close()
+		if len(got) >= n || i >= 100 {
+			return got
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func until(what string, cond func() bool) {
+	for i := 0; i < 100; i++ {
+		if cond() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	log.Fatalf("FAIL: timed out waiting for %s", what)
+}
+
+func sameJSON(v interface{}, want string) bool {
+	b, err := json.Marshal(v)
+	return err == nil && jsonEqual(b, want)
+}
+
+// windowValue is the value of the first open window of key in a stream's step.
+func windowValue(h streams.FeedHandle, step, key string) map[string]interface{} {
+	got := h.State(step).Get(key)
+	if found, _ := got["found"].(bool); !found {
+		return nil
+	}
+	windows, _ := got["value"].(map[string]interface{})["windows"].([]interface{})
+	if len(windows) == 0 {
+		return nil
+	}
+	value, _ := windows[0].(map[string]interface{})["value"].(map[string]interface{})
+	return value
+}
+
 // The helpers the examples call. In a real program they are yours.
 var errPermanent = errors.New("permanent failure")
 
@@ -112,7 +184,11 @@ func main() {
 	}
 	for _, q := range []string{"jobs", "emails", "events", "reviews", "prices", "metrics", "tasks",
 		"payments", "logins", "login-rate", "clicks", "sales", "sales-per-hour", "outgoing-sms",
-		"invoices"} {
+		"invoices",
+		// the feed streams' (end of this program)
+		"orders", "orders-it", "orders-IT", "orders-FR", "per-minute", "order-followups", "shipments",
+		"order-status", "parts", "batches", "bookings", "property-settings", "bookings-priced", "bursts",
+		"gh-issues", "gh-comments", "gh-unanswered", "clicks-per-tenant"} {
 		_, _ = client.Queue(q).Delete().Execute(ctx)
 	}
 
@@ -753,6 +829,300 @@ func main() {
 	limiter.Stop()
 	check(sentCount() == 3, fmt.Sprintf("the gate let the first three messages through (%d)", sentCount()))
 	fmt.Println("ok: stream-gate")
+
+	// --- Streams from the tenant feed (broker 2.8.0) --------------------------------
+	// A feed stream keeps its position and state in KV (`queen-feed`, under its
+	// queryId): an earlier run's go first, so every run starts the same way.
+	for _, id := range feedQueries {
+		page, err := client.KV().GetPrefix(ctx, "queen-feed", id, queen.KVPrefixOptions{KeysOnly: true, Limit: 1000})
+		check(err == nil, fmt.Sprint("feed keys: ", err))
+		for _, row := range page.Rows {
+			_, _ = client.KV().Delete(ctx, "queen-feed", row.Key)
+		}
+	}
+
+	// guide:start(feed-route)
+	ordersIt, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"orders"}}).
+		Where("data.country", "=", "IT").
+		Filter(func(m interface{}, _ streams.EmitCtx) (bool, error) {
+			total, _ := data(m)["total"].(float64)
+			return total >= 10, nil
+		}).
+		To(client.Queue("orders-it")).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "orders-it"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	feedPush(ctx, client, "orders", "order-1", map[string]interface{}{"id": 1, "country": "IT", "total": 20})
+	feedPush(ctx, client, "orders", "order-2", map[string]interface{}{"id": 2, "country": "IT", "total": 5})
+	feedPush(ctx, client, "orders", "order-3", map[string]interface{}{"id": 3, "country": "DE", "total": 30})
+	got := messagesOf(ctx, client, "orders-it", 1)
+	check(sameJSON(got, `[{"id":1,"total":20,"country":"IT"}]`), fmt.Sprint("only the Italian order of 10 or more: ", got))
+	_ = ordersIt.Stop(ctx)
+	fmt.Println("ok: feed-route")
+
+	// guide:start(feed-routing)
+	byCountry, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"orders"}}).
+		ToFunc(func(order, _ interface{}) (interface{}, error) {
+			return fmt.Sprintf("orders-%v", order.(map[string]interface{})["country"]), nil
+		}).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "orders-by-country"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	feedPush(ctx, client, "orders", "order-4", map[string]interface{}{"id": 4, "country": "IT", "total": 12})
+	feedPush(ctx, client, "orders", "order-5", map[string]interface{}{"id": 5, "country": "FR", "total": 8})
+	check(sameJSON(messagesOf(ctx, client, "orders-IT", 1), `[{"id":4,"country":"IT","total":12}]`), "routed to orders-IT")
+	check(sameJSON(messagesOf(ctx, client, "orders-FR", 1), `[{"id":5,"country":"FR","total":8}]`), "routed to orders-FR")
+	_ = byCountry.Stop(ctx)
+	fmt.Println("ok: feed-routing")
+
+	// guide:start(feed-window)
+	perMinute, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"orders", "payments"}}).
+		WindowTumbling(60).
+		AggregateFields(
+			streams.AggregateField{Name: "count", Fn: func(interface{}) (interface{}, error) { return 1, nil }},
+			streams.AggregateField{Name: "sum", Fn: func(e interface{}) (interface{}, error) {
+				return e.(map[string]interface{})["total"], nil
+			}},
+		).
+		Map(func(totals interface{}, w streams.EmitCtx) (interface{}, error) {
+			out := map[string]interface{}{"customer": w["key"], "minute": w["windowKey"]}
+			for k, v := range totals.(map[string]interface{}) {
+				out[k] = v
+			}
+			return out, nil
+		}).
+		To(client.Queue("per-minute")).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "per-minute"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	feedPush(ctx, client, "orders", "customer-1", map[string]interface{}{"total": 10})
+	feedPush(ctx, client, "payments", "customer-1", map[string]interface{}{"total": 5})
+	// The window closes at the end of its minute; until then the stream shows it open.
+	until("the open window", func() bool { return windowValue(perMinute, "step1", "customer-1")["count"] == float64(2) })
+	check(sameJSON(windowValue(perMinute, "step1", "customer-1"), `{"count":2,"sum":15}`), "the window's totals")
+	_ = perMinute.Stop(ctx)
+	fmt.Println("ok: feed-window")
+
+	// guide:start(feed-pattern)
+	followups, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"orders", "payments"}}).
+		Pattern(streams.PatternOptions{
+			Start:  func(m interface{}) (bool, error) { return queueOf(m) == "orders", nil },
+			Then:   func(m interface{}) (bool, error) { return queueOf(m) == "payments", nil },
+			Within: "15m",
+			OnMatch: func(order, payment interface{}) (interface{}, error) {
+				return map[string]interface{}{"order": data(order)["id"], "paid": data(payment)["amount"]}, nil
+			},
+			OnTimeout: func(order interface{}) (interface{}, error) {
+				return map[string]interface{}{"order": data(order)["id"], "remind": true}, nil
+			},
+		}).
+		To(client.Queue("order-followups")).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "order-followups"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	feedPush(ctx, client, "orders", "order-7", map[string]interface{}{"id": 7})
+	feedPush(ctx, client, "payments", "order-7", map[string]interface{}{"amount": 30})
+	check(sameJSON(messagesOf(ctx, client, "order-followups", 1), `[{"order":7,"paid":30}]`), "the order and its payment matched")
+	_ = followups.Stop(ctx)
+	fmt.Println("ok: feed-pattern")
+
+	// guide:start(feed-join)
+	orderStatus, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"orders", "payments", "shipments"}}).
+		JoinSides(streams.JoinSidesOptions{
+			Sides:  []streams.Part{{Name: "order", Queue: "orders"}, {Name: "paid", Queue: "payments"}, {Name: "sent", Queue: "shipments"}},
+			Within: "2d",
+			Select: func(got interface{}, order string) (interface{}, error) {
+				return map[string]interface{}{"order": order, "carrier": data(got.(map[string]interface{})["sent"])["carrier"]}, nil
+			},
+			OnTimeout: func(got, missing interface{}, order string) (interface{}, error) {
+				return map[string]interface{}{"order": order, "missing": missing}, nil
+			},
+		}).
+		To(client.Queue("order-status")).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "order-status"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	feedPush(ctx, client, "orders", "order-9", map[string]interface{}{"id": 9})
+	feedPush(ctx, client, "payments", "order-9", map[string]interface{}{"amount": 5})
+	feedPush(ctx, client, "shipments", "order-9", map[string]interface{}{"carrier": "dhl"})
+	check(sameJSON(messagesOf(ctx, client, "order-status", 1), `[{"order":"order-9","carrier":"dhl"}]`), "the three sides joined")
+	_ = orderStatus.Stop(ctx)
+	fmt.Println("ok: feed-join")
+
+	// guide:start(feed-gather)
+	batches, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"parts"}}).
+		Gather(streams.GatherOptions{
+			Count:  func(m, _ interface{}) (interface{}, error) { return data(m)["of"], nil },
+			Key:    func(m, _ interface{}) (interface{}, error) { return data(m)["batch"], nil },
+			Within: "10m",
+			OnComplete: func(got interface{}, batch string) (interface{}, error) {
+				return map[string]interface{}{"batch": batch, "parts": len(got.([]interface{}))}, nil
+			},
+			OnTimeout: func(got, missing interface{}, batch string) (interface{}, error) {
+				return map[string]interface{}{"batch": batch, "missing": missing}, nil
+			},
+		}).
+		To(client.Queue("batches")).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "batches"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	for i := 0; i < 3; i++ {
+		feedPush(ctx, client, "parts", fmt.Sprintf("part-%d", i), map[string]interface{}{"batch": "b-1", "of": 3})
+	}
+	check(sameJSON(messagesOf(ctx, client, "batches", 1), `[{"batch":"b-1","parts":3}]`), "the batch is complete")
+	_ = batches.Stop(ctx)
+	fmt.Println("ok: feed-gather")
+
+	feedPush(ctx, client, "property-settings", "p-1", map[string]interface{}{"currency": "EUR"})
+	// guide:start(feed-table)
+	priced, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"bookings"}}).
+		JoinTable(streams.TableOptions{
+			Queue: "property-settings",
+			On:    func(m, _ interface{}) (interface{}, error) { return data(m)["propertyId"], nil },
+			Select: func(booking, settings, _ interface{}) (interface{}, error) {
+				out := map[string]interface{}{"currency": nil}
+				for k, v := range booking.(map[string]interface{}) {
+					out[k] = v
+				}
+				if s, ok := settings.(map[string]interface{}); ok {
+					out["currency"] = s["currency"]
+				}
+				return out, nil
+			},
+		}).
+		To(client.Queue("bookings-priced")).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "bookings-priced"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	feedPush(ctx, client, "bookings", "booking-1", map[string]interface{}{"id": "booking-1", "propertyId": "p-1"})
+	feedPush(ctx, client, "bookings", "booking-2", map[string]interface{}{"id": "booking-2", "propertyId": "p-2"})
+	check(sameJSON(messagesOf(ctx, client, "bookings-priced", 2),
+		`[{"id":"booking-1","propertyId":"p-1","currency":"EUR"},{"id":"booking-2","propertyId":"p-2","currency":null}]`),
+		"each booking with its property's currency, as of the booking")
+	_ = priced.Stop(ctx)
+	fmt.Println("ok: feed-table")
+
+	// guide:start(feed-steps)
+	bursts, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"clicks"}}).
+		WindowTumbling(60).
+		AggregateFields(streams.AggregateField{Name: "clicks", Fn: func(interface{}) (interface{}, error) { return 1, nil }}).
+		Name("perMinute").
+		Pattern(streams.PatternOptions{
+			Start:  func(m interface{}) (bool, error) { c, _ := data(m)["clicks"].(float64); return c >= 100, nil },
+			Then:   func(m interface{}) (bool, error) { c, _ := data(m)["clicks"].(float64); return c < 100, nil },
+			Within: "10m",
+			OnMatch: func(burst, calm interface{}) (interface{}, error) {
+				return map[string]interface{}{"tenant": burst.(map[string]interface{})["partition"], "peak": data(burst)["clicks"]}, nil
+			},
+		}).
+		To(client.Queue("bursts")).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "bursts"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	for i := 0; i < 3; i++ {
+		feedPush(ctx, client, "clicks", "tenant-42", map[string]interface{}{"page": "/"})
+	}
+	until("three clicks in the minute", func() bool { return windowValue(bursts, "perMinute", "tenant-42")["clicks"] == float64(3) })
+	fmt.Println("ok: feed-steps")
+
+	// guide:start(feed-event-time)
+	unanswered, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"gh-issues", "gh-comments"}, From: "earliest"}).
+		Pattern(streams.PatternOptions{
+			Start: func(m interface{}) (bool, error) { return queueOf(m) == "gh-issues", nil },
+			Then:  func(m interface{}) (bool, error) { return queueOf(m) == "gh-comments", nil },
+			Key: func(m, _ interface{}) (interface{}, error) {
+				return fmt.Sprintf("%v#%v", m.(map[string]interface{})["partition"], data(m)["number"]), nil
+			},
+			Within: "1h",
+			StepTime: streams.StepTime{
+				EventTime:       func(m interface{}) (interface{}, error) { return data(m)["created_at"], nil },
+				AllowedLateness: "5m",
+				Idle:            "1m",
+			},
+			OnMatch: func(issue, comment interface{}) (interface{}, error) { return nil, nil }, // an answered issue sends nothing
+			OnTimeout: func(issue interface{}) (interface{}, error) {
+				return map[string]interface{}{"repo": issue.(map[string]interface{})["partition"], "issue": data(issue)["number"]}, nil
+			},
+		}).
+		To(client.Queue("gh-unanswered")).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "gh-unanswered"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	{
+		at := time.Now().UTC()
+		// The comment arrives first; on event time it still answers the issue.
+		feedPush(ctx, client, "gh-comments", "queen-mq/queen",
+			map[string]interface{}{"number": 1, "created_at": at.Add(time.Minute).Format(time.RFC3339Nano)})
+		feedPush(ctx, client, "gh-issues", "queen-mq/queen",
+			map[string]interface{}{"number": 1, "created_at": at.Format(time.RFC3339Nano)})
+		// Both wait in the step, in event-time order, for AllowedLateness.
+		until("the two held messages", func() bool {
+			steps := unanswered.Metrics().Steps
+			return len(steps) == 1 && steps[0].Held != nil && *steps[0].Held == 2
+		})
+	}
+	_ = unanswered.Stop(ctx)
+	fmt.Println("ok: feed-event-time")
+
+	// guide:start(feed-shards)
+	perTenant, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"clicks"}}).
+		KeyBy(func(m interface{}) (string, error) { return fmt.Sprint(data(m)["tenant"]), nil }).
+		WindowTumbling(60).
+		AggregateFields(streams.AggregateField{Name: "clicks", Fn: func(interface{}) (interface{}, error) { return 1, nil }}).
+		To(client.Queue("clicks-per-tenant")).
+		RunFeed(ctx, streams.FeedRunOptions{
+			QueryID: "clicks-per-tenant",
+			Shards:  4,
+			ShardBy: func(m interface{}) (interface{}, error) { return data(m)["tenant"], nil },
+		})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	check(perTenant.Metrics().Running == 4, fmt.Sprintf("four shards, all in this process (%d)", perTenant.Metrics().Running))
+	for _, tenant := range []string{"acme", "globex", "acme"} {
+		feedPush(ctx, client, "clicks", "visitor-"+tenant, map[string]interface{}{"tenant": tenant})
+	}
+	until("a window per tenant", func() bool { return perTenant.Metrics().Open == 2 })
+	_ = perTenant.Stop(ctx)
+	fmt.Println("ok: feed-shards")
+
+	// guide:start(feed-view)
+	view, err := streams.View(client, "bursts", streams.ViewOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	answer, _ := view.Get(ctx, "perMinute", "tenant-42") // answer["found"], answer["value"]
+	page, _ := view.List(ctx, "perMinute", 50)           // page["items"]
+	shards, _ := view.Status(ctx)                        // role, position, lag and open state per shard
+	// guide:end
+	check(answer["found"] == true, fmt.Sprint("the view found the window: ", answer))
+	windows, _ := answer["value"].(map[string]interface{})["windows"].([]interface{})
+	check(len(windows) == 1 && sameJSON(windows[0].(map[string]interface{})["value"], `{"clicks":3}`),
+		"the live window, asked from outside the process")
+	items, _ := page["items"].([]interface{})
+	check(len(items) >= 1, "the view listed the step")
+	check(len(shards) == 1 && shards[0]["role"] == "active", fmt.Sprint("one active runner: ", shards))
+	_ = bursts.Stop(ctx)
+	fmt.Println("ok: feed-view")
 
 	_ = client.Close(ctx)
 	fmt.Println("\nPASS")

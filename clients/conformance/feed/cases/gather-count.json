@@ -1,0 +1,157 @@
+{
+  "name": "gather-count",
+  "about": "gather by count: a part says how many parts its run has (the largest count wins); complete at that many; a deadline says how many are missing (null when no part said)",
+  "source": {
+    "queues": [
+      "c-parts"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "gather",
+      "opts": {
+        "count": {
+          "$get": "0.data.parts"
+        },
+        "key": {
+          "$get": "0.data.batch"
+        },
+        "within": "10m",
+        "onComplete": {
+          "batch": {
+            "$get": "1"
+          },
+          "n": {
+            "$len": {
+              "$get": "0"
+            }
+          }
+        },
+        "onTimeout": {
+          "batch": {
+            "$get": "2"
+          },
+          "missing": {
+            "$get": "1"
+          },
+          "n": {
+            "$len": {
+              "$get": "0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-batches"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-parts",
+              "partition": "a",
+              "data": {
+                "batch": "b1",
+                "parts": 3
+              },
+              "transactionId": "x1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-parts",
+              "partition": "b",
+              "data": {
+                "batch": "b1"
+              },
+              "transactionId": "x2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:06.000Z",
+          "push": [
+            {
+              "queue": "c-parts",
+              "partition": "a",
+              "data": {
+                "batch": "b2",
+                "parts": 4
+              },
+              "transactionId": "x3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:07.000Z",
+          "push": [
+            {
+              "queue": "c-parts",
+              "partition": "c",
+              "data": {
+                "batch": "b1"
+              },
+              "transactionId": "x4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:08.000Z",
+          "push": [
+            {
+              "queue": "c-parts",
+              "partition": "b",
+              "data": {
+                "batch": "b2",
+                "parts": 2
+              },
+              "transactionId": "x5"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:09.000Z",
+          "push": [
+            {
+              "queue": "c-parts",
+              "partition": "c",
+              "data": {
+                "batch": "b3"
+              },
+              "transactionId": "x6"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:10:11.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-gather-count"
+  },
+  "mode": "fake"
+}

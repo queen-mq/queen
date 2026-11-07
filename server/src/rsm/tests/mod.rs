@@ -58,6 +58,7 @@ mod edge;
 mod facade;
 mod facade_kv;
 mod facade_locks;
+mod feed;
 mod fetch_offsets;
 mod fuzz;
 mod gates;

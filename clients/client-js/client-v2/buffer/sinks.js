@@ -69,20 +69,26 @@ export function ephemeralDestination(queue, partition = null) {
 }
 
 /**
- * The durable buffer address, unchanged: `queue/partition`. Kept here next to
- * its ephemeral sibling so the two can be compared at a glance.
+ * The durable buffer address: the QUEUE. One buffer per queue (2026-11-06,
+ * before that `queue/partition`): the durable push wire carries the partition
+ * on every item, so one flush carries every partition the queue's pushes
+ * named. A queue pushed across many partitions now holds one buffer instead of
+ * one per partition -- 100 queues x 1,000 partitions were 100,000 buffers, each
+ * with its own bound, which bounded nothing. Order within a partition is kept:
+ * one drain per queue sends its buffer front to back.
  */
-export function durableAddress(queue, partition) {
-  return `${queue}/${partition}`
+export function durableAddress(queue) {
+  return queue
 }
 
 /**
  * The ephemeral buffer address: `eph:queue/partition`, or `eph:queue` when the
  * caller named no partition (which is a different destination from any named
- * one, because the broker picks, and a buffer must not merge the two).
+ * one, because the broker picks, and a buffer must not merge the two). Still
+ * one buffer per partition: the ephemeral wire hoists the partition to the
+ * envelope, so one request cannot carry two.
  *
- * Same ambiguity as the durable address -- a queue named `a/b` collides with
- * (`a`, `b`) -- inherited deliberately rather than fixed on one side only.
+ * A queue named `a/b` collides with (`a`, `b`); kept as it always was.
  */
 export function ephemeralAddress(queue, partition = null) {
   return partition === null || partition === undefined ? `eph:${queue}` : `eph:${queue}/${partition}`

@@ -1,0 +1,77 @@
+{
+  "outputs": [
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "n": 1
+      },
+      "from": "S1.1/c-in/p#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "n": 2
+      },
+      "from": "S1.2/c-in/p#0"
+    }
+  ],
+  "records": {
+    "c-poison-flaky": {
+      "position": "end",
+      "epoch": 0,
+      "readTo": 1793955602000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-poison-flaky": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-poison-flaky",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "outputs": 2,
+      "poisoned": 0,
+      "retries": 4
+    }
+  },
+  "problems": []
+}

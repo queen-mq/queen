@@ -16,6 +16,7 @@
                           HttpClient$Version
                           HttpConnectTimeoutException
                           HttpRequest
+                          HttpRequest$Builder
                           HttpRequest$BodyPublishers
                           HttpResponse$BodyHandlers
                           HttpTimeoutException)
@@ -52,11 +53,15 @@
 
 (defn request!
   "Sends one request (method :get, :post, :put or :delete; body a Clojure
-  value encoded as JSON, or nil). See the namespace doc for the result and the exceptions."
-  [^HttpClient c method url body timeout-ms]
+  value encoded as JSON, or nil), with the `headers` map's name/value pairs
+  when given. See the namespace doc for the result and the exceptions."
+  ([c method url body timeout-ms]
+   (request! c method url body timeout-ms nil))
+  ([^HttpClient c method url body timeout-ms headers]
   (let [b (-> (HttpRequest/newBuilder (URI/create url))
               (.timeout (Duration/ofMillis (long timeout-ms)))
               (.header "Content-Type" "application/json"))
+        b (reduce-kv (fn [^HttpRequest$Builder b k v] (.header b (str k) (str v))) b (or headers {}))
         b (case method
             :get    (.GET b)
             :delete (.DELETE b)
@@ -79,7 +84,7 @@
         (if (instance? ConnectException (root-cause e))
           (throw (ex-info "connection refused" {:type ::refused
                                                 :msg (str (root-cause e))}))
-          (throw (ex-info "io error" {:type ::io, :msg (str e)})))))))
+          (throw (ex-info "io error" {:type ::io, :msg (str e)}))))))))
 
 (defn health
   "GET /health of a node: the parsed body (also on 503 settling), or nil."

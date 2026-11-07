@@ -1,0 +1,174 @@
+{
+  "outputs": [
+    {
+      "queue": "c-keep-out",
+      "partition": "order-1",
+      "data": {
+        "start": {
+          "id": 1
+        },
+        "then": {}
+      },
+      "from": "S1.3/c-payments/order-1#0"
+    }
+  ],
+  "records": {
+    "c-pattern-keep": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "5985e10e7cc5a9c1",
+      "clock": 1793955602000,
+      "units": 0,
+      "readTo": 1793955602000,
+      "caughtUp": true,
+      "open": {
+        "waits": 1
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 0,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-pattern-keep": [
+      {
+        "kind": "pattern",
+        "entries": [
+          [
+            "p\u001forder-2",
+            {
+              "key": "order-2",
+              "msg": {
+                "position": "S1.2",
+                "queue": "c-orders",
+                "partition": "order-2",
+                "partitionId": "pid:c-orders/order-2",
+                "offset": 1,
+                "id": "id:S1.2/c-orders/order-2/1",
+                "transactionId": "o2",
+                "ts": "2026-11-06T09:00:01.000Z",
+                "createdAt": "2026-11-06T09:00:01.000Z",
+                "data": {
+                  "id": 2
+                }
+              },
+              "due": 1793956501001
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-pattern-keep",
+    "hash": "5985e10e7cc5a9c1",
+    "reads": {
+      "queues": [
+        "c-orders",
+        "c-payments"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "pattern",
+        "name": "waits",
+        "config": {
+          "kind": "pattern",
+          "within": 900000,
+          "onRepeat": "keep",
+          "timeout": false
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-keep-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "waits-2": {
+      "found": true,
+      "value": {
+        "key": "order-2",
+        "waiting": [
+          {
+            "msg": {
+              "position": "S1.2",
+              "queue": "c-orders",
+              "partition": "order-2",
+              "partitionId": "pid:c-orders/order-2",
+              "offset": 1,
+              "id": "id:S1.2/c-orders/order-2/1",
+              "transactionId": "o2",
+              "ts": "2026-11-06T09:00:01.000Z",
+              "createdAt": "2026-11-06T09:00:01.000Z",
+              "data": {
+                "id": 2
+              }
+            },
+            "deadline": "2026-11-06T09:15:01.000Z"
+          }
+        ]
+      }
+    },
+    "waits-list": {
+      "items": [
+        {
+          "key": "order-2",
+          "waiting": [
+            {
+              "msg": {
+                "position": "S1.2",
+                "queue": "c-orders",
+                "partition": "order-2",
+                "partitionId": "pid:c-orders/order-2",
+                "offset": 1,
+                "id": "id:S1.2/c-orders/order-2/1",
+                "transactionId": "o2",
+                "ts": "2026-11-06T09:00:01.000Z",
+                "createdAt": "2026-11-06T09:00:01.000Z",
+                "data": {
+                  "id": 2
+                }
+              },
+              "deadline": "2026-11-06T09:15:01.000Z"
+            }
+          ]
+        }
+      ],
+      "truncated": false,
+      "total": 1
+    },
+    "A.stopped": {
+      "emitted": 1,
+      "outputs": 1,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

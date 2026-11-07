@@ -18,5 +18,6 @@ are exactly-once even across retries.
 
 from .stream import Stream
 from .helpers.rate_limiter import token_bucket_gate, sliding_window_gate
+from .util.js import UNDEFINED
 
-__all__ = ["Stream", "token_bucket_gate", "sliding_window_gate"]
+__all__ = ["Stream", "token_bucket_gate", "sliding_window_gate", "UNDEFINED"]

@@ -26,6 +26,10 @@ pub enum Error {
         code: Option<ErrorCode>,
         /// Seconds from a `Retry-After` header, on a 429.
         retry_after_seconds: Option<f64>,
+        /// The whole JSON answer, when it was JSON: for a caller that reads
+        /// more than the code (a feed read refused by a leader names the
+        /// followers to ask).
+        body: Option<Box<serde_json::Value>>,
     },
 
     /// The request did not complete within the configured timeout.
@@ -44,6 +48,10 @@ pub enum Error {
     /// The caller passed something the broker would reject, caught client-side
     /// so the mistake surfaces at the call rather than as a rejected ack.
     Invalid(String),
+
+    /// A feed stream refused to run, with the JS SDK's code
+    /// (`feed_chain_changed`, `feed_layout_changed`, `feed_view_timeout`, ...).
+    Feed { code: ErrorCode, message: String },
 }
 
 impl Error {
@@ -59,7 +67,17 @@ impl Error {
     pub fn code(&self) -> Option<&ErrorCode> {
         match self {
             Self::Http { code, .. } => code.as_ref(),
+            Self::Feed { code, .. } => Some(code),
             Self::AllBackendsFailed { last, .. } => last.code(),
+            _ => None,
+        }
+    }
+
+    /// The parsed JSON body of an HTTP error, when it had one.
+    pub fn body(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Http { body, .. } => body.as_deref(),
+            Self::AllBackendsFailed { last, .. } => last.body(),
             _ => None,
         }
     }
@@ -131,6 +149,7 @@ impl fmt::Display for Error {
                 write!(f, "all {attempted} backends failed; last error: {last}")
             }
             Self::Invalid(m) => write!(f, "{m}"),
+            Self::Feed { message, .. } => write!(f, "{message}"),
         }
     }
 }
@@ -162,6 +181,7 @@ mod tests {
             message: "x".into(),
             code: None,
             retry_after_seconds: None,
+            body: None,
         }
     }
 

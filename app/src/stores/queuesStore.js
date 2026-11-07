@@ -38,6 +38,8 @@ import { queues as queuesApi } from '@/api'
 import { toNum } from '@/composables/useApi'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
 import { readSinceRefresh } from '@/composables/useRefresh'
+import { useFeedStore } from '@/stores/feedStore'
+import { withFeedReaders } from '@/console/streams/feedStreams'
 
 // Default cache TTL — long enough that incidental view-switching is free,
 // short enough that a stale list doesn't deceive the operator. Nothing
@@ -48,7 +50,12 @@ const DEFAULT_TTL_MS = 30_000
 // ---------------------------------------------------------------------------
 // Module-level singletons. Every useQueuesStore() call shares these refs.
 // ---------------------------------------------------------------------------
-const queues = ref([])
+// The broker's list as it answered, and the list every page reads: each queue
+// a feed stream reads carries `feedReaders` (feedStore), which the "nobody
+// reads it" rules check, as they check `kafkaTopic`.
+const listed = ref([])
+const feed = useFeedStore()
+const queues = computed(() => withFeedReaders(listed.value, feed.rows.value))
 const loading = ref(false)
 const error = ref(null)
 const lastFetched = ref(0)
@@ -108,7 +115,9 @@ const applyUsage = (payload) => {
 // Fetch with TTL + de-duplication.
 // ---------------------------------------------------------------------------
 const fetchQueues = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
-  const fresh = queues.value.length > 0 && Date.now() - lastFetched.value < ttlMs && readSinceRefresh(lastFetched.value)
+  // The feed streams that read the queues are read on the same schedule.
+  feed.fetchFeed({ force, ttlMs }).catch(() => {})
+  const fresh = listed.value.length > 0 && Date.now() - lastFetched.value < ttlMs && readSinceRefresh(lastFetched.value)
   if (!force && fresh) return queues.value
   if (inflight && inflightEpoch === currentEpoch()) return inflight
 
@@ -127,7 +136,7 @@ const fetchQueues = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
       // Filter out queues with empty/whitespace names — these are stale
       // entries from the partition_lookup table that should be cleaned
       // up server-side but show up in the API response today.
-      queues.value = all.filter(q => q.name && q.name.trim() !== '')
+      listed.value = all.filter(q => q.name && q.name.trim() !== '')
       // Re-read on every load, including the loads that carry none: a cell
       // that has stopped answering the usage fields must stop reporting the
       // figure it answered ten minutes ago.
@@ -154,7 +163,7 @@ const invalidate = () => { lastFetched.value = 0 }
 const reset = () => {
   inflight = null
   inflightEpoch = -1
-  queues.value = []
+  listed.value = []
   error.value = null
   lastFetched.value = 0
   loading.value = false
@@ -194,7 +203,7 @@ const tasks = computed(() => {
 })
 
 const isFresh = computed(() =>
-  queues.value.length > 0 && Date.now() - lastFetched.value < DEFAULT_TTL_MS
+  listed.value.length > 0 && Date.now() - lastFetched.value < DEFAULT_TTL_MS
 )
 
 /** Last load failed and what is on screen predates it. */

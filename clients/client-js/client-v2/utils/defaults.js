@@ -52,7 +52,15 @@ export const CLIENT_DEFAULTS = {
   // framedPop: pops ask for the messages as the stored records (frames=true)
   // and unpack them here (http/popFrames.js). A broker that does not know the
   // parameter answers JSON, which is read as always.
-  framedPop: false
+  framedPop: false,
+  // bufferMaxMessages: buffered pushes the WHOLE client may hold (every queue,
+  // in flight included) before a buffered push waits. Each buffer also has its
+  // own bound (BUFFER_DEFAULTS.maxSize); this one bounds the client however
+  // many queues it buffers for.
+  bufferMaxMessages: 100000,
+  // onBufferError(items, error): buffered messages the broker refused 5 times,
+  // given up on. Absent, they are reported on the console.
+  onBufferError: null
 }
 
 export const QUEUE_DEFAULTS = {

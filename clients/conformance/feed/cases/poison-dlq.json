@@ -1,0 +1,95 @@
+{
+  "name": "poison-dlq",
+  "about": "a dead-letter queue gets the failing message with the error and the attempts, in the commit of the others",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "$if": [
+          {
+            "$get": "0.data.bad"
+          },
+          {
+            "$throw": "bad message"
+          },
+          {
+            "n": {
+              "$get": "0.data.n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "run": {
+    "onPoison": "c-dlq",
+    "retries": 2,
+    "queryId": "c-poison-dlq"
+  },
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "q",
+              "data": {
+                "bad": true,
+                "why": "x"
+              },
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "i3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "mode": "fake"
+}

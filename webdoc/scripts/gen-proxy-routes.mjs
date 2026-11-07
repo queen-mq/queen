@@ -123,7 +123,13 @@ const PROXY_ROUTES = "proxy/src/routes.rs";
 // untouched. 2026-10-30, 2523c5591: rustfmt rewrapped `classify` and added
 // trailing commas; with whitespace and those commas removed the function is
 // the same text, so the mirror below stands.
-const CLASSIFY_FINGERPRINT = "af1e81a887c627bb";
+// 2026-11-07: `classify` grew ONE arm, for `POST /api/v1/feed` (the tenant
+// feed, which `queen.feed()` and `Stream.fromFeed()` read). It sits right after
+// the offset-for-a-time arm and answers `Consume` for the fetch's reason, only
+// more so: it hands out the payloads of every queue of the tenant at once.
+// POST on the exact path only, every other method `Blocked`. Re-read in full:
+// nothing else in the function moved, and `is_operator_route` is untouched.
+const CLASSIFY_FINGERPRINT = "4ae26555b5aecfd2";
 const OPERATOR_FINGERPRINT = "0eca43d77dc8c6f2";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -207,6 +213,11 @@ function classify(m, p) {
   // The offset for a time: the fetch arm's other twin, method-exact on the
   // exact path, below the discovery arm exactly as in the Rust.
   if (p === "/api/v1/fetch/offsets") {
+    return m === "POST" ? "consume" : "blocked";
+  }
+  // The tenant feed: the payloads of every queue at once, so the fetch's
+  // class, method-exact on the exact path, below the offset arm as in the Rust.
+  if (p === "/api/v1/feed") {
     return m === "POST" ? "consume" : "blocked";
   }
 

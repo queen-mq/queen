@@ -1,0 +1,98 @@
+{
+  "name": "pattern-default-output",
+  "about": "a pattern without onMatch sends { key, start, then } with the two messages as the step keeps them; a timeout without onTimeout sends nothing",
+  "source": {
+    "queues": [
+      "c-a",
+      "c-b"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "pattern",
+      "opts": {
+        "start": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-a"
+          ]
+        },
+        "then": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-b"
+          ]
+        },
+        "within": "1m"
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-default-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-a",
+              "partition": "e1",
+              "data": {
+                "v": 1
+              },
+              "transactionId": "a1"
+            },
+            {
+              "queue": "c-a",
+              "partition": "e2",
+              "data": {
+                "v": 2
+              },
+              "transactionId": "a2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-b",
+              "partition": "e1",
+              "data": {
+                "v": 3
+              },
+              "transactionId": "b1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:01:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-pattern-default-output"
+  },
+  "mode": "fake"
+}

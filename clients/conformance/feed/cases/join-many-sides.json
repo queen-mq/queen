@@ -1,0 +1,169 @@
+{
+  "name": "join-many-sides",
+  "about": "a join of three sides (two by queue name, one by a test) sends select(got, key) when the last is in; a deadline sends onTimeout(got, missing, key); onRepeat 'latest' replaces a side",
+  "source": {
+    "queues": [
+      "c-orders",
+      "c-payments",
+      "c-shipments"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "join",
+      "opts": {
+        "sides": {
+          "order": "c-orders",
+          "paid": "c-payments",
+          "sent": {
+            "$eq": [
+              {
+                "$get": "0.queue"
+              },
+              "c-shipments"
+            ]
+          }
+        },
+        "within": "1h",
+        "onRepeat": "latest",
+        "select": {
+          "key": {
+            "$get": "1"
+          },
+          "parts": {
+            "$keys": {
+              "$get": "0"
+            }
+          },
+          "amount": {
+            "$get": "0.paid.data.amount"
+          },
+          "carrier": {
+            "$get": "0.sent.data.carrier"
+          }
+        },
+        "onTimeout": {
+          "key": {
+            "$get": "2"
+          },
+          "missing": {
+            "$get": "1"
+          },
+          "got": {
+            "$keys": {
+              "$get": "0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-three"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "o-1",
+              "data": {
+                "id": 1
+              },
+              "transactionId": "o1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-payments",
+              "partition": "o-1",
+              "data": {
+                "amount": 5
+              },
+              "transactionId": "p1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:20.000Z",
+          "push": [
+            {
+              "queue": "c-payments",
+              "partition": "o-1",
+              "data": {
+                "amount": 6
+              },
+              "transactionId": "p1b"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:30.000Z",
+          "push": [
+            {
+              "queue": "c-shipments",
+              "partition": "o-1",
+              "data": {
+                "carrier": "gls"
+              },
+              "transactionId": "s1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:40.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "o-2",
+              "data": {
+                "id": 2
+              },
+              "transactionId": "o2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:50.000Z",
+          "push": [
+            {
+              "queue": "c-shipments",
+              "partition": "o-2",
+              "data": {
+                "carrier": "dpd"
+              },
+              "transactionId": "s2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T10:00:41.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-join-many-sides"
+  },
+  "mode": "fake"
+}

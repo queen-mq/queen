@@ -352,12 +352,15 @@ class HttpClient:
             if not response.is_success:
                 error_msg = f"HTTP {response.status_code}: {response.reason_phrase}"
                 code: Optional[str] = None
+                parsed_body: Optional[Dict[str, Any]] = None
                 try:
                     text = response.text
                     if text:
                         body_data = response.json()
                         error_msg = body_data.get("error", error_msg)
                         code = body_data.get("code")
+                        if isinstance(body_data, dict):
+                            parsed_body = body_data
                 except Exception:
                     pass
 
@@ -373,6 +376,11 @@ class HttpClient:
                 # set (code may be None) so callers can branch without
                 # string-matching the message.
                 error.code = code  # type: ignore[attr-defined]
+                # The status, and the whole answer for a caller that reads more
+                # than the code: a feed read refused by a leader (421
+                # feed_on_leader) names the followers to ask.
+                error.status = response.status_code  # type: ignore[attr-defined]
+                error.body = parsed_body  # type: ignore[attr-defined]
                 # Retry-After is read on every error, not only a 429: the
                 # broker also sends it (1 s) with each 503 it means to be
                 # retried (no leader, a leader change, an elapsed deadline),

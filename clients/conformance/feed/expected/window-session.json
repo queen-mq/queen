@@ -1,0 +1,146 @@
+{
+  "outputs": [
+    {
+      "queue": "c-sessions",
+      "partition": "u1",
+      "data": {
+        "user": "u1",
+        "start": 1793955600000,
+        "end": 1793955640000,
+        "value": {
+          "count": 2,
+          "sum": 3
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-sessions",
+      "partition": "u1",
+      "data": {
+        "user": "u1",
+        "start": 1793955645000,
+        "end": 1793955665000,
+        "value": {
+          "count": 1,
+          "sum": 4
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-sessions",
+      "partition": "u2",
+      "data": {
+        "user": "u2",
+        "start": 1793955605000,
+        "end": 1793955625000,
+        "value": {
+          "count": 1,
+          "sum": 10
+        }
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-window-session": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "98a7ad324e84f6da",
+      "clock": 1793955690000,
+      "units": 3,
+      "readTo": 1793955690000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 3,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-window-session": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-window-session",
+    "hash": "98a7ad324e84f6da",
+    "reads": {
+      "queues": [
+        "c-clicks"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "keyBy"
+        ]
+      },
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-session",
+          "gap": 20,
+          "gracePeriod": 0,
+          "idleFlushMs": 1000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count",
+            "sum"
+          ]
+        },
+        "clock": "feed"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-sessions"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 3,
+      "outputs": 3,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

@@ -1,0 +1,140 @@
+{
+  "name": "route-where-map",
+  "about": "stateless: a where pushed to the broker, map, one sink; a restart reads on without duplicates",
+  "mode": "both",
+  "source": {
+    "queues": [
+      "c-orders"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "where",
+      "args": [
+        "data.country",
+        "=",
+        "IT"
+      ]
+    },
+    {
+      "op": "map",
+      "fn": {
+        "id": {
+          "$get": "0.data.id"
+        },
+        "total": {
+          "$get": "0.data.total"
+        },
+        "from": {
+          "$get": "0.partition"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-orders-it"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "p1",
+              "data": {
+                "id": 1,
+                "country": "IT",
+                "total": 10
+              },
+              "transactionId": "o1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "p2",
+              "data": {
+                "id": 2,
+                "country": "DE",
+                "total": 20
+              },
+              "transactionId": "o2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "p1",
+              "data": {
+                "id": 3,
+                "country": "IT",
+                "total": 30
+              },
+              "transactionId": "o3"
+            },
+            {
+              "queue": "c-orders",
+              "partition": "p3",
+              "data": {
+                "id": 4,
+                "country": "IT",
+                "total": 40
+              },
+              "transactionId": "o4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "p2",
+              "data": {
+                "id": 5,
+                "country": "IT",
+                "total": 50
+              },
+              "transactionId": "o5"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "B"
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "run": {
+    "queryId": "c-route-where-map"
+  }
+}

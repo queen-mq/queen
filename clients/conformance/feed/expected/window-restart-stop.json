@@ -1,0 +1,134 @@
+{
+  "outputs": [
+    {
+      "queue": "c-visits-out",
+      "partition": "v1",
+      "data": {
+        "key": "v1",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 5
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-visits-out",
+      "partition": "v2",
+      "data": {
+        "key": "v2",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 2
+        }
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-window-restart-stop": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "a33660de0a3d664f",
+      "clock": 1793955661000,
+      "units": 2,
+      "readTo": 1793955661000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 2,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-window-restart-stop": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-window-restart-stop",
+    "hash": "a33660de0a3d664f",
+    "reads": {
+      "queues": [
+        "c-visits"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count",
+            "sum"
+          ]
+        },
+        "clock": "feed"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-visits-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 0,
+      "outputs": 0,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    },
+    "B.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

@@ -354,6 +354,27 @@ impl TransactionBuilder {
     /// So `commit().await?` alone is no longer proof that the bundle landed.
     /// `resp.success` is.
     pub async fn commit(self) -> Result<TransactionResponse> {
+        match self.commit_outcome().await? {
+            TxOutcome::Answered(resp) => {
+                if !resp.success && resp.lost_precondition().is_none() {
+                    return Err(Error::Invalid(format!(
+                        "transaction rolled back: {}",
+                        resp.error.as_deref().unwrap_or("no reason given")
+                    )));
+                }
+                Ok(resp)
+            }
+            TxOutcome::LockNotHeld(name) => Err(Error::Invalid(format!(
+                "lock '{name}' is not held; there is nothing to guard with"
+            ))),
+        }
+    }
+
+    /// Send it, and hand back every verdict as it came: a commit, or a
+    /// rollback with its `reason` (`duplicate`, `kv_precondition`, ...), or
+    /// a guard lock that holds nothing (the JS client's `LOCK_NOT_HELD`).
+    /// What the feed runner tells apart; [`Self::commit`] is built on it.
+    pub(crate) async fn commit_outcome(self) -> Result<TxOutcome> {
         if self.is_empty() {
             return Err(Error::Invalid(
                 "a transaction needs at least one operation".into(),
@@ -390,12 +411,10 @@ impl TransactionBuilder {
                 let mut kv = Vec::with_capacity(guards.len() + req.kv.len());
                 for lock in &guards {
                     lock.settled().await;
-                    kv.push(lock.guard().ok_or_else(|| {
-                        Error::Invalid(format!(
-                            "lock '{}' is not held; there is nothing to guard with",
-                            lock.name()
-                        ))
-                    })?);
+                    match lock.guard() {
+                        Some(op) => kv.push(op),
+                        None => return Ok(TxOutcome::LockNotHeld(lock.name().to_string())),
+                    }
                 }
                 kv.append(&mut req.kv);
                 req.kv = kv;
@@ -429,15 +448,17 @@ impl TransactionBuilder {
             }
             attempt += 1;
         };
-
-        if !resp.success && resp.lost_precondition().is_none() {
-            return Err(Error::Invalid(format!(
-                "transaction rolled back: {}",
-                resp.error.as_deref().unwrap_or("no reason given")
-            )));
-        }
-        Ok(resp)
+        Ok(TxOutcome::Answered(resp))
     }
+}
+
+/// What [`TransactionBuilder::commit_outcome`] got.
+#[derive(Debug)]
+pub(crate) enum TxOutcome {
+    /// The broker's answer: `success`, or a rollback with its `reason`.
+    Answered(TransactionResponse),
+    /// A guard's lock holds nothing: the bundle was not sent.
+    LockNotHeld(String),
 }
 
 fn non_empty(s: &str) -> Option<String> {

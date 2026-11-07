@@ -194,6 +194,12 @@ type SinkOperator struct {
 	// (per-value partition). Build it through NewSinkOperator so a wrong type
 	// fails loudly instead of silently falling back to the source partition.
 	PartitionResolver interface{}
+	// Queues and Route are a sink that routes (feed sources): every record to
+	// each of Queues, or where Route says (NewRoutingSink).
+	Queues []string
+	Route  RouteFn
+	// PartitionValueFn is a partition function answering any value (String() of it).
+	PartitionValueFn func(value interface{}) (interface{}, error)
 }
 
 // NewSinkOperator builds a sink with an optional partition resolver.
@@ -227,9 +233,23 @@ func (SinkOperator) Kind() string { return "sink" }
 // (see util.ConfigHashOf). Changing a resolver therefore does NOT invalidate
 // existing query state, in any of the three clients.
 func (s SinkOperator) Config() map[string]interface{} {
+	if s.Route != nil {
+		return map[string]interface{}{"kind": "sink", "route": true}
+	}
+	if s.Queues != nil {
+		return map[string]interface{}{"kind": "sink", "queues": s.Queues}
+	}
 	return map[string]interface{}{"kind": "sink", "queue": s.QueueName}
 }
-func (SinkOperator) ConfigKeys() []string { return []string{"kind", "queue"} }
+func (s SinkOperator) ConfigKeys() []string {
+	if s.Route != nil {
+		return []string{"kind", "route"}
+	}
+	if s.Queues != nil {
+		return []string{"kind", "queues"}
+	}
+	return []string{"kind", "queue"}
+}
 
 // PushItem is the shape of an entry in /streams/v1/cycle.push_items.
 type PushItem struct {
@@ -329,6 +349,8 @@ type windowBaseConfig struct {
 	EventTimeFn       EventTimeFn
 	AllowedLatenessMs int64
 	OnLatePolicy      string
+	// feed is what a feed source needs beside (feed_ops.go).
+	feed feedWindow
 }
 
 func normaliseLate(s string) string {
@@ -379,6 +401,7 @@ func NewWindowTumblingOperator(seconds float64, opts ...WindowOption) *WindowTum
 	}
 	wo := applyWindowOptions(opts...)
 	wo.IdleFlushMs = orDefault(wo.IdleFlushMs, 5000)
+	wo.finishFeed("windowTumbling")
 	return &WindowTumblingOperator{Seconds: seconds, windowBaseConfig: wo}
 }
 
@@ -445,6 +468,7 @@ func NewWindowSlidingOperator(size, slide float64, opts ...WindowOption) *Window
 	}
 	wo := applyWindowOptions(opts...)
 	wo.IdleFlushMs = orDefault(wo.IdleFlushMs, 5000)
+	wo.finishFeed("windowSliding")
 	return &WindowSlidingOperator{Size: size, Slide: slide, windowBaseConfig: wo}
 }
 
@@ -529,8 +553,10 @@ func everyToMs(every string) int64 {
 }
 
 func NewWindowCronOperator(every string, opts ...WindowOption) *WindowCronOperator {
+	everyToMs(every) // panics on a bad every, as before
 	wo := applyWindowOptions(opts...)
 	wo.IdleFlushMs = orDefault(wo.IdleFlushMs, 30_000)
+	wo.finishFeed("windowCron")
 	return &WindowCronOperator{Every: every, windowBaseConfig: wo}
 }
 
@@ -593,6 +619,7 @@ func NewWindowSessionOperator(gap float64, opts ...WindowOption) *WindowSessionO
 	}
 	wo := applyWindowOptions(opts...)
 	wo.IdleFlushMs = orDefault(wo.IdleFlushMs, 1000)
+	wo.finishFeed("windowSession")
 	return &WindowSessionOperator{Gap: gap, windowBaseConfig: wo}
 }
 
@@ -1000,6 +1027,15 @@ func cloneJSON(v interface{}) interface{} {
 type AggregateOperator struct {
 	ReduceOperator
 	Fields []string
+	// Values are the extractors as a feed runs them: any value, as JS's
+	// (a non-number counts 1 for count, 0 for sum, and nothing for min, max, avg).
+	Values []AggregateField
+}
+
+// AggregateField is one named extractor of an aggregate, in order.
+type AggregateField struct {
+	Name string
+	Fn   func(value interface{}) (interface{}, error)
 }
 
 // NewAggregateOperator builds an aggregate from a name->extractor map.
@@ -1068,9 +1104,21 @@ func NewAggregateOperator(extractors map[string]ExtractorFn, fieldOrder ...strin
 		}
 		return nxt, nil
 	}
+	values := make([]AggregateField, len(fields))
+	for i, name := range fields {
+		ex := extractors[name]
+		values[i] = AggregateField{Name: name, Fn: func(v interface{}) (interface{}, error) {
+			f, err := ex(v)
+			if err != nil {
+				return nil, err
+			}
+			return f, nil
+		}}
+	}
 	return &AggregateOperator{
 		ReduceOperator: ReduceOperator{Fn: fn, Initial: initial},
 		Fields:         fields,
+		Values:         values,
 	}
 }
 
@@ -1124,16 +1172,26 @@ func numMax(a, b interface{}) interface{} {
 type WindowOption func(*windowBaseConfig)
 
 func WithGracePeriod(seconds float64) WindowOption {
-	return func(w *windowBaseConfig) { w.GracePeriodMs = int64(seconds * msPerSec) }
+	return func(w *windowBaseConfig) {
+		w.GracePeriodMs = int64(seconds * msPerSec)
+		w.feed.graceRaw = seconds
+	}
 }
 func WithIdleFlushMs(ms int64) WindowOption {
-	return func(w *windowBaseConfig) { w.IdleFlushMs = ms }
+	return func(w *windowBaseConfig) {
+		w.IdleFlushMs = ms
+		f := float64(ms)
+		w.feed.idleFlushRaw = &f
+	}
 }
 func WithEventTime(fn EventTimeFn) WindowOption {
 	return func(w *windowBaseConfig) { w.EventTimeFn = fn }
 }
 func WithAllowedLateness(seconds float64) WindowOption {
-	return func(w *windowBaseConfig) { w.AllowedLatenessMs = int64(seconds * msPerSec) }
+	return func(w *windowBaseConfig) {
+		w.AllowedLatenessMs = int64(seconds * msPerSec)
+		w.feed.latenessRaw = seconds
+	}
 }
 func WithOnLate(policy string) WindowOption {
 	return func(w *windowBaseConfig) { w.OnLatePolicy = normaliseLate(policy) }

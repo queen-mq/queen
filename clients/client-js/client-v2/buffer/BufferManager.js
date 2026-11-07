@@ -1,8 +1,9 @@
 /**
  * Buffer manager for client-side message buffering across queues.
  *
- * One MessageBuffer per `queue/partition` address (the granularity the broker
- * fuses writes on), and exactly ONE drain loop per buffer. The drain is the
+ * One MessageBuffer per address -- a durable QUEUE (since 2026-11-06; each item
+ * carries its partition, so one flush carries every partition) or an ephemeral
+ * `queue/partition` -- and exactly ONE drain loop per buffer. The drain is the
  * only thing that sends: it takes `messageCount`-sized batches off the front,
  * POSTs them, and wakes producers parked on the buffer's maxSize bound after
  * each batch that is definitively gone.
@@ -12,6 +13,23 @@
  * lands or the buffer is stopped. That is the half of the 2026-08-20 fix that
  * removes loss on flush error; MessageBuffer's docs carry the other half
  * (blocking backpressure) and the measurements behind both.
+ *
+ * Three more guards (2026-11-06), found with a producer that pushed buffered
+ * messages to 100 queues x 1,000 partitions in a `while (true)` loop and ran
+ * Node out of memory in ten seconds without sending a request:
+ *
+ *  - A bound for the WHOLE client (`maxMessages`, default 100,000): a buffer's
+ *    own bound (4 x messageCount) bounds that buffer, and 100,000 of them bound
+ *    nothing. Past it, a buffered push waits for the drains, whatever the
+ *    number of buffers.
+ *  - A turn for the event loop every 256 buffered messages: an add that finds
+ *    room resolves at once, so a loop of them never let Node run the flush
+ *    timers or the sockets, and nothing was ever sent.
+ *  - Items the broker REFUSES inside a successful push (a per-item status
+ *    other than queued, buffered or duplicate) go back to the front and are
+ *    retried; after 5 attempts they are dropped and reported (`onError`, else
+ *    the console). Before, the drain read only whether the POST threw, so a
+ *    refused item vanished without a word.
  *
  * Deadlines: an explicit flush (`flushBuffer`, `flushAllBuffers`) may pass
  * `deadlineMillis` to bound how long it is willing to keep retrying, because
@@ -30,7 +48,73 @@
  */
 
 import { MessageBuffer } from './MessageBuffer.js'
+import { DURABLE_SINK } from './sinks.js'
 import * as logger from '../utils/logger.js'
+
+/** Messages the whole client may hold buffered before a push waits. */
+export const DEFAULT_MAX_BUFFERED_MESSAGES = 100000
+/** A buffered push gives the event loop a turn after this many. */
+const YIELD_EVERY = 256
+/** Attempts at an item the broker keeps refusing before it is dropped and reported. */
+export const MAX_REFUSED_ATTEMPTS = 5
+/** Per-item push statuses that mean the item is stored (or already was). */
+const LANDED = new Set(['queued', 'buffered', 'duplicate'])
+
+const yieldToEventLoop = () => new Promise((resolve) => {
+  if (typeof setImmediate === 'function') setImmediate(resolve)
+  else setTimeout(resolve, 0)
+})
+
+/**
+ * A durable batch with each partition's items together, in the order each
+ * partition first appears, and each partition's own order kept. The broker
+ * plans a push per partition, and the binary body has one group per run of a
+ * partition: grouping makes the fewest groups. Order ACROSS partitions was
+ * never promised.
+ */
+export function groupByPartition(batch) {
+  const groups = new Map()
+  for (const item of batch) {
+    const key = item.partition ?? 'Default'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(item)
+  }
+  if (groups.size <= 1) return batch
+  return [].concat(...groups.values())
+}
+
+/**
+ * The items of a sent batch the broker refused, by position: the answer is
+ * one result per item, in order (a binary push's answers are put back in item
+ * order by the HTTP client). A missing result counts as landed, as it always
+ * did. A counts answer (`{count, queued, duplicate, error}`) says how many but
+ * not which: then the whole batch is sent again, and what had landed comes
+ * back as a duplicate (each item keeps its transaction id).
+ */
+export function refusedItems(sent, result) {
+  if (Array.isArray(result)) {
+    const out = []
+    for (let i = 0; i < sent.length; i++) {
+      const r = result[i]
+      if (r === undefined || r === null || typeof r !== 'object') continue
+      if (r.status === undefined || LANDED.has(r.status)) continue
+      out.push({ item: sent[i], error: typeof r.error === 'string' && r.error ? r.error : `status ${JSON.stringify(r.status)}` })
+    }
+    return out
+  }
+  if (result && typeof result === 'object' && Number.isInteger(result.error) && result.error > 0) {
+    return sent.map((item) => ({ item, error: `${result.error} of ${result.count ?? sent.length} refused` }))
+  }
+  return []
+}
+
+function abortError(signal) {
+  if (signal.reason instanceof Error) return signal.reason
+  const error = new Error('Queen buffered push aborted while waiting for buffer capacity')
+  error.name = 'AbortError'
+  if (signal.reason !== undefined) error.cause = signal.reason
+  return error
+}
 
 export class BufferManager {
   #httpClient
@@ -38,13 +122,35 @@ export class BufferManager {
   #drains = new Map()  // queueAddress -> { promise, ctl } for the in-flight drain
   #flushCount = 0
   #stopped = false
+  // The client-wide bound: messages in every buffer, in flight included.
+  #maxMessages
+  #total = 0
+  #roomWaiters = []
+  #adds = 0
+  // Refused items: how many times each was sent, and what was given up on.
+  #attempts = new WeakMap()
+  #dropped = 0
+  #onError
+  #lastSaid = new Map()
 
-  constructor(httpClient) {
+  /**
+   * @param {object} httpClient
+   * @param {object} [options]
+   * @param {number} [options.maxMessages=100000] - messages the whole client may
+   *   hold buffered (every queue, in flight included) before a push waits
+   * @param {(items: object[], error: Error) => void} [options.onError] - items
+   *   the broker kept refusing, dropped after MAX_REFUSED_ATTEMPTS; without it
+   *   they are reported on the console
+   */
+  constructor(httpClient, { maxMessages, onError } = {}) {
     this.#httpClient = httpClient
+    this.#maxMessages = Number.isInteger(maxMessages) && maxMessages > 0 ? maxMessages : DEFAULT_MAX_BUFFERED_MESSAGES
+    this.#onError = typeof onError === 'function' ? onError : null
   }
 
   /**
-   * Buffer one message, waiting for room if the buffer is at its bound.
+   * Buffer one message, waiting for room if its buffer, or the client, is at
+   * its bound.
    *
    * Returns a promise: the add path is where backpressure is applied, so
    * callers MUST await it. PushBuilder does; anything that forgets would be
@@ -66,6 +172,22 @@ export class BufferManager {
       throw new Error(`Queen client is closed: message not buffered for ${queueAddress}`)
     }
 
+    // A turn for the event loop now and then: an add that finds room resolves
+    // at once, and a loop of them would never let the flush timers or the
+    // sockets run.
+    if (++this.#adds % YIELD_EVERY === 0) await yieldToEventLoop()
+
+    // The client-wide bound. Every buffer holding messages is made to drain
+    // first: the waiting add must not depend on a timer that is far away.
+    while (this.#total >= this.#maxMessages && !this.#stopped) {
+      this.#drainEverything()
+      await this.#waitForRoom(signal)
+      if (signal?.aborted) throw abortError(signal)
+    }
+    if (this.#stopped) {
+      throw new Error(`Queen client is closed: message not buffered for ${queueAddress}`)
+    }
+
     if (!this.#buffers.has(queueAddress)) {
       // The raw options go to the buffer, which fills in the defaults itself:
       // maxSize is derived from the messageCount this caller asked for, and
@@ -78,7 +200,40 @@ export class BufferManager {
 
     const buffer = this.#buffers.get(queueAddress)
     await buffer.add(formattedMessage, { signal })
+    this.#total++
     logger.log('BufferManager.addMessage', { queueAddress, messageCount: buffer.messageCount })
+  }
+
+  #waitForRoom(signal) {
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, signal, onAbort: null }
+      waiter.settle = (fn, arg) => {
+        const i = this.#roomWaiters.indexOf(waiter)
+        if (i !== -1) this.#roomWaiters.splice(i, 1)
+        if (waiter.onAbort) signal.removeEventListener('abort', waiter.onAbort)
+        fn(arg)
+      }
+      if (signal) {
+        waiter.onAbort = () => waiter.settle(reject, abortError(signal))
+        signal.addEventListener('abort', waiter.onAbort, { once: true })
+      }
+      this.#roomWaiters.push(waiter)
+    })
+  }
+
+  /** Wake every add waiting on the client-wide bound; each checks again. */
+  #wakeRoom() {
+    for (const waiter of this.#roomWaiters.slice()) waiter.settle(waiter.resolve)
+  }
+
+  /** Start (or join) the drain of every buffer that holds a message. */
+  #drainEverything() {
+    for (const [address, buffer] of this.#buffers) {
+      if (buffer.messageCount > 0 && !buffer.isFlushing) {
+        buffer.cancelTimer()
+        this.#startDrain(address)
+      }
+    }
   }
 
   /**
@@ -123,21 +278,21 @@ export class BufferManager {
   async #drain(queueAddress, buffer, ctl) {
     const { messageCount, retryDelayMillis } = buffer.options
     const { sink, queue, partition } = buffer.destination
+    const durable = sink === DURABLE_SINK
 
     try {
       while (buffer.messageCount > 0 && !buffer.isStopped) {
         const batch = buffer.takeBatch(messageCount)
         if (batch.length === 0) break
+        // A durable buffer holds every partition of its queue: send each
+        // partition's items together (their own order kept).
+        const sent = durable ? groupByPartition(batch) : batch
 
+        let result
         try {
-          const result = await this.#httpClient.post(sink.path, sink.format(queue, partition, batch))
-          logger.debug('BufferManager.drain', { queueAddress, sink: sink.name, sent: batch.length, serverResponse: result ? `${result.length || 'N/A'} items` : 'null' })
-
+          result = await this.#httpClient.post(sink.path, sink.format(queue, partition, sent))
+          logger.debug('BufferManager.drain', { queueAddress, sink: sink.name, sent: sent.length, serverResponse: result ? `${result.length || 'N/A'} items` : 'null' })
           this.#flushCount++
-          // Capacity freed. Woken here rather than at takeBatch, because a
-          // batch that fails to send goes straight back: waking on extraction
-          // would let producers refill against room that never freed.
-          buffer.wakeWaiters()
         } catch (error) {
           // NOT dropped. The batch goes back at the front, in order, and this
           // loop retries it. Before 2026-08-20 this branch logged and moved on,
@@ -153,6 +308,38 @@ export class BufferManager {
           }
 
           await buffer.sleepUnlessStopped(Math.min(retryDelayMillis, remaining))
+          continue
+        }
+
+        // The POST answered. What the broker refused inside it goes back to
+        // the front (in order) for another attempt, until it has had its share.
+        const refused = durable ? refusedItems(sent, result) : []
+        const retry = []
+        const dropped = []
+        for (const { item, error } of refused) {
+          const tries = (this.#attempts.get(item) || 1) + 1
+          if (tries > MAX_REFUSED_ATTEMPTS) {
+            dropped.push({ item, error })
+          } else {
+            this.#attempts.set(item, tries)
+            retry.push(item)
+          }
+        }
+        if (retry.length) buffer.restoreBatch(retry)
+        this.#total -= sent.length - retry.length
+        if (dropped.length) this.#reportDropped(queueAddress, dropped)
+
+        // Capacity freed. Woken here rather than at takeBatch, because a
+        // batch that fails to send goes straight back: waking on extraction
+        // would let producers refill against room that never freed.
+        buffer.wakeWaiters()
+        this.#wakeRoom()
+
+        if (retry.length) {
+          logger.error('BufferManager.drain', { queueAddress, refused: retry.length, error: refused[0].error })
+          const remaining = ctl.deadline - Date.now()
+          if (remaining <= 0) break
+          await buffer.sleepUnlessStopped(Math.min(retryDelayMillis, remaining))
         }
       }
     } finally {
@@ -165,6 +352,27 @@ export class BufferManager {
         this.#buffers.delete(queueAddress)
       }
       buffer.wakeWaiters()
+      this.#wakeRoom()
+    }
+  }
+
+  #reportDropped(queueAddress, dropped) {
+    this.#dropped += dropped.length
+    const error = new Error(
+      `${dropped.length} buffered message(s) for ${queueAddress} refused by the broker ${MAX_REFUSED_ATTEMPTS} times and dropped: ${dropped[0].error}`
+    )
+    error.items = dropped.map((d) => d.item)
+    logger.error('BufferManager.drain', { queueAddress, dropped: dropped.length, error: dropped[0].error })
+    if (this.#onError) {
+      try { this.#onError(error.items, error) } catch (_) { /* the hook's own */ }
+      return
+    }
+    // No hook: say it, once per message every 30 s -- these messages are lost.
+    const now = Date.now()
+    const last = this.#lastSaid.get(error.message)
+    if (last === undefined || now - last >= 30000) {
+      this.#lastSaid.set(error.message, now)
+      console.error(`[queen buffer] ${error.message}`)
     }
   }
 
@@ -243,7 +451,9 @@ export class BufferManager {
       activeBuffers: this.#buffers.size,
       totalBufferedMessages,
       oldestBufferAge,
-      flushesPerformed: this.#flushCount
+      flushesPerformed: this.#flushCount,
+      maxBufferedMessages: this.#maxMessages,
+      droppedMessages: this.#dropped
     }
 
     logger.log('BufferManager.getStats', stats)
@@ -269,5 +479,9 @@ export class BufferManager {
       buffer.cleanup()
     }
     this.#buffers.clear()
+    this.#total = 0
+    for (const waiter of this.#roomWaiters.slice()) {
+      waiter.settle(waiter.reject, new Error('Queen client is closed: message not buffered'))
+    }
   }
 }
