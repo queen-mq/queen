@@ -1,0 +1,21 @@
+w13-kill                --workload feed --nemesis kill --time-limit 300 --rate 200 --concurrency 3n
+w13-part                --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n
+w13-idx-kill            --workload feed --nemesis kill --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+w13-relay-kill          --workload feed --feed-relay --nemesis kill --time-limit 300 --rate 200 --concurrency 3n
+w13-relay-part          --workload feed --feed-relay --nemesis partition --time-limit 300 --rate 200 --concurrency 3n
+w13-relay-leader-deaf   --workload feed --feed-relay --nemesis leader-deaf --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-lz-kill             --workload feed --lazyfs --nemesis kill --time-limit 300 --rate 200 --concurrency 3n
+w13-pause               --workload feed --nemesis pause --time-limit 300 --rate 200 --concurrency 3n
+w13-clock               --workload feed --nemesis clock --time-limit 300 --rate 200 --concurrency 3n
+w13-leader-deaf         --workload feed --nemesis leader-deaf --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-restart             --workload feed --nemesis restart --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-membership          --workload feed --nemesis membership --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-part-kill           --workload feed --nemesis part-kill --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-pause-kill          --workload feed --nemesis pause-kill --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-bridge              --workload feed --nemesis bridge --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+w13-idx-lz-kill         --workload feed --lazyfs --nemesis kill --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+w13-idx-part            --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+w13-shards4-kill        --workload feed --nemesis kill --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_QLOG_SHARDS=4
+w13-shards4-part        --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_QLOG_SHARDS=4
+w13-onleader-part       --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_FEED_ON_LEADER=true
+w13-onleader-deaf       --workload feed --nemesis leader-deaf --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20 --env QUEEN_FEED_ON_LEADER=true

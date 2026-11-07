@@ -1,5 +1,6 @@
 # Sidecar ignore (buildx honors <dockerfile>.dockerignore) — keeps the repo-root
-# build context light. This runner COPYs only crates/ and clients/client-rust.
+# build context light. This runner COPYs crates/, clients/client-rust and the
+# feed fake broker (clients/conformance/feed/fake-broker.mjs).
 .git
 .claude
 server

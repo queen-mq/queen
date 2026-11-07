@@ -16,8 +16,10 @@ sourceOfTruth:
   - test/jepsen/src/jepsen/queen/workload/timers.clj
   - test/jepsen/src/jepsen/queen/workload/locks.clj
   - test/jepsen/src/jepsen/queen/workload/failover.clj
+  - test/jepsen/src/jepsen/queen/workload/feed.clj
   - test/jepsen/src/jepsen/queen/db.clj
   - test/jepsen/run-campaign.sh
+  - test/jepsen/run-matrix.sh
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): core.clj gained
 # --dedup-window, the dedupWindowSeconds of the test queues, and db.clj passes it to the queues it
 # configures. The default is the 24 hours every campaign on this page ran with. Nothing this page
@@ -34,13 +36,18 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-07 (the tenant feed): core.clj registers W13 `feed` and its
 # --feed-relay flag. Its campaign is still running, so the workload table and the campaigns leave it
 # out until it reports. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07, evening (the W13 campaign reported): feed.clj and run-matrix.sh,
+# which ran it, join the sources. The workload table, the campaigns, what the tests found and the
+# limits now hold W13.
 ---
 
 A million messages a second is worth nothing if one of them can go missing. We check that with
 Jepsen: five nodes, clients driving the native API as hard as they can, a nemesis that kills,
 pauses, partitions, skews clocks and cuts power, and checkers that read the whole history
 afterwards looking for a message lost, delivered twice, acked twice or seen out of order. The
-latest campaign ran 226 tests on the code of 2.7.0, on 2026-10-30 and 31, stream claims and pushes
+latest campaign, on 2026-11-07, tested the tenant feed of 2.8.0: its workload found two bugs in the
+feed's resolvedTs, and on the fixed code all 21 of its tests came back valid. The one before ran 226
+tests on the code of 2.7.0, on 2026-10-30 and 31, stream claims and pushes
 of several messages at once among them: all 226 came back valid at their first run. The latest full
 one, with a standby cluster's failover, ran 257 tests on the code of 2.6.0, all valid. That is
 evidence, not proof. Jepsen finds bugs and cannot show there are
@@ -93,6 +100,7 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | W10 `timers` | schedule, reschedule and cancel timers, and consume what fires | a timer that fires twice or early, a cancelled timer that fires, fires and cancels that do not add up to the timers created |
 | W11 `locks`, W11b `semaphore` | take a lock, or one permit of a semaphore, for 2 to 4 seconds; commit transactions that carry its guard and push to the partition it protects; renew it, release it and read its holders. No client watches a clock, so each goes on using a token whose lease ran out | a guarded transaction that commits after its permit moved on, a token with two owners, a record of a transaction that rolled back, a grant whose token is not above the one before it, a permit handed to another owner before its lease could have ended |
 | W12 `failover` | two clusters of three nodes, one [following the other](/manage/standby/): push to the source, one record or a transaction over several partitions, and keep sending writes to the standby, which must refuse them; then the source stops (a crash, a crash while the standby is 10 s behind, or a planned switch that waits for the standby), the standby is promoted, and the clients write to it | a write a standby took before its promotion; a promoted log that is not the source's, record for record, up to where it ends; a transaction there in part; a planned switch that lost a write; after a crash, an acknowledged write missing while a later one is there; a write of the promoted cluster lost; a write refused as a standby's and found in the log |
+| W13 `feed` | push to 48 partitions: one message, several of one partition, or a transaction over several partitions. Ten readers read the [tenant feed](/reference/http/#post-apiv1feed) from the start on every node, five whole and five one shard each, with small pages and short long polls, and move to the next node when a read fails. At the end one transaction covers every shard, and each reader reads until it has it. With `--feed-relay`, every read asks to be relayed, as the proxy's reads do, so a leader passes it to a follower | an acknowledged message that a reader selecting it did not read exactly once, a failed push that was read, two orders, a hole, part of a transaction or of a position in one answer, a message at or after an answer's `next` stamped at or before its resolvedTs, a resolvedTs that goes back between two answers of one node with no restart in between, stamps that do not rise with position, a shard reader that reads another shard |
 
 ## The faults
 
@@ -129,6 +137,8 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | 2.5.0 | 2026-10-17 and 18 | `3646d217f`, the server code of 2.5.0 without the boxing of `19b024495` (a lint fix in the Kafka facade), as the binary of the 2.5.0-beta.1 image | 257: the tests of the 2.4.0 campaign | 257 valid: 256 at their first run; `p11-w1-corrupt-all` failed the panic checker alone in both of its runs, on the node's own refusals to boot on a cut queue log, and both runs are valid under the fixed checker |
 | 2.6.0 | 2026-10-21 and 22 | `229a4c3ea`, the server code of 2.6.0 without its version line, as the binary of the 2.6.0-beta.6 image; the setup check and the first 91 tests of the main list ran `d3809f2e5`, 2.6.0-beta.1 | 257: the tests of the 2.5.0 campaign | 257 valid: 255 at their first run; `p11-w5-slow-lz-kill` in four reruns, after its first run's final drain ran out of time with inputs still waiting, and `p11-w3-lead-deaf` once knossos' WGL search checked the history its linear search ran out of memory on |
 | 2.7.0 | 2026-10-30 and 31 | `f9c9a37f2`, the server code of 2.7.0 without its version lines, the disk fields of `107aaaf9b`, a lint fix in the Kafka facade and the streams list of `97b0f2f8e`; the first 19 tests ran `19f3d492c` | 226: the tests of the 2.6.0 campaign without its 31 standby failovers, the stream tests closing quiet partitions under a claim | 226 valid, all at their first run |
+| Feed | 2026-11-07 | the tenant feed's code before its commit, with the fix for the first resolvedTs bug below | 43: W13 (19: one without faults; kills, power loss, partitions, pauses, clock faults, a deaf leader, restarts, membership changes, partitions with kills, pauses with kills and bridges; kills, power loss and partitions on 256 KiB log files sealed after 10 s; kills and partitions on shared logs; partitions and a deaf leader with the leader serving feed reads), then the log, the queue, the pipeline and streams (24) under kills, partitions, pauses, clock faults, a deaf leader and restarts | 40 valid; the other 3 were the second resolvedTs bug below |
+| Feed, on the fix | 2026-11-07 | the broker code of `a6e85381d`, the tenant feed's commit, with an older copy of three files of the embedded proxy, which no test runs | 21: the 18 W13 tests with faults, and 3 whose every read asks to be relayed, under kills, partitions and a deaf leader | 21 valid, all at their first run |
 
 The unknown of 2026-10-02 is W9 under bridge partitions. After the last heal, a follower's pops
 kept timing out for about 90 seconds although it had caught up, so the final reads did not finish
@@ -263,6 +273,25 @@ stream claim answered 404 from a 2.6.0 leader and 200 after it; KV reads gave th
 versions; and a 2.6.0 node led a directory 2.7.0 wrote. The verdicts and the upgrade are in
 `benchmark-queen/2026-10-30-jepsen-27/`.
 
+The feed campaign tests what 2.8.0 adds: the tenant feed, which reads every push to a tenant's
+queues in one order, by position, from any follower, with a resolvedTs below which nothing new will
+appear. Its workload, W13, checks every answer of ten readers against the pushes. Its checker ran
+first on crafted histories: a clean one, 18 with a planted bug each, and three for relayed reads.
+Before the campaign, W13 without faults found the first bug below. The campaign ran on a build
+with its fix, from 2026-11-07 11:51 to 15:57 UTC on six GCP VMs. Its 24 tests of the other
+workloads were valid, and so were 16 of its 19 W13 tests. The other three found the second bug: a
+resolvedTs that went back by one microsecond on one node, after a new leader's first entry. No test
+lost a message, read one twice or left a hole. The 18 W13 tests with faults then ran again on the
+fixed code, until 17:56 UTC, with three more whose every read asks to be relayed, as the proxy's
+reads do: a leader passes such a read to a follower instead of answering 421. All 21 were valid.
+Without that header the leader answered 421 2 to 58 times a test, and with it 0, 0 and 1 times. A
+relayed answer does not say which follower gave it, so in those three tests the checker lists a
+step back of resolvedTs and does not judge it. Each W13 test with faults acknowledged 12,867 to
+44,336 messages. The campaign ran on `run-matrix.sh`, which does not read the nodes' logs after a
+test the way `run-campaign.sh` does. Each test's panic checker read them, and its member check
+found all five nodes answering as voters at the end. The verdicts are in
+`benchmark-queen/2026-11-07-jepsen-feed/`.
+
 ## What the tests found
 
 Every row is a bug in Queen that a campaign caught, and the commit that fixed it names the test
@@ -283,6 +312,8 @@ that found it.
 | Failover | W12, partitions | a node that had led the standby and was elected again after the promotion answered `503 standby`, also to the retry of a write the cluster had already taken | `63a4805ed` |
 | Rows window | W2 and W8, power loss, on log files sealed after 10 s | an empty queue log was deleted in place; a removal that stopped half-way left its directory with no file in it, which a start takes for a log that lost its records, and every node refused to start | `6f18bd40f` |
 | Rows window and 2.2.0 | W8 and W2, kills, on log files sealed after 10 s | a follower's log was cut back and its next entry went into an empty file created for a later seq, one the cut had emptied or one sealed right after it; a search by seq skipped that file, and the node refused to start | `6f18bd40f`, `3b1a6d9bb` |
+| Feed | W13, no faults | a caught-up answer could claim a resolvedTs at or past the stamp of the entry at its `next`: the node read its applied index before its clock, and an entry that applied in between gave it the clock of the next one | `a6e85381d` |
+| Feed | W13, kills and partitions | resolvedTs went back by 1 µs on one node: an answer cut short claimed the stamp of its newest entry, and a new leader's empty entry moves the applied index but not the clock, so the next caught-up answer claimed 1 µs less | `a6e85381d` |
 
 Two of P8's failures were our own. The claim workload lost ids when a call timed out, and Elle
 reported version cycles that did not exist, because a set union in its `bifurcan` dependency
@@ -323,7 +354,11 @@ failovers included, last ran on the binary of `229a4c3ea`, 2.6.0-beta.6 (its fir
 2.6.0-beta.1); the server code of 2.6.0 adds its version line and nothing else. The 2.7.0 campaign
 ran the rest of it on `f9c9a37f2` (its first 19 tests on `19f3d492c`); the server code of 2.7.0 adds
 its version lines, disk fields in the metrics, a lint fix in the Kafka facade and a read-only list of
-streams, none of them on a path the tests drive. No test sets a completed retention above its queue's dedup window, so
+streams, none of them on a path the tests drive. The feed campaign ran W13 and 24 tests of the log,
+the queue, the pipeline and streams on the code of 2.8.0; the other workloads last ran on 2.7.0's.
+It read the feed over HTTP: the SDKs' stream runners on the feed (`Stream.fromFeed` and its ports)
+were not part of it, and its relayed reads sent the proxy's header to the nodes themselves.
+No test sets a completed retention above its queue's dedup window, so
 none of them checks the rule of 2.2.0 by which a queue's completed retention no longer extends how
 long a push keeps its row. A standby's failover
 has its own workload since 2026-10-08, on a standby that starts empty beside its source: a seeded

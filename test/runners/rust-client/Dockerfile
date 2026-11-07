@@ -23,6 +23,12 @@ WORKDIR /suite/clients/client-rust
 # eat into the suite's wall clock (and cannot be mistaken for a hung broker).
 RUN cargo test --locked --no-run
 
+# The feed stream tests (tests/feed_support) start the conformance kit's fake
+# broker with node. The script uses only node's standard library. Both come
+# after the build, so a change to the script does not rebuild the tests.
+COPY --from=node:24-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY clients/conformance/feed/fake-broker.mjs /suite/clients/conformance/feed/fake-broker.mjs
+
 COPY test/runners/common/wait-for-broker.sh /usr/local/bin/wait-for-broker
 COPY test/runners/rust-client/entrypoint.sh /entrypoint.sh
 RUN chmod +x /usr/local/bin/wait-for-broker /entrypoint.sh

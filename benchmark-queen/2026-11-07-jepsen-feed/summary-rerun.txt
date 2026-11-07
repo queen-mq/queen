@@ -1,0 +1,43 @@
+2026-11-07T15:57:46Z start w13-kill: --workload feed --nemesis kill --time-limit 300 --rate 200 --concurrency 3n
+2026-11-07T16:03:27Z done  w13-kill: valid store=/root/jepsen-relay/store/queen-feed-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-11-07T15:57:58.264178064Z log=/root/runs-w13-fix2/w13-kill.log
+2026-11-07T16:03:27Z start w13-part: --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n
+2026-11-07T16:09:15Z done  w13-part: valid store=/root/jepsen-relay/store/queen-feed-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-11-07T16:03:38.725399897Z log=/root/runs-w13-fix2/w13-part.log
+2026-11-07T16:09:15Z start w13-idx-kill: --workload feed --nemesis kill --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-11-07T16:14:52Z done  w13-idx-kill: valid store=/root/jepsen-relay/store/queen-feed-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-11-07T16:09:26.546180422Z log=/root/runs-w13-fix2/w13-idx-kill.log
+2026-11-07T16:14:52Z start w13-relay-kill: --workload feed --feed-relay --nemesis kill --time-limit 300 --rate 200 --concurrency 3n
+2026-11-07T16:20:29Z done  w13-relay-kill: valid store=/root/jepsen-relay/store/queen-feed-kill_t=one,primaries,majority,all_relay_offload=on_lanes=16/2026-11-07T16:15:03.26315564Z log=/root/runs-w13-fix2/w13-relay-kill.log
+2026-11-07T16:20:29Z start w13-relay-part: --workload feed --feed-relay --nemesis partition --time-limit 300 --rate 200 --concurrency 3n
+2026-11-07T16:26:07Z done  w13-relay-part: valid store=/root/jepsen-relay/store/queen-feed-partition_p=one,primaries,majority,majorities-ring_relay_offload=on_lanes=16/2026-11-07T16:20:40.725688624Z log=/root/runs-w13-fix2/w13-relay-part.log
+2026-11-07T16:26:07Z start w13-relay-leader-deaf: --workload feed --feed-relay --nemesis leader-deaf --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+2026-11-07T16:31:49Z done  w13-relay-leader-deaf: valid store=/root/jepsen-relay/store/queen-feed-leader-deaf_relay_offload=on_lanes=16/2026-11-07T16:26:17.800906828Z log=/root/runs-w13-fix2/w13-relay-leader-deaf.log
+2026-11-07T16:31:49Z start w13-lz-kill: --workload feed --lazyfs --nemesis kill --time-limit 300 --rate 200 --concurrency 3n
+2026-11-07T16:37:30Z done  w13-lz-kill: valid store=/root/jepsen-relay/store/queen-feed-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-11-07T16:32:00.514128389Z log=/root/runs-w13-fix2/w13-lz-kill.log
+2026-11-07T16:37:30Z start w13-pause: --workload feed --nemesis pause --time-limit 300 --rate 200 --concurrency 3n
+2026-11-07T16:42:46Z done  w13-pause: valid store=/root/jepsen-relay/store/queen-feed-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-11-07T16:37:40.909075652Z log=/root/runs-w13-fix2/w13-pause.log
+2026-11-07T16:42:46Z start w13-clock: --workload feed --nemesis clock --time-limit 300 --rate 200 --concurrency 3n
+2026-11-07T16:48:45Z done  w13-clock: valid store=/root/jepsen-relay/store/queen-feed-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-11-07T16:42:57.542245174Z log=/root/runs-w13-fix2/w13-clock.log
+2026-11-07T16:48:45Z start w13-leader-deaf: --workload feed --nemesis leader-deaf --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+2026-11-07T16:54:23Z done  w13-leader-deaf: valid store=/root/jepsen-relay/store/queen-feed-leader-deaf_offload=on_lanes=16/2026-11-07T16:48:57.190146436Z log=/root/runs-w13-fix2/w13-leader-deaf.log
+2026-11-07T16:54:23Z start w13-restart: --workload feed --nemesis restart --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+2026-11-07T17:00:00Z done  w13-restart: valid store=/root/jepsen-relay/store/queen-feed-restart_offload=on_lanes=16/2026-11-07T16:54:34.020789522Z log=/root/runs-w13-fix2/w13-restart.log
+2026-11-07T17:00:00Z start w13-membership: --workload feed --nemesis membership --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+2026-11-07T17:05:38Z done  w13-membership: valid store=/root/jepsen-relay/store/queen-feed-membership_offload=on_lanes=16/2026-11-07T17:00:12.024099711Z log=/root/runs-w13-fix2/w13-membership.log
+2026-11-07T17:05:38Z start w13-part-kill: --workload feed --nemesis part-kill --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+2026-11-07T17:11:27Z done  w13-part-kill: valid store=/root/jepsen-relay/store/queen-feed-part-kill_offload=on_lanes=16/2026-11-07T17:05:49.955259568Z log=/root/runs-w13-fix2/w13-part-kill.log
+2026-11-07T17:11:27Z start w13-pause-kill: --workload feed --nemesis pause-kill --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+2026-11-07T17:17:18Z done  w13-pause-kill: valid store=/root/jepsen-relay/store/queen-feed-pause-kill_offload=on_lanes=16/2026-11-07T17:11:46.452674565Z log=/root/runs-w13-fix2/w13-pause-kill.log
+2026-11-07T17:17:18Z start w13-bridge: --workload feed --nemesis bridge --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20
+2026-11-07T17:23:00Z done  w13-bridge: valid store=/root/jepsen-relay/store/queen-feed-bridge_offload=on_lanes=16/2026-11-07T17:17:29.325315191Z log=/root/runs-w13-fix2/w13-bridge.log
+2026-11-07T17:23:00Z start w13-idx-lz-kill: --workload feed --lazyfs --nemesis kill --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-11-07T17:28:01Z done  w13-idx-lz-kill: valid store=/root/jepsen-relay/store/queen-feed-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-11-07T17:23:11.689745178Z log=/root/runs-w13-fix2/w13-idx-lz-kill.log
+2026-11-07T17:28:01Z start w13-idx-part: --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-11-07T17:33:45Z done  w13-idx-part: valid store=/root/jepsen-relay/store/queen-feed-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144/2026-11-07T17:28:12.535386542Z log=/root/runs-w13-fix2/w13-idx-part.log
+2026-11-07T17:33:45Z start w13-shards4-kill: --workload feed --nemesis kill --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_QLOG_SHARDS=4
+2026-11-07T17:39:20Z done  w13-shards4-kill: valid store=/root/jepsen-relay/store/queen-feed-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SHARDS=4/2026-11-07T17:33:56.613382236Z log=/root/runs-w13-fix2/w13-shards4-kill.log
+2026-11-07T17:39:20Z start w13-shards4-part: --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_QLOG_SHARDS=4
+2026-11-07T17:44:59Z done  w13-shards4-part: valid store=/root/jepsen-relay/store/queen-feed-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16_env=QLOG_SHARDS=4/2026-11-07T17:39:31.879725073Z log=/root/runs-w13-fix2/w13-shards4-part.log
+2026-11-07T17:44:59Z start w13-onleader-part: --workload feed --nemesis partition --time-limit 300 --rate 200 --concurrency 3n --env QUEEN_FEED_ON_LEADER=true
+2026-11-07T17:50:38Z done  w13-onleader-part: valid store=/root/jepsen-relay/store/queen-feed-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16_env=FEED_ON_LEADER=true/2026-11-07T17:45:10.574017245Z log=/root/runs-w13-fix2/w13-onleader-part.log
+2026-11-07T17:50:38Z start w13-onleader-deaf: --workload feed --nemesis leader-deaf --time-limit 300 --rate 200 --concurrency 3n --nemesis-interval 20 --env QUEEN_FEED_ON_LEADER=true
+2026-11-07T17:56:19Z done  w13-onleader-deaf: valid store=/root/jepsen-relay/store/queen-feed-leader-deaf_offload=on_lanes=16_env=FEED_ON_LEADER=true/2026-11-07T17:50:49.428625607Z log=/root/runs-w13-fix2/w13-onleader-deaf.log
+2026-11-07T17:56:19Z matrix matrix-w13-fix2.txt finished
