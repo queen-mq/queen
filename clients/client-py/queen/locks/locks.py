@@ -396,12 +396,14 @@ class Lock:
 
     # ---- the operations -------------------------------------------------------
 
-    async def acquire(self, *, wait: Optional[Seconds] = None) -> bool:
+    async def acquire(self, *, wait: Optional[Seconds] = None, signal: Optional[asyncio.Event] = None) -> bool:
         """Take the permit. ``True`` or ``False``.
 
         With ``wait`` (seconds, or a timedelta) it keeps trying until the
         permit is free or the wait is over, coming back every 100 ms to 1 s
         with jitter. Without it, the ``wait`` the handle was created with.
+        ``signal`` (an asyncio.Event) gives the wait up early: once it is set,
+        the next pause ends at once and the answer is ``False``.
         """
         if self.held:
             return True
@@ -420,9 +422,16 @@ class Lock:
                 self._take(result, sent_at)
                 return True
             left = deadline - time.monotonic()
-            if left <= 0:
+            if left <= 0 or (signal is not None and signal.is_set()):
                 return False
-            await asyncio.sleep(min(pause * (0.75 + random.random() * 0.25), left))
+            delay = min(pause * (0.75 + random.random() * 0.25), left)
+            if signal is None:
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    await asyncio.wait_for(signal.wait(), delay)
+                except asyncio.TimeoutError:
+                    pass
             pause = min(pause * 1.5, self._retry_max)
 
     async def renew(self) -> bool:

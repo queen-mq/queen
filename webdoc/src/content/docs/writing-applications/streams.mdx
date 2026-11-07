@@ -19,6 +19,40 @@ sourceOfTruth:
   - clients/client-js/client-v2/streams/operators/GateOperator.js
   - server/src/rsm/facade/real/phase2/streams.rs
   - server/src/rsm/planner/txn.rs
+  - clients/client-js/client-v2/streams/runtime/FeedRunner.js
+  - clients/client-js/client-v2/streams/runtime/feed/windows.js
+  - clients/client-js/client-v2/streams/runtime/feed/patterns.js
+  - clients/client-js/client-v2/streams/runtime/feed/state.js
+  - clients/client-js/client-v2/streams/operators/PatternOperator.js
+  - clients/client-js/client-v2/streams/operators/SinkOperator.js
+  - clients/client-js/client-v2/streams/operators/CollectOperator.js
+  - clients/client-js/client-v2/streams/operators/TableOperator.js
+  - clients/client-js/client-v2/streams/operators/NameOperator.js
+  - clients/client-js/client-v2/streams/runtime/FeedShards.js
+  - clients/client-js/client-v2/streams/runtime/feed/pipeline.js
+  - clients/client-js/client-v2/streams/runtime/feed/snapshot.js
+  - clients/client-js/client-v2/streams/runtime/feed/collect.js
+  - clients/client-js/client-v2/streams/runtime/feed/tables.js
+  - clients/client-js/client-v2/streams/runtime/feed/query.js
+  - clients/client-js/client-v2/feed/Feed.js
+  - clients/client-js/client-v2/streams/runtime/feed/clock.js
+  - clients/client-js/client-v2/streams/operators/_windowCommon.js
+  - clients/client-js/client-v2/streams/runtime/feed/about.js
+  - app/src/console/streams/feedStreams.js
+  - clients/client-py/queen/streams/runtime/feed_runner.py
+  - clients/client-go/streams/feedrt/runner.go
+  - clients/client-rust/src/streams/feed/runner.rs
+  - clients/client-js/client-v2/streams/operators/ForeachBatchOperator.js
+# sourceOfTruth re-read 2026-11-07 (foreachBatch): ForeachBatchOperator.js and FeedRunner.js end a feed
+# stream with batches of results ({ value, ctx, id }), the position committed after the function returns;
+# a batch that fails is tried whole, then item by item for the poison policy. This page: "Results in batches".
+# sourceOfTruth re-read 2026-11-07 (feed streams in Python, Go and Rust): the three clients run the
+# JS engine with the same records, ids and snapshots (feed_runner.py, feedrt/runner.go,
+# streams/feed/runner.rs), checked by clients/conformance/feed. This page: "In four clients", and
+# the line that said JavaScript only.
+# sourceOfTruth re-read 2026-11-07 (console feed streams): FeedRunner.js writes readTo, caughtUp,
+# open, held and stopped in the position record and the description feed/about.js names; the
+# console's Streams page reads them (app/src/console/streams/feedStreams.js). This page: In the console.
 # sourceOfTruth re-read 2026-11-02 (C++ client 2.7.1): the C++ programs behind this page use the
 # 2.7.1 API, and run.sh builds them without clients/server/. Nothing this page states changes.
 verifiedBy:
@@ -36,6 +70,39 @@ verifiedBy:
 # changes.
 # sourceOfTruth re-read 2026-10-31 (97b0f2f8e): streams.rs answers GET /streams/v1/queries, the list of a
 # tenant's streams with their state and the windows past their end; the page says so under Running a stream.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): Stream.js gains Stream.fromFeed() and .where(). This page: a section on streams from the tenant feed (Stream.fromFeed, .where).
+# sourceOfTruth re-read 2026-11-06 (feed streams): FeedRunner.js, feed/*.js, PatternOperator.js and
+# SinkOperator.js add routing, windows, patterns and joins, a lock per queryId and the poison
+# policy to feed streams. This page: the feed section's subsections and its run options.
+# sourceOfTruth re-read 2026-11-06 (feed state and steps): the state is a snapshot now and then plus a
+# replay (snapshot.js), any number of steps (pipeline.js), joins of more sides and gather (collect.js),
+# table joins (tables.js), shards (FeedShards.js, the broker's shard filter), live state (query.js).
+# This page: the feed section, rewritten from "Patterns and joins" on, and its run options.
+# sourceOfTruth re-read 2026-11-07 (feed event time): clock.js gives every stateful step of a feed
+# stream a clock, the feed's or event time (eventTime, allowedLateness, onLate, idle, in
+# _windowCommon.js), and holds the messages of patterns, joins, gathers and sessions for order.
+# This page: a section on event time, and the lines of the feed section that point to it.
+# windows.js: a feed session closes the millisecond after its last message + gap, so a message
+# exactly gap later stays in it whatever the gracePeriod. This page: one line under "Windows on
+# the feed's clock".
+# clock.js after the code review: a step fed by a step on event time follows that step's floor (no idle
+# of its own); a message a pattern, join or gather ignores needs no time; windows take allowedLateness as a
+# duration too. This page: the Event time section's table and its paragraphs on chained steps and idle.
+# sourceOfTruth re-read 2026-11-07 (snapshots in layers and pieces, counts kept): snapshot.js writes a
+# full layer then deltas of the keys changed (state.js `touched`), in pieces of ~256 KB of JSON deflated
+# off the main thread, and reads them piece by piece; format 1 still loads. FeedRunner.js: a delta when
+# due (snapshotMaxEntries no longer waits for the state's size), a full layer when the deltas weigh as much
+# or at 16 layers; metrics() and status() read counts state.js keeps. This page: the State section's text,
+# table and Why, a line in Live state, and the snapshotMaxEntries row.
+# feed.rs + qlog/mod.rs: a shard reads its records of each sealed queue-log file through the file's
+# index. This page: the Shards paragraph.
+# FeedRunner.js + pipeline.js: closes due at one time commit in the middle of the close once
+# maxPendingOutputs results wait; the record and the snapshot pointer count them (`units`), and a replay
+# stops at that count. This page: a paragraph in the State section.
+# sourceOfTruth re-read 2026-11-07 (what the SDK ports found): pipeline.js refuses allowedLateness and
+# onLate: 'include' on a window on the feed's clock, as on a pattern (a window ignored them);
+# snapshot.js counts a piece's limit in UTF-8 bytes; FeedRunner.js counts metrics().emitted once for
+# a unit that was retried. This page: the onLate row of the Event time table.
 ---
 
 A stream reads a queue and writes its results to another. The partition is the key, so each customer gets its own windows. Streams are in the JavaScript, Python, Go and Rust clients; PHP and C++ have none, and a stream reads any queue, whoever pushes to it. Like a new group it starts at the tail: push a few more orders and a result arrives a minute later.
@@ -109,11 +176,402 @@ A window on a partition that goes quiet still closes on time. The client keeps t
 
 <Why>a session per visit or per trace ends with silence, not with a message. If closing it waited for the next message, a deploy or a crash would leave it open for good, and its result would never be sent.</Why>
 
-`GET /streams/v1/queries` (broker 2.7) lists a tenant's streams: each with its source and sink queues and what its state holds now, the partitions with state, the open windows, and the windows that ended more than five minutes ago and never closed. The dashboard's Streams page reads it.
+`GET /streams/v1/queries` (broker 2.7) lists a tenant's streams: each with its source and sink queues and what its state holds now, the partitions with state, the open windows, and the windows that ended more than five minutes ago and never closed. The console's Streams page reads it, and lists feed streams beside them (see [In the console](#in-the-console)).
 
 <Why>a window that never closes is a result that was never sent. It has to show before someone asks where the number went.</Why>
 
 Push, consume, ack, replay, fetch, transactions, KV, timers, locks, streams and ephemeral queues all combine. Build on them and Queen carries the logic you would otherwise write around a broker. [Patterns](/patterns/) shows them combined, one real case each.
+
+## Streams from the tenant feed
+
+`Stream.fromFeed(queen, { queues })` reads the [tenant feed](/reference/http/#post-apiv1feed)
+instead of one queue: every push to the queues named, or to all of them, in the order the log
+committed them, read from followers. `.where(field, op, value)` keeps the messages where a
+condition holds and is sent to the broker, so a message that fails it never crosses the network;
+`.filter(fn)` runs your own code where the stream runs. Feed streams are in the JavaScript,
+Python, Go and Rust clients (see [In four clients](#in-four-clients)).
+
+<SdkCode id="feed-route" />
+
+The stream keeps its position in KV (namespace `queen-feed`, key the `queryId`) and commits it with
+its outputs in one transaction, with `expect` on its version: a restart carries on where it
+stopped, and nothing is committed twice. A new query starts at `from`: `'now'` (the default, the
+position when `run()` resolves), `'earliest'`, a position, or `since` a time. Its outputs carry
+transaction ids that start with the query's own prefix, and its reads leave those out: a stream
+never reads back what it wrote, whatever queues it reads. On a feed, `.foreach()` runs before the
+position moves, so at least once; `.gate()` runs on queue sources only.
+
+<Why>a router or a mirror over many queues should not need a consumer group for each queue, and
+with its position in the same commit as its output it moves each message once.</Why>
+
+### In four clients
+
+The JavaScript, Python, Go and Rust clients run the same engine: the same results for the same
+messages, the same output ids and the same records in KV. A stream one client runs can be stopped,
+or die, and go on in another client with the same `queryId`, open windows and waiting patterns
+included. `Stream.view` in any client asks a runner of any client. PHP and C++ have no streams
+client.
+
+| | JavaScript | Python | Go | Rust |
+| --- | --- | --- | --- | --- |
+| Read the feed | `queen.feed()` | `client.feed()` | `q.Feed()` | `queen.feed()` |
+| A stream on it | `Stream.fromFeed()` | `Stream.from_feed()` | `streams.FromFeed()` | `Stream::from_feed()` |
+| Run it | `.run()` | `.run()` | `.RunFeed()` | `.run()` |
+| Live state | `Stream.view()` | `Stream.view()` | `streams.View()` | `Stream::view()` |
+| Results in batches | `.foreachBatch()` | `.foreach_batch()` | `.ForeachBatch()` | `.foreach_batch()` |
+
+The options keep their meaning and their defaults in each client, in its own spelling
+(`onPoison` is `on_poison` in Python, `OnPoison` in Go). Each client's README lists them.
+
+<Why>a stream belongs with the service that owns its data, in that service's language. Moving it
+must not lose its state or send a result twice. The price is that the four clients move together:
+the same cases (`clients/conformance/feed` in the repository) run against each of them.</Why>
+
+### Routing
+
+`.to()` takes one queue, a list of queues (each result goes to all of them), or a function that
+picks per result: a queue name or builder, `{ queue, partition }`, a list of those, or `null` for
+nowhere. Every output of a commit goes in one transaction with the position.
+
+<SdkCode id="feed-routing" />
+
+<Why>one router that sends each order to the queue of its country replaces a consumer per country,
+and with all of its outputs in one commit a crash never sends half of them.</Why>
+
+### Results in batches
+
+`.foreachBatch(fn, options)` ends a stream like `.foreach()`, but calls `fn` with many results at
+once: a list of items `{ value, ctx, id }`. `value` and `ctx` are what `.foreach()` gets; `id` is
+the id a `.to()` output of that result would have, the same each time the result is delivered. The
+position moves in the commit right after `fn` returns, so a crash before then delivers the batch
+again, with the same ids: write the batch with the ids as keys (an upsert), and the second delivery
+changes nothing.
+
+<SdkCode id="feed-batch" />
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `maxItems` | 1000 | At most this many items in one call; a read with more makes more calls. |
+| `maxWaitMillis` | 0 | 0: one batch per read. More: the batch also waits for the next reads, until it is full or its first item has waited this long. Nothing commits while it waits. |
+
+A batch that throws is tried again whole (`retries`), then one item at a time, so `onPoison` meets
+only the item that fails: `'skip'` leaves it out, a dead-letter queue gets
+`{ queryId, attempts, error, item }`, and `'stop'` commits nothing of the batch and stops before it
+(the next start delivers it again). `stop()` delivers the batch that waits before the stream stops.
+On a queue source, use `.foreach()`.
+
+<Why>a database or an API takes a thousand rows in one call much faster than in a thousand calls.
+With the position saved only after the call, a crash loses no row, and the ids make the second
+delivery harmless.</Why>
+
+### Windows on the feed's clock
+
+A feed stream takes the windows of a queue stream (`windowTumbling`, `windowSliding`,
+`windowSession`, `windowCron`) with `reduce` or `aggregate`, and `keyBy`. The key is the partition
+name by default, so `customer-42` of `orders` and `customer-42` of `payments` count together. A
+message exactly `gap` after the last one is still in its session, with or without `gracePeriod`.
+
+<SdkCode id="feed-window" />
+
+A message's time is when the log committed it, one clock for every queue. That clock only moves
+forward, and once a read has answered `resolvedTs`, nothing committed later is older: a window
+closes when the clock passes its end, and no message of it can arrive after. When the feed is
+quiet, the stream writes its position when a window ends; the write moves the broker's clock, and
+the next read closes the window on time. With `eventTime` the windows close on the watermark
+instead: see [Event time](#event-time).
+
+<Why>a window over several queues needs a clock they share. With the log's own, a quiet partition
+closes on time, and no message comes in late.</Why>
+
+### Patterns and joins
+
+`.pattern()` waits, per entity, for a second message after a first one; `.join()` pairs the
+messages of an entity, two sides or more, in any order. Both run on the feed's clock, or on
+[event time](#event-time).
+
+<SdkCode id="feed-pattern" />
+
+A join of more sides names them, each with a test or a queue name; the last one to arrive sends
+`select(got, key)`, and a deadline that passes first sends `onTimeout(got, missing, key)`, with the
+names of the sides that never came.
+
+<SdkCode id="feed-join" />
+
+| Option | Meaning |
+|---|---|
+| `start`, `then` | (pattern) the message that opens a wait, and the one that ends it |
+| `left`, `right` | (join of two) the two kinds of message, in either order |
+| `sides` | (join of more) `{ name: test }` or a list of queue names; a message is the side of the first test it passes |
+| `within` | how long a wait lasts: `'15m'`, `'2d'`. A message exactly that long after is still in time. |
+| `onMatch`, `select` | what to send on when the set is complete; by default `{ key, start, then }`, `{ key, left, right }` or `{ key, parts }` |
+| `onTimeout` | what to send on when the time passes first (a two-sided join's also gets `'left'` or `'right'`, a join of more the missing names); without it, nothing is sent |
+| `key` | the entity, `key(msg, value)`: `value` is the item of a `.flatMap()` before, so a message that carries several ids waits once for each; by default `keyBy()`, else the partition name |
+| `onRepeat` | a second message of a part while one waits: `'keep'` (the default: the first stays) or `'restart'` (pattern: the deadline counts from the latest) / `'latest'` (join of more) |
+| `keep` | what a waiting message keeps, `keep(msg, value)`, as its `data`: the whole payload by default. After a `.map()` or a table join, `keep: (m, value) => value` keeps that result. |
+| `eventTime`, `allowedLateness`, `onLate`, `idle` | the time the messages carry, instead of the feed's: see [Event time](#event-time) |
+
+A function that returns `null` sends nothing.
+
+<Why>"an order and no payment within 15 minutes" is an absence: no message says it. On a clock
+every queue shares, the deadline passes once and on time, even when nothing else arrives.</Why>
+
+### Gather
+
+`.gather()` collects the parts of one run: named steps, as a join, or a number of parts the
+messages say themselves (`count`), counted once each by queue, partition and transaction id. When
+all are in it sends `onComplete(got, key)`; when the deadline passes first, `onTimeout(got, missing,
+key)`, with the names missing or how many. A finished run is remembered until its deadline, so a
+part that comes in late opens no new run.
+
+<SdkCode id="feed-gather" />
+
+<Why>a fan-out is only done when every branch answered, and "branch 3 never came" is the message
+someone needs. A duplicate that arrives after the run closed must not open a run that then times
+out.</Why>
+
+### Table joins
+
+`.joinTable()` keeps the latest row per key of a table queue, one message per change (`null`
+deletes the row), and joins it into every message: `on(msg, value)` names the row,
+`select(value, row, msg)` makes the result. The rows come from the same feed, in one order, so a
+message sees the table as of its own position: every change before it, and the one in its own
+transaction, none after. A new stream first reads the table queue from its beginning (`initial:
+'all'`, the default; `'now'` starts empty).
+
+<SdkCode id="feed-table" />
+
+The rows of a table queue go to the table only, whatever the stream's own filters: its `where`,
+`partitions` and shard filter run in the stream's process then, for its own messages. `key(row)`
+(default: the partition) and `value(row)` (default: the payload) say what a row is; `missing:
+'drop'` drops a message whose row is not there.
+
+<Why>a lookup in a database answers with today's settings for a booking of last week, and a replay
+would see other ones. A table on the same feed answers with the settings the booking had.</Why>
+
+### Many steps in one stream
+
+A stream may chain any number of stateful steps, in any order: windows, patterns, joins, gathers and
+table joins. A step's results are the next step's messages: `.map()`, `.filter()` and `.keyBy()`
+see them as after a window, and a pattern, a join or a gather sees them in the feed's shape (`data`
+is the result, `partition` its key). `.name()` names the step before it, for the
+[live state](#live-state); unnamed steps are `step1`, `step2`, ...
+
+<SdkCode id="feed-steps" />
+
+A window's result happens when the window closed, and a timeout when its deadline passed, on the
+feed's clock: every run, and every replay, hands it to the next step with that time. After a step
+on event time, the next step runs on event time too: see [Event time](#event-time).
+
+<Why>a per-minute count, then "a burst that calmed down", is two steps. In one stream they share one
+clock, one position and one commit, and nothing glues two streams together with a queue between
+them.</Why>
+
+### Event time
+
+Every step runs on the feed's clock unless it says otherwise. Give a step `eventTime` and it runs on
+the time the messages carry: history pushed long after it happened, or producers that send late (a
+phone that was offline, a batch upload). Its windows close, and its deadlines pass, on its
+watermark: the latest event time it has seen, minus `allowedLateness`.
+
+<SdkCode id="feed-event-time" />
+
+A pattern, a join, a gather and a session depend on the order of their messages. On event time
+such a step holds each message that concerns it until the watermark reaches the message's time,
+then takes them in event-time order: a comment that comes before its issue still answers it. The
+cost is `allowedLateness` of those messages in memory. Tumbling, sliding and cron windows only add
+up, so they take each message as it comes. Only the messages a pattern's, a join's or a gather's
+tests take count: the others need no time and move no watermark.
+
+A message older than the watermark is late: dropped and counted (`metrics().late`), or with `onLate:
+'include'` taken at once, out of order. The messages of one push share a position and come grouped
+by partition, so the time one push covers counts as disorder too.
+
+| Option | Meaning |
+|---|---|
+| `eventTime` | `(msg) => time`: a Date, epoch milliseconds or an ISO string. A pattern, a join or a gather gets the message in the feed's shape; a window, as on a queue source. `false` keeps a step on the feed's clock after a step on event time. |
+| `allowedLateness` | How far out of order messages may come: a duration (`'5m'`), or seconds on a window. Default 0. |
+| `onLate` | `'drop'` (the default) or `'include'`. On the feed's clock nothing comes late: `run()` refuses a lateness above 0 and `'include'` on a step that runs on it, a window as a pattern. |
+| `idle` | On the first step on event time: after this long without a message (`'1m'`, or seconds), the watermark moves on with the feed's clock, so a quiet feed closes its windows and passes its deadlines. Off by default: then only a message moves the watermark. |
+
+A step after a step on event time runs on event time too: a window's result has the time of the
+window's last millisecond, a timeout the time of its deadline, a match the time of the message that
+made it. Its watermark follows the step before: it moves with the results it gets, and up to the
+oldest time that step can still send (what it holds, the windows and deadlines it keeps open), so
+nothing the step before sends is late, and a quiet feed closes every step in turn. `idle` goes on
+the first step on event time only. A table join answers as of the message's position, on event
+time too.
+
+With `idle`, event time passes at the pace of the feed's clock once the feed is quiet: the deadlines
+left at the end of an import pass as long after it as they are ahead of its last message. It
+counts the feed's quiet time as the events' own: a message that comes after a quiet spell and is
+older than the watermark `idle` moved on is late. `onLate: 'include'` on a step sends its windows
+again with times the step after has passed: that step drops them, unless it includes late ones too.
+
+The watermark and the messages a step holds are part of its state and its snapshot, and `idle`
+depends only on the feed's clock: a replay closes the same windows, at the same times, as the run
+it repeats. `metrics().steps` shows each step's clock, watermark and the messages it holds.
+
+<Why>history pushed today has today's commit times: on the feed's clock, a day of issues imported in
+five minutes would all be answered "within the hour". On event time the import gives the answers
+the day gave, and a late producer's events count in the hour they happened.</Why>
+
+### State: two positions and a snapshot
+
+A stream with state does not write it at every commit. The position record holds two positions:
+the committed one, and the one of the last snapshot, named by the commit that moves the position.
+A snapshot is layers under the stream's own KV keys (`<queryId>#snap#...`): a full layer, with every
+entry of every step, then deltas, each with the entries set or deleted since the layer before. A
+restart loads the layers in order and reads the feed again from the snapshot's position to the
+committed one, sending nothing: the feed replays in one order with the times it had, so the state
+comes back as it was.
+
+| When | What a commit writes |
+|---|---|
+| A new stream | Its start is its first snapshot: the state is empty there, so no chunk at all. |
+| Most commits | The position, and the outputs. |
+| The state did not change since the snapshot | The snapshot's position moves with the commit, writing no chunk. |
+| Nothing is open | A snapshot of no layers. The old chunks are deleted. |
+| `snapshotEveryMillis` (60 s) since the last one, `snapshotMaxEntries` messages (200,000), or a stop | A delta: the keys changed since the last snapshot. |
+| The deltas weigh as much as the full layer, or there are 16 layers | A full layer. The old layers are deleted. |
+
+A layer is written in pieces of about 256 KB of JSON, each compressed off the main thread into KV
+values of at most 64 KiB (`QUEEN_KV_MAX_VALUE_BYTES` by default). No string ever holds the whole
+state, and the process keeps its lock and answers live reads while a big layer is written or
+loaded. So a snapshot costs what changed, a restart reads again at most about a minute of the
+stream's own messages, and the state has no size limit but memory.
+
+The results of windows, deadlines and runs that end at the same time (a daily window for a million
+users at midnight) are not one commit: once `maxPendingOutputs` results wait, they commit in the
+middle of the close. The position record counts the closes the stream has made (`units`); they come
+in one order on every run, so a process that takes over replays to that count and closes the rest,
+and every result goes out once. A chain whose stateful steps changed is refused at `run()` while state is
+stored; `reset` starts it over. The functions that decide the state (keys, filters, `reduce`,
+tests) must give the same answer every time: a replay runs them again, with the same retries, and
+leaves out the messages the poison policy left out before (they are kept with the position until
+the next snapshot). The functions that only make an output may do anything, since a replay sends
+nothing. A replay reads what the queues still hold: a queue with retention must keep its messages
+longer than the snapshot interval.
+
+<Why>writing every window at every commit costs a write per window and caps the state at what a
+commit can carry, and rewriting the whole state at every snapshot costs its size each time. The
+feed already holds every message in order: two positions and the keys that changed are enough to
+rebuild the rest.</Why>
+
+### Shards
+
+`run({ queryId, shards: 4 })` runs the stream in 4 shards: each reads the partitions whose name
+hashes to it (FNV-1a, 32 bit): the broker reads only those partitions' records, through the index of
+each sealed log file (the file still being written is read through), with its own
+position, snapshots and lock (`queen-feed/<queryId>/shard-<i>-of-<n>`). Every shard's outputs carry
+the query's prefix, so no shard reads back another's. With `shardBy: (msg) => key` the stream
+splits by any key, filtered in each shard's process. `run({ shard: { index, count } })` runs one
+shard, to place them on purpose.
+
+<SdkCode id="feed-shards" />
+
+Every stateful step must group by the shard key, or by a key made from it: a step keyed on
+something else would see only its shard's part. The shard count and the split (by partition or by
+a function) are kept with the stream (`<queryId>#layout`): another one is refused, and `reset`
+starts the shards over; every commit checks the layout, so a process still running the old one
+commits nothing more and stops. A table queue is read whole by every shard. Started in several
+processes, each shard runs in the one that takes its lock first and waits in the others.
+
+<Why>one process per stream is a ceiling. With shards a stream spreads over processes, each reading
+only its own partitions, and a process that dies hands its shards to the others.</Why>
+
+### Live state
+
+`runner.state('perMinute').get(key)` and `.list(limit)` read a step's state in the stream's own
+process: a window's open windows and their running values, a pattern's waiting messages, a join's
+or a gather's parts, a table's row. From any other process, `Stream.view(queen, queryId)` asks the
+running stream over ephemeral queues; a sharded stream is asked on every shard, and the shard that
+holds the key answers.
+
+<SdkCode id="feed-view" />
+
+The answer is the live state, as of the position the runner has read to (`position`), which may
+include results not committed yet. `status()` and `runner.metrics()` cost the same at any size:
+the counts of open windows, waits and held messages are kept as the state changes. A read of one
+key of a window step looks through that step's open windows, so it suits thousands of keys better
+than millions. `serveState: false` turns the answers off.
+
+<Why>"how many clicks has tenant 42 this minute?" is in the stream's memory. Asking the stream
+spares a copy of every window in a database just to read it.</Why>
+
+### One process at a time
+
+Each `queryId` (each shard) has a lock (`queen-feed/<queryId>`). The process that holds it runs
+the stream; another process with the same `queryId` waits, and takes over when the first one
+stops, or when it dies and its lock runs out (`lockTtl`, 15 s): it loads the snapshot and reads the
+feed again to where the first one committed. Every commit is guarded by the lock, so a process that
+lost it commits nothing more. `runner.metrics().role` says `active` or `standby`.
+
+<Why>two copies of a deploy, or a rolling restart, must not run a `.foreach()` twice, and a standby
+takes over in seconds.</Why>
+
+### A message that keeps failing
+
+A message whose function throws is tried again (`retries`, 3, after 0.1, 0.2 and 0.4 s), each time
+from the state it saw the first time. Then `onPoison` decides:
+
+| `onPoison` | What happens |
+|---|---|
+| `'stop'` (the default) | What came before it is committed, and the stream stops at the message: `runner.done` resolves, `metrics().stopped` names it, `onError` gets it. |
+| `'skip'` | The message is left out, and `onError` hears of it. |
+| a queue, `queen.queue('feed-dlq')` | The message and the error go to that queue, in the commit of the others. |
+
+A stop keeps the whole transaction the message came in, because its pushes share one position and
+a stream resumes at a position. A step's result whose function fails goes the same way. In a
+replay, a message that fails is left out at once: the run before skipped it too, or it would not
+have committed past it.
+
+<Why>a message no code can handle must not hold up every other one in silence. Stopping is the safe
+default; a dead-letter queue is the one for production.</Why>
+
+### In the console
+
+The console's Streams page lists feed streams beside queue streams. It reads what each stream keeps
+in KV, in the namespace `queen-feed`, and its lock. It never asks the running process.
+
+| Key | What it holds |
+|---|---|
+| `<queryId>` (`<queryId>#shard<i>of<n>` for a shard) | The position record: the position and `updatedAt`, the feed time the position is at (`readTo`), whether the runner was caught up there (`caughtUp`), what each step holds (`open`, and `held` on event time), and `stopped` when the stream stopped. |
+| `<queryId>#about` | What the stream reads, its steps and where its results go. The first commit of each runner that becomes active writes it. |
+| `<queryId>#layout` | How many shards. |
+
+| The page says | When |
+|---|---|
+| caught up, or the time behind | A runner holds the lock and writes. The time behind is from its last commit. |
+| no writes (amber) | A runner holds the lock and has written nothing for a minute at least: its reads fail, or a function does not return. A runner that reads writes its position every `positionCommitMillis` (5 s). |
+| stopped (amber) | It stopped on a message that kept failing. The page names the message, the error and the tries. |
+| stopped | Its process stopped it: `stop()` or the abort signal. |
+| no runner (amber) | Its lock is free and its record does not say it stopped: a crash or a kill. |
+
+A runner that has not committed yet has a lock and no key, and shows too. A runner of an older
+client writes no description: the page shows its position and its lock only. On the Queues page, a queue
+a feed stream reads says so (Feed stream, or Feed down when nothing runs it) instead of No reader:
+the stream reads without a consumer group, so nothing there is acked or waits.
+
+<Why>a feed stream runs in a process the broker does not know. Its records and its lock are enough
+for the console to tell whether it runs, where, how far behind, and why it stopped.</Why>
+
+### Run options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `queryId` | (required) | The stream's identity: its position, snapshots and lock. No `#`. |
+| `from` | `'now'` | Where a new query starts: `'now'`, `'earliest'` or a position. |
+| `waitMillis` | 5000 | How long a read waits for something new. |
+| `exclusive` | `true` | One process at a time. `false` lets several run, and the position's version decides which one commits. |
+| `lockTtl` | `'15s'` | How long the lock of a process that died holds. |
+| `onPoison`, `retries` | `'stop'`, 3 | See above. |
+| `commitEveryMillis` | 1000 | How often a stream that is catching up commits; caught up, outputs commit at once. |
+| `maxPendingOutputs` | 5000 | Outputs one commit carries at most. |
+| `snapshotEveryMillis` | 60000 | Time between two snapshots of a changing state. |
+| `snapshotMaxEntries` | 200000 | Messages between two snapshots, at most. |
+| `shards`, `shard`, `shardBy` | 1, -, `'partition'` | See Shards. |
+| `serveState` | `true` | Answer `Stream.view()` questions. |
+| `reset` | `false` | `true` starts over at every start; a string starts over once (in a process that takes over, too), and is kept with the position. |
 
 ## See also
 

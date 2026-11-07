@@ -1,0 +1,96 @@
+{
+  "outputs": [
+    {
+      "queue": "c-where-out",
+      "partition": "eu-1",
+      "data": {
+        "id": 1
+      }
+    },
+    {
+      "queue": "c-where-out",
+      "partition": "eu-3",
+      "data": {
+        "id": 9
+      }
+    }
+  ],
+  "record": {
+    "epoch": 0,
+    "caughtUp": true
+  },
+  "about": {
+    "exclusive": true,
+    "hash": "4f53cda18c2baa0c",
+    "lockTtl": "5s",
+    "onPoison": "stop",
+    "positionCommitMillis": 0,
+    "reads": {
+      "partitions": null,
+      "queues": [
+        "c-sales"
+      ],
+      "where": [
+        {
+          "field": "data.total",
+          "op": ">",
+          "value": 10
+        },
+        {
+          "field": "partition",
+          "op": "prefix",
+          "value": "eu-"
+        },
+        {
+          "field": "data.kind",
+          "op": "in",
+          "value": [
+            "x",
+            "y"
+          ]
+        },
+        {
+          "field": "data.tags",
+          "op": "exists"
+        },
+        {
+          "field": "data.status",
+          "op": "!=",
+          "value": "void"
+        }
+      ]
+    },
+    "shards": null,
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-where-out"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "filter",
+          "map"
+        ]
+      }
+    ],
+    "v": 1
+  },
+  "foreach": [],
+  "errors": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

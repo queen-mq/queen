@@ -1,0 +1,143 @@
+{
+  "outputs": [
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 9
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:01:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 18
+        }
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-et-window-lateness": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "85a8ea38a95b1452",
+      "clock": 1793955606000,
+      "units": 2,
+      "readTo": 1793955606000,
+      "caughtUp": true,
+      "open": {
+        "step1": 1
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 2,
+      "metas": [
+        {
+          "n": 0,
+          "w": 1793955770000,
+          "t": 1793955606000,
+          "s": 1793955606000
+        }
+      ]
+    }
+  },
+  "states": {
+    "c-et-window-lateness": [
+      {
+        "kind": "window",
+        "entries": [
+          [
+            "w\u001f1793955780000\u001fr",
+            {
+              "key": "r",
+              "start": 1793955780000,
+              "end": 1793955840000,
+              "due": 1793955840000,
+              "acc": {
+                "count": 1,
+                "sum": 32
+              }
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-et-window-lateness",
+    "hash": "85a8ea38a95b1452",
+    "reads": {
+      "queues": [
+        "c-readings"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": true,
+          "allowedLateness": "30s",
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count",
+            "sum"
+          ]
+        },
+        "clock": "event"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-et-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "late": 1
+    }
+  },
+  "problems": []
+}

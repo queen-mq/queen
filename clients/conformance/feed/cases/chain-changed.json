@@ -1,0 +1,116 @@
+{
+  "name": "chain-changed",
+  "about": "a chain whose stateful steps changed is refused while the stored state was kept by the old chain; reset starts it over",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {},
+              "transactionId": "i1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    },
+    {
+      "start": "B",
+      "chain": [
+        {
+          "op": "windowTumbling",
+          "opts": {
+            "seconds": 120
+          }
+        },
+        {
+          "op": "aggregate",
+          "fields": {
+            "count": 1
+          }
+        },
+        {
+          "op": "to",
+          "target": "c-out"
+        }
+      ],
+      "mayFail": true
+    },
+    {
+      "start": "C",
+      "chain": [
+        {
+          "op": "windowTumbling",
+          "opts": {
+            "seconds": 120
+          }
+        },
+        {
+          "op": "aggregate",
+          "fields": {
+            "count": 1
+          }
+        },
+        {
+          "op": "to",
+          "target": "c-out"
+        }
+      ],
+      "run": {
+        "reset": true
+      }
+    },
+    {
+      "idle": "C"
+    },
+    {
+      "clock": "2026-11-06T09:02:01.000Z"
+    },
+    {
+      "idle": "C"
+    },
+    {
+      "stop": "C"
+    }
+  ],
+  "run": {
+    "queryId": "c-chain-changed"
+  },
+  "mode": "fake"
+}

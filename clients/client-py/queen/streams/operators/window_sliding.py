@@ -5,13 +5,17 @@ WindowSlidingOperator — overlapping fixed-size windows that slide every
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Optional
 
 from ._window_common import (
     MS_PER_SEC,
     extract_event_time,
+    feed_time_options,
+    ms_value,
     normalise_late_opts,
     to_iso,
+    window_lateness_ms,
 )
 
 
@@ -26,25 +30,26 @@ class WindowSlidingOperator:
         grace_period: float = 0,
         idle_flush_ms: int = 5000,
         event_time: Optional[Callable[[Any], Any]] = None,
-        allowed_lateness: float = 0,
+        allowed_lateness: Any = 0,
         on_late: Optional[str] = None,
+        idle: Any = None,
     ):
-        if not isinstance(size, (int, float)) or size <= 0:
+        if not isinstance(size, (int, float)) or isinstance(size, bool) or size <= 0:
             raise ValueError("window_sliding requires size=<positive number>")
-        if not isinstance(slide, (int, float)) or slide <= 0:
+        if not isinstance(slide, (int, float)) or isinstance(slide, bool) or slide <= 0:
             raise ValueError("window_sliding requires slide=<positive number>")
         if size % slide != 0:
             raise ValueError(
                 f"window_sliding: size ({size}) must be an integer multiple of slide ({slide}) "
                 "to keep the per-event window count finite"
             )
-        self.size_ms = int(size * MS_PER_SEC)
-        self.slide_ms = int(slide * MS_PER_SEC)
+        self.size_ms = ms_value(size * MS_PER_SEC)
+        self.slide_ms = ms_value(slide * MS_PER_SEC)
         self.windows_per_event = int(size / slide)
-        self.grace_period_ms = max(0, int(grace_period * MS_PER_SEC))
-        self.idle_flush_ms = max(0, int(idle_flush_ms))
+        self.grace_period_ms = max(0, math.floor(grace_period * MS_PER_SEC))
+        self.idle_flush_ms = max(0, math.floor(idle_flush_ms))
         self.event_time_fn = event_time if callable(event_time) else None
-        self.allowed_lateness_ms = max(0, int(allowed_lateness * MS_PER_SEC))
+        self.allowed_lateness_ms = window_lateness_ms(allowed_lateness, "windowSliding")
         self.on_late_policy = normalise_late_opts(on_late)
         self.operator_tag = f"slide:{size}:{slide}"
         self.config = {
@@ -57,6 +62,7 @@ class WindowSlidingOperator:
             "allowedLateness": allowed_lateness,
             "onLate": self.on_late_policy,
         }
+        feed_time_options(self, event_time, idle, "windowSliding")
 
     async def apply(self, envelope: dict) -> list[dict]:
         ts = await extract_event_time(envelope.get("msg"), self.event_time_fn)

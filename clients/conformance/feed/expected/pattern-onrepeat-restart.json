@@ -1,0 +1,103 @@
+{
+  "outputs": [
+    {
+      "queue": "c-followups",
+      "partition": "order-1",
+      "data": {
+        "order": 2,
+        "paid": 5,
+        "at": "2026-11-06T09:25:00.000Z"
+      },
+      "from": "S1.3/c-payments/order-1#0"
+    },
+    {
+      "queue": "c-followups",
+      "partition": "order-3",
+      "data": {
+        "order": 3,
+        "paid": 7,
+        "at": "2026-11-06T09:41:40.000Z"
+      },
+      "from": "S6.1/c-payments/order-3#0"
+    }
+  ],
+  "records": {
+    "c-pattern-onrepeat-restart": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "66113a9d295fffb7",
+      "clock": 1793958100000,
+      "units": 0,
+      "readTo": 1793958100000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 0,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-pattern-onrepeat-restart": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-pattern-onrepeat-restart",
+    "hash": "66113a9d295fffb7",
+    "reads": {
+      "queues": [
+        "c-orders",
+        "c-payments"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "pattern",
+        "name": "step1",
+        "config": {
+          "kind": "pattern",
+          "within": 900000,
+          "onRepeat": "restart",
+          "timeout": true
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-followups"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

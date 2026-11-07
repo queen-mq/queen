@@ -2,12 +2,15 @@
  * AggregateOperator — sugar over reduce. Each named extractor produces one
  * field of the per-window aggregate value.
  *
+ * Each extractor gets the value the window folds: the message payload
+ * (`data`), or what a `.map()` before the window made of it.
+ *
  * Supported extractor names:
  *   count: () => 1                         // scalar count contribution
- *   sum:   m => m.data.amount              // running sum
- *   min:   m => m.data.value               // running min (ignores nulls)
- *   max:   m => m.data.value               // running max (ignores nulls)
- *   avg:   m => m.data.value               // running average (sum + count internally)
+ *   sum:   v => v.amount                   // running sum
+ *   min:   v => v.value                    // running min (ignores nulls)
+ *   max:   v => v.value                    // running max (ignores nulls)
+ *   avg:   v => v.value                    // running average (sum + count internally)
  *
  * Output shape per window:
  *   { count?: number, sum?: number, min?: number, max?: number, avg?: number, ... }

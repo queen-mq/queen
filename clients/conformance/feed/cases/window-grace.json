@@ -1,0 +1,109 @@
+{
+  "name": "window-grace",
+  "about": "gracePeriod delays the close past the window end",
+  "source": {
+    "queues": [
+      "c-hits"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 30,
+        "gracePeriod": 15
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "count": {
+          "$get": "0.count"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-grace-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:35.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:00:44.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "metrics": "A",
+      "as": "before-grace",
+      "keys": [
+        "outputs"
+      ]
+    },
+    {
+      "clock": "2026-11-06T09:00:46.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:01:16.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-window-grace"
+  },
+  "mode": "fake"
+}

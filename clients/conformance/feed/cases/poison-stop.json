@@ -1,0 +1,111 @@
+{
+  "name": "poison-stop",
+  "about": "onPoison 'stop' (the default): what came before the failing message commits, the stream stops there; a new process stops there again",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "$if": [
+          {
+            "$get": "0.data.bad"
+          },
+          {
+            "$throw": "bad message"
+          },
+          {
+            "n": {
+              "$get": "0.data.n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "run": {
+    "retries": 1,
+    "queryId": "c-poison-stop"
+  },
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "bad": true
+              },
+              "transactionId": "i3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 4
+              },
+              "transactionId": "i4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "wait": "A",
+      "for": "done"
+    },
+    {
+      "start": "B"
+    },
+    {
+      "wait": "B",
+      "for": "done"
+    }
+  ],
+  "mode": "fake"
+}

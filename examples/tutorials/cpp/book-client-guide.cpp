@@ -18,7 +18,7 @@
 //       -lssl -lcrypto -lzstd -lpthread
 //
 // Run it against the node that the book's first section starts:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.1
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.0
 //   ./build/book-client-guide
 // run.sh builds a copy with localhost:6632 replaced by $QUEEN_URL.
 

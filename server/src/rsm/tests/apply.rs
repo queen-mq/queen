@@ -1257,6 +1257,117 @@ fn an_append_writes_the_payload_the_index_and_the_counters() {
     assert_eq!(rec.applied.lock().unwrap().len(), 2);
 }
 
+/// Apply's per-partition wakes, delivered to a real notifier: what the
+/// facade's waker does with them.
+struct ToNotifier(Arc<crate::notify::Notifier>);
+
+impl Notify for ToNotifier {
+    fn applied(&self, _index: u64, _term: u64, _commands: &[crate::rsm::entry::CommandRecord]) {}
+
+    fn wake(&self, _tenant: &str, _queue: &str, _group: Option<&str>) {}
+
+    fn durable(&self, _index: u64) {}
+
+    fn wants_appended(&self) -> bool {
+        self.0.watches_partitions()
+    }
+
+    fn appended(&self, tenant: &str, queue: &str, partition: &str) {
+        self.0
+            .wake_partition(&crate::handlers::tenant_queue_key(tenant, queue), partition);
+    }
+
+    fn appended_any(&self) {
+        self.0.wake_all_partitions();
+    }
+}
+
+/// A long poll that arms its watch while an entry is being applied, and reads
+/// before that entry's applied index, is woken by the entry. Apply reads
+/// whether anyone watches once, as the entry begins; an entry begun before the
+/// first watch collected no partition to wake, and the watch slept to its cap
+/// (the feed's one-second re-read: about 1% of feed long polls at 200k msg/s
+/// on GCP, most with bursty writers). The watch is armed here between the
+/// entry's effects, through the mid-entry hook, on the apply thread itself.
+#[test]
+fn a_watch_armed_while_an_entry_applies_is_woken_by_it() {
+    let node = Node::new("watch-mid-entry");
+    let notifier = crate::notify::Notifier::new(false);
+    let (mut a, _) = Applier::open(
+        node.store(),
+        &node.seg_dir(),
+        seg_opts(),
+        cfg(),
+        Arc::new(ToNotifier(notifier.clone())),
+    )
+    .expect("open");
+    let part = |pid: u64, name: &str| Effect::PartitionCreate {
+        pid,
+        uuid: uuid(pid),
+        tenant: TENANT.into(),
+        queue: QUEUE.into(),
+        partition: name.into(),
+        created_at_us: BASE_US,
+    };
+    a.apply(
+        &Build::new(BASE_US, 1, 0)
+            .cmd(vec![
+                Effect::QueueUpsert {
+                    tenant: TENANT.into(),
+                    queue: QUEUE.into(),
+                    cfg: queue_config(BASE_US),
+                },
+                part(1, "p0"),
+                part(2, "p1"),
+            ])
+            .at(1, 1),
+    )
+    .expect("apply");
+    assert!(!notifier.watches_partitions(), "nobody watches yet");
+
+    let append = |pid: u64| Effect::Append {
+        pid,
+        bucket: 1,
+        base_offset: 0,
+        count: 1,
+        created_at_us: BASE_US + 10,
+        hashes: hashes(pid, 1),
+        blob: b"frame".to_vec(),
+    };
+    let watch: Arc<Mutex<Option<crate::notify::PartitionWatch>>> = Arc::new(Mutex::new(None));
+    {
+        let (watch, notifier) = (watch.clone(), notifier.clone());
+        crate::rsm::faults::set_mid_entry_hook(Some(Box::new(move || {
+            let mut w = watch.lock().unwrap();
+            if w.is_none() {
+                let key = crate::handlers::tenant_queue_key(TENANT, QUEUE);
+                *w = Some(notifier.watch_topics(&[key]));
+            }
+        })));
+    }
+    // The `Noop` keeps a hook between the appends when the shards run them.
+    let done = a.apply(
+        &Build::new(BASE_US + 10, 3, 10)
+            .cmd(vec![append(1), Effect::Noop, append(2)])
+            .at(2, 1),
+    );
+    crate::rsm::faults::set_mid_entry_hook(None);
+    done.expect("apply");
+    let w = watch
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the hook armed the watch during the entry");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    assert!(
+        rt.block_on(w.wait(Duration::from_millis(200))),
+        "the entry applied while the watch was armed did not wake it"
+    );
+}
+
 #[test]
 fn an_append_that_does_not_continue_the_partition_is_refused() {
     let node = Node::new("gapless");

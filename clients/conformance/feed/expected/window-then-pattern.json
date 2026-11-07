@@ -1,0 +1,155 @@
+{
+  "outputs": [
+    {
+      "queue": "c-busy",
+      "partition": "h",
+      "data": {
+        "key": "h",
+        "first": 2,
+        "second": 3,
+        "firstCtx": "2026-11-06T09:00:00.000Z"
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-window-then-pattern": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "240745bbac17173c",
+      "clock": 1793955781000,
+      "units": 3,
+      "readTo": 1793955781000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0,
+        "step2": 1
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 3,
+      "metas": [
+        {},
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-window-then-pattern": [
+      null,
+      {
+        "kind": "pattern",
+        "entries": [
+          [
+            "p\u001fh",
+            {
+              "key": "h",
+              "msg": {
+                "position": null,
+                "queue": null,
+                "partition": "h",
+                "ts": "2026-11-06T09:02:00.000Z",
+                "createdAt": "2026-11-06T09:02:00.000Z",
+                "data": {
+                  "count": 3
+                },
+                "derived": true,
+                "key": "h",
+                "ctx": {
+                  "kind": "tumbling",
+                  "key": "h",
+                  "partition": "h",
+                  "windowStart": 1793955660000,
+                  "windowEnd": 1793955720000,
+                  "windowKey": "2026-11-06T09:01:00.000Z"
+                }
+              },
+              "due": 1793955810001
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-window-then-pattern",
+    "hash": "240745bbac17173c",
+    "reads": {
+      "queues": [
+        "c-hits"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count"
+          ]
+        },
+        "clock": "feed"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "filter"
+        ]
+      },
+      {
+        "kind": "pattern",
+        "name": "step2",
+        "config": {
+          "kind": "pattern",
+          "within": 90000,
+          "onRepeat": "keep",
+          "timeout": false
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-busy"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 1,
+      "outputs": 1,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

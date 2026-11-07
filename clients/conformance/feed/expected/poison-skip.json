@@ -1,0 +1,121 @@
+{
+  "outputs": [
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "key": "p",
+        "value": {
+          "count": 2,
+          "sum": 4
+        }
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-poison-skip": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "a33660de0a3d664f",
+      "clock": 1793955661000,
+      "units": 1,
+      "readTo": 1793955661000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 1,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-poison-skip": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-poison-skip",
+    "hash": "a33660de0a3d664f",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      },
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count",
+            "sum"
+          ]
+        },
+        "clock": "feed"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-out"
+      ]
+    },
+    "onPoison": "skip",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [
+    {
+      "runner": "A",
+      "phase": "poison",
+      "action": "skipped",
+      "code": null
+    }
+  ],
+  "failed": [],
+  "recorded": {
+    "a": {
+      "skipped": 1,
+      "poisoned": 1
+    },
+    "b": {
+      "replaySkipped": 1
+    },
+    "B.stopped": {}
+  },
+  "problems": []
+}

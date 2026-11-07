@@ -117,12 +117,15 @@ export function ackAttention(name, linesFor, ops = null) {
 
 /**
  * The queues that need you, in the order they were given, each as
- *   { name, sev: 'bad'|'warn', reason: 'lag'|'acks'|'noReader', lag, pending, deadOnly, ops }
+ *   { name, sev: 'bad'|'warn', reason: 'lag'|'acks'|'noReader'|'feedDown', lag, pending, deadOnly, ops, readers? }
  * `lag` is the worst live group's age in seconds; `deadOnly` says the queue has
  * a queue-mode cursor, but it has never consumed; `ops` is the queue's hour
  * (queueOps) when `ops` has it. A queue behind AND failing acks takes the
  * worse of the two, and 'lag' on a tie.
  */
+// A feed stream's states in which it reads nothing (console/streams/feedStreams.js shardState).
+const FEED_DOWN = new Set(['gone', 'failed', 'quiet', 'never'])
+
 export function queueAttention(queues = [], groups = [], linesFor, ops = null) {
   const byQueue = new Map()
   for (const g of groups || []) {
@@ -152,7 +155,15 @@ export function queueAttention(queues = [], groups = [], linesFor, ops = null) {
       out.push({ name: q.name, sev, reason, lag, pending, deadOnly: false, ops: hour })
     } else if (pending > 0 && live.length === 0 && !named && q.kafkaTopic !== true
       && !linesOf(linesFor, q.name)?.noReaderOk) {
-      out.push({ name: q.name, sev: 'warn', reason: 'noReader', lag, pending, deadOnly: all.length > 0, ops: hour })
+      // A feed stream reads without a consumer group (queuesStore `feedReaders`):
+      // the queue has a reader while one of its streams runs, or was stopped on
+      // purpose; when every one is down, nothing reads it.
+      const readers = Array.isArray(q.feedReaders) ? q.feedReaders : []
+      if (!readers.length) {
+        out.push({ name: q.name, sev: 'warn', reason: 'noReader', lag, pending, deadOnly: all.length > 0, ops: hour })
+      } else if (readers.every((r) => FEED_DOWN.has(r?.status))) {
+        out.push({ name: q.name, sev: 'warn', reason: 'feedDown', lag, pending, deadOnly: false, ops: hour, readers })
+      }
     }
   }
   return out

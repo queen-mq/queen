@@ -132,6 +132,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
 # rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 QueenMQ can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and running the workers, which Horizon's master does. Your job classes stay ordinary Laravel jobs, and `queue:work` stays the worker.
@@ -149,7 +153,7 @@ If you run Horizon today, [Queen or Horizon](/integrations/laravel/queen-vs-hori
 
    ```bash
    docker run -d --name queen -p 6632:6632 \
-     -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.7.1
+     -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.8.0
    ```
 
 2. **Install the package and publish its configuration.** Package discovery registers the service

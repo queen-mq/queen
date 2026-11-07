@@ -1,0 +1,114 @@
+{
+  "outputs": [
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "count": 1
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-chain-changed": {
+      "position": "end",
+      "epoch": 1,
+      "hash": "57d590114e1629bf",
+      "clock": 1793955721000,
+      "units": 1,
+      "readTo": 1793955721000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 1,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-chain-changed": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-chain-changed",
+    "hash": "57d590114e1629bf",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 120,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count"
+          ]
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [
+    {
+      "runner": "B",
+      "code": "feed_chain_changed"
+    }
+  ],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 0,
+      "outputs": 0,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    },
+    "C.stopped": {
+      "emitted": 1,
+      "outputs": 1,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

@@ -114,6 +114,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus): phase2.rs
 # reads that lag for the collector (group_lags_of); phase2/reads.rs walks every group's positions
 # for it (group_lags). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): auth.rs makes POST /api/v1/feed read-only, like POST /api/v1/fetch; phase2.rs routes POST /api/v1/feed to the new phase2/feed.rs. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 The [dashboard](/integrations/laravel/dashboard/) shows what the supervisors are doing. This page is about

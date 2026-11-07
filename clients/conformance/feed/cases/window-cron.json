@@ -1,0 +1,142 @@
+{
+  "name": "window-cron",
+  "about": "cron windows on minute boundaries keyed by a field; an object accumulator",
+  "source": {
+    "queues": [
+      "c-temps"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "keyBy",
+      "fn": {
+        "$get": "0.data.sensor"
+      }
+    },
+    {
+      "op": "windowCron",
+      "opts": {
+        "every": "minute"
+      }
+    },
+    {
+      "op": "reduce",
+      "fn": {
+        "n": {
+          "$add": [
+            {
+              "$get": "0.n"
+            },
+            1
+          ]
+        },
+        "last": {
+          "$get": "1.v"
+        }
+      },
+      "initial": {
+        "n": 0
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "sensor": {
+          "$get": "1.key"
+        },
+        "minute": {
+          "$get": "1.windowKey"
+        },
+        "acc": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-cron-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-temps",
+              "partition": "a",
+              "data": {
+                "sensor": "s1",
+                "v": 20
+              },
+              "transactionId": "t1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:30.000Z",
+          "push": [
+            {
+              "queue": "c-temps",
+              "partition": "b",
+              "data": {
+                "sensor": "s1",
+                "v": 21
+              },
+              "transactionId": "t2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:50.000Z",
+          "push": [
+            {
+              "queue": "c-temps",
+              "partition": "a",
+              "data": {
+                "sensor": "s2",
+                "v": 5
+              },
+              "transactionId": "t3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:01:05.000Z",
+          "push": [
+            {
+              "queue": "c-temps",
+              "partition": "a",
+              "data": {
+                "sensor": "s1",
+                "v": 22
+              },
+              "transactionId": "t4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:02:05.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-window-cron"
+  },
+  "mode": "fake"
+}

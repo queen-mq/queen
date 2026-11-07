@@ -487,6 +487,13 @@ pub trait Notify: Send + Sync {
     /// it does not depend on any native consumer group being subscribed.
     fn appended(&self, _tenant: &str, _queue: &str, _partition: &str) {}
 
+    /// Records were appended on this node, and apply cannot say to which
+    /// partitions: the entry began while nobody listened
+    /// ([`Notify::wants_appended`] was `false`), so it collected none, and a
+    /// listener appeared before it was applied. Wake every listener once; one
+    /// woken for nothing reads again and finds nothing new.
+    fn appended_any(&self) {}
+
     /// Apply refused the entry `failure` describes, and this node stops here
     /// (§12.1 Fatal). Called once, on the apply thread, before it returns the
     /// error: the replicator keeps it for `/health` and for the next boot's
@@ -2162,8 +2169,8 @@ impl<'s, S: Store> Applier<'s, S> {
         // bytes of a pop's payload are already in this node's files; a reader
         // that needs the ROWS waits for the next store commit (≤ 4 ms, §11.3).
         self.notify.applied(c.index, c.term, &c.entry.commands);
-        // Per-partition append wakes (Kafka fetches), once per partition of
-        // the entry, after the answer like every wake.
+        // Per-partition append wakes (Kafka fetches, feed long polls), once
+        // per partition of the entry, after the answer like every wake.
         if ecx.wants_appended {
             let mut appended: Vec<(String, String, String)> = Vec::new();
             for s in &mut self.shards {
@@ -2174,6 +2181,20 @@ impl<'s, S: Store> Applier<'s, S> {
             for (t, q, part) in &appended {
                 self.notify.appended(t, q, part);
             }
+        } else if self.notify.wants_appended()
+            && c.entry
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::Append { .. }))
+        {
+            // A watch was armed while this entry ran, after its start read
+            // that nobody watched: none of its partitions was collected. The
+            // watch may have read before the applied index above and found
+            // nothing, so it waits for a wake that only this entry can send.
+            // The applied index is published before this second look, and a
+            // watch registers before it reads, so a reader that missed the
+            // entry is seen here. Every watch is woken, once.
+            self.notify.appended_any();
         }
         self.emit_wakes();
         Ok(Applied::Executed {

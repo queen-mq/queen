@@ -62,8 +62,10 @@ pub mod config;
 pub mod consumer;
 pub mod ephemeral;
 pub mod error;
+pub mod feed;
 mod http;
 mod inner;
+mod js;
 pub mod kv;
 pub mod lb;
 pub mod locks;
@@ -240,6 +242,14 @@ impl Queen {
     /// Begin an atomic push + ack.
     pub fn transaction(&self) -> TransactionBuilder {
         TransactionBuilder::new(Arc::clone(&self.inner))
+    }
+
+    /// Every push to the tenant's queues, in log order (`POST /api/v1/feed`).
+    ///
+    /// Followers serve it; a leader's 421 sends the reader to the followers
+    /// it names. See [`feed`] for the options.
+    pub fn feed(&self, options: feed::FeedOptions) -> Result<feed::FeedReader> {
+        feed::FeedReader::new(Arc::clone(&self.inner.http), options)
     }
 
     // --------------------------------------------------------------- acking

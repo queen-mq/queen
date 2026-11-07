@@ -1,0 +1,229 @@
+{
+  "name": "where-ops",
+  "about": "where with > prefix in exists != on the broker, then a local filter; missing fields hold for no op",
+  "mode": "both",
+  "source": {
+    "queues": [
+      "c-sales"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "where",
+      "args": [
+        "data.total",
+        ">",
+        10
+      ]
+    },
+    {
+      "op": "where",
+      "args": [
+        "partition",
+        "prefix",
+        "eu-"
+      ]
+    },
+    {
+      "op": "where",
+      "args": [
+        "data.kind",
+        "in",
+        [
+          "x",
+          "y"
+        ]
+      ]
+    },
+    {
+      "op": "where",
+      "args": [
+        "data.tags",
+        "exists"
+      ]
+    },
+    {
+      "op": "where",
+      "args": [
+        "data.status",
+        "!=",
+        "void"
+      ]
+    },
+    {
+      "op": "filter",
+      "fn": {
+        "$eq": [
+          {
+            "$get": "0.data.vip"
+          },
+          true
+        ]
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "id": {
+          "$get": "0.data.id"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-where-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-sales",
+              "partition": "eu-1",
+              "data": {
+                "id": 1,
+                "total": 11,
+                "kind": "x",
+                "tags": [],
+                "status": "ok",
+                "vip": true
+              },
+              "transactionId": "s1"
+            },
+            {
+              "queue": "c-sales",
+              "partition": "eu-1",
+              "data": {
+                "id": 2,
+                "total": 10,
+                "kind": "x",
+                "tags": [],
+                "status": "ok",
+                "vip": true
+              },
+              "transactionId": "s2"
+            },
+            {
+              "queue": "c-sales",
+              "partition": "us-1",
+              "data": {
+                "id": 3,
+                "total": 50,
+                "kind": "x",
+                "tags": [],
+                "status": "ok",
+                "vip": true
+              },
+              "transactionId": "s3"
+            },
+            {
+              "queue": "c-sales",
+              "partition": "eu-2",
+              "data": {
+                "id": 4,
+                "total": 50,
+                "kind": "z",
+                "tags": [],
+                "status": "ok",
+                "vip": true
+              },
+              "transactionId": "s4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-sales",
+              "partition": "eu-2",
+              "data": {
+                "id": 5,
+                "total": 50,
+                "kind": "y",
+                "status": "ok",
+                "vip": true
+              },
+              "transactionId": "s5"
+            },
+            {
+              "queue": "c-sales",
+              "partition": "eu-2",
+              "data": {
+                "id": 6,
+                "total": 50,
+                "kind": "y",
+                "tags": [
+                  "a"
+                ],
+                "vip": true
+              },
+              "transactionId": "s6"
+            },
+            {
+              "queue": "c-sales",
+              "partition": "eu-3",
+              "data": {
+                "id": 7,
+                "total": 50,
+                "kind": "y",
+                "tags": [
+                  "a"
+                ],
+                "status": "void",
+                "vip": true
+              },
+              "transactionId": "s7"
+            },
+            {
+              "queue": "c-sales",
+              "partition": "eu-3",
+              "data": {
+                "id": 8,
+                "total": 99.5,
+                "kind": "y",
+                "tags": [
+                  "a"
+                ],
+                "status": "ok",
+                "vip": false
+              },
+              "transactionId": "s8"
+            },
+            {
+              "queue": "c-sales",
+              "partition": "eu-3",
+              "data": {
+                "id": 9,
+                "total": 99.5,
+                "kind": "y",
+                "tags": {
+                  "a": 1
+                },
+                "status": "ok",
+                "vip": true
+              },
+              "transactionId": "s9"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-where-ops"
+  }
+}

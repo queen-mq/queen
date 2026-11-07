@@ -1,0 +1,99 @@
+{
+  "name": "lost-answer",
+  "about": "a commit that applied but whose answer was lost is not written twice",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "n": {
+          "$get": "0.data.n"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "compareMetrics": [],
+  "script": [
+    {
+      "start": "A"
+    },
+    {
+      "inject": {
+        "route": "/api/v1/transaction",
+        "when": "after",
+        "status": 503,
+        "times": 1
+      }
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "i2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "A",
+      "timeoutMs": 30000
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "i3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-lost-answer"
+  },
+  "mode": "fake"
+}

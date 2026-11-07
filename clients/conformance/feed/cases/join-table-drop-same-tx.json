@@ -1,0 +1,92 @@
+{
+  "name": "join-table-drop-same-tx",
+  "about": "missing 'drop' leaves out a message with no row; a row in the same transaction as a message counts before it",
+  "source": {
+    "queues": [
+      "c-bookings"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "joinTable",
+      "opts": {
+        "queue": "c-settings",
+        "on": {
+          "$get": "0.data.propertyId"
+        },
+        "missing": "drop",
+        "select": {
+          "booking": {
+            "$get": "0.id"
+          },
+          "currency": {
+            "$get": "1.currency"
+          },
+          "pos": {
+            "$get": "2.position"
+          }
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-priced"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-bookings",
+              "partition": "b",
+              "data": {
+                "id": 1,
+                "propertyId": "prop-9"
+              },
+              "transactionId": "k1"
+            },
+            {
+              "queue": "c-settings",
+              "partition": "prop-9",
+              "data": {
+                "currency": "CHF"
+              },
+              "transactionId": "r1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-bookings",
+              "partition": "b",
+              "data": {
+                "id": 2,
+                "propertyId": "prop-0"
+              },
+              "transactionId": "k2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-join-table-drop-same-tx"
+  },
+  "mode": "fake"
+}

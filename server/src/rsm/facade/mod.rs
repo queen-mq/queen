@@ -1079,6 +1079,16 @@ pub trait Rsm: Send + Sync {
     fn leader_route(&self) -> Route {
         self.route()
     }
+
+    /// Where a feed read of `tenant` that reached this node goes when its
+    /// caller cannot follow a 421 to the followers (it asked to be relayed,
+    /// `x-queen-feed-relay`: the proxy does): the HTTP addresses of the
+    /// followers, when this node leads the tenant's raft group of a cluster
+    /// and the leader does not serve the feed itself. Empty: the read is
+    /// served here, or answered as `POST /api/v1/feed` answers it.
+    fn feed_followers(&self, _tenant: &str) -> Vec<String> {
+        Vec::new()
+    }
     /// `POST /api/v1/push`.
     async fn push(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError>;
 

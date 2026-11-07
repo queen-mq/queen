@@ -1,0 +1,134 @@
+{
+  "name": "view-live",
+  "about": "Stream.view asks the running process over ephemeral queues: get, list, status",
+  "source": {
+    "queues": [
+      "c-visits"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "keyBy",
+      "fn": {
+        "$get": "0.data.user"
+      }
+    },
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "name",
+      "name": "perUser"
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "p",
+              "data": {
+                "user": "ann"
+              },
+              "transactionId": "v1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "p",
+              "data": {
+                "user": "ann"
+              },
+              "transactionId": "v2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "q",
+              "data": {
+                "user": "bob"
+              },
+              "transactionId": "v3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "view": {
+        "op": "get",
+        "step": "perUser",
+        "key": "ann"
+      },
+      "as": "view-ann"
+    },
+    {
+      "view": {
+        "op": "get",
+        "step": "perUser",
+        "key": "nobody"
+      },
+      "as": "view-nobody"
+    },
+    {
+      "view": {
+        "op": "list",
+        "step": "perUser",
+        "limit": 10
+      },
+      "as": "view-list"
+    },
+    {
+      "view": {
+        "op": "get",
+        "step": "noSuchStep",
+        "key": "ann"
+      },
+      "as": "view-bad-step"
+    },
+    {
+      "view": {
+        "op": "status"
+      },
+      "as": "view-status"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-view-live"
+  },
+  "mode": "fake"
+}

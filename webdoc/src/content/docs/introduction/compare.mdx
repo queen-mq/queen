@@ -16,6 +16,10 @@ sourceOfTruth:
 # value's text into the answer instead of building a JSON tree; every answer is the same, byte for
 # byte; admin.rs (3e6b92631): the Kafka facade bounds frames, records, fetches, metadata and groups.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 Two questions separate these systems more than any feature list: how you keep order per entity when there are millions of entities, and what one commit covers when a service handles an event. QueenMQ's answers are a partition per entity, created by its first message, and one transaction that writes the ack, the state, the next events and the timers as one entry. Every system below answers differently, and each one is better than QueenMQ at something. Laravel teams on Horizon have their own comparison: [Queen or Horizon](/integrations/laravel/queen-vs-horizon/).

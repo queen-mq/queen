@@ -1,0 +1,1021 @@
+{
+ "hashes": {
+  "tumbling": "11cc47f117a86612",
+  "slidingKeyed": "c15f1497162334e1",
+  "session": "94eb25f05717f681",
+  "sessionEt": "7e2121aa0daa15fa",
+  "reduceNull": "348045c5d901b531",
+  "cron": "5beec55a5c91911b",
+  "pattern": "7201fa20fd2be239",
+  "joinTwo": "b40d44c21305239b",
+  "joinSides": "8e287b1e917e8891",
+  "gatherSteps": "863b4ef76ebb2087",
+  "gatherCount": "60e79b872764398d",
+  "table": "a5b54dcdc9bccbc2",
+  "inherit": "32fde1c19e1cb3f9",
+  "inheritOff": "6d42c5db399fc8a8",
+  "twoWindows": "3995adf257e42564"
+ },
+ "configHashes": {
+  "tumbling": "a59a027ec334199fef55fc391f013ab7dac933d1e85a6be46b84ba85c8dfc0f0",
+  "slidingKeyed": "e7e7326c026978cffe02feb96674d04024e2786ff38c830355ad1df5fe0df001",
+  "session": "7b01241635ce09f013d8af047266038d37cc5ca57c02d50f4c680ea7128a8a8c",
+  "sessionEt": "035eb29d5c5cf316c71d84e89219b1f67ab54b735253261b6dc527734558ec12",
+  "reduceNull": "2b08401d21ce499c574c5140b5953a9ae561d89ae6b49ed4d87b2266da57b9e5",
+  "cron": "cd796e258796aa364296d35c98ca7f53490c1560dba7242e23592ddec1021eb3",
+  "pattern": "9c25f9695f2d6f22fdc7e935e2fb7fd702cce3521d633bb3265de1f82b4a3aa3",
+  "joinTwo": "6823adaa185079fcf88d46ced1e895599dab1a8a6ab6c6b6023c185a53bb91e2",
+  "joinSides": "05a5a795c8fe50594630677961e399fe7490660d78f67a5dad8e6647185ec8f9",
+  "gatherSteps": "bb6721ff54e51c3b5d82eafd49e02e60ec8a550456f744a76d44f68fe2981205",
+  "gatherCount": "b19f54d85ba3414bb98db3a987ccef0673277e0ece59ce73cce4704470ba7497",
+  "table": "c664ea8fdc553f961d0a5deead457c48f12eea04307e0201b737fe5451b2ac24",
+  "inherit": "4f2cc0633f9c64da62ef2398fae5336b96ab8c1b701d912022d4175268ef6b39",
+  "inheritOff": "4f2cc0633f9c64da62ef2398fae5336b96ab8c1b701d912022d4175268ef6b39",
+  "twoWindows": "de8d31170d2b029ad5aad7dc23402aa4e9cee52034218833d3748d043cf458d8"
+ },
+ "abouts": {
+  "tumbling": {
+   "v": 1,
+   "queryId": "tumbling",
+   "hash": "11cc47f117a86612",
+   "reads": {
+    "queues": [
+     "orders"
+    ],
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "window",
+     "name": "perMinute",
+     "window": {
+      "kind": "window-tumbling",
+      "seconds": 60,
+      "gracePeriod": 0,
+      "idleFlushMs": 5000,
+      "eventTime": false,
+      "allowedLateness": 0,
+      "onLate": "drop"
+     },
+     "reducer": {
+      "kind": "aggregate",
+      "fields": [
+       "count"
+      ]
+     },
+     "clock": "feed"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "counts"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "slidingKeyed": {
+   "v": 1,
+   "queryId": "slidingKeyed",
+   "hash": "c15f1497162334e1",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "ops",
+     "ops": [
+      "keyBy"
+     ]
+    },
+    {
+     "kind": "window",
+     "name": "step1",
+     "window": {
+      "kind": "window-sliding",
+      "size": 60,
+      "slide": 30,
+      "gracePeriod": 1.5,
+      "idleFlushMs": 5000,
+      "eventTime": false,
+      "allowedLateness": 0,
+      "onLate": "drop"
+     },
+     "reducer": {
+      "kind": "aggregate",
+      "fields": [
+       "count",
+       "sum",
+       "avg"
+      ]
+     },
+     "clock": "feed"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "session": {
+   "v": 1,
+   "queryId": "session",
+   "hash": "94eb25f05717f681",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "window",
+     "name": "step1",
+     "window": {
+      "kind": "window-session",
+      "gap": 10,
+      "gracePeriod": 2,
+      "idleFlushMs": 1000,
+      "eventTime": true,
+      "allowedLateness": "30s",
+      "onLate": "drop"
+     },
+     "reducer": {
+      "kind": "reduce",
+      "hasInitial": true
+     },
+     "clock": "event"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "sessionEt": {
+   "v": 1,
+   "queryId": "sessionEt",
+   "hash": "7e2121aa0daa15fa",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "window",
+     "name": "step1",
+     "window": {
+      "kind": "window-session",
+      "gap": 0.5,
+      "gracePeriod": 0,
+      "idleFlushMs": 1000,
+      "eventTime": true,
+      "allowedLateness": 5,
+      "onLate": "drop",
+      "idle": 30000
+     },
+     "reducer": {
+      "kind": "reduce",
+      "hasInitial": false
+     },
+     "clock": "event"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "reduceNull": {
+   "v": 1,
+   "queryId": "reduceNull",
+   "hash": "348045c5d901b531",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "window",
+     "name": "step1",
+     "window": {
+      "kind": "window-tumbling",
+      "seconds": 1.5,
+      "gracePeriod": 0,
+      "idleFlushMs": 5000,
+      "eventTime": false,
+      "allowedLateness": 0,
+      "onLate": "drop"
+     },
+     "reducer": {
+      "kind": "reduce",
+      "hasInitial": true
+     },
+     "clock": "feed"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "cron": {
+   "v": 1,
+   "queryId": "cron",
+   "hash": "5beec55a5c91911b",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "window",
+     "name": "step1",
+     "window": {
+      "kind": "window-cron",
+      "every": "hour",
+      "gracePeriod": 0,
+      "idleFlushMs": 30000,
+      "eventTime": true,
+      "allowedLateness": 0,
+      "onLate": "drop",
+      "idle": 60000
+     },
+     "reducer": {
+      "kind": "aggregate",
+      "fields": [
+       "n"
+      ]
+     },
+     "clock": "event"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "a",
+     "b"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "pattern": {
+   "v": 1,
+   "queryId": "pattern",
+   "hash": "7201fa20fd2be239",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": [
+     {
+      "field": "data.x",
+      "op": "=",
+      "value": 1
+     }
+    ]
+   },
+   "steps": [
+    {
+     "kind": "pattern",
+     "name": "p1",
+     "config": {
+      "kind": "pattern",
+      "within": 900000,
+      "onRepeat": "keep",
+      "timeout": true,
+      "eventTime": true,
+      "allowedLateness": 300000,
+      "onLate": "include",
+      "idle": 60000
+     },
+     "clock": "event"
+    }
+   ],
+   "sink": {
+    "kind": "route"
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "joinTwo": {
+   "v": 1,
+   "queryId": "joinTwo",
+   "hash": "b40d44c21305239b",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "join",
+     "name": "step1",
+     "config": {
+      "kind": "join",
+      "within": 3600000,
+      "onRepeat": "restart",
+      "timeout": false
+     },
+     "clock": "feed"
+    }
+   ],
+   "sink": {
+    "kind": "foreach"
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "joinSides": {
+   "v": 1,
+   "queryId": "joinSides",
+   "hash": "8e287b1e917e8891",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "join",
+     "name": "step1",
+     "config": {
+      "kind": "join",
+      "within": 600000,
+      "parts": [
+       "orders",
+       "payments",
+       "shipments"
+      ],
+      "count": false,
+      "onRepeat": "keep",
+      "timeout": true
+     },
+     "clock": "feed"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "gatherSteps": {
+   "v": 1,
+   "queryId": "gatherSteps",
+   "hash": "863b4ef76ebb2087",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "gather",
+     "name": "step1",
+     "config": {
+      "kind": "gather",
+      "within": 300000,
+      "parts": [
+       "a",
+       "b"
+      ],
+      "count": false,
+      "onRepeat": "latest",
+      "timeout": false
+     },
+     "clock": "feed"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "gatherCount": {
+   "v": 1,
+   "queryId": "gatherCount",
+   "hash": "60e79b872764398d",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "gather",
+     "name": "step1",
+     "config": {
+      "kind": "gather",
+      "within": 5400000,
+      "parts": null,
+      "count": true,
+      "onRepeat": "keep",
+      "timeout": false
+     },
+     "clock": "feed"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "table": {
+   "v": 1,
+   "queryId": "table",
+   "hash": "a5b54dcdc9bccbc2",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": [],
+    "tables": [
+     "s1",
+     "s2"
+    ]
+   },
+   "steps": [
+    {
+     "kind": "table",
+     "name": "t",
+     "config": {
+      "kind": "table",
+      "queues": [
+       "s1",
+       "s2"
+      ],
+      "key": true,
+      "value": false
+     }
+    },
+    {
+     "kind": "ops",
+     "ops": [
+      "map"
+     ]
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "inherit": {
+   "v": 1,
+   "queryId": "inherit",
+   "hash": "32fde1c19e1cb3f9",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "window",
+     "name": "step1",
+     "window": {
+      "kind": "window-tumbling",
+      "seconds": 60,
+      "gracePeriod": 0,
+      "idleFlushMs": 5000,
+      "eventTime": true,
+      "allowedLateness": 0,
+      "onLate": "drop"
+     },
+     "reducer": {
+      "kind": "aggregate",
+      "fields": [
+       "n"
+      ]
+     },
+     "clock": "event"
+    },
+    {
+     "kind": "pattern",
+     "name": "step2",
+     "config": {
+      "kind": "pattern",
+      "within": 60000,
+      "onRepeat": "keep",
+      "timeout": false
+     },
+     "clock": "event"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "inheritOff": {
+   "v": 1,
+   "queryId": "inheritOff",
+   "hash": "6d42c5db399fc8a8",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "window",
+     "name": "step1",
+     "window": {
+      "kind": "window-tumbling",
+      "seconds": 60,
+      "gracePeriod": 0,
+      "idleFlushMs": 5000,
+      "eventTime": true,
+      "allowedLateness": 0,
+      "onLate": "drop"
+     },
+     "reducer": {
+      "kind": "aggregate",
+      "fields": [
+       "n"
+      ]
+     },
+     "clock": "event"
+    },
+    {
+     "kind": "pattern",
+     "name": "step2",
+     "config": {
+      "kind": "pattern",
+      "within": 60000,
+      "onRepeat": "keep",
+      "timeout": false
+     },
+     "clock": "feed"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  },
+  "twoWindows": {
+   "v": 1,
+   "queryId": "twoWindows",
+   "hash": "3995adf257e42564",
+   "reads": {
+    "queues": null,
+    "partitions": null,
+    "where": []
+   },
+   "steps": [
+    {
+     "kind": "window",
+     "name": "step1",
+     "window": {
+      "kind": "window-tumbling",
+      "seconds": 60,
+      "gracePeriod": 0,
+      "idleFlushMs": 5000,
+      "eventTime": false,
+      "allowedLateness": 0,
+      "onLate": "drop"
+     },
+     "reducer": {
+      "kind": "aggregate",
+      "fields": [
+       "count"
+      ]
+     },
+     "clock": "feed"
+    },
+    {
+     "kind": "ops",
+     "ops": [
+      "keyBy"
+     ]
+    },
+    {
+     "kind": "window",
+     "name": "total",
+     "window": {
+      "kind": "window-tumbling",
+      "seconds": 120,
+      "gracePeriod": 0,
+      "idleFlushMs": 5000,
+      "eventTime": false,
+      "allowedLateness": 0,
+      "onLate": "drop"
+     },
+     "reducer": {
+      "kind": "aggregate",
+      "fields": [
+       "total",
+       "keys"
+      ]
+     },
+     "clock": "feed"
+    }
+   ],
+   "sink": {
+    "kind": "queues",
+    "queues": [
+     "x"
+    ]
+   },
+   "onPoison": "stop",
+   "shards": null,
+   "exclusive": true,
+   "lockTtl": "15s",
+   "positionCommitMillis": 5000
+  }
+ },
+ "numberStrings": [
+  [
+   0,
+   "0"
+  ],
+  [
+   0,
+   "0"
+  ],
+  [
+   1,
+   "1"
+  ],
+  [
+   -1,
+   "-1"
+  ],
+  [
+   60,
+   "60"
+  ],
+  [
+   1.5,
+   "1.5"
+  ],
+  [
+   0.1,
+   "0.1"
+  ],
+  [
+   0.5,
+   "0.5"
+  ],
+  [
+   0.3333333333333333,
+   "0.3333333333333333"
+  ],
+  [
+   100,
+   "100"
+  ],
+  [
+   1e+21,
+   "1e+21"
+  ],
+  [
+   1e-7,
+   "1e-7"
+  ],
+  [
+   0.000001,
+   "0.000001"
+  ],
+  [
+   123.456,
+   "123.456"
+  ],
+  [
+   1.5e+300,
+   "1.5e+300"
+  ],
+  [
+   9007199254740992,
+   "9007199254740992"
+  ],
+  [
+   9007199254740994,
+   "9007199254740994"
+  ],
+  [
+   1152921504606847000,
+   "1152921504606847000"
+  ],
+  [
+   10000000000000000,
+   "10000000000000000"
+  ],
+  [
+   123456789012345680000,
+   "123456789012345680000"
+  ],
+  [
+   5e-324,
+   "5e-324"
+  ],
+  [
+   1.7976931348623157e+308,
+   "1.7976931348623157e+308"
+  ],
+  [
+   0.000123,
+   "0.000123"
+  ],
+  [
+   12345678000000,
+   "12345678000000"
+  ],
+  [
+   -2.5e-8,
+   "-2.5e-8"
+  ]
+ ],
+ "times": [
+  [
+   0,
+   "1970-01-01T00:00:00.000Z"
+  ],
+  [
+   1.7,
+   "1970-01-01T00:00:00.001Z"
+  ],
+  [
+   -1.7,
+   "1969-12-31T23:59:59.999Z"
+  ],
+  [
+   1793955600123,
+   "2026-11-06T09:00:00.123Z"
+  ],
+  [
+   253402300800000,
+   "+010000-01-01T00:00:00.000Z"
+  ],
+  [
+   -62198755200000,
+   "-000001-01-01T00:00:00.000Z"
+  ],
+  [
+   8640000000000000,
+   "+275760-09-13T00:00:00.000Z"
+  ],
+  [
+   -8640000000000000,
+   "-271821-04-20T00:00:00.000Z"
+  ]
+ ],
+ "parses": [
+  [
+   "2026-11-06T09:00:00.123456Z",
+   1793955600123
+  ],
+  [
+   "2026-11-06",
+   1793923200000
+  ],
+  [
+   "2026-11-06T09:00:00.5+01:00",
+   1793952000500
+  ],
+  [
+   "2026-11-06 09:00:00Z",
+   1793955600000
+  ],
+  [
+   "2026-11-31T00:00:00Z",
+   1796083200000
+  ],
+  [
+   "2026-11-32T00:00:00Z",
+   null
+  ],
+  [
+   "+002026-11-06T09:00:00Z",
+   1793955600000
+  ],
+  [
+   "2026-11-06T24:00:00Z",
+   1794009600000
+  ],
+  [
+   "Thu, 06 Nov 2026 09:00:00 GMT",
+   1793955600000
+  ],
+  [
+   "nope",
+   null
+  ],
+  [
+   "2026-11-06T09:00:00z",
+   1793955600000
+  ],
+  [
+   "2026-11-06T09:00:00+0100",
+   1793952000000
+  ]
+ ],
+ "fnv": [
+  [
+   "",
+   2166136261,
+   2
+  ],
+  [
+   "a",
+   3826002220,
+   5
+  ],
+  [
+   "foobar",
+   3214735720,
+   0
+  ],
+  [
+   "c17",
+   1206617002,
+   3
+  ],
+  [
+   "é😀",
+   60646348,
+   0
+  ],
+  [
+   "booking-9137",
+   288166019,
+   1
+  ],
+  [
+   "\ud800x",
+   1538974390,
+   2
+  ]
+ ],
+ "ids": {
+  "prefix": "fd-1219b51c-",
+  "out0": "fd-1219b51c-6516aff90b4a3b85797ceaaecbf852b3f27ccd90",
+  "out2": "fd-43c28133-fba2ccbbf6a6c2d0fa1e2df3b08fb43153ff1e99",
+  "shardId": "q#shard1of3",
+  "queue0": "queen-feed-q.ae6039ea17ee6bed.0",
+  "queue3": "queen-feed-q.ae6039ea17ee6bed.3",
+  "emit": "fd-43c28133-c73086e0f57de0e921a6be018d1b690749713623"
+ },
+ "piece": {
+  "text": "{\"v\":2,\"s\":0,\"k\":\"window\",\"set\":[[\"w\\u001f60000\\u001fk1\",{\"key\":\"k1\",\"start\":60000,\"end\":120000,\"due\":120000,\"acc\":{\"count\":2,\"avg\":1.5}}]],\"del\":[\"w\\u001f0\\u001fgone\"]}",
+  "chunk": "RY1BCsIwEAD/Mucgm4Ie9iu1h9DEIpEUTNIgpX8XW9HbDAzMyoJ2hoyKIaK0e/Jzw5BDQfuedq0i9nYRETkwWsxKDC+UD5OLexZ0TwwhedR2h/ga/uLGEV0Z55rKvnXLhNrTeduGweDDA/0Nv7NpToFhewM="
+ },
+ "clips": [
+  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…",
+  [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23,
+   24,
+   25,
+   26,
+   27,
+   28,
+   29,
+   30,
+   31,
+   32,
+   33,
+   34,
+   35,
+   36,
+   37,
+   38,
+   39,
+   40,
+   41,
+   42,
+   43,
+   44,
+   45,
+   46,
+   47,
+   48,
+   49,
+   "… 10 more"
+  ],
+  {
+   "a": {
+    "b": {
+     "c": {
+      "d": "…"
+     }
+    }
+   }
+  },
+  "NaN",
+  "fn",
+  {
+   "n": null
+  }
+ ]
+}

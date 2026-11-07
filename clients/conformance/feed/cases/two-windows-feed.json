@@ -1,0 +1,128 @@
+{
+  "name": "two-windows-feed",
+  "about": "a window of window results on the feed clock: each result reaches the next step at the time its window closed",
+  "source": {
+    "queues": [
+      "c-hits"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 300
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "max": {
+          "$get": "0.count"
+        },
+        "sum": {
+          "$get": "0.count"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-five-min"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:20.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:01:10.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:04:10.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:05:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-two-windows-feed"
+  },
+  "mode": "fake"
+}

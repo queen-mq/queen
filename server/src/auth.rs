@@ -510,6 +510,14 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
         return ReadOnly;
     }
 
+    // `POST /api/v1/feed` reads the same message records as `/api/v1/fetch`,
+    // in log order across a tenant's queues: nothing leased, nothing moved, no
+    // cursor (rsm/facade/real/phase2/feed.rs). Same level as the fetch beside
+    // it, spelled with the method for the same reason.
+    if m == "POST" && path == "/api/v1/feed" {
+        return ReadOnly;
+    }
+
     // `POST /api/v1/fetch/offsets` is the fetch arm's other twin: which offset
     // a partition's log had reached at a time, read from the same partition
     // and txns rows a fetch reads, nothing leased and nothing moved

@@ -47,6 +47,12 @@ verifiedBy:
 # line wrapping only. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-31 (97b0f2f8e): auth.rs classifies the read-only GET /streams/v1/queries,
 # which lists a tenant's streams for the console. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): auth.rs makes POST /api/v1/feed read-only, like POST /api/v1/fetch. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (JS push across partitions, buffer per queue): TransactionBuilder.js lets a pushed item name its own partition. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 The transaction above already used two of the three: `kv.put` stored the order's state, and `timer()` scheduled tomorrow's reminder, which arrives as a message.

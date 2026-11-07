@@ -1,0 +1,127 @@
+{
+  "outputs": [],
+  "records": {
+    "c-batch-flatmap-split": {
+      "position": "end",
+      "epoch": 0,
+      "readTo": 1793955601000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-batch-flatmap-split": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-batch-flatmap-split",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "flatMap"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "foreachBatch",
+      "maxItems": 2,
+      "maxWaitMillis": 0
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "foreachBatch": [
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "n": 1,
+            "i": 0
+          },
+          "ctx": {
+            "position": "S1.1",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 1,
+            "transactionId": "i1"
+          },
+          "id": "S1.1/c-in/p1#0"
+        },
+        {
+          "value": {
+            "n": 1,
+            "i": 1
+          },
+          "ctx": {
+            "position": "S1.1",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 1,
+            "transactionId": "i1"
+          },
+          "id": "S1.1/c-in/p1#1"
+        }
+      ]
+    },
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "n": 1,
+            "i": 2
+          },
+          "ctx": {
+            "position": "S1.1",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 1,
+            "transactionId": "i1"
+          },
+          "id": "S1.1/c-in/p1#2"
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "a": {
+      "batches": 2,
+      "effects": 3,
+      "commits": 1
+    },
+    "A.stopped": {
+      "emitted": 3,
+      "effects": 3,
+      "batches": 2,
+      "outputs": 0,
+      "retries": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "pendingBatch": 0
+    }
+  },
+  "problems": []
+}

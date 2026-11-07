@@ -16,6 +16,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (after #154 merged into next-release): raft/mod.rs declares
 # raft/traffic.rs, which counts the Raft port's bytes by channel (23cee6523). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-07 (the tenant feed): raft/mod.rs and local.rs pass on
+# `appended_any`, the wake for feed long polls. Backups and restores are unchanged.
 ---
 
 Three nodes protect you from losing a machine, not from a mistake: a deleted queue or a retention that was too short reaches every node as faithfully as a good write. A backup is the copy that lives outside the cluster. [Recovery](/manage/recovery/#backups) says it in short; this page has every command.
@@ -57,7 +59,7 @@ kill -CONT "$PID"          # thaw whether or not the copy worked
 # Freeze the container, copy its volume through a helper container, thaw.
 docker pause queen
 docker run --rm --entrypoint tar -v queen-data:/data:ro -v /backup:/backup \
-  ghcr.io/queen-mq/queen:2.7.1 -C /data -cf "/backup/queen-$(date -u +%Y%m%dT%H%MZ).tar" .
+  ghcr.io/queen-mq/queen:2.8.0 -C /data -cf "/backup/queen-$(date -u +%Y%m%dT%H%MZ).tar" .
 docker unpause queen
 ```
 

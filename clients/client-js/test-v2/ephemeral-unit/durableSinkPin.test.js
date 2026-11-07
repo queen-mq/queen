@@ -90,8 +90,10 @@ describe('durable sink — byte identity', () => {
     const httpClient = { async post(path, body) { posts.push({ path, body }); return [] } }
     const manager = new BufferManager(httpClient)
 
-    const address = durableAddress('orders', 'Default')
-    assert.equal(address, 'orders/Default', 'the durable address is unchanged: no namespace prefix')
+    // One buffer per queue since 2026-11-06: the address is the queue (each item
+    // carries its partition), still with no namespace prefix.
+    const address = durableAddress('orders')
+    assert.equal(address, 'orders', 'the durable address is the queue: no namespace prefix')
 
     await manager.addMessage(address, { queue: 'orders', partition: 'Default', payload: { n: 1 }, transactionId: 'fixed-1' }, { messageCount: 1, timeMillis: 60000 })
     await until(() => posts.length === 1, 'the drain')

@@ -26,7 +26,7 @@
  */
 
 import * as logger from '../utils/logger.js'
-import { generateUUID } from './QueueBuilder.js'
+import { generateUUID, itemPartition } from './QueueBuilder.js'
 import { isValidUUID } from '../utils/validation.js'
 import { kvOp, materializeKvOp } from '../kv/Kv.js'
 import { TimerBuilder } from './TimerBuilder.js'
@@ -151,9 +151,11 @@ export class TransactionBuilder {
               transactionId: item.transactionId || generateUUID()
             }
 
-            // Add partition if set
-            if (partition !== null) {
-              result.partition = partition
+            // The item's own partition (an envelope's), else `.partition(p)`.
+            // Absent both, none is sent and the broker uses Default, as before.
+            const itemPart = itemPartition(item, 'data' in item || 'payload' in item, partition)
+            if (itemPart !== null) {
+              result.partition = itemPart
             }
 
             if (item.traceId && isValidUUID(item.traceId)) {

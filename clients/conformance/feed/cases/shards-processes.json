@@ -1,0 +1,147 @@
+{
+  "name": "shards-processes",
+  "about": "shard { index, count } in two processes: the same split as one process with shards",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "n": {
+          "$get": "0.data.n"
+        },
+        "p": {
+          "$get": "0.partition"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "compareMetrics": [],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 0
+              },
+              "transactionId": "i0"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p2",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p3",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "i3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p4",
+              "data": {
+                "n": 4
+              },
+              "transactionId": "i4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:06.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p5",
+              "data": {
+                "n": 5
+              },
+              "transactionId": "i5"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A",
+      "run": {
+        "shard": {
+          "index": 0,
+          "count": 2
+        }
+      }
+    },
+    {
+      "start": "B",
+      "run": {
+        "shard": {
+          "index": 1,
+          "count": 2
+        }
+      }
+    },
+    {
+      "idle": "A",
+      "keys": [
+        "$q#shard0of2",
+        "$q#shard1of2"
+      ]
+    },
+    {
+      "stop": "A"
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "run": {
+    "queryId": "c-shards-processes"
+  },
+  "mode": "fake"
+}

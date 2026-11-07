@@ -1,0 +1,105 @@
+{
+  "outputs": [
+    {
+      "queue": "c-et-pattern-out",
+      "partition": "e1",
+      "data": {
+        "key": "e1",
+        "a": "a1",
+        "b": "b1"
+      }
+    },
+    {
+      "queue": "c-et-pattern-out",
+      "partition": "e2",
+      "data": {
+        "key": "e2",
+        "a": "a2",
+        "timeout": true
+      }
+    },
+    {
+      "queue": "c-et-pattern-out",
+      "partition": "e3",
+      "data": {
+        "key": "e3",
+        "a": "a3",
+        "b": "b3"
+      }
+    }
+  ],
+  "record": {
+    "epoch": 0,
+    "hash": "3e7c1eda4f5a2723",
+    "caughtUp": true,
+    "open": {
+      "step1": 0
+    },
+    "held": {
+      "step1": 1
+    }
+  },
+  "about": {
+    "exclusive": true,
+    "hash": "3e7c1eda4f5a2723",
+    "lockTtl": "5s",
+    "onPoison": "stop",
+    "positionCommitMillis": 0,
+    "reads": {
+      "partitions": null,
+      "queues": [
+        "c-a",
+        "c-b"
+      ],
+      "where": []
+    },
+    "shards": null,
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-et-pattern-out"
+      ]
+    },
+    "steps": [
+      {
+        "clock": "event",
+        "config": {
+          "allowedLateness": 60000,
+          "eventTime": true,
+          "kind": "pattern",
+          "onRepeat": "keep",
+          "timeout": true,
+          "within": 300000
+        },
+        "kind": "pattern",
+        "name": "step1"
+      }
+    ],
+    "v": 1
+  },
+  "foreach": [],
+  "errors": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 0,
+      "outputs": 0,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    },
+    "B.stopped": {
+      "emitted": 3,
+      "outputs": 3,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

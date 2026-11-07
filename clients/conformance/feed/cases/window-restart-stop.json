@@ -1,0 +1,122 @@
+{
+  "name": "window-restart-stop",
+  "about": "a stop with open windows writes a snapshot; the next process loads it and closes the windows with every message counted once",
+  "source": {
+    "queues": [
+      "c-visits"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.n"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-visits-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "v1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v2",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "v2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:20.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v1",
+              "data": {
+                "n": 4
+              },
+              "transactionId": "v3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "B"
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "clock": "2026-11-06T09:01:01.000Z"
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "run": {
+    "queryId": "c-window-restart-stop"
+  },
+  "mode": "fake"
+}

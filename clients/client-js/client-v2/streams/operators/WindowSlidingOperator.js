@@ -24,7 +24,7 @@
  *   eventTime, allowedLateness, onLate — same semantics as WindowTumblingOperator
  */
 
-import { extractEventTime, normaliseLateOpts, MS_PER_SEC } from './_windowCommon.js'
+import { extractEventTime, normaliseLateOpts, feedTimeOptions, windowLatenessMs, MS_PER_SEC } from './_windowCommon.js'
 
 export class WindowSlidingOperator {
   constructor({
@@ -34,7 +34,8 @@ export class WindowSlidingOperator {
     idleFlushMs   = 5000,
     eventTime,
     allowedLateness = 0,
-    onLate
+    onLate,
+    idle
   } = {}) {
     if (typeof size !== 'number' || size <= 0) {
       throw new Error('windowSliding requires { size: <positive number> }')
@@ -56,7 +57,7 @@ export class WindowSlidingOperator {
     this.gracePeriodMs    = Math.max(0, Math.floor(gracePeriod * MS_PER_SEC))
     this.idleFlushMs      = Math.max(0, Math.floor(idleFlushMs))
     this.eventTimeFn      = typeof eventTime === 'function' ? eventTime : null
-    this.allowedLatenessMs = Math.max(0, Math.floor(allowedLateness * MS_PER_SEC))
+    this.allowedLatenessMs = windowLatenessMs(allowedLateness, 'windowSliding')
     this.onLatePolicy     = normaliseLateOpts(onLate)
     this.operatorTag      = `slide:${size}:${slide}`
     this.config           = {
@@ -69,6 +70,7 @@ export class WindowSlidingOperator {
       allowedLateness,
       onLate:           this.onLatePolicy
     }
+    feedTimeOptions(this, { eventTime, idle }, 'windowSliding')
   }
 
   /**

@@ -1,0 +1,157 @@
+{
+  "name": "et-window-lateness",
+  "about": "event-time windows close on the watermark (latest event time - allowedLateness); an event older than the watermark is late and dropped",
+  "mode": "both",
+  "source": {
+    "queues": [
+      "c-readings"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60,
+        "eventTime": {
+          "$get": "0.data.at"
+        },
+        "allowedLateness": "30s"
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.v"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-et-out"
+    }
+  ],
+  "compareMetrics": [
+    "emitted",
+    "outputs",
+    "late"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:00:10.000Z",
+                "v": 1
+              },
+              "transactionId": "e1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:01:20.000Z",
+                "v": 2
+              },
+              "transactionId": "e2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:00:40.000Z",
+                "v": 4
+              },
+              "transactionId": "e3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:00:55.000Z",
+                "v": 8
+              },
+              "transactionId": "e4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:01:40.000Z",
+                "v": 16
+              },
+              "transactionId": "e5"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:06.000Z",
+          "push": [
+            {
+              "queue": "c-readings",
+              "partition": "r",
+              "data": {
+                "at": "2026-11-06T09:03:20.000Z",
+                "v": 32
+              },
+              "transactionId": "e6"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-et-window-lateness"
+  }
+}

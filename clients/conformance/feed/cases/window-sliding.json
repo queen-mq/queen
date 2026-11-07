@@ -1,0 +1,118 @@
+{
+  "name": "window-sliding",
+  "about": "sliding windows (60 s every 30 s): each message counts in every window it falls in; reduce with an initial value",
+  "source": {
+    "queues": [
+      "c-pay"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowSliding",
+      "opts": {
+        "size": 60,
+        "slide": 30
+      }
+    },
+    {
+      "op": "reduce",
+      "fn": {
+        "$add": [
+          {
+            "$get": "0"
+          },
+          {
+            "$get": "1.amount"
+          }
+        ]
+      },
+      "initial": 0
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowStart"
+        },
+        "end": {
+          "$get": "1.windowEnd"
+        },
+        "sum": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-sliding-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-pay",
+              "partition": "k",
+              "data": {
+                "amount": 1
+              },
+              "transactionId": "p1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:40.000Z",
+          "push": [
+            {
+              "queue": "c-pay",
+              "partition": "k",
+              "data": {
+                "amount": 2
+              },
+              "transactionId": "p2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:01:10.000Z",
+          "push": [
+            {
+              "queue": "c-pay",
+              "partition": "k",
+              "data": {
+                "amount": 4
+              },
+              "transactionId": "p3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:02:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-window-sliding"
+  },
+  "mode": "fake"
+}

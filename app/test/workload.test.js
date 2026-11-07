@@ -219,6 +219,20 @@ test("a Kafka topic's messages are not pending with no consumer group", () => {
   assert.deepEqual(findings(enrichRows(payload(['k']), new Map(), meta, 'namespace'), 'namespace', 'last 1h'), [])
 })
 
+test("a queue a feed stream reads has no messages pending with no consumer group", () => {
+  const meta = new Map([
+    ['feed-0', { namespace: 'f', task: '', feedRead: true }],
+    ['feed-1', { namespace: 'f', task: '', feedRead: true }],
+    ['spool', { namespace: 'mixed', task: '' }],
+    ['read', { namespace: 'mixed', task: '', feedRead: true }],
+  ])
+  const w = { pushMessages: 5, popMessages: 0, popEmpty: 0, parkedAvg: 0, ackSuccess: 0, ackFailed: 0, maxLagMs: null, avgLagMs: null }
+  const n = { pending: 9, pendingWithoutGroup: 9, queuesWithoutGroup: 2, queuesTouched: 1, partitions: 1, deadLetter: 0 }
+  const payload = (keys) => ({ tenant: { window: w }, rows: keys.map((key) => ({ key, queues: 2, window: { ...w }, now: { ...n }, series: {} })) })
+  assert.deepEqual(enrichRows(payload(['feed-0', 'spool']), new Map(), meta, 'queue').map((r) => r.sev), ['ok', 'bad'])
+  assert.deepEqual(enrichRows(payload(['f', 'mixed']), new Map(), meta, 'namespace').map((r) => r.sev), ['ok', 'bad'])
+})
+
 test('flowSeries: at most five series, Other last, gaps preserved', () => {
   const rows = enrichRows(Q, groupsByQueue(), queueMeta(), 'queue')
   assert.ok(rows.length > 5, 'the queue fixture should have more than five rows')

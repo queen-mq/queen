@@ -1,0 +1,84 @@
+{
+  "name": "foreach-ctx",
+  "about": "foreach gets the value and the message context, once per message, in log order",
+  "mode": "both",
+  "source": {
+    "queues": [
+      "c-ticks"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "n": {
+          "$get": "0.data.n"
+        },
+        "q": {
+          "$get": "0.queue"
+        }
+      }
+    },
+    {
+      "op": "foreach"
+    }
+  ],
+  "compareMetrics": [
+    "emitted",
+    "effects",
+    "outputs"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-ticks",
+              "partition": "p1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "t1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-ticks",
+              "partition": "p2",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "t2"
+            },
+            {
+              "queue": "c-ticks",
+              "partition": "p1",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "t3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-foreach-ctx"
+  }
+}

@@ -1277,6 +1277,14 @@ pub(crate) fn build_raft_router(
         // heavy-read slot), around every handler and the fallback: the
         // memory guard and the heavy-read slots (`memguard.rs`).
         .layer(axum::middleware::from_fn(memory_guard))
+        // Inside auth and tenancy (the relay names the tenant they resolved),
+        // outside the memory guard (passing a follower's answer on takes no
+        // heavy-read slot here): a feed read that asked to be relayed and
+        // reached the leader goes to a follower.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            relay_feed_from_leader,
+        ))
         // Inside tenancy: it reads the tenant the layer below resolved.
         .layer(axum::middleware::from_fn(refuse_reserved_tenant))
         .layer(axum::middleware::from_fn_with_state(
@@ -1512,23 +1520,180 @@ fn is_hop_by_hop(name: &header::HeaderName) -> bool {
     )
 }
 
-/// Relay `req` to the leader at `addr` and its answer back, both streamed.
+/// The HTTP client a node relays client requests to another node with.
 #[cfg(feature = "server")]
-async fn forward(addr: &str, req: axum::extract::Request) -> Response {
+type PeerClient = hyper_util::client::legacy::Client<
+    hyper_util::client::legacy::connect::HttpConnector,
+    axum::body::Body,
+>;
+
+#[cfg(feature = "server")]
+fn peer_client() -> &'static PeerClient {
     use std::sync::OnceLock;
-    type Client = hyper_util::client::legacy::Client<
-        hyper_util::client::legacy::connect::HttpConnector,
-        axum::body::Body,
-    >;
-    static CLIENT: OnceLock<Client> = OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
+    static CLIENT: OnceLock<PeerClient> = OnceLock::new();
+    CLIENT.get_or_init(|| {
         let mut c = hyper_util::client::legacy::connect::HttpConnector::new();
         c.set_nodelay(true);
         c.set_connect_timeout(Some(std::time::Duration::from_secs(2)));
         hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
             .pool_max_idle_per_host(256)
             .build::<_, axum::body::Body>(c)
-    });
+    })
+}
+
+/// A caller that cannot reach the followers a feed read's 421 names sets this
+/// header: anything behind the proxy, which talks to one node, and the proxy
+/// sets it on every feed read. The leader of a cluster then relays the read to
+/// a follower itself ([`relay_feed_from_leader`]).
+#[cfg(feature = "server")]
+pub(crate) const FEED_RELAY_HEADER: &str = "x-queen-feed-relay";
+
+/// The most a relayed feed read's body may weigh: a read names queues,
+/// partitions and conditions, never data.
+#[cfg(feature = "server")]
+const FEED_RELAY_BODY_MAX: usize = 4 * 1024 * 1024;
+
+/// How long one follower may take with a relayed feed read: the longest wait a
+/// read may ask for (`maxWaitMs`, 30 s) and some room, and the proxy's own
+/// upstream timeout (35 s): past it nobody is waiting for the answer.
+#[cfg(feature = "server")]
+const FEED_RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
+
+/// A feed read is served by followers so that its readers add no load to the
+/// leader (`phase2/feed.rs`): the leader answers 421 and names them. A caller
+/// that asked to be relayed ([`FEED_RELAY_HEADER`]) gets the read served by a
+/// follower through this node instead: the follower reads the log, the leader
+/// only passes the bytes on. Followers are tried in the order the facade gives
+/// (the freshest heartbeat first); a read moves nothing, so asking the next
+/// one after a failure is safe.
+///
+/// Inside auth and tenancy, on purpose. The relay proves itself to the
+/// follower with the cluster token (`peerclient::internal_headers`), and a
+/// proven relay names its tenant: so it names the tenant THIS node resolved,
+/// never a header the caller sent. The caller's own credential goes with it,
+/// as with every relay. The forward mark makes the follower serve it where it
+/// lands, even with `QUEEN_RAFT_CLIENT_OFFLOAD` off, so it never comes back.
+#[cfg(feature = "server")]
+async fn relay_feed_from_leader(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if req.uri().path() != "/api/v1/feed"
+        || req.method() != Method::POST
+        || !req.headers().contains_key(FEED_RELAY_HEADER)
+        || req.headers().contains_key(FORWARDED_HEADER)
+    {
+        return next.run(req).await;
+    }
+    let tenant = req
+        .extensions()
+        .get::<crate::tenant::Tenant>()
+        .map(|t| t.0.clone())
+        .unwrap_or_else(|| crate::config::DEFAULT_TENANT.to_string());
+    let followers = st.rsm.feed_followers(&tenant);
+    if followers.is_empty() {
+        return next.run(req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let body = match axum::body::to_bytes(body, FEED_RELAY_BODY_MAX).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                [(header::CONTENT_TYPE, "application/json")],
+                "{\"error\":\"a feed read's body is a few names and conditions: this one is too large to relay\",\"code\":\"feed_body_too_large\"}",
+            )
+                .into_response()
+        }
+    };
+    let mut headers = parts.headers.clone();
+    let names: Vec<header::HeaderName> = headers
+        .keys()
+        .filter(|n| is_hop_by_hop(n))
+        .cloned()
+        .collect();
+    for n in names {
+        headers.remove(&n);
+    }
+    // Whatever the caller spelled to pass for a broker goes; this node's own word replaces it.
+    for h in [
+        FEED_RELAY_HEADER,
+        FORWARDED_HEADER,
+        crate::peerclient::FWD_HEADER,
+        crate::peerclient::TOKEN_HEADER,
+        crate::config::TENANT_HEADER,
+    ] {
+        headers.remove(h);
+    }
+    headers.insert(FORWARDED_HEADER, axum::http::HeaderValue::from_static("1"));
+    if let Ok(v) = axum::http::HeaderValue::from_str(&tenant) {
+        headers.insert(crate::config::TENANT_HEADER, v);
+    }
+    for (k, v) in crate::peerclient::internal_headers() {
+        headers.insert(k, v);
+    }
+    let pq = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "/api/v1/feed".into());
+    let mut last = String::new();
+    for addr in &followers {
+        let uri: Uri = match format!("http://{addr}{pq}").parse() {
+            Ok(u) => u,
+            Err(e) => {
+                last = format!("{addr}: {e}");
+                continue;
+            }
+        };
+        let mut b = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .version(axum::http::Version::HTTP_11);
+        if let Some(h) = b.headers_mut() {
+            *h = headers.clone();
+        }
+        let Ok(upstream) = b.body(axum::body::Body::from(body.clone())) else {
+            continue;
+        };
+        match tokio::time::timeout(FEED_RELAY_TIMEOUT, peer_client().request(upstream)).await {
+            Ok(Ok(resp)) => {
+                let (mut parts, body) = resp.into_parts();
+                let names: Vec<header::HeaderName> = parts
+                    .headers
+                    .keys()
+                    .filter(|n| is_hop_by_hop(n))
+                    .cloned()
+                    .collect();
+                for n in names {
+                    parts.headers.remove(&n);
+                }
+                return Response::from_parts(parts, axum::body::Body::new(body));
+            }
+            Ok(Err(e)) => last = format!("{addr}: {e}"),
+            Err(_) => last = format!("{addr}: no answer in time"),
+        }
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::RETRY_AFTER, "1".to_string()),
+        ],
+        serde_json::json!({
+            "error": format!("this node leads the tenant's raft group and relays feed reads to a follower, but none answered ({last})"),
+            "code": "retry",
+        })
+        .to_string(),
+    )
+        .into_response()
+}
+
+/// Relay `req` to the leader at `addr` and its answer back, both streamed.
+#[cfg(feature = "server")]
+async fn forward(addr: &str, req: axum::extract::Request) -> Response {
+    let client = peer_client();
     let unavailable = |why: String| {
         (
             StatusCode::SERVICE_UNAVAILABLE,

@@ -1,0 +1,97 @@
+{
+  "name": "reset-token",
+  "about": "reset: \"<token>\" starts over once per token: the next start with the same token goes on",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "n": {
+          "$get": "0.data.n"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    },
+    {
+      "start": "B",
+      "run": {
+        "reset": "v2"
+      }
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "stop": "B"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "i2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "C",
+      "run": {
+        "reset": "v2"
+      }
+    },
+    {
+      "idle": "C"
+    },
+    {
+      "stop": "C"
+    }
+  ],
+  "run": {
+    "queryId": "c-reset-token"
+  },
+  "mode": "fake"
+}

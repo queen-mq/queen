@@ -1,0 +1,163 @@
+{
+  "name": "shards-shardby",
+  "about": "shardBy: a function of the message picks the shard (filtered in the process); a window keyed by the same field",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "keyBy",
+      "fn": {
+        "$get": "0.data.user"
+      }
+    },
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "user": {
+          "$get": "1.key"
+        },
+        "count": {
+          "$get": "0.count"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "run": {
+    "shardBy": {
+      "$get": "0.data.user"
+    },
+    "queryId": "c-shards-shardby"
+  },
+  "compareMetrics": [],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "user": "ann"
+              },
+              "transactionId": "i0"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "user": "bob"
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "user": "cy"
+              },
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "user": "dee"
+              },
+              "transactionId": "i3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "user": "ann"
+              },
+              "transactionId": "i4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:06.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "user": "bob"
+              },
+              "transactionId": "i5"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A",
+      "run": {
+        "shards": 2
+      }
+    },
+    {
+      "idle": "A",
+      "keys": [
+        "$q#shard0of2",
+        "$q#shard1of2"
+      ]
+    },
+    {
+      "clock": "2026-11-06T09:01:01.000Z"
+    },
+    {
+      "idle": "A",
+      "keys": [
+        "$q#shard0of2",
+        "$q#shard1of2"
+      ]
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "mode": "fake"
+}

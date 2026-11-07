@@ -1,0 +1,120 @@
+{
+  "outputs": [
+    {
+      "queue": "c-three",
+      "partition": "o-1",
+      "data": {
+        "key": "o-1",
+        "parts": [
+          "order",
+          "paid",
+          "sent"
+        ],
+        "amount": 6,
+        "carrier": "gls"
+      },
+      "from": "S1.4/c-shipments/o-1#0"
+    },
+    {
+      "queue": "c-three",
+      "partition": "o-2",
+      "data": {
+        "key": "o-2",
+        "missing": [
+          "paid"
+        ],
+        "got": [
+          "order",
+          "sent"
+        ]
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-join-many-sides": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "5321a488d604940f",
+      "clock": 1793959241000,
+      "units": 1,
+      "readTo": 1793959241000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 1,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-join-many-sides": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-join-many-sides",
+    "hash": "5321a488d604940f",
+    "reads": {
+      "queues": [
+        "c-orders",
+        "c-payments",
+        "c-shipments"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "join",
+        "name": "step1",
+        "config": {
+          "kind": "join",
+          "within": 3600000,
+          "parts": [
+            "order",
+            "paid",
+            "sent"
+          ],
+          "count": false,
+          "onRepeat": "latest",
+          "timeout": true
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-three"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

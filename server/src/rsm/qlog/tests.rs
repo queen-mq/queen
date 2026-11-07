@@ -3307,3 +3307,223 @@ fn the_fetch_read_answers_what_the_plain_read_answers() {
         reader.read_owned(LOG, 7, 4).unwrap()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Feed reads through the index (`POST /api/v1/feed`, sharded)
+// ---------------------------------------------------------------------------
+
+/// `(seq, base_offset)` of partition `pid`'s records in `file`, read through
+/// `ix`, into `out`.
+fn index_records(
+    ix: &super::FeedIndex,
+    file: &super::FeedFile,
+    pid: u64,
+    out: &mut Vec<(u64, u64)>,
+) {
+    let start = ix.start(file).unwrap();
+    let slots = super::feed_slots(&ix.view, &mut |p| p == pid);
+    let mut reader = super::SlotReader::new(ix);
+    for i in slots.partition_point(|s| s.offset < start)..slots.len() {
+        let (h, _) = reader.read(&slots, i).unwrap().expect("the record");
+        out.push((h.seq, h.base_offset));
+    }
+}
+
+/// `(seq, base_offset)` of partition `pid`'s records a feed read of `plan`
+/// meets: through the index where the log gives one when the read gets to
+/// the file ([`QLog::feed_index`]), scanned elsewhere.
+fn feed_records(q: &QLog, plan: &[super::FeedFile], pid: u64, upto: u64) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    for f in plan {
+        match q.feed_index(f) {
+            Some(ix) => index_records(&ix, f, pid, &mut out),
+            None => super::feed_scan(f, 1, upto, None, &mut |h, _| {
+                if h.pid == pid {
+                    out.push((h.seq, h.base_offset));
+                }
+                Ok(true)
+            })
+            .unwrap(),
+        }
+    }
+    out
+}
+
+/// A feed plan offers a file's index only where the index answers for the
+/// file: a sealed file whose index this process read and checked, with no
+/// record above the read's last seq. The active file, a file holding later
+/// records, and a file the boot mapped but has not checked are scanned; an
+/// index the open rebuilt from its file is checked, and offered.
+#[test]
+fn a_feed_plan_offers_an_index_only_where_it_answers_for_the_file() {
+    let td = TmpDir::new("feed-plan-index");
+    let opts = QLogOptions::testing(300);
+    let (mut q, _) = QLog::open(td.path(), 1, opts).unwrap();
+    for i in 0..20u64 {
+        append_one(&mut q, i + 1, 10 + (i % 2), i / 2, 10_000 + i as i64);
+    }
+    let sealed = q.files().iter().filter(|m| m.sealed).count();
+    assert!(sealed >= 5, "{sealed} sealed files");
+    let offered = |q: &QLog, plan: &[super::FeedFile]| {
+        plan.iter()
+            .filter(|f| f.view.is_some() && q.feed_index(f).is_some())
+            .count()
+    };
+
+    let plan = q.feed_plan(1, 20, None, true);
+    assert_eq!(offered(&q, &plan), sealed, "every sealed file");
+    assert!(
+        plan.last().unwrap().view.is_none(),
+        "the active file is scanned"
+    );
+    assert_eq!(
+        offered(&q, &q.feed_plan(1, 20, None, false)),
+        0,
+        "not asked for"
+    );
+    // A file with records above the read's last seq is scanned.
+    for f in q.feed_plan(1, 15, None, true) {
+        let m = q.files().iter().find(|m| m.id == f.id).unwrap();
+        assert_eq!(
+            f.view.is_some(),
+            m.sealed && m.max_seq <= 15,
+            "file {}",
+            m.id
+        );
+    }
+    // The same records either way.
+    let unindexed = q.feed_plan(1, 20, None, false);
+    for pid in [10, 11] {
+        assert_eq!(
+            feed_records(&q, &plan, pid, 20),
+            feed_records(&q, &unindexed, pid, 20),
+            "pid {pid}"
+        );
+    }
+
+    // Reopened: the boot maps the indexes without reading them, and none is
+    // offered until checked; one the open had to rebuild was read whole.
+    drop(q);
+    let qidx: Vec<PathBuf> = std::fs::read_dir(td.path().join("q1"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "qidx"))
+        .collect();
+    std::fs::remove_file(&qidx[0]).unwrap();
+    let (mut q, rec) = QLog::open(td.path(), 1, opts).unwrap();
+    assert_eq!(rec.rebuilt_indexes, 1);
+    let plan = q.feed_plan(1, 20, None, true);
+    assert_eq!(offered(&q, &plan), 1, "the rebuilt one");
+    // An unchecked file has no time range yet: a read `since` a time plans it.
+    assert_eq!(
+        q.feed_plan(1, 20, Some(10_000), true).len(),
+        q.files().len(),
+        "a since read skipped the files the boot has not checked"
+    );
+    let unindexed = q.feed_plan(1, 20, None, false);
+    for pid in [10, 11] {
+        assert_eq!(
+            feed_records(&q, &plan, pid, 20),
+            feed_records(&q, &unindexed, pid, 20),
+            "pid {pid}"
+        );
+    }
+    q.check_all_indexes().unwrap();
+    // A plan made before the check holds the unchecked indexes it saw (none),
+    // and one made after is offered every one.
+    let plan = q.feed_plan(1, 20, None, true);
+    assert_eq!(
+        offered(&q, &plan),
+        sealed,
+        "every sealed file, once checked"
+    );
+    for pid in [10, 11] {
+        assert_eq!(
+            feed_records(&q, &plan, pid, 20),
+            feed_records(&q, &unindexed, pid, 20),
+            "pid {pid}"
+        );
+    }
+}
+
+/// Retention rewrites a sealed file under its name with its live records at
+/// new offsets and a new index (a new uid, so nothing cached of the old index
+/// is served for it). A handle a read took before keeps reading the file it
+/// was taken on; a read planned before that reaches the file after gets no
+/// handle through the old index, and scans the new file; a read planned after
+/// gets the new index with the new file. All find every live record. The old
+/// offsets read in the new file name other bytes, and the reader says so
+/// instead of handing them out.
+#[test]
+fn a_rewritten_file_is_never_read_through_its_old_offsets() {
+    let td = TmpDir::new("feed-index-rewrite");
+    let opts = QLogOptions::testing(300);
+    let (mut q, _) = QLog::open(td.path(), 1, opts).unwrap();
+    for i in 0..20u64 {
+        append_one(&mut q, i + 1, 10 + (i % 2), i / 2, 10_000 + i as i64);
+    }
+    let live = feed_records(&q, &q.feed_plan(1, 20, None, false), 11, 20);
+    assert_eq!(live.len(), 10);
+    let before = q.feed_plan(1, 20, None, true);
+    assert_eq!(feed_records(&q, &before, 11, 20), live);
+    // The handles of a read that got to every sealed file before the rewrite.
+    let held: Vec<(super::FeedFile, super::FeedIndex)> = before
+        .iter()
+        .filter_map(|f| q.feed_index(f).map(|ix| (f.clone(), ix)))
+        .collect();
+    assert!(held.len() >= 5, "{} sealed files", held.len());
+
+    // Partition 10's records are dead: every sealed file mixes them with
+    // partition 11's, and is rewritten.
+    let mut starts = std::collections::HashMap::new();
+    starts.insert(10u64, u64::MAX);
+    starts.insert(11u64, 0);
+    while q.unlink_below_txns_bounded(&starts, 1).unwrap().more {}
+    let after = q.feed_plan(1, 20, None, true);
+
+    let mut rewritten = 0;
+    for (f, old) in &held {
+        let now = after
+            .iter()
+            .find(|n| n.id == f.id)
+            .expect("the file is kept, rewritten");
+        let new = q.feed_index(now).expect("its new index");
+        if new.view.uid() == old.view.uid() {
+            continue;
+        }
+        rewritten += 1;
+        assert!(new.view.file_bytes() < old.view.file_bytes());
+        assert!(
+            q.feed_index(f).is_none(),
+            "file {}: the new file was handed out with its old index",
+            f.id
+        );
+        // The old index with the new file, which the checks above rule out.
+        let stale = super::FeedIndex {
+            view: old.view.clone(),
+            file: new.file.clone(),
+        };
+        let slots = super::feed_slots(&stale.view, &mut |p| p == 11);
+        let mut reader = super::SlotReader::new(&stale);
+        for i in 0..slots.len() {
+            assert!(
+                reader.read(&slots, i).unwrap().is_none(),
+                "an old offset read other bytes as its record: {:?}",
+                slots[i]
+            );
+        }
+    }
+    assert!(rewritten > 0, "no file was rewritten");
+    // The handles taken before read the files they were taken on.
+    let mut from_held = Vec::new();
+    for (f, ix) in &held {
+        index_records(ix, f, 11, &mut from_held);
+    }
+    assert_eq!(from_held, live[..held.len()], "handles taken before");
+    assert_eq!(feed_records(&q, &before, 11, 20), live, "planned before");
+    assert_eq!(feed_records(&q, &after, 11, 20), live, "planned after");
+    // The dead records are gone from the rewritten files; the active file is
+    // never rewritten, and keeps its one.
+    assert_eq!(feed_records(&q, &after, 10, 20), vec![(19, 9)]);
+}

@@ -1,0 +1,175 @@
+{
+  "name": "window-tumbling",
+  "about": "a 60 s tumbling window with aggregate per partition across two queues, closed when the feed clock passes its end",
+  "source": {
+    "queues": [
+      "c-orders",
+      "c-refunds"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.amount"
+        },
+        "max": {
+          "$get": "0.amount"
+        },
+        "min": {
+          "$get": "0.amount"
+        },
+        "avg": {
+          "$get": "0.amount"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "end": {
+          "$get": "1.windowEnd"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-minute-totals"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "u1",
+              "data": {
+                "amount": 10
+              },
+              "transactionId": "a1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:15.000Z",
+          "push": [
+            {
+              "queue": "c-refunds",
+              "partition": "u1",
+              "data": {
+                "amount": -4
+              },
+              "transactionId": "a2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:20.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "u2",
+              "data": {
+                "amount": 7
+              },
+              "transactionId": "a3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:59.999Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "u1",
+              "data": {
+                "amount": 3
+              },
+              "transactionId": "a4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "state": "A",
+      "step": "step1",
+      "key": "u1",
+      "as": "u1-open"
+    },
+    {
+      "clock": "2026-11-06T09:01:00.500Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:01:10.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "u1",
+              "data": {
+                "amount": 100
+              },
+              "transactionId": "a5"
+            },
+            {
+              "queue": "c-orders",
+              "partition": "u3",
+              "data": {
+                "note": "no amount"
+              },
+              "transactionId": "a6"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "list": "A",
+      "step": "step1",
+      "limit": 10,
+      "as": "open-list"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-window-tumbling"
+  },
+  "mode": "fake"
+}

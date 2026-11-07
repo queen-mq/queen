@@ -8,15 +8,19 @@ import { useConsoleFrame } from '@/console/useConsoleFrame'
 import { useStreamsPage } from '@/console/useStreamsPage'
 import { rate, span } from '@/console/useOverview'
 import { fmt } from '@/console/useQueuePage'
+import FeedStreamOpen from '@/console/streams/FeedStreamOpen.vue'
+import { behindCell } from '@/console/streams/feedStreams'
 
 const route = useRoute()
 const router = useRouter()
 const frame = useConsoleFrame()
 const s = useStreamsPage()
 
+// A queue stream and a feed stream may share a name: the address picks by key
+// (`feed:<queryId>` for a feed stream, the name for a queue stream).
 const picked = computed(() => (typeof route.query.name === 'string' ? route.query.name : ''))
-function pick(name) { router.replace({ query: { ...route.query, name: picked.value === name ? undefined : name } }) }
-const sel = computed(() => s.rows.value.find((r) => r.name === picked.value) || null)
+function pick(key) { router.replace({ query: { ...route.query, name: picked.value === key ? undefined : key } }) }
+const sel = computed(() => s.rows.value.find((r) => r.key === picked.value) || null)
 const path = computed(() => (sel.value ? [{ label: 'Streams', to: '/streams' }, { label: sel.value.name, mono: true }] : [{ label: 'Streams' }]))
 
 const ago = (ms) => (ms ? `${span((Date.now() - ms) / 1000)} ago` : '–')
@@ -49,29 +53,37 @@ const overdueMin = computed(() => Math.round(s.overdueAfterMs.value / 60000))
       <p v-if="s.off.value" class="st-note qn-panel">Streams are not turned on for this tenant. An operator turns them on in its quotas.</p>
       <p v-if="s.error.value" class="qn-t2" style="margin-top: 14px">The broker did not answer: {{ s.error.value }}</p>
       <p v-else-if="!s.loading.value && !s.off.value && !s.rows.value.length" class="st-empty">
-        No streams yet. A stream is a query a runner keeps over a queue: windows, sums, joins, written to another queue. It shows here once its runner registers it.
+        No streams yet. A stream is a query a runner keeps over a queue or over the feed of every queue: windows, sums, patterns, joins, written to other queues. It shows here once its runner registers it, or commits for the first time.
       </p>
+      <p v-if="s.feedError.value" class="qn-t2" style="margin-top: 14px">The feed streams could not be read: {{ s.feedError.value }}</p>
 
       <div v-if="s.rows.value.length" class="st-table" role="table" aria-label="Streams" style="--cols: minmax(0, 1fr) minmax(0, 1.8fr) 96px 92px 92px 92px 100px">
         <div class="qn-tr head" role="row">
           <span role="columnheader">Stream</span><span role="columnheader">Reads → writes</span><span role="columnheader" class="r">Behind</span>
           <span role="columnheader" class="r">In a second</span><span role="columnheader" class="r">Out a second</span>
-          <span role="columnheader" class="r">Windows</span><span role="columnheader" class="r">Past their end</span>
+          <span role="columnheader" class="r" title="Windows, and the waits of patterns, joins and gathers">Open</span><span role="columnheader" class="r">Past their end</span>
         </div>
         <template v-for="r in s.rows.value" :key="r.key">
-          <div class="qn-tr click" :class="{ on: picked === r.name }" role="row" tabindex="0" @click="pick(r.name)" @keydown.enter="pick(r.name)">
+          <div class="qn-tr click" :class="{ on: picked === r.key }" role="row" tabindex="0" @click="pick(r.key)" @keydown.enter="pick(r.key)">
             <span role="cell" style="display: flex; align-items: center; gap: 8px">
               <span v-if="r.needs" class="qn-mark" :class="r.needs" aria-hidden="true" />
               <span class="qn-mono" style="font-weight: 500; overflow: hidden; text-overflow: ellipsis">{{ r.name }}</span>
             </span>
-            <span role="cell" class="qn-mono qn-t2">{{ r.source }}<span v-if="r.sink" class="qn-t3" style="margin: 0 8px">→</span><span v-if="r.sink">{{ r.sink }}</span></span>
-            <span role="cell" class="r qn-num" :class="r.lagTone">{{ r.lag ? span(r.lag) : 'caught up' }}</span>
+            <span v-if="r.kind === 'feed'" role="cell" class="qn-mono qn-t2 st-reads">
+              <span class="st-kind">feed</span>
+              <template v-if="r.source">{{ r.source }}<template v-if="r.sinkText"><span class="qn-t3" style="margin: 0 8px">→</span>{{ r.sinkText }}</template></template>
+              <span v-else class="qn-t3" style="font-family: inherit">not described</span>
+            </span>
+            <span v-else role="cell" class="qn-mono qn-t2 st-reads"><span class="st-kind">queue</span>{{ r.source }}<span v-if="r.sink" class="qn-t3" style="margin: 0 8px">→</span><span v-if="r.sink">{{ r.sink }}</span></span>
+            <span v-if="r.kind === 'feed'" role="cell" class="r qn-num" :class="behindCell(r).tone">{{ behindCell(r).text }}</span>
+            <span v-else role="cell" class="r qn-num" :class="r.lagTone">{{ r.lag ? span(r.lag) : 'caught up' }}</span>
             <span role="cell" class="r qn-num">{{ rate(r.inS) }}</span>
             <span role="cell" class="r qn-num">{{ r.sink ? rate(r.outS) : '–' }}</span>
             <span role="cell" class="r qn-num">{{ r.windows == null ? '–' : fmt(r.windows) + (r.exact ? '' : '+') }}</span>
-            <span role="cell" class="r qn-num" :class="r.overdue ? 'amber' : 'qn-t3'">{{ r.windows == null ? '–' : fmt(r.overdue) }}</span>
+            <span role="cell" class="r qn-num" :class="r.overdue ? 'amber' : 'qn-t3'">{{ r.windows == null || r.kind === 'feed' ? '–' : fmt(r.overdue) }}</span>
           </div>
-          <section v-if="picked === r.name" class="st-open" :aria-label="`Stream ${r.name}`">
+          <FeedStreamOpen v-if="picked === r.key && r.kind === 'feed'" :row="r" />
+          <section v-else-if="picked === r.key" class="st-open" :aria-label="`Stream ${r.name}`">
             <p class="st-shape">
               <span class="qn-t3">reads</span>
               <RouterLink :to="`/queues/${enc(r.source)}`" class="qn-mono">{{ r.source }}</RouterLink>
@@ -103,7 +115,7 @@ const overdueMin = computed(() => Math.round(s.overdueAfterMs.value / 60000))
         </template>
       </div>
       <p class="qn-read" style="margin-top: 12px">
-        Read from <span class="qn-mono">GET /streams/v1/queries</span> and the consumer groups. In and out are the source's arrivals and the sink's, the last 5 minutes. A window is past its end once it ended {{ overdueMin }} min ago.
+        Read from <span class="qn-mono">GET /streams/v1/queries</span> and the consumer groups; feed streams from their keys in <span class="qn-mono">queen-feed</span> and their locks<template v-if="!s.feedExact.value"> (the first 20,000 keys)</template>. In and out are the source's arrivals and the sink's, the last 5 minutes. A window is past its end once it ended {{ overdueMin }} min ago.
       </p>
     </div>
   </ConsoleShell>
@@ -118,12 +130,15 @@ const overdueMin = computed(() => Math.round(s.overdueAfterMs.value / 60000))
 .st-note { margin-top: 18px; color: var(--text2); max-width: 900px; }
 .st-empty { margin-top: 18px; color: var(--text2); max-width: 680px; }
 .st-table { margin-top: 22px; overflow-x: auto; }
-.st-table [role='row'] { min-width: 920px; }
-.st-open { padding: 14px 4px 18px; border-bottom: 1px solid var(--line2); min-width: 920px; }
+.st-table [role='row'] { min-width: 920px; padding: 0 12px; }
+.st-open { padding: 14px 12px 18px; border-bottom: 1px solid var(--line2); min-width: 920px; }
 .st-shape { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 14px; }
 .st-why { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin-top: 12px; max-width: 900px; }
 .st-why .qn-mark { align-self: center; }
 .st-dl { margin-top: 12px; max-width: 760px; }
+.st-reads { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the kind of a stream: words, not a colour */
+.st-kind { font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; font-size: 11px; color: var(--text3); margin-right: 8px; }
 @media (max-width: 640px) {
   .st { padding: 18px 16px 40px; }
   /* a phone: the stream and how far behind it is */

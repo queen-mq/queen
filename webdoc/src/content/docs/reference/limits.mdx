@@ -34,6 +34,7 @@ sourceOfTruth:
   - server/src/rsm/facade/real/phase2/admin.rs
   - protocols/queen-kafka/src/config.rs
   - protocols/queen-kafka/src/txn.rs
+  - server/src/rsm/facade/real/phase2/feed.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): defaults checked against 2.0.1; traces are on disk and expire in bounded steps; a trace key over 511 bytes is answered 400.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs read the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. No limit or default changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its existing limit and offset handling; the listed request limits are unchanged.
@@ -120,6 +121,11 @@ sourceOfTruth:
 # reads that lag for the collector (group_lags_of); phase2/reads.rs walks every group's positions
 # for it (group_lags); handlers/raft.rs adds the queen_consumer_group_lag_* families to
 # /metrics/prometheus. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): memguard.rs classes POST /api/v1/feed as a heavy read, like POST /api/v1/fetch; phase2.rs routes POST /api/v1/feed to the new phase2/feed.rs. This page: a Feed section lists the feed's limits.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -263,6 +269,23 @@ default, then answers 504 `upstream_timeout`. The edge waits `timeout` plus
 | Bytes per call | the call's `maxBytes`, or 50 MiB (`QUEEN_FETCH_MAX_BYTES`) | | 100,000 partitions over all entries |
 
 Applied in `server/src/rsm/facade/real/phase2/reads.rs` and `offsets.rs`.
+
+## Feed
+
+| Limit | `POST /api/v1/feed` |
+|---|---|
+| Messages per answer | `maxRecords`, 1,000 by default, 1 to 10,000 |
+| Payload bytes per answer | `maxBytes`, 1 MiB by default, 1 byte to 16 MiB |
+| Long-poll | `maxWaitMs`, at most 30,000 |
+| Queue names or patterns | 256 |
+| Queues one call reads | 10,000, the first in name order |
+| Partition names | 1,000 |
+| `where` conditions | 16, an `in` list at most 256 values |
+
+An answer holds whole positions, so it passes a cap by one transaction's pushes at most. Each queue
+log a call reads gets at least 64 KiB of its byte budget.
+
+Applied in `server/src/rsm/facade/real/phase2/feed.rs`.
 
 ## Pages and lists
 

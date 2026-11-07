@@ -176,6 +176,15 @@ pub fn public_router(
 /// ring hand-over and the leaving notice.
 const PEER_PATHS: &str = "/api/v1/ephemeral/";
 
+/// The feed read a leader relays to a follower (`handlers/raft.rs`,
+/// `relay_feed_from_leader`), for a caller that asked to be relayed.
+const PEER_FEED: &str = "/api/v1/feed";
+
+/// Is `path` one a peer relays here ([`PEER_PATHS`], [`PEER_FEED`])?
+fn is_peer_path(path: &str) -> bool {
+    path.starts_with(PEER_PATHS) || path == PEER_FEED
+}
+
 /// The public router when the proxy shares PORT ([`separate_port`] `None`):
 /// the proxy in front of everything, except a relay from another broker of
 /// this cluster, which goes to `broker` (the inner router: tenancy on, no
@@ -192,8 +201,8 @@ pub fn with_peer_relays(public: Router, broker: Router) -> Router {
     let public = queen_proxy::upstream::Upstream::InProcess(public);
     let broker = queen_proxy::upstream::Upstream::InProcess(broker);
     Router::new().fallback(move |req: Request<Body>| {
-        let peer = req.uri().path().starts_with(PEER_PATHS)
-            && crate::peerclient::verified_relay(req.headers());
+        let peer =
+            is_peer_path(req.uri().path()) && crate::peerclient::verified_relay(req.headers());
         let to = if peer { broker.clone() } else { public.clone() };
         async move {
             match to.call(req).await {

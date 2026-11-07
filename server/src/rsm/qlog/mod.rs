@@ -4992,6 +4992,367 @@ fn scan_records_at(
 }
 
 // ---------------------------------------------------------------------------
+// Feed reads (`POST /api/v1/feed`)
+// ---------------------------------------------------------------------------
+
+/// One file of a queue log that a feed read walks, planned under the log's
+/// read lock ([`QLog::feed_plan`]) and walked after it ([`feed_scan`]), so a
+/// long walk never holds up the writer.
+#[derive(Clone, Debug)]
+pub struct FeedFile {
+    pub id: u64,
+    pub path: PathBuf,
+    /// Where the walk starts: the file's last seq point at or below the read's
+    /// first seq, else its first record.
+    pub start: u64,
+    /// The seq the record at `start` must carry when `start` is a seq point.
+    pub start_seq: Option<u64>,
+    /// The file's valid bytes when the plan was made. Nothing past them is
+    /// read: a record the writer is still appending is the next read's.
+    pub bytes: u64,
+    /// The file's index, when the plan was asked for it and the index answers
+    /// for the file ([`QLog::feed_plan`]): the file is read through it once
+    /// [`QLog::feed_index`] gives a handle on the file. `None`: the file is
+    /// walked from `start` ([`feed_scan`]).
+    pub view: Option<Arc<index::View>>,
+}
+
+/// A sealed file's index and a handle on the very file it indexes, taken
+/// together under the log's lock ([`QLog::feed_index`]), so the offsets the
+/// index gives are only ever read in the file they were written for.
+/// Retention rewrites a sealed file under the same name with records at new
+/// offsets and a new index ([`copy_forward`], [`QLog::reclaim_apply`]): a
+/// read holding this keeps reading the old file through the handle (the
+/// replaced file stays readable while it is open), and a read planned before
+/// the rewrite that reaches the file after it gets no handle, and scans it.
+#[derive(Clone, Debug)]
+pub struct FeedIndex {
+    pub view: Arc<index::View>,
+    file: Arc<File>,
+}
+
+/// One message record of a sealed file as the index gives it: where it is in
+/// the file, its length, its partition and its stamp. The index holds no seq:
+/// that is in the record's own header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeedSlot {
+    pub offset: u64,
+    pub pid: u64,
+    pub created_at_us: i64,
+    pub len: u32,
+}
+
+/// The records of `view` whose partition `keep` takes, in file order, which is
+/// seq order. The index is sorted by partition, so `keep` is asked once per
+/// partition the file holds.
+pub fn feed_slots(view: &index::View, keep: &mut dyn FnMut(u64) -> bool) -> Vec<FeedSlot> {
+    let mut out = Vec::new();
+    let mut last: Option<(u64, bool)> = None;
+    for r in view.records() {
+        let take = match last {
+            Some((pid, take)) if pid == r.pid => take,
+            _ => {
+                let take = keep(r.pid);
+                last = Some((r.pid, take));
+                take
+            }
+        };
+        if take {
+            out.push(FeedSlot {
+                offset: r.offset,
+                pid: r.pid,
+                created_at_us: r.created_at_us,
+                len: r.len,
+            });
+        }
+    }
+    out.sort_unstable_by_key(|s| s.offset);
+    out
+}
+
+/// Every partition `view` holds a record of, once each, ascending.
+pub fn feed_pids(view: &index::View) -> Vec<u64> {
+    let mut out: Vec<u64> = Vec::new();
+    for r in view.records() {
+        if out.last() != Some(&r.pid) {
+            out.push(r.pid);
+        }
+    }
+    out
+}
+
+impl FeedIndex {
+    /// The record that starts at byte `offset` of the file, checksum-verified,
+    /// with its bytes. `None` when the bytes there are not a whole record (the
+    /// file ends, or they are damaged).
+    pub fn record_at(&self, offset: u64) -> io::Result<Option<(record::Header, Vec<u8>)>> {
+        let mut prefix = [0u8; record::FIXED_PREFIX];
+        if !read_all_at(&self.file, &mut prefix, offset)? {
+            return Ok(None);
+        }
+        let Ok(h) = record::parse_header(&prefix) else {
+            return Ok(None);
+        };
+        let mut buf = vec![0u8; h.record_len()];
+        if !read_all_at(&self.file, &mut buf, offset)? || record::verify(&buf, &h).is_err() {
+            return Ok(None);
+        }
+        Ok(Some((h, buf)))
+    }
+
+    /// Where a walk of `file` through this index starts: its planned start
+    /// when the record there still carries the planned seq, else the file's
+    /// first record, as [`feed_scan`] does with a point that no longer holds.
+    pub fn start(&self, file: &FeedFile) -> io::Result<u64> {
+        let Some(seq) = file.start_seq else {
+            return Ok(file.start);
+        };
+        Ok(match self.record_at(file.start)? {
+            Some((h, _)) if h.seq == seq => file.start,
+            _ => FILE_HEADER_LEN,
+        })
+    }
+}
+
+/// `read_exact_at`, answering `false` when the file ends first.
+fn read_all_at(f: &File, buf: &mut [u8], offset: u64) -> io::Result<bool> {
+    match f.read_exact_at(buf, offset) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Records closer than this to the one before them are read with it, in one
+/// `pread`: a system call costs about what copying a few kilobytes does.
+const SLOT_GAP: u64 = 4 << 10;
+
+/// The most one `pread` of [`SlotReader`] takes, unless one record is larger.
+const SLOT_RUN: u64 = 256 << 10;
+
+/// Reads the records a list of slots names (ascending by offset) from a
+/// [`FeedIndex`]'s file: a record with the ones after it that lie close
+/// together, in one `pread`.
+pub struct SlotReader<'a> {
+    ix: &'a FeedIndex,
+    /// Grown, never shrunk or zeroed again: its first `len` bytes are the
+    /// file's from offset `at`.
+    buf: Vec<u8>,
+    len: usize,
+    at: u64,
+}
+
+impl<'a> SlotReader<'a> {
+    pub fn new(ix: &'a FeedIndex) -> SlotReader<'a> {
+        SlotReader {
+            ix,
+            buf: Vec::new(),
+            len: 0,
+            at: 0,
+        }
+    }
+
+    /// Read `len` bytes of the file from `at` into the buffer: `false` when
+    /// the file ends first.
+    fn fill(&mut self, at: u64, len: usize) -> io::Result<bool> {
+        if self.buf.len() < len {
+            self.buf.resize(len, 0);
+        }
+        self.at = at;
+        self.len = 0;
+        if !read_all_at(&self.ix.file, &mut self.buf[..len], at)? {
+            return Ok(false);
+        }
+        self.len = len;
+        Ok(true)
+    }
+
+    /// The record `slots[i]` names, checksum-verified and matching what the
+    /// index says of it, with its bytes. `None` when the bytes there are not
+    /// that record (damaged, or the file ends first).
+    pub fn read(
+        &mut self,
+        slots: &[FeedSlot],
+        i: usize,
+    ) -> io::Result<Option<(record::Header, &[u8])>> {
+        let s = slots[i];
+        let end = s.offset + u64::from(s.len);
+        let held = s.offset >= self.at && end <= self.at + self.len as u64;
+        if !held {
+            // This record and those after it that lie close, up to a run.
+            let mut run_end = end;
+            for next in &slots[i + 1..] {
+                let next_end = next.offset + u64::from(next.len);
+                if next.offset > run_end + SLOT_GAP || next_end - s.offset > SLOT_RUN {
+                    break;
+                }
+                run_end = run_end.max(next_end);
+            }
+            // A file shorter than its index says: the record alone, so a
+            // damaged tail costs only the records in it.
+            if !self.fill(s.offset, (run_end - s.offset) as usize)?
+                && !self.fill(s.offset, s.len as usize)?
+            {
+                return Ok(None);
+            }
+        }
+        let from = (s.offset - self.at) as usize;
+        let raw = &self.buf[from..from + s.len as usize];
+        let Ok(h) = record::parse_header(raw) else {
+            return Ok(None);
+        };
+        if h.record_len() != raw.len()
+            || h.pid != s.pid
+            || h.created_at_us != s.created_at_us
+            || record::verify(raw, &h).is_err()
+        {
+            return Ok(None);
+        }
+        Ok(Some((h, raw)))
+    }
+}
+
+impl QLog {
+    /// The files that may hold MESSAGE records with a seq in
+    /// `from_seq..=upto_seq`, oldest first, each with where to start reading.
+    /// A file with no message record, one whose seqs are all below `from_seq`,
+    /// and one whose messages were all created before `since_us` are left
+    /// out. Metadata and seq points only: no file is opened. With `indexed`,
+    /// each file whose index answers for it ([`QLog::feed_view`]) comes with
+    /// that index.
+    pub fn feed_plan(
+        &self,
+        from_seq: u64,
+        upto_seq: u64,
+        since_us: Option<i64>,
+        indexed: bool,
+    ) -> Vec<FeedFile> {
+        let points = self.seq_points.lock_unpoisoned();
+        let mut out = Vec::new();
+        for m in &self.files {
+            if m.records == 0 || m.bytes <= FILE_HEADER_LEN || m.max_seq < from_seq {
+                continue;
+            }
+            // Seqs never decrease in a queue log: a file created for a seq
+            // past the end holds nothing at or below it, nor does a later one.
+            if m.first_seq > upto_seq {
+                break;
+            }
+            // A file whose index the boot mapped and nobody has read yet has
+            // no time range yet: it is kept.
+            if m.checked && since_us.is_some_and(|since| m.max_created_at_us < since) {
+                continue;
+            }
+            let point = points
+                .start(m.id, from_seq)
+                .filter(|(_, off)| *off >= FILE_HEADER_LEN && *off < m.bytes);
+            out.push(FeedFile {
+                id: m.id,
+                path: file_path(&self.dir, m.id),
+                start: point.map_or(FILE_HEADER_LEN, |(_, off)| off),
+                start_seq: point.map(|(seq, _)| seq),
+                bytes: m.bytes,
+                view: if indexed {
+                    self.feed_view(m, upto_seq)
+                } else {
+                    None
+                },
+            });
+        }
+        out
+    }
+
+    /// The index of file `m` when it answers for the file up to seq
+    /// `upto_seq`: the file sealed, its index read and checked in this
+    /// process (the boot maps indexes without reading them), the index for
+    /// exactly the file's bytes, and no record in the file above `upto_seq`
+    /// (one this node has not applied may be of a partition the reader cannot
+    /// place yet). `None`: the file is scanned.
+    fn feed_view(&self, m: &FileMeta, upto_seq: u64) -> Option<Arc<index::View>> {
+        if !m.sealed || !m.checked || m.max_seq > upto_seq {
+            return None;
+        }
+        self.sealed
+            .get(&m.id)
+            .filter(|v| v.file_bytes() == m.bytes)
+            .cloned()
+    }
+
+    /// Planned `file`'s index with a handle on the file, for a read through
+    /// the index: only while the index is still the one the plan took (no
+    /// rewrite or rebuild since). Under the log's lock, so the handle opens
+    /// the file the index is of. Taken when a walk reaches the file, so a
+    /// plan holds no handle on the files its read never gets to. `None`: scan
+    /// the file.
+    pub fn feed_index(&self, file: &FeedFile) -> Option<FeedIndex> {
+        let view = file.view.as_ref()?;
+        if !self
+            .sealed
+            .get(&file.id)
+            .is_some_and(|v| Arc::ptr_eq(v, view))
+        {
+            return None;
+        }
+        Some(FeedIndex {
+            view: view.clone(),
+            file: self.cache.file(file.id).ok()?,
+        })
+    }
+}
+
+/// Walk `file` from its planned start and hand `visit` every MESSAGE record
+/// with a seq in `from_seq..=upto_seq` created at or after `since_us`, in
+/// file order, which is seq order. `visit` gets the header and the record's
+/// bytes as stored ([`decode_message`] reads them) and answers whether to go
+/// on. Entry records are skipped, and the walk stops at the first record
+/// above `upto_seq`. A start point whose record no longer carries its seq
+/// (the file was rewritten) is dropped and the file read from its start.
+pub fn feed_scan(
+    file: &FeedFile,
+    from_seq: u64,
+    upto_seq: u64,
+    since_us: Option<i64>,
+    visit: &mut dyn FnMut(&record::Header, &[u8]) -> io::Result<bool>,
+) -> io::Result<()> {
+    let mut walk = |start: u64, expect: Option<u64>| -> io::Result<bool> {
+        let mut first = true;
+        let mut stale = false;
+        scan_records_at(&file.path, start, file.bytes, |h, _pos, raw| {
+            if first {
+                first = false;
+                if expect.is_some_and(|seq| seq != h.seq) {
+                    stale = true;
+                    return Ok(false);
+                }
+            }
+            if h.seq > upto_seq {
+                return Ok(false);
+            }
+            let kind = h.kind();
+            let message = kind == 0 || kind == record::TXN_CROSS_QUEUE;
+            if !message || h.seq < from_seq || since_us.is_some_and(|s| h.created_at_us < s) {
+                return Ok(true);
+            }
+            visit(h, raw)
+        })?;
+        Ok(stale)
+    };
+    // A point at the file's first record goes stale as well (a rewrite that
+    // dropped that record): the file is read from its start all the same.
+    if walk(file.start, file.start_seq)? {
+        walk(FILE_HEADER_LEN, None)?;
+    }
+    Ok(())
+}
+
+/// A message record's bytes as [`feed_scan`] handed them, decoded, with its
+/// payload decompressed.
+pub fn decode_message(raw: &[u8]) -> io::Result<OwnedRecord> {
+    let rr = record::decode(raw).map_err(io::Error::from)?;
+    owned_from(&rr)
+}
+
+// ---------------------------------------------------------------------------
 // Files
 // ---------------------------------------------------------------------------
 

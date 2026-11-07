@@ -40,6 +40,11 @@ sourceOfTruth:
 # credential (QUEEN_EDGE_ANON_RPS_PER_IP), and refuses the address 429 once it is spent. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-31 (97b0f2f8e): auth.rs classifies, and streams.rs answers, the read-only GET /streams/v1/queries,
 # which lists a tenant's streams for the console. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): auth.rs makes POST /api/v1/feed read-only, like POST /api/v1/fetch. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 Out of the box a node authenticates nobody: its port is plain HTTP, and every route answers any caller that can reach it. That keeps the first run to one command, and it is the first thing to change. Put one of two front doors on it (the broker's own JWT for services, or the built-in proxy for API keys and people), keep the raft port private, and encrypt the queues whose payloads must not sit on disk in clear.

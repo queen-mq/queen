@@ -7,7 +7,7 @@
 # says it does.
 #
 # Run it against the node that the book's first section starts:
-#   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.1
+#   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.0
 #   PYTHONPATH=clients/client-py python3 examples/tutorials/py/book_client_guide.py
 # The wire-forms example needs zstd: Python 3.14, or pip install "queen-mq[zstd]".
 # run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
@@ -22,7 +22,13 @@ import httpx
 from queen import Queen, Stream
 
 QUEUES = ["jobs", "emails", "events", "reviews", "prices", "metrics", "tasks", "payments",
-          "logins", "login-rate", "clicks", "sales", "sales-per-hour", "outgoing-sms", "invoices"]
+          "logins", "login-rate", "clicks", "sales", "sales-per-hour", "outgoing-sms", "invoices",
+          # the feed streams' (end of this program)
+          "orders", "orders-it", "orders-IT", "orders-FR", "per-minute", "order-followups", "shipments",
+          "order-status", "parts", "batches", "bookings", "property-settings", "bookings-priced", "bursts",
+          "gh-issues", "gh-comments", "gh-unanswered", "clicks-per-tenant"]
+FEED_QUERIES = ["orders-it", "orders-by-country", "per-minute", "order-followups", "order-status", "batches",
+                "bookings-priced", "bursts", "gh-unanswered", "clicks-per-tenant", "orders-to-warehouse"]
 
 
 # The helpers the examples call. In a real program they are yours.
@@ -35,6 +41,45 @@ async def set_when(condition, event):
     while not condition():
         await asyncio.sleep(0.02)
     event.set()
+
+
+# Test bookkeeping for the feed streams.
+async def feed_push(queen, queue, partition, data):
+    await queen.queue(queue).partition(partition).push(
+        [{"transactionId": f"{queue}-{partition}-{time.time_ns()}", "data": data}])
+
+
+async def messages_of(queen, queue, n):
+    """The messages of a queue, read back through the feed; waits for `n` of them."""
+    for i in range(101):
+        got = [e["data"] async for e in queen.feed(queues=[queue], from_="earliest", follow=False)]
+        if len(got) >= n or i == 100:
+            return got
+        await asyncio.sleep(0.1)
+
+
+async def until(what, cond):
+    for _ in range(100):
+        if cond():
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+class Table:
+    """A table elsewhere, written by key (an upsert): a second write of a row changes nothing."""
+
+    def __init__(self):
+        self.rows = {}
+
+    async def upsert(self, rows):
+        for r in rows:
+            self.rows[r["key"]] = r
+
+
+def window_value(runner, step, key):
+    got = runner.state(step).get(key)
+    return got["value"]["windows"][0]["value"] if got.get("found") else None
 
 
 async def main() -> None:
@@ -524,6 +569,242 @@ async def main() -> None:
     await limiter.stop()
     assert len(sent) == 3, f"the gate let the first three messages through ({len(sent)})"
     print("ok: stream-gate")
+
+    # --- Streams from the tenant feed (broker 2.8.0) --------------------------------
+    # A feed stream keeps its position and state in KV (`queen-feed`, under its
+    # queryId): an earlier run's go first, so every run starts the same way.
+    for query_id in FEED_QUERIES:
+        page = await queen.kv.get_prefix("queen-feed", query_id, keys_only=True, limit=1000)
+        for row in page["rows"]:
+            await queen.kv.delete("queen-feed", row["key"])
+
+    # guide:start(feed-route)
+    orders_it = await (
+        Stream.from_feed(queen, queues=["orders"])
+        .where("data.country", "=", "IT")
+        .filter(lambda m: m["data"]["total"] >= 10)
+        .to(queen.queue("orders-it"))
+        .run(query_id="orders-it")
+    )
+    # guide:end
+    await feed_push(queen, "orders", "order-1", {"id": 1, "country": "IT", "total": 20})
+    await feed_push(queen, "orders", "order-2", {"id": 2, "country": "IT", "total": 5})
+    await feed_push(queen, "orders", "order-3", {"id": 3, "country": "DE", "total": 30})
+    got = await messages_of(queen, "orders-it", 1)
+    assert [o["id"] for o in got] == [1], f"only the Italian order of 10 or more: {got}"
+    await orders_it.stop()
+    print("ok: feed-route")
+
+    # guide:start(feed-routing)
+    by_country = await (
+        Stream.from_feed(queen, queues=["orders"])
+        .to(lambda order: f"orders-{order['country']}")
+        .run(query_id="orders-by-country")
+    )
+    # guide:end
+    await feed_push(queen, "orders", "order-4", {"id": 4, "country": "IT", "total": 12})
+    await feed_push(queen, "orders", "order-5", {"id": 5, "country": "FR", "total": 8})
+    assert [o["id"] for o in await messages_of(queen, "orders-IT", 1)] == [4]
+    assert [o["id"] for o in await messages_of(queen, "orders-FR", 1)] == [5]
+    await by_country.stop()
+    print("ok: feed-routing")
+
+    warehouse = Table()
+    # guide:start(feed-batch)
+    async def write(items):
+        # One write for the batch. An item's id is the same each time it is delivered.
+        await warehouse.upsert([{"key": it["id"], **it["value"]} for it in items])
+
+    to_warehouse = await (
+        Stream.from_feed(queen, queues=["orders"])
+        .foreach_batch(write, max_items=500, max_wait_millis=1000)
+        .run(query_id="orders-to-warehouse")
+    )
+    # guide:end
+    await feed_push(queen, "orders", "order-8", {"id": 8, "total": 20})
+    await feed_push(queen, "orders", "order-9", {"id": 9, "total": 30})
+    await until("the batch", lambda: len(warehouse.rows) == 2)
+    assert sorted(r["id"] for r in warehouse.rows.values()) == [8, 9]
+    await to_warehouse.stop()
+    print("ok: feed-batch")
+
+    # guide:start(feed-window)
+    per_minute = await (
+        Stream.from_feed(queen, queues=["orders", "payments"])
+        .window_tumbling(seconds=60)
+        .aggregate({"count": lambda e: 1, "sum": lambda e: e["total"]})
+        .map(lambda totals, w: {**totals, "customer": w["key"], "minute": w["windowKey"]})
+        .to(queen.queue("per-minute"))
+        .run(query_id="per-minute")
+    )
+    # guide:end
+    await feed_push(queen, "orders", "customer-1", {"total": 10})
+    await feed_push(queen, "payments", "customer-1", {"total": 5})
+    # The window closes at the end of its minute; until then the stream shows it open.
+    await until("the open window", lambda: (window_value(per_minute, "step1", "customer-1") or {}).get("count") == 2)
+    assert window_value(per_minute, "step1", "customer-1") == {"count": 2, "sum": 15}
+    await per_minute.stop()
+    print("ok: feed-window")
+
+    # guide:start(feed-pattern)
+    followups = await (
+        Stream.from_feed(queen, queues=["orders", "payments"])
+        .pattern(
+            start=lambda m: m["queue"] == "orders",
+            then=lambda m: m["queue"] == "payments",
+            within="15m",
+            on_match=lambda order, payment: {"order": order["data"]["id"], "paid": payment["data"]["amount"]},
+            on_timeout=lambda order: {"order": order["data"]["id"], "remind": True},
+        )
+        .to(queen.queue("order-followups"))
+        .run(query_id="order-followups")
+    )
+    # guide:end
+    await feed_push(queen, "orders", "order-7", {"id": 7})
+    await feed_push(queen, "payments", "order-7", {"amount": 30})
+    assert await messages_of(queen, "order-followups", 1) == [{"order": 7, "paid": 30}]
+    await followups.stop()
+    print("ok: feed-pattern")
+
+    # guide:start(feed-join)
+    order_status = await (
+        Stream.from_feed(queen, queues=["orders", "payments", "shipments"])
+        .join(
+            sides={"order": "orders", "paid": "payments", "sent": "shipments"},
+            within="2d",
+            select=lambda got, order: {"order": order, "carrier": got["sent"]["data"]["carrier"]},
+            on_timeout=lambda got, missing, order: {"order": order, "missing": missing},
+        )
+        .to(queen.queue("order-status"))
+        .run(query_id="order-status")
+    )
+    # guide:end
+    await feed_push(queen, "orders", "order-9", {"id": 9})
+    await feed_push(queen, "payments", "order-9", {"amount": 5})
+    await feed_push(queen, "shipments", "order-9", {"carrier": "dhl"})
+    assert await messages_of(queen, "order-status", 1) == [{"order": "order-9", "carrier": "dhl"}]
+    await order_status.stop()
+    print("ok: feed-join")
+
+    # guide:start(feed-gather)
+    batches = await (
+        Stream.from_feed(queen, queues=["parts"])
+        .gather(
+            count=lambda m: m["data"]["of"],
+            key=lambda m: m["data"]["batch"],
+            within="10m",
+            on_complete=lambda got, batch: {"batch": batch, "parts": len(got)},
+            on_timeout=lambda got, missing, batch: {"batch": batch, "missing": missing},
+        )
+        .to(queen.queue("batches"))
+        .run(query_id="batches")
+    )
+    # guide:end
+    for i in range(3):
+        await feed_push(queen, "parts", f"part-{i}", {"batch": "b-1", "of": 3})
+    assert await messages_of(queen, "batches", 1) == [{"batch": "b-1", "parts": 3}]
+    await batches.stop()
+    print("ok: feed-gather")
+
+    await feed_push(queen, "property-settings", "p-1", {"currency": "EUR"})
+    # guide:start(feed-table)
+    priced = await (
+        Stream.from_feed(queen, queues=["bookings"])
+        .join_table(
+            queue="property-settings",
+            on=lambda m: m["data"]["propertyId"],
+            select=lambda booking, settings: {**booking, "currency": settings["currency"] if settings else None},
+        )
+        .to(queen.queue("bookings-priced"))
+        .run(query_id="bookings-priced")
+    )
+    # guide:end
+    await feed_push(queen, "bookings", "booking-1", {"id": "booking-1", "propertyId": "p-1"})
+    await feed_push(queen, "bookings", "booking-2", {"id": "booking-2", "propertyId": "p-2"})
+    assert await messages_of(queen, "bookings-priced", 2) == [
+        {"id": "booking-1", "propertyId": "p-1", "currency": "EUR"},   # the row pushed before the stream started
+        {"id": "booking-2", "propertyId": "p-2", "currency": None},
+    ]
+    await priced.stop()
+    print("ok: feed-table")
+
+    # guide:start(feed-steps)
+    bursts = await (
+        Stream.from_feed(queen, queues=["clicks"])
+        .window_tumbling(seconds=60).aggregate({"clicks": lambda c: 1}).name("perMinute")
+        .pattern(
+            start=lambda m: m["data"]["clicks"] >= 100,
+            then=lambda m: m["data"]["clicks"] < 100,
+            within="10m",
+            on_match=lambda burst, calm: {"tenant": burst["partition"], "peak": burst["data"]["clicks"]},
+        )
+        .to(queen.queue("bursts"))
+        .run(query_id="bursts")
+    )
+    # guide:end
+    for _ in range(3):
+        await feed_push(queen, "clicks", "tenant-42", {"page": "/"})
+    await until("three clicks in the minute",
+                lambda: (window_value(bursts, "perMinute", "tenant-42") or {}).get("clicks") == 3)
+    print("ok: feed-steps")
+
+    # guide:start(feed-event-time)
+    unanswered = await (
+        Stream.from_feed(queen, queues=["gh-issues", "gh-comments"], from_="earliest")
+        .pattern(
+            start=lambda m: m["queue"] == "gh-issues",
+            then=lambda m: m["queue"] == "gh-comments",
+            key=lambda m: f"{m['partition']}#{m['data']['number']}",
+            within="1h",
+            event_time=lambda m: m["data"]["created_at"],
+            allowed_lateness="5m",
+            idle="1m",
+            on_match=lambda issue, comment: None,   # an answered issue sends nothing
+            on_timeout=lambda issue: {"repo": issue["partition"], "issue": issue["data"]["number"]},
+        )
+        .to(queen.queue("gh-unanswered"))
+        .run(query_id="gh-unanswered")
+    )
+    # guide:end
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    # The comment arrives first; on event time it still answers the issue.
+    await feed_push(queen, "gh-comments", "queen-mq/queen",
+                    {"number": 1, "created_at": (now + timedelta(minutes=1)).isoformat()})
+    await feed_push(queen, "gh-issues", "queen-mq/queen", {"number": 1, "created_at": now.isoformat()})
+    # Both wait in the step, in event-time order, for allowed_lateness.
+    await until("the two held messages", lambda: unanswered.metrics()["steps"][0].get("held") == 2)
+    await unanswered.stop()
+    print("ok: feed-event-time")
+
+    # guide:start(feed-shards)
+    per_tenant = await (
+        Stream.from_feed(queen, queues=["clicks"])
+        .key_by(lambda m: m["data"]["tenant"])
+        .window_tumbling(seconds=60).aggregate({"clicks": lambda c: 1})
+        .to(queen.queue("clicks-per-tenant"))
+        .run(query_id="clicks-per-tenant", shards=4, shard_by=lambda m: m["data"]["tenant"])
+    )
+    # guide:end
+    assert per_tenant.metrics()["running"] == 4, "four shards, all in this process"
+    for tenant in ["acme", "globex", "acme"]:
+        await feed_push(queen, "clicks", f"visitor-{tenant}", {"tenant": tenant})
+    await until("a window per tenant", lambda: per_tenant.metrics()["open"] == 2)
+    await per_tenant.stop()
+    print("ok: feed-shards")
+
+    # guide:start(feed-view)
+    view = Stream.view(queen, "bursts")
+    answer = await view.get("perMinute", "tenant-42")       # {found, value, shard, position}
+    page = await view.list("perMinute", limit=50)           # {items, truncated}
+    shards = await view.status()   # role, position, lag and open state per shard
+    # guide:end
+    assert answer["found"] is True
+    assert answer["value"]["windows"][0]["value"]["clicks"] == 3, "the live window, asked from outside the process"
+    assert len(page["items"]) >= 1
+    assert len(shards) == 1 and shards[0]["role"] == "active", shards
+    await bursts.stop()
+    print("ok: feed-view")
 
     await queen.close()
     print("\nPASS")

@@ -77,7 +77,10 @@ const sizeLine = computed(() => {
   const r = q.row.value
   if (!r) return ''
   const m = r.messages || {}
-  return `${fmt(r.partitions)} partition${Number(r.partitions) === 1 ? '' : 's'}, ${fmt(m.total)} message${Number(m.total) === 1 ? '' : 's'} (${fmt(m.pending)} waiting) and ${q.groups.value.length} consumer group${q.groups.value.length === 1 ? '' : 's'}`
+  const parts = `${fmt(r.partitions)} partition${Number(r.partitions) === 1 ? '' : 's'}, ${fmt(m.total)} message${Number(m.total) === 1 ? '' : 's'}`
+  // Read by feed streams only: no group acks what it holds, so none of it waits.
+  if (q.feedOnly.value) return `${parts}, read by feed streams and no consumer group`
+  return `${parts} (${fmt(m.pending)} waiting) and ${q.groups.value.length} consumer group${q.groups.value.length === 1 ? '' : 's'}`
 })
 </script>
 
@@ -122,6 +125,9 @@ const sizeLine = computed(() => {
             <span v-if="q.verdict.value.tone" class="qn-mark" :class="q.verdict.value.tone" aria-hidden="true" />{{ q.verdict.value.badge }}
           </span>
           <span>{{ q.verdict.value.text }}</span>
+          <template v-if="q.verdict.value.feed">
+            <RouterLink v-for="f in q.verdict.value.feed.slice(0, 3)" :key="f.name" :to="{ path: '/streams', query: { name: `feed:${f.name}` } }" class="qn-mono">{{ f.name }}</RouterLink>
+          </template>
           <span v-if="q.caughtUp.value" class="qn-t2">{{ q.caughtUp.value }}</span>
         </p>
         <p v-else class="qp-verdict qn-t2">Reading {{ name }}…</p>
@@ -164,6 +170,12 @@ const sizeLine = computed(() => {
             </div>
             <p class="qn-read" style="margin-top: 10px">Read from <span class="qn-mono">GET /api/v1/resources/partitions?queue={{ name }}</span>, the partitions holding the most.</p>
           </template>
+          <template v-else-if="q.why.value.kind === 'feedDown'">
+            <p class="qn-t2" style="margin-top: 10px">{{ q.why.value.line }}</p>
+            <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px">
+              <RouterLink v-for="s in q.why.value.streams.slice(0, 3)" :key="s" :to="{ path: '/streams', query: { name: `feed:${s}` } }" class="qn-btn2">Open {{ s }}</RouterLink>
+            </div>
+          </template>
           <template v-else>
             <p class="qn-t2" style="margin-top: 10px">{{ q.why.value.line }}</p>
             <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px">
@@ -186,7 +198,7 @@ const sizeLine = computed(() => {
           </div>
           <div class="qp-chart">
             <div class="qp-legend">
-              <span class="qp-key"><span class="qp-swatch" style="background: var(--ink-in)" aria-hidden="true" />Waiting <span class="qn-num" style="color: var(--text); font-weight: 500">{{ fmt(q.row.value?.messages?.pending) }}</span> now</span>
+              <span class="qp-key"><span class="qp-swatch" style="background: var(--ink-in)" aria-hidden="true" />{{ q.feedOnly.value ? 'Held' : 'Waiting' }} <span class="qn-num" style="color: var(--text); font-weight: 500">{{ fmt(q.row.value?.messages?.pending) }}</span> now</span>
               <span class="qn-t3" style="margin-left: auto">read once a minute</span>
             </div>
             <QcChart :series="q.traffic.value.waiting" :from="win.from" :to="win.to" :height="120" :axis="win.axis" :min-top="10" aria-label="Messages waiting" @zoom="range" />

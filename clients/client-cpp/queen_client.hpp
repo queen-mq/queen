@@ -37,10 +37,10 @@
 
 #pragma once
 
-#define QUEEN_CLIENT_VERSION "2.7.1"
+#define QUEEN_CLIENT_VERSION "2.8.0"
 #define QUEEN_CLIENT_VERSION_MAJOR 2
-#define QUEEN_CLIENT_VERSION_MINOR 7
-#define QUEEN_CLIENT_VERSION_PATCH 1
+#define QUEEN_CLIENT_VERSION_MINOR 8
+#define QUEEN_CLIENT_VERSION_PATCH 0
 
 #include <string>
 #include <vector>
@@ -105,7 +105,7 @@ namespace queen {
 
 using json = nlohmann::json;
 
-/** This client's version: 2.7.1. */
+/** This client's version: 2.8.0. */
 inline const char* version() { return QUEEN_CLIENT_VERSION; }
 
 // ============================================================================

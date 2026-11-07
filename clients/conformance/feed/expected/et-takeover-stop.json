@@ -1,0 +1,166 @@
+{
+  "outputs": [
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 3
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:01:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 12
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:02:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 16
+        }
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:03:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 32
+        }
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-et-takeover-stop": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "6a92dd810f17bfc7",
+      "clock": 1793955607000,
+      "units": 4,
+      "readTo": 1793955607000,
+      "caughtUp": true,
+      "open": {
+        "step1": 1
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 4,
+      "metas": [
+        {
+          "n": 0,
+          "w": 1793956000000,
+          "t": 1793955607000,
+          "s": 1793955607000
+        }
+      ]
+    }
+  },
+  "states": {
+    "c-et-takeover-stop": [
+      {
+        "kind": "window",
+        "entries": [
+          [
+            "w\u001f1793955960000\u001fr",
+            {
+              "key": "r",
+              "start": 1793955960000,
+              "end": 1793956020000,
+              "due": 1793956020000,
+              "acc": {
+                "count": 1,
+                "sum": 64
+              }
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-et-takeover-stop",
+    "hash": "6a92dd810f17bfc7",
+    "reads": {
+      "queues": [
+        "c-readings"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": true,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count",
+            "sum"
+          ]
+        },
+        "clock": "event"
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-et-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {},
+    "B.stopped": {}
+  },
+  "problems": []
+}

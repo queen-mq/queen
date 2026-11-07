@@ -19,6 +19,7 @@
                                    [dlq :as dlq]
                                    [elle :as elle]
                                    [failover :as failover]
+                                   [feed :as feed]
                                    [locks :as locks]
                                    [log :as log]
                                    [pipeline :as pipeline]
@@ -43,7 +44,8 @@
    :timers   timers/workload      ; W10
    :locks    locks/workload       ; W11
    :semaphore locks/semaphore-workload   ; W11b
-   :failover failover/workload})  ; W12, needs --standby-nodes
+   :failover failover/workload    ; W12, needs --standby-nodes
+   :feed     feed/workload})      ; W13
 
 (def all-faults
   #{:pause :kill :partition :clock :pause-kill :part-kill :bridge :leader-deaf
@@ -236,6 +238,7 @@
          (str "_c=" (->> (:corrupt-classes opts) distinct (map name) (str/join ","))
               "_" (name (:corrupt-remedy opts))))
        (when (:lazyfs opts) "_lazyfs")
+       (when (:feed-relay opts) "_relay")
        (when (:disk-hog opts) "_hog")
        (when (seq (:slow-fsync-nodes opts))
          (str "_slowfsync=" (str/join "," (:slow-fsync-nodes opts))
@@ -429,6 +432,9 @@
    [nil "--lazyfs" "Put QUEEN_RAFT_DIR on lazyfs: every kill becomes a power loss (un-fsynced writes are lost)."
     :default false]
 
+   [nil "--feed-relay" "W13: every feed read sends x-queen-feed-relay: 1 (as the proxy does), so a leader relays it to a follower instead of answering 421."
+    :default false]
+
    [nil "--lazyfs-cache SIZE" "lazyfs cache size; each node pre-allocates it in RAM. A full cache writes through (toothless)."
     :default "1GB"]
 
@@ -551,7 +557,7 @@
     :default 8
     :parse-fn parse-long]
 
-   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6), dlq (W7), retention (W8), streams (W9), timers (W10), locks (W11), semaphore (W11b), failover (W12)."
+   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6), dlq (W7), retention (W8), streams (W9), timers (W10), locks (W11), semaphore (W11b), failover (W12), feed (W13)."
     :default :log
     :parse-fn keyword
     :validate [workloads (cli/one-of workloads)]]])

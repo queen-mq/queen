@@ -306,9 +306,10 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
             | "/api/v1/kv"
             | "/api/v1/timers"
             | "/api/v1/traces" => RouteClass::Grows,
-            "/streams/v1/state/get" | "/api/v1/fetch" | "/api/v1/resources/kv/list" => {
-                RouteClass::HeavyRead
-            }
+            "/streams/v1/state/get"
+            | "/api/v1/fetch"
+            | "/api/v1/feed"
+            | "/api/v1/resources/kv/list" => RouteClass::HeavyRead,
             _ => RouteClass::Free,
         };
     }

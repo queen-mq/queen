@@ -47,3 +47,25 @@ def _describe(op: Any) -> dict:
     if not isinstance(cfg, dict):
         cfg = {}
     return {"kind": op.kind, **cfg}
+
+
+def _describe_feed(op: Any) -> dict:
+    # The JS shape: `{kind, ...config}`. An operator whose feed reading of its
+    # config differs from the queue runner's keeps it in `feed_config`.
+    cfg = getattr(op, "feed_config", None)
+    if not isinstance(cfg, dict):
+        cfg = getattr(op, "config", None)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return {"kind": op.kind, **cfg}
+
+
+def js_config_hash_of(operators: Iterable[Any]) -> str:
+    """``configHashOf`` of the JS SDK, byte for byte: sha256 over the
+    ``JSON.stringify`` text of ``[{kind, ...config}, ...]`` (JS key order, JS
+    number text: ``60`` never ``60.0``). The feed's chain hash is its first 16
+    hex characters."""
+    from .js import js_json_dumps
+
+    payload = js_json_dumps([_describe_feed(op) for op in operators])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

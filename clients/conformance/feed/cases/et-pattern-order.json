@@ -1,0 +1,179 @@
+{
+  "name": "et-pattern-order",
+  "about": "a pattern on event time takes its messages in event-time order: a then that arrives before its start, within allowedLateness, still matches; held messages are state, carried by the snapshot to the next process",
+  "mode": "both",
+  "source": {
+    "queues": [
+      "c-a",
+      "c-b"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "pattern",
+      "opts": {
+        "start": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-a"
+          ]
+        },
+        "then": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-b"
+          ]
+        },
+        "within": "5m",
+        "eventTime": {
+          "$get": "0.data.at"
+        },
+        "allowedLateness": "1m",
+        "onMatch": {
+          "key": {
+            "$get": "0.partition"
+          },
+          "a": {
+            "$get": "0.data.n"
+          },
+          "b": {
+            "$get": "1.data.n"
+          }
+        },
+        "onTimeout": {
+          "key": {
+            "$get": "0.partition"
+          },
+          "a": {
+            "$get": "0.data.n"
+          },
+          "timeout": true
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-et-pattern-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-b",
+              "partition": "e1",
+              "data": {
+                "at": "2026-11-06T09:00:30.000Z",
+                "n": "b1"
+              },
+              "transactionId": "b1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-a",
+              "partition": "e1",
+              "data": {
+                "at": "2026-11-06T09:00:10.000Z",
+                "n": "a1"
+              },
+              "transactionId": "a1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-a",
+              "partition": "e2",
+              "data": {
+                "at": "2026-11-06T09:00:40.000Z",
+                "n": "a2"
+              },
+              "transactionId": "a2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-a",
+              "partition": "e3",
+              "data": {
+                "at": "2026-11-06T09:01:40.000Z",
+                "n": "a3"
+              },
+              "transactionId": "a3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-b",
+              "partition": "e3",
+              "data": {
+                "at": "2026-11-06T09:03:20.000Z",
+                "n": "b3"
+              },
+              "transactionId": "b3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:06.000Z",
+          "push": [
+            {
+              "queue": "c-b",
+              "partition": "zz",
+              "data": {
+                "at": "2026-11-06T09:15:00.000Z",
+                "n": "flush"
+              },
+              "transactionId": "bz"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "B"
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "run": {
+    "queryId": "c-et-pattern-order"
+  }
+}

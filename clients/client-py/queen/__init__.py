@@ -28,7 +28,9 @@ from .errors import (
     QueenError,
     QueenHttpError,
     TimerError,
+    TransactionError,
 )
+from .feed import FeedReader
 from .kv import KV, KvResult
 from .locks import Lock, LockResult, Locks
 from .reads import ChangedPartition, ChangedPartitions, FetchedPartition, FetchedRecord
@@ -44,7 +46,7 @@ from .utils.defaults import (
     BUFFER_DEFAULTS,
 )
 
-__version__ = "2.7.0"
+__version__ = "2.8.0"
 
 __all__ = [
     "Queen",
@@ -68,6 +70,8 @@ __all__ = [
     "LockError",
     "LockNotHeldError",
     "TimerError",
+    "TransactionError",
+    "FeedReader",
     "EphemeralError",
     "EphemeralQueueNotFoundError",
     "ConflationUnsupportedError",

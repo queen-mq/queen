@@ -49,6 +49,7 @@
 //!   part-way, and the window model assumes the whole batch commits atomically.
 
 mod engine;
+pub mod feed;
 mod hash;
 pub mod ops;
 mod runner;
@@ -123,6 +124,17 @@ pub struct Stream {
 }
 
 impl Stream {
+    /// A stream over the tenant feed: every push to the tenant's queues (or
+    /// the ones named), in log order, read from followers. See [`feed`].
+    pub fn from_feed(queen: &Queen, source: feed::FeedSource) -> feed::FeedStream {
+        feed::FeedStream::new(queen, source)
+    }
+
+    /// Ask a running feed stream about its live state, from any process.
+    pub fn view(queen: &Queen, query_id: &str, opts: feed::ViewOptions) -> Result<feed::FeedView> {
+        feed::FeedView::new(queen, query_id, opts)
+    }
+
     /// Source a stream from a queue.
     pub fn from(source: QueueBuilder) -> Self {
         Self {

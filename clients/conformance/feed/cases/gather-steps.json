@@ -1,0 +1,174 @@
+{
+  "name": "gather-steps",
+  "about": "gather by steps: onComplete when every step is in; a finished run is remembered, so a late duplicate opens nothing; a run missing a step times out with the missing names",
+  "source": {
+    "queues": [
+      "c-pay",
+      "c-stock",
+      "c-ship"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "gather",
+      "opts": {
+        "steps": [
+          "c-pay",
+          "c-stock",
+          "c-ship"
+        ],
+        "key": {
+          "$get": "0.data.orderId"
+        },
+        "within": "5m",
+        "onComplete": {
+          "order": {
+            "$get": "1"
+          },
+          "got": {
+            "$keys": {
+              "$get": "0"
+            }
+          }
+        },
+        "onTimeout": {
+          "order": {
+            "$get": "2"
+          },
+          "missing": {
+            "$get": "1"
+          },
+          "got": {
+            "$keys": {
+              "$get": "0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "op": "name",
+      "name": "runs"
+    },
+    {
+      "op": "to",
+      "target": "c-gathered"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-pay",
+              "partition": "x",
+              "data": {
+                "orderId": "r1"
+              },
+              "transactionId": "g1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-stock",
+              "partition": "y",
+              "data": {
+                "orderId": "r1"
+              },
+              "transactionId": "g2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:20.000Z",
+          "push": [
+            {
+              "queue": "c-pay",
+              "partition": "x",
+              "data": {
+                "orderId": "r2"
+              },
+              "transactionId": "g3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:30.000Z",
+          "push": [
+            {
+              "queue": "c-ship",
+              "partition": "z",
+              "data": {
+                "orderId": "r1"
+              },
+              "transactionId": "g4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:40.000Z",
+          "push": [
+            {
+              "queue": "c-pay",
+              "partition": "w",
+              "data": {
+                "orderId": "r1"
+              },
+              "transactionId": "g5"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:50.000Z",
+          "push": [
+            {
+              "queue": "c-stock",
+              "partition": "y",
+              "data": {
+                "orderId": "r2"
+              },
+              "transactionId": "g6"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "state": "A",
+      "step": "runs",
+      "key": "r1",
+      "as": "r1-done"
+    },
+    {
+      "state": "A",
+      "step": "runs",
+      "key": "r2",
+      "as": "r2-open"
+    },
+    {
+      "clock": "2026-11-06T09:05:21.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-gather-steps"
+  },
+  "mode": "fake"
+}

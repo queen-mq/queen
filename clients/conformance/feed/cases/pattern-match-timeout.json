@@ -1,0 +1,158 @@
+{
+  "name": "pattern-match-timeout",
+  "about": "an order then its payment within 15 minutes is a match across two queues; an order alone times out on a quiet feed; a second start while one waits is ignored (keep)",
+  "source": {
+    "queues": [
+      "c-orders",
+      "c-payments"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "pattern",
+      "opts": {
+        "start": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-orders"
+          ]
+        },
+        "then": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-payments"
+          ]
+        },
+        "within": "15m",
+        "onMatch": {
+          "order": {
+            "$get": "0.data.id"
+          },
+          "paid": {
+            "$get": "1.data.amount"
+          },
+          "at": {
+            "$get": "1.ts"
+          }
+        },
+        "onTimeout": {
+          "order": {
+            "$get": "0.data.id"
+          },
+          "remind": true
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-followups"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "order-1",
+              "data": {
+                "id": 1
+              },
+              "transactionId": "o1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:01:00.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "order-2",
+              "data": {
+                "id": 2
+              },
+              "transactionId": "o2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:02:00.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "order-1",
+              "data": {
+                "id": 11
+              },
+              "transactionId": "o1b"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:05:00.000Z",
+          "push": [
+            {
+              "queue": "c-payments",
+              "partition": "order-1",
+              "data": {
+                "amount": 30
+              },
+              "transactionId": "p1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:06:40.000Z",
+          "push": [
+            {
+              "queue": "c-payments",
+              "partition": "order-9",
+              "data": {
+                "amount": 1
+              },
+              "transactionId": "p9"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "state": "A",
+      "step": "step1",
+      "key": "order-2",
+      "as": "waiting-2"
+    },
+    {
+      "clock": "2026-11-06T09:16:00.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:16:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-pattern-match-timeout"
+  },
+  "mode": "fake"
+}

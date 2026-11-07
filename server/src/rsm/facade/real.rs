@@ -151,6 +151,10 @@ impl Waker for NotifierWaker {
         let qkey = crate::handlers::tenant_queue_key(tenant, queue);
         self.notifier.wake_partition(&qkey, partition);
     }
+
+    fn appended_any(&self) {
+        self.notifier.wake_all_partitions();
+    }
 }
 
 /// PLAN_RAFT_DRAIN_FIX P2.2: long-poll gates per `(tenant, queue, group)`.
@@ -946,6 +950,14 @@ impl RaftFacade {
         });
         let node_id = cluster.as_ref().map_or(NODE_ID, |c| c.node_id);
         let ocfg = OpenConfig::new(node_id, dir.clone());
+        #[cfg(test)]
+        let ocfg = {
+            let mut o = ocfg;
+            if let Some(bytes) = TEST_SEGMENT_BYTES.with(|c| c.get()) {
+                o.seg_opts.segment_bytes = bytes;
+            }
+            o
+        };
         // A standby is a cluster, of one node or more: how its nodes get what
         // its leader replays, its seed, and everything the link was tested
         // with are the openraft replicator's. (A source is one by
@@ -2098,6 +2110,13 @@ thread_local! {
     /// ([`StoreOpts::txns_without_hashes`]): a test of the production form
     /// without moving the process-wide dedup mode the other tests rely on.
     pub(crate) static TEST_TXNS_WITHOUT_HASHES: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+
+    /// TEST ONLY: the roll size of the queue logs (and segment files) of the
+    /// facades opened ON THIS THREAD, instead of `QUEEN_RAFT_SEGMENT_BYTES`:
+    /// small, so a test seals files with a few pushes, without moving the
+    /// size every other test of the process opens with.
+    pub(crate) static TEST_SEGMENT_BYTES: std::cell::Cell<Option<u64>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -6908,6 +6927,10 @@ impl Rsm for RaftFacade {
                 None => Route::NoLeader,
             },
         }
+    }
+
+    fn feed_followers(&self, _tenant: &str) -> Vec<String> {
+        self.feed_relay_followers()
     }
 
     fn route(&self) -> crate::rsm::facade::Route {

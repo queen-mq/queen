@@ -4,6 +4,7 @@ Transaction builder for atomic operations
 
 from typing import Any, Dict, List, Optional, Union
 
+from ..errors import TransactionError
 from ..kv import ops as kv_ops
 from ..timers import ops as timer_ops
 from ..utils import logger
@@ -356,8 +357,15 @@ class TransactionBuilder:
                         },
                     )
                     return TransactionResult(result)
-                logger.error("TransactionBuilder.commit", {"error": result.get("error")})
-                raise Exception(result.get("error") or "Transaction failed")
+                logger.error("TransactionBuilder.commit", {"error": result.get("error"), "reason": result.get("reason")})
+                # The broker's reason code travels ON the error, so no caller
+                # has to match the message (a duplicate push, a rejected ack...).
+                reason = result.get("reason")
+                raise TransactionError(
+                    result.get("error") or "Transaction failed",
+                    reason=reason if isinstance(reason, str) else None,
+                    result=result,
+                )
 
             logger.log("TransactionBuilder.commit", {"status": "success"})
             return TransactionResult(result)

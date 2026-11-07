@@ -40,6 +40,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
 # rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector; phase2.rs
 # reads that lag for the collector (group_lags_of). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): phase2.rs routes POST /api/v1/feed to the new phase2/feed.rs. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 A cluster is three copies of the same broker, each on its own machine, each told where the other two are. Together they keep one log. The leader puts every write in that log and sends it to the others, and a write is answered only when a majority of the nodes (two of three) has it on disk. Any node serves any client: it prepares the work of its own clients and sends the leader only the prepared command.
@@ -136,7 +141,7 @@ docker run -d --name queen --hostname queen-1 \
   -e QUEEN_RAFT_NODE_ID=1 \
   -e QUEEN_RAFT_PEERS="$PEERS" \
   -e QUEEN_RAFT_TOKEN="$TOKEN" \
-  ghcr.io/queen-mq/queen:2.7.1
+  ghcr.io/queen-mq/queen:2.8.0
 ```
 
 | Setting | Default | What it does |

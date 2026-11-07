@@ -715,6 +715,15 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
     for h in crate::config::BROKER_INTERNAL_HEADERS {
         parts.headers.remove(*h);
     }
+    // A cluster's leader answers a feed read 421 and names its followers, which
+    // nothing behind this proxy can reach: ask it to relay the read to one of
+    // them instead (routes.rs, the feed arm; config.rs `FEED_RELAY_HEADER`).
+    if path_only == "/api/v1/feed" {
+        parts.headers.insert(
+            crate::config::FEED_RELAY_HEADER,
+            HeaderValue::from_static("1"),
+        );
+    }
     if let Ok(v) = HeaderValue::from_str(&rid) {
         parts.headers.insert(crate::config::REQUEST_ID_HEADER, v);
     }
@@ -4417,6 +4426,49 @@ mod tests {
         assert!(st.upstream.in_process());
 
         assert_internal_headers_never_reach(&st, &heads).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cluster's leader answers a feed read 421 and names followers nothing
+    /// behind the proxy can reach, so every feed read the proxy relays asks
+    /// the broker to relay it to a follower (`FEED_RELAY_HEADER`), and no
+    /// other request asks for anything.
+    #[tokio::test]
+    async fn a_feed_read_asks_the_broker_to_relay_it_to_a_follower() {
+        let dir =
+            std::env::temp_dir().join(format!("queen-proxy-feed-relay-{}", uuid::Uuid::new_v4()));
+        let dir = dir.to_str().expect("temp path").to_string();
+        let heads = Heads::default();
+        let upstream = crate::upstream::Upstream::InProcess(recording_broker(heads.clone()));
+        let st = relay_st("inprocess://self", &dir, upstream).await;
+        for (method, path, body) in [
+            (
+                Method::POST,
+                "/api/v1/feed",
+                r#"{"from":"earliest","queues":["orders"]}"#,
+            ),
+            (Method::GET, "/api/v1/resources/queues", ""),
+        ] {
+            let req = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::HOST, "cell.test")
+                .body(Body::from(body))
+                .expect("request");
+            let resp = handle(State(st.clone()), req).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{method} {path}");
+        }
+        let seen = heads.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        let relay = |h: &HeaderMap| {
+            h.get(crate::config::FEED_RELAY_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        assert_eq!(seen[0].0, "/api/v1/feed");
+        assert_eq!(relay(&seen[0].1).as_deref(), Some("1"));
+        assert_eq!(seen[1].0, "/api/v1/resources/queues");
+        assert_eq!(relay(&seen[1].1), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

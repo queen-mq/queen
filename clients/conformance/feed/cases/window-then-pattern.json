@@ -1,0 +1,152 @@
+{
+  "name": "window-then-pattern",
+  "about": "a pattern over window results: two busy minutes in a row for one key",
+  "source": {
+    "queues": [
+      "c-hits"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "filter",
+      "fn": {
+        "$gte": [
+          {
+            "$get": "0.count"
+          },
+          2
+        ]
+      }
+    },
+    {
+      "op": "pattern",
+      "opts": {
+        "start": true,
+        "then": true,
+        "within": "90s",
+        "onMatch": {
+          "key": {
+            "$get": "0.partition"
+          },
+          "first": {
+            "$get": "0.data.count"
+          },
+          "second": {
+            "$get": "1.data.count"
+          },
+          "firstCtx": {
+            "$get": "0.ctx.windowKey"
+          }
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-busy"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:01:01.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:01:02.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:01:03.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "h",
+              "data": {},
+              "transactionId": "h5"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:02:01.000Z",
+          "push": [
+            {
+              "queue": "c-hits",
+              "partition": "k",
+              "data": {},
+              "transactionId": "k1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:03:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-window-then-pattern"
+  },
+  "mode": "fake"
+}

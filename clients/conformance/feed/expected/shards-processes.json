@@ -1,0 +1,136 @@
+{
+  "outputs": [
+    {
+      "queue": "c-out",
+      "partition": "p0",
+      "data": {
+        "n": 0,
+        "p": "p0"
+      },
+      "from": "S1.1/c-in/p0#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p1",
+      "data": {
+        "n": 1,
+        "p": "p1"
+      },
+      "from": "S1.2/c-in/p1#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p2",
+      "data": {
+        "n": 2,
+        "p": "p2"
+      },
+      "from": "S1.3/c-in/p2#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p3",
+      "data": {
+        "n": 3,
+        "p": "p3"
+      },
+      "from": "S1.4/c-in/p3#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p4",
+      "data": {
+        "n": 4,
+        "p": "p4"
+      },
+      "from": "S1.5/c-in/p4#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p5",
+      "data": {
+        "n": 5,
+        "p": "p5"
+      },
+      "from": "S1.6/c-in/p5#0"
+    }
+  ],
+  "records": {
+    "c-shards-processes#shard0of2": {
+      "position": "end",
+      "epoch": 0,
+      "shard": {
+        "index": 0,
+        "count": 2
+      },
+      "readTo": 1793955606000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    },
+    "c-shards-processes#shard1of2": {
+      "position": "end",
+      "epoch": 0,
+      "shard": {
+        "index": 1,
+        "count": 2
+      },
+      "readTo": 1793955606000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-shards-processes#shard0of2": null,
+    "c-shards-processes#shard1of2": null
+  },
+  "layout": {
+    "shards": 2,
+    "shardBy": "partition"
+  },
+  "about": {
+    "v": 1,
+    "queryId": "c-shards-processes",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": {
+      "count": 2,
+      "by": "partition"
+    },
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {},
+    "B.stopped": {}
+  },
+  "problems": []
+}

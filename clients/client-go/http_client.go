@@ -105,6 +105,11 @@ type requestOptions struct {
 	// noFailoverRetry suppresses the outer 5xx/network retry loop in
 	// doRequestRaw for THIS request. See WithoutFailoverRetry.
 	noFailoverRetry bool
+
+	// ownTimeout: the request's own timeout rules, also past the client-wide
+	// TimeoutMillis (a feed long poll holds a read up to 30 s, and its HTTP
+	// deadline is 10 s past that). See PostRawTimeout.
+	ownTimeout bool
 }
 
 // WithLongPollRetry marks a request as a long-poll pop (wait=true): on a
@@ -199,6 +204,15 @@ func (hc *HttpClient) GetRawWith(ctx context.Context, path string, timeoutMs int
 // PostRaw performs a POST request and returns the undecoded response body.
 func (hc *HttpClient) PostRaw(ctx context.Context, path string, body interface{}, opts ...RequestOption) ([]byte, error) {
 	return hc.doRequestRaw(ctx, http.MethodPost, path, body, 0, "", resolveRequestOptions(opts))
+}
+
+// PostRawTimeout performs a POST with its own timeout (milliseconds), which
+// rules also when it is longer than the client's TimeoutMillis, and returns
+// the undecoded response body. The feed reader's long polls use it.
+func (hc *HttpClient) PostRawTimeout(ctx context.Context, path string, body interface{}, timeoutMs int, opts ...RequestOption) ([]byte, error) {
+	ro := resolveRequestOptions(opts)
+	ro.ownTimeout = true
+	return hc.doRequestRaw(ctx, http.MethodPost, path, body, timeoutMs, "", ro)
 }
 
 // PutRaw performs a PUT request and returns the undecoded response body.
@@ -400,7 +414,7 @@ func (hc *HttpClient) doRequestWithRetry429Raw(ctx context.Context, method, url 
 	tries := 0
 	for {
 		tries++
-		result, err := hc.attemptOnceRaw(ctx, method, url, body, timeout)
+		result, err := hc.attemptOnceRawWith(ctx, hc.httpFor(ro, timeout), method, url, body, timeout)
 		if err == nil {
 			return result, nil
 		}
@@ -448,6 +462,20 @@ func (hc *HttpClient) doRequestWithRetry429Raw(ctx context.Context, method, url 
 // anything else (marshal/transport/timeout) as a plain error. The split exists
 // so a caller that needs 64-bit integers can choose its own decoder (§10.4).
 func (hc *HttpClient) attemptOnceRaw(ctx context.Context, method, url string, body interface{}, timeout int) ([]byte, error) {
+	return hc.attemptOnceRawWith(ctx, hc.client, method, url, body, timeout)
+}
+
+// httpFor is the http.Client one request goes through: the client's own, or,
+// for a request whose own timeout is longer than the client-wide one, the
+// same transport without that cap (the request's context carries its deadline).
+func (hc *HttpClient) httpFor(ro requestOptions, timeout int) *http.Client {
+	if ro.ownTimeout && timeout > hc.config.TimeoutMillis {
+		return &http.Client{Transport: hc.client.Transport}
+	}
+	return hc.client
+}
+
+func (hc *HttpClient) attemptOnceRawWith(ctx context.Context, client *http.Client, method, url string, body interface{}, timeout int) ([]byte, error) {
 	// Create request body
 	var bodyReader io.Reader
 	contentType := "application/json"
@@ -498,7 +526,7 @@ func (hc *HttpClient) attemptOnceRaw(ctx context.Context, method, url string, bo
 	// below and surfaces as "context canceled" for any response that
 	// isn't fully buffered (chunked transfer-encoding, large bodies).
 	// We cancel after the body has been read+closed.
-	resp, err := hc.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		cancel()
 		return nil, err

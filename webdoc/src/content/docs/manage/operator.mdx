@@ -22,6 +22,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
 # handlers/raft.rs adds the queen_consumer_group_lag_* families to /metrics/prometheus. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 The [manifest](/manage/kubernetes/) installs a cluster, and a rolling update takes a new version
@@ -58,7 +62,7 @@ metadata:
   name: queen
   namespace: queen
 spec:
-  version: "2.7.1"
+  version: "2.8.0"
   replicas: 3
   secretName: queen
   storage:
@@ -71,7 +75,7 @@ kubectl -n queen get queencluster
 
 ```text
 NAME    VERSION   VOTERS    COMMITS   PHASE   AGE
-queen   2.7.1     [1,2,3]   true      Ready   40s
+queen   2.8.0     [1,2,3]   true      Ready   40s
 ```
 
 The pods and the Services have the names of the [manifest](/manage/kubernetes/)

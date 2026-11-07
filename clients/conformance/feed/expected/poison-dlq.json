@@ -1,0 +1,118 @@
+{
+  "outputs": [
+    {
+      "queue": "c-dlq",
+      "partition": "q",
+      "data": {
+        "queryId": "c-poison-dlq",
+        "attempts": 3,
+        "error": {
+          "message": "bad message"
+        },
+        "entry": {
+          "position": "S1.2",
+          "queue": "c-in",
+          "partition": "q",
+          "partitionId": "pid:c-in/q",
+          "offset": 1,
+          "id": "id:S1.2/c-in/q/1",
+          "transactionId": "i2",
+          "ts": "2026-11-06T09:00:02.000Z",
+          "createdAt": "2026-11-06T09:00:02.000Z",
+          "data": {
+            "bad": true,
+            "why": "x"
+          }
+        }
+      },
+      "from": "dlq:S1.2/c-in/q"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "n": 1
+      },
+      "from": "S1.1/c-in/p#0"
+    },
+    {
+      "queue": "c-out",
+      "partition": "p",
+      "data": {
+        "n": 3
+      },
+      "from": "S1.3/c-in/p#0"
+    }
+  ],
+  "records": {
+    "c-poison-dlq": {
+      "position": "end",
+      "epoch": 0,
+      "readTo": 1793955603000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-poison-dlq": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-poison-dlq",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-out"
+      ]
+    },
+    "onPoison": {
+      "queue": "c-dlq"
+    },
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [
+    {
+      "runner": "A",
+      "phase": "poison",
+      "action": "deadLettered",
+      "code": null
+    }
+  ],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 3,
+      "effects": 0,
+      "poisoned": 1,
+      "skipped": 0,
+      "deadLettered": 1,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

@@ -3,6 +3,208 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Feed streams deliver their results in batches: `.foreachBatch()`.** `.foreachBatch(fn, {
+maxItems, maxWaitMillis })` ends a feed stream like `.foreach()`, but calls `fn` with up to
+`maxItems` results at once (1000 by default), each `{ value, ctx, id }`: `value` and `ctx` are what
+`.foreach()` gets, and `id` is the id a `.to()` output of that result would have. By default a
+batch is what one read brought; with `maxWaitMillis` it also waits for the next reads, until it is
+full or its first item has waited that long, and nothing commits while it waits. The position moves
+in the commit right after `fn` returns, so a crash before then delivers the batch again with the
+same ids. A batch that throws is tried again whole (`retries`), then item by item, so `onPoison`
+meets only the item that fails ('stop' commits nothing of the batch); `stop()` delivers the batch
+that waits. In JavaScript, Python (`.foreach_batch()`), Go (`.ForeachBatch()`) and Rust
+(`.foreach_batch()`), checked by 12 new cases of `clients/conformance/feed`; `metrics()` gains
+`batches` and `pendingBatch`. Why: a database or an API takes a thousand rows in one call much
+faster than in a thousand calls, and a position saved before the call returns could lose them.
+
+**The console knows that a feed stream reads a queue, and its rates count quiet minutes.** A feed
+stream reads without a consumer group, so the Queues page, a queue's page, the Overview and the
+Workload page called every queue it reads "No reader" and counted all its messages as waiting. Now
+each queue a feed stream reads (by the queues its description names, patterns too, and its table
+joins) says so: State "Feed stream" while one of its streams runs, "Feed stopped" when their
+processes stopped them, and "Feed down" when none runs. "Feed down" needs you, like "No reader",
+only while the queue holds messages. Waiting shows "–" for a queue only feed streams read, since
+no group acks it, and a queue's page names its streams and links them. The rates a second on the
+Overview, the Queues page, a queue's page and the Streams page also counted only the minutes that
+had traffic: a two-minute burst read as its own rate for five minutes after, and an hour later on
+a quiet queue. A quiet minute now counts as 0, and a chart's "In a second" is its window's mean.
+Why: a queue a stream processes is not a queue nobody reads, and a rate that ignores the quiet
+minutes is not the rate.
+
+**The feed through the proxy.** The proxy used to block `POST /api/v1/feed` (an API route it had no
+rule for), so `queen.feed()` and `Stream.fromFeed()` could not run behind it. It is now a consume
+route, like `/api/v1/fetch`: a Viewer cannot read every queue's messages through it. A cluster's
+leader answers a feed read 421 and names its followers, which nothing behind the proxy can reach,
+so the proxy sends `x-queen-feed-relay: 1` on every feed read, and a leader that gets that header
+hands the read to a follower and passes its answer back. The relay names the tenant the leader
+resolved, never the one the caller sent, and proves it to the follower with the cluster token. A
+client that talks to the brokers directly still gets the 421 and goes to a follower itself, so the
+leader does no feed work for it. Why: behind the proxy a feed read landed on any node, and on the
+leader it failed.
+
+**Feed streams in the Python, Go and Rust clients, with the JavaScript engine and its records.**
+`Stream.from_feed` (Python), `streams.FromFeed` (Go) and `Stream::from_feed` (Rust) run what
+`Stream.fromFeed` runs: routing, windows, patterns, joins, gathers, table joins, event time, any
+number of stateful steps, snapshots and replay, one runner per `queryId` with standbys, the poison
+policy, shards and live state; `client.feed()`, `q.Feed()` and `queen.feed()` read the tenant feed
+and go to a follower by themselves. The position record, the snapshots, the state, the output ids,
+`<queryId>#about` and the live-state questions mean the same in every client, so a stream can stop
+(or die) in one client and go on in another with the same `queryId`, and `Stream.view` in any
+client asks a runner of any client. `clients/conformance/feed` checks it: a broker in memory over
+HTTP, 52 cases plus 9 on a real broker, run against each client and with the clients taking turns
+inside one case; the JavaScript client's results are the expected ones. The Rust client adds the
+`flate2` dependency (deflate, for the snapshots). Why: a stream belongs with the service that owns
+its data, in that service's language, and moving it must not lose its state or send a result twice.
+
+**The console lists feed streams, and a feed stream's records say what the console needs.** The
+Streams page shows feed streams (`Stream.fromFeed`) beside queue streams. It reads their keys in
+`queen-feed` and their locks, never the running process: whether a runner holds the stream (its
+host and pid, per shard), how far behind its last commit was, what each step holds, the state it
+saved, and why it stopped, with the message, the error and the tries when it stopped on a message
+that kept failing. A stream with no runner, a runner that holds its lock and writes nothing for a
+minute, and a poison stop are marked as needing you; a runner that has not committed yet is found
+by its lock. For this the JavaScript runner writes `<queryId>#about` (what the stream reads, its
+steps, where its results go) in its first commit after it becomes active, and its position record
+gains `readTo` (the feed time the position is at), `caughtUp`, `open` and `held` per step, and
+`stopped` (`{reason: 'poison', error, attempts, position, queue, partition, offset}` or
+`{reason: 'stop'}`); a poison stop and a stop asked by `stop()` now always commit, so the record
+says so. Why: a feed stream runs in a process the broker does not know; before this, only raw KV
+keys showed it.
+
+**The tenant feed: every push of a tenant's queues in one order, read from followers.** `POST
+/api/v1/feed` answers the pushes to a tenant's queues (all of them, or names and `*` patterns) in
+the order the log committed them, each with its position: the log entry that wrote it, one number
+across every queue, shared by the pushes of one transaction. A read starts at a position, `now` or
+`earliest`, can keep only `since` a time, some partitions, or the messages a `where` holds for
+(`data.country = IT`, `data.total > 100`, `partition prefix booking-`), long-polls with
+`maxWaitMs`, and answers `next`, `caughtUp` and `resolvedTs`. Nothing is leased or moved: every
+consumer group still gets its messages. It reads the queue logs on disk, never past the answering
+node's applied index, and only followers serve it: the leader of a cluster answers 421
+`feed_on_leader` with the followers to ask (`QUEEN_FEED_ON_LEADER=true` lifts it on a test
+cluster), so readers add no load to the node that orders the writes. The JavaScript client has
+`queen.feed(options)`, an async iterator that goes to a follower by itself, and
+`Stream.fromFeed(queen, { queues })` with `.where()` sent to the broker (ops include `!prefix`): a
+stream whose position lives in KV (`queen-feed`) and commits with its output in one transaction.
+Not yet: kinds other than `push` (acks, KV writes, timers). Why: a router, a mirror or an audit over many queues needed a consumer group per queue
+and saw no order across them. `Stream.fromFeed` fails `run()` with `no_feed_route` on a broker
+without the feed, and says its cycle errors on the console when no `onError` is given.
+
+**Feed streams: routing, windows, patterns and joins, one process per queryId, and a policy for a
+message that keeps failing.** `.to()` takes a list of queues or a function that picks per result
+(``.to((o) => `orders-${o.country}`)``), and every output commits with the position; a stream's
+outputs carry ids with its own prefix, and its reads leave them out, so it never reads back what it
+wrote. Tumbling, sliding, session and cron windows with `reduce`/`aggregate` and `keyBy` run on
+the log's clock, the commit time every queue shares: a window closes once that clock passes its
+end, nothing of it can arrive later, and on a quiet feed the stream writes its position at the
+window's end so the broker's clock moves and the window closes on time. `.pattern({ start, then,
+within, onMatch, onTimeout })` waits per entity for a second message ("an order and no payment
+within 15 minutes" sends the reminder at the deadline) and `.join({ left, right, within, select })`
+pairs two messages of an entity in either order; the entity is the partition name, so it spans
+queues. A chain whose stateful steps changed is refused while state is stored, unless `reset`
+(true, or a string to start over once). Each queryId has a lock
+(`queen-feed/<queryId>`): one process runs, another one waits and takes over from the stored
+position when the first stops or dies (`lockTtl`, 15 s), and every commit is guarded by the lock.
+A message whose function throws is retried 3 times from the state before it, then `onPoison`:
+`'stop'` (the default: what came before commits, the stream stops at the message and names it),
+`'skip'`, or a dead-letter queue that gets the message and the error in the same commit. Commits
+come at once when caught up and every `commitEveryMillis` (1 s) while catching up. Why: two copies
+of a feed stream ran its `.foreach()` twice, a throwing function retried its page forever and
+stopped the stream, and a router, a window or a reminder over several queues had no clock they
+share.
+
+**Feed streams: two positions instead of the state at every commit, many steps, joins of many
+queues, gather, table joins, shards and live state.** A stream's record holds its committed
+position and the position of its last snapshot, the whole state written now and then
+(`snapshotEveryMillis`, 60 s, `snapshotMaxEntries`, 200,000 messages and at least as many as the
+state has keys, and at a stop) in
+deflated chunks under `<queryId>#snap#...`, named by the commit that moves the position; a new
+stream's first snapshot is its start, with no chunk, and a state that did not change moves the
+snapshot's position at no cost. A restart loads the snapshot and reads the feed again up to the
+committed position, sending nothing, so the state has no size limit but memory (the 2 MiB of KV
+buckets is gone; an old bucket record is read once and carried on). A stream chains any number of
+stateful steps, windows, patterns, joins, gathers and table joins, each step's results being the
+next one's messages, on one clock: a result happens when its window closed or its deadline passed,
+on every run and every replay. `.join({ sides: { order: 'orders', paid: 'payments', sent:
+'shipments' } })` joins any number of queues and names the missing sides at the deadline;
+`.gather({ steps | count })` collects the parts of a run and remembers a finished one until its
+deadline; `.joinTable({ queue, on, select })` joins every message with the latest row of a table
+queue as of the message's own position; `keep(msg, value)` says what a waiting message keeps;
+`.name()` names a step. `run({ shards: N })` splits a stream by partition hash, which the broker
+filters before reading payloads (`shard: { count, index, queues? }` on `POST /api/v1/feed`), each
+shard with its own position, snapshots and lock, or by any key with `shardBy`; the shard layout is
+kept and another one is refused unless `reset`, and every commit checks it, so a process on the old
+layout stops. A replay leaves out what the poison policy left out (kept with the position until the
+next snapshot). `runner.state(step)` reads the live state in
+process and `Stream.view(queen, queryId).get(step, key)` from anywhere, over ephemeral queues.
+`from: 'now'` is now the position when `run()` resolves, and `stop()` cancels the long poll in
+flight instead of waiting it out (5 s by default). Why: writing every window at every commit
+capped the state and cost a write per window, one process per stream was the ceiling, and joins of
+three queues, fan-in, lookups and "what does the stream hold now" each needed a second system.
+
+**Feed streams on event time: every stateful step can run on the time its messages carry.**
+`eventTime` on a pattern, a join (of two sides or more) or a gather puts its deadlines on the
+messages' own times, as windows already could. The step keeps a watermark (the latest event time
+seen, minus `allowedLateness`) and takes its messages in event-time order: each one that concerns
+it waits until the watermark reaches its time, so a comment that arrives before its issue still
+answers it. Sessions on event time take their messages in that order too; tumbling, sliding and
+cron windows take them as they come. Messages a pattern's, join's or gather's tests do not take
+need no event time and move nothing. A message older than the watermark is dropped and counted
+(`onLate: 'include'` takes it at once). `idle`, on the first step on event time, lets the feed's
+clock move the watermark on after a quiet spell, so a quiet feed closes its windows and passes its
+deadlines, and a finished import does too. A step after a step on event time runs on event time: a
+window's result carries the time of its last millisecond, a timeout its deadline's, a match the
+time of the message that made it (`eventTime: false` keeps a step on the feed's clock), and its
+watermark follows that step's, up to the oldest time that step can still send, so nothing it sends
+is late and every step closes in turn. Windows take `allowedLateness` as a duration too. The watermark and the held messages are in
+the snapshot, so a replay closes the same things at the same times: a day of 340,284 issues and
+comments pushed out of order, read by two streams killed with SIGKILL halfway, gave all 200,000
+verdicts and 1,613 hourly counts once each, equal to the same day computed in batch.
+`metrics().steps` shows each step's clock, watermark and held messages. A feed session window now
+closes the millisecond after its last message plus `gap`, so a message exactly `gap` later stays in
+the session; before, it did only with a `gracePeriod`. Why: history pushed today has today's commit
+times, so on the feed's clock a day of issues imported in five minutes was all "answered within the
+hour", and a producer that sends late counted in the wrong hour.
+
+**Feed streams: snapshots that cost what changed, and metrics that cost the same at any size.** A
+snapshot is a full layer, then deltas of the keys set or deleted since the layer before, and a full
+layer again when the deltas weigh as much as it or there are 16. A layer is written and read in
+pieces of about 256 KB of JSON, compressed off the main thread: no string holds the whole state
+(one JSON of it failed above about 3.9M window keys, at V8's string limit), and the process keeps
+its lock and answers live reads while a big layer goes (a shard of 2.65M keys used to lose its own
+5 s lock). `snapshotMaxEntries` no longer waits for as many messages as the state has keys.
+Snapshots of the old format still load, and the next one is a full layer. Windows, waits and runs
+that end at the same time close 2,000 at a time with the event loop turning between batches, in the
+same order, and a loaded state is indexed again in batches, so a shard of millions of keys keeps its
+lock through a load or a mass close. Their results no longer wait for one commit: once
+`maxPendingOutputs` results wait, they commit in the middle of the close, and the position record
+counts the closes made (`units`), so a process that takes over replays to that count and closes the
+rest, each result once (8M windows closing at one time made one transaction far over the broker's
+64 MiB body limit). `runner.metrics()` and
+`Stream.view().status()` read counts kept as the state changes instead of walking every key twice
+(at 4M keys, reading them every 50 ms had slowed a stream to 5.4k msg/s). On the broker, a feed
+read with a `shard` reads only that shard's records of each sealed queue-log file, through the
+file's index, instead of walking every record of the log (the file still being written is read
+through); and a long-polling feed read no longer sleeps to its one-second re-read when its watch
+was armed while the entry it waits for was being applied, or when the queue it names did not exist
+yet. Why: on three c4-standard-24 brokers, the state of one shard was the first limit feed streams
+hit, every shard paid for the whole log, and about 1% of caught-up reads at 200k msg/s woke a
+second late.
+
+**JavaScript client: one push across many partitions, and a buffer that holds under any load.** An
+item may name its own partition (`push([{ partition: 'hotel-1', data }, ...])`); without one it
+takes `.partition()`, or `Default`, as before, and a bare object stays its own payload. A buffer
+now holds a whole queue, not one partition: each message keeps its partition and one batch carries
+them all, each partition in its own order. The client holds at most `bufferMaxMessages` (100,000)
+buffered messages before a buffered push waits, a buffered push gives the event loop a turn every
+256 messages, and a message the broker refuses inside a batch is sent again, up to five times, then
+dropped and reported to `onBufferError` (else the console) where it used to vanish. Why: a producer
+that buffered pushes to 100 queues x 1,000 partitions in a `while (true)` loop made 100,000
+buffers, each with its own bound, and never let Node run a flush timer: it ran out of memory in ten
+seconds without sending a request. The same loop now sends about 38,000 messages a second with a
+373 MB peak.
+
 ## 2.7.1 - 2026-11-03
 
 **Upgrading from 2.7.0: a rolling restart, nothing else.** Nothing on disk or on the wire changes

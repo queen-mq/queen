@@ -53,9 +53,13 @@ pub(crate) type OpDescription = Vec<(&'static str, Json)>;
 
 /// `sha256(JSON.stringify(descriptions))`, hex-encoded lowercase.
 pub(crate) fn config_hash(descriptions: &[OpDescription]) -> String {
-    let json = render(descriptions);
+    sha256_hex(&render(descriptions))
+}
+
+/// `sha256(text)`, hex-encoded lowercase.
+pub(crate) fn sha256_hex(text: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(json.as_bytes());
+    hasher.update(text.as_bytes());
     let digest = hasher.finalize();
     let mut out = String::with_capacity(64);
     for b in digest {

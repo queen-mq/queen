@@ -1,0 +1,105 @@
+{
+  "outputs": [
+    {
+      "queue": "c-orders-it",
+      "partition": "p1",
+      "data": {
+        "id": 1,
+        "total": 10,
+        "from": "p1"
+      }
+    },
+    {
+      "queue": "c-orders-it",
+      "partition": "p1",
+      "data": {
+        "id": 3,
+        "total": 30,
+        "from": "p1"
+      }
+    },
+    {
+      "queue": "c-orders-it",
+      "partition": "p2",
+      "data": {
+        "id": 5,
+        "total": 50,
+        "from": "p2"
+      }
+    },
+    {
+      "queue": "c-orders-it",
+      "partition": "p3",
+      "data": {
+        "id": 4,
+        "total": 40,
+        "from": "p3"
+      }
+    }
+  ],
+  "record": {
+    "epoch": 0,
+    "caughtUp": true
+  },
+  "about": {
+    "exclusive": true,
+    "hash": "4f53cda18c2baa0c",
+    "lockTtl": "5s",
+    "onPoison": "stop",
+    "positionCommitMillis": 0,
+    "reads": {
+      "partitions": null,
+      "queues": [
+        "c-orders"
+      ],
+      "where": [
+        {
+          "field": "data.country",
+          "op": "=",
+          "value": "IT"
+        }
+      ]
+    },
+    "shards": null,
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-orders-it"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "v": 1
+  },
+  "foreach": [],
+  "errors": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 3,
+      "outputs": 3,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    },
+    "B.stopped": {
+      "emitted": 1,
+      "outputs": 1,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

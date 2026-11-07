@@ -16,7 +16,7 @@
  *   eventTime, allowedLateness, onLate — same as the other window operators
  */
 
-import { extractEventTime, normaliseLateOpts, everyToMs, MS_PER_SEC } from './_windowCommon.js'
+import { extractEventTime, normaliseLateOpts, everyToMs, feedTimeOptions, windowLatenessMs, MS_PER_SEC } from './_windowCommon.js'
 
 const WEEK_EPOCH_OFFSET_MS = 4 * 86_400 * 1000  // Jan 1 1970 UTC was Thursday;
 // shift so weeks align to Monday 00:00 UTC
@@ -28,7 +28,8 @@ export class WindowCronOperator {
     idleFlushMs   = 30_000,
     eventTime,
     allowedLateness = 0,
-    onLate
+    onLate,
+    idle
   } = {}) {
     if (typeof every !== 'string') {
       throw new Error("windowCron requires { every: 'second'|'minute'|'hour'|'day'|'week' }")
@@ -40,7 +41,7 @@ export class WindowCronOperator {
     this.gracePeriodMs    = Math.max(0, Math.floor(gracePeriod * MS_PER_SEC))
     this.idleFlushMs      = Math.max(0, Math.floor(idleFlushMs))
     this.eventTimeFn      = typeof eventTime === 'function' ? eventTime : null
-    this.allowedLatenessMs = Math.max(0, Math.floor(allowedLateness * MS_PER_SEC))
+    this.allowedLatenessMs = windowLatenessMs(allowedLateness, 'windowCron')
     this.onLatePolicy     = normaliseLateOpts(onLate)
     this.operatorTag      = `cron:${every}`
     this.config           = {
@@ -52,6 +53,7 @@ export class WindowCronOperator {
       allowedLateness,
       onLate:           this.onLatePolicy
     }
+    feedTimeOptions(this, { eventTime, idle }, 'windowCron')
   }
 
   async apply(envelope) {

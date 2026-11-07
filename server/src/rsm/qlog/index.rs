@@ -239,7 +239,12 @@ pub struct View {
     file_id: u64,
     count: usize,
     file_bytes: u64,
+    /// A number no other view of this process carries ([`View::uid`]).
+    uid: u64,
 }
+
+/// The last [`View::uid`] handed out.
+static LAST_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// An index at most this long is read into memory and not mapped. The
 /// kernel caps the memory maps of a process (`vm.max_map_count`, 65,530
@@ -439,7 +444,16 @@ impl View {
             file_id,
             count,
             file_bytes,
+            uid: LAST_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
         })
+    }
+
+    /// A number no other view opened by this process carries, whatever file
+    /// it is of. A rewritten file (retention's copy-forward) or a rebuilt
+    /// index comes with a new view, so what is kept about a view's records
+    /// under its uid can never be taken for another version of the file.
+    pub fn uid(&self) -> u64 {
+        self.uid
     }
 
     /// The record array against the checksum the header carries: every page

@@ -1,0 +1,158 @@
+{
+  "outputs": [
+    {
+      "queue": "c-priced",
+      "partition": "b",
+      "data": {
+        "booking": 1,
+        "currency": "EUR"
+      },
+      "from": "S3.1/c-bookings/b#0"
+    },
+    {
+      "queue": "c-priced",
+      "partition": "b",
+      "data": {
+        "booking": 2,
+        "currency": "GBP"
+      },
+      "from": "S3.3/c-bookings/b#0"
+    },
+    {
+      "queue": "c-priced",
+      "partition": "b",
+      "data": {
+        "booking": 3
+      },
+      "from": "S3.5/c-bookings/b#0"
+    },
+    {
+      "queue": "c-priced",
+      "partition": "b",
+      "data": {
+        "booking": 4
+      },
+      "from": "S3.6/c-bookings/b#0"
+    }
+  ],
+  "records": {
+    "c-join-table": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "2369d6b19a25a908",
+      "clock": 1793955615000,
+      "units": 0,
+      "readTo": 1793955615000,
+      "caughtUp": true,
+      "open": {
+        "settings": 1
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 0,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-join-table": [
+      {
+        "kind": "table",
+        "entries": [
+          [
+            "t\u001fprop-1",
+            {
+              "v": {
+                "currency": "GBP"
+              },
+              "p": "S3.2"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-join-table",
+    "hash": "2369d6b19a25a908",
+    "reads": {
+      "queues": [
+        "c-bookings"
+      ],
+      "partitions": null,
+      "where": [],
+      "tables": [
+        "c-settings"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "table",
+        "name": "settings",
+        "config": {
+          "kind": "table",
+          "queues": [
+            "c-settings"
+          ],
+          "key": false,
+          "value": false
+        }
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-priced"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "row-1": {
+      "found": true,
+      "value": {
+        "key": "prop-1",
+        "row": {
+          "currency": "GBP"
+        },
+        "position": "S3.2"
+      }
+    },
+    "rows": {
+      "items": [
+        {
+          "key": "prop-1",
+          "row": {
+            "currency": "GBP"
+          },
+          "position": "S3.2"
+        }
+      ],
+      "truncated": false,
+      "total": 1
+    },
+    "A.stopped": {
+      "emitted": 4,
+      "outputs": 4,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

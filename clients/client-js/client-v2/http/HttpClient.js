@@ -483,6 +483,9 @@ export class HttpClient {
             const body = JSON.parse(text)
             error.message = body.error || error.message
             if (body.code) error.code = body.code
+            // The whole answer, for a caller that reads more than the code: a
+            // feed read refused by a leader names the followers to ask.
+            error.body = body
           }
         } catch (e) {
           // Ignore JSON parse errors

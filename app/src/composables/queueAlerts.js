@@ -47,6 +47,17 @@ export function queueAlerts(queue, groups = [], linesFor, ops = null) {
       tab: 'failed',
     })
   }
+  if (verdict?.reason === 'feedDown') {
+    const pending = num(queue.messages?.pending) || 0
+    const names = (verdict.readers || []).map((r) => r.name)
+    out.push({
+      key: 'feedDown',
+      sev: 'warn',
+      title: names.length === 1 ? `Its feed stream ${names[0]} does not run` : 'Its feed streams do not run',
+      detail: `${pending.toLocaleString('en-US')} held, read without a consumer group by ${names.join(', ')}, and nothing runs ${names.length === 1 ? 'it' : 'them'} now.`,
+      tab: 'consumers',
+    })
+  }
   if (verdict?.reason === 'noReader') {
     const pending = num(queue.messages?.pending) || 0
     out.push({

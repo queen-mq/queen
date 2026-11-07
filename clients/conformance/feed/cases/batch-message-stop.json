@@ -1,0 +1,119 @@
+{
+  "name": "batch-message-stop",
+  "about": "foreachBatch: a message that stops the stream comes after the batch that waits: the batch goes first, the commit stops at the message",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "$if": [
+          {
+            "$eq": [
+              {
+                "$get": "0.data.n"
+              },
+              3
+            ]
+          },
+          {
+            "$throw": "bad message"
+          },
+          {
+            "n": {
+              "$get": "0.data.n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "foreachBatch"
+    }
+  ],
+  "run": {
+    "retries": 0,
+    "queryId": "c-batch-message-stop"
+  },
+  "compareMetrics": [
+    "emitted",
+    "effects",
+    "batches",
+    "outputs",
+    "retries",
+    "poisoned",
+    "skipped",
+    "deadLettered",
+    "pendingBatch"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "i3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 4
+              },
+              "transactionId": "i4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "wait": "A",
+      "for": "done"
+    }
+  ],
+  "mode": "fake"
+}

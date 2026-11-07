@@ -1,0 +1,22 @@
+{
+  "js": {
+    "cwd": "clients/conformance/feed",
+    "build": null,
+    "run": ["node", "runners/js.mjs"]
+  },
+  "python": {
+    "cwd": "clients/client-py",
+    "build": null,
+    "run": [".venv/bin/python", "tests/feed_conformance/runner.py"]
+  },
+  "go": {
+    "cwd": "clients/client-go",
+    "build": ["go", "build", "-o", "../conformance/feed/.bin/go-runner", "./tests/feed_conformance"],
+    "run": ["../conformance/feed/.bin/go-runner"]
+  },
+  "rust": {
+    "cwd": "clients/client-rust",
+    "build": ["cargo", "build", "--quiet", "--example", "feed_conformance"],
+    "run": ["target/debug/examples/feed_conformance"]
+  }
+}

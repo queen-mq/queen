@@ -1,0 +1,177 @@
+{
+  "name": "join-table",
+  "about": "joinTable: a new stream first reads the table queue from its start (initial 'all'); a message sees the table as of its position; null deletes a row; missing 'keep'",
+  "source": {
+    "queues": [
+      "c-bookings"
+    ]
+  },
+  "chain": [
+    {
+      "op": "joinTable",
+      "opts": {
+        "queue": "c-settings",
+        "on": {
+          "$get": "0.data.propertyId"
+        },
+        "select": {
+          "booking": {
+            "$get": "0.id"
+          },
+          "currency": {
+            "$get": "1.currency"
+          }
+        }
+      }
+    },
+    {
+      "op": "name",
+      "name": "settings"
+    },
+    {
+      "op": "to",
+      "target": "c-priced"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-settings",
+              "partition": "prop-1",
+              "data": {
+                "currency": "EUR"
+              },
+              "transactionId": "r1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-settings",
+              "partition": "prop-2",
+              "data": {
+                "currency": "USD"
+              },
+              "transactionId": "r2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-bookings",
+              "partition": "b",
+              "data": {
+                "id": 1,
+                "propertyId": "prop-1"
+              },
+              "transactionId": "k1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:11.000Z",
+          "push": [
+            {
+              "queue": "c-settings",
+              "partition": "prop-1",
+              "data": {
+                "currency": "GBP"
+              },
+              "transactionId": "r3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:12.000Z",
+          "push": [
+            {
+              "queue": "c-bookings",
+              "partition": "b",
+              "data": {
+                "id": 2,
+                "propertyId": "prop-1"
+              },
+              "transactionId": "k2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:13.000Z",
+          "push": [
+            {
+              "queue": "c-settings",
+              "partition": "prop-2",
+              "data": null,
+              "transactionId": "r4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:14.000Z",
+          "push": [
+            {
+              "queue": "c-bookings",
+              "partition": "b",
+              "data": {
+                "id": 3,
+                "propertyId": "prop-2"
+              },
+              "transactionId": "k3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:15.000Z",
+          "push": [
+            {
+              "queue": "c-bookings",
+              "partition": "b",
+              "data": {
+                "id": 4,
+                "propertyId": "prop-3"
+              },
+              "transactionId": "k4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "state": "A",
+      "step": "settings",
+      "key": "prop-1",
+      "as": "row-1"
+    },
+    {
+      "list": "A",
+      "step": "settings",
+      "limit": 10,
+      "as": "rows"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-join-table"
+  },
+  "mode": "fake"
+}

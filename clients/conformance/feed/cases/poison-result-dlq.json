@@ -1,0 +1,114 @@
+{
+  "name": "poison-result-dlq",
+  "about": "a window result whose next function keeps failing goes to the dead-letter queue as a result, and the stream goes on",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "$if": [
+          {
+            "$eq": [
+              {
+                "$get": "0.count"
+              },
+              2
+            ]
+          },
+          {
+            "$throw": "two is bad"
+          },
+          {
+            "key": {
+              "$get": "1.key"
+            },
+            "count": {
+              "$get": "0.count"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "run": {
+    "onPoison": "c-dlq",
+    "retries": 0,
+    "queryId": "c-poison-result-dlq"
+  },
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "a",
+              "data": {},
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "b",
+              "data": {},
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "b",
+              "data": {},
+              "transactionId": "i3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:01:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "mode": "fake"
+}

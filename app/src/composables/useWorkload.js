@@ -192,7 +192,7 @@ export function severity(row) {
  *
  * @param {object} payload GET /api/v1/analytics/workload response
  * @param {Map<string, Array<object>>} groupsByQueue queue -> consumer-group rows ('' / empty map when unknown)
- * @param {Map<string, {namespace: string, task: string, kafkaTopic?: boolean}>} queueMeta queue -> its namespace/task, and whether the Kafka facade created it
+ * @param {Map<string, {namespace: string, task: string, kafkaTopic?: boolean, feedRead?: boolean}>} queueMeta queue -> its namespace/task, whether the Kafka facade created it, and whether a feed stream reads it
  * @param {'namespace'|'task'|'queue'} level how the rows are keyed
  * @param {(queue: string) => object} [linesFor] the lines in force for a queue
  * @returns {Array<object>} the payload rows plus name/level/acks/fetched/reads/kafkaOnly/share/ackOk/fill/oldest/lagSev/noGroupExpected/groupsLagging/groupsN/groupsInactive/laggingGroups/touched/sev
@@ -212,7 +212,8 @@ export function enrichRows(payload, groupsByQueue, queueMeta, level, linesFor) {
   // (see the header). A row may hold several queues and the payload does not
   // say which ones are without a group, so the row is let off only when EVERY
   // group-less queue of it is one of those.
-  const expected = (q) => lagLines(linesFor, q).noReaderOk === true || meta.get(q)?.kafkaTopic === true
+  // A feed stream reads without a consumer group (queuesStore `feedReaders`).
+  const expected = (q) => lagLines(linesFor, q).noReaderOk === true || meta.get(q)?.kafkaTopic === true || meta.get(q)?.feedRead === true
   const groupless = new Map()
   if (level !== 'queue') {
     for (const q of meta.keys()) {

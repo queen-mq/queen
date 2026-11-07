@@ -1,0 +1,134 @@
+{
+  "name": "pattern-keep",
+  "about": "keep(msg, value) keeps only a projection of the waiting message: in the state, in the snapshot and in what onMatch sees; .name() names the step for live reads",
+  "source": {
+    "queues": [
+      "c-orders",
+      "c-payments"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "pattern",
+      "opts": {
+        "start": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-orders"
+          ]
+        },
+        "then": {
+          "$eq": [
+            {
+              "$get": "0.queue"
+            },
+            "c-payments"
+          ]
+        },
+        "within": "15m",
+        "keep": {
+          "id": {
+            "$get": "0.data.id"
+          }
+        },
+        "onMatch": {
+          "start": {
+            "$get": "0.data"
+          },
+          "then": {
+            "$get": "1.data"
+          }
+        }
+      }
+    },
+    {
+      "op": "name",
+      "name": "waits"
+    },
+    {
+      "op": "to",
+      "target": "c-keep-out"
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:00.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "order-1",
+              "data": {
+                "id": 1,
+                "big": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "more": [
+                  1,
+                  2,
+                  3
+                ]
+              },
+              "transactionId": "o1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-orders",
+              "partition": "order-2",
+              "data": {
+                "id": 2,
+                "big": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+              },
+              "transactionId": "o2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-payments",
+              "partition": "order-1",
+              "data": {
+                "amount": 9,
+                "note": "kept"
+              },
+              "transactionId": "p1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "state": "A",
+      "step": "waits",
+      "key": "order-2",
+      "as": "waits-2"
+    },
+    {
+      "list": "A",
+      "step": "waits",
+      "limit": 10,
+      "as": "waits-list"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-pattern-keep"
+  },
+  "mode": "fake"
+}

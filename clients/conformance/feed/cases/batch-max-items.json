@@ -1,0 +1,156 @@
+{
+  "name": "batch-max-items",
+  "about": "foreachBatch maxItems: a read of 7 goes in calls of 3, 3 and 1, each followed by its commit",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "n": {
+          "$get": "0.data.n"
+        }
+      }
+    },
+    {
+      "op": "foreachBatch",
+      "opts": {
+        "maxItems": 3
+      }
+    }
+  ],
+  "compareMetrics": [
+    "emitted",
+    "effects",
+    "batches",
+    "outputs",
+    "retries",
+    "poisoned",
+    "skipped",
+    "deadLettered",
+    "pendingBatch"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "i3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 4
+              },
+              "transactionId": "i4"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 5
+              },
+              "transactionId": "i5"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:06.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 6
+              },
+              "transactionId": "i6"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:07.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 7
+              },
+              "transactionId": "i7"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "metrics": "A",
+      "as": "a",
+      "keys": [
+        "batches",
+        "effects",
+        "commits"
+      ]
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-batch-max-items"
+  },
+  "mode": "fake"
+}

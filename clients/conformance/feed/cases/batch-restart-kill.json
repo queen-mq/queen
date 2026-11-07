@@ -1,0 +1,133 @@
+{
+  "name": "batch-restart-kill",
+  "about": "foreachBatch: a process killed with a batch that waits; the next one delivers it, with the same ids, at its stop",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "n": {
+          "$get": "0.data.n"
+        }
+      }
+    },
+    {
+      "op": "foreachBatch",
+      "opts": {
+        "maxItems": 2,
+        "maxWaitMillis": 600000
+      }
+    }
+  ],
+  "run": {
+    "lockTtl": "1s",
+    "queryId": "c-batch-restart-kill"
+  },
+  "compareMetrics": [
+    "emitted",
+    "effects",
+    "batches",
+    "outputs",
+    "retries",
+    "poisoned",
+    "skipped",
+    "deadLettered",
+    "pendingBatch"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "i2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "i3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "sleep": 300
+    },
+    {
+      "metrics": "A",
+      "as": "a-waiting",
+      "keys": [
+        "pendingBatch",
+        "batches"
+      ]
+    },
+    {
+      "kill": "A"
+    },
+    {
+      "start": "B"
+    },
+    {
+      "waitRole": "B",
+      "role": "active"
+    },
+    {
+      "sleep": 300
+    },
+    {
+      "metrics": "B",
+      "as": "b-waiting",
+      "keys": [
+        "pendingBatch",
+        "batches"
+      ]
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "mode": "fake"
+}

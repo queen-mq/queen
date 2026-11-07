@@ -116,6 +116,9 @@ verifiedBy:
 # groups with their pools, details beside it, a bounded KV read with Read more. The application
 # overview is rewritten to say so; the old view, its components, supervisorActivity.js and
 # supervisorQueueMetrics.js left the sources with the files.
+# sourceOfTruth re-read 2026-11-06 (JS push across partitions, buffer per queue): QueueBuilder.js lets an item name its own partition (itemPartition) and buffers by queue. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (clients 2.8.0): queen_client.hpp's version macro says 2.8.0.
+# Nothing this page states changes.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.

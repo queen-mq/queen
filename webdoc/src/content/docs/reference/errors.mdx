@@ -108,6 +108,10 @@ sourceOfTruth:
 # rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector; phase2.rs
 # reads that lag for the collector (group_lags_of); handlers/raft.rs adds the
 # queen_consumer_group_lag_* families to /metrics/prometheus. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): HttpClient.js also puts an error's parsed body on the thrown error (error.body); auth.rs makes POST /api/v1/feed read-only, like POST /api/v1/fetch; phase2.rs routes POST /api/v1/feed to the new phase2/feed.rs. This page: 421 feed_on_leader joins the status codes.
+# sourceOfTruth re-read 2026-11-06 (JS push across partitions, buffer per queue): TransactionBuilder.js lets a pushed item name its own partition. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): a feed read that asks (x-queen-feed-relay) is
+# relayed by the leader instead of answered 421. This page: the feed_on_leader row says so.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -147,6 +151,7 @@ The `code` of the first shape.
 | `timeout` | 503 | The request's deadline passed before an answer. A write may have committed. | Retry a write that is safe to repeat; otherwise read to check. |
 | `outcome_unknown` | 503 | The leader changed while an ack, nack or DLQ move was being made durable, or a forwarded one was lost after it went out. It may or may not have applied. | Send the same ack again: a repeat of an ack that applied is answered as the first one was. |
 | `standby` | 503 | The cluster is a [standby](/manage/standby/): it replays another cluster and takes no writes until it is promoted. Every write route answers it, on every node, and nothing was applied. | Retry after `Retry-After` (1 s) if a switch to this cluster is under way: the call is served once the standby is promoted. Otherwise you are pointed at the wrong cluster. |
+| `feed_on_leader` | 421 | `POST /api/v1/feed` reached the node that leads the tenant's raft group of a cluster: the feed is read from followers, so its readers add no load to the leader. The body lists `followers` (`nodeId`, `httpAddr`). | Ask one of the followers; the JavaScript client does. A caller that cannot reach them sends `x-queen-feed-relay: 1` and the leader relays the read to a follower; the proxy always does. On a test cluster, `QUEEN_FEED_ON_LEADER=true` lets the leader serve it. |
 | `overloaded` | 429 | The node's admission budget for writes stayed full for the whole hold. | Retry after `Retry-After` (1 to 5 s). |
 | `storage_full` | 507 | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Pushes, KV writes and timer schedules are refused; acks and deletes still work. | Free disk or add space, then retry. |
 | `name_too_long` | 413 | The tenant, queue and partition or group names together exceed the store's key budget, counting every key the command derives from them. | Shorten the name. |

@@ -71,7 +71,9 @@ const NO_STREAMS = (lang: string) =>
   "step from JavaScript, Python, Go or Rust.";
 
 /** The steps that are streams: a language without a streams client lists them all. */
-const STREAM_STEPS = ["stream", "stream-sliding", "stream-session", "stream-hourly", "stream-gate", "uc-trace", "uc-rate"];
+const STREAM_STEPS = ["stream", "stream-sliding", "stream-session", "stream-hourly", "stream-gate", "uc-trace", "uc-rate",
+  "feed-route", "feed-routing", "feed-batch", "feed-window", "feed-pattern", "feed-join", "feed-gather", "feed-table", "feed-steps",
+  "feed-event-time", "feed-shards", "feed-view"];
 const noStreams = (lang: string) => Object.fromEntries(STREAM_STEPS.map((id) => [id, NO_STREAMS(lang)]));
 
 export const SDK_LANGS: SdkLang[] = [

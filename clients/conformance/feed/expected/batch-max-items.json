@@ -1,0 +1,185 @@
+{
+  "outputs": [],
+  "records": {
+    "c-batch-max-items": {
+      "position": "end",
+      "epoch": 0,
+      "readTo": 1793955607000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-batch-max-items": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-batch-max-items",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "foreachBatch",
+      "maxItems": 3,
+      "maxWaitMillis": 0
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "foreachBatch": [
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "n": 1
+          },
+          "ctx": {
+            "position": "S1.1",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 1,
+            "transactionId": "i1"
+          },
+          "id": "S1.1/c-in/p1#0"
+        },
+        {
+          "value": {
+            "n": 2
+          },
+          "ctx": {
+            "position": "S1.2",
+            "queue": "c-in",
+            "partition": "p0",
+            "partitionId": "pid:c-in/p0",
+            "offset": 1,
+            "transactionId": "i2"
+          },
+          "id": "S1.2/c-in/p0#0"
+        },
+        {
+          "value": {
+            "n": 3
+          },
+          "ctx": {
+            "position": "S1.3",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 2,
+            "transactionId": "i3"
+          },
+          "id": "S1.3/c-in/p1#0"
+        }
+      ]
+    },
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "n": 4
+          },
+          "ctx": {
+            "position": "S1.4",
+            "queue": "c-in",
+            "partition": "p0",
+            "partitionId": "pid:c-in/p0",
+            "offset": 2,
+            "transactionId": "i4"
+          },
+          "id": "S1.4/c-in/p0#0"
+        },
+        {
+          "value": {
+            "n": 5
+          },
+          "ctx": {
+            "position": "S1.5",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 3,
+            "transactionId": "i5"
+          },
+          "id": "S1.5/c-in/p1#0"
+        },
+        {
+          "value": {
+            "n": 6
+          },
+          "ctx": {
+            "position": "S1.6",
+            "queue": "c-in",
+            "partition": "p0",
+            "partitionId": "pid:c-in/p0",
+            "offset": 3,
+            "transactionId": "i6"
+          },
+          "id": "S1.6/c-in/p0#0"
+        }
+      ]
+    },
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "n": 7
+          },
+          "ctx": {
+            "position": "S1.7",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 4,
+            "transactionId": "i7"
+          },
+          "id": "S1.7/c-in/p1#0"
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "a": {
+      "batches": 3,
+      "effects": 7,
+      "commits": 3
+    },
+    "A.stopped": {
+      "emitted": 7,
+      "effects": 7,
+      "batches": 3,
+      "outputs": 0,
+      "retries": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "pendingBatch": 0
+    }
+  },
+  "problems": []
+}

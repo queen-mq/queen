@@ -1,0 +1,85 @@
+{
+  "name": "lost-answer-window",
+  "about": "a stateful commit whose answer was lost: the window still counts each message once",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "compareMetrics": [],
+  "script": [
+    {
+      "start": "A"
+    },
+    {
+      "inject": {
+        "route": "/api/v1/transaction",
+        "when": "after",
+        "status": 503,
+        "times": 1
+      }
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {},
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p",
+              "data": {},
+              "transactionId": "i2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "A",
+      "timeoutMs": 30000
+    },
+    {
+      "clock": "2026-11-06T09:01:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-lost-answer-window"
+  },
+  "mode": "fake"
+}

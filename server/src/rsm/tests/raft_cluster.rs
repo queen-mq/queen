@@ -1275,6 +1275,258 @@ async fn a_request_in_flight_across_a_leader_transfer_is_answered_quickly() {
     }
 }
 
+/// `POST /api/v1/feed` is read from followers, so its readers cost the leader
+/// nothing: the leader of the tenant's group answers 421 and names the two
+/// followers, and a follower answers the pushes in log order once it has
+/// applied them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_feed_is_served_by_followers_and_refused_by_the_leader() {
+    use crate::rsm::facade::{ApiReq, Deadline, PushReq, ReqCtx};
+    let _one = serial().await;
+    log_init();
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("feed")).collect();
+    let ports = free_ports(3);
+    let opts = vec![test_opts(); 3];
+    let nodes = open_facades(&dirs, &opts, |id| cluster_config(&ports, id)).await;
+    let l = facade_leader(&nodes).await;
+    let ctx = || {
+        ReqCtx::new(
+            crate::config::DEFAULT_TENANT,
+            Deadline::after(Duration::from_secs(10)),
+        )
+    };
+    let leader = nodes[l].clone().expect("leader");
+    for n in 0..5u64 {
+        leader
+            .push(ctx(), PushReq { raw: push_body(n) })
+            .await
+            .expect("push");
+    }
+    let feed = |f: Arc<RaftFacade>, body: serde_json::Value| async move {
+        let out = f
+            .api(
+                ctx(),
+                ApiReq {
+                    method: "POST".into(),
+                    path: "/api/v1/feed".into(),
+                    query: None,
+                    body: body.to_string().into_bytes(),
+                },
+            )
+            .await
+            .expect("feed");
+        let v: serde_json::Value = serde_json::from_str(&out.body).expect("json");
+        (out.status, v)
+    };
+
+    let (status, v) = feed(leader.clone(), serde_json::json!({"from": "earliest"})).await;
+    assert_eq!(status, 421, "{v}");
+    assert_eq!(v["code"], "feed_on_leader", "{v}");
+    assert_eq!(v["followers"].as_array().map(Vec::len), Some(2), "{v}");
+
+    let follower = nodes[(l + 1) % 3].clone().expect("follower");
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, v) = feed(follower.clone(), serde_json::json!({"from": "earliest"})).await;
+        assert_eq!(status, 200, "{v}");
+        let ns: Vec<u64> = v["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|e| e["payload"]["n"].as_u64().expect("n"))
+            .collect();
+        if ns.len() == 5 {
+            assert_eq!(ns, vec![0, 1, 2, 3, 4], "{v}");
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "the follower never applied the pushes: {v}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop((leader, follower));
+    for n in nodes.into_iter().flatten() {
+        close_facade(n).await;
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A caller that cannot reach the followers (anything behind the proxy, which
+/// talks to one node) asks to be relayed (`x-queen-feed-relay`): the leader's
+/// router hands the read to a follower over HTTP and passes the follower's
+/// answer back. The relay names the tenant the LEADER resolved, never the one
+/// the caller sent: on a router with tenancy off, a caller's tenant header is
+/// replaced by the default tenant, and the follower serves that tenant's feed
+/// (a relay that carried the caller's header would be refused there,
+/// `tenant_unverified`). Without the header the leader still answers 421.
+#[cfg(feature = "server")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_feed_read_that_asks_is_relayed_by_the_leader_to_a_follower() {
+    use crate::rsm::facade::{Deadline, PushReq, ReqCtx};
+    use axum::http::{Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let _one = serial().await;
+    log_init();
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("feed-relay")).collect();
+    let raft = free_ports(3);
+    let http = free_ports(3);
+    // The harness's members answer no HTTP (`127.0.0.1:1`); these do, below.
+    let cluster = |id: u64| {
+        let peers = raft
+            .iter()
+            .zip(&http)
+            .enumerate()
+            .map(|(i, (r, h))| format!("{}=127.0.0.1:{r}/127.0.0.1:{h}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        ClusterConfig::parse(
+            id,
+            &peers,
+            Some(&format!("127.0.0.1:{}", raft[id as usize - 1])),
+            None,
+        )
+        .expect("cluster config")
+    };
+    let nodes = open_facades(&dirs, &vec![test_opts(); 3], cluster).await;
+    let l = facade_leader(&nodes).await;
+    let leader = nodes[l].clone().expect("leader");
+    for n in 0..5u64 {
+        leader
+            .push(
+                ReqCtx::new(
+                    crate::config::DEFAULT_TENANT,
+                    Deadline::after(Duration::from_secs(10)),
+                ),
+                PushReq { raw: push_body(n) },
+            )
+            .await
+            .expect("push");
+    }
+
+    let cfg_dir = scratch("feed-relay-cfg");
+    std::env::set_var("QUEEN_RAFT_DIR", cfg_dir.display().to_string());
+    let cfg = crate::config::load();
+    let auth = || {
+        crate::auth::Authenticator::new(crate::config::AuthConfig {
+            enabled: false,
+            algorithm: "HS256".into(),
+            secret: String::new(),
+            public_key: String::new(),
+            jwks_url: String::new(),
+            jwks_refresh_interval_seconds: 3600,
+            jwks_request_timeout_ms: 5000,
+            issuer: String::new(),
+            audience: String::new(),
+            clock_skew_seconds: 30,
+            skip_paths: Vec::new(),
+            roles_claim: "role".into(),
+            roles_array_claim: "roles".into(),
+            role_admin: "admin".into(),
+            role_read_write: "read-write".into(),
+            role_read_only: "read-only".into(),
+            role_write_only: "write-only".into(),
+        })
+    };
+    // Each follower serves its router on its HTTP address, tenancy off: a
+    // broker's PORT behind the single binary's proxy.
+    let mut servers = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if i == l {
+            continue;
+        }
+        let rsm: Arc<dyn Rsm> = node.clone().expect("follower");
+        let state = crate::handlers::raft::build_raft_state_with(&cfg, Some(rsm)).expect("state");
+        let router = crate::handlers::raft::build_raft_router(state, auth(), false);
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", http[i]))
+            .await
+            .expect("bind");
+        // Shut down gracefully at the end: the relay's pooled connections stay
+        // open otherwise, and their tasks hold the facade past its close.
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = stopped.await;
+                })
+                .await;
+        });
+        servers.push((stop, task));
+    }
+    let rsm: Arc<dyn Rsm> = leader.clone();
+    let state = crate::handlers::raft::build_raft_state_with(&cfg, Some(rsm)).expect("state");
+    let router = crate::handlers::raft::build_raft_router(state, auth(), false);
+    let call = |relay: bool, tenant: Option<&'static str>| {
+        let router = router.clone();
+        async move {
+            let mut req = Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/feed")
+                .header("content-type", "application/json");
+            if relay {
+                req = req.header(crate::handlers::raft::FEED_RELAY_HEADER, "1");
+            }
+            if let Some(t) = tenant {
+                req = req.header(crate::config::TENANT_HEADER, t);
+            }
+            let req = req
+                .body(axum::body::Body::from(r#"{"from":"earliest"}"#))
+                .expect("request");
+            let resp = router.oneshot(req).await.expect("answer");
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let v: serde_json::Value =
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, v)
+        }
+    };
+
+    let (s, v) = call(false, None).await;
+    assert_eq!(s, StatusCode::MISDIRECTED_REQUEST, "{v}");
+    assert_eq!(v["code"], "feed_on_leader", "{v}");
+
+    for tenant in [None, Some("00000000-0000-0000-0000-000000000042")] {
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (s, v) = call(true, tenant).await;
+            assert_eq!(s, StatusCode::OK, "relayed, tenant header {tenant:?}: {v}");
+            let ns: Vec<u64> = v["entries"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .map(|e| e["payload"]["n"].as_u64().expect("n"))
+                .collect();
+            if ns.len() == 5 {
+                assert_eq!(ns, vec![0, 1, 2, 3, 4], "{v}");
+                break;
+            }
+            assert!(
+                Instant::now() < end,
+                "the followers never served the pushes: {v}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    for (stop, task) in servers {
+        let _ = stop.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+    }
+    drop((leader, router));
+    for n in nodes.into_iter().flatten() {
+        close_facade(n).await;
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    let _ = std::fs::remove_dir_all(cfg_dir);
+}
+
 /// A node behind where a pop's answer last came too late sends no pop to the
 /// leader until it has applied that far: its callers' pops fail without taking
 /// a lease, and the partition stays for consumers of nodes that can deliver it.

@@ -33,7 +33,7 @@ To survive the loss of a whole site & A standby cluster \\
 One command, no settings:
 
 \begin{shell}
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.1
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.0
 \end{shell}
 
 Without a volume, the data lives inside the container and is gone when the container is removed.
@@ -46,7 +46,7 @@ One node with its data on a volume:
 \begin{shell}
 docker run -d --name queen --restart unless-stopped --stop-timeout 60 \
   -p 6632:6632 -v /var/lib/queen:/var/lib/queen/raft \
-  ghcr.io/queen-mq/queen:2.7.1
+  ghcr.io/queen-mq/queen:2.8.0
 \end{shell}
 
 A single node writes every message to disk (fsync) before it answers. A crash, a kill -9 or a
@@ -116,7 +116,7 @@ docker run -d --name queen -p 6711:6711 -p 127.0.0.1:6632:6632 \
   -e QUEEN_PROXY_BOOTSTRAP_TENANT=acme \
   -e QUEEN_PROXY_BOOTSTRAP_API_KEY="$QUEEN_KEY" \
   -e QUEEN_PROXY_DEFAULT_CLUSTER=acme \
-  ghcr.io/queen-mq/queen:2.7.1
+  ghcr.io/queen-mq/queen:2.8.0
 \end{shell}
 
 The first start creates the tenant \texttt{acme} and its key. Clients now use port 6711, with the
@@ -202,7 +202,7 @@ docker run -d --name queen -p 6632:6632 -v /var/lib/queen:/var/lib/queen/raft \
   -e PARTITION_CLEANUP_SECONDS=60 \
   -e QUEEN_RAFT_TXN_WINDOW_MIN_S=60 \
   -e QUEEN_RAFT_RETENTION_SCAN_PER_S=40000 \
-  ghcr.io/queen-mq/queen:2.7.1
+  ghcr.io/queen-mq/queen:2.8.0
 \end{shell}
 
 and give the queue retention and a short dedup window:

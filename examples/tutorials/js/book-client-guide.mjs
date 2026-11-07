@@ -7,7 +7,7 @@
 // says it does.
 //
 // Run it against the node that the book's first section starts:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.7.1
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.0
 //   node book-client-guide.mjs
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 
@@ -17,7 +17,11 @@ import { Queen, Stream } from 'queen-mq'
 const queen = new Queen({ url: 'http://localhost:6632', handleSignals: false })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const QUEUES = ['jobs', 'emails', 'events', 'reviews', 'prices', 'metrics', 'tasks', 'payments', 'payments-statuses', 'logins',
-  'login-rate', 'clicks', 'sales', 'sales-per-hour', 'outgoing-sms', 'invoices']
+  'login-rate', 'clicks', 'sales', 'sales-per-hour', 'outgoing-sms', 'invoices',
+  // the feed streams' (end of this program)
+  'orders', 'orders-it', 'orders-IT', 'orders-FR', 'per-minute', 'order-followups', 'shipments', 'order-status', 'parts',
+  'batches', 'bookings', 'property-settings', 'bookings-priced', 'bursts', 'gh-issues', 'gh-comments', 'gh-unanswered',
+  'clicks-per-tenant']
 for (const q of QUEUES) {
   try { await queen.queue(q).delete() } catch {}
 }
@@ -422,6 +426,247 @@ for (let i = 0; i < 100 && sent.length < 3; i++) await sleep(100)
 await limiter.stop()
 assert.equal(sent.length, 3, 'the gate let the first three messages through')
 console.log('ok: stream-gate')
+
+// --- Streams from the tenant feed (broker 2.8.0) --------------------------------
+// A feed stream keeps its position and state in KV (`queen-feed`, under its
+// queryId): an earlier run's go first, so every run starts the same way.
+const FEED_QUERIES = ['orders-it', 'orders-by-country', 'per-minute', 'order-followups', 'order-status', 'batches',
+  'bookings-priced', 'bursts', 'gh-unanswered', 'clicks-per-tenant', 'orders-to-warehouse']
+for (const id of FEED_QUERIES) {
+  const { rows } = await queen.kv.getPrefix('queen-feed', id, { keysOnly: true, limit: 1000 })
+  for (const row of rows) await queen.kv.delete('queen-feed', row.key)
+}
+const push = (queue, partition, data) => queen.queue(queue).partition(partition)
+  .push([{ transactionId: `${queue}-${partition}-${Date.now()}-${Math.random()}`, data }])
+// The messages of a queue, read back through the feed; waits for `n` of them.
+async function messagesOf(queue, n) {
+  for (let i = 0; ; i++) {
+    const got = []
+    for await (const e of queen.feed({ queues: [queue], from: 'earliest', follow: false })) got.push(e.data)
+    if (got.length >= n || i >= 100) return got
+    await sleep(100)
+  }
+}
+async function until(what, cond) {
+  for (let i = 0; i < 100; i++) {
+    if (await cond()) return
+    await sleep(100)
+  }
+  assert.fail(`timed out waiting for ${what}`)
+}
+
+// guide:start(feed-route)
+const ordersIt = await Stream
+  .fromFeed(queen, { queues: ['orders'] })
+  .where('data.country', '=', 'IT')
+  .filter((m) => m.data.total >= 10)
+  .to(queen.queue('orders-it'))
+  .run({ queryId: 'orders-it' })
+// guide:end
+await push('orders', 'order-1', { id: 1, country: 'IT', total: 20 })
+await push('orders', 'order-2', { id: 2, country: 'IT', total: 5 })
+await push('orders', 'order-3', { id: 3, country: 'DE', total: 30 })
+assert.deepEqual((await messagesOf('orders-it', 1)).map((o) => o.id), [1], 'only the Italian order of 10 or more')
+await ordersIt.stop()
+console.log('ok: feed-route')
+
+// guide:start(feed-routing)
+const byCountry = await Stream
+  .fromFeed(queen, { queues: ['orders'] })
+  .to((order) => `orders-${order.country}`)
+  .run({ queryId: 'orders-by-country' })
+// guide:end
+await push('orders', 'order-4', { id: 4, country: 'IT', total: 12 })
+await push('orders', 'order-5', { id: 5, country: 'FR', total: 8 })
+assert.deepEqual((await messagesOf('orders-IT', 1)).map((o) => o.id), [4])
+assert.deepEqual((await messagesOf('orders-FR', 1)).map((o) => o.id), [5])
+await byCountry.stop()
+console.log('ok: feed-routing')
+
+// A table elsewhere, written by key (an upsert): a second write of a row changes nothing.
+const warehouse = { rows: new Map(), async upsert(rows) { for (const r of rows) this.rows.set(r.key, r) } }
+// guide:start(feed-batch)
+const toWarehouse = await Stream
+  .fromFeed(queen, { queues: ['orders'] })
+  .foreachBatch(async (items) => {
+    // One write for the batch. An item's id is the same each time it is delivered.
+    await warehouse.upsert(items.map((it) => ({ key: it.id, ...it.value })))
+  }, { maxItems: 500, maxWaitMillis: 1000 })
+  .run({ queryId: 'orders-to-warehouse' })
+// guide:end
+await push('orders', 'order-8', { id: 8, total: 20 })
+await push('orders', 'order-9', { id: 9, total: 30 })
+await until('the batch', () => warehouse.rows.size === 2)
+assert.deepEqual([...warehouse.rows.values()].map((r) => r.id).sort(), [8, 9])
+await toWarehouse.stop()
+console.log('ok: feed-batch')
+
+// guide:start(feed-window)
+const perMinute = await Stream
+  .fromFeed(queen, { queues: ['orders', 'payments'] })
+  .windowTumbling({ seconds: 60 })
+  .aggregate({ count: () => 1, sum: (e) => e.total })
+  .map((totals, w) => ({ ...totals, customer: w.key, minute: w.windowKey }))
+  .to(queen.queue('per-minute'))
+  .run({ queryId: 'per-minute' })
+// guide:end
+await push('orders', 'customer-1', { total: 10 })
+await push('payments', 'customer-1', { total: 5 })
+// The window closes at the end of its minute; until then the stream shows it open.
+await until('the open window', () => perMinute.state('step1').get('customer-1').value?.windows[0].value.count === 2)
+assert.deepEqual(perMinute.state('step1').get('customer-1').value.windows[0].value, { count: 2, sum: 15 })
+await perMinute.stop()
+console.log('ok: feed-window')
+
+// guide:start(feed-pattern)
+const followups = await Stream
+  .fromFeed(queen, { queues: ['orders', 'payments'] })
+  .pattern({
+    start: (m) => m.queue === 'orders',
+    then: (m) => m.queue === 'payments',
+    within: '15m',
+    onMatch: (order, payment) => ({ order: order.data.id, paid: payment.data.amount }),
+    onTimeout: (order) => ({ order: order.data.id, remind: true })
+  })
+  .to(queen.queue('order-followups'))
+  .run({ queryId: 'order-followups' })
+// guide:end
+await push('orders', 'order-7', { id: 7 })
+await push('payments', 'order-7', { amount: 30 })
+assert.deepEqual(await messagesOf('order-followups', 1), [{ order: 7, paid: 30 }])
+await followups.stop()
+console.log('ok: feed-pattern')
+
+// guide:start(feed-join)
+const orderStatus = await Stream
+  .fromFeed(queen, { queues: ['orders', 'payments', 'shipments'] })
+  .join({
+    sides: { order: 'orders', paid: 'payments', sent: 'shipments' },
+    within: '2d',
+    select: (got, order) => ({ order, carrier: got.sent.data.carrier }),
+    onTimeout: (got, missing, order) => ({ order, missing })
+  })
+  .to(queen.queue('order-status'))
+  .run({ queryId: 'order-status' })
+// guide:end
+await push('orders', 'order-9', { id: 9 })
+await push('payments', 'order-9', { amount: 5 })
+await push('shipments', 'order-9', { carrier: 'dhl' })
+assert.deepEqual(await messagesOf('order-status', 1), [{ order: 'order-9', carrier: 'dhl' }])
+await orderStatus.stop()
+console.log('ok: feed-join')
+
+// guide:start(feed-gather)
+const batches = await Stream
+  .fromFeed(queen, { queues: ['parts'] })
+  .gather({
+    count: (m) => m.data.of,
+    key: (m) => m.data.batch,
+    within: '10m',
+    onComplete: (got, batch) => ({ batch, parts: got.length }),
+    onTimeout: (got, missing, batch) => ({ batch, missing })
+  })
+  .to(queen.queue('batches'))
+  .run({ queryId: 'batches' })
+// guide:end
+for (let i = 0; i < 3; i++) await push('parts', `part-${i}`, { batch: 'b-1', of: 3 })
+assert.deepEqual(await messagesOf('batches', 1), [{ batch: 'b-1', parts: 3 }])
+await batches.stop()
+console.log('ok: feed-gather')
+
+await push('property-settings', 'p-1', { currency: 'EUR' })
+// guide:start(feed-table)
+const priced = await Stream
+  .fromFeed(queen, { queues: ['bookings'] })
+  .joinTable({
+    queue: 'property-settings',
+    on: (m) => m.data.propertyId,
+    select: (booking, settings) => ({ ...booking, currency: settings ? settings.currency : null })
+  })
+  .to(queen.queue('bookings-priced'))
+  .run({ queryId: 'bookings-priced' })
+// guide:end
+await push('bookings', 'booking-1', { id: 'booking-1', propertyId: 'p-1' })
+await push('bookings', 'booking-2', { id: 'booking-2', propertyId: 'p-2' })
+assert.deepEqual(await messagesOf('bookings-priced', 2), [
+  { id: 'booking-1', propertyId: 'p-1', currency: 'EUR' },   // the row pushed before the stream started
+  { id: 'booking-2', propertyId: 'p-2', currency: null }
+])
+await priced.stop()
+console.log('ok: feed-table')
+
+// guide:start(feed-steps)
+const bursts = await Stream
+  .fromFeed(queen, { queues: ['clicks'] })
+  .windowTumbling({ seconds: 60 }).aggregate({ clicks: () => 1 }).name('perMinute')
+  .pattern({
+    start: (m) => m.data.clicks >= 100,
+    then: (m) => m.data.clicks < 100,
+    within: '10m',
+    onMatch: (burst, calm) => ({ tenant: burst.partition, peak: burst.data.clicks })
+  })
+  .to(queen.queue('bursts'))
+  .run({ queryId: 'bursts' })
+// guide:end
+for (let i = 0; i < 3; i++) await push('clicks', 'tenant-42', { page: '/' })
+await until('three clicks in the minute', () => bursts.state('perMinute').get('tenant-42').value?.windows[0].value.clicks === 3)
+console.log('ok: feed-steps')
+
+// guide:start(feed-event-time)
+const unanswered = await Stream
+  .fromFeed(queen, { queues: ['gh-issues', 'gh-comments'], from: 'earliest' })
+  .pattern({
+    start: (m) => m.queue === 'gh-issues',
+    then: (m) => m.queue === 'gh-comments',
+    key: (m) => `${m.partition}#${m.data.number}`,
+    within: '1h',
+    eventTime: (m) => m.data.created_at,
+    allowedLateness: '5m',
+    idle: '1m',
+    onMatch: () => null,   // an answered issue sends nothing
+    onTimeout: (issue) => ({ repo: issue.partition, issue: issue.data.number })
+  })
+  .to(queen.queue('gh-unanswered'))
+  .run({ queryId: 'gh-unanswered' })
+// guide:end
+{
+  const at = Date.now()
+  // The comment arrives first; on event time it still answers the issue.
+  await push('gh-comments', 'queen-mq/queen', { number: 1, created_at: new Date(at + 60_000).toISOString() })
+  await push('gh-issues', 'queen-mq/queen', { number: 1, created_at: new Date(at).toISOString() })
+  // Both wait in the step, in event-time order, for allowedLateness.
+  await until('the two held messages', () => unanswered.metrics().steps[0].held === 2)
+}
+await unanswered.stop()
+console.log('ok: feed-event-time')
+
+// guide:start(feed-shards)
+const perTenant = await Stream
+  .fromFeed(queen, { queues: ['clicks'] })
+  .keyBy((m) => m.data.tenant)
+  .windowTumbling({ seconds: 60 }).aggregate({ clicks: () => 1 })
+  .to(queen.queue('clicks-per-tenant'))
+  .run({ queryId: 'clicks-per-tenant', shards: 4, shardBy: (m) => m.data.tenant })
+// guide:end
+assert.equal(perTenant.metrics().running, 4, 'four shards, all in this process')
+for (const tenant of ['acme', 'globex', 'acme']) await push('clicks', `visitor-${tenant}`, { tenant })
+await until('a window per tenant', () => perTenant.metrics().open === 2)
+await perTenant.stop()
+console.log('ok: feed-shards')
+
+// guide:start(feed-view)
+const view = Stream.view(queen, 'bursts')
+const { found, value } = await view.get('perMinute', 'tenant-42')
+const { items } = await view.list('perMinute', { limit: 50 })
+const shards = await view.status()   // role, position, lag and open state per shard
+// guide:end
+assert.equal(found, true)
+assert.equal(value.windows[0].value.clicks, 3, 'the live window, asked from outside the process')
+assert.ok(items.length >= 1)
+assert.equal(shards.length, 1)
+assert.equal(shards[0].role, 'active')
+await bursts.stop()
+console.log('ok: feed-view')
 
 await queen.close()
 console.log('\nPASS')

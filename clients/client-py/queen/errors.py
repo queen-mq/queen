@@ -48,6 +48,21 @@ class ConflationUnsupportedError(QueenError):
     """
 
 
+class TransactionError(QueenError):
+    """A transaction the broker refused for a reason other than a lost KV
+    precondition (which ``commit()`` returns instead of raising).
+
+    ``reason`` is the broker's code -- ``bad_request``, ``duplicate`` (a pushed
+    transactionId is already stored), ``rejected_ack``, ``too_large``, ... -- so
+    no caller has to match the message; ``result`` is the whole answer.
+    """
+
+    def __init__(self, message: str, *, reason: Optional[str] = None, result: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.result = result
+
+
 class QueenHttpError(httpx.HTTPStatusError, QueenError):
     """An HTTP failure carrying the server's machine-readable verdict."""
 

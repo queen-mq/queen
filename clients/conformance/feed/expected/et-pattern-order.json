@@ -1,0 +1,165 @@
+{
+  "outputs": [
+    {
+      "queue": "c-et-pattern-out",
+      "partition": "e1",
+      "data": {
+        "key": "e1",
+        "a": "a1",
+        "b": "b1"
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-pattern-out",
+      "partition": "e2",
+      "data": {
+        "key": "e2",
+        "a": "a2",
+        "timeout": true
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-et-pattern-out",
+      "partition": "e3",
+      "data": {
+        "key": "e3",
+        "a": "a3",
+        "b": "b3"
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-et-pattern-order": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "3e7c1eda4f5a2723",
+      "clock": 1793955606000,
+      "units": 6,
+      "readTo": 1793955606000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "held": {
+        "step1": 1
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 6,
+      "metas": [
+        {
+          "n": 6,
+          "w": 1793956440000,
+          "t": 1793955606000,
+          "s": 1793955606000
+        }
+      ]
+    }
+  },
+  "states": {
+    "c-et-pattern-order": [
+      {
+        "kind": "pattern",
+        "entries": [
+          [
+            "b\u001f000000000005",
+            {
+              "t": 1793956500000,
+              "e": {
+                "m": {
+                  "position": "S5.3",
+                  "kind": "push",
+                  "queue": "c-b",
+                  "partition": "zz",
+                  "partitionId": "pid:c-b/zz",
+                  "offset": 1,
+                  "id": "id:S5.3/c-b/zz/1",
+                  "transactionId": "bz",
+                  "data": {
+                    "at": "2026-11-06T09:15:00.000Z",
+                    "n": "flush"
+                  },
+                  "ts": "2026-11-06T09:00:06.000Z",
+                  "createdAt": "2026-11-06T09:00:06.000Z"
+                },
+                "k": "zz",
+                "vd": 1
+              }
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-et-pattern-order",
+    "hash": "3e7c1eda4f5a2723",
+    "reads": {
+      "queues": [
+        "c-a",
+        "c-b"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "pattern",
+        "name": "step1",
+        "config": {
+          "kind": "pattern",
+          "within": 300000,
+          "onRepeat": "keep",
+          "timeout": true,
+          "eventTime": true,
+          "allowedLateness": 60000
+        },
+        "clock": "event"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-et-pattern-out"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 0,
+      "outputs": 0,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    },
+    "B.stopped": {
+      "emitted": 3,
+      "outputs": 3,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

@@ -31,6 +31,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-18 (2.5.0: the panic checker): core.clj's panic check leaves out an
 # NA-QLOG-I1 line the corrupt nemesis recorded as its victim's reason to refuse a boot; "How a test
 # runs" says so.
+# sourceOfTruth re-read 2026-11-07 (the tenant feed): core.clj registers W13 `feed` and its
+# --feed-relay flag. Its campaign is still running, so the workload table and the campaigns leave it
+# out until it reports. Nothing this page states changes.
 ---
 
 A million messages a second is worth nothing if one of them can go missing. We check that with

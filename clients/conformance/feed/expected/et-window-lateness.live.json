@@ -1,0 +1,97 @@
+{
+  "outputs": [
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 9
+        }
+      }
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:01:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 18
+        }
+      }
+    }
+  ],
+  "record": {
+    "epoch": 0,
+    "hash": "85a8ea38a95b1452",
+    "caughtUp": true,
+    "open": {
+      "step1": 1
+    }
+  },
+  "about": {
+    "exclusive": true,
+    "hash": "85a8ea38a95b1452",
+    "lockTtl": "5s",
+    "onPoison": "stop",
+    "positionCommitMillis": 0,
+    "reads": {
+      "partitions": null,
+      "queues": [
+        "c-readings"
+      ],
+      "where": []
+    },
+    "shards": null,
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-et-out"
+      ]
+    },
+    "steps": [
+      {
+        "clock": "event",
+        "kind": "window",
+        "name": "step1",
+        "reducer": {
+          "fields": [
+            "count",
+            "sum"
+          ],
+          "kind": "aggregate"
+        },
+        "window": {
+          "allowedLateness": "30s",
+          "eventTime": true,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "kind": "window-tumbling",
+          "onLate": "drop",
+          "seconds": 60
+        }
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "v": 1
+  },
+  "foreach": [],
+  "errors": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 2,
+      "outputs": 2,
+      "late": 1
+    }
+  },
+  "problems": []
+}

@@ -101,6 +101,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-03 (queen-mq/queen#146, consumer group lag in Prometheus):
 # rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector; the
 # generated table gains QUEEN_METRICS_GROUP_LAG_MAX_CURSORS. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): qlog/set.rs gains QLogReader::queue_logs, a read-only lookup. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
@@ -113,7 +118,7 @@ default, with the value the code applies when you don't.
 ```bash
 docker run -p 6632:6632 -v queen-data:/var/lib/queen/raft \
   -e QUEEN_KV_MAX_VALUE_BYTES=262144 -e LOG_LEVEL=info \
-  ghcr.io/queen-mq/queen:2.7.1
+  ghcr.io/queen-mq/queen:2.8.0
 ```
 
 In a cluster, give every node the same values except the per-node ones: `QUEEN_RAFT_NODE_ID`,

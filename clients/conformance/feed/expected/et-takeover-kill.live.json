@@ -1,0 +1,117 @@
+{
+  "outputs": [
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:00:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 3
+        }
+      }
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:01:00.000Z",
+        "value": {
+          "count": 2,
+          "sum": 12
+        }
+      }
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:02:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 16
+        }
+      }
+    },
+    {
+      "queue": "c-et-out",
+      "partition": "r",
+      "data": {
+        "key": "r",
+        "start": "2026-11-06T09:03:00.000Z",
+        "value": {
+          "count": 1,
+          "sum": 32
+        }
+      }
+    }
+  ],
+  "record": {
+    "epoch": 0,
+    "hash": "6a92dd810f17bfc7",
+    "caughtUp": true,
+    "open": {
+      "step1": 1
+    }
+  },
+  "about": {
+    "exclusive": true,
+    "hash": "6a92dd810f17bfc7",
+    "lockTtl": "5s",
+    "onPoison": "stop",
+    "positionCommitMillis": 0,
+    "reads": {
+      "partitions": null,
+      "queues": [
+        "c-readings"
+      ],
+      "where": []
+    },
+    "shards": null,
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-et-out"
+      ]
+    },
+    "steps": [
+      {
+        "clock": "event",
+        "kind": "window",
+        "name": "step1",
+        "reducer": {
+          "fields": [
+            "count",
+            "sum"
+          ],
+          "kind": "aggregate"
+        },
+        "window": {
+          "allowedLateness": 0,
+          "eventTime": true,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "kind": "window-tumbling",
+          "onLate": "drop",
+          "seconds": 60
+        }
+      },
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "v": 1
+  },
+  "foreach": [],
+  "errors": [],
+  "recorded": {
+    "B.stopped": {}
+  },
+  "problems": []
+}

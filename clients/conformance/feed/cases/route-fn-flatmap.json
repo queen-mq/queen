@@ -1,0 +1,143 @@
+{
+  "name": "route-fn-flatmap",
+  "about": "flatMap makes several records per message; a .to() function picks a queue, {queue, partition}, a list, or nothing",
+  "mode": "both",
+  "source": {
+    "queues": [
+      "c-baskets"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "flatMap",
+      "fn": {
+        "$get": "0.data.items"
+      }
+    },
+    {
+      "op": "to",
+      "target": {
+        "fn": {
+          "$if": [
+            {
+              "$eq": [
+                {
+                  "$get": "0.kind"
+                },
+                "a"
+              ]
+            },
+            {
+              "queue": "c-out-a",
+              "partition": {
+                "$str": {
+                  "$get": "0.id"
+                }
+              }
+            },
+            {
+              "$if": [
+                {
+                  "$eq": [
+                    {
+                      "$get": "0.kind"
+                    },
+                    "b"
+                  ]
+                },
+                [
+                  "c-out-b",
+                  {
+                    "queue": "c-out-all",
+                    "partition": "x"
+                  }
+                ],
+                null
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-baskets",
+              "partition": "p1",
+              "data": {
+                "items": [
+                  {
+                    "kind": "a",
+                    "id": 1
+                  },
+                  {
+                    "kind": "b",
+                    "id": 2
+                  },
+                  {
+                    "kind": "none",
+                    "id": 3
+                  }
+                ]
+              },
+              "transactionId": "b1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-baskets",
+              "partition": "p2",
+              "data": {
+                "items": [
+                  {
+                    "kind": "b",
+                    "id": 4
+                  },
+                  {
+                    "kind": "a",
+                    "id": 5.5
+                  }
+                ]
+              },
+              "transactionId": "b2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-baskets",
+              "partition": "p2",
+              "data": {
+                "items": []
+              },
+              "transactionId": "b3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-route-fn-flatmap"
+  }
+}

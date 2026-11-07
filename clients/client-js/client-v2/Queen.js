@@ -12,6 +12,7 @@ import { TimerBuilder } from './builders/TimerBuilder.js'
 import { Kv } from './kv/Kv.js'
 import { Locks, Lock } from './locks/Locks.js'
 import { Ephemeral } from './ephemeral/Ephemeral.js'
+import { FeedReader } from './feed/Feed.js'
 import { StreamBuilder } from './stream/StreamBuilder.js'
 import { StreamConsumer } from './stream/StreamConsumer.js'
 import { Admin } from './admin/Admin.js'
@@ -122,8 +123,12 @@ export class Queen {
     // Create HTTP client
     this.#httpClient = this.#createHttpClient()
 
-    // Create buffer manager
-    this.#bufferManager = new BufferManager(this.#httpClient)
+    // Create buffer manager: one bound for the whole client's buffered pushes,
+    // and where messages the broker kept refusing are reported.
+    this.#bufferManager = new BufferManager(this.#httpClient, {
+      maxMessages: this.#config.bufferMaxMessages,
+      onError: this.#config.onBufferError
+    })
 
     // Setup graceful shutdown (opt-out via handleSignals: false)
     if (this.#config.handleSignals) {
@@ -453,6 +458,37 @@ export class Queen {
 
   transaction() {
     return new TransactionBuilder(this.#httpClient)
+  }
+
+  // ===========================
+  // Tenant feed
+  // ===========================
+
+  /**
+   * Every push to the tenant's queues, in log order (`POST /api/v1/feed`):
+   *
+   *   for await (const e of queen.feed({ queues: ['orders*'], from: 'earliest', follow: false })) { ... }
+   *
+   * See feed/Feed.js for the options. Followers serve it; a leader's 421 sends
+   * the reader to the followers it names.
+   */
+  feed(options = {}) {
+    const scheme = (this.#config.urls[0] || '').startsWith('https://') ? 'https' : 'http'
+    return new FeedReader(this.#httpClient, (baseUrl) => this.#nodeClient(baseUrl), scheme, options)
+  }
+
+  /** A client to one node, with this client's credentials and timeouts. */
+  #nodeClient(baseUrl) {
+    const { timeoutMillis, retryAttempts, retryDelayMillis, bearerToken, headers, retry429 } = this.#config
+    return new HttpClient({
+      baseUrl: validateUrl(baseUrl),
+      timeoutMillis,
+      retryAttempts,
+      retryDelayMillis,
+      bearerToken,
+      headers,
+      retry429
+    })
   }
 
   // ===========================

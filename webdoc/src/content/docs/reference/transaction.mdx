@@ -72,6 +72,11 @@ sourceOfTruth:
 # rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector;
 # handlers/raft.rs adds the queen_consumer_group_lag_* families to /metrics/prometheus. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-11-06 (JS push across partitions, buffer per queue): TransactionBuilder.js lets a pushed item name its own partition. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): routes.rs classifies POST /api/v1/feed as consume,
+# gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
+# leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
+# relay through). Nothing this page states changes.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step

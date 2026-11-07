@@ -261,7 +261,17 @@ await queen.queue('tasks').push([
     data: { value: 42 }
   }
 ])
+
+// Many partitions in one push: each item names its own
+await queen.queue('bookings').push([
+  { partition: 'hotel-1', data: { night: '2026-12-01' } },
+  { partition: 'hotel-2', data: { night: '2026-12-02' } }
+])
 ```
+
+An item's own `partition` wins over `.partition()`; an item without one takes the builder's, or
+`Default`. Only an item with `data` (or `payload`) is read this way: a bare object is its own
+payload, `partition` field and all.
 
 ### Consume Messages (Long-Running Workers)
 
@@ -518,6 +528,18 @@ A producer that outruns the flush pipeline is therefore paced down to the drain
 rate, and a broker outage shows up as slow pushes with bounded memory rather
 than as messages that quietly disappeared. `close()` flushes with a 30 second
 deadline and logs how many messages were left unsent if it expires.
+
+A buffer holds a whole queue: each message keeps its partition, and one batch
+carries every partition, each in its own order. Two client options bound the
+rest:
+
+| Client option | Default | Meaning |
+| --- | --- | --- |
+| `bufferMaxMessages` | `100000` | Messages the whole client may hold buffered, every queue and batches in flight included, before a buffered `push()` waits |
+| `onBufferError` | console | `(items, error)` for messages the broker refused inside a batch five times: they are dropped, and this is where you hear about it |
+
+A buffered `push()` also gives the event loop a turn every 256 messages, so a
+`while (true)` producer cannot starve the timers and sockets that send the batches.
 
 ### Binary Push, Push Compression and Framed Pop
 
@@ -838,6 +860,143 @@ named; a partition nobody wrote, or of a queue that does not exist, has no recor
 `changedSince` takes a `Date`, epoch milliseconds or an ISO-8601 string; without one it lists every
 partition of the queue. `safeTime` is the broker's time up to which every write is counted in the
 answer: pass it as the next `since`, and never compare it with your own clock.
+
+---
+
+## The Tenant Feed
+
+Every push to the tenant's queues, in the order the broker's log committed them
+(`POST /api/v1/feed`). Each entry carries its `position`: one number across every queue, shared by
+the pushes of one transaction. Nothing is leased or acked, and every consumer group still gets its
+messages. Followers serve it: when the client reaches the leader, it moves to a follower by itself.
+
+```javascript
+// A question: what happened to one booking in the last day, then stop.
+for await (const e of queen.feed({ partitions: ['booking-9137'], since: '1d', follow: false })) {
+  console.log(e.position, e.queue, e.partition, e.data)
+}
+
+// Live: every Italian order from now on, filtered by the broker.
+for await (const e of queen.feed({ queues: ['orders'], where: [['data.country', '=', 'IT']] })) {
+  // ...
+}
+```
+
+| Option | Meaning |
+|---|---|
+| `queues` | Names or patterns (`orders*`); every queue when absent |
+| `partitions` | Partition names |
+| `where` | Conditions the broker checks, `[field, op, value]`: fields `queue`, `partition`, `transactionId`, `offset`, `position`, `data.<path>`; ops `= != < <= > >= in exists prefix !prefix` |
+| `from` | A position, `'now'` (default) or `'earliest'` (default with `since`) |
+| `since` | `'15m'`, `'1d'`, a `Date` or an ISO time: only messages created since then |
+| `follow` | `true` (default) keeps waiting for new entries; `false` stops once caught up |
+| `followerUrls` | Nodes to read from first |
+
+`reader.read()` answers one page (`entries`, `next`, `caughtUp`, `resolvedTs`, `applied`) and moves
+the reader to `next`.
+
+### Streams from the feed
+
+```javascript
+import { Stream } from 'queen-mq'
+
+await Stream
+  .fromFeed(queen, { queues: ['orders'] })
+  .where('data.country', '=', 'IT')        // sent to the broker, filtered there
+  .filter((m) => m.data.total >= 10)       // your code, runs here
+  .to(queen.queue('orders-it'))
+  .run({ queryId: 'orders-it' })
+```
+
+The stream keeps its position in KV (`queen-feed` / queryId) and commits it with its outputs in
+one transaction: a restart carries on where it stopped, with no duplicates. It never reads back its
+own outputs. The state of its windows and patterns is not written at every commit: now and then a
+snapshot, and a restart reads the feed again from the snapshot to the committed position, sending
+nothing. One process runs a `queryId` (or a shard of it) at a time: another one with the same
+`queryId` waits, and takes over when the first stops or dies.
+
+```javascript
+// Routing: a function picks the queue (or a list, or { queue, partition }, or null).
+Stream.fromFeed(queen, { queues: ['orders'] })
+  .to((order) => `orders-${order.country}`)
+
+// Batches: up to maxItems results per call, each { value, ctx, id }; the position moves after
+// the call returns, and a crash delivers the batch again with the same ids (upsert by id).
+Stream.fromFeed(queen, { queues: ['orders'] })
+  .foreachBatch(async (items) => db.upsert(items.map((it) => ({ id: it.id, ...it.value }))),
+    { maxItems: 500, maxWaitMillis: 1000 })
+
+// Windows on the log's clock, one for every queue: a quiet feed still closes them on time.
+Stream.fromFeed(queen, { queues: ['orders', 'payments'] })
+  .windowTumbling({ seconds: 60 })
+  .aggregate({ count: () => 1, sum: (e) => e.total })
+  .to(queen.queue('per-minute'))
+
+// An order, then its payment within 15 minutes; a reminder when none comes.
+Stream.fromFeed(queen, { queues: ['orders', 'payments'] })
+  .pattern({
+    start: (m) => m.queue === 'orders',
+    then: (m) => m.queue === 'payments',
+    within: '15m',
+    onMatch: (order, payment) => ({ order: order.data.id, paid: payment.data.amount }),
+    onTimeout: (order) => ({ order: order.data.id, remind: true })
+  })
+  .to(queen.queue('order-followups'))
+
+// A join of three queues; the missing sides named at the deadline.
+Stream.fromFeed(queen, { queues: ['orders', 'payments', 'shipments'] })
+  .join({
+    sides: { order: 'orders', paid: 'payments', sent: 'shipments' },
+    within: '2d',
+    select: (got, order) => ({ order, carrier: got.sent.data.carrier }),
+    onTimeout: (got, missing, order) => ({ order, missing })
+  })
+
+// The parts of a run: named steps, or as many as the messages say.
+Stream.fromFeed(queen, { queues: ['parts'] })
+  .gather({ count: (m) => m.data.of, key: (m) => m.data.batch, within: '10m',
+    onComplete: (got, batch) => ({ batch, parts: got.length }) })
+
+// The latest row of a table queue, as of each message's own position.
+Stream.fromFeed(queen, { queues: ['bookings'] })
+  .joinTable({ queue: 'property-settings', on: (m) => m.data.propertyId,
+    select: (booking, settings) => ({ ...booking, currency: settings ? settings.currency : null }) })
+
+// Steps in a chain: a per-minute count, then a pattern over the counts.
+Stream.fromFeed(queen, { queues: ['clicks'] })
+  .windowTumbling({ seconds: 60 }).aggregate({ clicks: () => 1 }).name('perMinute')
+  .pattern({ start: (m) => m.data.clicks >= 100, then: (m) => m.data.clicks < 100, within: '10m' })
+
+// Event time: history imported today, or producers that send late. The step takes its
+// messages in event-time order (each waits allowedLateness), and idle lets a quiet feed
+// move the watermark on. A step after it runs on event time too, and follows its watermark.
+Stream.fromFeed(queen, { queues: ['gh-issues', 'gh-comments'], from: 'earliest' })
+  .pattern({ start: (m) => m.queue === 'gh-issues', then: (m) => m.queue === 'gh-comments',
+    key: (m) => `${m.partition}#${m.data.number}`, within: '1h',
+    eventTime: (m) => m.data.created_at, allowedLateness: '5m', idle: '1m',
+    onTimeout: (issue) => ({ repo: issue.partition, issue: issue.data.number }) })
+
+// A message whose function keeps failing (3 retries): 'stop' (default), 'skip', or a queue.
+  .run({ queryId: 'enrich', onPoison: queen.queue('enrich-dlq') })
+
+// Shards: each reads its partitions (filtered by the broker), with its own position and lock.
+  .run({ queryId: 'per-minute', shards: 4 })
+
+// The live state, from any process.
+const { found, value } = await Stream.view(queen, 'bursts').get('perMinute', 'tenant-42')
+```
+
+`.join({ left, right, within, select })` pairs two messages of an entity in either order. The
+entity is the partition name by default (`key` or `keyBy()` to choose). Windows, patterns, joins
+and gathers take `eventTime` (`false`: the feed's clock after a step on event time),
+`allowedLateness` (a duration, or seconds on a window), `onLate` ('drop' or 'include') and, on the
+first step on event time, `idle`; the steps after it follow its watermark. Table joins take none of
+these. `metrics().steps` shows each step's clock, watermark and the messages it holds. `run()` options:
+`exclusive` (true), `lockTtl` ('15s'), `onPoison` ('stop'), `retries` (3), `commitEveryMillis`
+(1000), `maxPendingOutputs` (5000), `snapshotEveryMillis` (60000), `snapshotMaxEntries` (200000),
+`shards` / `shard` / `shardBy`, `serveState` (true), `reset` (false, true, or a string to start
+over once). The handle has `stop()`, `metrics()` (with `role`: active or standby), `state(step)`
+and `done`.
 
 ---
 

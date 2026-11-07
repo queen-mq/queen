@@ -125,18 +125,20 @@ fn map_unsupported(err: Error) -> Error {
         return err;
     }
     let code = err.code().cloned();
-    let retry_after_seconds = match &err {
+    let (retry_after_seconds, body) = match &err {
         Error::Http {
             retry_after_seconds,
+            body,
             ..
-        } => *retry_after_seconds,
-        _ => None,
+        } => (*retry_after_seconds, body.clone()),
+        _ => (None, None),
     };
     Error::Http {
         status: 404,
         message: EPHEMERAL_UNSUPPORTED.to_string(),
         code,
         retry_after_seconds,
+        body,
     }
 }
 
@@ -797,6 +799,7 @@ mod tests {
             message: "x".into(),
             code: code.map(|c| queen_protocol::ErrorCode::Other(c.into())),
             retry_after_seconds: None,
+            body: None,
         }
     }
 
@@ -834,6 +837,7 @@ mod tests {
             message: "route not available".into(),
             code: Some(queen_protocol::ErrorCode::Other("route_blocked".into())),
             retry_after_seconds: None,
+            body: None,
         };
         let mapped = map_unsupported(original);
         assert_eq!(
@@ -850,6 +854,7 @@ mod tests {
             message: "the ephemeral queue is at its maxBytes".into(),
             code: Some(queen_protocol::ErrorCode::Other("queue_full".into())),
             retry_after_seconds: Some(1.0),
+            body: None,
         };
         let mapped = map_unsupported(e);
         assert_eq!(mapped.status(), Some(429));

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitHub day on Queen</title>
+<style>
+  :root {
+    --bg: #0b0b0c; --card: #121214; --line: #222226; --text: #ededee; --dim: #8b8b93; --faint: #55555c;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin-bottom: 18px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; }
+  .clock { font: 600 28px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .sub { color: var(--dim); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .card h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); margin: 0 0 10px; }
+  .big { font: 600 30px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .row span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); white-space: nowrap; }
+  .pair { display: flex; gap: 24px; margin-bottom: 10px; }
+  .label { color: var(--dim); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 5px 8px; border-top: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font-weight: 500; border-top: 0; }
+  td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--faint); }
+  .dot.active { background: var(--ok); } .dot.standby { background: var(--warn); } .dot.off { background: var(--bad); }
+  .wide { grid-column: 1 / -1; overflow-x: auto; }
+  .muted { color: var(--faint); }
+  @media (max-width: 640px) { .clock { font-size: 22px; } .big { font-size: 24px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>A day of GitHub, through Queen feed streams</h1>
+    <span class="clock" id="clock">--</span>
+    <span class="sub">event time of the slowest stream (2025-10-01, GitHub Archive)</span>
+  </header>
+  <div class="grid">
+    <section class="card wide">
+      <h2>Streams</h2>
+      <table>
+        <thead><tr><th>stream</th><th>role</th><th>read</th><th>sent</th><th>late</th><th>open</th><th>held</th><th>watermark</th></tr></thead>
+        <tbody id="streams"></tbody>
+      </table>
+    </section>
+    <section class="card">
+      <h2>Trending: stars</h2>
+      <div class="label" id="trendHour">waiting for the first hour to close</div>
+      <div id="trend"></div>
+    </section>
+    <section class="card">
+      <h2>Issues: a reply within the hour?</h2>
+      <div class="pair">
+        <div><div class="big" id="answered">0</div><div class="label">answered</div></div>
+        <div><div class="big" id="unanswered">0</div><div class="label">not answered</div></div>
+        <div><div class="big" id="median">-</div><div class="label">median minutes</div></div>
+      </div>
+      <div class="label">waiting right now (the stream's state)</div>
+      <div id="waiting"></div>
+    </section>
+    <section class="card">
+      <h2>Pull requests merged</h2>
+      <div class="pair">
+        <div><div class="big" id="reviewed">0</div><div class="label">reviewed, then merged</div></div>
+        <div><div class="big" id="unreviewed">0</div><div class="label">merged, no review in 6 h</div></div>
+      </div>
+      <div class="label">latest merged without review</div>
+      <div id="prs"></div>
+    </section>
+    <section class="card">
+      <h2>Push bursts: 100+ pushes, gaps under 5 min</h2>
+      <div class="pair"><div><div class="big" id="bursts">0</div><div class="label">sessions</div></div></div>
+      <div id="burstList"></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id)
+const fmt = (n) => (n === null || n === undefined ? '-' : Number(n).toLocaleString('en-US'))
+const hhmm = (iso) => (iso ? iso.slice(11, 16) : '--')
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+const rows = (el, items, f) => { el.innerHTML = items.length ? items.map(f).join('') : '<div class="muted">none yet</div>' }
+async function refresh() {
+  let s
+  try { s = await (await fetch('/api/state')).json() } catch (_) { return }
+  const marks = Object.values(s.streams).map((x) => x.watermark).filter(Boolean).sort()
+  $('clock').textContent = marks.length ? marks[0].slice(0, 16).replace('T', ' ') : '--'
+  $('streams').innerHTML = Object.entries(s.streams).map(([name, x]) => {
+    const cls = x.role === 'active' ? 'active' : x.role === 'standby' ? 'standby' : 'off'
+    return `<tr><td><span class="dot ${cls}"></span>${esc(name)}</td><td>${esc(x.role)}${x.shards > 1 ? ` (${x.shards} shards)` : ''}</td>` +
+      `<td class="mono">${fmt(x.read)}</td><td class="mono">${fmt(x.outputs)}</td><td class="mono">${fmt(x.late)}</td>` +
+      `<td class="mono">${fmt(x.open)}</td><td class="mono">${fmt(x.held)}</td><td class="mono">${x.watermark ? x.watermark.slice(5, 19).replace('T', ' ') : '-'}</td></tr>`
+  }).join('')
+  $('trendHour').textContent = s.trending.hour ? `top 10 of ${hhmm(s.trending.hour)}-${String((Number(hhmm(s.trending.hour).slice(0, 2)) + 1) % 24).padStart(2, '0')}:00, and their stars this hour so far` : 'waiting for the first hour to close'
+  rows($('trend'), s.trending.top, (r) => `<div class="row"><span>${esc(r.repo)}</span><span class="num">${fmt(r.lastHour)} · now ${fmt(r.now)}</span></div>`)
+  $('answered').textContent = fmt(s.unanswered.answered)
+  $('unanswered').textContent = fmt(s.unanswered.unanswered)
+  $('median').textContent = s.unanswered.medianMinutes ?? '-'
+  rows($('waiting'), s.unanswered.waiting, (w) => `<div class="row"><span>${esc(w.issue)}</span><span class="num">since ${hhmm(w.since)}, until ${hhmm(w.deadline)}</span></div>`)
+  $('reviewed').textContent = fmt(s.prs['reviewed-and-merged'])
+  $('unreviewed').textContent = fmt(s.prs['merged-without-review'])
+  rows($('prs'), s.prs.latestUnreviewed, (r) => `<div class="row"><span>${esc(r.pr)}</span><span class="num">merged after ${fmt(r.minutes)} min</span></div>`)
+  $('bursts').textContent = fmt(s.bursts.count)
+  rows($('burstList'), s.bursts.latest, (b) => `<div class="row"><span>${esc(b.actor)}</span><span class="num">${fmt(b.pushes)} pushes, ${hhmm(b.from)}-${hhmm(b.to)}</span></div>`)
+}
+refresh()
+setInterval(refresh, 1000)
+</script>
+</body>
+</html>

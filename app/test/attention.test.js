@@ -84,6 +84,21 @@ test('a queue Kafka clients created is not unread for having no group yet', () =
   assert.deepEqual(out.map((i) => [i.name, i.reason]), [['orders', 'noReader']])
 })
 
+test('a queue a feed stream reads is not unread for having no consumer group', () => {
+  const read = { ...q('orders', 83), feedReaders: [{ name: 'copy', status: 'running', needs: '' }] }
+  const out = queueAttention([read, q('spool', 83)], [])
+  assert.deepEqual(out.map((i) => [i.name, i.reason]), [['spool', 'noReader']])
+  // Every stream that reads it down: nothing reads it, and the queue needs you as one with no reader does.
+  const down = { ...q('orders', 83), feedReaders: [{ name: 'copy', status: 'gone', needs: 'amber' }, { name: 'audit', status: 'failed', needs: 'amber' }] }
+  assert.deepEqual(queueAttention([down], []).map((i) => [i.reason, i.sev, i.readers.map((r) => r.name)]), [['feedDown', 'warn', ['copy', 'audit']]])
+  // One of them running, or stopped on purpose by its process: it has a reader.
+  assert.deepEqual(queueAttention([{ ...down, feedReaders: [...down.feedReaders, { name: 'copy2', status: 'running' }] }], []), [])
+  assert.deepEqual(queueAttention([{ ...down, feedReaders: [{ name: 'copy', status: 'stopped' }] }], []), [])
+  // Nothing held, nothing to read: nothing needs you.
+  assert.deepEqual(queueAttention([{ ...q('orders', 0), feedReaders: down.feedReaders }], []), [])
+  assert.deepEqual(queueAttention([{ ...q('orders', 83), feedReaders: [] }], []).map((i) => i.reason), ['noReader'])
+})
+
 test('"no reader expected" still lets a native queue off', () => {
   const linesFor = (queue) => (queue === 'audit' ? { ...THRESHOLDS, noReaderOk: true } : THRESHOLDS)
   assert.deepEqual(queueAttention([q('audit', 83)], [], linesFor), [])

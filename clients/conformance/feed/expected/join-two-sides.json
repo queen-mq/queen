@@ -1,0 +1,110 @@
+{
+  "outputs": [
+    {
+      "queue": "c-joined",
+      "partition": "o-1",
+      "data": {
+        "order": 1,
+        "carrier": "dhl"
+      },
+      "from": "S1.2/c-orders/o-1#0"
+    },
+    {
+      "queue": "c-joined",
+      "partition": "o-2",
+      "data": {
+        "key": "o-2",
+        "side": "left"
+      },
+      "from": "emit"
+    },
+    {
+      "queue": "c-joined",
+      "partition": "o-3",
+      "data": {
+        "key": "o-3",
+        "side": "right"
+      },
+      "from": "emit"
+    }
+  ],
+  "records": {
+    "c-join-two-sides": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "8c57deb31945460d",
+      "clock": 1794128431000,
+      "units": 2,
+      "readTo": 1794128431000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 2,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-join-two-sides": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-join-two-sides",
+    "hash": "8c57deb31945460d",
+    "reads": {
+      "queues": [
+        "c-orders",
+        "c-shipments"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "join",
+        "name": "step1",
+        "config": {
+          "kind": "join",
+          "within": 172800000,
+          "onRepeat": "keep",
+          "timeout": true
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "queues",
+      "queues": [
+        "c-joined"
+      ]
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 3,
+      "outputs": 3,
+      "effects": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "late": 0,
+      "replaySkipped": 0
+    }
+  },
+  "problems": []
+}

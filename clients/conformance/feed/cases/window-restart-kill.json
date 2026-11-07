@@ -1,0 +1,151 @@
+{
+  "name": "window-restart-kill",
+  "about": "a process killed with open windows: the next one loads the last snapshot and reads the feed again from its position, sending nothing twice",
+  "source": {
+    "queues": [
+      "c-visits"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.n"
+        }
+      }
+    },
+    {
+      "op": "map",
+      "fn": {
+        "key": {
+          "$get": "1.key"
+        },
+        "start": {
+          "$get": "1.windowKey"
+        },
+        "value": {
+          "$get": "0"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-visits-out"
+    }
+  ],
+  "compareMetrics": [],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "v1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v2",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "v2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:30.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v1",
+              "data": {
+                "n": 8
+              },
+              "transactionId": "v4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "kill": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:40.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v2",
+              "data": {
+                "n": 16
+              },
+              "transactionId": "v5"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "B"
+    },
+    {
+      "idle": "B",
+      "timeoutMs": 30000
+    },
+    {
+      "metrics": "B",
+      "as": "b-replayed",
+      "keys": [
+        "replays"
+      ]
+    },
+    {
+      "clock": "2026-11-06T09:01:01.000Z"
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "run": {
+    "queryId": "c-window-restart-kill"
+  },
+  "mode": "fake"
+}

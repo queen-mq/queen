@@ -23,6 +23,7 @@ sourceOfTruth:
   - proxy/src/auth.rs
   - proxy/src/app.rs
   - proxy/src/cp.rs
+  - server/src/rsm/facade/real/phase2/feed.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*; the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long). Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs name the pop's commit at delivery commitOnDelivery; the parameter example names it, and the OpenAPI document lists it on every pop route, with the old name marked deprecated.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
@@ -77,6 +78,23 @@ sourceOfTruth:
 # rsm/facade/real.rs registers a consumer group lag sampler with the metrics collector;
 # phase2/reads.rs walks every group's positions for it (group_lags); handlers/raft.rs adds the
 # queen_consumer_group_lag_* families to /metrics/prometheus. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-06 (tenant feed): auth.rs makes POST /api/v1/feed read-only, like POST /api/v1/fetch. This page: the tenant feed section (POST /api/v1/feed) joins Reads by offset; the generated route table lists the route.
+# sourceOfTruth re-read 2026-11-06 (feed streams): feed.rs gains the where op !prefix, which a feed
+# stream uses to leave its own outputs out of its reads. This page: the where row lists it.
+# sourceOfTruth re-read 2026-11-06 (feed shards): feed.rs reads a shard {count, index, queues?} and
+# leaves the other shards' partitions out before decoding them. This page: the feed body's shard row.
+# sourceOfTruth re-read 2026-11-07 (feed shards through the index, long-poll wakes): feed.rs reads a
+# shard's records of each sealed queue-log file through the file's .qidx (qlog/mod.rs feed_index), and
+# scans the open file; apply.rs wakes every feed watch when one was armed during an entry; a read also
+# watches the exact queue names it gives. This page: the shard and maxWaitMs rows.
+# sourceOfTruth re-read 2026-11-07 (resolvedTs of a caught-up answer): feed.rs reads the clock before
+# the applied index (meta is read live, and apply writes an entry's clock before its index) and claims
+# one microsecond below it. This page: the resolvedTs promise, unchanged.
+# feed.rs after the W13 kill and partition runs: a partial answer claims at most what a caught-up one
+# would (the clock less one microsecond), since a no-op entry moves the index and not the clock. This
+# page: a sentence after the resolvedTs promise (it does not go back on a running node).
+# sourceOfTruth re-read 2026-11-07 (the feed through the proxy): handlers/raft.rs relays a feed read that asks
+# (x-queen-feed-relay) from the leader to a follower; the proxy asks on every feed read. This page: the feed section says so.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
@@ -302,6 +320,65 @@ only those written since a time.
 Each entry answers `partitions` and `next`, a cursor to pass back as `after` while the page was
 full; `limit` defaults to 1000 and is capped there. A queue that does not exist answers
 `UNKNOWN_TOPIC_OR_PARTITION`, a cursor that does not parse `BAD_CURSOR`. At most 1024 entries.
+
+### `POST /api/v1/feed`
+
+Every push to a tenant's queues, in the order the log committed them, read by position. A position
+is the log entry that wrote a message: one number orders every queue of the tenant, and the pushes
+of one transaction share it. Like the reads above, nothing is leased, acked or moved, and every
+consumer group still gets its messages. The JavaScript client wraps it as `queen.feed()` and
+`Stream.fromFeed()`.
+
+```bash
+curl -s localhost:6632/api/v1/feed -H 'content-type: application/json' -d '{
+  "from": "earliest", "queues": ["orders*"],
+  "where": [{"field": "data.country", "op": "=", "value": "IT"}],
+  "maxWaitMs": 5000}'
+```
+
+```json
+{"applied": 12, "caughtUp": true,
+ "entries": [{"id": "0193f1c2-5d4e-7a10-9b2c-4f6a8e1d2c3b", "kind": "push", "offset": 0,
+              "partition": "customer-42", "partitionId": "0193f1c2-5d40-7000-8000-1a2b3c4d5e6f",
+              "payload": {"orderId": 9137, "country": "IT"}, "position": 7, "queue": "orders",
+              "transactionId": "order-9137-created", "ts": "2026-11-06T09:14:03.512887Z"}],
+ "next": 13, "resolvedTs": "2026-11-06T09:14:03.600000Z"}
+```
+
+| Field | Rule |
+|---|---|
+| `from` | A position (included), `"now"` (the default: only what comes next) or `"earliest"`. Send an answer's `next` back to read on. |
+| `since` | Only messages created at or after this time (ISO-8601). Files holding only older messages are not read. |
+| `queues` | Names or patterns (`*` any run of characters, `?` one); every queue of the tenant when absent. At most 256. |
+| `partitions` | Partition names, in whichever queue is read. At most 1000. |
+| `where` | Conditions that must all hold, each `{field, op, value}`. Fields: `queue`, `partition`, `transactionId`, `offset`, `position`, `data` and `data.<path>` (a number in the path indexes an array). Ops: `=`, `!=`, `<`, `<=`, `>`, `>=`, `in` (the value is an array), `exists`, `prefix`, `!prefix` (a string that does not start with it). A field the message does not have holds for no op, `!=` and `!prefix` included. At most 16. |
+| `kinds` | `["push"]`, the one kind served so far. |
+| `maxRecords` | Messages in one answer: default 1,000, at most 10,000. |
+| `maxBytes` | Payload bytes in one answer: default 1 MiB, at most 16 MiB. |
+| `maxWaitMs` | Default 0, at most 30,000. With a wait, a read that is caught up and found nothing waits for a push to one of the queues it reads, or to a queue it names that does not exist yet. |
+| `shard` | `{count, index, queues?}`: only the partitions whose name hashes to `index` of `count` (FNV-1a, 32 bit, over the name's UTF-8 bytes, modulo `count`), left out before their payload is read. In each sealed file of a queue log the broker reads only the shard's records, through the file's index; the file still being written is read through. With `queues` (names or patterns), only those queues are split and the others are read whole. `count` from 1 to 4096. |
+| An unknown field | 400: a typo would widen the read. |
+
+An answer holds whole positions: a cap that falls inside a transaction's pushes lets that position
+through and stops before the next. `next` is where to read on; `caughtUp` says the answer reached
+`applied`, the last position this node has applied; `resolvedTs` is a time such that every message
+stamped at or before it is in this answer or an earlier one, the same promise as `safeTime` above.
+It does not go back on a running node. Another node, or the same node after a restart, can answer
+a lower one, so a reader keeps the highest it has seen.
+A filter that drops everything still moves `next` past what it read.
+
+A leader does not serve it. A node that leads the tenant's raft group of a cluster answers 421 with
+`"code": "feed_on_leader"` and the `followers` to ask (`nodeId`, `httpAddr`); the JavaScript client
+goes there by itself. A caller that cannot reach the followers sends `x-queen-feed-relay: 1`, and
+the leader hands the read to a follower and passes its answer back: the follower reads the log, the
+leader only passes the bytes on. The proxy sends that header on every feed read, so a read through
+the proxy is served whichever node it lands on; the route there needs a consumer's authority, like
+`/api/v1/fetch`. A single node serves it. `QUEEN_FEED_ON_LEADER=true` lets a leader serve it too. The read never goes past what the answering node has applied: its queue logs are also the raft
+log, and their tail can hold entries a new leader may still cut.
+
+<Why>a reader that sees every queue in one order, from one position, can route, mirror, audit and
+react without a consumer group per queue, and reading on followers keeps all of it off the node
+that orders the writes.</Why>
 
 ## Binary bodies
 

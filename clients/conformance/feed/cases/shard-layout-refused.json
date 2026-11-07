@@ -1,0 +1,84 @@
+{
+  "name": "shard-layout-refused",
+  "about": "a query that ran whole is refused in shards (keys would move with their state) unless reset",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "n": {
+          "$get": "0.data.n"
+        },
+        "p": {
+          "$get": "0.partition"
+        }
+      }
+    },
+    {
+      "op": "to",
+      "target": "c-out"
+    }
+  ],
+  "compareMetrics": [],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    },
+    {
+      "start": "B",
+      "run": {
+        "shards": 2
+      },
+      "mayFail": true
+    },
+    {
+      "start": "C",
+      "run": {
+        "shards": 2,
+        "reset": true
+      }
+    },
+    {
+      "idle": "C",
+      "keys": [
+        "$q#shard0of2",
+        "$q#shard1of2"
+      ]
+    },
+    {
+      "stop": "C"
+    }
+  ],
+  "run": {
+    "queryId": "c-shard-layout-refused"
+  },
+  "mode": "fake"
+}

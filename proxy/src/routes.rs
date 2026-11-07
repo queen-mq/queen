@@ -278,6 +278,35 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
             RouteClass::Blocked
         };
     }
+    // `POST /api/v1/feed` (2026-11-06) — the tenant feed: the pushes of every
+    // queue of the tenant (or of the queues and patterns a body names) in the
+    // order the log committed them, read from a position, filtered by
+    // `where`. `queen.feed()` and `Stream.fromFeed()` read through it. The
+    // fetch arm's argument once more, and harder: it hands out the PAYLOADS
+    // of every queue at once, so it is `Consume` — `scopes.consume`, or
+    // Admin/Consumer — and never the `Read` every user role has, or a Viewer
+    // could read every message of the tenant through one call. Nothing is
+    // leased or moved and no consumer group sees it, so it is never
+    // quota-blocked, for the fetch's reason: a read a block can refuse
+    // strands a reader that would drain the backlog.
+    //
+    // Metering needs no new `op_for` arm: not an `is_pop_path`, so it books
+    // reqs-only `Read` like the fetch. Its long poll is a body field
+    // (`maxWaitMs`, at most 30 s), inside the 35 s upstream timeout, and it
+    // holds no parked slot, like the fetch's. A cluster's leader serves no
+    // feed read (it answers 421 and names its followers, which a caller
+    // behind this proxy cannot reach): the gateway asks the broker to relay
+    // the read to a follower instead (`FEED_RELAY_HEADER`).
+    //
+    // POST only, and the exact path only, the rule of the fetch family: the
+    // broker serves one method here, so every other spelling fails closed.
+    if p == "/api/v1/feed" {
+        return if *m == Method::POST {
+            RouteClass::Consume
+        } else {
+            RouteClass::Blocked
+        };
+    }
 
     // --- queue admin ---
     if p == "/api/v1/configure" {
@@ -947,6 +976,27 @@ mod tests {
         assert_eq!(classify(&post, "/api/v1/fetch/"), RouteClass::Blocked);
         // and the arm does not swallow a neighbour that does not exist yet
         assert_eq!(classify(&post, "/api/v1/fetchall"), RouteClass::Blocked);
+    }
+
+    /// The tenant feed hands out the payloads of every queue at once: the
+    /// authority of a consumer, never the `Read` every user role has, and
+    /// POST-only on one exact path, like the fetch. Before its arm it fell
+    /// through to the fail-closed `/api/` default: no feed read reached a
+    /// broker behind the proxy.
+    #[test]
+    fn feed_is_consume_and_post_only() {
+        let post = Method::POST;
+        assert_eq!(classify(&post, "/api/v1/feed"), RouteClass::Consume);
+        assert_ne!(classify(&post, "/api/v1/feed"), RouteClass::Read);
+        for m in [Method::GET, Method::PUT, Method::DELETE, Method::PATCH] {
+            assert_eq!(
+                classify(&m, "/api/v1/feed"),
+                RouteClass::Blocked,
+                "{m} /api/v1/feed"
+            );
+        }
+        assert_eq!(classify(&post, "/api/v1/feed/"), RouteClass::Blocked);
+        assert_eq!(classify(&post, "/api/v1/feeds"), RouteClass::Blocked);
     }
 
     /// The offset for a time is the fetch's other twin: offsets and append

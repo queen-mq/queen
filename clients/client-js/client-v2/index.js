@@ -35,6 +35,9 @@ export { CLIENT_DEFAULTS, QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS, BUFFER
 // matching on the message text.
 export { CONFLATION_UNSUPPORTED } from './utils/conflation.js'
 
+// Tenant feed — every push of the tenant's queues in log order (queen.feed()).
+export { FeedReader, whereCondition, sinceToIso } from './feed/Feed.js'
+
 // Streaming SDK — full source under ./streams/.
 export { Stream } from './streams/Stream.js'
 export { tokenBucketGate, slidingWindowGate } from './streams/helpers/rateLimiter.js'
