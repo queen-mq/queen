@@ -23,6 +23,7 @@ import { AggregateOperator } from './operators/AggregateOperator.js'
 import { GateOperator } from './operators/GateOperator.js'
 import { SinkOperator } from './operators/SinkOperator.js'
 import { ForeachOperator } from './operators/ForeachOperator.js'
+import { ForeachBatchOperator } from './operators/ForeachBatchOperator.js'
 import { PatternOperator } from './operators/PatternOperator.js'
 import { CollectOperator } from './operators/CollectOperator.js'
 import { TableOperator } from './operators/TableOperator.js'
@@ -58,7 +59,7 @@ export class Stream {
    * stateful steps in any order -- a window with reduce/aggregate, a pattern,
    * a join (two sides or more), a gather, a table join -- each step's results
    * feeding the next; then .to() (one queue, several, or a function that
-   * picks) or .foreach(). Gates run on queue sources only.
+   * picks), .foreach() or .foreachBatch(). Gates run on queue sources only.
    *
    * @param {object} queen - the Queen client
    * @param {object} [options]
@@ -483,6 +484,29 @@ export class Stream {
     return this._extend(new ForeachOperator(fn))
   }
 
+  /**
+   * Terminal at-least-once side effect, in batches (Stream.fromFeed only).
+   * `fn(items)` gets up to `maxItems` results, each `{ value, ctx, id }`: the
+   * value and context `.foreach()` would get, and an id that is the same on
+   * every delivery of that result (a key for an upsert). A batch goes at the
+   * end of each read, or, with `maxWaitMillis`, once it is full or its first
+   * item has waited that long. The position moves only after `fn` returns:
+   * a crash before that delivers the batch again.
+   *
+   *   .foreachBatch(async (items) => {
+   *     await db.upsert('totals', items.map((it) => ({ id: it.id, ...it.value })))
+   *   }, { maxItems: 500, maxWaitMillis: 1000 })
+   *
+   * A batch that throws is tried again whole (`retries`), then item by item,
+   * so the poison policy (`onPoison`) meets only the item that fails.
+   *
+   * @param {(items:Array<{value:any, ctx:object, id:string}>)=>void|Promise<void>} fn
+   * @param {{maxItems?: number, maxWaitMillis?: number}} [opts] - maxItems 1000, maxWaitMillis 0
+   */
+  foreachBatch(fn, opts = {}) {
+    return this._extend(new ForeachBatchOperator(fn, opts))
+  }
+
   // ----------------------------------------------------------------- Compile/run
 
   /**
@@ -524,6 +548,9 @@ export class Stream {
       await feedRunner.start()
       return feedRunner
     }
+    if (this._operators.some((op) => op.kind === 'foreachBatch')) {
+      throw new Error('.foreachBatch() runs on Stream.fromFeed only; on a queue source use .foreach(), or .to() a queue that a worker pops in batches')
+    }
     const feedOnly = this._operators.find((op) => FEED_ONLY.has(op.kind))
     if (feedOnly) {
       throw new Error('.pattern(), .join(), .gather(), .joinTable() and .name() run on Stream.fromFeed only: they need the clock every queue shares')
@@ -563,9 +590,9 @@ export class Stream {
    */
   _compileFeed() {
     const ops = this._operators
-    const sinkIdx = ops.findIndex((op) => op.kind === 'sink' || op.kind === 'foreach')
+    const sinkIdx = ops.findIndex((op) => op.kind === 'sink' || op.kind === 'foreach' || op.kind === 'foreachBatch')
     if (sinkIdx !== -1 && sinkIdx !== ops.length - 1) {
-      throw new Error(`sink operators (.to / .foreach) must be the last in the chain; found ${ops[sinkIdx].kind} at position ${sinkIdx} of ${ops.length}`)
+      throw new Error(`sink operators (.to / .foreach / .foreachBatch) must be the last in the chain; found ${ops[sinkIdx].kind} at position ${sinkIdx} of ${ops.length}`)
     }
     const sink = sinkIdx === -1 ? null : ops[sinkIdx]
     const upstream = sinkIdx === -1 ? ops : ops.slice(0, sinkIdx)

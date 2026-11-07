@@ -574,7 +574,9 @@ shard of it) at a time: another one with the same `queryId` waits, and takes ove
 stops or dies.
 
 ```rust
-use queen_mq::streams::feed::{FeedAggregate, FeedSink, Gather, Join, Pattern, Poison, TableJoin, ViewOptions};
+use queen_mq::streams::feed::{
+    BatchOptions, FeedAggregate, FeedSink, Gather, Join, Pattern, Poison, TableJoin, ViewOptions,
+};
 
 // Routing: a function picks the queue (or a list, or { queue, partition }, or null).
 feed.to(FeedSink::route(|order: Option<Value>, _msg: Value| async move {
@@ -638,6 +640,18 @@ feed.map(|m, _| -> Result<Value, String> {
     .run(FeedRunOptions::new("enrich").on_poison(Poison::DeadLetter("enrich-dlq".into())))
     .await?;
 
+// The results in batches, each item { value, ctx, id }: the position moves only after the
+// function returns, and a batch delivered again carries the same ids (a key for an upsert).
+feed.foreach_batch(
+    |items| async move {
+        for it in &items {
+            println!("upsert {} {:?}", it.id, it.value);
+        }
+        Ok::<(), String>(())
+    },
+    BatchOptions::new().max_items(500).max_wait_millis(1000),
+);
+
 // Shards: each reads its partitions (filtered by the broker), with its own position and lock.
 feed.to("copy").run(FeedRunOptions::new("per-minute").shards(4)).await?;
 
@@ -650,8 +664,9 @@ let got = Stream::view(&queen, "bursts", ViewOptions::default())?.get("perMinute
 `commit_every_millis` (1000), `position_commit_millis` (5000), `max_pending_outputs` (5000),
 `snapshot_every_millis` (60000), `snapshot_max_entries` (200000), `shards` / `shard` / `shard_by`,
 `serve_state` (true), `reset` (`Reset::No`, `Always`, or `Token(s)` to start over once), `on_error`
-and `now`. The handle has `stop()`, `done()`, `metrics()` (with `role`: active or standby) and
-`state(step)`.
+and `now`. The handle has `stop()`, `done()`, `metrics()` (with `role`: active or standby;
+`batches` and `pendingBatch` for a `.foreach_batch()`) and `state(step)`. A batch that fails is
+tried again whole (`retries`), then item by item, so `on_poison` meets only the item that fails.
 
 Where Rust differs:
 
@@ -660,7 +675,8 @@ Where Rust differs:
 | A user function that fails | returns `Err` (any `Display`), or panics | throws |
 | A chain that cannot run | `run()` fails, with the JS message | the call throws |
 | `.foreach()` and a routing function | async closures | async or not |
-| A queue source with routing, a pattern or a join | does not compile (`Stream::from` has none of them) | `run()` fails |
+| A queue source with routing, a pattern, a join or `foreach_batch` | does not compile (`Stream::from` has none of them) | `run()` fails |
+| The `error.name` of a dead letter | `"Error"` | the class of what was thrown |
 | The keys of a JSON object written to KV | sorted (serde_json) | in the order they were set |
 | A date-time without an offset (`event_time`, `since`) | UTC | local time |
 

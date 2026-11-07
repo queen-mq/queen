@@ -139,6 +139,11 @@ pub(crate) fn describe_feed_stream(a: &AboutInput<'_>) -> Value {
     let sink = match a.terminal {
         None => Value::Null,
         Some(Terminal::Foreach(_)) => json!({ "kind": "foreach" }),
+        Some(Terminal::ForeachBatch(b)) => json!({
+            "kind": "foreachBatch",
+            "maxItems": b.max_items,
+            "maxWaitMillis": b.max_wait_millis
+        }),
         Some(Terminal::To(sink)) if sink.route.is_some() => json!({ "kind": "route" }),
         Some(Terminal::To(sink)) => {
             json!({ "kind": "queues", "queues": clip(&json!(sink.queues), 0) })

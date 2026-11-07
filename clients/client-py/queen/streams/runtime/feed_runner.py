@@ -29,6 +29,15 @@ out; a queue (``client.queue('feed-dlq')``) receives it.
 
 Closes are counted (``units``): a long close (millions of windows that end at
 one time) commits in pieces, and the record's ``units`` says how far it got.
+
+``.foreach_batch(fn, max_items=..., max_wait_millis=...)`` keeps the results
+instead of calling a function per result: ``fn(items)`` gets up to
+``max_items`` at the end of each read, or, with ``max_wait_millis``, once the
+batch is full or its first item has waited that long. Nothing commits past an
+item that waits: no position, no tick. The commit right after ``fn`` returns
+moves the position, so a crash before it delivers the batch again, with the
+same ids. A batch that raises is tried again whole, then item by item: the
+poison policy meets the item that fails ('stop' commits nothing of the batch).
 """
 
 from __future__ import annotations
@@ -263,7 +272,11 @@ def lock_ttl_seconds_of(lock_ttl: Any) -> int:
 
 def _fresh_pending() -> Dict[str, Any]:
     # readTo / caughtUp: the feed time `next` is at, and whether the read was caught up there.
-    return {"outputs": [], "next": None, "work": 0, "effects": 0, "emitSeq": 0, "readTo": None, "caughtUp": None}
+    # batch / batchSince: the results a .foreach_batch() keeps, and when the first of them came.
+    return {
+        "outputs": [], "next": None, "work": 0, "effects": 0, "emitSeq": 0, "readTo": None, "caughtUp": None,
+        "batch": [], "batchSince": None,
+    }
 
 
 _CAMEL = re.compile(r"(?<!^)(?=[A-Z])")
@@ -462,6 +475,8 @@ class FeedRunner:
         self._last_said: Dict[str, Any] = {}
         self._server: Optional[StateServer] = None
         self._abort_watch: Optional["asyncio.Task[None]"] = None
+        # The unit running now (a message, or a result of a step): what a batch item came from.
+        self._subject: Optional[Dict[str, Any]] = None
         self._metrics: Dict[str, Any] = {
             "role": "starting",
             "cycles": 0,
@@ -469,6 +484,7 @@ class FeedRunner:
             "emitted": 0,
             "outputs": 0,
             "effects": 0,
+            "batches": 0,
             "commits": 0,
             "conflicts": 0,
             "errors": 0,
@@ -504,7 +520,7 @@ class FeedRunner:
         """Check the chain, take the lock if it is free, load the position and state, start the cycles."""
         steps, sink, chain_hash = self._stream.steps, self._stream.sink, self._stream.chain_hash
         if not sink:
-            raise ValueError("Stream.fromFeed: end the chain with .to(queen.queue(...)) or .foreach(fn)")
+            raise ValueError("Stream.fromFeed: end the chain with .to(queen.queue(...)), .foreach(fn) or .foreach_batch(fn)")
         self._sink = sink
         self._pipeline = Pipeline(steps)
         self._hash = chain_hash
@@ -588,6 +604,7 @@ class FeedRunner:
     def metrics(self) -> Dict[str, Any]:
         m = dict(self._metrics)
         m["pendingOutputs"] = len(self._pending["outputs"])
+        m["pendingBatch"] = len(self._pending["batch"])
         if self._shard:
             m["shard"] = dict(self._shard)
         p = self._pipeline
@@ -839,8 +856,24 @@ class FeedRunner:
                     break
                 await _sleep(backoff, self._stop_event)
                 backoff = min(backoff * 2, MAX_BACKOFF_MILLIS)
-        # Stopping: what is done and not yet committed goes in now, with a
-        # snapshot, so the next start has nothing to read again.
+        # Stopping: a batch that waits goes to its function first, tried once (one
+        # that fails now is delivered again at the next start); then what is done
+        # and not yet committed goes in, with a snapshot, so the next start has
+        # nothing to read again.
+        if (
+            self._active
+            and len(self._pending["batch"]) > 0
+            and not (self._lock is not None and not self._lock.held)
+            and self._poison_stop is None
+        ):
+            try:
+                await self._flush_batch()
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - left for the next start
+                if not getattr(err, "stopping", False):
+                    self._report(err, {"phase": "stop", "position": self._position})
+                self._rollback()
         snapshot_owed = self._pipeline.has_state and self._pipeline.changed_since_snapshot
         # Asked to stop: the record of this last commit says so (`stopped`), so
         # that a stream stopped on purpose is not taken for one that died.
@@ -1023,7 +1056,8 @@ class FeedRunner:
         r = await self._process_page(page, resolved)
         if r == "abandon":
             return
-        if r == "stop":
+        # 'halt': an item of a batch stopped the stream (rolled back to the last commit already).
+        if r in ("stop", "halt"):
             await self._stop_on_poison()
             return
         await self._settle(page)
@@ -1045,8 +1079,8 @@ class FeedRunner:
         for g in self._groups(page["entries"]):
             ref = {"cp": self._checkpoint()}
             r = await self._process_group(g, ref)
-            if r == "abandon":
-                return "abandon"
+            if r in ("abandon", "halt"):
+                return r
             if r == "stop":
                 # The whole transaction the poisoned message came in stays for
                 # later (from the last commit, when one came in the middle of a close).
@@ -1055,17 +1089,20 @@ class FeedRunner:
                 return "stop"
             self._pending["next"] = g["position"] + 1
             self._read_to(_ts_of(g["entries"][0]), False)
-            # Enough waiting outputs: commit them now, between two positions.
-            if len(self._pending["outputs"]) >= self._opts["maxPendingOutputs"]:
-                if (await self._commit()) != "ok":
+            # Enough waiting outputs, or a full batch: commit them now, between two positions.
+            if len(self._pending["outputs"]) >= self._opts["maxPendingOutputs"] or self._batch_full():
+                c = await self._commit_all()
+                if c == "halt":
+                    return "halt"
+                if c != "ok":
                     return "abandon"
         if self._pipeline.has_state and self._pipeline.needs_feed_clock:
             ref = {"cp": self._checkpoint()}
             t = max(self._clock, 0 if resolved is None else resolved)
             self._clock = t
             r = await self._advance_to(t, ref)
-            if r == "abandon":
-                return "abandon"
+            if r in ("abandon", "halt"):
+                return r
             if r == "stop":
                 self._restore(ref["cp"])
                 self._pending["next"] = page.get("next")
@@ -1164,18 +1201,25 @@ class FeedRunner:
                 self._units += 1
             return r
 
+        halted = False
+
         async def on_batch(_done: int) -> str:
-            if len(self._pending["outputs"]) < self._opts["maxPendingOutputs"]:
+            nonlocal halted
+            if len(self._pending["outputs"]) < self._opts["maxPendingOutputs"] and not self._batch_full():
                 return "ok"
             self._metrics["closeCommits"] += 1
-            if (await self._commit()) != "ok":
+            c = await self._commit_all()
+            if c == "halt":
+                halted = True
+            if c != "ok":
                 return "abandon"
             if ref is not None:
                 ref["cp"] = self._checkpoint()
             return "ok"
 
         try:
-            return await self._pipeline.advance(t, unit, max_units=max_units, on_batch=on_batch if live else None)
+            r = await self._pipeline.advance(t, unit, max_units=max_units, on_batch=on_batch if live else None)
+            return "halt" if halted else r
         finally:
             self._burst_target = outer
 
@@ -1187,7 +1231,7 @@ class FeedRunner:
         self._metrics["emitted"] += 1
         derived = bool(env.get("derived"))
         ctx = env.get("ctx", UNDEFINED) if derived else entry
-        if self._sink.kind == "foreach":
+        if self._sink.kind in ("foreach", "foreachBatch"):
             if derived or not entry:
                 fctx = env.get("ctx", UNDEFINED)
             else:
@@ -1199,6 +1243,24 @@ class FeedRunner:
                     "offset": entry.get("offset", UNDEFINED),
                     "transactionId": entry.get("transactionId", UNDEFINED),
                 }
+            if self._sink.kind == "foreachBatch":
+                # Kept for the batch, with the id a queue output of it would have: the same on every delivery.
+                if entry:
+                    item_id = feed_output_id(self._query_id, entry, ctr["n"], self._epoch, self._id)
+                    ctr["n"] += 1
+                else:
+                    item_id = self._emit_id()
+                p = self._pending
+                if len(p["batch"]) == 0:
+                    p["batchSince"] = self._now()
+                p["batch"].append({
+                    "value": env.get("value", UNDEFINED),
+                    "ctx": fctx,
+                    "id": item_id,
+                    "subject": self._subject,
+                    "partition": entry.get("partition", UNDEFINED) if entry else js_str(env.get("key", UNDEFINED)),
+                })
+                return
             await call_user(self._sink.fn, env.get("value", UNDEFINED), fctx)
             self._metrics["effects"] += 1
             self._pending["effects"] += 1
@@ -1255,6 +1317,7 @@ class FeedRunner:
                     await _sleep(self._opts["retryDelayMillis"] * 2 ** attempt, self._stop_event)
             return "ok"
         last_err: Optional[BaseException] = None
+        self._subject = subject
         for attempt in range(retries + 1):
             cp = self._checkpoint()
             try:
@@ -1294,13 +1357,14 @@ class FeedRunner:
         eid = em.get("id")
         return f"{sid}\u001f{js_str(eid)}" if eid else sid
 
-    def _poisoned(self, subject: Dict[str, Any], err: Optional[BaseException], attempts: int) -> str:
-        self._metrics["poisoned"] += 1
-        if self._poison["kind"] != "stop" and self._pipeline.has_state:
-            self._pending_skips.append(self._skip_id(subject))
-        # A feed message: the unit's own, or one an event-time step held and took in its turn.
-        emit = subject.get("emit")
-        entry = subject.get("entry") or (emit.get("entry") if isinstance(emit, dict) else None) or None
+    def _describe(self, subject: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """A unit for a report: the feed message (the unit's own, or one an
+        event-time step held and took in its turn), or the result."""
+        emit = subject.get("emit") if isinstance(subject, dict) else None
+        own = subject.get("entry") if isinstance(subject, dict) else None
+        entry = own or (emit.get("entry") if isinstance(emit, dict) else None) or None
+        if not entry and emit is None:
+            return {"entry": None, "what": {}, "where": "a result"}
         if entry:
             what: Dict[str, Any] = {
                 "position": entry.get("position", UNDEFINED),
@@ -1318,7 +1382,16 @@ class FeedRunner:
             what = {"step": None if nullish(step) else step, "result": emit["ctx"].get("kind", UNDEFINED), "key": emit.get("key", UNDEFINED)}
             key_text = js_json_dumps(what["key"])
             where = f"the {js_str(what['result'])} result for key {key_text if key_text is not UNDEFINED else 'undefined'}"
-        reason = (str(err) if err is not None and str(err) else (type(err).__name__ if err is not None else "undefined"))
+        return {"entry": entry, "what": what, "where": where}
+
+    def _poisoned(self, subject: Dict[str, Any], err: Optional[BaseException], attempts: int) -> str:
+        self._metrics["poisoned"] += 1
+        if self._poison["kind"] != "stop" and self._pipeline.has_state:
+            self._pending_skips.append(self._skip_id(subject))
+        d = self._describe(subject)
+        entry, what, where = d["entry"], d["what"], d["where"]
+        emit = subject.get("emit")
+        reason = _reason_of(err)
         if self._poison["kind"] == "skip":
             self._metrics["skipped"] += 1
             e = FeedRunnerError(f"{where} failed {attempts} times and was skipped: {reason}")
@@ -1365,6 +1438,11 @@ class FeedRunner:
 
     async def _stop_on_poison(self) -> None:
         """on_poison 'stop': commit what came before the message, then stop there."""
+        # A batch that waits came before the message: it goes first (the commit
+        # moves the position past it). An item of it that fails stops the stream
+        # instead, at the last commit ('halt': _poison_stop names that item now).
+        if len(self._pending["batch"]) > 0 and self._poison_stop is not None and not self._poison_stop.get("batch"):
+            await self._flush_batch()
         p = self._poison_stop
         assert p is not None
         # This commit's record says why the stream stopped, and at which
@@ -1384,9 +1462,18 @@ class FeedRunner:
             # Another commit won: the stream reads on from the stored position.
             self._poison_stop = None
             return
+        if p.get("batch"):
+            text = (
+                f"{p['where']} failed {p['attempts']} times in foreachBatch: {p['reason']}. The stream stopped before its batch: "
+                "fix the function and start it again (it gets the batch again), or run it with onPoison: 'skip' or a dead-letter queue"
+            )
+        else:
+            text = (
+                f"{p['where']} failed {p['attempts']} times: {p['reason']}. The stream stopped there: fix the function and start it again, "
+                "or run it with onPoison: 'skip' or a dead-letter queue"
+            )
         error = FeedRunnerError(
-            f"{p['where']} failed {p['attempts']} times: {p['reason']}. The stream stopped there: fix the function and start it again, "
-            "or run it with onPoison: 'skip' or a dead-letter queue",
+            text,
             code="feed_poison",
             **{k: v for k, v in p["what"].items() if k not in ("code", "fatal")},
         )
@@ -1406,6 +1493,8 @@ class FeedRunner:
             "units": self._units,
             "late": self._pipeline.late,
             "skips": len(self._pending_skips),
+            "batch": len(self._pending["batch"]),
+            "batchSince": self._pending["batchSince"],
             # A unit tried again counts its results once.
             "emitted": self._metrics["emitted"],
         }
@@ -1420,6 +1509,10 @@ class FeedRunner:
         self._units = cp["units"]
         self._pipeline.late = cp["late"]
         del self._pending_skips[cp["skips"]:]
+        batch = self._pending["batch"]
+        if len(batch) > cp["batch"]:
+            del batch[cp["batch"]:]
+        self._pending["batchSince"] = cp["batchSince"] if batch else None
         self._metrics["emitted"] = cp["emitted"]
 
     def _rollback(self) -> None:
@@ -1438,6 +1531,7 @@ class FeedRunner:
             len(p["outputs"]) > 0
             or p["work"] > 0
             or p["effects"] > 0
+            or len(p["batch"]) > 0
             or (self._pipeline.has_state and self._pipeline.dirty)
             or (js_is_integer(p["next"]) and p["next"] != self._position)
         )
@@ -1446,23 +1540,33 @@ class FeedRunner:
         """After a page: commit when it is time, else move the broker's clock if a deadline is due."""
         p = self._pending
         now = self._now()
-        # Outputs and done effects commit soon (at once when caught up); state
-        # alone every commitEveryMillis; a position alone now and then.
-        outputs = len(p["outputs"]) > 0 or p["effects"] > 0
-        moved = js_is_integer(p["next"]) and p["next"] != self._position
         due = False
-        if outputs:
-            due = (
-                page["caughtUp"]
-                or len(p["outputs"]) >= self._opts["maxPendingOutputs"]
-                or now - self._last_commit_at >= self._opts["commitEveryMillis"]
-            )
-        elif self._pipeline.dirty or p["work"] > 0:
-            due = now - self._last_commit_at >= self._opts["commitEveryMillis"]
-        elif moved:
-            due = now - self._last_position_commit >= self._opts["positionCommitMillis"]
-        if due:
-            await self._commit()
+        if len(p["batch"]) > 0:
+            # A batch goes when it is due, and the commit right after it moves the
+            # position. Until then nothing commits past it (no position, no tick):
+            # the next read waits until the batch is due, at most.
+            if not self._batch_due(now):
+                self._next_wait = max(0, min(self._opts["waitMillis"], math.ceil(p["batchSince"] + self._sink.max_wait_millis - now)))
+                return
+            due = True
+        else:
+            # Outputs and done effects commit soon (at once when caught up); state
+            # alone every commitEveryMillis; a position alone now and then.
+            outputs = len(p["outputs"]) > 0 or p["effects"] > 0
+            moved = js_is_integer(p["next"]) and p["next"] != self._position
+            if outputs:
+                due = (
+                    page["caughtUp"]
+                    or len(p["outputs"]) >= self._opts["maxPendingOutputs"]
+                    or now - self._last_commit_at >= self._opts["commitEveryMillis"]
+                )
+            elif self._pipeline.dirty or p["work"] > 0:
+                due = now - self._last_commit_at >= self._opts["commitEveryMillis"]
+            elif moved:
+                due = now - self._last_position_commit >= self._opts["positionCommitMillis"]
+        if due and (await self._commit_all()) == "halt":
+            await self._stop_on_poison()
+            return
         if not self._pipeline.has_state or not self._pipeline.needs_feed_clock or self._resolved_at == 0:
             return
         nxt = self._pipeline.next_due()
@@ -1493,6 +1597,114 @@ class FeedRunner:
         self._last_tick_at = now
         self._metrics["ticks"] += 1
         await self._commit()
+
+    # ---- foreach_batch ----------------------------------------------------------
+
+    def _batch_full(self) -> bool:
+        """The batch holds max_items: it goes now."""
+        return self._sink.kind == "foreachBatch" and len(self._pending["batch"]) >= self._sink.max_items
+
+    def _batch_due(self, now: Any) -> bool:
+        """The batch goes now: full, at the end of a read (max_wait_millis 0), or its first item waited max_wait_millis."""
+        p = self._pending
+        sink = self._sink
+        return len(p["batch"]) >= sink.max_items or sink.max_wait_millis == 0 or now - p["batchSince"] >= sink.max_wait_millis
+
+    async def _commit_all(self) -> str:
+        """The batch that waits, then the commit (which moves the position past it). 'halt': an item stopped the stream."""
+        if len(self._pending["batch"]) > 0 and (await self._flush_batch()) == "halt":
+            return "halt"
+        return await self._commit()
+
+    async def _flush_batch(self) -> str:
+        """Every item that waits, to the function, max_items at a time. 'ok', or 'halt' (rolled back to the last commit)."""
+        p = self._pending
+        items = p["batch"]
+        n = self._sink.max_items
+        for i in range(0, len(items), n):
+            if (await self._deliver(items[i:i + n])) == "halt":
+                return "halt"
+        p["batch"] = []
+        p["batchSince"] = None
+        return "ok"
+
+    async def _deliver(self, items: List[Dict[str, Any]]) -> str:
+        """One call: tried ``retries`` more times, with the pause of a message's
+        retries; then item by item, each tried as often, so the poison policy
+        meets the item that fails, and the others are delivered."""
+        err = await self._try_items(items)
+        if err is None:
+            return "ok"
+        if len(items) == 1:
+            return self._item_poisoned(items[0], err["error"])
+        for item in items:
+            e = await self._try_items([item])
+            if e is not None and self._item_poisoned(item, e["error"]) == "halt":
+                return "halt"
+        return "ok"
+
+    async def _try_items(self, items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """None when the function returned, else ``{"error"}`` after the last try. A stop cuts the tries short."""
+        retries = self._opts["retries"]
+        for attempt in range(retries + 1):
+            try:
+                await call_user(self._sink.fn, [{"value": it["value"], "ctx": it["ctx"], "id": it["id"]} for it in items])
+                self._metrics["batches"] += 1
+                self._metrics["effects"] += len(items)
+                self._pending["effects"] += len(items)
+                return None
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - tried again, then the poison policy
+                if self._stopping:
+                    raise _Stopping("stopping") from err
+                if attempt == retries:
+                    return {"error": err}
+                self._metrics["retries"] += 1
+                await _sleep(self._opts["retryDelayMillis"] * 2 ** attempt, self._stop_event)
+        return None
+
+    def _item_poisoned(self, item: Dict[str, Any], err: Optional[BaseException]) -> str:
+        """The poison policy for one item of a batch: 'skip' leaves it out, a
+        queue receives it (``{queryId, attempts, error, item}``, with the next
+        commit); 'stop' rolls back to the last commit -- nothing of the batch
+        commits, the next start delivers it again -- and answers 'halt'."""
+        attempts = self._opts["retries"] + 1
+        self._metrics["poisoned"] += 1
+        d = self._describe(item["subject"])
+        where = f"an item of {d['where']}"
+        what = d["what"]
+        reason = _reason_of(err)
+        if self._poison["kind"] == "skip":
+            self._metrics["skipped"] += 1
+            e = FeedRunnerError(f"{where} failed {attempts} times in foreachBatch and was skipped: {reason}")
+            e.__cause__ = err
+            self._report(e, {"phase": "poison", "action": "skipped", "attempts": attempts, **what})
+            return "ok"
+        if self._poison["kind"] == "deadLetter":
+            record: Dict[str, Any] = {
+                "queryId": self._query_id,
+                "attempts": attempts,
+                "error": {"name": _error_name(err), "message": reason},
+                "item": {"value": item["value"], "ctx": item["ctx"], "id": item["id"]},
+            }
+            if self._shard:
+                record["shard"] = dict(self._shard)
+            text = f"{self._id}\n{self._epoch}\ndlq-item\n{item['id']}"
+            self._pending["outputs"].append({
+                "queue": self._poison["queue"],
+                "partition": item["partition"],
+                "data": record,
+                "transactionId": f"{output_prefix(self._query_id)}{_sha(text)[:40]}",
+            })
+            self._metrics["deadLettered"] += 1
+            e = FeedRunnerError(f"{where} failed {attempts} times in foreachBatch and went to {self._poison['queue']}: {reason}")
+            e.__cause__ = err
+            self._report(e, {"phase": "poison", "action": "deadLettered", "attempts": attempts, **what})
+            return "ok"
+        self._rollback()
+        self._poison_stop = {"where": where, "what": what, "attempts": attempts, "err": err, "reason": reason, "batch": True}
+        return "halt"
 
     # ---- commit -----------------------------------------------------------------
 
@@ -1990,6 +2202,11 @@ class FeedRunner:
         if rows:
             self._pending["work"] += 1
         logger.log("FeedRunner.tablePrelude", {"queryId": self._id, "rows": rows, "start": start})
+
+
+def _reason_of(err: Optional[BaseException]) -> str:
+    """``err.message`` when it has one, else ``String(err)``."""
+    return str(err) if err is not None and str(err) else (type(err).__name__ if err is not None else "undefined")
 
 
 def _error_name(err: Optional[BaseException]) -> str:

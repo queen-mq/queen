@@ -28,6 +28,7 @@
 //! ```
 
 mod about;
+mod batch;
 mod clock;
 mod collect;
 mod env;
@@ -52,6 +53,7 @@ use crate::feed::{FeedFrom, Since, WhereCondition};
 use crate::queue::QueueBuilder;
 use crate::{js, Queen};
 
+pub use batch::{BatchItem, BatchOptions};
 pub use collect::Gather;
 pub use ops::{
     FeedAggregate, FeedDuration, FeedWindow, FnResult, IntoEventTime, IntoFeedBool, IntoFeedDone,
@@ -326,6 +328,7 @@ impl From<Vec<QueueBuilder>> for FeedSink {
 pub(crate) enum Terminal {
     To(FeedSink),
     Foreach(ForeachFn),
+    ForeachBatch(batch::ForeachBatch),
 }
 
 // --------------------------------------------------------------- operators
@@ -365,6 +368,7 @@ impl FeedOp {
             FeedOp::Name(_) => "name",
             FeedOp::Terminal(Terminal::To(_)) => "sink",
             FeedOp::Terminal(Terminal::Foreach(_)) => "foreach",
+            FeedOp::Terminal(Terminal::ForeachBatch(_)) => "foreachBatch",
         }
     }
 }
@@ -563,6 +567,40 @@ impl FeedStream {
         self.push(FeedOp::Terminal(Terminal::Foreach(fe)))
     }
 
+    /// Run an async side effect per batch of results, before the position
+    /// moves (at least once): `f(items)` gets up to `max_items` results, each
+    /// a [`BatchItem`] (`value` and `ctx` as `.foreach()` gets them, and an
+    /// `id` that is the same on every delivery of that result: a key for an
+    /// upsert). A batch goes at the end of each read, or, with
+    /// `max_wait_millis`, once it is full or its first item has waited that
+    /// long. The position moves only after `f` returns: a crash before that
+    /// delivers the batch again.
+    ///
+    /// A batch that fails is tried again whole (`retries`), then item by
+    /// item, so the poison policy (`on_poison`) meets only the item that fails.
+    ///
+    /// Feed streams only: a queue source has no `.foreach_batch()` (use
+    /// `.foreach()`, or `.to()` a queue that a worker pops in batches).
+    ///
+    /// ```compile_fail
+    /// # async fn f(queen: queen_mq::Queen) {
+    /// use queen_mq::streams::feed::BatchOptions;
+    /// use queen_mq::streams::Stream;
+    /// let _ = Stream::from(queen.queue("orders")).foreach_batch(|_items| async {}, BatchOptions::new());
+    /// # }
+    /// ```
+    pub fn foreach_batch<F, Fut, R>(self, f: F, opts: BatchOptions) -> Self
+    where
+        F: Fn(Vec<BatchItem>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoFeedDone + 'static,
+    {
+        match batch::ForeachBatch::new(f, opts) {
+            Ok(fb) => self.push(FeedOp::Terminal(Terminal::ForeachBatch(fb))),
+            Err(e) => self.fail(e),
+        }
+    }
+
     /// The chain's hash, as JS computes it (`chainHash`): the stored state
     /// was kept by this chain when the record names it.
     pub fn chain_hash(&self) -> Result<String> {
@@ -604,7 +642,7 @@ impl FeedStream {
         if let Some(i) = sink_idx {
             if i != ops.len() - 1 {
                 return Err(bad(format!(
-                    "sink operators (.to / .foreach) must be the last in the chain; found {} at position {i} of {}",
+                    "sink operators (.to / .foreach / .foreachBatch) must be the last in the chain; found {} at position {i} of {}",
                     ops[i].kind(),
                     ops.len()
                 )));

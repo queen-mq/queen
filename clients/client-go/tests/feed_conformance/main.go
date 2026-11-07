@@ -428,6 +428,30 @@ func build(q *queen.Queen, c jsv.Ordered) (s *streams.Stream, err error) {
 				_, err := evaluate(e, []interface{}{value, undef(ctx)})
 				return err
 			})
+		case "foreachBatch":
+			e := st.Get("fn")
+			var bopts []streams.BatchOption
+			if o, ok := st.Get("opts").(jsv.Ordered); ok {
+				if v, ok := jsv.Num(o.Get("maxItems")); ok {
+					bopts = append(bopts, streams.WithMaxItems(int(v)))
+				}
+				if v, ok := jsv.Num(o.Get("maxWaitMillis")); ok {
+					bopts = append(bopts, streams.WithMaxWaitMillis(int(v)))
+				}
+			}
+			s = s.ForeachBatch(func(items []streams.BatchItem) error {
+				// The items as JSON (as the JS runner prints them), then the expression with them as its one argument.
+				list := make([]interface{}, len(items))
+				for i, it := range items {
+					list[i] = map[string]interface{}{"value": it.Value, "ctx": undef(it.Ctx), "id": it.ID}
+				}
+				say(map[string]interface{}{"event": "foreachBatch", "items": list})
+				if jsv.IsUndefined(e) {
+					return nil
+				}
+				_, err := evaluate(e, []interface{}{jsv.JSONClone(list)})
+				return err
+			}, bopts...)
 		default:
 			return nil, fmt.Errorf("case: unknown chain op %s", str(st, "op"))
 		}

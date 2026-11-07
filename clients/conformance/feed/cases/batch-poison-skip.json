@@ -1,0 +1,137 @@
+{
+  "name": "batch-poison-skip",
+  "about": "foreachBatch onPoison 'skip': tried whole, then item by item; the item that fails is left out, the others are delivered",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "n": {
+          "$get": "0.data.n"
+        }
+      }
+    },
+    {
+      "op": "foreachBatch",
+      "fn": {
+        "$if": [
+          {
+            "$or": [
+              {
+                "$gt": [
+                  {
+                    "$len": {
+                      "$get": "0"
+                    }
+                  },
+                  1
+                ]
+              },
+              {
+                "$eq": [
+                  {
+                    "$get": "0.0.value.n"
+                  },
+                  3
+                ]
+              }
+            ]
+          },
+          {
+            "$throw": "bad row"
+          },
+          null
+        ]
+      }
+    }
+  ],
+  "run": {
+    "onPoison": "skip",
+    "retries": 1,
+    "queryId": "c-batch-poison-skip"
+  },
+  "compareMetrics": [
+    "emitted",
+    "effects",
+    "batches",
+    "outputs",
+    "retries",
+    "poisoned",
+    "skipped",
+    "deadLettered",
+    "pendingBatch"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "i3"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:04.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 4
+              },
+              "transactionId": "i4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "mode": "fake"
+}

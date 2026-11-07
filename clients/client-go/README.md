@@ -777,6 +777,14 @@ snapshots and the output ids are the same as the JS SDK's: a stream started in J
 and back.
 
 ```go
+// Batches: up to 500 results per call, at the end of each read or once the first has waited 1 s.
+// The position moves only after the function returns: a crash delivers the batch again, with the
+// same IDs (a key for an upsert). A batch that fails is tried again whole, then item by item.
+streams.FromFeed(q, streams.FeedSource{Queues: []string{"orders"}}).
+    ForeachBatch(func(items []streams.BatchItem) error {
+        return upsert(items) // each item: it.Value, it.Ctx (what Foreach gets), it.ID
+    }, streams.WithMaxItems(500), streams.WithMaxWaitMillis(1000))
+
 // Routing: a function picks the queue (or a list, or a streams.Target, or nil for nowhere).
 streams.FromFeed(q, streams.FeedSource{Queues: []string{"orders"}}).
     ToFunc(func(order, _ interface{}) (interface{}, error) {

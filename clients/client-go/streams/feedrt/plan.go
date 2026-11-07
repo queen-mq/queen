@@ -141,9 +141,14 @@ type TableSpec struct {
 
 // SinkSpec is the end of the chain: .to() or .foreach().
 type SinkSpec struct {
-	Kind    string // sink | foreach
+	Kind    string // sink | foreach | foreachBatch
 	Foreach func(value interface{}, ctx interface{}) error
-	Queues  []string
+	// ForeachBatch gets up to MaxItems results at once; MaxWaitMillis keeps a
+	// batch across reads (0: it goes at the end of each read).
+	ForeachBatch  func(items []BatchItem) error
+	MaxItems      int
+	MaxWaitMillis int
+	Queues        []string
 	// Route answers a queue name, a Target, a list of those, or nil (nowhere).
 	Route func(value, msg interface{}) (interface{}, error)
 	// Partition is nil, a fixed partition, or a function of the value.
@@ -151,6 +156,14 @@ type SinkSpec struct {
 	PartitionFn   func(value interface{}) (interface{}, error)
 	HasPartition  bool
 	PartitionFunc bool
+}
+
+// BatchItem is one result a foreachBatch function gets: the value and the
+// context a foreach would get, and the id a queue output of it would carry.
+type BatchItem struct {
+	Value interface{}
+	Ctx   interface{}
+	ID    string
 }
 
 // Target is where one record goes: a queue, and its partition ("" = the default rule).

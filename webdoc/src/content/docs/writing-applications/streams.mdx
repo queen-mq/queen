@@ -42,6 +42,10 @@ sourceOfTruth:
   - clients/client-py/queen/streams/runtime/feed_runner.py
   - clients/client-go/streams/feedrt/runner.go
   - clients/client-rust/src/streams/feed/runner.rs
+  - clients/client-js/client-v2/streams/operators/ForeachBatchOperator.js
+# sourceOfTruth re-read 2026-11-07 (foreachBatch): ForeachBatchOperator.js and FeedRunner.js end a feed
+# stream with batches of results ({ value, ctx, id }), the position committed after the function returns;
+# a batch that fails is tried whole, then item by item for the poison policy. This page: "Results in batches".
 # sourceOfTruth re-read 2026-11-07 (feed streams in Python, Go and Rust): the three clients run the
 # JS engine with the same records, ids and snapshots (feed_runner.py, feedrt/runner.go,
 # streams/feed/runner.rs), checked by clients/conformance/feed. This page: "In four clients", and
@@ -214,6 +218,7 @@ client.
 | A stream on it | `Stream.fromFeed()` | `Stream.from_feed()` | `streams.FromFeed()` | `Stream::from_feed()` |
 | Run it | `.run()` | `.run()` | `.RunFeed()` | `.run()` |
 | Live state | `Stream.view()` | `Stream.view()` | `streams.View()` | `Stream::view()` |
+| Results in batches | `.foreachBatch()` | `.foreach_batch()` | `.ForeachBatch()` | `.foreach_batch()` |
 
 The options keep their meaning and their defaults in each client, in its own spelling
 (`onPoison` is `on_poison` in Python, `OnPoison` in Go). Each client's README lists them.
@@ -232,6 +237,32 @@ nowhere. Every output of a commit goes in one transaction with the position.
 
 <Why>one router that sends each order to the queue of its country replaces a consumer per country,
 and with all of its outputs in one commit a crash never sends half of them.</Why>
+
+### Results in batches
+
+`.foreachBatch(fn, options)` ends a stream like `.foreach()`, but calls `fn` with many results at
+once: a list of items `{ value, ctx, id }`. `value` and `ctx` are what `.foreach()` gets; `id` is
+the id a `.to()` output of that result would have, the same each time the result is delivered. The
+position moves in the commit right after `fn` returns, so a crash before then delivers the batch
+again, with the same ids: write the batch with the ids as keys (an upsert), and the second delivery
+changes nothing.
+
+<SdkCode id="feed-batch" />
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `maxItems` | 1000 | At most this many items in one call; a read with more makes more calls. |
+| `maxWaitMillis` | 0 | 0: one batch per read. More: the batch also waits for the next reads, until it is full or its first item has waited this long. Nothing commits while it waits. |
+
+A batch that throws is tried again whole (`retries`), then one item at a time, so `onPoison` meets
+only the item that fails: `'skip'` leaves it out, a dead-letter queue gets
+`{ queryId, attempts, error, item }`, and `'stop'` commits nothing of the batch and stops before it
+(the next start delivers it again). `stop()` delivers the batch that waits before the stream stops.
+On a queue source, use `.foreach()`.
+
+<Why>a database or an API takes a thousand rows in one call much faster than in a thousand calls.
+With the position saved only after the call, a crash loses no row, and the ids make the second
+delivery harmless.</Why>
 
 ### Windows on the feed's clock
 

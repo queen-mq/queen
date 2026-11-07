@@ -76,6 +76,15 @@ type (
 	Target           = feedrt.Target
 	AggregateField   = operators.AggregateField
 	EventTimeValueFn = operators.EventTimeValueFn
+	BatchItem        = operators.BatchItem
+	ForeachBatchFn   = operators.ForeachBatchFn
+	BatchOption      = operators.BatchOption
+)
+
+// .ForeachBatch() options.
+var (
+	WithMaxItems      = operators.WithMaxItems
+	WithMaxWaitMillis = operators.WithMaxWaitMillis
 )
 
 // Undefined is JavaScript's undefined: answered by a function, it means
@@ -208,6 +217,28 @@ func (s *Stream) AggregateFields(fields ...AggregateField) *Stream {
 	return s.extend(op)
 }
 
+// ForeachBatch ends a feed chain with a side effect in batches (JS
+// .foreachBatch(fn, { maxItems, maxWaitMillis })): fn gets up to MaxItems
+// results at once, each with the value and context .Foreach() would get and
+// an ID that is the same on every delivery of that result (a key for an
+// upsert). A batch goes at the end of each read, or, with WithMaxWaitMillis,
+// once it is full or its first item has waited that long. The position moves
+// only after fn returns: a crash before that delivers the batch again.
+//
+//	.ForeachBatch(func(items []streams.BatchItem) error {
+//		return db.Upsert(ctx, "totals", items)
+//	}, streams.WithMaxItems(500), streams.WithMaxWaitMillis(1000))
+//
+// A batch that fails is tried again whole (Retries), then item by item, so
+// the poison policy (OnPoison) meets only the item that fails.
+func (s *Stream) ForeachBatch(fn ForeachBatchFn, opts ...BatchOption) *Stream {
+	op, err := operators.NewForeachBatchOperator(fn, opts...)
+	if err != nil {
+		return s.fail(err)
+	}
+	return s.extend(op)
+}
+
 // ToAll sends every record to each of the queues (feed sources).
 func (s *Stream) ToAll(sinks ...Sink) *Stream {
 	if len(sinks) == 0 {
@@ -317,6 +348,11 @@ func feedOnly(kind string) bool {
 // queueOnlyCheck refuses on a queue source what runs on a feed only.
 func (s *Stream) queueOnlyCheck() error {
 	for _, op := range s.operators {
+		if op.Kind() == "foreachBatch" {
+			return errors.New(".foreachBatch() runs on Stream.fromFeed only; on a queue source use .foreach(), or .to() a queue that a worker pops in batches")
+		}
+	}
+	for _, op := range s.operators {
 		if feedOnly(op.Kind()) {
 			return errors.New(".pattern(), .join(), .gather(), .joinTable() and .name() run on Stream.fromFeed only: they need the clock every queue shares")
 		}
@@ -422,13 +458,13 @@ func (s *Stream) CompileFeed() (*feedrt.Compiled, error) {
 	ops := s.operators
 	sinkIdx := -1
 	for i, op := range ops {
-		if op.Kind() == "sink" || op.Kind() == "foreach" {
+		if op.Kind() == "sink" || op.Kind() == "foreach" || op.Kind() == "foreachBatch" {
 			sinkIdx = i
 			break
 		}
 	}
 	if sinkIdx != -1 && sinkIdx != len(ops)-1 {
-		return nil, fmt.Errorf("sink operators (.to / .foreach) must be the last in the chain; found %s at position %d of %d", ops[sinkIdx].Kind(), sinkIdx, len(ops))
+		return nil, fmt.Errorf("sink operators (.to / .foreach / .foreachBatch) must be the last in the chain; found %s at position %d of %d", ops[sinkIdx].Kind(), sinkIdx, len(ops))
 	}
 	upstream := ops
 	var sink util.Operator
@@ -803,6 +839,16 @@ func sinkSpec(op util.Operator) *feedrt.SinkSpec {
 	case operators.ForeachOperator:
 		fn := o.Fn
 		return &feedrt.SinkSpec{Kind: "foreach", Foreach: func(value, ctx interface{}) error { return fn(value, ctxOf(ctx)) }}
+	case operators.ForeachBatchOperator:
+		fn := o.Fn
+		return &feedrt.SinkSpec{Kind: "foreachBatch", MaxItems: o.MaxItems, MaxWaitMillis: o.MaxWaitMillis,
+			ForeachBatch: func(items []feedrt.BatchItem) error {
+				list := make([]BatchItem, len(items))
+				for i, it := range items {
+					list[i] = BatchItem{Value: it.Value, Ctx: ctxOf(it.Ctx), ID: it.ID}
+				}
+				return fn(list)
+			}}
 	case operators.SinkOperator:
 		s := &feedrt.SinkSpec{Kind: "sink"}
 		if o.Route != nil {

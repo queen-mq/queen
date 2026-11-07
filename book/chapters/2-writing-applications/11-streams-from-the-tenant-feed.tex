@@ -18,11 +18,11 @@ The stream keeps its position in KV (namespace \texttt{queen-feed}, key the \tex
 
 The JavaScript, Python, Go and Rust clients run the same engine: the same results for the same messages, the same output ids and the same records in KV. A stream one client runs can be stopped, or die, and go on in another client with the same \texttt{queryId}, open windows and waiting patterns included. \texttt{Stream.view} in any client asks a runner of any client. PHP and C++ have no streams client.
 
-\begin{pairs}[0.18]{Client}{Read the feed, a stream on it, run it, live state}
-JavaScript & \texttt{queen.feed()}, \texttt{Stream.fromFeed()}, \texttt{.run()}, \texttt{Stream.view()} \\
-Python & \texttt{client.feed()}, \texttt{Stream.from\_feed()}, \texttt{.run()}, \texttt{Stream.view()} \\
-Go & \texttt{q.Feed()}, \texttt{streams.FromFeed()}, \texttt{.RunFeed()}, \texttt{streams.View()} \\
-Rust & \texttt{queen.feed()}, \texttt{Stream::from\_feed()}, \texttt{.run()}, \texttt{Stream::view()} \\
+\begin{pairs}[0.18]{Client}{Read the feed, a stream on it, run it, live state, results in batches}
+JavaScript & \texttt{queen.feed()}, \texttt{Stream.fromFeed()}, \texttt{.run()}, \texttt{Stream.view()}, \texttt{.foreachBatch()} \\
+Python & \texttt{client.feed()}, \texttt{Stream.from\_feed()}, \texttt{.run()}, \texttt{Stream.view()}, \texttt{.foreach\_batch()} \\
+Go & \texttt{q.Feed()}, \texttt{streams.FromFeed()}, \texttt{.RunFeed()}, \texttt{streams.View()}, \texttt{.ForeachBatch()} \\
+Rust & \texttt{queen.feed()}, \texttt{Stream::from\_feed()}, \texttt{.run()}, \texttt{Stream::view()}, \texttt{.foreach\_batch()} \\
 \end{pairs}
 
 The options keep their meaning and their defaults in each client, in its own spelling (\texttt{onPoison} is \texttt{on\_poison} in Python, \texttt{OnPoison} in Go). Each client's README lists them.
@@ -36,6 +36,21 @@ The options keep their meaning and their defaults in each client, in its own spe
 \guide{feed-routing}
 
 \why{one router that sends each order to the queue of its country replaces a consumer per country, and with all of its outputs in one commit a crash never sends half of them.}
+
+\subsection{Results in batches}
+
+\texttt{.foreachBatch(fn,\ options)} ends a stream like \texttt{.foreach()}, but calls \texttt{fn} with many results at once: a list of items \texttt{\{\ value,\ ctx,\ id\ \}}. \texttt{value} and \texttt{ctx} are what \texttt{.foreach()} gets; \texttt{id} is the id a \texttt{.to()} output of that result would have, the same each time the result is delivered. The position moves in the commit right after \texttt{fn} returns, so a crash before then delivers the batch again, with the same ids: write the batch with the ids as keys (an upsert), and the second delivery changes nothing.
+
+\guide{feed-batch}
+
+\begin{options}{Option}{Default}{What it does}
+\texttt{maxItems} & 1000 & At most this many items in one call; a read with more makes more calls. \\
+\texttt{maxWaitMillis} & 0 & 0: one batch per read. More: the batch also waits for the next reads, until it is full or its first item has waited this long. Nothing commits while it waits. \\
+\end{options}
+
+A batch that throws is tried again whole (\texttt{retries}), then one item at a time, so \texttt{onPoison} meets only the item that fails: \texttt{\textquotesingle{}skip\textquotesingle{}} leaves it out, a dead-letter queue gets \texttt{\{\ queryId,\ attempts,\ error,\ item\ \}}, and \texttt{\textquotesingle{}stop\textquotesingle{}} commits nothing of the batch and stops before it (the next start delivers it again). \texttt{stop()} delivers the batch that waits before the stream stops. On a queue source, use \texttt{.foreach()}.
+
+\why{a database or an API takes a thousand rows in one call much faster than in a thousand calls. With the position saved only after the call, a crash loses no row, and the ids make the second delivery harmless.}
 
 \subsection{Windows on the feed's clock}
 

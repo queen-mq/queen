@@ -37,8 +37,8 @@ use queen_mq::streams::{GateCtx, Record};
 
 use queen_mq::feed::{FeedFrom, FeedOptions};
 use queen_mq::streams::feed::{
-    FeedAggregate, FeedHandle, FeedRunOptions, FeedSink, FeedSource, Gather, Join, Pattern, ShardBy,
-    TableJoin, ViewOptions,
+    BatchOptions, FeedAggregate, FeedHandle, FeedRunOptions, FeedSink, FeedSource, Gather, Join,
+    Pattern, ShardBy, TableJoin, ViewOptions,
 };
 use queen_mq::streams::{RunOptions, Stream};
 use queen_mq::{
@@ -61,9 +61,9 @@ fn check(ok: bool, what: &str) {
 }
 
 // Test bookkeeping for the feed streams.
-const FEED_QUERIES: [&str; 10] = [
+const FEED_QUERIES: [&str; 11] = [
     "orders-it", "orders-by-country", "per-minute", "order-followups", "order-status", "batches",
-    "bookings-priced", "bursts", "gh-unanswered", "clicks-per-tenant",
+    "bookings-priced", "bursts", "gh-unanswered", "clicks-per-tenant", "orders-to-warehouse",
 ];
 
 async fn feed_push(queen: &Queen, queue: &str, partition: &str, data: Value) -> Result<(), Box<dyn Error>> {
@@ -100,6 +100,29 @@ async fn until(what: &str, cond: impl Fn() -> bool) {
         sleep_ms(100).await;
     }
     check(false, &format!("timed out waiting for {what}"));
+}
+
+/// A table elsewhere, written by key (an upsert): a second write of a row changes nothing.
+#[derive(Clone, Default)]
+struct Table {
+    rows: Arc<Mutex<std::collections::HashMap<String, Value>>>,
+}
+
+impl Table {
+    async fn upsert(&self, rows: Vec<Value>) -> Result<(), String> {
+        let mut map = self.rows.lock().unwrap();
+        for r in rows {
+            map.insert(r["key"].as_str().unwrap_or_default().to_string(), r);
+        }
+        Ok(())
+    }
+
+    /// The order ids the table holds, sorted.
+    fn orders(&self) -> Vec<i64> {
+        let mut out: Vec<i64> = self.rows.lock().unwrap().values().filter_map(|r| r["id"].as_i64()).collect();
+        out.sort();
+        out
+    }
 }
 
 /// The value of the first open window of `key` in a stream's step.
@@ -926,6 +949,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
     check(messages_of(&queen, "orders-FR", 1).await? == vec![json!({ "id": 5, "country": "FR", "total": 8 })], "routed to orders-FR");
     by_country.stop().await;
     println!("ok: feed-routing");
+
+    let warehouse = Table::default();
+    let table = warehouse.clone();
+    // guide:start(feed-batch)
+    let to_warehouse = Stream::from_feed(&queen, FeedSource::new().queues(["orders"]))
+        .foreach_batch(
+            move |items| {
+                let table = table.clone();
+                async move {
+                    // One write for the batch. An item's id is the same each time it is delivered.
+                    let rows = items.iter().map(|it| {
+                        let order = it.value.clone().unwrap_or_default();
+                        json!({ "key": it.id, "id": order["id"], "total": order["total"] })
+                    });
+                    table.upsert(rows.collect()).await
+                }
+            },
+            BatchOptions::new().max_items(500).max_wait_millis(1000),
+        )
+        .run(FeedRunOptions::new("orders-to-warehouse"))
+        .await?;
+    // guide:end
+    feed_push(&queen, "orders", "order-8", json!({ "id": 8, "total": 20 })).await?;
+    feed_push(&queen, "orders", "order-9", json!({ "id": 9, "total": 30 })).await?;
+    until("the batch", || warehouse.orders().len() == 2).await;
+    check(warehouse.orders() == vec![8, 9], "orders 8 and 9 in the warehouse");
+    to_warehouse.stop().await;
+    println!("ok: feed-batch");
 
     // guide:start(feed-window)
     let per_minute = Stream::from_feed(&queen, FeedSource::new().queues(["orders", "payments"]))

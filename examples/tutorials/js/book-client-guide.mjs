@@ -431,7 +431,7 @@ console.log('ok: stream-gate')
 // A feed stream keeps its position and state in KV (`queen-feed`, under its
 // queryId): an earlier run's go first, so every run starts the same way.
 const FEED_QUERIES = ['orders-it', 'orders-by-country', 'per-minute', 'order-followups', 'order-status', 'batches',
-  'bookings-priced', 'bursts', 'gh-unanswered', 'clicks-per-tenant']
+  'bookings-priced', 'bursts', 'gh-unanswered', 'clicks-per-tenant', 'orders-to-warehouse']
 for (const id of FEED_QUERIES) {
   const { rows } = await queen.kv.getPrefix('queen-feed', id, { keysOnly: true, limit: 1000 })
   for (const row of rows) await queen.kv.delete('queen-feed', row.key)
@@ -482,6 +482,24 @@ assert.deepEqual((await messagesOf('orders-IT', 1)).map((o) => o.id), [4])
 assert.deepEqual((await messagesOf('orders-FR', 1)).map((o) => o.id), [5])
 await byCountry.stop()
 console.log('ok: feed-routing')
+
+// A table elsewhere, written by key (an upsert): a second write of a row changes nothing.
+const warehouse = { rows: new Map(), async upsert(rows) { for (const r of rows) this.rows.set(r.key, r) } }
+// guide:start(feed-batch)
+const toWarehouse = await Stream
+  .fromFeed(queen, { queues: ['orders'] })
+  .foreachBatch(async (items) => {
+    // One write for the batch. An item's id is the same each time it is delivered.
+    await warehouse.upsert(items.map((it) => ({ key: it.id, ...it.value })))
+  }, { maxItems: 500, maxWaitMillis: 1000 })
+  .run({ queryId: 'orders-to-warehouse' })
+// guide:end
+await push('orders', 'order-8', { id: 8, total: 20 })
+await push('orders', 'order-9', { id: 9, total: 30 })
+await until('the batch', () => warehouse.rows.size === 2)
+assert.deepEqual([...warehouse.rows.values()].map((r) => r.id).sort(), [8, 9])
+await toWarehouse.stop()
+console.log('ok: feed-batch')
 
 // guide:start(feed-window)
 const perMinute = await Stream

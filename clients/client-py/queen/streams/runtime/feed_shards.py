@@ -22,9 +22,9 @@ from ..util.js import js_is_finite, js_is_integer, js_json_dumps
 from .feed_runner import FeedRunner
 
 _SUMS = (
-    "cycles", "entriesRead", "emitted", "outputs", "effects", "commits", "conflicts", "errors", "retries",
+    "cycles", "entriesRead", "emitted", "outputs", "effects", "batches", "commits", "conflicts", "errors", "retries",
     "poisoned", "skipped", "deadLettered", "late", "ticks", "takeovers", "snapshots", "replays", "replayEntries",
-    "tableRows", "pendingOutputs", "open", "stateKeys",
+    "tableRows", "pendingOutputs", "pendingBatch", "open", "stateKeys",
 )
 
 

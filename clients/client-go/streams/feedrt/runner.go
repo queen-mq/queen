@@ -256,6 +256,20 @@ type pendingT struct {
 	// readTo / caughtUp: the feed time next is at, and whether the read was caught up there (nil: null).
 	readTo   *float64
 	caughtUp *bool
+	// batch / batchSince: the results a .foreachBatch() keeps, and when the first of them came (nil: none).
+	batch      []batchItem
+	batchSince *float64
+}
+
+// batchItem is one result a .foreachBatch() keeps: what its function gets
+// (value, ctx, id), the unit it came from (for reports) and the partition a
+// dead-letter record of it goes to.
+type batchItem struct {
+	value     interface{}
+	ctx       interface{}
+	id        string
+	subject   subject
+	partition string
 }
 
 type poisonStopT struct {
@@ -264,6 +278,8 @@ type poisonStopT struct {
 	attempts int
 	err      error
 	reason   string
+	// batch: an item of a batch stopped the stream (rolled back to the last commit).
+	batch bool
 }
 
 type checkpointT struct {
@@ -278,6 +294,9 @@ type checkpointT struct {
 	skips   int
 	// A unit tried again counts its results once.
 	emitted int64
+	// The batch a .foreachBatch() keeps: its length, and when its first item came.
+	batch      int
+	batchSince *float64
 }
 
 type snapResult struct {
@@ -357,6 +376,8 @@ type Runner struct {
 	clock      float64
 	replaying  bool
 	poisonStop *poisonStopT
+	// subject is the unit running now (a message, or a result of a step): what a batch item came from.
+	subject subject
 
 	lastCommitAt       float64
 	lastPositionCommit float64
@@ -405,7 +426,7 @@ type metricsT struct {
 	late, ticks, takeovers, snapshots, snapshotBytes             int64
 	snapshotChunks, snapshotsFull, snapshotLayers, snapshotMilli int64
 	closeCommits, replays, replayEntries, replayMillis           int64
-	replaySkipped, tableRows                                     int64
+	replaySkipped, tableRows, batches                            int64
 	position                                                     interface{}
 	applied                                                      *int64
 	lag                                                          *int64
@@ -507,7 +528,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	defer r.mu.Unlock()
 	defer r.publish()
 	if r.stream.Sink == nil {
-		return errors.New("Stream.fromFeed: end the chain with .to(queen.queue(...)) or .foreach(fn)")
+		return errors.New("Stream.fromFeed: end the chain with .to(queen.queue(...)), .foreach(fn) or .foreachBatch(fn)")
 	}
 	r.sink = r.stream.Sink
 	p, err := NewPipeline(r.stream.Steps)
@@ -654,6 +675,7 @@ func (r *Runner) metricsLocked() Metrics {
 		CloseCommits: m.closeCommits, Replays: m.replays, ReplayEntries: m.replayEntries, ReplayMillis: m.replayMillis,
 		ReplaySkipped: m.replaySkipped, TableRows: m.tableRows, Position: m.position, Applied: m.applied, Lag: m.lag,
 		Stopped: m.stopped, PendingOutputs: int64(len(r.pending.outputs)),
+		Batches: m.batches, PendingBatch: int64(len(r.pending.batch)),
 	}
 	if r.shard != nil {
 		s := *r.shard
@@ -1151,8 +1173,18 @@ func (r *Runner) run() {
 		r.sleep(backoff)
 		backoff = math.Min(backoff*2, maxBackoffMillis)
 	}
-	// Stopping: what is done and not yet committed goes in now, with a
-	// snapshot, so the next start has nothing to read again.
+	// Stopping: a batch that waits goes to its function first, tried once (one
+	// that fails now is delivered again at the next start); then what is done
+	// and not yet committed goes in, with a snapshot, so the next start has
+	// nothing to read again.
+	if r.active && len(r.pending.batch) > 0 && !(r.lock != nil && !r.lock.Held()) && r.poisonStop == nil {
+		if _, err := r.flushBatch(context.Background()); err != nil {
+			if !errors.Is(err, errStopping) {
+				r.report(err, map[string]interface{}{"phase": "stop", "position": r.positionValue()})
+			}
+			r.rollback()
+		}
+	}
 	snapshotOwed := r.pipeline.HasState() && r.pipeline.ChangedSinceSnapshot()
 	// Asked to stop: the record of this last commit says so (stopped), so that
 	// a stream stopped on purpose is not taken for one that died.
@@ -1416,7 +1448,8 @@ func (r *Runner) cycle(ctx context.Context) error {
 	if pr == "abandon" {
 		return nil
 	}
-	if pr == "stop" {
+	// "halt": an item of a batch stopped the stream (rolled back to the last commit already).
+	if pr == "stop" || pr == "halt" {
 		return r.stopOnPoison(ctx)
 	}
 	return r.settle(ctx, page)
@@ -1454,8 +1487,8 @@ func (r *Runner) processPage(ctx context.Context, entries []map[string]interface
 		if err != nil {
 			return "", err
 		}
-		if res == "abandon" {
-			return "abandon", nil
+		if res == "abandon" || res == "halt" {
+			return res, nil
 		}
 		if res == "stop" {
 			// The whole transaction the poisoned message came in stays for later
@@ -1466,11 +1499,14 @@ func (r *Runner) processPage(ctx context.Context, entries []map[string]interface
 		}
 		r.setNext(int64(g.position) + 1)
 		r.readTo(tsOf(g.entries[0]), false)
-		// Enough waiting outputs: commit them now, between two positions.
-		if len(r.pending.outputs) >= r.opts.maxPendingOutputs {
-			c, err := r.commit(ctx)
+		// Enough waiting outputs, or a full batch: commit them now, between two positions.
+		if len(r.pending.outputs) >= r.opts.maxPendingOutputs || r.batchFull() {
+			c, err := r.commitAll(ctx)
 			if err != nil {
 				return "", err
+			}
+			if c == "halt" {
+				return "halt", nil
 			}
 			if c != "ok" {
 				return "abandon", nil
@@ -1490,8 +1526,8 @@ func (r *Runner) processPage(ctx context.Context, entries []map[string]interface
 		if err != nil {
 			return "", err
 		}
-		if res == "abandon" {
-			return "abandon", nil
+		if res == "abandon" || res == "halt" {
+			return res, nil
 		}
 		if res == "stop" {
 			r.restore(ref.cp)
@@ -1631,15 +1667,19 @@ func (r *Runner) advanceTo(ctx context.Context, t float64, ref *cpRef) (string, 
 	r.burstTarget = &target
 	defer func() { r.burstTarget = outer }()
 	var onBatch func(int) (string, error)
+	halted := false
 	if live {
 		onBatch = func(int) (string, error) {
-			if len(r.pending.outputs) < r.opts.maxPendingOutputs {
+			if len(r.pending.outputs) < r.opts.maxPendingOutputs && !r.batchFull() {
 				return "ok", nil
 			}
 			r.m.closeCommits++
-			c, err := r.commit(ctx)
+			c, err := r.commitAll(ctx)
 			if err != nil {
 				return "", err
+			}
+			if c == "halt" {
+				halted = true
 			}
 			if c != "ok" {
 				return "abandon", nil
@@ -1650,7 +1690,7 @@ func (r *Runner) advanceTo(ctx context.Context, t float64, ref *cpRef) (string, 
 			return "ok", nil
 		}
 	}
-	return r.pipeline.Advance(t, func(em *emit, run func(out outFn) error) (string, error) {
+	res, err := r.pipeline.Advance(t, func(em *emit, run func(out outFn) error) (string, error) {
 		res, err := r.unit(subject{emit: em}, func(ctr *counter) error {
 			return run(func(env *envelope, ent map[string]interface{}) error { return r.out(env, ent, ctr) })
 		})
@@ -1662,6 +1702,13 @@ func (r *Runner) advanceTo(ctx context.Context, t float64, ref *cpRef) (string, 
 		}
 		return res, nil
 	}, AdvanceOpts{MaxUnits: maxUnits, OnBatch: onBatch})
+	if err != nil {
+		return "", err
+	}
+	if halted {
+		return "halt", nil
+	}
+	return res, nil
 }
 
 // out is one result at the end of the chain: the queues it goes to (pushed
@@ -1675,13 +1722,32 @@ func (r *Runner) out(env *envelope, entry map[string]interface{}, ctr *counter) 
 	if env.derived {
 		msg = env.ctx
 	}
-	if r.sink.Kind == "foreach" {
+	if r.sink.Kind == "foreach" || r.sink.Kind == "foreachBatch" {
 		var fctx interface{}
 		if env.derived || entry == nil {
 			fctx = ctxArg(env.ctx)
 		} else {
 			fctx = map[string]interface{}{"position": entry["position"], "queue": entry["queue"], "partition": entry["partition"],
 				"partitionId": entry["partitionId"], "offset": entry["offset"], "transactionId": entry["transactionId"]}
+		}
+		if r.sink.Kind == "foreachBatch" {
+			// Kept for the batch, with the id a queue output of it would have: the same on every delivery.
+			var id, partition string
+			if entry != nil {
+				id = FeedOutputID(r.queryID, entry, ctr.n, r.epoch, r.id)
+				ctr.n++
+				partition = jsv.String(entry["partition"])
+			} else {
+				id = r.emitID()
+				partition = env.key
+			}
+			p := &r.pending
+			if len(p.batch) == 0 {
+				now := r.now()
+				p.batchSince = &now
+			}
+			p.batch = append(p.batch, batchItem{value: env.value, ctx: fctx, id: id, subject: r.subject, partition: partition})
+			return nil
 		}
 		if err := callErr(func() error { return r.sink.Foreach(env.value, fctx) }); err != nil {
 			return err
@@ -1746,6 +1812,7 @@ func (r *Runner) unit(s subject, fn func(*counter) error) (string, error) {
 		return "ok", nil
 	}
 	var lastErr error
+	r.subject = s
 	for attempt := 0; attempt <= r.opts.retries; attempt++ {
 		cp := r.checkpoint()
 		err := fn(&counter{})
@@ -1799,35 +1866,45 @@ func errorName(err error) string {
 	return "Error"
 }
 
-func (r *Runner) poisoned(s subject, err error, attempts int) string {
-	r.m.poisoned++
-	if r.poison.kind != "stop" && r.pipeline.HasState() {
-		r.pendingSkips = append(r.pendingSkips, r.skipID(s))
-	}
-	// A feed message: the unit's own, or one an event-time step held and took in its turn.
-	entry := s.entry
+// describeUnit is a unit for a report: the feed message (the unit's own, or
+// one an event-time step held and took in its turn), or the result.
+func (r *Runner) describeUnit(s subject) (entry map[string]interface{}, what jsv.Ordered, where string) {
+	entry = s.entry
 	if entry == nil && s.emit != nil {
 		entry = s.emit.entry
 	}
-	var what jsv.Ordered
-	var where string
+	if entry == nil && s.emit == nil {
+		return nil, jsv.Ordered{}, "a result"
+	}
 	if entry != nil {
 		what = jsv.Ordered{{K: "position", V: entry["position"]}, {K: "queue", V: entry["queue"]}, {K: "partition", V: entry["partition"]},
 			{K: "offset", V: entry["offset"]}, {K: "transactionId", V: entry["transactionId"]}}
 		where = fmt.Sprintf("the message at position %s (%s/%s, offset %s)", jsv.String(entry["position"]), jsv.String(entry["queue"]),
 			jsv.String(entry["partition"]), jsv.String(entry["offset"]))
-	} else {
-		what = jsv.Ordered{{K: "step", V: float64(s.emit.step)}, {K: "result", V: jsv.Get(s.emit.ctx, "kind")}, {K: "key", V: s.emit.key}}
-		where = fmt.Sprintf("the %s result for key %s", jsv.String(jsv.Get(s.emit.ctx, "kind")), jsv.MustMarshal(s.emit.key))
+		return entry, what, where
 	}
+	what = jsv.Ordered{{K: "step", V: float64(s.emit.step)}, {K: "result", V: jsv.Get(s.emit.ctx, "kind")}, {K: "key", V: s.emit.key}}
+	where = fmt.Sprintf("the %s result for key %s", jsv.String(jsv.Get(s.emit.ctx, "kind")), jsv.MustMarshal(s.emit.key))
+	return nil, what, where
+}
+
+// poisonCtx is a poison report's context: phase, action, attempts and what the unit was.
+func poisonCtx(action string, attempts int, what jsv.Ordered) map[string]interface{} {
+	c := map[string]interface{}{"phase": "poison", "action": action, "attempts": float64(attempts)}
+	for _, p := range what {
+		c[p.K] = p.V
+	}
+	return c
+}
+
+func (r *Runner) poisoned(s subject, err error, attempts int) string {
+	r.m.poisoned++
+	if r.poison.kind != "stop" && r.pipeline.HasState() {
+		r.pendingSkips = append(r.pendingSkips, r.skipID(s))
+	}
+	entry, what, where := r.describeUnit(s)
 	reason := err.Error()
-	ctxOf := func(action string) map[string]interface{} {
-		c := map[string]interface{}{"phase": "poison", "action": action, "attempts": float64(attempts)}
-		for _, p := range what {
-			c[p.K] = p.V
-		}
-		return c
-	}
+	ctxOf := func(action string) map[string]interface{} { return poisonCtx(action, attempts, what) }
 	switch r.poison.kind {
 	case "skip":
 		r.m.skipped++
@@ -1875,6 +1952,14 @@ func (r *Runner) poisoned(s subject, err error, attempts int) string {
 
 // stopOnPoison: onPoison 'stop' commits what came before the message, then stops there.
 func (r *Runner) stopOnPoison(ctx context.Context) error {
+	// A batch that waits came before the message: it goes first (the commit
+	// moves the position past it). An item of it that fails stops the stream
+	// instead, at the last commit ("halt": poisonStop names that item now).
+	if len(r.pending.batch) > 0 && r.poisonStop != nil && !r.poisonStop.batch {
+		if _, err := r.flushBatch(ctx); err != nil {
+			return err
+		}
+	}
 	p := r.poisonStop
 	// This commit's record says why the stream stopped, and at which message:
 	// it is written even with nothing else to commit.
@@ -1898,8 +1983,13 @@ func (r *Runner) stopOnPoison(ctx context.Context) error {
 	for _, kv := range p.what {
 		fields[kv.K] = kv.V
 	}
-	e := &FeedError{Msg: fmt.Sprintf("%s failed %d times: %s. The stream stopped there: fix the function and start it again, "+
-		"or run it with onPoison: 'skip' or a dead-letter queue", p.where, p.attempts, p.reason), Code: "feed_poison", Fields: fields, Cause: p.err}
+	msg := fmt.Sprintf("%s failed %d times: %s. The stream stopped there: fix the function and start it again, "+
+		"or run it with onPoison: 'skip' or a dead-letter queue", p.where, p.attempts, p.reason)
+	if p.batch {
+		msg = fmt.Sprintf("%s failed %d times in foreachBatch: %s. The stream stopped before its batch: fix the function "+
+			"and start it again (it gets the batch again), or run it with onPoison: 'skip' or a dead-letter queue", p.where, p.attempts, p.reason)
+	}
+	e := &FeedError{Msg: msg, Code: "feed_poison", Fields: fields, Cause: p.err}
 	stopped := map[string]interface{}{"reason": "poison", "error": p.reason, "attempts": float64(p.attempts)}
 	ctxMap := map[string]interface{}{"phase": "poison", "action": "stopped", "attempts": float64(p.attempts)}
 	for _, kv := range p.what {
@@ -1916,7 +2006,7 @@ func (r *Runner) checkpoint() checkpointT {
 	return checkpointT{
 		state: r.pipeline.Checkpoint(), outputs: len(r.pending.outputs), work: r.pending.work, effects: r.pending.effects,
 		emitSeq: r.pending.emitSeq, clock: r.clock, units: r.units, late: r.pipeline.late, skips: len(r.pendingSkips),
-		emitted: r.m.emitted,
+		emitted: r.m.emitted, batch: len(r.pending.batch), batchSince: r.pending.batchSince,
 	}
 }
 
@@ -1935,6 +2025,15 @@ func (r *Runner) restore(cp checkpointT) {
 		r.pendingSkips = r.pendingSkips[:cp.skips]
 	}
 	r.m.emitted = cp.emitted
+	// The batch only shrinks back (a commit in between may have delivered it).
+	if len(r.pending.batch) > cp.batch {
+		r.pending.batch = r.pending.batch[:cp.batch]
+	}
+	if len(r.pending.batch) > 0 {
+		r.pending.batchSince = cp.batchSince
+	} else {
+		r.pending.batchSince = nil
+	}
 }
 
 // rollback goes back to the last commit: what was produced since is dropped, and read again.
@@ -1956,7 +2055,7 @@ func (r *Runner) positionInt() (int64, bool) {
 
 func (r *Runner) hasPending() bool {
 	p := r.pending
-	if len(p.outputs) > 0 || p.work > 0 || p.effects > 0 || (r.pipeline.HasState() && r.pipeline.Dirty()) {
+	if len(p.outputs) > 0 || p.work > 0 || p.effects > 0 || len(p.batch) > 0 || (r.pipeline.HasState() && r.pipeline.Dirty()) {
 		return true
 	}
 	if p.hasNext {
@@ -1970,25 +2069,41 @@ func (r *Runner) hasPending() bool {
 func (r *Runner) settle(ctx context.Context, page feed.Page) error {
 	p := r.pending
 	now := r.now()
-	// Outputs and done effects commit soon (at once when caught up); state
-	// alone every commitEveryMillis; a position alone now and then.
-	outputs := len(p.outputs) > 0 || p.effects > 0
-	moved := false
-	if p.hasNext {
-		pos, ok := r.positionInt()
-		moved = !ok || p.next != pos
-	}
 	due := false
-	if outputs {
-		due = page.CaughtUp || len(p.outputs) >= r.opts.maxPendingOutputs || now-r.lastCommitAt >= r.opts.commitEveryMillis
-	} else if r.pipeline.Dirty() || p.work > 0 {
-		due = now-r.lastCommitAt >= r.opts.commitEveryMillis
-	} else if moved {
-		due = now-r.lastPositionCommit >= r.opts.positionCommitMillis
+	if len(p.batch) > 0 {
+		// A batch goes when it is due, and the commit right after it moves the
+		// position. Until then nothing commits past it (no position, no tick):
+		// the next read waits until the batch is due, at most.
+		if !r.batchDue(now) {
+			w := int(math.Max(0, math.Min(float64(r.opts.waitMillis), math.Ceil(*p.batchSince+float64(r.sink.MaxWaitMillis)-now))))
+			r.nextWait = &w
+			return nil
+		}
+		due = true
+	} else {
+		// Outputs and done effects commit soon (at once when caught up); state
+		// alone every commitEveryMillis; a position alone now and then.
+		outputs := len(p.outputs) > 0 || p.effects > 0
+		moved := false
+		if p.hasNext {
+			pos, ok := r.positionInt()
+			moved = !ok || p.next != pos
+		}
+		if outputs {
+			due = page.CaughtUp || len(p.outputs) >= r.opts.maxPendingOutputs || now-r.lastCommitAt >= r.opts.commitEveryMillis
+		} else if r.pipeline.Dirty() || p.work > 0 {
+			due = now-r.lastCommitAt >= r.opts.commitEveryMillis
+		} else if moved {
+			due = now-r.lastPositionCommit >= r.opts.positionCommitMillis
+		}
 	}
 	if due {
-		if _, err := r.commit(ctx); err != nil {
+		c, err := r.commitAll(ctx)
+		if err != nil {
 			return err
+		}
+		if c == "halt" {
+			return r.stopOnPoison(ctx)
 		}
 	}
 	if !r.pipeline.HasState() || !r.pipeline.NeedsFeedClock() || r.resolvedAt == 0 {
@@ -2038,6 +2153,149 @@ func (r *Runner) tick(ctx context.Context, now float64) error {
 	r.m.ticks++
 	_, err := r.commit(ctx)
 	return err
+}
+
+// ---- foreachBatch -------------------------------------------------------------------
+
+// batchFull: the batch holds maxItems, it goes now.
+func (r *Runner) batchFull() bool {
+	return r.sink.Kind == "foreachBatch" && len(r.pending.batch) >= r.sink.MaxItems
+}
+
+// batchDue: the batch goes now: full, at the end of a read (maxWaitMillis 0), or its first item waited maxWaitMillis.
+func (r *Runner) batchDue(now float64) bool {
+	p := r.pending
+	return len(p.batch) >= r.sink.MaxItems || r.sink.MaxWaitMillis == 0 || now-*p.batchSince >= float64(r.sink.MaxWaitMillis)
+}
+
+// commitAll is the batch that waits, then the commit (which moves the
+// position past it). "halt": an item stopped the stream.
+func (r *Runner) commitAll(ctx context.Context) (string, error) {
+	if len(r.pending.batch) > 0 {
+		res, err := r.flushBatch(ctx)
+		if err != nil {
+			return "", err
+		}
+		if res == "halt" {
+			return "halt", nil
+		}
+	}
+	return r.commit(ctx)
+}
+
+// flushBatch hands every item that waits to the function, maxItems at a
+// time: "ok", or "halt" (rolled back to the last commit).
+func (r *Runner) flushBatch(ctx context.Context) (string, error) {
+	items := r.pending.batch
+	max := r.sink.MaxItems
+	for i := 0; i < len(items); i += max {
+		end := i + max
+		if end > len(items) {
+			end = len(items)
+		}
+		res, err := r.deliver(items[i:end])
+		if err != nil {
+			return "", err
+		}
+		if res == "halt" {
+			return "halt", nil
+		}
+	}
+	r.pending.batch = nil
+	r.pending.batchSince = nil
+	return "ok", nil
+}
+
+// deliver is one call: tried retries more times, with the pause of a
+// message's retries; then item by item, each tried as often, so the poison
+// policy meets the item that fails, and the others are delivered.
+func (r *Runner) deliver(items []batchItem) (string, error) {
+	fnErr, err := r.tryItems(items)
+	if err != nil {
+		return "", err
+	}
+	if fnErr == nil {
+		return "ok", nil
+	}
+	if len(items) == 1 {
+		return r.itemPoisoned(items[0], fnErr), nil
+	}
+	for _, it := range items {
+		e, err := r.tryItems([]batchItem{it})
+		if err != nil {
+			return "", err
+		}
+		if e != nil && r.itemPoisoned(it, e) == "halt" {
+			return "halt", nil
+		}
+	}
+	return "ok", nil
+}
+
+// tryItems calls the function with the items: fnErr is nil when it returned,
+// else its error after the last try; err is errStopping when a stop cut the
+// tries short.
+func (r *Runner) tryItems(items []batchItem) (fnErr error, err error) {
+	for attempt := 0; attempt <= r.opts.retries; attempt++ {
+		list := make([]BatchItem, len(items))
+		for i, it := range items {
+			list[i] = BatchItem{Value: it.value, Ctx: it.ctx, ID: it.id}
+		}
+		e := callErr(func() error { return r.sink.ForeachBatch(list) })
+		if e == nil {
+			r.m.batches++
+			r.m.effects += int64(len(items))
+			r.pending.effects += len(items)
+			return nil, nil
+		}
+		if r.stopping.Load() {
+			return nil, errStopping
+		}
+		if attempt == r.opts.retries {
+			return e, nil
+		}
+		r.m.retries++
+		r.sleep(r.opts.retryDelayMillis * math.Pow(2, float64(attempt)))
+	}
+	return nil, nil
+}
+
+// itemPoisoned is the poison policy for one item of a batch: "skip" leaves
+// it out, a queue receives it ({queryId, attempts, error, item}, with the next
+// commit); "stop" rolls back to the last commit (nothing of the batch
+// commits, the next start delivers it again) and answers "halt".
+func (r *Runner) itemPoisoned(it batchItem, err error) string {
+	attempts := r.opts.retries + 1
+	r.m.poisoned++
+	_, what, where := r.describeUnit(it.subject)
+	where = "an item of " + where
+	reason := err.Error()
+	switch r.poison.kind {
+	case "skip":
+		r.m.skipped++
+		r.report(&FeedError{Msg: fmt.Sprintf("%s failed %d times in foreachBatch and was skipped: %s", where, attempts, reason), Cause: err},
+			poisonCtx("skipped", attempts, what))
+		return "ok"
+	case "deadLetter":
+		record := map[string]interface{}{
+			"queryId":  r.queryID,
+			"attempts": float64(attempts),
+			"error":    map[string]interface{}{"name": errorName(err), "message": reason},
+			"item":     map[string]interface{}{"value": it.value, "ctx": it.ctx, "id": it.id},
+		}
+		if r.shard != nil {
+			record["shard"] = map[string]interface{}{"index": float64(r.shard.Index), "count": float64(r.shard.Count)}
+		}
+		id := OutputPrefix(r.queryID) + sha256Hex(fmt.Sprintf("%s\n%d\ndlq-item\n%s", r.id, r.epoch, it.id))[:40]
+		r.pending.outputs = append(r.pending.outputs, output{queue: r.poison.queue, partition: it.partition, data: record, transactionID: id})
+		r.m.deadLettered++
+		r.report(&FeedError{Msg: fmt.Sprintf("%s failed %d times in foreachBatch and went to %s: %s", where, attempts, r.poison.queue, reason), Cause: err},
+			poisonCtx("deadLettered", attempts, what))
+		return "ok"
+	}
+	r.rollback()
+	r.poisonStop = &poisonStopT{where: where, what: what, attempts: attempts, err: err, reason: reason, batch: true}
+	return "halt"
 }
 
 // ---- commit -------------------------------------------------------------------------

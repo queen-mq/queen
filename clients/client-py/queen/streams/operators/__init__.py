@@ -17,6 +17,7 @@ from .reduce_op import ReduceOperator, state_key_for, parse_state_key
 from .aggregate_op import AggregateOperator, RESERVED_AGGREGATE_FIELDS
 from .sink_op import SinkOperator
 from .foreach_op import ForeachOperator
+from .foreach_batch_op import ForeachBatchOperator
 from .gate_op import GateOperator
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "RESERVED_AGGREGATE_FIELDS",
     "SinkOperator",
     "ForeachOperator",
+    "ForeachBatchOperator",
     "GateOperator",
     "state_key_for",
     "parse_state_key",

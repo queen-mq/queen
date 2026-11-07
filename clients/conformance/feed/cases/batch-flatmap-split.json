@@ -1,0 +1,93 @@
+{
+  "name": "batch-flatmap-split",
+  "about": "foreachBatch maxItems splits what one message makes: calls of at most maxItems, one commit after the last",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "flatMap",
+      "fn": [
+        {
+          "n": {
+            "$get": "0.data.n"
+          },
+          "i": 0
+        },
+        {
+          "n": {
+            "$get": "0.data.n"
+          },
+          "i": 1
+        },
+        {
+          "n": {
+            "$get": "0.data.n"
+          },
+          "i": 2
+        }
+      ]
+    },
+    {
+      "op": "foreachBatch",
+      "opts": {
+        "maxItems": 2
+      }
+    }
+  ],
+  "compareMetrics": [
+    "emitted",
+    "effects",
+    "batches",
+    "outputs",
+    "retries",
+    "poisoned",
+    "skipped",
+    "deadLettered",
+    "pendingBatch"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "metrics": "A",
+      "as": "a",
+      "keys": [
+        "batches",
+        "effects",
+        "commits"
+      ]
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-batch-flatmap-split"
+  },
+  "mode": "fake"
+}

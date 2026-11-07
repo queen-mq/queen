@@ -38,6 +38,7 @@ use crate::transaction::TxOutcome;
 use crate::Queen;
 use queen_protocol::kv::{Expiry, KvOperation};
 
+use super::batch::BatchItem;
 use super::env::{snapshot_of, Env};
 use super::ops::{Fn1, FnResult};
 use super::pipeline::{Emit, Pipeline, PipelineCp, Release};
@@ -426,6 +427,9 @@ struct Pending {
     // The feed time `next` is at, and whether the read was caught up there.
     read_to: Option<f64>,
     caught_up: Option<bool>,
+    // The results a .foreach_batch() keeps, and when the first of them came.
+    batch: Vec<PendingItem>,
+    batch_since: Option<f64>,
 }
 
 fn fresh_pending() -> Pending {
@@ -437,6 +441,92 @@ fn fresh_pending() -> Pending {
         emit_seq: 0,
         read_to: None,
         caught_up: None,
+        batch: Vec::new(),
+        batch_since: None,
+    }
+}
+
+/// A result a `.foreach_batch()` keeps until its batch goes: what the
+/// function gets, the unit it came from (for reports), and the partition a
+/// dead letter of it goes to.
+#[derive(Clone)]
+struct PendingItem {
+    value: Option<Value>,
+    ctx: Value,
+    id: String,
+    subject: Option<Arc<ItemSubject>>,
+    partition: String,
+}
+
+impl PendingItem {
+    fn item(&self) -> BatchItem {
+        BatchItem {
+            value: self.value.clone(),
+            ctx: self.ctx.clone(),
+            id: self.id.clone(),
+        }
+    }
+}
+
+/// A unit for a report, kept by the batch items it made: a feed message, or
+/// a step's result (with the message an event-time step held, if any).
+enum ItemSubject {
+    Entry(Arc<Value>),
+    Emit {
+        step: usize,
+        kind: Value,
+        key: String,
+        entry: Option<Arc<Value>>,
+    },
+}
+
+/// `#describe`: what a report says of a unit (`what`), and where it was.
+fn describe(
+    entry: Option<&Value>,
+    emit: Option<(usize, &Value, &str)>,
+) -> (Map<String, Value>, String) {
+    let mut what = Map::new();
+    if let Some(e) = entry {
+        for k in ["position", "queue", "partition", "offset", "transactionId"] {
+            if let Some(v) = e.get(k) {
+                what.insert(k.into(), v.clone());
+            }
+        }
+        let where_ = format!(
+            "the message at position {} ({}/{}, offset {})",
+            js::string_of(e.get("position")),
+            js::string_of(e.get("queue")),
+            js::string_of(e.get("partition")),
+            js::string_of(e.get("offset"))
+        );
+        return (what, where_);
+    }
+    let Some((step, kind, key)) = emit else {
+        return (what, "a result".into());
+    };
+    what.insert("step".into(), json!(step));
+    what.insert("result".into(), kind.clone());
+    what.insert("key".into(), json!(key));
+    (
+        what,
+        format!(
+            "the {} result for key {}",
+            js::string_of(Some(kind)),
+            js::string_json(key)
+        ),
+    )
+}
+
+fn describe_item(subject: Option<&ItemSubject>) -> (Map<String, Value>, String) {
+    match subject {
+        None => describe(None, None),
+        Some(ItemSubject::Entry(e)) => describe(Some(e), None),
+        Some(ItemSubject::Emit {
+            step,
+            kind,
+            key,
+            entry,
+        }) => describe(entry.as_deref(), Some((*step, kind, key))),
     }
 }
 
@@ -464,6 +554,7 @@ struct Output {
 struct Counters {
     m: Map<String, Value>,
     pending_outputs: usize,
+    pending_batch: usize,
     clock: f64,
     units: u64,
     snap_position: Value,
@@ -471,12 +562,13 @@ struct Counters {
     committed: Value,
 }
 
-const COUNTERS: [&str; 33] = [
+const COUNTERS: [&str; 34] = [
     "cycles",
     "entriesRead",
     "emitted",
     "outputs",
     "effects",
+    "batches",
     "commits",
     "conflicts",
     "errors",
@@ -526,6 +618,7 @@ impl Counters {
         Self {
             m,
             pending_outputs: 0,
+            pending_batch: 0,
             clock: 0.0,
             units: 0,
             snap_position: Value::Null,
@@ -590,6 +683,7 @@ impl Shared {
         let c = self.c();
         let mut m = c.m.clone();
         m.insert("pendingOutputs".into(), json!(c.pending_outputs));
+        m.insert("pendingBatch".into(), json!(c.pending_batch));
         if let Some((index, count)) = self.shard {
             m.insert("shard".into(), json!({ "index": index, "count": count }));
         }
@@ -916,6 +1010,8 @@ enum Flow {
     Ok,
     Stop,
     Abandon,
+    // An item of a batch stopped the stream (rolled back to the last commit already).
+    Halt,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -943,6 +1039,8 @@ struct PoisonStop {
     what: Map<String, Value>,
     attempts: u32,
     reason: String,
+    // An item of a batch, not a message.
+    batch: bool,
 }
 
 /// The snapshot a commit names.
@@ -1018,6 +1116,8 @@ struct Core {
     about: Option<Option<Value>>,
     about_owed: bool,
     steps: Vec<super::pipeline::PlanStep>,
+    // The unit running now (with a .foreach_batch()): what a batch item came from.
+    subject: Option<Arc<ItemSubject>>,
 }
 
 type LoadFuture<'a> = std::pin::Pin<
@@ -1035,6 +1135,8 @@ struct Cp {
     units: u64,
     late: u64,
     skips: usize,
+    batch: usize,
+    batch_since: Option<f64>,
     // A unit tried again counts its results once.
     emitted: u64,
 }
@@ -1085,7 +1187,7 @@ impl Core {
         }
         if compiled.terminal.is_none() {
             return Err(FeedErr::msg(
-                "Stream.fromFeed: end the chain with .to(queen.queue(...)) or .foreach(fn)",
+                "Stream.fromFeed: end the chain with .to(queen.queue(...)), .foreach(fn) or .foreachBatch(fn)",
             ));
         }
         let id = shard_id(&o.query_id, shard);
@@ -1166,6 +1268,7 @@ impl Core {
             about: None,
             about_owed: false,
             steps: steps_plan,
+            subject: None,
         })
     }
 
@@ -1214,6 +1317,7 @@ impl Core {
         };
         let mut c = self.sh.c();
         c.pending_outputs = self.pending.outputs.len();
+        c.pending_batch = self.pending.batch.len();
         c.clock = self.clock;
         c.units = self.units;
         c.snap_position = snap_position;
@@ -1704,13 +1808,31 @@ impl Core {
             }
             self.publish();
         }
-        // Stopping: what is done and not yet committed goes in now, with a
-        // snapshot, so the next start has nothing to read again.
+        // Stopping: a batch that waits goes to its function first, tried once (one
+        // that fails now is delivered again at the next start); then what is done
+        // and not yet committed goes in, with a snapshot, so the next start has
+        // nothing to read again.
+        let held = |l: &Option<Lock>| l.as_ref().is_none_or(|l| l.held());
+        if self.active()
+            && !self.pending.batch.is_empty()
+            && held(&self.lock)
+            && self.poison_stop.is_none()
+        {
+            if let Err(err) = self.flush_batch().await {
+                if !err.stopping {
+                    self.report(
+                        &err,
+                        json!({ "phase": "stop", "position": self.position.to_value() }),
+                    );
+                }
+                self.rollback();
+            }
+        }
+        let lock_gone = !held(&self.lock);
         let snapshot_owed = {
             let p = self.p();
             p.has_state() && p.changed_since_snapshot()
         };
-        let lock_gone = self.lock.as_ref().is_some_and(|l| !l.held());
         // Asked to stop: the record of this last commit says so (`stopped`), so
         // that a stream stopped on purpose is not taken for one that died.
         // (Only at a position: a stream stopped before its first read has none to write.)
@@ -1931,7 +2053,8 @@ impl Core {
         if r == Flow::Abandon {
             return Ok(());
         }
-        if r == Flow::Stop {
+        // Halt: an item of a batch stopped the stream (rolled back to the last commit already).
+        if r == Flow::Stop || r == Flow::Halt {
             self.stop_on_poison().await?;
             return Ok(());
         }
@@ -1946,8 +2069,8 @@ impl Core {
         for g in groups(&page.entries, None) {
             let mut cp = self.checkpoint();
             let r = self.process_group(&g, Some(&mut cp)).await?;
-            if r == Flow::Abandon {
-                return Ok(Flow::Abandon);
+            if r == Flow::Abandon || r == Flow::Halt {
+                return Ok(r);
             }
             if r == Flow::Stop {
                 // The whole transaction the poisoned message came in stays for later.
@@ -1957,11 +2080,15 @@ impl Core {
             }
             self.pending.next = Some(g.position + 1);
             self.read_to(ts_of(&g.entries[0]), false);
-            // Enough waiting outputs: commit them now, between two positions.
-            if self.pending.outputs.len() >= self.o.max_pending_outputs
-                && self.commit().await? != Flow::Ok
-            {
-                return Ok(Flow::Abandon);
+            // Enough waiting outputs, or a full batch: commit them now, between two positions.
+            if self.pending.outputs.len() >= self.o.max_pending_outputs || self.batch_full() {
+                let c = self.commit_all().await?;
+                if c == Flow::Halt {
+                    return Ok(Flow::Halt);
+                }
+                if c != Flow::Ok {
+                    return Ok(Flow::Abandon);
+                }
             }
         }
         let feed_clock = {
@@ -1973,8 +2100,8 @@ impl Core {
             let t = self.clock.max(resolved.unwrap_or(0.0));
             self.clock = t;
             let r = self.advance_to(t, Some(&mut cp)).await?;
-            if r == Flow::Abandon {
-                return Ok(Flow::Abandon);
+            if r == Flow::Abandon || r == Flow::Halt {
+                return Ok(r);
             }
             if r == Flow::Stop {
                 self.restore(&cp);
@@ -2108,8 +2235,11 @@ impl Core {
                 }
                 self.units += 1;
                 done += 1;
-                if live && self.on_batch(cp).await? == Flow::Abandon {
-                    return Ok(Flow::Abandon);
+                if live {
+                    let b = self.on_batch(cp).await?;
+                    if b != Flow::Ok {
+                        return Ok(b);
+                    }
                 }
                 continue;
             }
@@ -2124,8 +2254,11 @@ impl Core {
                 self.units += 1;
                 done += 1;
             }
-            if live && n > 0 && self.on_batch(cp).await? == Flow::Abandon {
-                return Ok(Flow::Abandon);
+            if live && n > 0 {
+                let b = self.on_batch(cp).await?;
+                if b != Flow::Ok {
+                    return Ok(b);
+                }
             }
             if n >= CLOSE_BATCH {
                 tokio::task::yield_now().await;
@@ -2133,13 +2266,18 @@ impl Core {
         }
     }
 
-    /// After a batch of closes: commit in the middle once enough results wait.
+    /// After a batch of closes: commit in the middle once enough results
+    /// wait, or a full batch (Abandon, or Halt: an item stopped the stream).
     async fn on_batch(&mut self, cp: &mut Option<&mut Cp>) -> std::result::Result<Flow, FeedErr> {
-        if self.pending.outputs.len() < self.o.max_pending_outputs {
+        if self.pending.outputs.len() < self.o.max_pending_outputs && !self.batch_full() {
             return Ok(Flow::Ok);
         }
         self.count("closeCommits", 1);
-        if self.commit().await? != Flow::Ok {
+        let c = self.commit_all().await?;
+        if c == Flow::Halt {
+            return Ok(Flow::Halt);
+        }
+        if c != Flow::Ok {
             return Ok(Flow::Abandon);
         }
         if let Some(c) = cp.as_deref_mut() {
@@ -2216,6 +2354,17 @@ impl Core {
             return Ok(Flow::Ok);
         }
         let mut last: Option<FeedErr> = None;
+        if matches!(self.terminal, Some(Terminal::ForeachBatch(_))) {
+            self.subject = Some(Arc::new(match &subject {
+                Subject::Entry(e) => ItemSubject::Entry(Arc::clone(&e.shape)),
+                Subject::Emit(em) => ItemSubject::Emit {
+                    step: em.step,
+                    kind: em.ctx.get("kind").cloned().unwrap_or(Value::Null),
+                    key: em.key.clone(),
+                    entry: em.entry.clone(),
+                },
+            }));
+        }
         for attempt in 0..=self.o.retries {
             let cp = self.checkpoint();
             match self.run_work(&work).await {
@@ -2249,37 +2398,11 @@ impl Core {
             Subject::Entry(e) => Some(e.to_value()),
             Subject::Emit(em) => em.entry.as_deref().cloned(),
         };
-        let mut what = Map::new();
-        let where_ = match &entry {
-            Some(e) => {
-                for k in ["position", "queue", "partition", "offset", "transactionId"] {
-                    if let Some(v) = e.get(k) {
-                        what.insert(k.into(), v.clone());
-                    }
-                }
-                format!(
-                    "the message at position {} ({}/{}, offset {})",
-                    js::string_of(e.get("position")),
-                    js::string_of(e.get("queue")),
-                    js::string_of(e.get("partition")),
-                    js::string_of(e.get("offset"))
-                )
-            }
-            None => {
-                let Subject::Emit(em) = subject else {
-                    unreachable!()
-                };
-                what.insert("step".into(), json!(em.step));
-                what.insert(
-                    "result".into(),
-                    em.ctx.get("kind").cloned().unwrap_or(Value::Null),
-                );
-                what.insert("key".into(), json!(em.key));
-                format!(
-                    "the {} result for key {}",
-                    js::string_of(em.ctx.get("kind")),
-                    js::string_json(&em.key)
-                )
+        let (what, where_) = match subject {
+            Subject::Entry(_) => describe(entry.as_ref(), None),
+            Subject::Emit(em) => {
+                let kind = em.ctx.get("kind").cloned().unwrap_or(Value::Null);
+                describe(entry.as_ref(), Some((em.step, &kind, &em.key)))
             }
         };
         let reason = err.message.clone();
@@ -2382,6 +2505,7 @@ impl Core {
                     what,
                     attempts,
                     reason,
+                    batch: false,
                 });
                 Flow::Stop
             }
@@ -2390,14 +2514,21 @@ impl Core {
 
     /// onPoison 'stop': commit what came before the message, then stop there.
     async fn stop_on_poison(&mut self) -> std::result::Result<(), FeedErr> {
+        // A batch that waits came before the message: it goes first (the commit
+        // moves the position past it). An item of it that fails stops the stream
+        // instead, at the last commit (Halt: `poison_stop` names that item now).
+        if !self.pending.batch.is_empty() && self.poison_stop.as_ref().is_some_and(|p| !p.batch) {
+            self.flush_batch().await?;
+        }
         let Some(p) = &self.poison_stop else {
             return Ok(());
         };
-        let (where_, attempts, reason, what) = (
+        let (where_, attempts, reason, what, batch) = (
             p.where_.clone(),
             p.attempts,
             p.reason.clone(),
             p.what.clone(),
+            p.batch,
         );
         // This commit's record says why the stream stopped, and at which
         // message: it is written even with nothing else to commit.
@@ -2420,10 +2551,17 @@ impl Core {
             self.poison_stop = None;
             return Ok(());
         }
-        let message = format!(
-            "{where_} failed {attempts} times: {reason}. The stream stopped there: fix the function and start it again, \
-             or run it with onPoison: 'skip' or a dead-letter queue"
-        );
+        let message = if batch {
+            format!(
+                "{where_} failed {attempts} times in foreachBatch: {reason}. The stream stopped before its batch: fix the function \
+                 and start it again (it gets the batch again), or run it with onPoison: 'skip' or a dead-letter queue"
+            )
+        } else {
+            format!(
+                "{where_} failed {attempts} times: {reason}. The stream stopped there: fix the function and start it again, \
+                 or run it with onPoison: 'skip' or a dead-letter queue"
+            )
+        };
         let mut stopped = Map::new();
         stopped.insert("reason".into(), json!("poison"));
         stopped.insert("error".into(), json!(reason));
@@ -2455,6 +2593,8 @@ impl Core {
             units: self.units,
             late: p.late,
             skips: self.pending_skips.len(),
+            batch: self.pending.batch.len(),
+            batch_since: self.pending.batch_since,
             emitted: self.sh.c().get_u64("emitted"),
         }
     }
@@ -2472,12 +2612,21 @@ impl Core {
         self.clock = cp.clock;
         self.units = cp.units;
         self.pending_skips.truncate(cp.skips);
+        // Never grows it: a batch that went since the checkpoint stays gone.
+        self.pending.batch.truncate(cp.batch);
+        self.pending.batch_since = if self.pending.batch.is_empty() {
+            None
+        } else {
+            cp.batch_since
+        };
+        self.batch_changed();
         self.sh.c().set("emitted", json!(cp.emitted));
     }
 
     /// Back to the last commit: what was produced since is dropped, and read again.
     fn rollback(&mut self) {
         self.pending = fresh_pending();
+        self.batch_changed();
         self.pending_skips.clear();
         self.clock = self.committed_clock;
         self.units = self.committed_units;
@@ -2497,6 +2646,7 @@ impl Core {
         !p.outputs.is_empty()
             || p.work > 0
             || p.effects > 0
+            || !p.batch.is_empty()
             || (has_state && dirty)
             || p.next
                 .is_some_and(|n| self.position != FeedFrom::Position(n))
@@ -2521,7 +2671,7 @@ impl Core {
         };
         let value = env.value().cloned();
         match self.terminal.clone() {
-            Some(Terminal::Foreach(f)) => {
+            Some(t @ (Terminal::Foreach(_) | Terminal::ForeachBatch(_))) => {
                 let fctx = if let (false, Some(entry)) = (env.derived, entry) {
                     let e = entry.shape();
                     let mut m = Map::new();
@@ -2540,6 +2690,42 @@ impl Core {
                     Value::Object(m)
                 } else {
                     env.ctx.clone().unwrap_or(Value::Null)
+                };
+                let f = match t {
+                    Terminal::Foreach(f) => f,
+                    _ => {
+                        // Kept for the batch, with the id a queue output of it would have: the same on every delivery.
+                        let id = match entry {
+                            Some(e) => {
+                                let id = feed_output_id(
+                                    &self.sh.query_id,
+                                    e.shape(),
+                                    *ctr,
+                                    self.epoch,
+                                    &self.sh.id,
+                                );
+                                *ctr += 1;
+                                id
+                            }
+                            None => self.emit_id(),
+                        };
+                        if self.pending.batch.is_empty() {
+                            self.pending.batch_since = Some(self.now());
+                        }
+                        let partition = match entry {
+                            Some(e) => e.partition.clone(),
+                            None => env.key.clone(),
+                        };
+                        self.pending.batch.push(PendingItem {
+                            value,
+                            ctx: fctx,
+                            id,
+                            subject: self.subject.clone(),
+                            partition,
+                        });
+                        self.batch_changed();
+                        return Ok(());
+                    }
                 };
                 f(value, fctx).await.map_err(FeedErr::msg)?;
                 self.count("effects", 1);
@@ -2598,25 +2784,44 @@ impl Core {
     /// After a page: commit when it is time, else move the broker's clock if a deadline is due.
     async fn settle(&mut self, page: &FeedPage) -> std::result::Result<(), FeedErr> {
         let now = self.now();
-        let outputs = !self.pending.outputs.is_empty() || self.pending.effects > 0;
-        let moved = self
-            .pending
-            .next
-            .is_some_and(|n| self.position != FeedFrom::Position(n));
-        let dirty = self.p().dirty();
-        let due = if outputs {
-            page.caught_up
-                || self.pending.outputs.len() >= self.o.max_pending_outputs
-                || now - self.last_commit_at >= self.o.commit_every_millis
-        } else if dirty || self.pending.work > 0 {
-            now - self.last_commit_at >= self.o.commit_every_millis
-        } else if moved {
-            now - self.last_position_commit >= self.o.position_commit_millis
+        let due = if !self.pending.batch.is_empty() {
+            // A batch goes when it is due, and the commit right after it moves the
+            // position. Until then nothing commits past it (no position, no tick):
+            // the next read waits until the batch is due, at most.
+            if !self.batch_due(now) {
+                let since = self.pending.batch_since.unwrap_or(now);
+                let w = (since + self.batch_wait_millis() as f64 - now)
+                    .ceil()
+                    .min(self.o.wait_millis as f64)
+                    .max(0.0);
+                self.next_wait = Some(w as u64);
+                return Ok(());
+            }
+            true
         } else {
-            false
+            // Outputs and done effects commit soon (at once when caught up); state
+            // alone every commitEveryMillis; a position alone now and then.
+            let outputs = !self.pending.outputs.is_empty() || self.pending.effects > 0;
+            let moved = self
+                .pending
+                .next
+                .is_some_and(|n| self.position != FeedFrom::Position(n));
+            let dirty = self.p().dirty();
+            if outputs {
+                page.caught_up
+                    || self.pending.outputs.len() >= self.o.max_pending_outputs
+                    || now - self.last_commit_at >= self.o.commit_every_millis
+            } else if dirty || self.pending.work > 0 {
+                now - self.last_commit_at >= self.o.commit_every_millis
+            } else if moved {
+                now - self.last_position_commit >= self.o.position_commit_millis
+            } else {
+                false
+            }
         };
-        if due {
-            self.commit().await?;
+        if due && self.commit_all().await? == Flow::Halt {
+            self.stop_on_poison().await?;
+            return Ok(());
         }
         let (has_state, needs, next) = {
             let mut p = self.p();
@@ -2659,6 +2864,210 @@ impl Core {
             self.next_wait = Some(w as u64);
         }
         Ok(())
+    }
+
+    // ---- foreach_batch -------------------------------------------------------------
+
+    fn batch_sink(&self) -> Option<&super::batch::ForeachBatch> {
+        match &self.terminal {
+            Some(Terminal::ForeachBatch(b)) => Some(b),
+            _ => None,
+        }
+    }
+
+    fn batch_wait_millis(&self) -> u64 {
+        self.batch_sink().map_or(0, |b| b.max_wait_millis)
+    }
+
+    /// The batch holds max_items: it goes now.
+    fn batch_full(&self) -> bool {
+        self.batch_sink()
+            .is_some_and(|b| self.pending.batch.len() >= b.max_items)
+    }
+
+    /// The batch goes now: full, at the end of a read (max_wait_millis 0), or its first item waited max_wait_millis.
+    fn batch_due(&self, now: f64) -> bool {
+        let Some(b) = self.batch_sink() else {
+            return true;
+        };
+        let since = self.pending.batch_since.unwrap_or(now);
+        self.pending.batch.len() >= b.max_items
+            || b.max_wait_millis == 0
+            || now - since >= b.max_wait_millis as f64
+    }
+
+    /// The batch that waits, then the commit (which moves the position past it). Halt: an item stopped the stream.
+    async fn commit_all(&mut self) -> std::result::Result<Flow, FeedErr> {
+        if !self.pending.batch.is_empty() && self.flush_batch().await? == Flow::Halt {
+            return Ok(Flow::Halt);
+        }
+        self.commit().await
+    }
+
+    /// Every item that waits, to the function, max_items at a time. Ok, or
+    /// Halt (rolled back to the last commit).
+    async fn flush_batch(&mut self) -> std::result::Result<Flow, FeedErr> {
+        let max = self.batch_sink().map_or(usize::MAX, |b| b.max_items.max(1));
+        let items = std::mem::take(&mut self.pending.batch);
+        for slice in items.chunks(max) {
+            match self.deliver(slice).await {
+                Ok(Flow::Halt) => return Ok(Flow::Halt),
+                Ok(_) => {}
+                Err(e) => {
+                    // Left as it was: the caller rolls back.
+                    if self.pending.batch.is_empty() {
+                        self.pending.batch = items;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        self.pending.batch = Vec::new();
+        self.pending.batch_since = None;
+        self.batch_changed();
+        Ok(Flow::Ok)
+    }
+
+    /// `metrics().pendingBatch` follows the batch as it changes (as JS reads it).
+    fn batch_changed(&self) {
+        self.sh.c().pending_batch = self.pending.batch.len();
+    }
+
+    /// One call: tried `retries` more times, with the pause of a message's
+    /// retries; then item by item, each tried as often, so the poison policy
+    /// meets the item that fails, and the others are delivered.
+    async fn deliver(&mut self, items: &[PendingItem]) -> std::result::Result<Flow, FeedErr> {
+        let Some(err) = self.try_items(items).await? else {
+            return Ok(Flow::Ok);
+        };
+        if items.len() == 1 {
+            return Ok(self.item_poisoned(&items[0], &err));
+        }
+        for item in items {
+            if let Some(e) = self.try_items(std::slice::from_ref(item)).await? {
+                if self.item_poisoned(item, &e) == Flow::Halt {
+                    return Ok(Flow::Halt);
+                }
+            }
+        }
+        Ok(Flow::Ok)
+    }
+
+    /// `None` when the function returned, else the error of the last try. A stop cuts the tries short.
+    async fn try_items(
+        &mut self,
+        items: &[PendingItem],
+    ) -> std::result::Result<Option<FeedErr>, FeedErr> {
+        let Some(f) = self.batch_sink().map(|b| b.f.clone()) else {
+            return Ok(None);
+        };
+        for attempt in 0..=self.o.retries {
+            match f(items.iter().map(PendingItem::item).collect()).await {
+                Ok(()) => {
+                    let n = items.len() as u64;
+                    {
+                        let mut c = self.sh.c();
+                        c.add("batches", 1);
+                        c.add("effects", n);
+                    }
+                    self.pending.effects += n;
+                    return Ok(None);
+                }
+                Err(e) => {
+                    if self.stopping() {
+                        return Err(FeedErr::stopping());
+                    }
+                    if attempt == self.o.retries {
+                        return Ok(Some(FeedErr::msg(e)));
+                    }
+                    self.count("retries", 1);
+                    self.sleep(self.o.retry_delay_millis * 2f64.powi(attempt as i32))
+                        .await;
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The poison policy for one item of a batch: Skip leaves it out, a queue
+    /// receives it (`{ queryId, attempts, error, item }`, with the next commit);
+    /// Stop rolls back to the last commit -- nothing of the batch commits, the
+    /// next start delivers it again -- and answers Halt. (Not in the record's
+    /// skips: the unit passed, and a replay applies its state again.)
+    fn item_poisoned(&mut self, item: &PendingItem, err: &FeedErr) -> Flow {
+        let attempts = self.o.retries + 1;
+        self.count("poisoned", 1);
+        let (what, where_) = describe_item(item.subject.as_deref());
+        let where_ = format!("an item of {where_}");
+        let reason = err.message.clone();
+        let mut ctx = Map::new();
+        ctx.insert("phase".into(), json!("poison"));
+        match self.o.on_poison.clone() {
+            Poison::Skip => {
+                self.count("skipped", 1);
+                ctx.insert("action".into(), json!("skipped"));
+                ctx.insert("attempts".into(), json!(attempts));
+                for (k, v) in &what {
+                    ctx.insert(k.clone(), v.clone());
+                }
+                let e = FeedErr::msg(format!(
+                    "{where_} failed {attempts} times in foreachBatch and was skipped: {reason}"
+                ));
+                self.report(&e, Value::Object(ctx));
+                Flow::Ok
+            }
+            Poison::DeadLetter(queue) => {
+                let mut it = Map::new();
+                if let Some(v) = &item.value {
+                    it.insert("value".into(), v.clone());
+                }
+                it.insert("ctx".into(), item.ctx.clone());
+                it.insert("id".into(), json!(item.id));
+                let mut record = Map::new();
+                record.insert("queryId".into(), json!(self.sh.query_id));
+                record.insert("attempts".into(), json!(attempts));
+                record.insert(
+                    "error".into(),
+                    json!({ "name": "Error", "message": reason }),
+                );
+                record.insert("item".into(), Value::Object(it));
+                if let Some((index, count)) = self.sh.shard {
+                    record.insert("shard".into(), json!({ "index": index, "count": count }));
+                }
+                let h = sha(&format!(
+                    "{}\n{}\ndlq-item\n{}",
+                    self.sh.id, self.epoch, item.id
+                ));
+                self.pending.outputs.push(Output {
+                    queue: queue.clone(),
+                    partition: item.partition.clone(),
+                    data: Value::Object(record),
+                    transaction_id: format!("{}{}", output_prefix(&self.sh.query_id), &h[..40]),
+                });
+                self.count("deadLettered", 1);
+                ctx.insert("action".into(), json!("deadLettered"));
+                ctx.insert("attempts".into(), json!(attempts));
+                for (k, v) in &what {
+                    ctx.insert(k.clone(), v.clone());
+                }
+                let e = FeedErr::msg(format!(
+                    "{where_} failed {attempts} times in foreachBatch and went to {queue}: {reason}"
+                ));
+                self.report(&e, Value::Object(ctx));
+                Flow::Ok
+            }
+            Poison::Stop => {
+                self.rollback();
+                self.poison_stop = Some(PoisonStop {
+                    where_,
+                    what,
+                    attempts,
+                    reason,
+                    batch: true,
+                });
+                Flow::Halt
+            }
+        }
     }
 
     /// Write the position: the write moves the broker's clock, and the next read shows it.

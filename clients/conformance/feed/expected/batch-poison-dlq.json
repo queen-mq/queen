@@ -1,0 +1,207 @@
+{
+  "outputs": [
+    {
+      "queue": "c-dlq",
+      "partition": "p0",
+      "data": {
+        "queryId": "c-batch-poison-dlq",
+        "attempts": 1,
+        "error": {
+          "message": "bad row"
+        },
+        "item": {
+          "value": {
+            "n": 2
+          },
+          "ctx": {
+            "position": "S1.2",
+            "queue": "c-in",
+            "partition": "p0",
+            "partitionId": "pid:c-in/p0",
+            "offset": 1,
+            "transactionId": "i2"
+          },
+          "id": "S1.2/c-in/p0#0"
+        }
+      },
+      "from": "dlq-item:S1.2/c-in/p0#0"
+    }
+  ],
+  "records": {
+    "c-batch-poison-dlq": {
+      "position": "end",
+      "epoch": 0,
+      "readTo": 1793955603000,
+      "caughtUp": true,
+      "stopped": {
+        "reason": "stop"
+      }
+    }
+  },
+  "states": {
+    "c-batch-poison-dlq": null
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-batch-poison-dlq",
+    "hash": "4f53cda18c2baa0c",
+    "reads": {
+      "queues": [
+        "c-in"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "sink": {
+      "kind": "foreachBatch",
+      "maxItems": 1000,
+      "maxWaitMillis": 0
+    },
+    "onPoison": {
+      "queue": "c-dlq"
+    },
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "foreachBatch": [
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "n": 1
+          },
+          "ctx": {
+            "position": "S1.1",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 1,
+            "transactionId": "i1"
+          },
+          "id": "S1.1/c-in/p1#0"
+        },
+        {
+          "value": {
+            "n": 2
+          },
+          "ctx": {
+            "position": "S1.2",
+            "queue": "c-in",
+            "partition": "p0",
+            "partitionId": "pid:c-in/p0",
+            "offset": 1,
+            "transactionId": "i2"
+          },
+          "id": "S1.2/c-in/p0#0"
+        },
+        {
+          "value": {
+            "n": 3
+          },
+          "ctx": {
+            "position": "S1.3",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 2,
+            "transactionId": "i3"
+          },
+          "id": "S1.3/c-in/p1#0"
+        }
+      ]
+    },
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "n": 1
+          },
+          "ctx": {
+            "position": "S1.1",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 1,
+            "transactionId": "i1"
+          },
+          "id": "S1.1/c-in/p1#0"
+        }
+      ]
+    },
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "n": 2
+          },
+          "ctx": {
+            "position": "S1.2",
+            "queue": "c-in",
+            "partition": "p0",
+            "partitionId": "pid:c-in/p0",
+            "offset": 1,
+            "transactionId": "i2"
+          },
+          "id": "S1.2/c-in/p0#0"
+        }
+      ]
+    },
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "n": 3
+          },
+          "ctx": {
+            "position": "S1.3",
+            "queue": "c-in",
+            "partition": "p1",
+            "partitionId": "pid:c-in/p1",
+            "offset": 2,
+            "transactionId": "i3"
+          },
+          "id": "S1.3/c-in/p1#0"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "runner": "A",
+      "phase": "poison",
+      "action": "deadLettered",
+      "code": null
+    }
+  ],
+  "failed": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 3,
+      "effects": 2,
+      "batches": 2,
+      "outputs": 1,
+      "retries": 0,
+      "poisoned": 1,
+      "skipped": 0,
+      "deadLettered": 1,
+      "pendingBatch": 0
+    }
+  },
+  "problems": []
+}

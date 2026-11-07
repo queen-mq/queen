@@ -826,3 +826,72 @@ type RouteFn func(value, msg interface{}) (interface{}, error)
 
 // Routes reports whether records may go to more than one queue (a function or a list).
 func (s SinkOperator) Routes() bool { return s.Route != nil || len(s.Queues) > 1 }
+
+// ---------------------------------------------------------------------------
+// ForeachBatch (feed sources)
+// ---------------------------------------------------------------------------
+
+// BatchItem is one result a .ForeachBatch() function gets: the value and the
+// context .Foreach() would get, and an ID that is the same on every delivery
+// of that result (a key for an upsert).
+type BatchItem struct {
+	Value interface{}
+	Ctx   EmitCtx
+	ID    string
+}
+
+// ForeachBatchFn gets up to MaxItems results at once. An error (or a panic)
+// fails the call: it is tried again whole, then item by item.
+type ForeachBatchFn func(items []BatchItem) error
+
+// BatchOption is an option of .ForeachBatch().
+type BatchOption func(*ForeachBatchOperator)
+
+// DefaultBatchMaxItems is the results of one call when WithMaxItems is not given.
+const DefaultBatchMaxItems = 1000
+
+// WithMaxItems is the most results one call gets (a whole number from 1; 1000 by default).
+func WithMaxItems(n int) BatchOption {
+	return func(o *ForeachBatchOperator) { o.MaxItems = n }
+}
+
+// WithMaxWaitMillis keeps a batch across reads until it is full or its
+// first item has waited this long (0, the default: a batch goes at the end
+// of each read).
+func WithMaxWaitMillis(ms int) BatchOption {
+	return func(o *ForeachBatchOperator) { o.MaxWaitMillis = ms }
+}
+
+// ForeachBatchOperator is .ForeachBatch(fn, options): a terminal side effect
+// in batches (JS ForeachBatchOperator). The position moves only in the
+// commit right after fn returns.
+type ForeachBatchOperator struct {
+	Fn            ForeachBatchFn
+	MaxItems      int
+	MaxWaitMillis int
+}
+
+// NewForeachBatchOperator checks the function and the options.
+func NewForeachBatchOperator(fn ForeachBatchFn, opts ...BatchOption) (ForeachBatchOperator, error) {
+	o := ForeachBatchOperator{Fn: fn, MaxItems: DefaultBatchMaxItems}
+	if fn == nil {
+		return o, errors.New(".foreachBatch(fn, options): fn is a function (items) => ..., each item { value, ctx, id }")
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	if o.MaxItems < 1 {
+		return o, fmt.Errorf(".foreachBatch(fn, options): maxItems is a whole number from 1, got %d", o.MaxItems)
+	}
+	if o.MaxWaitMillis < 0 {
+		return o, fmt.Errorf(".foreachBatch(fn, options): maxWaitMillis is a whole number from 0, got %d", o.MaxWaitMillis)
+	}
+	return o, nil
+}
+
+func (ForeachBatchOperator) Kind() string { return "foreachBatch" }
+func (o ForeachBatchOperator) Config() map[string]interface{} {
+	return map[string]interface{}{"kind": "foreachBatch", "maxItems": float64(o.MaxItems), "maxWaitMillis": float64(o.MaxWaitMillis)}
+}

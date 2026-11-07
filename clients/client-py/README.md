@@ -1038,15 +1038,27 @@ runner = await (
     .run(query_id="per-minute")
 )
 await runner.stop()
+
+# Batches: up to max_items results per call, each {"value", "ctx", "id"}; the position moves
+# after the call returns, and a crash delivers the batch again with the same ids (upsert by id).
+async def save(items):
+    await db.upsert([{"id": it["id"], **it["value"]} for it in items])
+
+await (
+    Stream.from_feed(client, queues=["orders"])
+    .foreach_batch(save, max_items=500, max_wait_millis=1000)
+    .run(query_id="orders-db")
+)
 ```
 
 The chain takes `where`, `filter`, `map`, `flat_map`, `key_by`, any number of
 stateful steps in any order (`window_tumbling` / `window_sliding` /
 `window_session` / `window_cron` with `reduce` or `aggregate`, `pattern`,
 `join` with two sides or `sides=...`, `gather`, `join_table`), `name`, and
-ends with `.to(...)` (a queue, a list of queues, or a function that picks) or
-`.foreach(fn)`. Event time: `event_time=`, `allowed_lateness=`, `on_late=`,
-`idle=` on a step; a step after a step on event time follows its watermark.
+ends with `.to(...)` (a queue, a list of queues, or a function that picks),
+`.foreach(fn)` or `.foreach_batch(fn, max_items=1000, max_wait_millis=0)`.
+Event time: `event_time=`, `allowed_lateness=`, `on_late=`, `idle=` on a
+step; a step after a step on event time follows its watermark.
 `run(query_id=..., ...)` takes the JS options in snake_case (`on_poison`,
 `retries`, `lock_ttl`, `shards`, `shard_by`, `snapshot_every_millis`,
 `max_pending_outputs`, `reset`, `exclusive`, ...) or in camelCase, with the

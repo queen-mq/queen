@@ -1182,6 +1182,174 @@ add_({
   ]
 })
 
+// =========================================================================
+// foreachBatch: the results in batches, the position after the call
+// =========================================================================
+
+const or = (...e) => ({ $or: e })
+const gt = (a, b) => ({ $gt: [a, b] })
+const len = (e) => ({ $len: e })
+const pause = (ms) => ({ sleep: ms })
+// A batch function that fails for every batch of more than one item, and for item n alone:
+// tried whole, then item by item, the poison policy meets item n only.
+const failsOn = (n) => iff(or(gt(len(g('0')), 1), eq(g('0.0.value.n'), n)), thr('bad row'), null)
+const BATCH_METRICS = ['emitted', 'effects', 'batches', 'outputs', 'retries', 'poisoned', 'skipped', 'deadLettered', 'pendingBatch']
+const numbers = { source: { queues: ['c-in'], from: 'earliest' } }
+const toN = { op: 'map', fn: { n: g('0.data.n') } }
+// Transactions for numbers from..to, one second apart from `sec`, in two partitions.
+const ins = (from, to, sec = from) => Array.from({ length: to - from + 1 }, (_, i) =>
+  tx(sec + i, push('c-in', `p${(from + i) % 2}`, { n: from + i }, `i${from + i}`)))
+
+add_({
+  name: 'batch-per-read',
+  about: 'foreachBatch: the results of one read in one call; each item has the value, the ctx foreach gets and the id its output would have; the position commits after the call',
+  mode: 'both',
+  ...numbers,
+  chain: [toN, { op: 'foreachBatch' }],
+  // Live, a follower that lags can split the first read: the calls compare on the fake broker only.
+  compareMetrics: ['emitted', 'effects', 'outputs', 'pendingBatch'],
+  script: [txs(...ins(1, 4)), start('A'), idle('A'), stop('A')]
+})
+
+add_({
+  name: 'batch-max-items',
+  about: 'foreachBatch maxItems: a read of 7 goes in calls of 3, 3 and 1, each followed by its commit',
+  ...numbers,
+  chain: [toN, { op: 'foreachBatch', opts: { maxItems: 3 } }],
+  compareMetrics: BATCH_METRICS,
+  script: [txs(...ins(1, 7)), start('A'), idle('A'), metrics('A', 'a', ['batches', 'effects', 'commits']), stop('A')]
+})
+
+add_({
+  name: 'batch-flatmap-split',
+  about: 'foreachBatch maxItems splits what one message makes: calls of at most maxItems, one commit after the last',
+  ...numbers,
+  chain: [
+    { op: 'flatMap', fn: [{ n: g('0.data.n'), i: 0 }, { n: g('0.data.n'), i: 1 }, { n: g('0.data.n'), i: 2 }] },
+    { op: 'foreachBatch', opts: { maxItems: 2 } }
+  ],
+  compareMetrics: BATCH_METRICS,
+  script: [txs(...ins(1, 1)), start('A'), idle('A'), metrics('A', 'a', ['batches', 'effects', 'commits']), stop('A')]
+})
+
+add_({
+  name: 'batch-linger',
+  about: 'foreachBatch maxWaitMillis: the items of two reads in one call; nothing commits while they wait',
+  ...numbers,
+  chain: [toN, { op: 'foreachBatch', opts: { maxItems: 10, maxWaitMillis: 1500 } }],
+  compareMetrics: BATCH_METRICS,
+  script: [
+    txs(...ins(1, 2)), start('A'), pause(300), metrics('A', 'waiting', ['pendingBatch', 'batches', 'commits']),
+    txs(...ins(3, 4, 10)), pause(300), metrics('A', 'still', ['pendingBatch', 'batches', 'commits']),
+    idle('A'), stop('A')
+  ]
+})
+
+add_({
+  name: 'batch-retry',
+  about: 'foreachBatch: a batch that fails twice, then passes, is tried again whole, with the same items and ids: not poison',
+  ...numbers,
+  chain: [toN, { op: 'foreachBatch', fn: { $flaky: { times: 2, key: 'batch', then: null } } }],
+  run: { retries: 3 },
+  compareMetrics: BATCH_METRICS,
+  script: [txs(...ins(1, 3)), start('A'), idle('A'), stop('A')]
+})
+
+add_({
+  name: 'batch-poison-skip',
+  about: "foreachBatch onPoison 'skip': tried whole, then item by item; the item that fails is left out, the others are delivered",
+  ...numbers,
+  chain: [toN, { op: 'foreachBatch', fn: failsOn(3) }],
+  run: { onPoison: 'skip', retries: 1 },
+  compareMetrics: BATCH_METRICS,
+  script: [txs(...ins(1, 4)), start('A'), idle('A'), stop('A')]
+})
+
+add_({
+  name: 'batch-poison-dlq',
+  about: 'foreachBatch with a dead-letter queue: the item that fails goes there (value, ctx, id, error), in the commit past the batch',
+  ...numbers,
+  chain: [toN, { op: 'foreachBatch', fn: failsOn(2) }],
+  run: { onPoison: 'c-dlq', retries: 0 },
+  compareMetrics: BATCH_METRICS,
+  script: [txs(...ins(1, 3)), start('A'), idle('A'), stop('A')]
+})
+
+add_({
+  name: 'batch-poison-stop',
+  about: "foreachBatch onPoison 'stop': nothing of the batch commits and the record names the item; a new process gets the whole batch again and stops there again",
+  ...numbers,
+  chain: [toN, { op: 'foreachBatch', fn: failsOn(3), opts: { maxItems: 2 } }],
+  run: { retries: 1 },
+  compareMetrics: BATCH_METRICS,
+  script: [txs(...ins(1, 4)), start('A'), waitDone('A'), start('B'), waitDone('B')]
+})
+
+add_({
+  name: 'batch-message-stop',
+  about: 'foreachBatch: a message that stops the stream comes after the batch that waits: the batch goes first, the commit stops at the message',
+  ...numbers,
+  chain: [{ op: 'map', fn: iff(eq(g('0.data.n'), 3), thr('bad message'), { n: g('0.data.n') }) }, { op: 'foreachBatch' }],
+  run: { retries: 0 },
+  compareMetrics: BATCH_METRICS,
+  script: [txs(...ins(1, 4)), start('A'), waitDone('A')]
+})
+
+add_({
+  name: 'batch-window',
+  about: 'foreachBatch after a window: the results of one close in one call, with ids of their own; the commit after the call moves the clock',
+  source: { queues: ['c-visits'], from: 'earliest' },
+  chain: [
+    { op: 'windowTumbling', opts: { seconds: 60 } },
+    { op: 'aggregate', fields: { count: 1, sum: g('0.n') } },
+    { op: 'foreachBatch' }
+  ],
+  compareMetrics: BATCH_METRICS,
+  script: [
+    txs(tx(5, push('c-visits', 'v1', { n: 1 }, 'v1')), tx(10, push('c-visits', 'v2', { n: 2 }, 'v2')), tx(20, push('c-visits', 'v1', { n: 4 }, 'v3'))),
+    start('A'), idle('A'),
+    clock(61), idle('A'),
+    txs(tx(70, push('c-visits', 'v1', { n: 8 }, 'v4'))),
+    clock(121), idle('A'), stop('A')
+  ]
+})
+
+add_({
+  name: 'batch-restart-kill',
+  about: 'foreachBatch: a process killed with a batch that waits; the next one delivers it, with the same ids, at its stop',
+  ...numbers,
+  chain: [toN, { op: 'foreachBatch', opts: { maxItems: 2, maxWaitMillis: 600000 } }],
+  run: { lockTtl: '1s' },
+  compareMetrics: BATCH_METRICS,
+  script: [
+    txs(...ins(1, 2)), start('A'), idle('A'),
+    txs(...ins(3, 3, 10)), pause(300), metrics('A', 'a-waiting', ['pendingBatch', 'batches']),
+    kill('A'),
+    start('B'), waitRole('B', 'active'), pause(300), metrics('B', 'b-waiting', ['pendingBatch', 'batches']),
+    stop('B')
+  ]
+})
+
+add_({
+  name: 'batch-window-restart',
+  about: 'foreachBatch after a window, killed after a close it delivered with the next window open: the next process reads the feed again from the snapshot and delivers nothing of that close, then the next one',
+  source: { queues: ['c-visits'], from: 'earliest' },
+  chain: [
+    { op: 'windowTumbling', opts: { seconds: 60 } },
+    { op: 'aggregate', fields: { count: 1 } },
+    { op: 'foreachBatch', opts: { maxItems: 1 } }
+  ],
+  run: { lockTtl: '1s', snapshotEveryMillis: 3600000 },
+  compareMetrics: BATCH_METRICS,
+  script: [
+    txs(tx(5, push('c-visits', 'v1', {}, 'v1')), tx(65, push('c-visits', 'v1', {}, 'v2'))),
+    start('A'), idle('A'), kill('A'),
+    start('B'), idle('B', { timeoutMs: 30000 }),
+    metrics('B', 'b-replayed', ['replays']),
+    clock(121), idle('B'), stop('B')
+  ]
+})
+
 // ---- write ----
 const dir = join(HERE, 'cases')
 mkdirSync(dir, { recursive: true })

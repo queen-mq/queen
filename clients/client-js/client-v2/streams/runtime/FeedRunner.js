@@ -63,6 +63,15 @@
  * Live state. The active runner answers questions about its state on an
  * ephemeral queue of its own (feed/query.js; `serveState`, on by default), and
  * `runner.state(step)` reads it in the same process.
+ *
+ * `.foreachBatch(fn, { maxItems, maxWaitMillis })` keeps the results instead
+ * of calling a function per result: `fn(items)` gets up to `maxItems` at the
+ * end of each read, or, with `maxWaitMillis`, once the batch is full or its
+ * first item has waited that long. Nothing commits past an item that waits:
+ * no position, no tick. The commit right after `fn` returns moves the
+ * position, so a crash before it delivers the batch again, with the same ids.
+ * A batch that throws is tried again whole, then item by item: the poison
+ * policy meets the item that fails ('stop' commits nothing of the batch).
  */
 
 import crypto from 'node:crypto'
@@ -199,8 +208,11 @@ function poisonTarget(onPoison) {
 
 function freshPending() {
   // readTo / caughtUp: the feed time `next` is at, and whether the read was caught up there.
-  return { outputs: [], next: null, work: 0, effects: 0, emitSeq: 0, readTo: null, caughtUp: null }
+  // batch / batchSince: the results a .foreachBatch() keeps, and when the first of them came.
+  return { outputs: [], next: null, work: 0, effects: 0, emitSeq: 0, readTo: null, caughtUp: null, batch: [], batchSince: null }
 }
+
+const stoppingError = () => Object.assign(new Error('stopping'), { stopping: true })
 
 function clipText(s, max) {
   const t = typeof s === 'string' ? s : String(s)
@@ -294,6 +306,8 @@ export class FeedRunner {
   #stopAbort = new AbortController()
   #lastSaid = new Map()
   #server = null
+  // The unit running now (a message, or a result of a step): what a batch item came from.
+  #subject = null
   #metrics = {
     role: 'starting',
     cycles: 0,
@@ -301,6 +315,7 @@ export class FeedRunner {
     emitted: 0,
     outputs: 0,
     effects: 0,
+    batches: 0,
     commits: 0,
     conflicts: 0,
     errors: 0,
@@ -383,7 +398,7 @@ export class FeedRunner {
   /** Check the chain, take the lock if it is free, load the position and state, start the cycles (not awaited). */
   async start() {
     const { steps, sink, chainHash } = this.#stream
-    if (!sink) throw new Error('Stream.fromFeed: end the chain with .to(queen.queue(...)) or .foreach(fn)')
+    if (!sink) throw new Error('Stream.fromFeed: end the chain with .to(queen.queue(...)), .foreach(fn) or .foreachBatch(fn)')
     this.#sink = sink
     this.#pipeline = new Pipeline(steps)
     this.#hash = chainHash
@@ -451,6 +466,7 @@ export class FeedRunner {
   metrics() {
     const m = { ...this.#metrics }
     m.pendingOutputs = this.#pending.outputs.length
+    m.pendingBatch = this.#pending.batch.length
     if (this.#shard) m.shard = { ...this.#shard }
     if (this.#pipeline && this.#pipeline.hasState) {
       m.open = this.#pipeline.open
@@ -693,8 +709,18 @@ export class FeedRunner {
         backoff = Math.min(backoff * 2, MAX_BACKOFF_MILLIS)
       }
     }
-    // Stopping: what is done and not yet committed goes in now, with a
-    // snapshot, so the next start has nothing to read again.
+    // Stopping: a batch that waits goes to its function first, tried once (one
+    // that fails now is delivered again at the next start); then what is done
+    // and not yet committed goes in, with a snapshot, so the next start has
+    // nothing to read again.
+    if (this.#active && this.#pending.batch.length > 0 && !(this.#lock && !this.#lock.held) && this.#poisonStop === null) {
+      try {
+        await this.#flushBatch()
+      } catch (err) {
+        if (!(err && err.stopping)) this.#report(err, { phase: 'stop', position: this.#position })
+        this.#rollback()
+      }
+    }
     const snapshotOwed = this.#pipeline.hasState && this.#pipeline.changedSinceSnapshot
     // Asked to stop: the record of this last commit says so (`stopped`), so
     // that a stream stopped on purpose is not taken for one that died.
@@ -867,7 +893,8 @@ export class FeedRunner {
 
     const r = await this.#processPage(page, Number.isNaN(resolved) ? null : resolved)
     if (r === 'abandon') return
-    if (r === 'stop') {
+    // 'halt': an item of a batch stopped the stream (rolled back to the last commit already).
+    if (r === 'stop' || r === 'halt') {
       await this.#stopOnPoison()
       return
     }
@@ -891,7 +918,7 @@ export class FeedRunner {
     for (const g of this.#groups(page.entries)) {
       const ref = { cp: this.#checkpoint() }
       const r = await this.#processGroup(g, ref)
-      if (r === 'abandon') return 'abandon'
+      if (r === 'abandon' || r === 'halt') return r
       if (r === 'stop') {
         // The whole transaction the poisoned message came in stays for later
         // (from the last commit, when one came in the middle of a close).
@@ -901,9 +928,11 @@ export class FeedRunner {
       }
       this.#pending.next = g.position + 1
       this.#readTo(tsOf(g.entries[0]), false)
-      // Enough waiting outputs: commit them now, between two positions.
-      if (this.#pending.outputs.length >= this.#opts.maxPendingOutputs) {
-        if ((await this.#commit()) !== 'ok') return 'abandon'
+      // Enough waiting outputs, or a full batch: commit them now, between two positions.
+      if (this.#pending.outputs.length >= this.#opts.maxPendingOutputs || this.#batchFull()) {
+        const c = await this.#commitAll()
+        if (c === 'halt') return 'halt'
+        if (c !== 'ok') return 'abandon'
       }
     }
     if (this.#pipeline.hasState && this.#pipeline.needsFeedClock) {
@@ -911,7 +940,7 @@ export class FeedRunner {
       const t = Math.max(this.#clock, resolved ?? 0)
       this.#clock = t
       const r = await this.#advanceTo(t, ref)
-      if (r === 'abandon') return 'abandon'
+      if (r === 'abandon' || r === 'halt') return r
       if (r === 'stop') {
         this.#restore(ref.cp)
         this.#pending.next = page.next
@@ -984,8 +1013,9 @@ export class FeedRunner {
     const maxUnits = live || !Number.isFinite(this.#replayCap) ? Infinity : Math.max(0, this.#replayCap - this.#units)
     const outer = this.#burstTarget
     this.#burstTarget = outer === null ? t : Math.max(outer, t)
+    let halted = false
     try {
-      return await this.#pipeline.advance(t, async (em, run) => {
+      const r = await this.#pipeline.advance(t, async (em, run) => {
         const r = await this.#unit({ emit: em }, (ctr) => run((env, ent) => this.#out(env, ent, ctr)))
         if (r !== 'stop') this.#units++
         return r
@@ -993,14 +1023,17 @@ export class FeedRunner {
         maxUnits,
         onBatch: live
           ? async () => {
-            if (this.#pending.outputs.length < this.#opts.maxPendingOutputs) return 'ok'
+            if (this.#pending.outputs.length < this.#opts.maxPendingOutputs && !this.#batchFull()) return 'ok'
             this.#metrics.closeCommits++
-            if ((await this.#commit()) !== 'ok') return 'abandon'
+            const c = await this.#commitAll()
+            if (c === 'halt') halted = true
+            if (c !== 'ok') return 'abandon'
             if (ref) ref.cp = this.#checkpoint()
             return 'ok'
           }
           : null
       })
+      return halted ? 'halt' : r
     } finally {
       this.#burstTarget = outer
     }
@@ -1016,10 +1049,18 @@ export class FeedRunner {
     if (this.#replaying) return
     this.#metrics.emitted++
     const ctx = env.derived ? env.ctx : entry
-    if (this.#sink.kind === 'foreach') {
+    if (this.#sink.kind === 'foreach' || this.#sink.kind === 'foreachBatch') {
       const fctx = env.derived || !entry
         ? env.ctx
         : { position: entry.position, queue: entry.queue, partition: entry.partition, partitionId: entry.partitionId, offset: entry.offset, transactionId: entry.transactionId }
+      if (this.#sink.kind === 'foreachBatch') {
+        // Kept for the batch, with the id a queue output of it would have: the same on every delivery.
+        const id = entry ? feedOutputId(this.#queryId, entry, ctr.n++, this.#epoch, this.#id) : this.#emitId()
+        const p = this.#pending
+        if (p.batch.length === 0) p.batchSince = this.#now()
+        p.batch.push({ value: env.value, ctx: fctx, id, subject: this.#subject, partition: entry ? entry.partition : String(env.key) })
+        return
+      }
       await this.#sink.fn(env.value, fctx)
       this.#metrics.effects++
       this.#pending.effects++
@@ -1073,6 +1114,7 @@ export class FeedRunner {
       return 'ok'
     }
     let lastErr = null
+    this.#subject = subject
     for (let attempt = 0; attempt <= this.#opts.retries; attempt++) {
       const cp = this.#checkpoint()
       try {
@@ -1103,11 +1145,10 @@ export class FeedRunner {
     return em.id ? `${id}\u001f${em.id}` : id
   }
 
-  #poisoned(subject, err, attempts) {
-    this.#metrics.poisoned++
-    if (this.#poison.kind !== 'stop' && this.#pipeline.hasState) this.#pendingSkips.push(this.#skipId(subject))
-    // A feed message: the unit's own, or one an event-time step held and took in its turn.
-    const entry = subject.entry || subject.emit?.entry || null
+  /** A unit for a report: the feed message (the unit's own, or one an event-time step held and took in its turn), or the result. */
+  #describe(subject) {
+    const entry = subject?.entry || subject?.emit?.entry || null
+    if (!entry && !subject?.emit) return { entry: null, what: {}, where: 'a result' }
     const what = entry
       ? {
           position: entry.position,
@@ -1120,6 +1161,13 @@ export class FeedRunner {
     const where = entry
       ? `the message at position ${what.position} (${what.queue}/${what.partition}, offset ${what.offset})`
       : `the ${what.result} result for key ${JSON.stringify(what.key)}`
+    return { entry, what, where }
+  }
+
+  #poisoned(subject, err, attempts) {
+    this.#metrics.poisoned++
+    if (this.#poison.kind !== 'stop' && this.#pipeline.hasState) this.#pendingSkips.push(this.#skipId(subject))
+    const { entry, what, where } = this.#describe(subject)
     const reason = err && err.message ? err.message : String(err)
     if (this.#poison.kind === 'skip') {
       this.#metrics.skipped++
@@ -1160,6 +1208,10 @@ export class FeedRunner {
 
   /** onPoison 'stop': commit what came before the message, then stop there. */
   async #stopOnPoison() {
+    // A batch that waits came before the message: it goes first (the commit
+    // moves the position past it). An item of it that fails stops the stream
+    // instead, at the last commit ('halt': #poisonStop names that item now).
+    if (this.#pending.batch.length > 0 && this.#poisonStop && !this.#poisonStop.batch) await this.#flushBatch()
     const p = this.#poisonStop
     // This commit's record says why the stream stopped, and at which message:
     // it is written even with nothing else to commit.
@@ -1182,8 +1234,11 @@ export class FeedRunner {
       return
     }
     const error = Object.assign(
-      new Error(`${p.where} failed ${p.attempts} times: ${p.reason}. The stream stopped there: fix the function and start it again, ` +
-        "or run it with onPoison: 'skip' or a dead-letter queue"),
+      new Error(p.batch
+        ? `${p.where} failed ${p.attempts} times in foreachBatch: ${p.reason}. The stream stopped before its batch: fix the function ` +
+          "and start it again (it gets the batch again), or run it with onPoison: 'skip' or a dead-letter queue"
+        : `${p.where} failed ${p.attempts} times: ${p.reason}. The stream stopped there: fix the function and start it again, ` +
+          "or run it with onPoison: 'skip' or a dead-letter queue"),
       { cause: p.err, code: 'feed_poison', ...p.what }
     )
     this.#metrics.stopped = { reason: 'poison', error: p.reason, attempts: p.attempts, ...p.what }
@@ -1202,6 +1257,8 @@ export class FeedRunner {
       units: this.#units,
       late: this.#pipeline.late,
       skips: this.#pendingSkips.length,
+      batch: this.#pending.batch.length,
+      batchSince: this.#pending.batchSince,
       // A unit tried again counts its results once.
       emitted: this.#metrics.emitted
     }
@@ -1217,6 +1274,8 @@ export class FeedRunner {
     this.#units = cp.units
     this.#pipeline.late = cp.late
     this.#pendingSkips.length = cp.skips
+    if (this.#pending.batch.length > cp.batch) this.#pending.batch.length = cp.batch
+    this.#pending.batchSince = this.#pending.batch.length ? cp.batchSince : null
     this.#metrics.emitted = cp.emitted
   }
 
@@ -1232,7 +1291,7 @@ export class FeedRunner {
 
   #hasPending() {
     const p = this.#pending
-    return p.outputs.length > 0 || p.work > 0 || p.effects > 0 || (this.#pipeline.hasState && this.#pipeline.dirty) ||
+    return p.outputs.length > 0 || p.work > 0 || p.effects > 0 || p.batch.length > 0 || (this.#pipeline.hasState && this.#pipeline.dirty) ||
       (Number.isInteger(p.next) && p.next !== this.#position)
   }
 
@@ -1240,19 +1299,33 @@ export class FeedRunner {
   async #settle(page) {
     const p = this.#pending
     const now = this.#now()
-    // Outputs and done effects commit soon (at once when caught up); state
-    // alone every commitEveryMillis; a position alone now and then.
-    const outputs = p.outputs.length > 0 || p.effects > 0
-    const moved = Number.isInteger(p.next) && p.next !== this.#position
     let due = false
-    if (outputs) {
-      due = page.caughtUp || p.outputs.length >= this.#opts.maxPendingOutputs || now - this.#lastCommitAt >= this.#opts.commitEveryMillis
-    } else if (this.#pipeline.dirty || p.work > 0) {
-      due = now - this.#lastCommitAt >= this.#opts.commitEveryMillis
-    } else if (moved) {
-      due = now - this.#lastPositionCommit >= this.#opts.positionCommitMillis
+    if (p.batch.length > 0) {
+      // A batch goes when it is due, and the commit right after it moves the
+      // position. Until then nothing commits past it (no position, no tick):
+      // the next read waits until the batch is due, at most.
+      if (!this.#batchDue(now)) {
+        this.#nextWait = Math.max(0, Math.min(this.#opts.waitMillis, Math.ceil(p.batchSince + this.#sink.maxWaitMillis - now)))
+        return
+      }
+      due = true
+    } else {
+      // Outputs and done effects commit soon (at once when caught up); state
+      // alone every commitEveryMillis; a position alone now and then.
+      const outputs = p.outputs.length > 0 || p.effects > 0
+      const moved = Number.isInteger(p.next) && p.next !== this.#position
+      if (outputs) {
+        due = page.caughtUp || p.outputs.length >= this.#opts.maxPendingOutputs || now - this.#lastCommitAt >= this.#opts.commitEveryMillis
+      } else if (this.#pipeline.dirty || p.work > 0) {
+        due = now - this.#lastCommitAt >= this.#opts.commitEveryMillis
+      } else if (moved) {
+        due = now - this.#lastPositionCommit >= this.#opts.positionCommitMillis
+      }
     }
-    if (due) await this.#commit()
+    if (due && (await this.#commitAll()) === 'halt') {
+      await this.#stopOnPoison()
+      return
+    }
     if (!this.#pipeline.hasState || !this.#pipeline.needsFeedClock || this.#resolvedAt === 0) return
     const next = this.#pipeline.nextDue()
     if (next === null) return
@@ -1282,6 +1355,117 @@ export class FeedRunner {
     this.#lastTickAt = now
     this.#metrics.ticks++
     await this.#commit()
+  }
+
+  // ---- foreachBatch -----------------------------------------------------------
+
+  /** The batch holds maxItems: it goes now. */
+  #batchFull() {
+    return this.#sink.kind === 'foreachBatch' && this.#pending.batch.length >= this.#sink.maxItems
+  }
+
+  /** The batch goes now: full, at the end of a read (maxWaitMillis 0), or its first item waited maxWaitMillis. */
+  #batchDue(now) {
+    const p = this.#pending
+    const { maxItems, maxWaitMillis } = this.#sink
+    return p.batch.length >= maxItems || maxWaitMillis === 0 || now - p.batchSince >= maxWaitMillis
+  }
+
+  /** The batch that waits, then the commit (which moves the position past it). 'halt': an item stopped the stream. */
+  async #commitAll() {
+    if (this.#pending.batch.length > 0 && (await this.#flushBatch()) === 'halt') return 'halt'
+    return this.#commit()
+  }
+
+  /** Every item that waits, to the function, maxItems at a time. 'ok', or 'halt' (rolled back to the last commit). */
+  async #flushBatch() {
+    const p = this.#pending
+    const items = p.batch
+    const { maxItems } = this.#sink
+    for (let i = 0; i < items.length; i += maxItems) {
+      if ((await this.#deliver(items.slice(i, i + maxItems))) === 'halt') return 'halt'
+    }
+    p.batch = []
+    p.batchSince = null
+    return 'ok'
+  }
+
+  /**
+   * One call: tried `retries` more times, with the pause of a message's
+   * retries; then item by item, each tried as often, so the poison policy
+   * meets the item that fails, and the others are delivered.
+   */
+  async #deliver(items) {
+    const err = await this.#tryItems(items)
+    if (err === null) return 'ok'
+    if (items.length === 1) return this.#itemPoisoned(items[0], err.error)
+    for (const item of items) {
+      const e = await this.#tryItems([item])
+      if (e !== null && this.#itemPoisoned(item, e.error) === 'halt') return 'halt'
+    }
+    return 'ok'
+  }
+
+  /** null when the function returned, else `{ error }` after the last try. A stop cuts the tries short. */
+  async #tryItems(items) {
+    for (let attempt = 0; attempt <= this.#opts.retries; attempt++) {
+      try {
+        await this.#sink.fn(items.map((it) => ({ value: it.value, ctx: it.ctx, id: it.id })))
+        this.#metrics.batches++
+        this.#metrics.effects += items.length
+        this.#pending.effects += items.length
+        return null
+      } catch (err) {
+        if (this.#stopping) throw stoppingError()
+        if (attempt === this.#opts.retries) return { error: err }
+        this.#metrics.retries++
+        await sleep(this.#opts.retryDelayMillis * 2 ** attempt, this.#stopAbort.signal)
+      }
+    }
+    return null
+  }
+
+  /**
+   * The poison policy for one item of a batch: 'skip' leaves it out, a queue
+   * receives it (`{ queryId, attempts, error, item }`, with the next commit);
+   * 'stop' rolls back to the last commit -- nothing of the batch commits, the
+   * next start delivers it again -- and answers 'halt'.
+   */
+  #itemPoisoned(item, err) {
+    const attempts = this.#opts.retries + 1
+    this.#metrics.poisoned++
+    const d = this.#describe(item.subject)
+    const where = `an item of ${d.where}`
+    const what = d.what
+    const reason = err && err.message ? err.message : String(err)
+    if (this.#poison.kind === 'skip') {
+      this.#metrics.skipped++
+      this.#report(Object.assign(new Error(`${where} failed ${attempts} times in foreachBatch and was skipped: ${reason}`), { cause: err }),
+        { phase: 'poison', action: 'skipped', attempts, ...what })
+      return 'ok'
+    }
+    if (this.#poison.kind === 'deadLetter') {
+      const record = {
+        queryId: this.#queryId,
+        attempts,
+        error: { name: err?.name ?? 'Error', message: reason },
+        item: { value: item.value, ctx: item.ctx, id: item.id }
+      }
+      if (this.#shard) record.shard = { ...this.#shard }
+      this.#pending.outputs.push({
+        queue: this.#poison.queue,
+        partition: item.partition,
+        data: record,
+        transactionId: `${outputPrefix(this.#queryId)}${sha(`${this.#id}\n${this.#epoch}\ndlq-item\n${item.id}`).slice(0, 40)}`
+      })
+      this.#metrics.deadLettered++
+      this.#report(Object.assign(new Error(`${where} failed ${attempts} times in foreachBatch and went to ${this.#poison.queue}: ${reason}`), { cause: err }),
+        { phase: 'poison', action: 'deadLettered', attempts, ...what })
+      return 'ok'
+    }
+    this.#rollback()
+    this.#poisonStop = { where, what, attempts, err, reason, batch: true }
+    return 'halt'
   }
 
   // ---- commit -----------------------------------------------------------------

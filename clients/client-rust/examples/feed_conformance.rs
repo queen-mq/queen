@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use queen_mq::feed::{FeedFrom, Since};
 use queen_mq::streams::feed::{
-    js_number, js_str_cmp, js_string, FeedAggregate, FeedDuration, FeedHandle, FeedRunOptions,
-    FeedSink, FeedSource, FeedStream, FeedWindow, Gather, Join, Pattern, Poison, Reset, ShardBy,
-    TableJoin, ViewOptions,
+    js_number, js_str_cmp, js_string, BatchItem, BatchOptions, FeedAggregate, FeedDuration,
+    FeedHandle, FeedRunOptions, FeedSink, FeedSource, FeedStream, FeedWindow, Gather, Join,
+    Pattern, Poison, Reset, ShardBy, TableJoin, ViewOptions,
 };
 use queen_mq::streams::Stream;
 use queen_mq::{Config, Queen};
@@ -864,6 +864,25 @@ fn build(queen: &Queen, c: &J) -> FeedStream {
                     }
                 })
             }
+            "foreachBatch" => {
+                let e = st.get("fn").cloned();
+                let opts = batch_options(st.get("opts"));
+                s.foreach_batch(
+                    move |items: Vec<BatchItem>| {
+                        let e = e.clone();
+                        async move {
+                            // The items as the function gets them, then the expression with them as its one argument.
+                            let list = serde_json::to_value(&items).unwrap_or(Value::Null);
+                            say(json!({ "event": "foreachBatch", "items": list }));
+                            match e {
+                                None => Ok::<(), String>(()),
+                                Some(e) => eval(&e, &[Some(list)] as &[Option<Value>]).map(|_| ()),
+                            }
+                        }
+                    },
+                    opts,
+                )
+            }
             other => {
                 say(
                     json!({ "event": "failed", "message": format!("case: unknown chain op {other}") }),
@@ -873,6 +892,45 @@ fn build(queen: &Queen, c: &J) -> FeedStream {
         };
     }
     s
+}
+
+/// `{ maxItems, maxWaitMillis }` of a foreachBatch op, checked as the JS operator checks them.
+fn batch_options(j: Option<&J>) -> BatchOptions {
+    let refuse = |m: String| -> ! {
+        say(json!({ "event": "failed", "message": m }));
+        std::process::exit(2);
+    };
+    let mut o = BatchOptions::new();
+    let Some(j) = j else { return o };
+    let J::Obj(fields) = j else {
+        refuse(
+            ".foreachBatch(fn, options): options is an object { maxItems, maxWaitMillis }".into(),
+        )
+    };
+    let whole = |v: &J, min: f64| v.num().filter(|n| n.fract() == 0.0 && *n >= min);
+    for (k, v) in fields {
+        match k.as_str() {
+            "maxItems" => match whole(v, 1.0) {
+                Some(n) => o = o.max_items(n as usize),
+                None => refuse(format!(
+                    ".foreachBatch(fn, options): maxItems is a whole number from 1, got {}",
+                    v.to_value()
+                )),
+            },
+            "maxWaitMillis" => match whole(v, 0.0) {
+                Some(n) => o = o.max_wait_millis(n as u64),
+                None => refuse(format!(
+                    ".foreachBatch(fn, options): maxWaitMillis is a whole number from 0, got {}",
+                    v.to_value()
+                )),
+            },
+            other => refuse(format!(
+                ".foreachBatch(fn, options): unknown option {} (maxItems, maxWaitMillis)",
+                Value::String(other.into())
+            )),
+        }
+    }
+    o
 }
 
 fn run_options(c: &J, overrides: &J) -> FeedRunOptions {

@@ -61,9 +61,9 @@ export class FeedShardGroup {
     const shards = this.#runners.map((r) => r.metrics())
     const sum = (k) => shards.reduce((n, m) => n + (Number.isFinite(m[k]) ? m[k] : 0), 0)
     const out = { shards: this.#count, running: shards.filter((m) => m.role === 'active').length }
-    for (const k of ['cycles', 'entriesRead', 'emitted', 'outputs', 'effects', 'commits', 'conflicts', 'errors', 'retries',
+    for (const k of ['cycles', 'entriesRead', 'emitted', 'outputs', 'effects', 'batches', 'commits', 'conflicts', 'errors', 'retries',
       'poisoned', 'skipped', 'deadLettered', 'late', 'ticks', 'takeovers', 'snapshots', 'replays', 'replayEntries',
-      'tableRows', 'pendingOutputs', 'open', 'stateKeys']) {
+      'tableRows', 'pendingOutputs', 'pendingBatch', 'open', 'stateKeys']) {
       out[k] = sum(k)
     }
     out.perShard = shards

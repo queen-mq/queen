@@ -1,0 +1,124 @@
+{
+  "name": "batch-poison-dlq",
+  "about": "foreachBatch with a dead-letter queue: the item that fails goes there (value, ctx, id, error), in the commit past the batch",
+  "source": {
+    "queues": [
+      "c-in"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "map",
+      "fn": {
+        "n": {
+          "$get": "0.data.n"
+        }
+      }
+    },
+    {
+      "op": "foreachBatch",
+      "fn": {
+        "$if": [
+          {
+            "$or": [
+              {
+                "$gt": [
+                  {
+                    "$len": {
+                      "$get": "0"
+                    }
+                  },
+                  1
+                ]
+              },
+              {
+                "$eq": [
+                  {
+                    "$get": "0.0.value.n"
+                  },
+                  2
+                ]
+              }
+            ]
+          },
+          {
+            "$throw": "bad row"
+          },
+          null
+        ]
+      }
+    }
+  ],
+  "run": {
+    "onPoison": "c-dlq",
+    "retries": 0,
+    "queryId": "c-batch-poison-dlq"
+  },
+  "compareMetrics": [
+    "emitted",
+    "effects",
+    "batches",
+    "outputs",
+    "retries",
+    "poisoned",
+    "skipped",
+    "deadLettered",
+    "pendingBatch"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:01.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "i1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:02.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p0",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "i2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:03.000Z",
+          "push": [
+            {
+              "queue": "c-in",
+              "partition": "p1",
+              "data": {
+                "n": 3
+              },
+              "transactionId": "i3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "mode": "fake"
+}

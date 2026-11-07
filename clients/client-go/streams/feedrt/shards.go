@@ -137,6 +137,8 @@ func (g *ShardGroup) Metrics() Metrics {
 		out.ReplayEntries += m.ReplayEntries
 		out.TableRows += m.TableRows
 		out.PendingOutputs += m.PendingOutputs
+		out.Batches += m.Batches
+		out.PendingBatch += m.PendingBatch
 		out.Open += m.Open
 		out.StateKeys += m.StateKeys
 	}

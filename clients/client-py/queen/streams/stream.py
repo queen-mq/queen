@@ -15,6 +15,7 @@ from .operators.aggregate_op import AggregateOperator
 from .operators.filter_op import FilterOperator
 from .operators.flat_map_op import FlatMapOperator
 from .operators.foreach_op import ForeachOperator
+from .operators.foreach_batch_op import ForeachBatchOperator
 from .operators.gate_op import GateOperator
 from .operators.key_by_op import KeyByOperator
 from .operators.map_op import MapOperator
@@ -335,6 +336,32 @@ class Stream:
     def foreach(self, fn: Callable[..., Any]) -> "Stream":
         return self._extend(ForeachOperator(fn))
 
+    def foreach_batch(self, fn: Callable[..., Any], opts: Optional[Any] = None, **kwargs: Any) -> "Stream":
+        """
+        Terminal at-least-once side effect, in batches (Stream.from_feed only).
+        ``fn(items)`` gets up to ``max_items`` results, each a dict
+        ``{"value", "ctx", "id"}``: the value and context ``.foreach()`` would
+        get, and an id that is the same on every delivery of that result (a
+        key for an upsert). A batch goes at the end of each read, or, with
+        ``max_wait_millis``, once it is full or its first item has waited that
+        long. The position moves only after ``fn`` returns: a crash before
+        that delivers the batch again::
+
+            async def save(items):
+                await db.upsert("totals", [{"id": it["id"], **it["value"]} for it in items])
+
+            stream.foreach_batch(save, max_items=500, max_wait_millis=1000)
+
+        A batch that raises is tried again whole (``retries``), then item by
+        item, so the poison policy (``on_poison``) meets only the item that
+        fails. Defaults: ``max_items`` 1000, ``max_wait_millis`` 0 (the JS
+        names ``maxItems`` / ``maxWaitMillis`` work too, as keywords or in a
+        mapping).
+        """
+        return self._extend(ForeachBatchOperator(fn, opts, **kwargs))
+
+    foreachBatch = foreach_batch
+
     # ----------------------------------------------------------------- Compile/run
 
     async def run(self, query_id: Optional[str] = None, url: Optional[str] = None, **opts: Any) -> Any:
@@ -362,6 +389,11 @@ class Stream:
             raise ValueError("run requires query_id=...")
         if isinstance(self._source, FeedSource):
             return await self._run_feed(query_id, opts)
+        if any(op.kind == "foreachBatch" for op in self._operators):
+            raise ValueError(
+                ".foreach_batch() runs on Stream.from_feed only; on a queue source use .foreach(), "
+                "or .to() a queue that a worker pops in batches"
+            )
         feed_only = next((op for op in self._operators if op.kind in FEED_ONLY), None)
         if feed_only is not None:
             raise ValueError(
@@ -416,10 +448,10 @@ class Stream:
         them: a different one finds the stored state was kept by another chain.
         """
         ops = self._operators
-        sink_idx = next((i for i, op in enumerate(ops) if op.kind in ("sink", "foreach")), -1)
+        sink_idx = next((i for i, op in enumerate(ops) if op.kind in ("sink", "foreach", "foreachBatch")), -1)
         if sink_idx != -1 and sink_idx != len(ops) - 1:
             raise ValueError(
-                "sink operators (.to / .foreach) must be the last in the chain; "
+                "sink operators (.to / .foreach / .foreach_batch) must be the last in the chain; "
                 f"found {ops[sink_idx].kind} at position {sink_idx} of {len(ops)}"
             )
         sink = None if sink_idx == -1 else ops[sink_idx]

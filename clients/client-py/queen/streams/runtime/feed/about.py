@@ -136,6 +136,8 @@ def _sink_of(sink: Any) -> Any:
         return None
     if sink.kind == "foreach":
         return {"kind": "foreach"}
+    if sink.kind == "foreachBatch":
+        return {"kind": "foreachBatch", "maxItems": sink.max_items, "maxWaitMillis": sink.max_wait_millis}
     if getattr(sink, "route", None):
         return {"kind": "route"}
     queues = getattr(sink, "queues", None) or ([sink.queue_name] if getattr(sink, "queue_name", None) else [])

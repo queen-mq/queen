@@ -39,7 +39,11 @@ type Metrics struct {
 	// Stopped says why the runner stopped on its own (reason poison or config); nil otherwise.
 	Stopped        map[string]interface{}
 	PendingOutputs int64
-	Shard          *ShardSpec
+	// Batches: the calls of a .foreachBatch() function that returned;
+	// PendingBatch: the results its batch holds now (0 for other sinks).
+	Batches      int64
+	PendingBatch int64
+	Shard        *ShardSpec
 
 	// With state (a stateful step in the chain).
 	HasState         bool
@@ -117,6 +121,7 @@ func (m Metrics) Map() map[string]interface{} {
 			"skipped": m.Skipped, "deadLettered": m.DeadLettered, "late": m.Late, "ticks": m.Ticks, "takeovers": m.Takeovers,
 			"snapshots": m.Snapshots, "replays": m.Replays, "replayEntries": m.ReplayEntries, "tableRows": m.TableRows,
 			"pendingOutputs": m.PendingOutputs, "open": m.Open, "stateKeys": m.StateKeys,
+			"batches": m.Batches, "pendingBatch": m.PendingBatch,
 		}
 		for k, v := range sums {
 			out[k] = float64(v)
@@ -144,6 +149,7 @@ func (m Metrics) Map() map[string]interface{} {
 		"replayEntries": float64(m.ReplayEntries), "replayMillis": float64(m.ReplayMillis), "replaySkipped": float64(m.ReplaySkipped),
 		"tableRows": float64(m.TableRows), "position": m.Position, "applied": optInt(m.Applied), "lag": optInt(m.Lag),
 		"stopped": stopped, "pendingOutputs": float64(m.PendingOutputs),
+		"batches": float64(m.Batches), "pendingBatch": float64(m.PendingBatch),
 	}
 	if m.Shard != nil {
 		out["shard"] = map[string]interface{}{"index": float64(m.Shard.Index), "count": float64(m.Shard.Count)}

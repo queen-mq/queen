@@ -1,0 +1,107 @@
+{
+  "name": "batch-window-restart",
+  "about": "foreachBatch after a window, killed after a close it delivered with the next window open: the next process reads the feed again from the snapshot and delivers nothing of that close, then the next one",
+  "source": {
+    "queues": [
+      "c-visits"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1
+      }
+    },
+    {
+      "op": "foreachBatch",
+      "opts": {
+        "maxItems": 1
+      }
+    }
+  ],
+  "run": {
+    "lockTtl": "1s",
+    "snapshotEveryMillis": 3600000,
+    "queryId": "c-batch-window-restart"
+  },
+  "compareMetrics": [
+    "emitted",
+    "effects",
+    "batches",
+    "outputs",
+    "retries",
+    "poisoned",
+    "skipped",
+    "deadLettered",
+    "pendingBatch"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v1",
+              "data": {},
+              "transactionId": "v1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:01:05.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v1",
+              "data": {},
+              "transactionId": "v2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "kill": "A"
+    },
+    {
+      "start": "B"
+    },
+    {
+      "idle": "B",
+      "timeoutMs": 30000
+    },
+    {
+      "metrics": "B",
+      "as": "b-replayed",
+      "keys": [
+        "replays"
+      ]
+    },
+    {
+      "clock": "2026-11-06T09:02:01.000Z"
+    },
+    {
+      "idle": "B"
+    },
+    {
+      "stop": "B"
+    }
+  ],
+  "mode": "fake"
+}

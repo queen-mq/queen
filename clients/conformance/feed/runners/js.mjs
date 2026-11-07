@@ -194,6 +194,14 @@ function build(queen, c) {
         })
         break
       }
+      case 'foreachBatch': {
+        const e = st.fn
+        s = s.foreachBatch(async (items) => {
+          say({ event: 'foreachBatch', items })
+          return e === undefined ? undefined : evaluate(e, [items])
+        }, st.opts || {})
+        break
+      }
       default:
         throw new Error(`case: unknown chain op ${st.op}`)
     }

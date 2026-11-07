@@ -14,12 +14,13 @@ use crate::js;
 use super::runner::{FeedRunOptions, FeedRunner, FeedStateView};
 use super::CompiledFeed;
 
-const SUMMED: [&str; 22] = [
+const SUMMED: [&str; 24] = [
     "cycles",
     "entriesRead",
     "emitted",
     "outputs",
     "effects",
+    "batches",
     "commits",
     "conflicts",
     "errors",
@@ -35,6 +36,7 @@ const SUMMED: [&str; 22] = [
     "replayEntries",
     "tableRows",
     "pendingOutputs",
+    "pendingBatch",
     "open",
     "stateKeys",
 ];

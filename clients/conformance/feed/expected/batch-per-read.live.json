@@ -1,0 +1,61 @@
+{
+  "outputs": [],
+  "record": {
+    "epoch": 0,
+    "caughtUp": true
+  },
+  "about": {
+    "exclusive": true,
+    "hash": "4f53cda18c2baa0c",
+    "lockTtl": "5s",
+    "onPoison": "stop",
+    "positionCommitMillis": 0,
+    "reads": {
+      "partitions": null,
+      "queues": [
+        "c-in"
+      ],
+      "where": []
+    },
+    "shards": null,
+    "sink": {
+      "kind": "foreachBatch",
+      "maxItems": 1000,
+      "maxWaitMillis": 0
+    },
+    "steps": [
+      {
+        "kind": "ops",
+        "ops": [
+          "map"
+        ]
+      }
+    ],
+    "v": 1
+  },
+  "foreach": [],
+  "foreachBatch": [
+    {
+      "n": 1
+    },
+    {
+      "n": 2
+    },
+    {
+      "n": 3
+    },
+    {
+      "n": 4
+    }
+  ],
+  "errors": [],
+  "recorded": {
+    "A.stopped": {
+      "emitted": 4,
+      "effects": 4,
+      "outputs": 0,
+      "pendingBatch": 0
+    }
+  },
+  "problems": []
+}

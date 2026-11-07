@@ -222,6 +222,9 @@ func sinkOf(s *SinkSpec) interface{} {
 	if s.Kind == "foreach" {
 		return jsv.Ordered{{K: "kind", V: "foreach"}}
 	}
+	if s.Kind == "foreachBatch" {
+		return jsv.Ordered{{K: "kind", V: "foreachBatch"}, {K: "maxItems", V: float64(s.MaxItems)}, {K: "maxWaitMillis", V: float64(s.MaxWaitMillis)}}
+	}
 	if s.Route != nil {
 		return jsv.Ordered{{K: "kind", V: "route"}}
 	}

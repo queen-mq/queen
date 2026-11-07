@@ -134,6 +134,14 @@ def build(queen: Any, c: Dict[str, Any]) -> Any:
                 return UNDEFINED if e is UNDEFINED else evaluate(e, [value, ctx])
 
             s = s.foreach(effect)
+        elif op == "foreachBatch":
+            e = st.get("fn", UNDEFINED)
+
+            def batch(items: Any, e: Any = e) -> Any:
+                say({"event": "foreachBatch", "items": items})
+                return UNDEFINED if e is UNDEFINED else evaluate(e, [items])
+
+            s = s.foreach_batch(batch, st.get("opts") or {})
         else:
             raise ValueError(f"case: unknown chain op {op}")
     return s

@@ -89,6 +89,7 @@ function stepOf(s, pipeStep) {
 function sinkOf(sink) {
   if (!sink) return null
   if (sink.kind === 'foreach') return { kind: 'foreach' }
+  if (sink.kind === 'foreachBatch') return { kind: 'foreachBatch', maxItems: sink.maxItems, maxWaitMillis: sink.maxWaitMillis }
   if (sink.route) return { kind: 'route' }
   return { kind: 'queues', queues: clip(sink.queues || (sink.queueName ? [sink.queueName] : [])) }
 }

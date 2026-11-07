@@ -5,6 +5,20 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Feed streams deliver their results in batches: `.foreachBatch()`.** `.foreachBatch(fn, {
+maxItems, maxWaitMillis })` ends a feed stream like `.foreach()`, but calls `fn` with up to
+`maxItems` results at once (1000 by default), each `{ value, ctx, id }`: `value` and `ctx` are what
+`.foreach()` gets, and `id` is the id a `.to()` output of that result would have. By default a
+batch is what one read brought; with `maxWaitMillis` it also waits for the next reads, until it is
+full or its first item has waited that long, and nothing commits while it waits. The position moves
+in the commit right after `fn` returns, so a crash before then delivers the batch again with the
+same ids. A batch that throws is tried again whole (`retries`), then item by item, so `onPoison`
+meets only the item that fails ('stop' commits nothing of the batch); `stop()` delivers the batch
+that waits. In JavaScript, Python (`.foreach_batch()`), Go (`.ForeachBatch()`) and Rust
+(`.foreach_batch()`), checked by 12 new cases of `clients/conformance/feed`; `metrics()` gains
+`batches` and `pendingBatch`. Why: a database or an API takes a thousand rows in one call much
+faster than in a thousand calls, and a position saved before the call returns could lose them.
+
 **The console knows that a feed stream reads a queue, and its rates count quiet minutes.** A feed
 stream reads without a consumer group, so the Queues page, a queue's page, the Overview and the
 Workload page called every queue it reads "No reader" and counted all its messages as waiting. Now

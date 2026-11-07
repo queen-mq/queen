@@ -80,7 +80,7 @@ func queueOf(m interface{}) string {
 
 // Test bookkeeping for the feed streams.
 var feedQueries = []string{"orders-it", "orders-by-country", "per-minute", "order-followups", "order-status",
-	"batches", "bookings-priced", "bursts", "gh-unanswered", "clicks-per-tenant"}
+	"batches", "bookings-priced", "bursts", "gh-unanswered", "clicks-per-tenant", "orders-to-warehouse"}
 
 func feedPush(ctx context.Context, client *queen.Queen, queue, partition string, payload map[string]interface{}) {
 	_, err := client.Queue(queue).Partition(partition).Push(payload).
@@ -140,6 +140,32 @@ func windowValue(h streams.FeedHandle, step, key string) map[string]interface{} 
 var errPermanent = errors.New("permanent failure")
 
 func sendEmail(data map[string]interface{}) error { return nil }
+
+// table is a table elsewhere, written by key (an upsert): a second write of a row changes nothing.
+type table struct {
+	mu   sync.Mutex
+	rows map[string]map[string]interface{}
+}
+
+func (t *table) upsert(rows []map[string]interface{}) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, r := range rows {
+		t.rows[r["key"].(string)] = r
+	}
+	return nil
+}
+
+// orders answers the order ids the table holds, in any order.
+func (t *table) orders() map[float64]bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := map[float64]bool{}
+	for _, r := range t.rows {
+		out[r["id"].(float64)] = true
+	}
+	return out
+}
 
 // One request the wire-forms client sent, and the answer's content type.
 type wireCall struct {
@@ -878,6 +904,30 @@ func main() {
 	check(sameJSON(messagesOf(ctx, client, "orders-FR", 1), `[{"id":5,"country":"FR","total":8}]`), "routed to orders-FR")
 	_ = byCountry.Stop(ctx)
 	fmt.Println("ok: feed-routing")
+
+	warehouse := &table{rows: map[string]map[string]interface{}{}}
+	// guide:start(feed-batch)
+	toWarehouse, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"orders"}}).
+		ForeachBatch(func(items []streams.BatchItem) error {
+			// One write for the batch. An item's ID is the same each time it is delivered.
+			rows := make([]map[string]interface{}, 0, len(items))
+			for _, it := range items {
+				order := it.Value.(map[string]interface{})
+				rows = append(rows, map[string]interface{}{"key": it.ID, "id": order["id"], "total": order["total"]})
+			}
+			return warehouse.upsert(rows)
+		}, streams.WithMaxItems(500), streams.WithMaxWaitMillis(1000)).
+		RunFeed(ctx, streams.FeedRunOptions{QueryID: "orders-to-warehouse"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// guide:end
+	feedPush(ctx, client, "orders", "order-8", map[string]interface{}{"id": 8, "total": 20})
+	feedPush(ctx, client, "orders", "order-9", map[string]interface{}{"id": 9, "total": 30})
+	until("the batch", func() bool { return len(warehouse.orders()) == 2 })
+	check(warehouse.orders()[8] && warehouse.orders()[9], "orders 8 and 9 in the warehouse")
+	_ = toWarehouse.Stop(ctx)
+	fmt.Println("ok: feed-batch")
 
 	// guide:start(feed-window)
 	perMinute, err := streams.FromFeed(client, streams.FeedSource{Queues: []string{"orders", "payments"}}).

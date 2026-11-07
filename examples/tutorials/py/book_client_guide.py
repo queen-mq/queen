@@ -28,7 +28,7 @@ QUEUES = ["jobs", "emails", "events", "reviews", "prices", "metrics", "tasks", "
           "order-status", "parts", "batches", "bookings", "property-settings", "bookings-priced", "bursts",
           "gh-issues", "gh-comments", "gh-unanswered", "clicks-per-tenant"]
 FEED_QUERIES = ["orders-it", "orders-by-country", "per-minute", "order-followups", "order-status", "batches",
-                "bookings-priced", "bursts", "gh-unanswered", "clicks-per-tenant"]
+                "bookings-priced", "bursts", "gh-unanswered", "clicks-per-tenant", "orders-to-warehouse"]
 
 
 # The helpers the examples call. In a real program they are yours.
@@ -64,6 +64,17 @@ async def until(what, cond):
             return
         await asyncio.sleep(0.1)
     raise AssertionError(f"timed out waiting for {what}")
+
+
+class Table:
+    """A table elsewhere, written by key (an upsert): a second write of a row changes nothing."""
+
+    def __init__(self):
+        self.rows = {}
+
+    async def upsert(self, rows):
+        for r in rows:
+            self.rows[r["key"]] = r
 
 
 def window_value(runner, step, key):
@@ -597,6 +608,25 @@ async def main() -> None:
     assert [o["id"] for o in await messages_of(queen, "orders-FR", 1)] == [5]
     await by_country.stop()
     print("ok: feed-routing")
+
+    warehouse = Table()
+    # guide:start(feed-batch)
+    async def write(items):
+        # One write for the batch. An item's id is the same each time it is delivered.
+        await warehouse.upsert([{"key": it["id"], **it["value"]} for it in items])
+
+    to_warehouse = await (
+        Stream.from_feed(queen, queues=["orders"])
+        .foreach_batch(write, max_items=500, max_wait_millis=1000)
+        .run(query_id="orders-to-warehouse")
+    )
+    # guide:end
+    await feed_push(queen, "orders", "order-8", {"id": 8, "total": 20})
+    await feed_push(queen, "orders", "order-9", {"id": 9, "total": 30})
+    await until("the batch", lambda: len(warehouse.rows) == 2)
+    assert sorted(r["id"] for r in warehouse.rows.values()) == [8, 9]
+    await to_warehouse.stop()
+    print("ok: feed-batch")
 
     # guide:start(feed-window)
     per_minute = await (

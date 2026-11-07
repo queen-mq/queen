@@ -303,20 +303,47 @@ function resultOf(c, dump, ctx) {
       }
     }
   }
-  const outputs = []
   const problems = []
+  // foreachBatch items: a message's result has the id its output would have (a place); a
+  // close's result an id of its own, named by when it first came (emit#1, emit#2, ...), so
+  // the same result delivered again shows the same name. A dead-lettered item's message id
+  // is made from the item's id.
+  const emitNames = new Map()
+  const itemId = (id) => {
+    if (idFrom.has(id)) return idFrom.get(id)
+    if (!emitNames.has(id)) {
+      if (typeof id !== 'string' || !id.startsWith(prefix) || !/^[0-9a-f]{40}$/.test(id.slice(prefix.length))) problems.push(`item id ${id}: not ${prefix} + 40 hex`)
+      emitNames.set(id, `emit#${emitNames.size + 1}`)
+    }
+    return emitNames.get(id)
+  }
+  const batches = ctx.events.filter((e) => e.event === 'foreachBatch').map((e) => ({
+    runner: e.runner,
+    items: (e.items || []).map((it) => ({ value: norm.walk(it.value), ctx: norm.walk(it.ctx), id: itemId(it.id), _raw: it.id }))
+  }))
+  const dlqItem = new Map()
+  for (const b of batches) {
+    for (const it of b.items) {
+      for (const scope of scopes) {
+        for (let epoch = 0; epoch < 4; epoch++) dlqItem.set(`${prefix}${sha(`${scope}\n${epoch}\ndlq-item\n${it._raw}`).slice(0, 40)}`, `dlq-item:${it.id}`)
+      }
+      delete it._raw
+    }
+  }
+  const outputs = []
   const seen = new Set()
   for (const e of dump.log) {
     if (typeof e.transactionId !== 'string' || !e.transactionId.startsWith(prefix)) continue
     if (seen.has(e.transactionId)) problems.push(`output id ${e.transactionId} twice`)
     seen.add(e.transactionId)
-    let from = idFrom.get(e.transactionId)
+    let from = idFrom.get(e.transactionId) ?? dlqItem.get(e.transactionId)
     if (!from) {
       if (!/^[0-9a-f]{40}$/.test(e.transactionId.slice(prefix.length))) problems.push(`output id ${e.transactionId}: not ${prefix} + 40 hex`)
       from = 'emit'
     }
     const data = norm.walk(e.payload)
     if (data && typeof data === 'object' && data.queryId && data.error && typeof data.error === 'object') delete data.error.name
+    if (data && typeof data === 'object' && data.queryId && data.item && typeof data.item.id === 'string') data.item.id = itemId(data.item.id)
     outputs.push({ queue: e.queue, partition: e.partition, data, from })
   }
   // Order inside one partition is the stream's order; across partitions it is how a commit grouped them.
@@ -365,6 +392,8 @@ function resultOf(c, dump, ctx) {
     layout: layout ? { shards: layout.value.shards, shardBy: layout.value.shardBy, resetToken: layout.value.resetToken } : null,
     about: about ? normAbout(about.value) : null,
     foreach: ctx.events.filter((e) => e.event === 'foreach').map((e) => ({ runner: e.runner, value: norm.walk(e.value), ctx: norm.walk(e.ctx) })),
+    // Every call, in order (a retry is a call): only in a case that has some, so the others' golden files stay as they are.
+    ...(batches.length ? { foreachBatch: batches } : {}),
     errors: ctx.events.filter((e) => e.event === 'error' && (c.compareErrors || e.phase === 'poison')).map((e) => ({ runner: e.runner, phase: e.phase, action: e.action ?? null, code: e.code ?? null })),
     failed: ctx.events.filter((e) => e.event === 'failed').map((e) => ({ runner: e.runner, code: e.code ?? null })),
     recorded: norm.walk(ctx.recorded),
@@ -643,6 +672,10 @@ async function liveResult(q, broker, events, recorded) {
     record: row ? { epoch: row.value.epoch, hash: row.value.hash, caughtUp: row.value.caughtUp, open: row.value.open, held: row.value.held } : null,
     about: about ? untag(normAbout({ ...about.value, queryId: undefined })) : null,
     foreach: events.filter((e) => e.event === 'foreach').map((e) => untag(e.value)).sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1)),
+    // Live, how reads split the items into calls is the broker's timing: the items only, sorted.
+    ...(events.some((e) => e.event === 'foreachBatch')
+      ? { foreachBatch: events.filter((e) => e.event === 'foreachBatch').flatMap((e) => (e.items || []).map((it) => untag(it.value))).sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1)) }
+      : {}),
     errors: events.filter((e) => e.event === 'error').map((e) => ({ phase: e.phase, action: e.action ?? null })),
     recorded: untag(recorded),
     problems

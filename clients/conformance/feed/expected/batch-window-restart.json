@@ -1,0 +1,133 @@
+{
+  "outputs": [],
+  "records": {
+    "c-batch-window-restart": {
+      "position": "end",
+      "epoch": 0,
+      "hash": "f44531ef6270fadf",
+      "clock": 1793955721000,
+      "units": 2,
+      "readTo": 1793955721000,
+      "caughtUp": true,
+      "open": {
+        "step1": 0
+      },
+      "stopped": {
+        "reason": "stop"
+      },
+      "snapshotPosition": "end",
+      "snapshotUnits": 2,
+      "metas": [
+        {}
+      ]
+    }
+  },
+  "states": {
+    "c-batch-window-restart": []
+  },
+  "layout": null,
+  "about": {
+    "v": 1,
+    "queryId": "c-batch-window-restart",
+    "hash": "f44531ef6270fadf",
+    "reads": {
+      "queues": [
+        "c-visits"
+      ],
+      "partitions": null,
+      "where": []
+    },
+    "steps": [
+      {
+        "kind": "window",
+        "name": "step1",
+        "window": {
+          "kind": "window-tumbling",
+          "seconds": 60,
+          "gracePeriod": 0,
+          "idleFlushMs": 5000,
+          "eventTime": false,
+          "allowedLateness": 0,
+          "onLate": "drop"
+        },
+        "reducer": {
+          "kind": "aggregate",
+          "fields": [
+            "count"
+          ]
+        },
+        "clock": "feed"
+      }
+    ],
+    "sink": {
+      "kind": "foreachBatch",
+      "maxItems": 1,
+      "maxWaitMillis": 0
+    },
+    "onPoison": "stop",
+    "shards": null,
+    "exclusive": true,
+    "lockTtl": "5s",
+    "positionCommitMillis": 0
+  },
+  "foreach": [],
+  "foreachBatch": [
+    {
+      "runner": "A",
+      "items": [
+        {
+          "value": {
+            "count": 1
+          },
+          "ctx": {
+            "kind": "tumbling",
+            "key": "v1",
+            "partition": "v1",
+            "windowStart": 1793955600000,
+            "windowEnd": 1793955660000,
+            "windowKey": "2026-11-06T09:00:00.000Z"
+          },
+          "id": "emit#1"
+        }
+      ]
+    },
+    {
+      "runner": "B",
+      "items": [
+        {
+          "value": {
+            "count": 1
+          },
+          "ctx": {
+            "kind": "tumbling",
+            "key": "v1",
+            "partition": "v1",
+            "windowStart": 1793955660000,
+            "windowEnd": 1793955720000,
+            "windowKey": "2026-11-06T09:01:00.000Z"
+          },
+          "id": "emit#2"
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "failed": [],
+  "recorded": {
+    "b-replayed": {
+      "replays": 1
+    },
+    "B.stopped": {
+      "emitted": 1,
+      "effects": 1,
+      "batches": 1,
+      "outputs": 0,
+      "retries": 0,
+      "poisoned": 0,
+      "skipped": 0,
+      "deadLettered": 0,
+      "pendingBatch": 0
+    }
+  },
+  "problems": []
+}

@@ -137,6 +137,12 @@ impl Fake {
         }
     }
 
+    /// Only the runner's clock (`now`) moves to `T0 + ms`: the broker's stays
+    /// where it is (the JS in-process fake's `at`, when nothing writes).
+    pub fn local_at(&self, ms: f64) {
+        self.bump(T0 + ms);
+    }
+
     /// The broker's clock moves to `T0 + ms` (never back); readers wake.
     pub async fn at(&self, ms: f64) {
         self.bump(T0 + ms);
@@ -157,6 +163,16 @@ impl Fake {
             )
             .await;
         r["positions"][0].as_u64().expect("a position")
+    }
+
+    /// Many transactions in one control call (each its own position): `(queue, partition, data)` each.
+    pub async fn txs_one_each(&self, items: &[(String, String, Value)]) {
+        let at = iso(self.now_ms());
+        let txs: Vec<Value> = items
+            .iter()
+            .map(|(q, p, d)| json!({ "at": at, "push": [{ "queue": q, "partition": p, "data": d }] }))
+            .collect();
+        self.post("/_control/tx", json!({ "txs": txs })).await;
     }
 
     pub async fn tx_ids(&self, items: &[(&str, &str, Value, &str)]) -> u64 {
@@ -586,6 +602,15 @@ impl Proxy {
         self.cut_at.store(n, Ordering::SeqCst);
     }
 
+    /// Cuts the proxy off from any thread (inside a batch function, say).
+    pub fn cutter(&self) -> impl Fn() + Send + Sync + 'static {
+        let (cut, epoch) = (Arc::clone(&self.cut), Arc::clone(&self.epoch));
+        move || {
+            cut.store(true, Ordering::SeqCst);
+            epoch.send_modify(|x| *x += 1);
+        }
+    }
+
     pub fn is_cut(&self) -> bool {
         self.cut.load(Ordering::SeqCst)
     }
@@ -598,4 +623,22 @@ impl Proxy {
     pub fn proc(&self) -> Proc {
         Proc::new(&self.url)
     }
+}
+
+/// The stored record `key` of a fake broker at `url`, from anywhere (a batch function).
+pub async fn record_at(url: &str, key: &str) -> Option<Value> {
+    let bytes = reqwest::Client::new()
+        .get(format!("{url}/_control/dump"))
+        .send()
+        .await
+        .ok()?
+        .bytes()
+        .await
+        .ok()?;
+    let dump: Value = serde_json::from_slice(&bytes).ok()?;
+    dump["kv"]
+        .as_array()?
+        .iter()
+        .find(|r| r["ns"] == NS && r["key"] == key)
+        .map(|r| r["value"].clone())
 }

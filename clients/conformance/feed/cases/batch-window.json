@@ -1,0 +1,128 @@
+{
+  "name": "batch-window",
+  "about": "foreachBatch after a window: the results of one close in one call, with ids of their own; the commit after the call moves the clock",
+  "source": {
+    "queues": [
+      "c-visits"
+    ],
+    "from": "earliest"
+  },
+  "chain": [
+    {
+      "op": "windowTumbling",
+      "opts": {
+        "seconds": 60
+      }
+    },
+    {
+      "op": "aggregate",
+      "fields": {
+        "count": 1,
+        "sum": {
+          "$get": "0.n"
+        }
+      }
+    },
+    {
+      "op": "foreachBatch"
+    }
+  ],
+  "compareMetrics": [
+    "emitted",
+    "effects",
+    "batches",
+    "outputs",
+    "retries",
+    "poisoned",
+    "skipped",
+    "deadLettered",
+    "pendingBatch"
+  ],
+  "script": [
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:00:05.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v1",
+              "data": {
+                "n": 1
+              },
+              "transactionId": "v1"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:10.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v2",
+              "data": {
+                "n": 2
+              },
+              "transactionId": "v2"
+            }
+          ]
+        },
+        {
+          "at": "2026-11-06T09:00:20.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v1",
+              "data": {
+                "n": 4
+              },
+              "transactionId": "v3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "A"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "clock": "2026-11-06T09:01:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "tx": [
+        {
+          "at": "2026-11-06T09:01:10.000Z",
+          "push": [
+            {
+              "queue": "c-visits",
+              "partition": "v1",
+              "data": {
+                "n": 8
+              },
+              "transactionId": "v4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "clock": "2026-11-06T09:02:01.000Z"
+    },
+    {
+      "idle": "A"
+    },
+    {
+      "stop": "A"
+    }
+  ],
+  "run": {
+    "queryId": "c-batch-window"
+  },
+  "mode": "fake"
+}

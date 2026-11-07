@@ -920,6 +920,12 @@ nothing. One process runs a `queryId` (or a shard of it) at a time: another one 
 Stream.fromFeed(queen, { queues: ['orders'] })
   .to((order) => `orders-${order.country}`)
 
+// Batches: up to maxItems results per call, each { value, ctx, id }; the position moves after
+// the call returns, and a crash delivers the batch again with the same ids (upsert by id).
+Stream.fromFeed(queen, { queues: ['orders'] })
+  .foreachBatch(async (items) => db.upsert(items.map((it) => ({ id: it.id, ...it.value }))),
+    { maxItems: 500, maxWaitMillis: 1000 })
+
 // Windows on the log's clock, one for every queue: a quiet feed still closes them on time.
 Stream.fromFeed(queen, { queues: ['orders', 'payments'] })
   .windowTumbling({ seconds: 60 })
