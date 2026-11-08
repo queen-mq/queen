@@ -553,6 +553,14 @@ impl Proxy {
                                 Ok(0) | Err(_) => return,
                                 Ok(n) => n,
                             };
+                            // A cut is set at once, from inside a batch function say;
+                            // the select below sees it only when this task runs again,
+                            // and picks its ready branch at random. Bytes read after
+                            // the cut never reach the broker: a commit sent right after
+                            // the function returned once got through under load.
+                            if c.load(Ordering::SeqCst) {
+                                return;
+                            }
                             let calls = buf[..n]
                                 .windows(18)
                                 .filter(|w| w == b"POST /api/v1/feed ")
