@@ -6,10 +6,10 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 ## 2.8.0 - 2026-11-08
 
 **Upgrading from 2.7.1: a rolling restart, nothing else.** Nothing on disk changes (cluster version
-7), so 2.7.1 and 2.8.0 nodes run side by side during the roll. The tenant feed is new: a follower
-serves `POST /api/v1/feed`, and the leader answers 421 with its followers until every node runs
-2.8.0. The JavaScript, Python, Go, Rust and C++ clients move to 2.8.0; the PHP client stays at
-2.7.0, queenctl at 2.7.1 and `queen-protocol` at 1.5.0, unchanged.
+7), so 2.7.1 and 2.8.0 nodes run side by side during the roll. The tenant feed (`POST
+/api/v1/feed`, served by followers) is new: a node still on 2.7.1 does not have it, so start feed
+readers once every node runs 2.8.0. The JavaScript, Python, Go, Rust and C++ clients move to 2.8.0;
+the PHP client stays at 2.7.0, queenctl at 2.7.1 and `queen-protocol` at 1.5.0, unchanged.
 
 **Feed streams deliver their results in batches: `.foreachBatch()`.** `.foreachBatch(fn, {
 maxItems, maxWaitMillis })` ends a feed stream like `.foreach()`, but calls `fn` with up to
