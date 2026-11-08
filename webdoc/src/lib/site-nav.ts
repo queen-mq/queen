@@ -8,9 +8,8 @@
  * no sidebar drawer either, a phone reader had no way into the docs but the
  * hero buttons. A docs page has the sidebar, so its header carries none.
  *
- * Five doors and the hosted service: where to start, what to build, how it
- * compares, the book, and the measurements. Everything else is one click away in the
- * sidebar.
+ * Five doors: where to start, what to build, how it compares, the book, and
+ * the measurements. Everything else is one click away in the sidebar.
  */
 
 export interface SiteLink {
@@ -26,12 +25,6 @@ export const SITE_NAV: readonly SiteLink[] = [
   { label: "Book", href: "/book/" },
   { label: "Benchmarks", href: "/benchmarks/" },
 ];
-
-export const CLOUD_LINK: SiteLink = {
-  label: "Queen Cloud",
-  href: "https://queenmq.cloud/",
-  external: true,
-};
 
 /** Pages that are not part of the docs: they have no sidebar to navigate with. */
 const OUTSIDE_DOCS = new Set(["/", "/404/"]);

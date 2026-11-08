@@ -14,7 +14,7 @@ second. Every customer, order or conversation gets its own ordered partition. Ev
 takes is saved as one commit, or not at all. One binary, no database, and Kafka clients work with
 it out of the box.
 
-[Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.8
+[Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · Apache-2.0 · v2.8
 
 </div>
 
