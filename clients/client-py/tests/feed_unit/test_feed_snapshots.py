@@ -6,6 +6,7 @@ Timing bounds that JS sets for its event loop are kept where a Python process
 meets them; where Python is slower by nature the bound is wider (noted)."""
 
 import asyncio
+import gc
 import hashlib
 import json
 import time
@@ -30,10 +31,12 @@ def sid_of(prefix, key):
 
 
 class Gaps:
-    """The longest the event loop stood still while it ran (a timer every 5 ms)."""
+    """The longest the event loop stood still while it ran (a timer every 5 ms),
+    and how many times the timer ran."""
 
     def __init__(self):
         self.max = 0.0
+        self.turns = 0
         self.last = time.monotonic()
         self.task = asyncio.ensure_future(self._tick())
 
@@ -44,6 +47,7 @@ class Gaps:
                 now = time.monotonic()
                 self.max = max(self.max, (now - self.last) * 1000)
                 self.last = now
+                self.turns += 1
         except asyncio.CancelledError:
             pass
 
@@ -151,10 +155,21 @@ async def test_a_loaded_state_of_500000_entries_is_indexed_again_in_batches():
     p = Pipeline(per_minute(q)._compile_feed().steps)
     p.load_begin()
     p.load_piece(0, "window", [[f"w\u001f0\u001fk{str(i).zfill(7)}", {"key": f"k{i}", "start": 0, "end": 60000, "due": 60000, "acc": {"count": 1}}] for i in range(500000)], [])
-    g = Gaps()
-    await p.load_end(None)
-    g.stop()
+    # Python's garbage collector stops the loop on its own, whatever the
+    # rebuild does: a full collection over these 500,000 entries took 200 to
+    # 410 ms on a Mac and failed CI at 407 ms. It is off while the rebuild is
+    # measured (with it off the longest stop was 22 to 47 ms).
+    gc.disable()
+    try:
+        g = Gaps()
+        await p.load_end(None)
+        g.stop()
+    finally:
+        gc.enable()
     assert p.open == 500000
+    # A rebuild that never turns the loop would still be quick enough to pass
+    # the bound on a fast machine: the loop must have turned along the way.
+    assert g.turns >= 5, f"the event loop turned {g.turns} times during the rebuild"
     assert g.max < 400, f"the event loop stood still for {g.max:.0f} ms"
 
 
