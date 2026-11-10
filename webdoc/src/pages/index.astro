@@ -61,7 +61,7 @@ const cardStatic = "block rounded-card bg-card p-5";
           42% under the clear header. Below lg the scene sits under the text. */}
       <section class="lg:-mt-[calc(3.5rem+1px)] lg:grid lg:min-h-svh lg:grid-cols-[minmax(0,1fr)_42%]">
         <div class="flex lg:items-center lg:justify-center lg:px-16 xl:px-24">
-          <div class="mx-auto w-full max-w-6xl px-6 pb-12 pt-12 lg:max-w-[30rem] lg:px-0 lg:py-24">
+          <div class="mx-auto w-full max-w-6xl px-6 pb-12 pt-12 lg:max-w-[31rem] lg:px-0 lg:py-20">
             <p class={eyebrow}>{hero.eyebrow}</p>
             <h1 data-md class="mt-5 text-foreground">
               <span
@@ -70,16 +70,37 @@ const cardStatic = "block rounded-card bg-card p-5";
               >
                 {hero.headline}
               </span>
-              {" "}
-              <span
-                class="block text-muted-foreground"
-                style="font-size: clamp(2.25rem, 3.4vw, 3.125rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
-              >
-                {hero.subline}
-              </span>
+              {hero.subline && (
+                <>
+                  {" "}
+                  <span
+                    class="block text-muted-foreground"
+                    style="font-size: clamp(2.25rem, 3.4vw, 3.125rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
+                  >
+                    {hero.subline}
+                  </span>
+                </>
+              )}
             </h1>
-            <p data-md class="mt-6 text-[1.0625rem] leading-relaxed text-foreground/85">{hero.lead}</p>
-            <p data-md class="mt-4 text-[0.9375rem] leading-relaxed text-muted-foreground">{hero.second}</p>
+            {/* One idea per line: the promise, then the proof and the limit, each
+                proof line ending with the page that backs it. */}
+            <div class="mt-6 space-y-2">
+              {hero.lines.map((t) => <p data-md class="text-[1.0625rem] leading-snug text-foreground/85">{t}</p>)}
+            </div>
+            <div class="mt-5 space-y-1.5">
+              {hero.proof.map((p) => (
+                <p data-md class="text-[0.875rem] leading-relaxed text-muted-foreground">
+                  {p.text}{" "}
+                  <a
+                    href={p.link.href}
+                    class="whitespace-nowrap text-foreground/80 no-underline transition-colors hover:text-foreground"
+                  >
+                    {p.link.label} →
+                  </a>
+                </p>
+              ))}
+            </div>
+            <p data-md class="mt-5 text-[0.875rem] leading-relaxed text-muted-foreground">{hero.facts}</p>
 
             <div class="mt-8 flex flex-wrap items-center gap-3">
               <a

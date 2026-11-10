@@ -23,7 +23,7 @@ import { sitemapLastmod } from "./src/lib/sitemap-lastmod";
 // homepage) and every page's isPartOf carry, through patches/ and
 // DocsLayout.astro, so consumers merge them into one site.
 const DESCRIPTION =
-  "An open-source distributed message broker where partitions are for ordering, not scaling: one ordered partition per entity, and every step one commit, replicated with Raft.";
+  "The ACID message broker: a queue for every customer, order and conversation, and one commit for every step. Open source, written in Rust, replicated with Raft.";
 
 const structuredData = {
   "@context": "https://schema.org",

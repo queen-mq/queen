@@ -39,7 +39,7 @@ export const prerender = true;
 const url = (path: string) => (config.site ? new URL(path, config.site).href : path);
 
 /** The page's `<h1>`, verbatim. */
-export const HOME_HEADLINE = `${hero.headline} ${hero.subline}`;
+export const HOME_HEADLINE = `${hero.headline} ${hero.subline}`.trim();
 
 /** One line describing the page, for the index and corpus rows that list it. */
 export const HOME_SUMMARY = SUMMARY;
@@ -53,7 +53,10 @@ export function homepageBody(): string {
   const lines: string[] = [];
   const link = (l: { label: string; href: string }) => `[${l.label}](${url(l.href)})`;
 
-  lines.push(`*${hero.eyebrow}*`, "", hero.lead, "", hero.second, "");
+  lines.push(`*${hero.eyebrow}*`, "");
+  for (const t of hero.lines) lines.push(t, "");
+  for (const p of hero.proof) lines.push(`${p.text} ${link(p.link)}`, "");
+  lines.push(hero.facts, "");
   lines.push(
     `${link(hero.primary)} · ${link(hero.secondary)} · [GitHub](https://github.com/queen-mq/queen)`,
     "",

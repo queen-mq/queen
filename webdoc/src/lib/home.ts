@@ -17,29 +17,50 @@ export const IMAGE = "ghcr.io/queen-mq/queen:2.8.0";
 /**
  * The `<title>`. NimbusHead appends " | Queen MQ" because this differs from
  * the site title, so the brand stays out of the string. It leads with the
- * words a reader searches for ("message broker"). 44 characters: with the
+ * words a reader searches for ("message broker"). 45 characters: with the
  * suffix it stays under the 65 that scripts/check-seo.mjs allows.
  */
-export const HOME_TITLE = "Message broker with one partition per entity";
+export const HOME_TITLE = "The ACID message broker: a queue per customer";
 
 /** One line describing the page, for the index and corpus rows that list it. */
 export const HOME_SUMMARY =
-  "The landing page: partitions for ordering instead of scaling, then a five-minute guide in " +
+  "The landing page: the ACID message broker, with a queue per customer, one commit per step, " +
+  "its proof and its limit, then a five-minute guide in " +
   "JavaScript, Python, Go, Rust, PHP and C++ (run a node, configure a queue, push to a partition, " +
   "consume, commit one step as one transaction, replay from a time and fetch by offset, run a job " +
   "once under a lock, aggregate with a stream, request/reply over an ephemeral queue), the " +
   "measured numbers with their conditions, and where to go next.";
 
 export const hero = {
-  eyebrow: "A new paradigm for message brokers",
-  headline: "Partitions are for ordering.",
-  /** Second line of the `<h1>`, drawn dimmer. */
-  subline: "Not for scaling.",
-  lead:
-    "Queen is an open-source distributed message broker, able to sustain millions of messages " +
-    "per second. Every customer, order or conversation gets its own ordered partition. Every " +
-    "step a worker takes is saved as one commit, or not at all.",
-  second: "One binary, no database, and Kafka clients work with it out of the box.",
+  eyebrow: "Queen MQ",
+  headline: "The ACID message broker.",
+  /** Second line of the `<h1>`, drawn dimmer. Empty: the headline stands alone. */
+  subline: "",
+  /** The promise, one idea per line: joined into a paragraph it reads as a wall of text. */
+  lines: [
+    "Every customer, order and conversation gets its own queue, so one slow customer never " +
+      "blocks the others.",
+    "Every step commits as one: the ack, the next message, the state, the timer.",
+    "No Redis lock, no cron job, no retry table.",
+  ],
+  /** The proof and the limit. Each line ends with a link to the page that backs it. */
+  proof: [
+    {
+      text: "Proof: 226 Jepsen tests passed, and every bug they found is published.",
+      link: { label: "The tests", href: "/benchmarks/jepsen/" },
+    },
+    {
+      text:
+        "3M msg/s on three nodes and ten million queues, with every write synced to disk on two.",
+      link: { label: "The benchmark", href: "/benchmarks/queen-vs-kafka/" },
+    },
+    {
+      text:
+        "The limit: a transaction is one call, not a SQL session. Your own database is outside it.",
+      link: { label: "Transactions", href: "/writing-applications/transactions/" },
+    },
+  ],
+  facts: "Open source (Apache-2.0), Rust, one binary. In production at Smartness.",
   primary: { label: "Run it in five minutes", href: "#guide" },
   secondary: { label: "See the model", href: "/introduction/model/" },
   run: `docker run -p 6632:6632 ${IMAGE}`,
@@ -106,10 +127,11 @@ export const guideSteps: GuideStep[] = [
     id: "push",
     title: "Push to a partition",
     body: [
-      "In Kafka you choose a number of partitions and hash keys onto them, so a slow customer " +
-        "holds up every customer that shares its partition. Here a partition is one entity: a " +
-        "customer, an order, a conversation. The push that names it creates it, order holds " +
-        "inside it, and one queue has held ten million.",
+      "Partitions are for ordering. Not for scaling. In Kafka you choose a number of partitions " +
+        "and hash keys onto them, so a slow customer holds up every customer that shares its " +
+        "partition. Here a partition is one entity's own queue: a customer, an order, a " +
+        "conversation. The push that names it creates it, order holds inside it, and one queue " +
+        "has held ten million.",
       "The transactionId makes a retry safe: the same id within the dedup window (an hour by " +
         "default) is not written twice.",
     ],

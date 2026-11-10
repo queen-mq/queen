@@ -5,14 +5,25 @@
   <img src="assets/logo/queen-tagline.svg" alt="Queen, message queue" width="340">
 </picture>
 
-## Partitions are for ordering. Not for scaling.
+## The ACID message broker.
 
-**A new paradigm for message brokers.**
+</div>
 
-Queen is an open-source distributed message broker, able to sustain millions of messages per
-second. Every customer, order or conversation gets its own ordered partition. Every step a worker
-takes is saved as one commit, or not at all. One binary, no database, and Kafka clients work with
-it out of the box.
+Every customer, order and conversation gets its own queue, so one slow customer never blocks the others.<br>
+Every step commits as one: the ack, the next message, the state, the timer.<br>
+No Redis lock, no cron job, no retry table.
+
+**Proof:** [226 Jepsen tests passed](https://queenmq.com/benchmarks/jepsen/), and every bug they found is published.<br>
+[3M msg/s](https://queenmq.com/benchmarks/queen-vs-kafka/#3000000-msgs-of-256-byte-messages) on three nodes and ten million queues, with every write synced to disk on two.<br>
+**The limit:** a [transaction](https://queenmq.com/writing-applications/transactions/) is one call, not a SQL session. Your own database is outside it.
+
+Open source (Apache-2.0), Rust, one binary. In production at [Smartness](https://www.smartness.com/en).
+
+```bash
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.0
+```
+
+<div align="center">
 
 [Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · Apache-2.0 · v2.8
 
@@ -58,10 +69,10 @@ await queen.queue('orders')
 
 ### 3. Push to a partition
 
-In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up
-every customer that shares its partition. Here a partition is one entity: a customer, an order, a
-conversation. The push that names it creates it, order holds inside it, and one queue has held ten
-million.
+**Partitions are for ordering. Not for scaling.** In Kafka you choose a number of partitions and
+hash keys onto them, so a slow customer holds up every customer that shares its partition. Here a
+partition is one entity's own queue: a customer, an order, a conversation. The push that names it
+creates it, order holds inside it, and one queue has held ten million.
 
 <!-- guide: push -->
 ```js
