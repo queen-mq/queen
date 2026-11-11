@@ -1,8 +1,8 @@
 <script setup>
 // With no group picked, the right side holds the partitions behind more than
 // a chosen age, across every group (the old page's Lagging partitions), under
-// the group and queue they belong to. A group's name opens it; Skip… moves
-// one partition to its newest message, after its dialog. Rows keep the place
+// the group and queue they belong to. A group's name opens it; Seek… moves
+// one partition to its newest message, or back to a time, after its dialog. Rows keep the place
 // they were first read in; one that catches up stays, greyed, until the age
 // changes.
 import { computed, ref, shallowRef, watch } from 'vue'
@@ -102,7 +102,7 @@ function skip(s, p) {
             <span role="cell" class="r qn-num" :title="p.oldestAt && !p.gone ? `Oldest unread pushed at ${clock(Date.parse(p.oldestAt), true)}` : undefined">{{ p.gone ? 'caught up' : span(p.lag) }}</span>
             <span role="cell" class="qn-mono qn-t2 cgb-w cgb-wide" :title="p.worker || undefined">{{ p.worker ? midCut(p.worker, 14) : '–' }}</span>
             <span v-if="canAct" role="cell" class="r">
-              <button v-if="!p.gone && s.row" type="button" class="qn-btn3 cgb-skip" :aria-label="`Skip partition ${p.partition} for ${s.label}`" @click="skip(s, p)">Skip…</button>
+              <button v-if="!p.gone && s.row" type="button" class="qn-btn3 cgb-skip" :aria-label="`Skip or seek partition ${p.partition} for ${s.label}`" @click="skip(s, p)">Seek…</button>
             </span>
           </div>
         </div>

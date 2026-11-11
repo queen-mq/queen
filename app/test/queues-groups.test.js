@@ -274,6 +274,10 @@ test('the calls: the method, path and body each action sends, names encoded', ()
   assert.equal(p.path, '/api/v1/consumer-groups/__QUEUE_MODE__/queues/channel.metric_sample/partitions/conn%3A28%2Fx/seek')
   assert.deepEqual(p.body, { toEnd: true })
   assert.equal(p.method, 'POST')
+  // One partition read again from a time: the body the whole queue's seek takes.
+  const pt = partitionCall('smartpms', 'smartpms.sync', 'hotel-12', at)
+  assert.deepEqual(pt.body, { timestamp: '2026-10-31T09:30:00.000Z' })
+  assert.equal(pt.text, 'POST /api/v1/consumer-groups/smartpms/queues/smartpms.sync/partitions/hotel-12/seek {"timestamp":"2026-10-31T09:30:00.000Z"}')
   const d1 = deleteCall('smartpms', 'smartpms.sync', false)
   assert.deepEqual([d1.kind, d1.method, d1.path, d1.params], ['deleteForQueue', 'DELETE', '/api/v1/consumer-groups/smartpms/queues/smartpms.sync', { deleteMetadata: false }])
   assert.equal(d1.text, 'DELETE /api/v1/consumer-groups/smartpms/queues/smartpms.sync?deleteMetadata=false')
@@ -293,12 +297,14 @@ test('sendCall hands the same parts to the API layer the dialog showed', async (
   await sendCall(api, seekCall('g', 'q'), cfg)
   await sendCall(api, seekCall('g', 'q', 0), cfg)
   await sendCall(api, partitionCall('g', 'q', 'p'), cfg)
+  await sendCall(api, partitionCall('g', 'q', 'p', 0), cfg)
   await sendCall(api, deleteCall('g', 'q', false), cfg)
   await sendCall(api, deleteCall('g', null, true), cfg)
   assert.deepEqual(sent, [
     ['seek', 'g', 'q', { toEnd: true }, cfg],
     ['seek', 'g', 'q', { timestamp: '1970-01-01T00:00:00.000Z' }, cfg],
-    ['seekPartition', 'g', 'q', 'p', cfg],
+    ['seekPartition', 'g', 'q', 'p', { toEnd: true }, cfg],
+    ['seekPartition', 'g', 'q', 'p', { timestamp: '1970-01-01T00:00:00.000Z' }, cfg],
     ['deleteForQueue', 'g', 'q', false, cfg],
     ['delete', 'g', true, cfg],
   ])

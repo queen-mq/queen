@@ -177,8 +177,9 @@ export const consumers = {
   // `Content-Type: application/json`, so a JSON client stringifies a null
   // payload into the 4 literal bytes `null` — non-empty, and not a struct, so
   // parse_seek answers 400 {"error":"bad body"} and the button never worked.
-  seekPartition: (name, queue, partition, config) =>
-    client.post(`/api/v1/consumer-groups/${encodeURIComponent(name)}/queues/${encodeURIComponent(queue)}/partitions/${encodeURIComponent(partition)}/seek`, { toEnd: true }, config),
+  // `options` is `{toEnd:true}` or `{timestamp}`, as for the whole queue.
+  seekPartition: (name, queue, partition, options = { toEnd: true }, config) =>
+    client.post(`/api/v1/consumer-groups/${encodeURIComponent(name)}/queues/${encodeURIComponent(queue)}/partitions/${encodeURIComponent(partition)}/seek`, options || { toEnd: true }, config),
 }
 
 // ============================================

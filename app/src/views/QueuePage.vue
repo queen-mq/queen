@@ -213,7 +213,7 @@ const sizeLine = computed(() => {
           </button>
         </nav>
         <div role="tabpanel" class="qp-panel">
-          <QueueGroups v-if="tab === 'groups'" :groups="q.groups.value" :lines-for="q.linesFor" />
+          <QueueGroups v-if="tab === 'groups'" :groups="q.groups.value" :lines-for="q.linesFor" :queue="name" :where="where" @changed="q.refresh()" />
           <QueuePartitions v-else-if="tab === 'partitions'" :data="q.parts.value" :total="q.row.value?.partitions ?? null" />
           <QueueMessages v-else-if="tab === 'messages'" :queue="name" :where="where" @copy="openPush" />
           <QueueDead v-else-if="tab === 'dead'" :queue="name" :count="q.row.value?.messages?.deadLetter || 0" :sig="q.sig.value" />

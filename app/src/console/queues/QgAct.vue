@@ -1,12 +1,13 @@
 <script setup>
-// What the Consumer groups view does to a group, one dialog at a time: skip
-// what waits, read again from a time, skip one partition, delete it on one
-// queue or everywhere. Each shows what changes, the cluster and the exact
-// call before it runs (groupsView builds the call; sendCall sends those same
-// parts through the app's API layer), and the broker's answer comes back in
-// a toast. A 2xx that moved or deleted nothing says so: it did nothing.
-import { computed, ref, watch } from 'vue'
-import { consumers as consumersApi } from '@/api'
+// What the Consumer groups view and a queue's page do to a group, one dialog
+// at a time: skip what waits, read again from a time, move one partition (to
+// its newest message, or back to a time), delete it on one queue or
+// everywhere. Each shows what changes, the cluster and the exact call before
+// it runs (groupsView builds the call; sendCall sends those same parts
+// through the app's API layer), and the broker's answer comes back in a
+// toast. A 2xx that moved or deleted nothing says so: it did nothing.
+import { computed, ref, shallowRef, watch } from 'vue'
+import { consumers as consumersApi, queues as queuesApi } from '@/api'
 import { describeApiError } from '@/api/errors'
 import QcDialog from '../QcDialog.vue'
 import QcSeg from '../QcSeg.vue'
@@ -19,7 +20,8 @@ import {
 } from './groupsView'
 
 const props = defineProps({
-  // { kind: 'skip'|'seek'|'partition'|'delete'|'deleteAll', row, partition?, waiting?, queues?, allMembers?, allWaiting? }
+  // { kind: 'skip'|'seek'|'partition'|'delete'|'deleteAll', row, partition?, waiting?, to?, queues?, allMembers?, allWaiting? }
+  // A 'partition' act with no partition asks for one; `to` ('end' | 'time') is where it starts.
   act: { type: Object, default: null },
   where: { type: String, default: '' }, // the cluster
 })
@@ -28,11 +30,29 @@ const emit = defineEmits(['close', 'done'])
 const busy = ref(false)
 const keep = ref(false) // keep its subscription: off by default, as the old page's box was on
 const field = ref('')
+const partTo = ref('end') // one partition: 'end' (skip what waits) or 'time'
+const partField = ref('') // one partition, when the act named none
+const partList = shallowRef([]) // the queue's partitions, for the field's suggestions
 watch(() => props.act, (a) => {
   if (!a) return
   keep.value = false
   field.value = whenText(Date.now() - 3600_000)
+  partTo.value = a.to === 'time' ? 'time' : 'end'
+  partField.value = ''
+  partList.value = []
+  if (a.kind === 'partition' && !a.partition && a.row?.queue) loadPartitions(a.row.queue)
 })
+async function loadPartitions(queue) {
+  try {
+    const r = await queuesApi.partitions({ queue, limit: 500 }, { quiet: true, probe: true })
+    if (props.act?.row?.queue !== queue) return
+    partList.value = (r.data?.partitions || []).map((p) => p.partition).filter((p) => typeof p === 'string')
+  } catch { /* no suggestions: the field still takes a name */ }
+}
+const PART_TO = [
+  { value: 'end', label: 'To its newest message' },
+  { value: 'time', label: 'Back to a time' },
+]
 
 const a = computed(() => props.act)
 const kind = computed(() => a.value?.kind || '')
@@ -51,7 +71,12 @@ const across = computed(() => {
 const DAY = (ms) => new Date(ms).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 const tz = timeZone()
 
-// ---- the time of a seek ----
+// ---- one partition: the one the act named, or the one typed ----
+const part = computed(() => (a.value?.partition ? a.value.partition : partField.value.trim()))
+const partProblem = computed(() => (kind.value === 'partition' && !part.value ? 'Name the partition, as its messages carry it.' : ''))
+
+// ---- the time of a seek: the whole queue's, or one partition's ----
+const wantsTime = computed(() => kind.value === 'seek' || (kind.value === 'partition' && partTo.value === 'time'))
 const at = computed(() => parseWhen(field.value))
 const QUICK = [
   { label: '15 min ago', s: 900 },
@@ -60,9 +85,9 @@ const QUICK = [
   { label: '24 h ago', s: 24 * 3600 },
 ]
 const seekProblem = computed(() => {
-  if (kind.value !== 'seek') return ''
+  if (!wantsTime.value) return ''
   if (at.value == null) return 'Type a date and a time, like 2026-10-31 09:30.'
-  if (at.value > Date.now()) return 'That is later than now. To skip everything that waits, use Skip what waits.'
+  if (at.value > Date.now()) return kind.value === 'seek' ? 'That is later than now. To skip everything that waits, use Skip what waits.' : 'That is later than now. To skip what waits there, move it to its newest message.'
   return ''
 })
 const atWords = computed(() => {
@@ -78,15 +103,19 @@ const call = computed(() => {
   if (!x || !r) return null
   if (x.kind === 'skip') return seekCall(r.name, r.queue)
   if (x.kind === 'seek') return seekCall(r.name, r.queue, at.value ?? Date.now())
-  if (x.kind === 'partition') return partitionCall(r.name, r.queue, x.partition)
+  if (x.kind === 'partition') return partitionCall(r.name, r.queue, part.value || '…', partTo.value === 'time' ? (at.value ?? Date.now()) : null)
   if (x.kind === 'delete') return deleteCall(r.name, r.queue, !keep.value)
   if (x.kind === 'deleteAll') return deleteCall(r.name, null, !keep.value)
   return null
 })
-// Until the time reads as one, the call says where it goes, not a made-up instant.
-const callText = computed(() => (kind.value === 'seek' && seekProblem.value
-  ? `POST ${call.value?.path} {"timestamp":"…"}`
-  : call.value?.text || ''))
+// Until the time reads as one, the call says where it goes, not a made-up
+// instant; until a partition is named, the path shows where it will go.
+const callText = computed(() => {
+  const c = call.value
+  if (!c) return ''
+  const text = wantsTime.value && seekProblem.value ? `POST ${c.path} {"timestamp":"…"}` : c.text
+  return partProblem.value ? text.replace(encodeURIComponent('…'), '…') : text
+})
 
 // ---- what a deleted group does next ----
 const SUBS = [
@@ -115,7 +144,7 @@ const title = computed(() => {
   switch (kind.value) {
     case 'skip': return `Skip what waits for ${label.value}?`
     case 'seek': return `Seek ${label.value} to a time?`
-    case 'partition': return `Skip one partition for ${label.value}?`
+    case 'partition': return partTo.value === 'time' ? `Seek one partition of ${label.value} to a time?` : `Skip one partition for ${label.value}?`
     case 'delete': return `Delete ${label.value} on ${queue.value}?`
     case 'deleteAll': return `Delete ${label.value} everywhere?`
     default: return ''
@@ -125,11 +154,13 @@ const confirmLabel = computed(() => {
   switch (kind.value) {
     case 'skip': return `Skip on ${props.where}`
     case 'seek': return `Seek on ${props.where}`
-    case 'partition': return `Skip on ${props.where}`
+    case 'partition': return partTo.value === 'time' ? `Seek on ${props.where}` : `Skip on ${props.where}`
     default: return `Delete on ${props.where}`
   }
 })
-const danger = computed(() => kind.value !== 'seek')
+// Reading again delivers twice, skipping loses: only the second is red.
+const danger = computed(() => !wantsTime.value)
+const blocked = computed(() => !!seekProblem.value || !!partProblem.value)
 // Skipping a whole queue and deleting are typed; one partition is named in full instead.
 const typedFor = computed(() => (['skip', 'delete', 'deleteAll'].includes(kind.value) ? typed.value : ''))
 
@@ -141,7 +172,7 @@ function close() {
 async function run() {
   const c = call.value
   const x = a.value
-  if (!c || !x || busy.value || (x.kind === 'seek' && seekProblem.value)) return
+  if (!c || !x || busy.value || blocked.value) return
   busy.value = true
   const who = label.value
   const on = props.where
@@ -155,6 +186,8 @@ async function run() {
         toast(`Skipped what waited for ${who} on ${on}`, `The broker answered ${r.status || 200}: ${plural(o.moved, 'partition', 'partitions')} of ${c.queue} moved to their newest message.`)
       } else if (x.kind === 'seek') {
         toast(`Moved ${who} to ${atWords.value} on ${on}`, `The broker answered ${r.status || 200}: ${plural(o.moved, 'partition', 'partitions')} of ${c.queue} read again from there.`)
+      } else if (c.body?.timestamp) {
+        toast(`Moved ${who} to ${atWords.value} in one partition on ${on}`, `The broker answered ${r.status || 200}: ${c.partition} of ${c.queue} is read again from there.`)
       } else {
         toast(`Skipped one partition for ${who} on ${on}`, `The broker answered ${r.status || 200}: ${c.partition} of ${c.queue} moved to its newest message.`)
       }
@@ -190,7 +223,7 @@ async function run() {
     :danger="danger"
     :typed="typedFor"
     :busy="busy"
-    :blocked="kind === 'seek' && !!seekProblem"
+    :blocked="blocked"
     @confirm="run"
     @cancel="close"
   >
@@ -227,13 +260,45 @@ async function run() {
         </template>
       </template>
 
-      <!-- one partition -->
+      <!-- one partition: to its newest message, or back to a time -->
       <template v-else-if="kind === 'partition'">
-        <div class="qa-change qn-num">
-          <span class="qn-t2">Waiting in <span class="qn-mono qa-break">{{ act.partition }}</span></span>
-          <span>{{ act.waiting == null ? '–' : fmt(act.waiting) }} → 0</span>
-        </div>
-        <p class="qn-t2 qa-p">They are never delivered to {{ row.queueMode ? 'pops without a group' : label }}. Its other partitions of <span class="qn-mono">{{ queue }}</span> are not touched.</p>
+        <label v-if="!act.partition" class="qa-part">
+          <span class="qn-t2">Partition of <span class="qn-mono">{{ queue }}</span></span>
+          <span class="qn-field qa-pfield"><input v-model="partField" class="qn-mono" type="text" spellcheck="false" autocomplete="off" list="qa-parts" placeholder="customer-123" /></span>
+          <datalist id="qa-parts"><option v-for="p in partList" :key="p" :value="p" /></datalist>
+        </label>
+        <QcSeg v-model="partTo" :options="PART_TO" label="Move its cursor" class="qa-seg qa-segtop" />
+        <template v-if="partTo === 'time'">
+          <label class="qa-when qa-p">
+            <span class="qn-t2">Read it again from</span>
+            <span class="qn-field qa-field"><input v-model="field" class="qn-mono" type="text" spellcheck="false" autocomplete="off" aria-describedby="qa-tz" /></span>
+            <span id="qa-tz" class="qn-t3 qa-tz">{{ tz }}</span>
+          </label>
+          <div class="qa-quick" role="group" aria-label="Quick times">
+            <button v-for="p in QUICK" :key="p.s" type="button" class="qn-btn3" @click="field = whenText(Date.now() - p.s * 1000)">{{ p.label }}</button>
+          </div>
+          <p v-if="seekProblem" class="qn-t2 qa-p">{{ seekProblem }}</p>
+          <template v-else>
+            <div class="qa-change qn-num">
+              <span class="qn-t2">Its cursor in <span class="qn-mono qa-break">{{ part || 'the partition' }}</span></span>
+              <span>→ the last message before {{ atWords }}</span>
+            </div>
+            <p class="qn-t2 qa-p">Every message of that partition pushed from {{ atWords }} on is delivered to {{ row.queueMode ? 'pops without a group' : label }} again, read or not. Its other partitions of <span class="qn-mono">{{ queue }}</span> are not touched.</p>
+          </template>
+        </template>
+        <template v-else>
+          <div class="qa-change qn-num qa-p">
+            <template v-if="act.waiting != null">
+              <span class="qn-t2">Waiting in <span class="qn-mono qa-break">{{ part }}</span></span>
+              <span>{{ fmt(act.waiting) }} → 0</span>
+            </template>
+            <template v-else>
+              <span class="qn-t2">Its cursor in <span class="qn-mono qa-break">{{ part || 'the partition' }}</span></span>
+              <span>→ its newest message</span>
+            </template>
+          </div>
+          <p class="qn-t2 qa-p">What waits there is never delivered to {{ row.queueMode ? 'pops without a group' : label }}. Its other partitions of <span class="qn-mono">{{ queue }}</span> are not touched.</p>
+        </template>
       </template>
 
       <!-- delete: one queue, or everywhere -->
@@ -267,4 +332,7 @@ async function run() {
 .qa-quick { display: flex; flex-wrap: wrap; gap: 2px; margin: 8px 0 14px -8px; }
 .qa-quick .qn-btn3 { height: 28px; font-size: 12px; }
 .qa-seg { margin-top: 14px; }
+.qa-segtop { margin-top: 12px; }
+.qa-part { display: flex; flex-direction: column; gap: 6px; }
+.qa-pfield { width: 100%; }
 </style>

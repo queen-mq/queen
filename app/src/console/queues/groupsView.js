@@ -466,9 +466,13 @@ export function seekCall(group, queue, at = null) {
   return { kind: 'seek', method: 'POST', path, body, group, queue, text: `POST ${path} ${JSON.stringify(body)}` }
 }
 
-/** Skip what waits in one partition: its cursor to the partition's newest message. */
-export function partitionCall(group, queue, partition) {
-  const body = { toEnd: true }
+/**
+ * One partition: its cursor to the partition's newest message (skip what
+ * waits there), or, given `at`, to the last message before that time (read
+ * again from it). The broker takes the same body as for the whole queue.
+ */
+export function partitionCall(group, queue, partition, at = null) {
+  const body = at == null ? { toEnd: true } : { timestamp: new Date(at).toISOString() }
   const path = `${BASE}/${enc(group)}/queues/${enc(queue)}/partitions/${enc(partition)}/seek`
   return { kind: 'seekPartition', method: 'POST', path, body, group, queue, partition, text: `POST ${path} ${JSON.stringify(body)}` }
 }
@@ -500,7 +504,7 @@ export function deleteCall(group, queue = null, deleteMetadata = true) {
 export function sendCall(api, call, config = { quiet: true }) {
   switch (call?.kind) {
     case 'seek': return api.seek(call.group, call.queue, call.body, config)
-    case 'seekPartition': return api.seekPartition(call.group, call.queue, call.partition, config)
+    case 'seekPartition': return api.seekPartition(call.group, call.queue, call.partition, call.body, config)
     case 'deleteForQueue': return api.deleteForQueue(call.group, call.queue, call.deleteMetadata, config)
     case 'delete': return api.delete(call.group, call.deleteMetadata, config)
     default: return Promise.reject(new Error(`No such call: ${call?.kind}`))

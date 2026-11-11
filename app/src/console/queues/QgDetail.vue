@@ -1,9 +1,10 @@
 <script setup>
-// One group on one queue, beside the list: why it needs you when it does,
-// what waits and where it reads from, its partitions furthest behind, and
-// what you can do: skip what waits, read again from a time, skip one
-// partition, delete it here or everywhere. The list already says how far
-// behind it is and whether it drains, so this side does not say it again.
+// One group on one queue, beside the list (Queues › Consumer groups, and a
+// queue's own page): why it needs you when it does, what waits and where it
+// reads from, its partitions furthest behind, and what you can do: skip what
+// waits, read again from a time, move one partition (to its newest message
+// or back to a time), delete it here or everywhere. The list already says how
+// far behind it is and whether it drains, so this side does not say it again.
 import { computed, ref, shallowRef, watch } from 'vue'
 import { acksText } from '@/composables/queueOps'
 import { midCut } from '@/composables/dlqWhy'
@@ -160,7 +161,7 @@ function act(kind, extra = {}) { more.value = false; emit('act', { kind, row: r.
             <span role="cell" class="r qn-num" :title="p.oldestAt && !p.gone ? `Oldest unread pushed at ${clock(Date.parse(p.oldestAt), true)}` : undefined">{{ p.gone ? 'caught up' : span(p.lag) }}</span>
             <span role="cell" class="qn-mono qn-t2 cgd-w cgd-wide" :title="p.worker || undefined">{{ p.worker ? midCut(p.worker, 14) : '–' }}</span>
             <span v-if="canAct" role="cell" class="r">
-              <button v-if="!p.gone" type="button" class="qn-btn3 cgd-skip" :aria-label="`Skip partition ${p.partition}`" @click="act('partition', { partition: p.partition, waiting: p.waiting })">Skip…</button>
+              <button v-if="!p.gone" type="button" class="qn-btn3 cgd-skip" :aria-label="`Skip or seek partition ${p.partition}`" @click="act('partition', { partition: p.partition, waiting: p.waiting })">Seek…</button>
             </span>
           </div>
         </div>
@@ -177,6 +178,7 @@ function act(kind, extra = {}) { more.value = false; emit('act', { kind, row: r.
       <div v-if="canAct" class="cgd-acts">
         <button type="button" class="qn-btn2" :disabled="!(r.waiting > 0)" @click="act('skip')">Skip what waits…</button>
         <button type="button" class="qn-btn2" @click="act('seek')">Seek to a time…</button>
+        <button type="button" class="qn-btn2" @click="act('partition', { partition: '', waiting: null, to: 'time' })">Seek one partition…</button>
         <!-- one queue: straight to its dialog; several: here, or everywhere -->
         <QcPopover v-if="count > 1 && !r.queueMode" v-model:open="more" side="bottom-start" :width="260" label="Delete">
           <template #trigger="{ toggle }">
