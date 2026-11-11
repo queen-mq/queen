@@ -29,7 +29,7 @@ A device in the field, or a user's browser, cannot hold an API key: anyone can r
 | | Holds | Reaches | Lives |
 | --- | --- | --- | --- |
 | Scoped key | your backend | what its grants name | until revoked |
-| Client token | one device or user | the key's grants, with `{sub}` filled in as that client | an hour by default, a day at most (the key's ceiling) |
+| Client token | one device or user | the key's grants, with `{sub}` filled in as that client | an hour by default, at most the key's ceiling (a day unless you raise it) |
 
 ## 1. Make a scoped key
 
@@ -44,7 +44,7 @@ curl -s -X POST localhost:6711/api/cp/keys -H "x-queen-cp-token: $CP_TOKEN" \
     "cluster_id": "'"$CLUSTER_ID"'", "name": "devices", "key_hash": "'"$HASH"'",
     "grants": [
       {"queue": "telemetry", "partition": "{sub}", "ops": ["produce"]},
-      {"queue": "commands", "partition": "{sub}", "group": "{sub}", "ops": ["consume"]},
+      {"queue": "commands", "partition": "{sub}", "ops": ["consume"]},
       {"kv": "devices", "key": "{sub}/*", "ops": ["read", "write"]}
     ],
     "limits": {"sub_rps": 5}}'
@@ -142,5 +142,6 @@ A node of 2.8 or older knows no scoped keys and no client tokens, and refuses bo
 
 - Scoped clients come through the proxy's port. Port 6632 checks no client token and stays private ([security](/manage/security/#what-listens-where)).
 - Rate limits are per node: behind a load balancer over three nodes, a client can reach three times its limit.
+- A partition per device counts against the plan's partitions per queue, 8 to 64 by default (`max_partitions_per_queue`): raise it with a cluster override (`null` is unlimited) before a fleet arrives.
 - A token cannot be revoked on its own: to cut off one device, block its `sub`; to cut off all of them, revoke the key.
 - A token carries at most 16 grants of its own (`allow`), and a key at most 64.
