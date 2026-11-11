@@ -336,11 +336,35 @@ export const access = {
    */
   grantMember: (email, role, config) => client.post('/api/console/members', { email, role }, config),
   revokeMember: (email, config) => client.delete('/api/console/members', { data: { email }, ...config }),
-  /** `[{id, name, scopes, created_at, last_used_at, revoked_at}]`. */
+  /**
+   * `[{id, name, scopes, scoped, grants, limits, token_ttl_max_s, created_at,
+   * last_used_at, revoked_at}]`. A scoped key has `grants` (and no scopes);
+   * the other three are null on a whole-cluster key.
+   */
   listKeys: (config) => client.get('/api/console/keys', config),
-  /** `{name, scopes}` → `{id, key}`. The key is in this answer only. */
+  /**
+   * `{name, scopes}` (the whole cluster) or `{name, grants, limits?,
+   * token_ttl_max_s?}` (scoped) → `{id, key}`. The key is in this answer only.
+   */
   createKey: (body, config) => client.post('/api/console/keys', body, config),
   revokeKey: (id, config) => client.delete(`/api/console/keys/${encodeURIComponent(id)}`, config),
+  /**
+   * A scoped key's `{grants, limits?, token_ttl_max_s?}`, replaced whole. The
+   * tokens it minted follow within about a second, on every node.
+   */
+  setKeyPolicy: (id, body, config) => client.put(`/api/console/keys/${encodeURIComponent(id)}/policy`, body, config),
+  /**
+   * A new secret for the same key → `{id, key, grace_seconds}`. Its tokens
+   * keep working; the replaced secret works `graceSeconds` more (0: none).
+   */
+  rotateKey: (id, graceSeconds, config) =>
+    client.post(`/api/console/keys/${encodeURIComponent(id)}/rotate`, { grace_seconds: graceSeconds }, config),
+  /** `[{key, sub, reason, at}]`: the clients a scoped key refuses, this cluster. */
+  listBlocks: (config) => client.get('/api/console/blocks', config),
+  blockClient: (keyId, sub, reason, config) =>
+    client.post(`/api/console/keys/${encodeURIComponent(keyId)}/blocks`, { sub, reason: reason || undefined }, config),
+  unblockClient: (keyId, sub, config) =>
+    client.delete(`/api/console/keys/${encodeURIComponent(keyId)}/blocks/${encodeURIComponent(sub)}`, config),
 }
 
 // ============================================
