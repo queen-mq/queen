@@ -99,7 +99,8 @@ if(QUEEN_CLIENT_BUILD_TESTS)
     # The suites that need no broker: each serves its own answers in-process.
     set(QUEEN_CLIENT_SUITES
         test_retry429 test_kv_timers test_locks test_conflation test_buffer
-        test_ephemeral test_autopilot test_consumer test_wire_forms test_reads)
+        test_ephemeral test_autopilot test_consumer test_wire_forms test_reads
+        test_tokens)
     foreach(suite IN LISTS QUEEN_CLIENT_SUITES)
         add_executable(${suite} ${suite}.cpp)
         target_link_libraries(${suite} PRIVATE queen::client)

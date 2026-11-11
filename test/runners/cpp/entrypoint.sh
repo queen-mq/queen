@@ -53,6 +53,11 @@ cd /src/clients/client-cpp
 ./bin/test_wire_forms
 ./bin/test_reads "$QUEEN_HTTP_URL"
 
+# Client tokens (ClientConfig::token_source, tokens().mint): the token read on
+# every try, one refresh after a 401 and the request sent once more, the mint
+# body. Broker-free: a 401 on demand needs a responder the test controls.
+./bin/test_tokens
+
 # Broker URL is argv[1] (there is no env override); default would be localhost.
 # The KV/timer INTEGRATION tests inside this binary run unconditionally: every
 # broker carries both surfaces, so a failure there is a failure and not a

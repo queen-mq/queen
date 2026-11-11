@@ -12,6 +12,8 @@
  * - KV (the eight operations), timers (schedule, cancel, peek, list), locks
  *   and semaphores with background renewal, ephemeral queues, reads by offset
  * - admin(): the management and observability routes
+ * - tokens(): client tokens, minted from a scoped key; ClientConfig::
+ *   token_source fetches the bearer token and refreshes it
  * - Transport: keep-alive connection pool, HTTPS with certificate
  *   verification, retry, 429 backoff, failover, affinity load balancing
  * - Client-side push buffering with a blocking bound and lossless retry
@@ -186,6 +188,18 @@ struct ClientConfig {
     bool enable_failover = true;
     /// Sent as "Authorization: Bearer <token>" (the proxy, Queen Cloud).
     std::string bearer_token;
+    /**
+     * A function that fetches the bearer token, instead of a fixed one:
+     * typically a client token the application's own backend minted for this
+     * device or user (Tokens::mint there). The client calls it before its
+     * first request and keeps the token; it calls it again when a client token
+     * is 30 s from its `exp`, and after a 401, when it then sends that request
+     * once more. One call at a time, shared by every connection of the
+     * client. A function that throws, or answers "", fails the request with
+     * TokenSourceError and nothing is sent. It must not use the client it
+     * feeds. Set this or bearer_token, not both.
+     */
+    std::function<std::string()> token_source;
     /// Extra headers on every request, e.g. {"x-queen-tenant", "acme"}.
     std::vector<std::pair<std::string, std::string>> headers;
     Retry429Options retry_429;
@@ -672,6 +686,19 @@ public:
 
     /** The queue the caller asked about, so what() is not the only clue. */
     const std::string& queue() const { return queue_; }
+};
+
+/**
+ * ClientConfig::token_source gave no token to send: the function threw, or
+ * answered an empty token or one that cannot travel in a header. Nothing was
+ * sent, and the request is not retried: the broker never saw it. what()
+ * starts with "token source: " and carries the function's own message when
+ * it threw one.
+ */
+class TokenSourceError : public Error {
+public:
+    explicit TokenSourceError(const std::string& message) : Error("token source: " + message) {
+    }
 };
 
 // ============================================================================
@@ -1167,6 +1194,66 @@ inline std::string base64_decode(const std::string& input) {
     }
 
     return out;
+}
+
+/**
+ * Base64url without padding (RFC 4648 §5), the encoding of a JWT's segments,
+ * decoded; nothing for text that is not.
+ */
+inline std::optional<std::string> base64url_decode(std::string text) {
+    for (char& c : text) {
+        if (c == '-') {
+            c = '+';
+        } else if (c == '_') {
+            c = '/';
+        } else if (c == '+' || c == '/') {
+            return std::nullopt;
+        }
+    }
+    while (text.size() % 4 != 0) text.push_back('=');
+    try {
+        return base64_decode(text);
+    } catch (const std::invalid_argument&) {
+        return std::nullopt;
+    }
+}
+
+/** What every client token starts with; a JWT follows. */
+inline constexpr const char* CLIENT_TOKEN_PREFIX = "qt_";
+
+/** How long before a client token's `exp` ClientConfig::token_source is called again. */
+inline constexpr std::chrono::seconds TOKEN_REFRESH_AHEAD{30};
+
+/**
+ * A client token's expiry, read from its `exp` claim; nothing for any other
+ * token (an API key, an opaque token) or one that cannot be read. Read, never
+ * verified: the broker verifies, and the client only wants to know when to
+ * fetch the next one.
+ */
+inline std::optional<std::chrono::system_clock::time_point> token_expires_at(const std::string& token) {
+    if (token.rfind(CLIENT_TOKEN_PREFIX, 0) != 0) return std::nullopt;
+    const std::string jwt = token.substr(std::strlen(CLIENT_TOKEN_PREFIX));
+    // Exactly three segments; the claims are the middle one.
+    const auto first = jwt.find('.');
+    const auto second = first == std::string::npos ? first : jwt.find('.', first + 1);
+    if (second == std::string::npos || jwt.find('.', second + 1) != std::string::npos) {
+        return std::nullopt;
+    }
+    const auto claims_text = base64url_decode(jwt.substr(first + 1, second - first - 1));
+    if (!claims_text) return std::nullopt;
+    // Not JSON is a discarded value here, not an exception.
+    const json claims = json::parse(*claims_text, nullptr, false);
+    if (!claims.is_object()) return std::nullopt;
+    const auto exp = claims.find("exp");
+    if (exp == claims.end() || !exp->is_number()) return std::nullopt;
+    const double seconds = exp->get<double>();
+    // Later than this clock can count to is as good as no expiry.
+    const double horizon = static_cast<double>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::duration::max()).count());
+    if (!(seconds >= 0) || seconds >= horizon) return std::nullopt;
+    return std::chrono::system_clock::time_point(
+        std::chrono::seconds(static_cast<long long>(seconds)));
 }
 
 /**
@@ -3262,6 +3349,83 @@ struct RequestOptions {
 };
 
 /**
+ * The bearer token of ClientConfig::token_source: the function's answer,
+ * kept. The function is called again when a client token is
+ * util::TOKEN_REFRESH_AHEAD from its `exp` (read from the token itself), and
+ * when a request was refused (401) with the kept token.
+ *
+ * One call at a time: the lock is held across the call, so a request that
+ * needs a token while one is being fetched waits for that one, and many
+ * requests refused at once with the same token refresh it once -- the first
+ * to take the lock fetches, the others find the token already replaced.
+ *
+ * An HttpClient has one, shared by every connection of its pool and by
+ * post_observation, so the function is called once per refresh and not once
+ * per connection. Thread-safe.
+ */
+class TokenSource {
+private:
+    std::function<std::string()> fetch_;
+    std::mutex mutex_;
+    std::string token_;
+    std::optional<std::chrono::system_clock::time_point> expires_at_;
+
+    bool expiring() const {
+        return expires_at_ &&
+               *expires_at_ - std::chrono::system_clock::now() < util::TOKEN_REFRESH_AHEAD;
+    }
+
+public:
+    explicit TokenSource(std::function<std::string()> fetch) : fetch_(std::move(fetch)) {
+    }
+
+    TokenSource(const TokenSource&) = delete;
+    TokenSource& operator=(const TokenSource&) = delete;
+
+    /**
+     * The token to send. `failed`: the token a request was just refused with
+     * (401); a new one is fetched unless another request already replaced it.
+     * Throws TokenSourceError when the function gives no token that can be sent.
+     */
+    std::string get(const std::string& failed = std::string()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!token_.empty()) {
+            const bool replaced = !failed.empty() && failed != token_;
+            const bool fresh = failed.empty() && !expiring();
+            if (replaced || fresh) return token_;
+        }
+        std::string token;
+        try {
+            token = fetch_();
+        } catch (const std::exception& e) {
+            throw TokenSourceError(e.what());
+        } catch (...) {
+            throw TokenSourceError("the token function threw");
+        }
+        // A token read from a file or a response often ends in a newline.
+        const auto first = token.find_first_not_of(" \t\r\n");
+        token = first == std::string::npos
+            ? std::string()
+            : token.substr(first, token.find_last_not_of(" \t\r\n") - first + 1);
+        if (token.empty()) {
+            throw TokenSourceError("the token function answered an empty token");
+        }
+        for (char c : token) {
+            // Visible ASCII only: nothing else belongs in a header, and a CR
+            // or an LF would end this one and start another.
+            const auto byte = static_cast<unsigned char>(c);
+            if (byte < 0x21 || byte > 0x7E) {
+                throw TokenSourceError(
+                    "the token function answered a token that cannot travel in a header");
+            }
+        }
+        token_ = std::move(token);
+        expires_at_ = util::token_expires_at(token_);
+        return token_;
+    }
+};
+
+/**
  * The transport every other class uses. Three retry mechanisms sit on top of
  * each other and are kept apart, as in the Rust client:
  *
@@ -3272,7 +3436,9 @@ struct RequestOptions {
  *   3. Retry: with one backend (or failover off) the same URL is retried
  *      retry_attempts times with exponential backoff.
  *
- * A 4xx other than 429 triggers none of them: it is the caller's mistake.
+ * A 4xx other than 429 triggers none of them: it is the caller's mistake. One
+ * exception, with ClientConfig::token_source: a 401 gets one new token and
+ * the request once more, which counts as no attempt.
  *
  * CONNECTIONS ARE REUSED. Every backend has a pool of idle keep-alive
  * connections (up to ClientConfig::max_idle_connections_per_host); a request
@@ -3304,6 +3470,9 @@ private:
     ClientConfig config_;
     std::shared_ptr<LoadBalancer> load_balancer_;
     httplib::Headers base_headers_;
+    // With ClientConfig::token_source: the token every request asks for. A
+    // fixed bearer_token is in base_headers_ instead, and this stays empty.
+    std::shared_ptr<TokenSource> token_source_;
 
     struct Idle {
         std::unique_ptr<httplib::Client> client;
@@ -3382,11 +3551,13 @@ private:
     /**
      * One HTTP exchange on one backend. Any status comes back as a Response;
      * only a transport fault throws (NetworkError), and only then is the
-     * connection closed instead of going back to the pool.
+     * connection closed instead of going back to the pool. `token`: the token
+     * source's for this attempt, empty without one.
      */
     Response execute_once(const std::string& base_url, const std::string& method,
                           const std::string& path, const std::string& body,
-                          const char* content_type, int timeout_millis) {
+                          const char* content_type, int timeout_millis,
+                          const std::string& token) {
         auto connection = acquire(base_url);
         const auto timeout = std::chrono::milliseconds(
             timeout_millis > 0 ? timeout_millis : config_.timeout_millis);
@@ -3395,6 +3566,7 @@ private:
         connection->set_write_timeout(timeout);
 
         httplib::Headers headers = base_headers_;
+        if (!token.empty()) headers.emplace("Authorization", "Bearer " + token);
 
         // A body's Content-Type travels as httplib's content-type argument,
         // which adds the header itself: putting it in `headers` as well would
@@ -3481,17 +3653,34 @@ private:
      * One logical request against one backend, waiting out HTTP 429 with
      * backoff until the policy for the request's kind is spent (never, for a
      * long-poll pop). Throws HttpError for any status of 400 or more, and
-     * NetworkError for a transport fault.
+     * NetworkError for a transport fault. With a token source, a 401 gets one
+     * new token and one more try (see below), and TokenSourceError is thrown
+     * when the source gives no token: nothing is sent then.
      */
     Response attempt_with_429(const std::string& base_url, const std::string& method,
                               const std::string& path, const std::string& body,
                               const char* content_type, const RequestOptions& options) {
         const Retry429Policy policy = retry429_policy_for(options.retry_kind);
         int tries = 0;
+        bool refreshed = false;
         for (;;) {
             ++tries;
+            // A source's token is asked for on every try (it is kept, so this
+            // is a lookup); a fixed one is already in base_headers_.
+            const std::string token = token_source_ ? token_source_->get() : std::string();
             Response response = execute_once(base_url, method, path, body, content_type,
-                                             options.timeout_millis);
+                                             options.timeout_millis, token);
+            if (response.status == 401 && token_source_ && !refreshed) {
+                // A token the broker no longer takes (expired, or its key
+                // changed): one new token and the request once more. It counts
+                // as no try; a second 401 is the caller's.
+                refreshed = true;
+                --tries;
+                util::log_warn("HttpClient.refreshToken",
+                               method + " " + path + " answered 401: fetching a new token");
+                token_source_->get(token);
+                continue;
+            }
             if (response.status != 429) {
                 if (response.status >= 400) throw_status(response);
                 return response;
@@ -3606,6 +3795,10 @@ private:
             }
 #endif
         }
+        if (config_.token_source && !config_.bearer_token.empty()) {
+            throw std::invalid_argument(
+                "bearer_token and token_source are two answers to one question: set one");
+        }
         load_balancer_ = std::make_shared<LoadBalancer>(
             config_.urls, config_.load_balancing, config_.affinity_hash_ring,
             config_.health_retry_after_millis);
@@ -3613,6 +3806,9 @@ private:
         base_headers_.emplace("User-Agent", std::string("queen-client-cpp/") + QUEEN_CLIENT_VERSION);
         if (!config_.bearer_token.empty()) {
             base_headers_.emplace("Authorization", "Bearer " + config_.bearer_token);
+        }
+        if (config_.token_source) {
+            token_source_ = std::make_shared<TokenSource>(config_.token_source);
         }
         for (const auto& header : config_.headers) {
             base_headers_.emplace(header.first, header.second);
@@ -3760,26 +3956,38 @@ public:
     /**
      * One best-effort publication (the consumer status reports): one attempt,
      * two seconds at most, no 429 or failover retries, on a connection of its
-     * own so its time limit never sticks to a pooled one.
+     * own so its time limit never sticks to a pooled one. With a token source
+     * it carries that source's token, and a 401 gets the one new token and
+     * the one more attempt every request gets.
      */
     json post_observation(const std::string& path, const json& body) {
         const std::string& base_url = load_balancer_->urls()[load_balancer_->pick()];
-        auto connection = make_connection(base_url);
-        connection->set_connection_timeout(std::chrono::milliseconds(2000));
-        connection->set_read_timeout(std::chrono::milliseconds(2000));
-        connection->set_write_timeout(std::chrono::milliseconds(2000));
-        connection->set_max_timeout(std::chrono::milliseconds(2000));
-        connection->set_keep_alive(false);
-        httplib::Headers headers = base_headers_;
-        auto result = connection->Post(path, headers, body.dump(), "application/json");
-        if (!result) {
-            throw NetworkError("POST " + base_url + path + ": " + httplib::to_string(result.error()));
+        std::string token = token_source_ ? token_source_->get() : std::string();
+        bool refreshed = false;
+        for (;;) {
+            auto connection = make_connection(base_url);
+            connection->set_connection_timeout(std::chrono::milliseconds(2000));
+            connection->set_read_timeout(std::chrono::milliseconds(2000));
+            connection->set_write_timeout(std::chrono::milliseconds(2000));
+            connection->set_max_timeout(std::chrono::milliseconds(2000));
+            connection->set_keep_alive(false);
+            httplib::Headers headers = base_headers_;
+            if (!token.empty()) headers.emplace("Authorization", "Bearer " + token);
+            auto result = connection->Post(path, headers, body.dump(), "application/json");
+            if (!result) {
+                throw NetworkError("POST " + base_url + path + ": " + httplib::to_string(result.error()));
+            }
+            if (result->status == 401 && token_source_ && !refreshed) {
+                refreshed = true;
+                token = token_source_->get(token);
+                continue;
+            }
+            Response response;
+            response.status = result->status;
+            response.body = result->body;
+            if (response.status >= 400) throw_status(response);
+            return parse_body(response);
         }
-        Response response;
-        response.status = result->status;
-        response.body = result->body;
-        if (response.status >= 400) throw_status(response);
-        return parse_body(response);
     }
 
     std::shared_ptr<LoadBalancer> get_load_balancer() const { return load_balancer_; }
@@ -6575,6 +6783,160 @@ public:
 };
 
 // ============================================================================
+// Client tokens (POST /api/v1/tokens)
+//
+// A client token is a credential for ONE entity -- a device, a browser user --
+// minted from a scoped key. The key is the role: its grants say which queues,
+// partitions, KV keys and timers it reaches, and may name the entity as
+// `{sub}` (queue `telemetry`, partition `{sub}`: each device its own
+// partition). The token adds the entity and never reaches more than its key.
+// The application's backend holds the key and mints; the device holds only
+// its token, and fetches the next one through ClientConfig::token_source:
+//
+//     // backend, with the scoped key `devices`
+//     queen::ClientConfig backend;
+//     backend.bearer_token = devices_key;
+//     queen::Queen queen(url, backend);
+//     queen::MintTokenResponse minted = queen.tokens().mint({"dev-8f3a", 3600});
+//
+//     // device: a function, so the client fetches a new token before this
+//     // one expires and after a 401
+//     queen::ClientConfig device;
+//     device.token_source = [] { return fetch_token_from_my_backend(); };
+//
+// Revoking or narrowing the key reaches every token it minted within about a
+// second; blocking one `sub` refuses that entity's tokens on every node.
+// ============================================================================
+
+/**
+ * One grant of MintTokenRequest::allow. Exactly one of queue, kv and timers
+ * names the surface; the other fields narrow it, and an unset one is `*`.
+ * Every field is a pattern -- a name, `prefix*` or `*` -- and may hold `{sub}`
+ * once.
+ *
+ *   queue    narrowed by partition, group   ops "produce", "consume"
+ *   kv       narrowed by key                ops "read", "write"   (kv names a namespace)
+ *   timers   narrowed by key, partition     ops "read", "write"   (key is the timer key)
+ *
+ * Unset is std::nullopt, not "": an empty pattern is sent as it is, and the
+ * broker refuses it, where reading it as unset would widen the grant to `*`.
+ */
+struct Grant {
+    std::optional<std::string> queue;
+    std::optional<std::string> kv;
+    std::optional<std::string> timers;
+    std::optional<std::string> partition;
+    std::optional<std::string> group;
+    std::optional<std::string> key;
+    std::vector<std::string> ops;
+
+    json to_json() const {
+        json out = json::object();
+        auto put = [&out](const char* name, const std::optional<std::string>& value) {
+            if (value) out[name] = *value;
+        };
+        put("queue", queue);
+        put("kv", kv);
+        put("timers", timers);
+        put("partition", partition);
+        put("group", group);
+        put("key", key);
+        out["ops"] = ops;
+        return out;
+    }
+};
+
+/**
+ * What Tokens::mint asks for. Only `sub` is required:
+ * mint({"dev-8f3a"}), or mint({"dev-8f3a", 3600}) with a lifetime.
+ */
+struct MintTokenRequest {
+    /// The entity, e.g. a device id: 1 to 128 letters, digits and `. _ - @ +`.
+    std::string sub;
+    /// The token's lifetime in seconds; unset = 3600, at most the key's own ceiling.
+    std::optional<long long> ttl_seconds;
+    /// The scoped key to mint for, by id or name: only when this client holds
+    /// an `admin` key (a scoped key mints for itself). Empty = unset.
+    std::string key;
+    /// Grants that narrow the key's for this token. They never widen them: a
+    /// request must pass the key's grants and these. Unset = the key's own.
+    std::optional<std::vector<Grant>> allow;
+
+    MintTokenRequest() = default;
+    MintTokenRequest(std::string entity, std::optional<long long> ttl = std::nullopt)
+        : sub(std::move(entity)), ttl_seconds(ttl) {
+    }
+
+    json to_json() const {
+        json out = {{"sub", sub}};
+        if (ttl_seconds) out["ttlSeconds"] = *ttl_seconds;
+        if (!key.empty()) out["key"] = key;
+        if (allow) {
+            json grants = json::array();
+            for (const auto& grant : *allow) grants.push_back(grant.to_json());
+            out["allow"] = std::move(grants);
+        }
+        return out;
+    }
+};
+
+/** The answer to Tokens::mint. */
+struct MintTokenResponse {
+    /// The bearer credential, `qt_` and a JWT: what the entity sends.
+    std::string token;
+    std::string sub;
+    /// The id of the key the token belongs to.
+    std::string key;
+    /// When the token stops working, RFC 3339.
+    std::string expires_at;
+    /// Its lifetime in seconds, from now.
+    long long expires_in = 0;
+
+    static MintTokenResponse from_json(const json& answer) {
+        MintTokenResponse r;
+        r.token = util::text_of(answer, "token");
+        r.sub = util::text_of(answer, "sub");
+        r.key = util::text_of(answer, "key");
+        r.expires_at = util::text_of(answer, "expiresAt");
+        if (answer.is_object() && answer.contains("expiresIn") &&
+            answer["expiresIn"].is_number_integer()) {
+            r.expires_in = answer["expiresIn"].get<long long>();
+        }
+        return r;
+    }
+};
+
+/** POST /api/v1/tokens, from Queen::tokens(): the backend's half of client tokens. */
+class Tokens {
+private:
+    std::shared_ptr<HttpClient> http_client_;
+
+public:
+    explicit Tokens(std::shared_ptr<HttpClient> http_client)
+        : http_client_(std::move(http_client)) {
+    }
+
+    /**
+     * Mint a token for `request.sub`, with this client's credential: a scoped
+     * key mints for itself; an `admin` key for the scoped key `request.key`
+     * names (its id or its name). A refusal throws HttpError with its code():
+     * 400 invalid_request, 403 forbidden or client_blocked, 404 key_unknown,
+     * 409 key_ambiguous, 503 not_configured.
+     */
+    MintTokenResponse mint(const MintTokenRequest& request) {
+        if (request.sub.empty()) {
+            throw std::invalid_argument("tokens.mint: sub is required (the entity the token is for)");
+        }
+        MintTokenResponse minted =
+            MintTokenResponse::from_json(http_client_->post("/api/v1/tokens", request.to_json()));
+        if (minted.token.empty()) {
+            throw Error("tokens.mint: the broker's answer carries no token");
+        }
+        return minted;
+    }
+};
+
+// ============================================================================
 // The pop - one code path for pop(), pop_result() and every consume() worker
 // ============================================================================
 
@@ -7428,6 +7790,11 @@ public:
     /** Management and observability routes. */
     Admin admin() {
         return Admin(http_client_);
+    }
+
+    /** Client tokens: mint one for a device or a user, with a scoped key. */
+    Tokens tokens() {
+        return Tokens(http_client_);
     }
 
     // --------------------------------------------------------------- acking
