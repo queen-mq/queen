@@ -98,6 +98,22 @@ const cells = (r) => ({
   sparkLabel: `${fmt(r.inHour)} arrived in the last hour`,
 })
 
+// A namespace's own row: its queues added up, in the same columns.
+function nsCells(g) {
+  const t = g.totals || {}
+  return {
+    waiting: count(t.pending),
+    oldest: t.lag ? { text: span(t.lag), dim: false } : dim('–'),
+    in: perS(t.inHour),
+    acked: perS(t.ackHour),
+    dead: count(t.dead),
+    partitions: count(t.partitions),
+    groups: t.groups == null ? dim('–') : count(t.groups),
+    spark: t.spark && t.spark.length > 1 && t.inHour > 0 ? { values: t.spark, max: Math.max(6, ...t.spark) } : null,
+    sparkLabel: `${fmt(t.inHour)} arrived in the last hour, across its queues`,
+  }
+}
+
 // A closed namespace says what it hides.
 function summary(g) {
   const toneIn = (kind) => (g.rows.some((r) => r.state?.kind === kind && r.state.tone === 'red') ? 'red' : 'amber')
@@ -119,6 +135,7 @@ const table = computed(() => groups.value.map((g) => {
     open,
     count: narrowed.value ? `${fmt(g.rows.length)} of ${fmt(g.total)} ${noun}` : `${fmt(g.total)} ${noun}`,
     summary: open ? [] : summary(g),
+    cells: nsCells(g),
     rows: open ? g.rows.map(cells) : [],
   }
 }))
@@ -249,18 +266,30 @@ function created({ name, ns }) { reveal(name, ns) }
 
             <div v-for="t in table" :key="t.key" role="rowgroup">
               <div class="qn-tr qs-nsrow" role="row">
-                <span role="rowheader" class="qs-nscell" aria-colspan="10">
+                <span role="rowheader" class="qs-nscell">
                   <button type="button" class="qs-ns" :aria-expanded="t.open" @click="toggle(t.g)">
                     <svg class="qs-chev" :class="{ open: t.open }" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" /></svg>
                     <span :class="t.ns ? 'qn-mono qs-nsname' : 'qs-nsname qs-none'">{{ t.ns || 'No namespace' }}</span>
-                    <span class="qn-t3 qn-num">{{ t.count }}</span>
+                    <span class="qn-t3 qn-num qs-nscount">{{ t.count }}</span>
                     <template v-if="!t.open">
-                      <span v-if="!t.summary.length" class="qn-t3">· none needs you</span>
+                      <span v-if="!t.summary.length" class="qn-t3 qs-nsquiet">· none needs you</span>
                       <span v-for="s in t.summary" :key="s.text" class="qs-sum qn-num" :class="s.tone || 'qn-t2'">
                         <span v-if="s.tone" class="qn-mark" :class="s.tone" aria-hidden="true" />{{ s.text }}
                       </span>
                     </template>
                   </button>
+                </span>
+                <!-- its queues added up, in their columns -->
+                <span role="cell" />
+                <span role="cell" class="r qn-num" :class="{ 'qn-t3': t.cells.waiting.dim }">{{ t.cells.waiting.text }}</span>
+                <span role="cell" class="r qn-num" :class="{ 'qn-t3': t.cells.oldest.dim }">{{ t.cells.oldest.text }}</span>
+                <span role="cell" class="r qn-num" :class="{ 'qn-t3': t.cells.in.dim }">{{ t.cells.in.text }}</span>
+                <span role="cell" class="r qn-num" :class="{ 'qn-t3': t.cells.acked.dim }">{{ t.cells.acked.text }}</span>
+                <span role="cell" class="r qn-num" :class="{ 'qn-t3': t.cells.dead.dim }">{{ t.cells.dead.text }}</span>
+                <span role="cell" class="r qn-num" :class="{ 'qn-t3': t.cells.partitions.dim }">{{ t.cells.partitions.text }}</span>
+                <span role="cell" class="r qn-num" :class="{ 'qn-t3': t.cells.groups.dim }" :title="t.cells.groups.dim ? undefined : 'Consumer groups reading at least one of its queues, each once'">{{ t.cells.groups.text }}</span>
+                <span role="cell" class="qs-sparkcell">
+                  <QcSpark v-if="t.cells.spark" :values="t.cells.spark.values" :max="t.cells.spark.max" :width="96" :height="20" :label="t.cells.sparkLabel" />
                 </span>
               </div>
               <div
@@ -349,10 +378,13 @@ function created({ name, ns }) { reveal(name, ns) }
 .qs-arrow { display: inline-block; width: 10px; text-align: center; }
 .qs-sparkhead { padding-left: 4px; }
 
-/* a namespace: one row that opens and closes it */
+/* a namespace: one row that opens and closes it, its queues added up in their columns */
 .qn-tr.qs-nsrow { min-height: 40px; border-bottom-color: var(--line); }
-.qs-nscell { grid-column: 1 / -1; }
-.qs-ns { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 40px; padding-right: 8px; text-align: left; color: var(--text3); }
+.qs-nscell { min-width: 0; }
+.qs-ns { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 40px; padding-right: 8px; text-align: left; color: var(--text3); overflow: hidden; white-space: nowrap; }
+.qs-ns > * { flex: 0 0 auto; }
+.qs-ns > .qs-sum, .qs-ns > .qs-nsquiet { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.qs-nsrow > [role='cell'].qn-num { font-weight: 500; }
 .qs-ns:hover .qs-nsname { text-decoration: underline; text-underline-offset: 3px; }
 .qs-chev { flex: 0 0 auto; width: 12px; height: 12px; margin-right: -2px; fill: none; stroke: var(--text3); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; transition: transform .12s ease; }
 .qs-chev.open { transform: rotate(90deg); }

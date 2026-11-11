@@ -116,6 +116,7 @@ export function queueRows({ queues = [], groups = null, ops = null, series = nul
       dead: num(q.messages?.deadLetter),
       partitions: num(q.partitions),
       named: all.filter((g) => g.name !== QUEUE_MODE).length,
+      groupNames: all.filter((g) => g.name !== QUEUE_MODE).map((g) => g.name),
       queueMode: all.some((g) => g.name === QUEUE_MODE),
       groupsKnown: groups != null,
       lag: lag && lag > 0 ? lag : null,
@@ -241,8 +242,51 @@ export function namespaceGroups(rows = [], { find = '', seg = 'all', rank = null
       else if (k === 'feedDown') counts.feedDown++
       else if (k === 'catching') counts.catching++
     }
-    out.push({ ns, rows: shown, total: mine.length, counts, flagged: shown.some((r) => r.sev) })
+    out.push({ ns, rows: shown, total: mine.length, counts, flagged: shown.some((r) => r.sev), totals: namespaceTotals(shown) })
   }
+  return out
+}
+
+/**
+ * A namespace's row, the sum of the queues it shows (all of them, or the ones
+ * a filter left): what waits, arrivals and acks over the hour, dead letters
+ * and partitions added up; Oldest the oldest of any of them; Groups the
+ * consumer groups that read at least one of them, each once; the hour's line
+ * the minutes added up, the newest aligned. A sum of nothing known is null.
+ */
+export function namespaceTotals(rows = []) {
+  const sum = (pick) => {
+    let s = null
+    for (const r of rows) {
+      const v = pick(r)
+      if (v != null && Number.isFinite(v)) s = (s ?? 0) + v
+    }
+    return s
+  }
+  const lags = rows.map((r) => r.lag).filter((v) => v != null && v > 0)
+  const known = rows.some((r) => r.groupsKnown)
+  const names = new Set()
+  for (const r of rows) for (const n of r.groupNames || []) names.add(n)
+  return {
+    // A queue only feed streams read holds nothing that waits (its row says –).
+    pending: sum((r) => (r.feedOnly ? null : r.pending)),
+    lag: lags.length ? Math.max(...lags) : null,
+    inHour: sum((r) => r.inHour),
+    ackHour: sum((r) => r.ackHour),
+    dead: sum((r) => r.dead),
+    partitions: sum((r) => r.partitions),
+    groups: known ? names.size : null,
+    spark: sumSparks(rows.map((r) => r.spark)),
+  }
+}
+
+/** Minute lines added up, aligned on their newest minute; null when none has one. */
+export function sumSparks(sparks = []) {
+  const lines = sparks.filter((s) => Array.isArray(s) && s.length)
+  if (!lines.length) return null
+  const len = Math.max(...lines.map((s) => s.length))
+  const out = new Array(len).fill(0)
+  for (const s of lines) for (let i = 0; i < s.length; i++) out[len - s.length + i] += s[i] || 0
   return out
 }
 

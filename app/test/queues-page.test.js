@@ -8,8 +8,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  HOUR_S, inSegment, namespaceGroups, newQueueDraft, nextSort, perSecond, queueRows, queuesVerdict,
-  readerOf, segmentCounts, snapshotOrder, sparkValues, stateOf, hasNews,
+  HOUR_S, inSegment, namespaceGroups, namespaceTotals, newQueueDraft, nextSort, perSecond, queueRows, queuesVerdict,
+  readerOf, segmentCounts, snapshotOrder, sparkValues, stateOf, sumSparks, hasNews,
 } from '../src/console/queues/queuesView.js'
 import { opsByQueue, seriesByQueue } from '../src/composables/queueOps.js'
 
@@ -145,6 +145,27 @@ test('namespaces by name, the default one last; a filter hides the empty ones', 
   assert.deepEqual(needs.map((x) => x.ns), ['channel', 'smartpms', 'traceflow'])
   assert.equal(hasNews(all[0]), true)
   assert.equal(hasNews(all[3]), false)
+})
+
+test('a namespace row adds up its queues: sums, the oldest, each group once', () => {
+  const r = (o) => ({ pending: 0, dead: 0, partitions: 1, lag: null, inHour: 0, ackHour: 0, groupsKnown: true, groupNames: [], spark: null, ...o })
+  const t = namespaceTotals([
+    r({ pending: 5, dead: 2, partitions: 8, lag: 30, inHour: 3600, ackHour: 1800, groupNames: ['billing', 'audit'], spark: [1, 2, 3] }),
+    r({ pending: 7, partitions: 4, lag: 300, inHour: 7200, ackHour: 7200, groupNames: ['billing'], spark: [4, 5] }),
+    // only feed streams read it: nothing waits there, whatever its count says
+    r({ pending: 99, feedOnly: true, partitions: 1, inHour: 0 }),
+  ])
+  assert.deepEqual(t, { pending: 12, lag: 300, inHour: 10800, ackHour: 9000, dead: 2, partitions: 13, groups: 2, spark: [1, 6, 8] })
+  // Nothing known adds up to nothing, not to 0.
+  const none = namespaceTotals([r({ pending: null, inHour: null, ackHour: null, dead: null, partitions: null, groupsKnown: false })])
+  assert.deepEqual([none.pending, none.inHour, none.dead, none.partitions, none.groups, none.lag, none.spark], [null, null, null, null, null, null, null])
+  assert.deepEqual(sumSparks([[1], null, [2, 3, 4]]), [2, 3, 5])
+  assert.equal(sumSparks([null, []]), null)
+  // Every namespace carries its row, over the queues it shows.
+  const all = namespaceGroups(rows)
+  const tf = all.find((x) => x.ns === 'traceflow')
+  assert.equal(tf.totals.pending, tf.rows.reduce((s, x) => s + (x.feedOnly ? 0 : x.pending || 0), 0))
+  assert.equal(tf.totals.partitions, tf.rows.reduce((s, x) => s + (x.partitions || 0), 0))
 })
 
 test('a header click freezes the order: the numbers move, the rows do not', () => {
