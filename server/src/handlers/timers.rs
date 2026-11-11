@@ -444,6 +444,7 @@ async fn apply_ops_raft(
     st: &Arc<AppState>,
     tenant: &str,
     producer_sub: Option<&str>,
+    scope: Option<crate::scope::ClientScope>,
     ops: Vec<Value>,
     charged: i64,
 ) -> Result<Vec<Value>, Response> {
@@ -465,12 +466,18 @@ async fn apply_ops_raft(
         ops,
         producer_sub: producer_sub.map(str::to_string),
     };
-    match st.rsm.timers_apply(raft_ctx(st, tenant), req).await {
+    // A scoped caller's queues, keys and partitions are checked by the facade
+    // on the ops it parsed (`check_timer_scope`).
+    let ctx = raft_ctx(st, tenant).with_scope(scope);
+    match st.rsm.timers_apply(ctx, req).await {
         Ok(out) => Ok(out.results),
         Err(e) => {
             if matches!(
                 e,
-                RsmError::Rejected { .. } | RsmError::NameTooLong { .. } | RsmError::Unsupported
+                RsmError::Rejected { .. }
+                    | RsmError::NameTooLong { .. }
+                    | RsmError::Unsupported
+                    | RsmError::Forbidden { .. }
             ) {
                 st.quota.refund(tenant, 0, 0, charged);
             }
@@ -514,9 +521,10 @@ pub async fn handle_timers_batch(
     State(st): State<Arc<AppState>>,
     Extension(authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     body: Bytes,
 ) -> Response {
-    let resp = timers_batch_inner(&st, authed, &tenant, body).await;
+    let resp = timers_batch_inner(&st, authed, &tenant, scope.map(|Extension(s)| s), body).await;
     // One funnel for the reject counter: every non-200 leaving THIS route is a
     // schedule that did not happen, and the status already carries which kind.
     if resp.status() != StatusCode::OK {
@@ -529,6 +537,7 @@ async fn timers_batch_inner(
     st: &Arc<AppState>,
     authed: crate::auth::AuthedSub,
     tenant: &Tenant,
+    scope: Option<crate::scope::ClientScope>,
     body: Bytes,
 ) -> Response {
     let root: Value = match serde_json::from_slice(&body) {
@@ -644,7 +653,15 @@ async fn timers_batch_inner(
     // The sweeper wake (§7.4) rang inside `apply_ops`, after the commit. Raft
     // mode has no sweeper to wake: the leader's fire step runs on its own tick
     // and in the very cycle that plans this call.
-    let res = apply_ops_raft(st, tenant.as_str(), producer_sub.as_deref(), ops, schedules).await;
+    let res = apply_ops_raft(
+        st,
+        tenant.as_str(),
+        producer_sub.as_deref(),
+        scope,
+        ops,
+        schedules,
+    )
+    .await;
     match res {
         Ok(results) => batch_response(results),
         Err(resp) => resp,
@@ -659,6 +676,7 @@ async fn timers_batch_inner(
 pub async fn handle_timer_cancel(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     Path((queue, timer_key)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
@@ -690,7 +708,15 @@ pub async fn handle_timer_cancel(
     }
     // A cancel carries no producer identity: it produces nothing. It is charged
     // ZERO and never refunded (§9.7: the cancel counts zero and does not refund).
-    let res = apply_ops_raft(&st, tenant.as_str(), None, vec![Value::Object(op)], 0).await;
+    let res = apply_ops_raft(
+        &st,
+        tenant.as_str(),
+        None,
+        scope.map(|Extension(s)| s),
+        vec![Value::Object(op)],
+        0,
+    )
+    .await;
     match res {
         Ok(results) => single_response(results),
         Err(resp) => resp,
@@ -704,13 +730,15 @@ pub async fn handle_timer_cancel(
 pub async fn handle_timer_peek(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     Path((queue, timer_key)): Path<(String, String)>,
 ) -> Response {
     if let Some(resp) = gated(&st, tenant.as_str(), crate::switches::Surface::TimerRead, 0) {
         return resp;
     }
     let req = crate::rsm::facade::TimerPeekReq { queue, timer_key };
-    match st.rsm.timer_peek(raft_ctx(&st, tenant.as_str()), req).await {
+    let ctx = raft_ctx(&st, tenant.as_str()).with_scope(scope.map(|Extension(s)| s));
+    match st.rsm.timer_peek(ctx, req).await {
         Ok(out) => json(StatusCode::OK, out.body),
         Err(e) => raft_error_response(e),
     }
@@ -805,6 +833,7 @@ fn timer_read_query(q: &TimerReadParams) -> Result<TimerReadQuery, (&'static str
 pub async fn handle_timers_list(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     Path(queue): Path<String>,
     Query(q): Query<TimerReadParams>,
 ) -> Response {
@@ -816,7 +845,7 @@ pub async fn handle_timers_list(
         Err((reason, detail)) => return bad_request(reason, &detail),
     };
 
-    let ctx = raft_ctx(&st, tenant.as_str());
+    let ctx = raft_ctx(&st, tenant.as_str()).with_scope(scope.map(|Extension(s)| s));
     let res = match query {
         TimerReadQuery::List { after, limit } => {
             let req = crate::rsm::facade::TimersListReq {

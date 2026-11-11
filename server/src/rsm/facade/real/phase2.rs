@@ -453,6 +453,7 @@ impl RaftFacade {
                 fetch_max_bytes: None,
                 ordered: None,
                 ordered_group: None,
+                scope: None,
             };
             self.submit_effects(
                 &chunk_ctx,

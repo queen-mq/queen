@@ -112,6 +112,7 @@ impl RaftFacade {
                 results: Vec::new(),
             });
         }
+        super::check_kv_scope(&ctx, &ops).map_err(KvFailure::Rsm)?;
         self.kv_ops_admitted(&ops)?;
 
         let pre: Vec<KvOpOutcome> = if ops.iter().any(KvOp::is_planned) {

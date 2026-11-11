@@ -232,6 +232,28 @@ pub struct ReqCtx {
     pub ordered: Option<std::sync::Arc<OrderedPush>>,
     /// One command of an [`OrderedPush`], set by the push path itself.
     pub ordered_group: Option<std::sync::Arc<OrderedGroup>>,
+    /// What a scoped credential may touch (`queen_protocol::scope`): set by
+    /// the HTTP layer for a request the proxy scoped, checked where the names
+    /// are resolved ([`check_scope`]). `None`: the caller's rights are the
+    /// tenant's, as before. Never sent to the leader: this node checks.
+    pub scope: Option<std::sync::Arc<queen_protocol::scope::Scope>>,
+}
+
+/// Refuse what the caller's grants do not cover (a scoped request, see
+/// [`ReqCtx::scope`]). A request with no scope passes untouched.
+pub fn check_scope(ctx: &ReqCtx, ask: queen_protocol::scope::Ask<'_>) -> Result<(), RsmError> {
+    match &ctx.scope {
+        Some(s) if !s.allows(&ask) => Err(scope_denied(&ask)),
+        _ => Ok(()),
+    }
+}
+
+/// The refusal of `ask` for a scoped caller: `403 scope_denied`.
+pub fn scope_denied(ask: &queen_protocol::scope::Ask<'_>) -> RsmError {
+    RsmError::Forbidden {
+        code: "scope_denied",
+        message: format!("this credential may not {}", ask.describe()),
+    }
 }
 
 /// A push whose caller pipelines the next one behind it (2026-10-17, the Kafka
@@ -359,11 +381,20 @@ impl ReqCtx {
             fetch_max_bytes: None,
             ordered: None,
             ordered_group: None,
+            scope: None,
         }
     }
 
     pub fn with_producer_sub(mut self, producer_sub: Option<String>) -> Self {
         self.producer_sub = producer_sub.filter(|s| !s.is_empty());
+        self
+    }
+
+    pub fn with_scope(
+        mut self,
+        scope: Option<std::sync::Arc<queen_protocol::scope::Scope>>,
+    ) -> Self {
+        self.scope = scope;
         self
     }
 }
@@ -417,6 +448,10 @@ pub enum RsmError {
     /// body). WP-1.7c added it so the facade can surface `plan_*`'s client
     /// refusals as 4xx rather than 500.
     Rejected { code: String, message: String },
+    /// The caller's credential does not cover what the request names
+    /// (`scope_denied`, see [`check_scope`]) → `403`. Produced by the node the
+    /// client reached, before any command is built: never a leader's answer.
+    Forbidden { code: &'static str, message: String },
     /// An internal, non-retryable failure → `500`. Never produced by the stub.
     Internal(String),
 }
@@ -435,6 +470,7 @@ impl RsmError {
             RsmError::InDoubt => "outcome_unknown",
             RsmError::Standby => crate::rsm::link::STANDBY_CODE,
             RsmError::Rejected { .. } => "rejected",
+            RsmError::Forbidden { code, .. } => code,
             RsmError::Internal(_) => "internal",
         }
     }
@@ -473,6 +509,7 @@ impl std::fmt::Display for RsmError {
                  is promoted"
             ),
             RsmError::Rejected { message, .. } => write!(f, "{message}"),
+            RsmError::Forbidden { message, .. } => write!(f, "{message}"),
             RsmError::Internal(m) => write!(f, "{m}"),
         }
     }

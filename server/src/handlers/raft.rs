@@ -58,6 +58,7 @@ pub(crate) fn err_response(e: RsmError) -> Response {
         RsmError::InDoubt => (StatusCode::SERVICE_UNAVAILABLE, Some(1)),
         RsmError::Standby => (StatusCode::SERVICE_UNAVAILABLE, Some(1)),
         RsmError::Rejected { .. } => (StatusCode::BAD_REQUEST, None),
+        RsmError::Forbidden { .. } => (StatusCode::FORBIDDEN, None),
         RsmError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
     // Build a valid JSON body {"error":"<escaped>","code":"<code>"} (+ the
@@ -121,15 +122,18 @@ pub(crate) async fn dispatch_push(
     st: &AppState,
     tenant: &str,
     producer_sub: Option<String>,
+    scope: Option<crate::scope::ClientScope>,
     body: axum::body::Bytes,
 ) -> Response {
     // The name-length guard (R-108) runs inside the facade's own parse of the
     // body, per item, before anything is submitted: a second parse here only
     // to read the names cost a full scan of every payload (measured
     // 2026-09-23: serde_json `ignore_value`/`skip_to_escape` among the top
-    // HTTP-side symbols at 400k msg/s).
+    // HTTP-side symbols at 400k msg/s). A scoped caller's names are checked
+    // there too, for the same reason.
     let ctx = ReqCtx::new(tenant, deadline_for(st.pop_default_timeout_ms))
-        .with_producer_sub(producer_sub);
+        .with_producer_sub(producer_sub)
+        .with_scope(scope);
     // PERF-J: the whole push handler, push-only. Compared to goload's per-request
     // latency this isolates the server-side cost from the loader / axum-accept /
     // auth+tenant middleware wrapper (the ~200 ms C1000 gap PERF-J localizes).
@@ -362,10 +366,17 @@ pub(crate) async fn dispatch_pop_discover(
 /// `POST /api/v1/ack` and `POST /api/v1/ack/batch`. The consumer group is the
 /// user-supplied name in the composite cursor key, so bound it (R-108); the
 /// partition id is a bounded derived value.
-pub(crate) async fn dispatch_ack(st: &AppState, tenant: &str, body: axum::body::Bytes) -> Response {
+pub(crate) async fn dispatch_ack(
+    st: &AppState,
+    tenant: &str,
+    scope: Option<crate::scope::ClientScope>,
+    body: axum::body::Bytes,
+) -> Response {
     // The group is the body's `consumerGroup` key: the facade reads and
     // bounds it in the one parse it does anyway (an empty `group` asks for it).
-    let ctx = ReqCtx::new(tenant, deadline_for(st.stmt_timeout.as_millis() as u64));
+    // A scoped caller's partitions are checked where the facade resolves them.
+    let ctx =
+        ReqCtx::new(tenant, deadline_for(st.stmt_timeout.as_millis() as u64)).with_scope(scope);
     let req = AckReq {
         queue: None,
         group: String::new(),
@@ -390,6 +401,7 @@ pub(crate) async fn dispatch_transaction(
     st: &AppState,
     tenant: &str,
     producer_sub: Option<String>,
+    scope: Option<crate::scope::ClientScope>,
     body: axum::body::Bytes,
     facade: bool,
 ) -> Response {
@@ -415,7 +427,8 @@ pub(crate) async fn dispatch_transaction(
         _ => None,
     };
     let ctx = ReqCtx::new(tenant, deadline_for(st.stmt_timeout.as_millis() as u64))
-        .with_producer_sub(producer_sub);
+        .with_producer_sub(producer_sub)
+        .with_scope(scope);
     let req = crate::rsm::facade::TxnReq { raw: body.to_vec() };
     match st.rsm.transaction(ctx, req).await {
         Ok(out) => {
@@ -1287,6 +1300,10 @@ pub(crate) fn build_raft_router(
         ))
         // Inside tenancy: it reads the tenant the layer below resolved.
         .layer(axum::middleware::from_fn(refuse_reserved_tenant))
+        // A scoped client's scope, resolved once, and every route it has no
+        // business on refused (`scope.rs`). Inside forward_to_leader, so a
+        // relayed request is checked by the node that serves it.
+        .layer(axum::middleware::from_fn(crate::scope::scope_middleware))
         .layer(axum::middleware::from_fn_with_state(
             crate::tenant::TenancyConfig {
                 enabled: tenancy_header,
@@ -1755,10 +1772,16 @@ async fn forward(addr: &str, req: axum::extract::Request) -> Response {
 async fn raft_fallback(
     axum::extract::State(st): axum::extract::State<Arc<AppState>>,
     axum::extract::Extension(tenant): axum::extract::Extension<crate::tenant::Tenant>,
+    scope: Option<axum::extract::Extension<crate::scope::ClientScope>>,
     method: Method,
     uri: Uri,
     body: axum::body::Bytes,
 ) -> Response {
+    // The generic facade checks no grant: a scoped request that got this far
+    // spelled an allowed route in a way the router did not match.
+    if scope.is_some() {
+        return crate::scope::refused("scope_denied", "this credential may not call this route");
+    }
     let path = uri.path();
     if path.starts_with("/api/") || path.starts_with("/streams/") {
         return dispatch_api(
@@ -2090,6 +2113,7 @@ mod tests {
             State(st),
             Extension(AuthedSub(None)),
             Extension(Tenant::default_tenant()),
+            None,
             body,
         )
         .await;
@@ -2114,6 +2138,7 @@ mod tests {
         let resp = super::super::handle_pop(
             State(st),
             Extension(Tenant::default_tenant()),
+            None,
             Path("orders".to_string()),
             Query(p),
         )
@@ -2139,6 +2164,7 @@ mod tests {
         let resp = super::super::handle_pop(
             State(st),
             Extension(Tenant::default_tenant()),
+            None,
             Path(long),
             Query(p),
         )
@@ -2225,6 +2251,7 @@ mod tests {
             State(st.clone()),
             Extension(AuthedSub(Some("svc-h".into()))),
             tenant(),
+            None,
             Bytes::from(body),
         )
         .await;
@@ -2239,6 +2266,7 @@ mod tests {
         let resp = super::super::handle_timer_peek(
             State(st.clone()),
             tenant(),
+            None,
             Path(("hq".to_string(), "later".to_string())),
         )
         .await;
@@ -2254,6 +2282,7 @@ mod tests {
         let resp = super::super::handle_timers_list(
             State(st.clone()),
             tenant(),
+            None,
             Path("hq".to_string()),
             Query(q),
         )
@@ -2267,6 +2296,7 @@ mod tests {
             let resp = super::super::handle_timer_peek(
                 State(st.clone()),
                 tenant(),
+                None,
                 Path(("hq".to_string(), "soon".to_string())),
             )
             .await;
@@ -2282,6 +2312,7 @@ mod tests {
         let resp = super::super::handle_pop(
             State(st.clone()),
             tenant(),
+            None,
             Path("hq".to_string()),
             Query(p),
         )
@@ -2299,6 +2330,7 @@ mod tests {
         let resp = super::super::handle_timer_cancel(
             State(st.clone()),
             tenant(),
+            None,
             Path(("hq".to_string(), "later".to_string())),
             Query(HashMap::new()),
         )
@@ -2312,6 +2344,7 @@ mod tests {
         let resp = super::super::handle_timer_cancel(
             State(st.clone()),
             tenant(),
+            None,
             Path(("hq".to_string(), "later".to_string())),
             Query(qp),
         )
@@ -2335,6 +2368,7 @@ mod tests {
             State(st.clone()),
             Extension(AuthedSub(None)),
             tenant(),
+            None,
             Bytes::from(bad),
         )
         .await;
@@ -2384,6 +2418,7 @@ mod tests {
             super::super::handle_kv_put(
                 State(st.clone()),
                 t(),
+                None,
                 path("order/9f1/items"),
                 q(),
                 Bytes::from_static(br#"{"value":{"n":1},"ttlSeconds":60}"#),
@@ -2398,7 +2433,8 @@ mod tests {
 
         // GET: the element, and the ETag of its version.
         let resp =
-            super::super::handle_kv_get(State(st.clone()), t(), path("order/9f1/items"), q()).await;
+            super::super::handle_kv_get(State(st.clone()), t(), None, path("order/9f1/items"), q())
+                .await;
         let etag = resp
             .headers()
             .get(axum::http::header::ETAG)
@@ -2411,7 +2447,8 @@ mod tests {
         assert_eq!(got["value"], serde_json::json!({"n":1}));
 
         // A miss is 200 with found:false and no ETag.
-        let resp = super::super::handle_kv_get(State(st.clone()), t(), path("nope"), q()).await;
+        let resp =
+            super::super::handle_kv_get(State(st.clone()), t(), None, path("nope"), q()).await;
         assert!(resp.headers().get(axum::http::header::ETAG).is_none());
         let (status, text) = body_of(resp).await;
         assert_eq!(
@@ -2429,9 +2466,10 @@ mod tests {
             ]}}"#,
             v + 1000
         );
-        let (status, text) =
-            body_of(super::super::handle_kv_batch(State(st.clone()), t(), Bytes::from(body)).await)
-                .await;
+        let (status, text) = body_of(
+            super::super::handle_kv_batch(State(st.clone()), t(), None, Bytes::from(body)).await,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let b: serde_json::Value = serde_json::from_str(&text).unwrap();
         let r = b["results"].as_array().expect("results");
@@ -2446,6 +2484,7 @@ mod tests {
             super::super::handle_kv_batch(
                 State(st.clone()),
                 t(),
+                None,
                 Bytes::from_static(br#"[{"op":"put","ns":"orders","key":"k","value":1}]"#),
             )
             .await,
@@ -2460,6 +2499,7 @@ mod tests {
             super::super::handle_kv_batch(
                 State(st.clone()),
                 t(),
+                None,
                 Bytes::from_static(
                     br#"[{"op":"putIfAbsent","ns":"orders","key":"order/9f1/items","value":0,"forever":true,"required":true}]"#,
                 ),
@@ -2506,6 +2546,7 @@ mod tests {
             super::super::handle_kv_delete(
                 State(st.clone()),
                 t(),
+                None,
                 path("order/9f1/items"),
                 q(),
                 Bytes::new(),
@@ -2516,7 +2557,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{text}");
         assert!(text.contains("\"applied\":true"), "{text}");
         let (_, text) = body_of(
-            super::super::handle_kv_get(State(st.clone()), t(), path("order/9f1/items"), q()).await,
+            super::super::handle_kv_get(State(st.clone()), t(), None, path("order/9f1/items"), q())
+                .await,
         )
         .await;
         assert!(text.contains("\"found\":false"), "{text}");
@@ -2650,6 +2692,7 @@ mod tests {
             super::super::handle_kv_delete(
                 State(st.clone()),
                 t(),
+                None,
                 Path(("queen-locks".to_string(), "daily-report#0".to_string())),
                 q(),
                 Bytes::new(),
@@ -2726,6 +2769,7 @@ mod tests {
         let resp = super::raft_fallback(
             State(st.clone()),
             Extension(Tenant::default_tenant()),
+            None,
             axum::http::Method::GET,
             "/api/v1/does-not-exist".parse().unwrap(),
             Bytes::new(),

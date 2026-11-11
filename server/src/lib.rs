@@ -65,6 +65,9 @@ mod rsm;
 // `handlers::status`.
 #[cfg(feature = "s3")]
 mod s3_inproc;
+// What a scoped client may reach (twin of `mod scope;` in main.rs).
+#[allow(dead_code)]
+mod scope;
 mod switches;
 mod syscollect;
 mod tenant;

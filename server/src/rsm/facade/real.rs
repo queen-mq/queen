@@ -50,6 +50,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use queen_protocol::scope::{Ask, Keys};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -1792,6 +1793,7 @@ impl RaftFacade {
         let encryption = self.encryption.clone();
         let tenant = ctx.tenant.clone();
         let group = group.to_string();
+        let scope = ctx.scope.clone();
         tokio::task::spawn_blocking(move || {
             let resolved = resolve_ack_targets(
                 &store,
@@ -1801,6 +1803,7 @@ impl RaftFacade {
                 &tenant,
                 &group,
                 &flats,
+                scope.as_deref(),
             );
             (resolved, flats)
         })
@@ -2390,6 +2393,7 @@ impl RaftFacade {
                 }
             }
         }
+        check_timer_scope(&ctx, &timer_ops)?;
         // The KV rider, validated with the WIRE's limits (024: fewer ops, no
         // getPrefix inside a transaction).
         let kv_values: Vec<serde_json::Value> = body
@@ -2409,6 +2413,7 @@ impl RaftFacade {
             Ok(o) => o,
             Err(e) => return Ok(answer(e.status, e.reason, &e.detail)),
         };
+        check_kv_scope(&ctx, &kv_ops)?;
         // D20: a `check` goes to the leader only once every member decodes it
         // (the KV route's own gate, `kv_ops_admitted`). Nothing ran; retryable.
         if let Err(super::KvFailure::NotYet { reason, detail }) = self.kv_ops_admitted(&kv_ops) {
@@ -2423,6 +2428,14 @@ impl RaftFacade {
             Ok(o) => o,
             Err(e) => return Ok(fail(e.reason, &e.detail)),
         };
+        // A position is a consumer group's cursor, set by name: no grant
+        // covers it, so a scoped caller cannot set one.
+        if ctx.scope.is_some() && !position_ops.is_empty() {
+            return Err(RsmError::Forbidden {
+                code: "scope_denied",
+                message: "this credential may not set consumer-group positions".into(),
+            });
+        }
         let ops = body.operations.unwrap_or_default();
         if ops.is_empty()
             && bin_frames.iter().all(|f| f.is_empty())
@@ -2512,6 +2525,13 @@ impl RaftFacade {
                 .unwrap_or("Default")
                 .to_string();
             super::check_message_key_names(&ctx.tenant, queue, None, Some(&partition))?;
+            super::check_scope(
+                &ctx,
+                Ask::Produce {
+                    queue,
+                    partition: &partition,
+                },
+            )?;
             let key = (queue.to_string(), partition.clone(), txn.clone());
             let follower_of = seen.get(&key).copied();
             let idx = pushes.len();
@@ -2753,6 +2773,9 @@ impl RaftFacade {
             }
             let resolved = self.resolve_acks(&ctx, &group, flats).await?;
             let (t, _per_item, bad) = resolved.map_err(RsmError::Internal)?;
+            if let Some(denied) = scope_denial(&bad) {
+                return Err(denied);
+            }
             if let Some((_, why)) = bad.first() {
                 return Ok(fail(
                     "rejected_ack",
@@ -3896,6 +3919,15 @@ impl RaftFacade {
                         it.queue,
                         None,
                         Some(partition_name),
+                    )?;
+                    // A scoped caller: one name outside its grants refuses the
+                    // whole push, before anything is submitted.
+                    super::check_scope(
+                        ctx,
+                        Ask::Produce {
+                            queue: it.queue,
+                            partition: partition_name,
+                        },
                     )?;
                     (
                         std::sync::Arc::<str>::from(it.queue),
@@ -5718,6 +5750,9 @@ impl RaftFacade {
         // queue) once. A pid with no row is a per-item error.
         let resolved = self.resolve_acks(&ctx, group, flats).await?;
         let (targets, per_item, more_bad) = resolved.map_err(RsmError::Internal)?;
+        if let Some(denied) = scope_denial(&more_bad) {
+            return Err(denied);
+        }
         bad.extend(more_bad);
 
         let txns: Vec<&str> = raw_items.iter().map(|r| r.0).collect();
@@ -5826,7 +5861,96 @@ type AckResolution = Result<(Vec<AckTarget>, Vec<AckPerItem>, Vec<(usize, String
 /// The reason an ack item names a partition this node's store does not hold.
 const NO_PARTITION: &str = "no partition";
 
+/// The reason of the one item [`resolve_ack_targets`] answers when a scoped
+/// caller's ack names a partition outside its grants ([`scope_denial`]).
+const SCOPE_DENIED: &str = "scope denied: ";
+
+/// A scoped caller's ack, refused whole, when its resolution found a
+/// partition outside the grants: the `403` for it.
+fn scope_denial(bad: &[(usize, String)]) -> Option<RsmError> {
+    bad.iter().find_map(|(_, why)| {
+        why.strip_prefix(SCOPE_DENIED).map(|m| RsmError::Forbidden {
+            code: "scope_denied",
+            message: m.to_string(),
+        })
+    })
+}
+
+/// A scoped caller's KV ops, each checked against its grants by the names it
+/// reaches: one key, several, or a prefix.
+fn check_kv_scope(ctx: &ReqCtx, ops: &[crate::rsm::planner::kv::KvOp]) -> Result<(), RsmError> {
+    use crate::rsm::planner::kv::KvOp;
+    if ctx.scope.is_none() {
+        return Ok(());
+    }
+    for op in ops {
+        match op {
+            KvOp::GetMany { ns, keys } => {
+                for k in keys {
+                    super::check_scope(
+                        ctx,
+                        Ask::Kv {
+                            ns,
+                            key: Keys::One(k),
+                            write: false,
+                        },
+                    )?;
+                }
+            }
+            KvOp::GetPrefix { ns, prefix, .. } => super::check_scope(
+                ctx,
+                Ask::Kv {
+                    ns,
+                    key: Keys::Prefix(prefix),
+                    write: false,
+                },
+            )?,
+            // A `check` writes nothing: it reads a version.
+            one => super::check_scope(
+                ctx,
+                Ask::Kv {
+                    ns: one.ns(),
+                    key: Keys::One(one.key().unwrap_or_default()),
+                    write: one.is_write(),
+                },
+            )?,
+        }
+    }
+    Ok(())
+}
+
+/// A scoped caller's timer ops: a schedule by its queue, key and the
+/// partition it fires into, a cancel by its queue and key.
+fn check_timer_scope(ctx: &ReqCtx, ops: &[TimerOp]) -> Result<(), RsmError> {
+    if ctx.scope.is_none() {
+        return Ok(());
+    }
+    for op in ops {
+        let partition = match op {
+            TimerOp::Schedule(s) => Some(s.partition.as_str()),
+            TimerOp::Cancel { .. } => None,
+        };
+        super::check_scope(
+            ctx,
+            Ask::Timer {
+                queue: op.queue(),
+                key: Keys::One(op.key()),
+                partition,
+                write: true,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Group resolved acks by (pid, worker), reading each pid's queue once.
+///
+/// `scope`: a scoped caller's grants. An item whose partition they do not
+/// cover ends the resolution: it is answered as the one bad item, with the
+/// [`SCOPE_DENIED`] reason, and the caller refuses the whole ack. It is
+/// checked here, in the read that resolves the partition, so the partition a
+/// number names cannot change between the check and the ack.
+#[allow(clippy::too_many_arguments)]
 fn resolve_ack_targets(
     store: &HeedStore,
     reader: &segments::Reader,
@@ -5835,6 +5959,7 @@ fn resolve_ack_targets(
     tenant: &str,
     group: &str,
     flats: &[AckFlat],
+    scope: Option<&queen_protocol::scope::Scope>,
 ) -> AckResolution {
     let mut targets: Vec<AckTarget> = Vec::new();
     let mut per_item: Vec<AckPerItem> = Vec::new();
@@ -5849,6 +5974,7 @@ fn resolve_ack_targets(
         std::collections::HashMap::new();
     let mut parts: std::collections::HashMap<Pid, Option<rows::PartitionRow>> =
         std::collections::HashMap::new();
+    let mut denied: Option<(usize, String)> = None;
 
     store
         .read(|r| {
@@ -5872,6 +5998,20 @@ fn resolve_ack_targets(
                         format!("partition {} not owned by this tenant", f.pid),
                     ));
                     continue;
+                }
+                if let Some(s) = scope {
+                    let ask = Ask::Consume {
+                        queue: &part.queue,
+                        partition: Some(&part.partition),
+                        group,
+                    };
+                    if !s.allows(&ask) {
+                        denied = Some((
+                            f.index,
+                            format!("{SCOPE_DENIED}this credential may not {}", ask.describe()),
+                        ));
+                        return Ok(());
+                    }
                 }
                 let same_as_last = last.is_some_and(|(lfi, _, _)| {
                     flats[lfi].pid == f.pid && flats[lfi].worker == f.worker
@@ -5970,6 +6110,9 @@ fn resolve_ack_targets(
             Ok(())
         })
         .map_err(|e| format!("ack resolve read: {e}"))?;
+    if let Some(d) = denied {
+        return Ok((Vec::new(), Vec::new(), vec![d]));
+    }
 
     for work in snapshot_work {
         match read_dlq_snapshot(reader, qlog_reader, encryption, tenant, &work) {
@@ -6301,6 +6444,7 @@ impl RaftFacade {
                 results: Vec::new(),
             });
         }
+        check_timer_scope(&ctx, &ops)?;
         let encrypted_queues = self
             .encrypted_queues(
                 &ctx.tenant,
@@ -6365,6 +6509,15 @@ impl RaftFacade {
             ));
         }
         super::check_message_key_names(&ctx.tenant, &req.queue, None, Some(&req.timer_key))?;
+        super::check_scope(
+            &ctx,
+            Ask::Timer {
+                queue: &req.queue,
+                key: Keys::One(&req.timer_key),
+                partition: None,
+                write: false,
+            },
+        )?;
         let tenant = ctx.tenant.clone();
         self.timer_read(&ctx, move |store| {
             store
@@ -6386,6 +6539,16 @@ impl RaftFacade {
             return Err(timers_bad_request("QTIMER list needs a queue"));
         }
         super::check_message_key_names(&ctx.tenant, &req.queue, None, req.after.as_deref())?;
+        // A list walks every key of the queue, whatever `after` says.
+        super::check_scope(
+            &ctx,
+            Ask::Timer {
+                queue: &req.queue,
+                key: Keys::All,
+                partition: None,
+                write: false,
+            },
+        )?;
         let tenant = ctx.tenant.clone();
         let limit = list_limit(req.limit);
         self.timer_read(&ctx, move |store| {
@@ -6438,6 +6601,15 @@ impl RaftFacade {
         if req.prefix.len() > 128 {
             return Err(timers_bad_request("QTIMER count prefix exceeds 128 bytes"));
         }
+        super::check_scope(
+            &ctx,
+            Ask::Timer {
+                queue: &req.queue,
+                key: Keys::Prefix(&req.prefix),
+                partition: None,
+                write: false,
+            },
+        )?;
         let tenant = ctx.tenant.clone();
         self.timer_read(&ctx, move |store| {
             store

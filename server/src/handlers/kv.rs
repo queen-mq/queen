@@ -310,6 +310,7 @@ fn precondition_200(detail: Option<&str>) -> Response {
 async fn apply_ops(
     st: &Arc<AppState>,
     tenant: &str,
+    scope: Option<crate::scope::ClientScope>,
     ops: Vec<Value>,
     write: bool,
 ) -> Result<Vec<Value>, Response> {
@@ -412,7 +413,10 @@ async fn apply_ops(
         .map(|v| v.to_string().len() as u64)
         .sum();
 
-    raft_apply(st, tenant, ops, add_rows, add_bytes, &kinds, bytes_in).await
+    raft_apply(
+        st, tenant, scope, ops, add_rows, add_bytes, &kinds, bytes_in,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -475,9 +479,11 @@ pub(super) fn raft_failure(f: crate::rsm::facade::KvFailure) -> Response {
 
 /// [`apply_ops`]'s raft leg: the call through the facade, with its own metrics
 /// and quota bookkeeping.
+#[allow(clippy::too_many_arguments)]
 async fn raft_apply(
     st: &Arc<AppState>,
     tenant: &str,
+    scope: Option<crate::scope::ClientScope>,
     ops: Vec<Value>,
     add_rows: i64,
     add_bytes: i64,
@@ -485,7 +491,9 @@ async fn raft_apply(
     bytes_in: u64,
 ) -> Result<Vec<Value>, Response> {
     use crate::rsm::facade::{Deadline, KvFailure, KvReq, ReqCtx, RsmError};
-    let ctx = ReqCtx::new(tenant, Deadline::after(st.stmt_timeout));
+    // A scoped caller's namespaces and keys are checked by the facade, on the
+    // ops it parsed (`check_kv_scope`).
+    let ctx = ReqCtx::new(tenant, Deadline::after(st.stmt_timeout)).with_scope(scope);
     let t0 = std::time::Instant::now();
     let res = st.rsm.kv_raw(ctx, KvReq { ops }).await;
     // One duration per call, shared out over its ops (see `apply_ops`).
@@ -641,6 +649,7 @@ fn single_response(results: Vec<Value>) -> Response {
 pub async fn handle_kv_batch(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     body: Bytes,
 ) -> Response {
     let root: Value = match serde_json::from_slice(&body) {
@@ -676,7 +685,15 @@ pub async fn handle_kv_batch(
             Some("put" | "putIfAbsent" | "delete" | "incr" | "check")
         )
     });
-    match apply_ops(&st, tenant.as_str(), ops, write).await {
+    match apply_ops(
+        &st,
+        tenant.as_str(),
+        scope.map(|Extension(s)| s),
+        ops,
+        write,
+    )
+    .await
+    {
         Ok(results) => batch_response(results),
         Err(resp) => resp,
     }
@@ -731,6 +748,7 @@ fn reject_path_shadowing(o: &Map<String, Value>) -> Option<Response> {
 pub async fn handle_kv_get(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     Path((ns, key)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
@@ -742,7 +760,15 @@ pub async fn handle_kv_get(
         ("ns".to_string(), Value::String(ns)),
         ("key".to_string(), Value::String(key)),
     ]));
-    match apply_ops(&st, tenant.as_str(), vec![op], false).await {
+    match apply_ops(
+        &st,
+        tenant.as_str(),
+        scope.map(|Extension(s)| s),
+        vec![op],
+        false,
+    )
+    .await
+    {
         Ok(results) => get_response(results),
         Err(resp) => resp,
     }
@@ -751,6 +777,7 @@ pub async fn handle_kv_get(
 pub async fn handle_kv_put(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     Path((ns, key)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
     body: Bytes,
@@ -784,7 +811,15 @@ pub async fn handle_kv_put(
             op.insert(f.to_string(), v.clone());
         }
     }
-    match apply_ops(&st, tenant.as_str(), vec![Value::Object(op)], true).await {
+    match apply_ops(
+        &st,
+        tenant.as_str(),
+        scope.map(|Extension(s)| s),
+        vec![Value::Object(op)],
+        true,
+    )
+    .await
+    {
         Ok(results) => single_response(results),
         Err(resp) => resp,
     }
@@ -793,6 +828,7 @@ pub async fn handle_kv_put(
 pub async fn handle_kv_delete(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     Path((ns, key)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
     body: Bytes,
@@ -824,7 +860,15 @@ pub async fn handle_kv_delete(
             op.insert(f.to_string(), v.clone());
         }
     }
-    match apply_ops(&st, tenant.as_str(), vec![Value::Object(op)], true).await {
+    match apply_ops(
+        &st,
+        tenant.as_str(),
+        scope.map(|Extension(s)| s),
+        vec![Value::Object(op)],
+        true,
+    )
+    .await
+    {
         Ok(results) => single_response(results),
         Err(resp) => resp,
     }

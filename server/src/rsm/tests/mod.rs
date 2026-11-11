@@ -91,6 +91,8 @@ mod retention_scan;
 mod roundtrip;
 mod rowless;
 pub(super) mod samples;
+#[cfg(feature = "server")]
+mod scope;
 mod stale_leader;
 mod store;
 mod store_crash;

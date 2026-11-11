@@ -19,12 +19,39 @@ pub async fn handle_push(
     State(st): State<Arc<AppState>>,
     Extension(authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     body: Bytes,
 ) -> Response {
     // Producer identity is server-owned: only the validated JWT subject is
     // forwarded to either storage backend, never a body-supplied field.
     let producer_sub = authed.0.filter(|s| !s.is_empty());
-    crate::handlers::raft::dispatch_push(&st, tenant.as_str(), producer_sub, body).await
+    crate::handlers::raft::dispatch_push(
+        &st,
+        tenant.as_str(),
+        producer_sub,
+        scope.map(|Extension(s)| s),
+        body,
+    )
+    .await
+}
+
+/// A scoped caller's pop: the queue, the partition (`None` when the broker
+/// picks it) and the consumer group, against its grants.
+fn pop_scope_refusal(
+    scope: &Option<Extension<crate::scope::ClientScope>>,
+    queue: &str,
+    partition: Option<&str>,
+    group: Option<&str>,
+) -> Option<Response> {
+    let Extension(s) = scope.as_ref()?;
+    crate::scope::denied(
+        Some(s),
+        queen_protocol::scope::Ask::Consume {
+            queue,
+            partition,
+            group: group.unwrap_or(queen_protocol::QUEUE_MODE_GROUP),
+        },
+    )
 }
 
 // ------------------------------------------------------------------- pop
@@ -182,9 +209,13 @@ fn conflation_refusal(
 pub async fn handle_pop(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     Path(queue): Path<String>,
     Query(p): Query<PopParams>,
 ) -> Response {
+    if let Some(r) = pop_scope_refusal(&scope, &queue, None, p.consumer_group.as_deref()) {
+        return r;
+    }
     // Clamped, never refused (`QUEEN_POP_MAX_BATCH`): a batch without a
     // ceiling let one pop lease and render millions of messages.
     let batch = p
@@ -244,9 +275,18 @@ pub async fn handle_pop(
 pub async fn handle_pop_partition(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     Path((queue, partition)): Path<(String, String)>,
     Query(p): Query<PopParams>,
 ) -> Response {
+    if let Some(r) = pop_scope_refusal(
+        &scope,
+        &queue,
+        Some(&partition),
+        p.consumer_group.as_deref(),
+    ) {
+        return r;
+    }
     // Clamped, never refused (`QUEEN_POP_MAX_BATCH`): a batch without a
     // ceiling let one pop lease and render millions of messages.
     let batch = p
@@ -342,8 +382,17 @@ impl PopDiscoverParams {
 pub async fn handle_pop_discover(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     Query(p): Query<PopDiscoverParams>,
 ) -> Response {
+    // Discovery picks queues by label: no grant names them. The scope layer
+    // already refuses the route; this keeps the handler safe on its own.
+    if scope.is_some() {
+        return crate::scope::refused(
+            "scope_denied",
+            "this credential may not pop by namespace or task",
+        );
+    }
     if p.namespace.as_deref().unwrap_or_default().is_empty()
         && p.task.as_deref().unwrap_or_default().is_empty()
     {
@@ -406,17 +455,21 @@ pub async fn handle_pop_discover(
 pub async fn handle_ack(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     body: Bytes,
 ) -> Response {
-    crate::handlers::raft::dispatch_ack(&st, tenant.as_str(), body).await
+    crate::handlers::raft::dispatch_ack(&st, tenant.as_str(), scope.map(|Extension(s)| s), body)
+        .await
 }
 
 pub async fn handle_ack_batch(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     body: Bytes,
 ) -> Response {
-    crate::handlers::raft::dispatch_ack(&st, tenant.as_str(), body).await
+    crate::handlers::raft::dispatch_ack(&st, tenant.as_str(), scope.map(|Extension(s)| s), body)
+        .await
 }
 
 // ----------------------------------------------------------- lease renew
@@ -457,6 +510,7 @@ pub async fn handle_transaction(
     Extension(authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
     facade: Option<Extension<crate::handlers::raft::KafkaFacadeCall>>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
     body: Bytes,
 ) -> Response {
     // As on the standalone push path, identity comes only from validated auth.
@@ -465,6 +519,7 @@ pub async fn handle_transaction(
         &st,
         tenant.as_str(),
         producer_sub,
+        scope.map(|Extension(s)| s),
         body,
         facade.is_some(),
     )

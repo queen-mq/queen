@@ -81,10 +81,18 @@ async fn conflation_refuses_commit_on_delivery_under_either_name() {
     for name in ["commitOnDelivery", "autoAck"] {
         let qs = format!("consumerGroup=g&conflation=true&{name}=true");
         let answers = [
-            handle_pop(State(st.clone()), tenant(), Path("q".into()), query(&qs)).await,
+            handle_pop(
+                State(st.clone()),
+                tenant(),
+                None,
+                Path("q".into()),
+                query(&qs),
+            )
+            .await,
             handle_pop_partition(
                 State(st.clone()),
                 tenant(),
+                None,
                 Path(("q".into(), "p".into())),
                 query(&qs),
             )
@@ -92,6 +100,7 @@ async fn conflation_refuses_commit_on_delivery_under_either_name() {
             handle_pop_discover(
                 State(st.clone()),
                 tenant(),
+                None,
                 query(&format!("namespace=ns&{qs}")),
             )
             .await,
@@ -114,6 +123,7 @@ async fn conflation_refuses_commit_on_delivery_under_either_name() {
     let resp = handle_pop(
         State(st.clone()),
         tenant(),
+        None,
         Path("q".into()),
         query("consumerGroup=g&conflation=true"),
     )
@@ -180,6 +190,7 @@ async fn a_commit_on_delivery_pop_takes_no_lease_and_is_not_redelivered() {
         State(st.clone()),
         Extension(AuthedSub(None)),
         tenant(),
+        None,
         Bytes::from(serde_json::json!({ "items": items }).to_string()),
     )
     .await;
@@ -191,11 +202,14 @@ async fn a_commit_on_delivery_pop_takes_no_lease_and_is_not_redelivered() {
         async move {
             let qs = format!("{group}&{extra}");
             let resp = match route {
-                "queue" => handle_pop(State(st), tenant(), Path(queue.into()), query(&qs)).await,
+                "queue" => {
+                    handle_pop(State(st), tenant(), None, Path(queue.into()), query(&qs)).await
+                }
                 "partition" => {
                     handle_pop_partition(
                         State(st),
                         tenant(),
+                        None,
                         Path((queue.into(), "Default".into())),
                         query(&qs),
                     )
@@ -205,6 +219,7 @@ async fn a_commit_on_delivery_pop_takes_no_lease_and_is_not_redelivered() {
                     handle_pop_discover(
                         State(st),
                         tenant(),
+                        None,
                         query(&format!("namespace=cod-ns&{qs}")),
                     )
                     .await

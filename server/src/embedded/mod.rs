@@ -284,6 +284,7 @@ impl Broker {
             State(self.inner.st.clone()),
             Extension(crate::auth::AuthedSub(None)),
             Extension(crate::tenant::Tenant::default_tenant()),
+            None,
             Bytes::from(body),
         )
         .await;
@@ -303,6 +304,7 @@ impl Broker {
         let resp = crate::handlers::handle_pop(
             State(self.inner.st.clone()),
             Extension(crate::tenant::Tenant::default_tenant()),
+            None,
             Path(queue.to_string()),
             Query(p),
         )
@@ -321,6 +323,7 @@ impl Broker {
         let resp = crate::handlers::handle_pop_partition(
             State(self.inner.st.clone()),
             Extension(crate::tenant::Tenant::default_tenant()),
+            None,
             Path((queue.to_string(), partition.to_string())),
             Query(p),
         )
@@ -336,6 +339,7 @@ impl Broker {
         let resp = crate::handlers::handle_pop_discover(
             State(self.inner.st.clone()),
             Extension(crate::tenant::Tenant::default_tenant()),
+            None,
             Query(p),
         )
         .await;
@@ -351,6 +355,7 @@ impl Broker {
         let resp = crate::handlers::handle_ack(
             State(self.inner.st.clone()),
             Extension(crate::tenant::Tenant::default_tenant()),
+            None,
             Bytes::from(body),
         )
         .await;
@@ -371,6 +376,7 @@ impl Broker {
         let resp = crate::handlers::handle_ack_batch(
             State(self.inner.st.clone()),
             Extension(crate::tenant::Tenant::default_tenant()),
+            None,
             Bytes::from(body),
         )
         .await;
@@ -418,6 +424,7 @@ impl Broker {
             State(self.inner.st.clone()),
             Extension(crate::auth::AuthedSub(None)),
             Extension(crate::tenant::Tenant::default_tenant()),
+            None,
             None,
             Bytes::from(body),
         )

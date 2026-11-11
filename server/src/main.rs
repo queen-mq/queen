@@ -52,6 +52,8 @@ mod rsm;
 // reading this node's own state — no child, no second binary.
 #[cfg(feature = "s3")]
 mod s3_inproc;
+// What a scoped client may reach (twin of `mod scope;` in lib.rs).
+mod scope;
 #[allow(dead_code)]
 mod switches;
 mod syscollect;
