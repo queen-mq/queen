@@ -94,7 +94,11 @@ fi
 # `docker` driver silently cannot produce one, so fail here with the fix rather
 # than letting buildx error halfway through a Rust release build.
 if [ "$MULTIARCH" = true ]; then
-    DRIVER=$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/{print $2; exit}')
+    # Capture, THEN parse, for the reason the platform check below gives: awk
+    # exits at the first match, and an inspect still writing then dies of
+    # SIGPIPE, which pipefail turned into this script's exit 255, no message.
+    BUILDER_INFO=$(docker buildx inspect 2>/dev/null || true)
+    DRIVER=$(awk -F': *' '/^Driver:/{print $2; exit}' <<<"$BUILDER_INFO")
     if [ "$DRIVER" != "docker-container" ]; then
         cat >&2 <<EOF
 build.sh: --multiarch needs a docker-container builder (current driver: ${DRIVER:-none}).
