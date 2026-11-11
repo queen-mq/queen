@@ -3,12 +3,14 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.8.1 - 2026-11-11
 
 **Upgrading from 2.8.0: a rolling restart, nothing else.** Nothing in the raft log or on disk
-changes form: the new proxy rows (`px.keys.policy`, `px.keys.previous`, `px.blocks`) are KV rows
-like the others. A 2.8.0 node knows no scoped key and no client token and refuses both, so make
-scoped keys once every node runs the new version.
+changes form (cluster version 7): the new proxy rows (`px.keys.policy`, `px.keys.previous`,
+`px.blocks`) are KV rows like the others. A 2.8.0 node knows no scoped key and no client token and
+refuses both, so make scoped keys once every node runs 2.8.1. The JavaScript, Python, Go, Rust, PHP
+and C++ clients move to 2.8.1 and `queen-protocol` to 1.6.0; queenctl stays at 2.7.1 and the
+supervisor at 0.9.0, unchanged.
 
 **Devices and browsers get a token of their own: scoped keys and client tokens.** A scoped API key
 holds grants instead of scopes: some queues, partitions, consumer groups, KV keys and timers, each
@@ -39,6 +41,23 @@ One fetch at a time, shared by every HTTP client the SDK makes; a function that 
 request unsent, without blaming the node. `tokens.mint()` calls `POST /api/v1/tokens`.
 `queen-protocol` gains the grant and token types (`scope`). Why: a token that expires every hour
 must be replaced without the application noticing.
+
+**A queue's page moves its consumer groups.** Its Consumer groups tab opens a group beside the list,
+in the same panel as Queues › Consumer groups, with the same actions: skip what waits, seek to a
+time, move one partition, delete it here or everywhere. One partition can now go back to a time as
+well as to its newest message (the broker's partition seek always took `{timestamp}`), and "Seek one
+partition…" reaches any partition, not only one behind. Why: the queue's page is where you look when
+a queue misbehaves, and you had to leave it to act.
+
+**A message opens in a panel about half the page wide.** On a queue's page and in Queues › Messages
+an open message takes a little more than half the width and stays in view while the list scrolls;
+its payload takes the height the window leaves, never less than before. On a busy queue's page it
+no longer closes when it leaves the newest 20. Why: a payload is read, and a 360-pixel box made it
+scroll inside itself.
+
+**On a phone, the bottom of every console page is in reach.** The console was as tall as the window
+with the browser's bars hidden (`100vh`), so while they showed, the bottom of the page sat under
+them; it is now as tall as the window you see (`100dvh`).
 
 ## 2.8.0 - 2026-11-08
 

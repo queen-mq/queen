@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "queen-engine"
-version = "2.8.0"
+version = "2.8.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "queen-protocol"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "serde",
  "serde_json",

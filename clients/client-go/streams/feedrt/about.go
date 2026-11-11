@@ -30,7 +30,7 @@ const (
 	clipMaxDepth = 4
 	modulePath   = "github.com/smartpricing/queen/clients/client-go/v2"
 	// sdkVersion is this client's version when the build says none (a local build).
-	sdkVersion = "2.8.0"
+	sdkVersion = "2.8.1"
 )
 
 var clientName = sync.OnceValue(func() string {

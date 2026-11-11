@@ -48,7 +48,7 @@ from .utils.defaults import (
     BUFFER_DEFAULTS,
 )
 
-__version__ = "2.8.0"
+__version__ = "2.8.1"
 
 __all__ = [
     "Queen",
