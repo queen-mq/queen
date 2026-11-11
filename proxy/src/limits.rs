@@ -382,7 +382,7 @@ impl Limits {
         let cluster_over = ctx
             .limits
             .max_parked_pops
-            .map_or(false, |m| cluster_before >= m);
+            .is_some_and(|m| cluster_before >= m);
 
         if cell_over || cluster_over {
             self.log_deny("parked", ctx.cluster_id, PARKED_RETRY_AFTER_S);
@@ -799,7 +799,7 @@ mod tests {
                 retry_after_s,
                 code,
             } => {
-                assert!(retry_after_s >= 1 && retry_after_s <= 60);
+                assert!((1..=60).contains(&retry_after_s));
                 assert_eq!(code, crate::errors::CODE_RATE_LIMITED);
             }
             Decision::Allow => panic!("expected burst to be exhausted"),

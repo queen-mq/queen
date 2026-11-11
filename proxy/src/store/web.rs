@@ -1292,7 +1292,7 @@ pub async fn list_cluster_keys(store: &Store, cluster_id: Uuid) -> Result<Vec<Ke
                 .into_iter()
                 .map(|d| d.value)
                 .collect();
-            docs.sort_by(|a, b| b.created_at_us.cmp(&a.created_at_us));
+            docs.sort_by_key(|d| std::cmp::Reverse(d.created_at_us));
             let ids: Vec<Uuid> = docs.iter().map(|k| k.id).collect();
             let mut policies = crate::store::data::key_policies(store, &ids)
                 .await

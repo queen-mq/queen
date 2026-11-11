@@ -4,6 +4,11 @@
 //! KV. Spec: PLAN_QUEEN_PROXY_CLOUD.md (repo root). Module ownership:
 //! CONTRACTS.md.
 
+// A refused request is answered by the step that refuses it: handlers and
+// their helpers return `Result<_, Response>` and hand the Response straight
+// back to axum. Boxing it would buy nothing but an allocation per refusal.
+#![allow(clippy::result_large_err)]
+
 pub mod acting;
 pub mod app;
 pub mod auth;

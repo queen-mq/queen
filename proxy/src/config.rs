@@ -614,7 +614,7 @@ impl Config {
             return false;
         }
         let host = canonical_host(host).to_ascii_lowercase();
-        !host.is_empty() && self.shared_hosts.iter().any(|h| *h == host)
+        !host.is_empty() && self.shared_hosts.contains(&host)
     }
 
     pub fn load() -> Config {

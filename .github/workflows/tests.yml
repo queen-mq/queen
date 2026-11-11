@@ -234,6 +234,42 @@ jobs:
       - name: cargo test
         run: cargo test --manifest-path server/Cargo.toml --locked
 
+  # The embedded proxy (proxy/) and the console (app/). Each has its own
+  # tests, and neither ran anywhere: the broker's `cargo test` reaches only the
+  # proxy's wiring (server/src/proxy_embed.rs), never the crate's own tests,
+  # and one of those went stale on master for weeks. Three proxy tests check
+  # the console the binary embeds (server/webapp/dist), so the console is
+  # built first; its own tests run on the way.
+  proxy-console-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: console tests
+        working-directory: app
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+      - name: build the console the proxy embeds
+        working-directory: app
+        run: npm run build
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+          # See rust-unit: name the manifest, or rust-cache probes the root.
+          cache-workspaces: proxy
+      - name: proxy tests
+        run: cargo test --manifest-path proxy/Cargo.toml --locked
+      - name: rustfmt
+        run: cargo fmt --manifest-path proxy/Cargo.toml --check
+      - name: clippy
+        run: cargo clippy --manifest-path proxy/Cargo.toml --locked --all-targets -- -D warnings
+
   # The Rust SDK, Laravel supervisor and wire-contract crate. There is no cargo workspace at the
   # repo root, and a path dependency's `#[cfg(test)]` modules are never compiled
   # — so the broker's `cargo test` above reaches neither of these. Each manifest

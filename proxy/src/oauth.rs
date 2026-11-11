@@ -2046,11 +2046,11 @@ var error=document.querySelector('[role=alert]');if(error)error.focus();
 /// with its line, centred over the card, at about the smallest height that
 /// still lets the line be read.
 const SIGN_IN_CSS: &str = "\
-:root{--ink-0:#1a1917;--ink-2:#1c1b19;--ink-3:#22211f;\
+:root{--ink-0:#0b0a0a;--ink-2:#111010;--ink-3:#171615;\
 --text-hi:#f3f0eb;--text-mid:#b8b3ab;--text-low:#9a958e;--text-faint:#706b65;\
 --brand:#fcc620;--accent:var(--brand);--accent-dim:#e6ae05;--accent-text:var(--brand);--on-accent:#000000;\
 --ember-400:#f07a5f;--ember-glow:rgba(240,122,95,0.12);--ember-bd:rgba(240,122,95,0.30);\
---bd:#2c2a27;--bd-hi:#403d39;--ring:var(--accent-text);color-scheme:dark}\
+--bd:#2a2725;--bd-hi:#34312e;--ring:var(--accent-text);color-scheme:dark}\
 html.light{--ink-0:#f7f7f6;--ink-2:#ffffff;--ink-3:#fcfcfb;\
 --text-hi:#1a1918;--text-mid:#45423e;--text-low:#67625c;--text-faint:#8c8782;\
 --brand:#fcc620;--accent:var(--brand);--accent-dim:#e6ae05;--accent-text:#806000;--on-accent:#000000;\
