@@ -34,6 +34,7 @@ sourceOfTruth:
   - app/src/console/ClusterChip.vue
   - app/src/console/useConsoleFrame.js
   - app/src/console/useOverview.js
+  - app/src/console/overviewPanels.js
   - app/src/composables/useTraffic.js
   - app/src/composables/useBrokerStatus.js
   - server/src/rsm/replicator/raft/traffic.rs
@@ -84,6 +85,10 @@ sourceOfTruth:
 # facade/real.rs carry each request's client scope (None without a client token) and refuse a name
 # outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599). Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-11-11 (the Overview's panels): overviewPanels.js gives the Overview a
+# panel of the nodes under its lists, built on clusterViews.js's node rows (disk, how far behind, up,
+# the versions, the disk gate). The paragraph after the Cell table says so, and overviewPanels.js
+# joins the sources.
 ---
 
 ## Upgrade one node at a time
@@ -148,7 +153,7 @@ For an operator, the Overview also covers the cell, not only the queues. What is
 | A node's disk | past the gate's low line | at its high line, where writes answer 507 |
 | A node's memory or CPU | 80% of its limit, 90% of its cores | 90% of its limit |
 
-These are the lines that colour the cluster chip, so the two never disagree. The chip's panel lists each node with its CPU, memory, disk and how far it is behind.
+These are the lines that colour the cluster chip, so the two never disagree. The chip's panel lists each node with its CPU, memory, disk and how far it is behind. Under its lists, the Overview's The cluster underneath shows each node too, with its disk and how far it is behind (or how long it has been up), the version every node runs, or the versions while a roll is under way, and where a disk stops writes.
 
 <Why>a cell in trouble is trouble for every queue on it. A follower that falls behind or a snapshot that runs for minutes shows in the verdict before it shows as latency.</Why>
 

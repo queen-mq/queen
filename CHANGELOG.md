@@ -59,6 +59,18 @@ scroll inside itself.
 with the browser's bars hidden (`100vh`), so while they showed, the bottom of the page sat under
 them; it is now as tall as the window you see (`100dvh`).
 
+**The Overview shows how the cluster runs, under what needs you.** Where the traffic is: the
+busiest namespaces by arrivals over the last hour, each with its rate in and acked, and one click to
+the Queues page filtered to it. The cluster underneath: each node with its disk and how far it is
+behind (or how long it has been up), the version they run and where a disk stops writes. In this
+cluster gains the streams and the connectors, each saying how many need you. The page stays one
+screen down to 1280x720: a shorter window shows two of each list, the rest behind "more". Why: the
+Overview said what was wrong, but not where the work was or how the nodes under it were.
+
+**A namespace's row on Queues adds up its queues.** What waits, the oldest, what arrived and was
+acked in the last hour, the dead letters, the partitions, the consumer groups and one traffic line
+for the whole namespace. Why: with dozens of queues in a namespace, you read the namespace first.
+
 ## 2.8.0 - 2026-11-08
 
 **Upgrading from 2.7.1: a rolling restart, nothing else.** Nothing on disk changes (cluster version
