@@ -57,6 +57,10 @@ digest: >-
 # gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
 # leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
 # relay through). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): handlers/raft.rs, facade/mod.rs,
+# facade/real.rs carry each request's client scope (None without a client token) and refuse a name
+# outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599); main.rs
+# declares the scope module. Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes catches up from the leader when it starts again. A leader that gets SIGTERM hands its job to a peer before it stops. A node that was away too long gets a snapshot from the leader, exits with code 75, and loads it when it starts again. This section is for the rest: a lost disk, a lost majority, a full disk, a bad day.

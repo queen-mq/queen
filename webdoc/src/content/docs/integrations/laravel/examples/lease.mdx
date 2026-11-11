@@ -41,6 +41,9 @@ verifiedBy:
 # checks binary_push, push_compression and framed_pop and gives them to the client it builds. The
 # lease renewal timing rule and its message, which this page quotes, are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): the PHP client: the Laravel
+# config's bearer_token stays a string (QueenConnector.php, QueenServiceProvider.php) (8c3fcd498).
+# Nothing this page states changes.
 ---
 
 Without lease renewal, a job that runs longer than `retry_after` goes to a second worker while the

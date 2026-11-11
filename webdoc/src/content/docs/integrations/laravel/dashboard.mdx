@@ -158,6 +158,11 @@ sourceOfTruth:
 # reads that lag for the collector (group_lags_of); phase2/reads.rs walks every group's positions
 # for it (group_lags). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-06 (tenant feed): phase2.rs routes POST /api/v1/feed to the new phase2/feed.rs. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): facade/real/phase2.rs carry each
+# request's client scope (None without a client token) and refuse a name outside it 403 scope_denied
+# before any command is built (server/src/scope.rs, b24b53599); the PHP client: the Laravel config's
+# bearer_token stays a string (QueenConnector.php, QueenServiceProvider.php) (8c3fcd498). Nothing
+# this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

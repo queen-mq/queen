@@ -33,6 +33,8 @@ verifiedBy:
 # memory guard's metrics, the follower drain window. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): ephemeral.rs,
 # handlers/ephemeral.rs, main.rs reformatted, line wrapping only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): main.rs declares the scope
+# module. Nothing this page states changes.
 ---
 
 Ephemeral queues live in memory, outside the log, for request/reply. The worker answers on whatever inbox a request names; the caller makes a private inbox and waits on it. There is no transaction or replay here, and a crash loses what is in flight.

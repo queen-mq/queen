@@ -103,6 +103,8 @@ verifiedBy:
 # onLate: 'include' on a window on the feed's clock, as on a pattern (a window ignored them);
 # snapshot.js counts a piece's limit in UTF-8 bytes; FeedRunner.js counts metrics().emitted once for
 # a unit that was retried. This page: the onLate row of the Event time table.
+# sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): the Go streams runner takes
+# RunOptions.TokenSource (367f278dc). Nothing this page states changes.
 ---
 
 A stream reads a queue and writes its results to another. The partition is the key, so each customer gets its own windows. Streams are in the JavaScript, Python, Go and Rust clients; PHP and C++ have none, and a stream reads any queue, whoever pushes to it. Like a new group it starts at the tail: push a few more orders and a result arrives a minute later.

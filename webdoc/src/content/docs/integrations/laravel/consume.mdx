@@ -72,6 +72,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-21: the SDKs gain a read of a partition by offset and a list of the
 # partitions written since a time (66622568e, clients 2.6.0, documented on start/clients). Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): the PHP client: the Laravel
+# config's bearer_token stays a string (QueenConnector.php, QueenServiceProvider.php); bearerToken
+# may be a token callable, read per attempt, and Queen gains tokens()->mint() (Queen.php,
+# HttpClient.php) (8c3fcd498). Nothing this page states changes.
 ---
 
 `php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it

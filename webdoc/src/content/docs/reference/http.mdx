@@ -95,6 +95,14 @@ sourceOfTruth:
 # page: a sentence after the resolvedTs promise (it does not go back on a running node).
 # sourceOfTruth re-read 2026-11-07 (the feed through the proxy): handlers/raft.rs relays a feed read that asks
 # (x-queen-feed-relay) from the leader to a follower; the proxy asks on every feed read. This page: the feed section says so.
+# sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): handlers/data.rs,
+# handlers/raft.rs, facade/mod.rs, facade/real.rs carry each request's client scope (None without a
+# client token) and refuse a name outside it 403 scope_denied before any command is built
+# (server/src/scope.rs, b24b53599); main.rs declares the scope module; proxy_embed.rs gains a test
+# of a client token through the single binary; proxy app.rs the mint route and the block-list
+# invalidation; proxy auth.rs the client-token credential and a verify-only previous signing key;
+# proxy cp.rs the scoped-key policy, rotation and block-list calls (9c7c0d515). This page: the client
+# token row in Authentication, and x-queen-scope under the tenancy header.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
@@ -158,6 +166,7 @@ proxy, which authenticates API keys and sessions before a request reaches the br
 | JWT | `Authorization: Bearer <jwt>` | `JWT_ENABLED=true`, plus `JWT_SECRET`, `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
 | Proxy API key | `Authorization: Bearer qk_...` | the embedded proxy, which issues the keys |
 | Proxy session | the proxy's session cookie, or `Authorization: Bearer <session token>` | signing in to the proxy (`queenctl login`, the console) |
+| Client token | `Authorization: Bearer qt_...` | a scoped key minting it at the proxy, `POST /api/v1/tokens` `{sub, ttlSeconds?}`: see [client tokens](/manage/client-tokens/) |
 
 With JWT on, every route requires an access level, shown in the route table below. A token's role
 comes from the `role` claim (`JWT_ROLES_CLAIM`) or the `roles` array (`JWT_ROLES_ARRAY_CLAIM`), and
@@ -188,6 +197,11 @@ The broker trusts `x-queen-tenant` as given. The embedded proxy sets it after it
 the caller. Never let clients reach a broker that has `QUEEN_TENANCY_HEADER=true` directly: anyone
 could name any tenant. See [tenants](/manage/tenants/).
 </Aside>
+
+For a [client token](/manage/client-tokens/) the proxy also sends `x-queen-scope`, the names the
+token may reach. The broker refuses a push, pop, ack, transaction, KV or timer call that touches
+anything else (403 `scope_denied`), and any other route (403). The header only narrows: a caller
+that sets it on the broker's port restricts itself and nobody else.
 
 ## Status codes
 

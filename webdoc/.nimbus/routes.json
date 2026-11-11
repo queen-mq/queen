@@ -52,6 +52,7 @@
     "/introduction/why",
     "/manage",
     "/manage/backups",
+    "/manage/client-tokens",
     "/manage/configuration",
     "/manage/docker",
     "/manage/kubernetes",

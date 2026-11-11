@@ -72,6 +72,11 @@ verifiedBy:
 # relay through). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-07 (clients 2.8.0): queen_client.hpp's version macro says 2.8.0.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): handlers/data.rs,
+# handlers/raft.rs, facade/real.rs carry each request's client scope (None without a client token)
+# and refuse a name outside it 403 scope_denied before any command is built (server/src/scope.rs,
+# b24b53599); queen_client.hpp gains ClientConfig::token_source and tokens().mint() (9f218acf7).
+# Nothing this page states changes.
 ---
 
 Every `failed` ack spends one retry. The message comes back after the queue's `retryDelay`, and its partition waits with it, for that consumer group. After `retryLimit` failures, the message goes to the dead-letter queue and the group moves on. You set both on the queue (see [Create and configure queues](/writing-applications/queues/)).

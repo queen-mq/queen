@@ -14,6 +14,8 @@ sourceOfTruth:
   - deploy/terraform-provider-queen/examples/main.tf
   - server/src/handlers/queues.rs
   - proxy/src/cp.rs
+# sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): proxy cp.rs the scoped-key
+# policy, rotation and block-list calls (9c7c0d515). Nothing this page states changes.
 ---
 
 A queue's retention and a cluster's S3 sink are settings of the broker, and they usually belong
