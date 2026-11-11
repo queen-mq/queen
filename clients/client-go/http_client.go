@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -35,6 +36,13 @@ func NewHttpClient(config ClientConfig) (*HttpClient, error) {
 	validatedURLs, err := ValidateURLs(urls)
 	if err != nil {
 		return nil, err
+	}
+
+	if config.BearerToken != "" && config.TokenSource != nil {
+		return nil, fmt.Errorf("BearerToken and TokenSource are two answers to one question: set one")
+	}
+	if config.TokenSource != nil && config.tokens == nil {
+		config.tokens = newTokenSource(config.TokenSource)
 	}
 
 	// Apply defaults
@@ -288,6 +296,12 @@ func (hc *HttpClient) doRequestRaw(ctx context.Context, method, path string, bod
 			return nil, ctx.Err()
 		}
 
+		// The token source gave no token: nothing was sent, so no backend is to
+		// blame, and another attempt would only ask the source again.
+		if errors.Is(err, ErrTokenSource) {
+			return nil, err
+		}
+
 		if httpErr, ok := err.(*HTTPError); ok {
 			// 4xx (including a 429 whose retry429 policy is exhausted, and a
 			// terminal 403) is never retried here, and never fails over to a
@@ -408,18 +422,42 @@ func computeRetry429Delay(attemptIndex int, retryAfterSeconds *float64, baseMs, 
 // Any other outcome (success, network/timeout error, non-429 4xx, 5xx) is
 // returned immediately -- 429 is the only status this layer treats as
 // retryable; 5xx/network retry and cross-backend failover are the caller's
-// job (doRequest).
+// job (doRequest). The one exception is a 401 with a token source, below.
 func (hc *HttpClient) doRequestWithRetry429Raw(ctx context.Context, method, url string, body interface{}, timeout int, ro requestOptions) ([]byte, error) {
 	policy := hc.retry429PolicyFor(ro.retryKind)
 	tries := 0
+	refreshed := false
 	for {
 		tries++
-		result, err := hc.attemptOnceRawWith(ctx, hc.httpFor(ro, timeout), method, url, body, timeout)
+		// Asked on every attempt: the source keeps its token, so this is a read
+		// unless the token nears its exp or was just refused.
+		token, err := hc.bearerToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result, err := hc.attemptOnceRawWith(ctx, hc.httpFor(ro, timeout), method, url, body, timeout, token)
 		if err == nil {
 			return result, nil
 		}
 
 		httpErr, ok := err.(*HTTPError)
+		// A token the broker no longer takes (expired, or its key changed):
+		// with a token source, one new token and the request once more. It
+		// counts as no attempt; a second 401 is the caller's. A fixed
+		// BearerToken would only be refused again.
+		if ok && httpErr.StatusCode == http.StatusUnauthorized && hc.config.tokens != nil && !refreshed {
+			refreshed = true
+			tries--
+			logWarn("HttpClient.refreshToken", map[string]interface{}{
+				"url":    url,
+				"method": method,
+				"code":   httpErr.Code,
+			})
+			if _, err := hc.config.tokens.Token(ctx, token); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if !ok || httpErr.StatusCode != 429 {
 			return nil, err
 		}
@@ -462,7 +500,20 @@ func (hc *HttpClient) doRequestWithRetry429Raw(ctx context.Context, method, url 
 // anything else (marshal/transport/timeout) as a plain error. The split exists
 // so a caller that needs 64-bit integers can choose its own decoder (§10.4).
 func (hc *HttpClient) attemptOnceRaw(ctx context.Context, method, url string, body interface{}, timeout int) ([]byte, error) {
-	return hc.attemptOnceRawWith(ctx, hc.client, method, url, body, timeout)
+	token, err := hc.bearerToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return hc.attemptOnceRawWith(ctx, hc.client, method, url, body, timeout, token)
+}
+
+// bearerToken is the credential one attempt sends: the token source's token
+// when the client has one, else the fixed BearerToken ("" for neither).
+func (hc *HttpClient) bearerToken(ctx context.Context) (string, error) {
+	if hc.config.tokens != nil {
+		return hc.config.tokens.Token(ctx, "")
+	}
+	return hc.config.BearerToken, nil
 }
 
 // httpFor is the http.Client one request goes through: the client's own, or,
@@ -475,7 +526,10 @@ func (hc *HttpClient) httpFor(ro requestOptions, timeout int) *http.Client {
 	return hc.client
 }
 
-func (hc *HttpClient) attemptOnceRawWith(ctx context.Context, client *http.Client, method, url string, body interface{}, timeout int) ([]byte, error) {
+// attemptOnceRawWith is attemptOnceRaw through client, with token as the
+// attempt's credential (see bearerToken): sent as "Authorization: Bearer
+// <token>" unless empty.
+func (hc *HttpClient) attemptOnceRawWith(ctx context.Context, client *http.Client, method, url string, body interface{}, timeout int, token string) ([]byte, error) {
 	// Create request body
 	var bodyReader io.Reader
 	contentType := "application/json"
@@ -504,8 +558,8 @@ func (hc *HttpClient) attemptOnceRawWith(ctx context.Context, client *http.Clien
 	// Set headers
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
-	if hc.config.BearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+hc.config.BearerToken)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	for key, value := range hc.config.Headers {
 		req.Header.Set(key, value)

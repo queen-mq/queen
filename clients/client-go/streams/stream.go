@@ -41,6 +41,7 @@ type (
 	Source       = runtime.Source
 	Message      = runtime.Message
 	RunOptions   = runtime.RunOptions
+	TokenSource  = runtime.TokenSource
 	Metrics      = runtime.Metrics
 	Runner       = runtime.Runner
 )
@@ -190,6 +191,9 @@ type Sink interface {
 func (s *Stream) Run(ctx context.Context, opts RunOptions) (*Runner, error) {
 	if opts.QueryID == "" {
 		return nil, fmt.Errorf("Run requires QueryID")
+	}
+	if opts.BearerToken != "" && opts.TokenSource != nil {
+		return nil, fmt.Errorf("Run: BearerToken and TokenSource are two answers to one question: set one")
 	}
 	if s.err != nil {
 		return nil, s.err

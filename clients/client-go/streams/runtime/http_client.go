@@ -24,10 +24,23 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return e.Msg }
 
+// TokenSource is where the bearer token comes from when it is not a fixed
+// string. The queen client's (Queen.TokenSource) is one: given to a runner, it
+// serves the client and the runner with one fetch per refresh.
+type TokenSource interface {
+	// Token answers the token to send. failed is the token a request was just
+	// refused with (401): a new one is fetched unless another request already
+	// replaced it. "" asks for the current token.
+	Token(ctx context.Context, failed string) (string, error)
+}
+
 // HTTPClient is the thin streams /streams/v1/* client.
 type HTTPClient struct {
-	URL           string
-	BearerToken   string
+	URL         string
+	BearerToken string
+	// TokenSource, when set, gives the token instead of BearerToken: asked on
+	// every attempt, and once more after a 401, when the request is sent again.
+	TokenSource   TokenSource
 	TimeoutMs     int
 	RetryAttempts int
 	hc            *http.Client
@@ -58,6 +71,7 @@ func (c *HTTPClient) Post(ctx context.Context, path string, body interface{}) (m
 	full := c.URL + path
 	bo := util.NewBackoff(100, 5000, 2)
 	var lastErr error
+	refreshed := false
 	for attempt := 0; attempt <= c.RetryAttempts; attempt++ {
 		buf, err := json.Marshal(body)
 		if err != nil {
@@ -68,8 +82,15 @@ func (c *HTTPClient) Post(ctx context.Context, path string, body interface{}) (m
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if c.BearerToken != "" {
-			req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+		token := c.BearerToken
+		if c.TokenSource != nil {
+			// A source that gives no token fails the call: nothing is sent.
+			if token, err = c.TokenSource.Token(ctx, ""); err != nil {
+				return nil, err
+			}
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		resp, err := c.hc.Do(req)
 		if err != nil {
@@ -96,6 +117,16 @@ func (c *HTTPClient) Post(ctx context.Context, path string, body interface{}) (m
 			errMsg = e
 		}
 		he := &HTTPError{Status: resp.StatusCode, Body: parsed, Msg: errMsg}
+		// A token the broker no longer takes: one new one, and the call once
+		// more. It counts as no attempt; a second 401 is the caller's.
+		if resp.StatusCode == http.StatusUnauthorized && c.TokenSource != nil && !refreshed {
+			refreshed = true
+			if _, err := c.TokenSource.Token(ctx, token); err != nil {
+				return nil, err
+			}
+			attempt--
+			continue
+		}
 		// 4xx (other than 408/429) is not retriable.
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 408 && resp.StatusCode != 429 {
 			return nil, he

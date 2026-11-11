@@ -153,9 +153,13 @@ type SinkLike interface {
 
 // RunOptions configure a Runner.
 type RunOptions struct {
-	QueryID          string
-	URL              string
-	BearerToken      string
+	QueryID     string
+	URL         string
+	BearerToken string
+	// TokenSource gives the bearer token of the runner's own calls instead of
+	// BearerToken: pass the queen client's (Queen.TokenSource), and one fetch
+	// per refresh serves both. Exclusive with BearerToken.
+	TokenSource      TokenSource
 	BatchSize        int
 	MaxPartitions    int
 	MaxWaitMillis    int
@@ -257,11 +261,13 @@ func NewRunner(stream *CompiledStream, opts RunOptions) *Runner {
 	if cg == "" {
 		cg = "streams." + opts.QueryID
 	}
+	hc := NewHTTPClient(opts.URL, opts.BearerToken, 0, 0)
+	hc.TokenSource = opts.TokenSource
 	return &Runner{
 		stream:        stream,
 		opts:          opts,
 		logger:        util.MakeLogger(opts.Logger),
-		http:          NewHTTPClient(opts.URL, opts.BearerToken, 0, 0),
+		http:          hc,
 		consumerGroup: cg,
 		watermarks:    map[string]int64{},
 		due:           map[string]dueEntry{},

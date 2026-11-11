@@ -83,6 +83,21 @@ type ClientConfig struct {
 	HealthRetryAfterMillis int
 	// BearerToken is the bearer token for authentication
 	BearerToken string
+	// TokenSource fetches the bearer token instead of a fixed one: typically a
+	// client token the application's own backend minted for this device or
+	// user (Tokens.Mint there). The client calls it, with the request's
+	// context, before the first request that needs a token, and keeps the
+	// token. It calls it again 30 s before a client token's exp (read from the
+	// token itself) and after an answer of 401, and then sends that request
+	// once more: a second 401 is the caller's. One call at a time, shared by
+	// every HTTP client this one makes (Queen.TokenSource hands it to a streams
+	// runner). A call that fails or answers an empty token fails the request
+	// with ErrTokenSource, and nothing is sent. Exclusive with BearerToken.
+	TokenSource func(ctx context.Context) (string, error)
+	// tokens is the cache behind TokenSource, made by NewHttpClient. A copy of
+	// a client's config (a per-node client) carries the same pointer, so the
+	// function is called once per refresh, not once per client.
+	tokens *tokenSource
 	// Headers is a map of custom headers to include in every request
 	Headers map[string]string
 	// BinaryPush sends a push whose items carry neither a transaction id nor a

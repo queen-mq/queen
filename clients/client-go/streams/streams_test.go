@@ -284,3 +284,21 @@ func TestToPartitioned(t *testing.T) {
 		From(newFake("orders")).ToPartitioned(fakeQueue{name: "orders.out"}, 42)
 	})
 }
+
+type fakeTokens struct{}
+
+func (fakeTokens) Token(context.Context, string) (string, error) { return "t", nil }
+
+// A fixed credential and a token source are two answers to one question:
+// Run refuses them together before it registers anything.
+func TestRunRefusesBearerTokenWithTokenSource(t *testing.T) {
+	_, err := From(newFake("orders")).To(fakeQueue{name: "orders.out"}).Run(context.Background(), RunOptions{
+		QueryID:     "q",
+		URL:         "http://127.0.0.1:1",
+		BearerToken: "qk_live_x",
+		TokenSource: fakeTokens{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "BearerToken and TokenSource") {
+		t.Fatalf("err = %v, want the configuration error naming both", err)
+	}
+}

@@ -81,3 +81,18 @@ func coerceData(v interface{}) map[string]interface{} {
 func (qb *QueueBuilder) AsStreamSource() runtime.Source {
 	return &streamSourceAdapter{qb: qb}
 }
+
+// TokenSource is this client's token source (ClientConfig.TokenSource), for
+// a streams runner's own calls, which then share the client's token and its
+// one fetch per refresh:
+//
+//	stream.Run(ctx, streams.RunOptions{QueryID: "q", URL: url, TokenSource: q.TokenSource()})
+//
+// Nil when the client has no TokenSource.
+func (q *Queen) TokenSource() runtime.TokenSource {
+	if q.httpClient.config.tokens == nil {
+		// Not a nil *tokenSource: inside the interface it would not be == nil.
+		return nil
+	}
+	return q.httpClient.config.tokens
+}
