@@ -33,6 +33,11 @@ sourceOfTruth:
 # gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
 # leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
 # relay through). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-11 (185f6452f): proxy/src/store/data.rs stamps its audit rows with
+# web.rs's strictly increasing clock, so they keep their newest-first order. Nothing this page states
+# changes.
+# sourceOfTruth re-read 2026-11-11 (a4a4ad2f1): rustfmt on server/src/proxy_embed.rs, line wrapping
+# only. Nothing this page states changes.
 ---
 
 The broker on its own has no users: anything that reaches its port can use it. The proxy built into the same binary adds them. With it on, every request presents an API key or a console session, and the proxy maps it to one tenant's cluster, checks it against the plan's limits, meters it, and hands it to the broker inside the same process. The proxy keeps its own state (tenants, users, key hashes, plans, usage) in the broker's replicated KV, so every node runs the same proxy and there is no database beside it.

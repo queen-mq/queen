@@ -60,6 +60,8 @@ sourceOfTruth:
 # route and the block-list invalidation; proxy config.rs a verify-only previous signing key; proxy
 # cp.rs the scoped-key policy, rotation and block-list calls (9c7c0d515). Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-11-11 (a4a4ad2f1): rustfmt on server/src/proxy_embed.rs, line wrapping
+# only. Nothing this page states changes.
 ---
 
 Every setting is an environment variable, and most installations need very few of them. When a node starts, it prints the settings it is really using, in lines that start with `config:`. Read them after every change. A yes/no setting accepts `true` or `false`, `1` or `0`, `yes` or `no`, `on` or `off`; any other value stops the node at boot, so a typo cannot pass unnoticed.
