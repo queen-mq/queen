@@ -265,6 +265,7 @@ inside your network; that port must not face the internet. Plans and limits are 
 | `QUEEN_PROXY_LONGPOLL_MARGIN_MS` | `10000` | Time the proxy gives a long-poll pop beyond its own timeout before it gives up on the broker. |
 | `QUEEN_PROXY_JWT_SECRET` | unset | HS256 secret for session tokens. |
 | `QUEEN_PROXY_JWT_ED25519_PEM`, `QUEEN_PROXY_JWT_ED25519_PUB_PEM` | unset | Ed25519 signing key, and a public key for a node that only verifies. |
+| `QUEEN_PROXY_JWT_ED25519_PREV_PUB_PEM`, `QUEEN_PROXY_JWT_PREV_SECRET` | unset | The key you are rotating away from, for verifying only, in the same algorithm: sessions and [client tokens](/manage/client-tokens/) it signed keep working while new ones get the new key. The JWKS lists both. |
 | `QUEEN_PROXY_JWT_ISS` | `queen-proxy` | Session token issuer. |
 | `QUEEN_PROXY_JWT_AUD` | the host of `QUEEN_PROXY_PUBLIC_URL` | Session token audience; none is enforced when both are unset. |
 | `QUEEN_PROXY_JWT_TTL_S` | `86400` | Session lifetime. |

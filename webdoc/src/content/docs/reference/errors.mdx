@@ -262,6 +262,13 @@ limits are on [tenants](/manage/tenants/).
 | `payload_too_large` | 413 | The body is over the proxy's body cap (`QUEEN_PROXY_MAX_BODY_BYTES`, 16 MiB). |
 | `invalid_request` | 400 | A binary push or transaction body whose headers do not say what it weighs uncompressed (`binary body: ...`), or a DLQ replay that names half a destination. |
 | `bad_gateway`, `upstream_timeout` | 502, 504 | The broker did not answer. |
+| `token_expired` | 401 | A [client token](/manage/client-tokens/) past its `exp`. A token function fetches a new one and sends the request again. |
+| `client_blocked` | 403 | The client (`sub`) is on its key's block list: its tokens are refused, and none is minted for it. |
+| `client_rate_limited` | 429 | A scoped key's own limit, for all its clients or for this one, with `Retry-After`. Applies in shadow mode too. |
+| `scope_denied` | 403 | From the broker: a client token's request names a queue, partition, group, KV key or timer outside its grants. The message names it. |
+| `scope_invalid`, `scope_unsupported` | 403, 503 | The scope the broker received cannot be read; a proxy that does not run in the broker's process cannot carry a client token. |
+| `key_unknown`, `key_ambiguous` | 404, 409 | `POST /api/v1/tokens` by an admin names no scoped key, or a name two keys share: use its id. |
+| `not_configured` | 503 | `POST /api/v1/tokens` on a proxy with no signing key (`QUEEN_PROXY_JWT_SECRET` or the Ed25519 key). |
 
 ### Control-plane codes
 

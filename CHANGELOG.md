@@ -3,6 +3,43 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Upgrading from 2.8.0: a rolling restart, nothing else.** Nothing in the raft log or on disk
+changes form: the new proxy rows (`px.keys.policy`, `px.keys.previous`, `px.blocks`) are KV rows
+like the others. A 2.8.0 node knows no scoped key and no client token and refuses both, so make
+scoped keys once every node runs the new version.
+
+**Devices and browsers get a token of their own: scoped keys and client tokens.** A scoped API key
+holds grants instead of scopes: some queues, partitions, consumer groups, KV keys and timers, each
+with what may be done there (`produce`, `consume`, `read`, `write`), where `{sub}` stands for the
+client. Your backend mints a client token per device or user with it (`POST /api/v1/tokens`,
+`{sub, ttlSeconds}`): a `qt_` token that reaches the key's grants with `{sub}` filled in, an hour
+by default and never longer than the key's ceiling (`token_ttl_max_s`, a day by default). The
+proxy hands the token's scope to the broker, which checks every name a push, pop, ack,
+transaction, KV call or timer call touches, and answers `403 scope_denied` naming the one outside
+it; other routes answer `403 forbidden`. Revoking or narrowing the key reaches its tokens within a
+second on every node; blocking one client (`px.blocks`) refuses its tokens with `403
+client_blocked`; a key rotates in place, its tokens untouched, the old secret kept for a grace of
+up to 7 days. A scoped key can cap its clients' rate, all together and each one (`limits`, `429
+client_rate_limited`). A second, verify-only signing key (`QUEEN_PROXY_JWT_PREV_SECRET` or
+`QUEEN_PROXY_JWT_ED25519_PREV_PUB_PEM`) changes the proxy's key without ending sessions or tokens.
+Why: a device in the field cannot hold an API key, and one leaked device must not read another's
+data.
+
+**The console makes and manages them.** Settings › Access makes a scoped key from a form of grants,
+edits its grants, limits and token ceiling, rotates any key with a grace, and lists, blocks and
+unblocks clients. The control plane gains the same calls (`PUT /api/cp/keys/:id/policy`, `POST
+.../rotate`, `POST .../blocks`, `DELETE .../blocks/:sub`, `GET /api/cp/clusters/:id/blocks`).
+
+**Every client takes a token function, and mints.** In JavaScript, Python, Go, Rust, PHP and C++,
+the bearer token can be a function that fetches one: the client calls it before its first request,
+again 30 s before a client token's `exp`, and once after a 401, when it sends the request again.
+One fetch at a time, shared by every HTTP client the SDK makes; a function that fails ends the
+request unsent, without blaming the node. `tokens.mint()` calls `POST /api/v1/tokens`.
+`queen-protocol` gains the grant and token types (`scope`). Why: a token that expires every hour
+must be replaced without the application noticing.
+
 ## 2.8.0 - 2026-11-08
 
 **Upgrading from 2.7.1: a rolling restart, nothing else.** Nothing on disk changes (cluster version

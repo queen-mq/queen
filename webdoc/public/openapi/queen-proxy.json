@@ -493,6 +493,31 @@
         "x-queen-handler": "session_token"
       }
     },
+    "/api/console/blocks": {
+      "get": {
+        "operationId": "get_api_console_blocks",
+        "tags": [
+          "Console"
+        ],
+        "summary": "GET /api/console/blocks",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "list_blocks",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      }
+    },
     "/api/operator/users": {
       "get": {
         "operationId": "get_api_operator_users",
@@ -763,6 +788,99 @@
         "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
       }
     },
+    "/api/cp/keys/{id}/policy": {
+      "put": {
+        "operationId": "put_api_cp_keys_id_policy",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "PUT /api/cp/keys/:id/policy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "set_key_policy",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/cp/keys/{id}/rotate": {
+      "post": {
+        "operationId": "post_api_cp_keys_id_rotate",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "POST /api/cp/keys/:id/rotate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "rotate_key",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/cp/keys/{id}/blocks": {
+      "post": {
+        "operationId": "post_api_cp_keys_id_blocks",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "POST /api/cp/keys/:id/blocks",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "block_client",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
     "/api/cp/clusters/{slug}/s3": {
       "put": {
         "operationId": "put_api_cp_clusters_slug_s3",
@@ -945,6 +1063,139 @@
         "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
       }
     },
+    "/api/cp/clusters/{id}/blocks": {
+      "get": {
+        "operationId": "get_api_cp_clusters_id_blocks",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "GET /api/cp/clusters/:id/blocks",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "list_blocks",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/console/keys/{id}/policy": {
+      "put": {
+        "operationId": "put_api_console_keys_id_policy",
+        "tags": [
+          "Console"
+        ],
+        "summary": "PUT /api/console/keys/:id/policy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "set_key_policy",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      }
+    },
+    "/api/console/keys/{id}/rotate": {
+      "post": {
+        "operationId": "post_api_console_keys_id_rotate",
+        "tags": [
+          "Console"
+        ],
+        "summary": "POST /api/console/keys/:id/rotate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "rotate_key",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      }
+    },
+    "/api/console/keys/{id}/blocks": {
+      "post": {
+        "operationId": "post_api_console_keys_id_blocks",
+        "tags": [
+          "Console"
+        ],
+        "summary": "POST /api/console/keys/:id/blocks",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "block_client",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      }
+    },
     "/api/operator/users/{user_id}": {
       "patch": {
         "operationId": "patch_api_operator_users_user_id",
@@ -993,6 +1244,45 @@
           }
         },
         "x-queen-handler": "set_tenant_status",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/cp/keys/{id}/blocks/{sub}": {
+      "delete": {
+        "operationId": "delete_api_cp_keys_id_blocks_sub",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "DELETE /api/cp/keys/:id/blocks/:sub",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "unblock_client",
         "security": [
           {
             "cpToken": []
@@ -1092,6 +1382,48 @@
           }
         ],
         "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/console/keys/{id}/blocks/{sub}": {
+      "delete": {
+        "operationId": "delete_api_console_keys_id_blocks_sub",
+        "tags": [
+          "Console"
+        ],
+        "summary": "DELETE /api/console/keys/:id/blocks/:sub",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "unblock_client",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
       }
     },
     "/api/operator/users/{user_id}/roles/{cluster_id}": {

@@ -104,7 +104,7 @@ A key is `qk_<env>_` and 43 random characters, and only its sha256 is stored. A 
 | Listings, status, message and DLQ reads | `read` or `admin` | every role |
 | KV, locks, timers, ephemeral, streams, when the plan has them | `produce` or `consume` | every role but viewer |
 
-A revoked key stops working on every node within about a second.
+A revoked key stops working on every node within about a second. A **scoped key** holds grants instead of scopes: some queues, partitions, KV keys or timers, for the [client tokens](/manage/client-tokens/) your backend mints for devices and browsers.
 
 ## Plans and quotas
 
@@ -145,7 +145,9 @@ Everything after the bootstrap can be driven over `/api/cp/*` on the proxy's por
 | `PUT /api/cp/clusters/:id/overrides`, `PUT .../status` | One cluster's limits; its status |
 | `GET /api/cp/clusters/:id/usage` | The last hour of metered minutes, summed over the nodes |
 | `POST /api/cp/activity` | For up to 256 slugs: the last active minute, the first push, the last key use, the retained bytes |
-| `POST /api/cp/keys`, `DELETE /api/cp/keys/:id` | A key from `{cluster_id, name, key_hash, scopes}`; its revocation |
+| `POST /api/cp/keys`, `DELETE /api/cp/keys/:id` | A key from `{cluster_id, name, key_hash, scopes}`, or a scoped key with `grants` (and `limits`, `token_ttl_max_s`) instead of `scopes`; its revocation |
+| `PUT /api/cp/keys/:id/policy`, `POST /api/cp/keys/:id/rotate` | A scoped key's grants, limits and token ceiling; a new secret for any key, from `{key_hash, grace_seconds}` |
+| `POST /api/cp/keys/:id/blocks`, `DELETE .../blocks/:sub`, `GET /api/cp/clusters/:id/blocks` | Block one client of a scoped key, from `{sub, reason?}`; unblock it; a cluster's blocked clients |
 
 `provision` is the call to build on. You mint the key and send only its sha256, so the plaintext never reaches the proxy:
 

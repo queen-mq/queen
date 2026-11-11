@@ -1,0 +1,146 @@
+---
+title: "Devices and browsers: scoped keys and client tokens"
+description: "Let untrusted clients reach Queen through the built-in proxy, each one only its own queues, partitions, KV keys and timers: a scoped key per role, a short-lived token per device, and a block list."
+type: how-to
+tier: operate
+sidebar:
+  label: "Client tokens"
+  order: 9.5
+sourceOfTruth:
+  - crates/queen-protocol/src/scope.rs
+  - server/src/scope.rs
+  - proxy/src/clients.rs
+  - proxy/src/tokens.rs
+  - proxy/src/gateway.rs
+  - proxy/src/auth.rs
+  - proxy/src/config.rs
+  - proxy/src/console.rs
+  - proxy/src/cp.rs
+  - proxy/src/store/data.rs
+  - proxy/src/store/schema.rs
+  - clients/client-js/client-v2/utils/tokenSource.js
+  - clients/client-js/client-v2/tokens/Tokens.js
+---
+
+A device in the field, or a user's browser, cannot hold an API key: anyone can read the key out of it, and a key reaches the whole cluster. With the [built-in proxy](/manage/tenants/) on, give such clients a **client token** instead. Your backend holds a **scoped key**, a role that names what its clients may reach. It mints one token per device or user, and the token reaches only that client's own names: its partition, its KV keys, its timers.
+
+<Why>one leaked device must not read or write another device's data, and must be easy to cut off. A token per device, checked by the broker on every request, does both, with nothing to deploy beside Queen.</Why>
+
+| | Holds | Reaches | Lives |
+| --- | --- | --- | --- |
+| Scoped key | your backend | what its grants name | until revoked |
+| Client token | one device or user | the key's grants, with `{sub}` filled in as that client | an hour by default, a day at most (the key's ceiling) |
+
+## 1. Make a scoped key
+
+In the console, open **Settings › Access**, choose **New API key**, then **Only what its grants name**. Or with the [control plane](/manage/tenants/#the-control-plane), where you mint the key and send only its sha256:
+
+```bash
+DEVICES_KEY="qk_live_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+HASH=$(printf %s "$DEVICES_KEY" | sha256sum | cut -d' ' -f1)
+CLUSTER_ID=$(curl -s localhost:6711/api/cp/clusters/acme -H "x-queen-cp-token: $CP_TOKEN" | jq -r .id)
+curl -s -X POST localhost:6711/api/cp/keys -H "x-queen-cp-token: $CP_TOKEN" \
+  -H 'content-type: application/json' -d '{
+    "cluster_id": "'"$CLUSTER_ID"'", "name": "devices", "key_hash": "'"$HASH"'",
+    "grants": [
+      {"queue": "telemetry", "partition": "{sub}", "ops": ["produce"]},
+      {"queue": "commands", "partition": "{sub}", "group": "{sub}", "ops": ["consume"]},
+      {"kv": "devices", "key": "{sub}/*", "ops": ["read", "write"]}
+    ],
+    "limits": {"sub_rps": 5}}'
+```
+
+Each device pushes to its own partition of `telemetry`, pops its own partition of `commands`, and reads and writes its own keys in the KV namespace `devices`. `{sub}` is the client a token is for. A grant names one of `queue`, `kv` or `timers`, and narrows it further:
+
+| Field | On | Matches | Empty means |
+| --- | --- | --- | --- |
+| `queue`, `kv`, `timers` | each grant names exactly one | the queue, the KV namespace, the timers' queue | (required) |
+| `partition` | `queue`, `timers` | the partition | any partition |
+| `group` | `queue` | the consumer group of a pop or an ack | any group, queue mode too |
+| `key` | `kv`, `timers` | the KV key, the timer key | any key |
+| `ops` | every grant | `produce`, `consume` on a queue; `read`, `write` on KV and timers | (at least one) |
+
+A pattern is a name (`telemetry`), a prefix ending in `*` (`orders.*`), `*` for any, or a name holding `{sub}` once (`{sub}`, `dev/{sub}`, `{sub}/*`). A `*` right after `{sub}` needs a separator, as in `{sub}/*`: `dev-1*` would cover `dev-12`. A grant that names no `{sub}` reaches the same names for every client.
+
+`produce` is push and the pushes of a transaction. `consume` is pop, ack, lease renewal and the acks of a transaction. KV `write` is put, delete, and the KV writes of a transaction; timers `write` is schedule and cancel.
+
+## 2. Mint a token on your backend
+
+Your backend decides who the device is (its own login, a device certificate), then mints:
+
+<Render file="snippets/js-client-token-mint" />
+
+```bash
+curl -s -X POST localhost:6711/api/v1/tokens -H "authorization: Bearer $DEVICES_KEY" \
+  -H 'content-type: application/json' -d '{"sub": "dev-8f3a", "ttlSeconds": 3600}'
+```
+
+```json
+{"token":"qt_eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9…","sub":"dev-8f3a","key":"99c2a00f-d238-40ac-8d2b-e948a195c430","expiresAt":"2026-11-11T10:26:36+00:00","expiresIn":3600}
+```
+
+| Field | Required | |
+| --- | --- | --- |
+| `sub` | yes | The client: 1 to 128 letters, digits and `. _ - @ +`. |
+| `ttlSeconds` | no | 3600 by default, at most the key's `token_ttl_max_s` (a day by default, a year at most). |
+| `allow` | no | Grants that narrow the key's for this one token, never widen them. |
+| `key` | no | The scoped key's id or name, when an `admin` key or a console admin mints for it. A scoped key mints only for itself. |
+
+Minting writes nothing: the token is a JWT signed by the proxy's session key (`QUEEN_PROXY_JWT_SECRET` or the Ed25519 key), `qt_` in front. A token cannot mint tokens.
+
+## 3. Use the token on the device
+
+Give the client a function rather than a string. It calls it before the first request, keeps the token, calls it again 30 seconds before the token's `exp`, and once after a 401, when it sends the refused request again:
+
+<Render file="snippets/js-client-token-device" />
+
+| SDK | The function | Mint |
+| --- | --- | --- |
+| JavaScript | `bearerToken: () => …` (may be async) | `queen.tokens.mint({ sub, ttlSeconds })` |
+| Python | `bearer_token=callable` (may be async) | `queen.tokens.mint(sub, ttl_seconds=…)` |
+| Go | `ClientConfig.TokenSource func(ctx) (string, error)` | `q.Tokens().Mint(ctx, queen.MintTokenRequest{Sub: sub, TTLSeconds: 3600})` |
+| Rust | `Config::token_source(TokenSource::new(…))` | `queen.tokens().mint(&MintTokenRequest::new(sub))` |
+| PHP | `bearerToken` as a callable | `$queen->tokens()->mint($sub, ['ttlSeconds' => 3600])` |
+| C++ | `ClientConfig::token_source` | `queen.tokens().mint({sub, 3600})` |
+
+A fixed string still works, and a 401 with it is never retried. A token function that fails ends the request unsent, with an error that says "token source": it is not retried, and no node is blamed for it.
+
+A token reaches only the routes that name what they touch: push, pop of a queue or a partition, ack, lease renewal, transactions, KV reads and writes by key, timer schedules, reads and cancels. Every other route, such as listings, configure, or the DLQ, answers `403 forbidden`. A name outside the grants answers `403 scope_denied`, which says which name.
+
+## Revoke, narrow, block and rotate
+
+| You do | What happens | When |
+| --- | --- | --- |
+| Revoke the key | Every token it minted answers 401 | within about a second, on every node |
+| Edit the key's grants | Its tokens reach what the grants now say | within about a second |
+| Block one client (`sub`) | That client's tokens answer `403 client_blocked`, and the key mints none for it | within about a second |
+| Unblock it | Its tokens that have not expired work again | within about a second |
+| Rotate the key | A new secret, the same key: its tokens keep working, the old secret works for the grace you pick (none to 7 days) | within about a second |
+
+All five are on **Settings › Access** in the console, and on the control plane: `PUT /api/cp/keys/:id/policy`, `POST /api/cp/keys/:id/blocks` and `DELETE /api/cp/keys/:id/blocks/:sub`, `GET /api/cp/clusters/:id/blocks`, `POST /api/cp/keys/:id/rotate` (`{key_hash, grace_seconds}`: you mint the new secret).
+
+<Why>a token cannot be recalled once it is handed out, so the proxy checks it against its key and the block list on every request: the key is the switch.</Why>
+
+## Limits per key and per client
+
+`limits` on a scoped key caps its requests per second, on each node: `key_rps` (and `key_burst`) for all its clients together, `sub_rps` (and `sub_burst`) for each client. Over the limit, the answer is `429 client_rate_limited` with `retry-after`. These apply on top of the cluster's plan, and always, not only with `QUEEN_PROXY_ENFORCE=true`.
+
+## Changing the signing key
+
+Tokens are signed with the proxy's session key, like console sessions. To change it without ending them, set the new key and keep the old one for verifying, in the same algorithm, for as long as the longest token lives:
+
+```bash
+QUEEN_PROXY_JWT_SECRET=$NEW_SECRET
+QUEEN_PROXY_JWT_PREV_SECRET=$OLD_SECRET            # or QUEEN_PROXY_JWT_ED25519_PREV_PUB_PEM
+```
+
+## Upgrading
+
+A node of 2.8 or older knows no scoped keys and no client tokens, and refuses both. Until every node runs the new version, a client behind a load balancer can get 401 or 403 from an old node, so make scoped keys after the rollout.
+
+## Limits
+
+- Scoped clients come through the proxy's port. Port 6632 checks no client token and stays private ([security](/manage/security/#what-listens-where)).
+- Rate limits are per node: behind a load balancer over three nodes, a client can reach three times its limit.
+- A token cannot be revoked on its own: to cut off one device, block its `sub`; to cut off all of them, revoke the key.
+- A token carries at most 16 grants of its own (`allow`), and a key at most 64.
