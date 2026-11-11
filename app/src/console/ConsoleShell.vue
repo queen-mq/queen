@@ -236,10 +236,13 @@ const initials = computed(() => {
 </template>
 
 <style scoped>
-/* The old body does not scroll (overflow: hidden): the console scrolls inside itself. */
-.qn-shell { display: flex; height: 100vh; overflow: hidden; }
+/* The old body does not scroll (overflow: hidden): the console scrolls inside itself.
+   Its height is the window's VISIBLE height (dvh). On a phone 100vh is the height
+   with the browser's own bars hidden, so while they show, the bottom of every
+   page sat under them, out of reach. 100vh stays first for a browser without dvh. */
+.qn-shell { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
 .qn-rail {
-  height: 100vh; flex: 0 0 var(--rail-w);
+  height: 100vh; height: 100dvh; flex: 0 0 var(--rail-w);
   display: flex; flex-direction: column; align-items: center; gap: 4px;
   padding: 0 0 14px; border-right: 1px solid var(--line); z-index: 31;
 }
@@ -269,7 +272,7 @@ const initials = computed(() => {
 .qn-ri:hover .qn-tip, .qn-ri:focus-visible .qn-tip { opacity: 1; }
 :global(.qn.tone .qn-tip) { border-color: transparent; }
 .qn-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--bg3); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 500; color: var(--text2); }
-.qn-body { flex: 1 1 0; min-width: 0; height: 100vh; overflow-y: auto; display: flex; flex-direction: column; }
+.qn-body { flex: 1 1 0; min-width: 0; height: 100vh; height: 100dvh; overflow-y: auto; display: flex; flex-direction: column; }
 .qn-band {
   position: sticky; top: 0; z-index: 25; background: var(--bg); flex: 0 0 auto;
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px 10px;
