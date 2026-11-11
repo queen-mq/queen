@@ -37,14 +37,16 @@ class FakeStreamsServer:
     async def start(self) -> "FakeStreamsServer":
         """Patch the StreamsHttpClient to use our MockTransport."""
         transport = self._transport
+        orig_init = self._orig_init
 
-        def patched_init(client_self, url, bearer_token=None, timeout_ms=30_000, retry_attempts=3):
-            client_self.url = url.rstrip("/")
-            client_self.bearer_token = bearer_token
-            client_self.timeout_ms = timeout_ms
-            client_self.retry_attempts = retry_attempts
-            client_self._client = httpx.AsyncClient(
-                transport=transport, timeout=httpx.Timeout(timeout_ms / 1000.0)
+        def patched_init(client_self, url, bearer_token=None, timeout_ms=30_000, retry_attempts=3, **_):
+            orig_init(
+                client_self,
+                url,
+                bearer_token=bearer_token,
+                timeout_ms=timeout_ms,
+                retry_attempts=retry_attempts,
+                transport=transport,
             )
 
         _shc_module.StreamsHttpClient.__init__ = patched_init

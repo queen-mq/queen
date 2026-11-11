@@ -8,7 +8,9 @@ import random
 from typing import Any, Dict, Optional, Tuple, Union
 import httpx
 
+from ..errors import TokenSourceError
 from ..utils import logger
+from ..utils.token_source import BearerToken, as_token_source
 from . import zstd
 from .load_balancer import LoadBalancer
 from .pop_frames import decode_pop_frames, is_pop_frames
@@ -35,7 +37,7 @@ class HttpClient:
         retry_attempts: int = 3,
         retry_delay_millis: int = 1000,
         enable_failover: bool = True,
-        bearer_token: Optional[str] = None,
+        bearer_token: Optional[BearerToken] = None,
         headers: Optional[Dict[str, str]] = None,
         retry_429: Optional[Dict[str, Any]] = None,
         transport: Optional[httpx.BaseTransport] = None,
@@ -53,7 +55,11 @@ class HttpClient:
             retry_attempts: Number of retry attempts
             retry_delay_millis: Initial retry delay (exponential backoff)
             enable_failover: Enable automatic failover
-            bearer_token: Bearer token for proxy authentication
+            bearer_token: The credential: a fixed string, or a function
+                (plain or coroutine) that fetches a token, called again before
+                a client token expires and after a 401
+                (queen/utils/token_source.py). A TokenSource given here is
+                shared: the Queen client hands one to every client it makes.
             headers: Custom headers to include in every request
             retry_429: Backoff policy for HTTP 429 (rate limited) responses,
                 separate from retry_attempts/retry_delay_millis above. See
@@ -86,7 +92,17 @@ class HttpClient:
         self._retry_attempts = retry_attempts
         self._retry_delay_millis = retry_delay_millis
         self._enable_failover = enable_failover
-        self._bearer_token = bearer_token
+        # Asked for on every attempt, not baked into the default headers: a
+        # function's token changes while the client lives.
+        self._token_source = as_token_source(bearer_token)
+        # A custom Authorization header outranks bearer_token, as it always
+        # has. Next to a token function it would be two answers to one
+        # question, and the function's tokens would never be sent.
+        self._auth_in_headers = any(name.lower() == "authorization" for name in (headers or {}))
+        if self._auth_in_headers and self._token_source.refreshable:
+            raise ValueError(
+                "bearer_token is a token function and headers set Authorization too: set one"
+            )
         self._retry_429: Dict[str, Any] = dict(retry_429) if retry_429 else {}
         self._binary_push = binary_push is True
         self._push_compression = push_compression is True
@@ -95,18 +111,11 @@ class HttpClient:
             # Both need zstd: say so now, not at the first compressed record.
             zstd.require()
 
-        # Build headers with optional auth
-        merged_headers: Dict[str, str] = {}
-        if bearer_token:
-            merged_headers["Authorization"] = f"Bearer {bearer_token}"
-        if headers:
-            merged_headers.update(headers)
-
         # Create httpx.AsyncClient (persistent connection pool)
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout_millis / 1000.0),
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=100),
-            headers=merged_headers,
+            headers=dict(headers) if headers else {},
             transport=transport,
         )
 
@@ -118,7 +127,7 @@ class HttpClient:
                 "timeout_millis": timeout_millis,
                 "retry_attempts": retry_attempts,
                 "enable_failover": enable_failover,
-                "has_auth": bearer_token is not None,
+                "has_auth": self._token_source.configured or self._auth_in_headers,
                 "custom_headers": len(headers) if headers else 0,
                 "retry_429": self._retry_429,
             },
@@ -181,15 +190,35 @@ class HttpClient:
         `retry_kind` is exhausted (or never, for an unbounded pop policy).
         Any other exception is raised straight through -- 429 is the only
         status this layer treats as retryable; 5xx/network retry and
-        cross-backend failover are the caller's job.
+        cross-backend failover are the caller's job. With a token function a
+        401 is also sent again, once, with a new token: see below.
         """
         max_attempts, base_ms, cap_ms = self._retry429_policy_for(retry_kind)
         tries = 0
+        refreshed = False
         while True:
             tries += 1
+            token = await self._token_source.get()
             try:
-                return await self._execute_request(url, method, body, request_timeout_millis)
+                return await self._execute_request(url, method, body, request_timeout_millis, token)
             except httpx.HTTPStatusError as error:
+                # A token the broker no longer takes (expired, or its key
+                # changed): with a token function, one new token and the
+                # request once more. It counts as no attempt; a second 401 is
+                # the caller's.
+                if (
+                    error.response.status_code == 401
+                    and self._token_source.refreshable
+                    and not refreshed
+                ):
+                    refreshed = True
+                    tries -= 1
+                    logger.warn(
+                        "HttpClient.refreshToken",
+                        {"method": method, "url": url, "code": getattr(error, "code", None)},
+                    )
+                    await self._token_source.get(failed=token)
+                    continue
                 if error.response.status_code != 429:
                     raise
 
@@ -314,8 +343,9 @@ class HttpClient:
         method: str,
         body: _Body,
         request_timeout_millis: Optional[int],
+        token: Optional[str] = None,
     ) -> Any:
-        """Execute single HTTP request"""
+        """Execute single HTTP request, with `token` as its bearer credential"""
         effective_timeout = request_timeout_millis or self._timeout_millis
         logger.log(
             "HttpClient.request",
@@ -333,12 +363,17 @@ class HttpClient:
                 "timeout": timeout,
             }
 
+            request_headers: Dict[str, str] = {}
+            if token and not self._auth_in_headers:
+                request_headers["Authorization"] = f"Bearer {token}"
             if isinstance(body, bytes):
                 # Already encoded (the binary push body): sent as it is.
                 kwargs["content"] = body
-                kwargs["headers"] = {"Content-Type": PUSH_BINARY_CONTENT_TYPE}
+                request_headers["Content-Type"] = PUSH_BINARY_CONTENT_TYPE
             elif body:
                 kwargs["json"] = body
+            if request_headers:
+                kwargs["headers"] = request_headers
 
             response = await self._client.request(**kwargs)
 
@@ -449,6 +484,10 @@ class HttpClient:
             try:
                 url = self._get_url() + path
                 return await self._execute_with_retry429(url, method, body, request_timeout_millis, retry_kind)
+            except TokenSourceError:
+                # The token function failed and nothing was sent: another
+                # attempt would only call it again.
+                raise
             except Exception as error:
                 last_error = error
 
@@ -525,6 +564,9 @@ class HttpClient:
                 self._load_balancer.mark_healthy(url)
 
                 return result
+            except TokenSourceError:
+                # Nothing was sent: no backend failed, and none would do better.
+                raise
             except Exception as error:
                 last_error = error
 

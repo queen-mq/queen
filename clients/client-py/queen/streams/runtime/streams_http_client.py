@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import httpx
 
+from ...utils.token_source import BearerToken, as_token_source
 from ..util.backoff import make_backoff, sleep
 
 
@@ -27,25 +28,29 @@ class StreamsHttpClient:
 
     Args:
         url: Base URL of Queen, e.g. ``http://localhost:6632``.
-        bearer_token: Optional JWT for auth-enabled brokers.
+        bearer_token: Optional credential for auth-enabled brokers: a fixed
+            string, a function that fetches a token, or a TokenSource shared
+            with a Queen client (queen/utils/token_source.py).
         timeout_ms: Per-request timeout (ms). Default 30 000.
         retry_attempts: Retries on 5xx/network errors. Default 3.
+        transport: Optional httpx transport override, for tests.
     """
 
     def __init__(
         self,
         url: str,
-        bearer_token: Optional[str] = None,
+        bearer_token: Optional[BearerToken] = None,
         timeout_ms: int = 30_000,
         retry_attempts: int = 3,
+        transport: Optional[httpx.AsyncBaseTransport] = None,
     ):
         if not url:
             raise ValueError("StreamsHttpClient requires url")
         self.url = url.rstrip("/")
-        self.bearer_token = bearer_token
+        self.tokens = as_token_source(bearer_token)
         self.timeout_ms = timeout_ms
         self.retry_attempts = retry_attempts
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_ms / 1000.0))
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_ms / 1000.0), transport=transport)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -55,12 +60,14 @@ class StreamsHttpClient:
         full = self.url + path
         backoff = make_backoff(initial_ms=100, max_ms=5000)
 
-        headers = {"Content-Type": "application/json"}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
-
         last_err: Optional[Exception] = None
-        for attempt in range(self.retry_attempts + 1):
+        refreshed = False
+        attempt = 0
+        while True:
+            headers = {"Content-Type": "application/json"}
+            token = await self.tokens.get()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
             try:
                 resp = await self._client.post(full, json=body, headers=headers)
                 try:
@@ -74,6 +81,12 @@ class StreamsHttpClient:
                     status=resp.status_code,
                     body=parsed,
                 )
+                # A token the broker no longer takes: one new one, and the
+                # request once more, as no attempt.
+                if resp.status_code == 401 and self.tokens.refreshable and not refreshed:
+                    refreshed = True
+                    await self.tokens.get(failed=token)
+                    continue
                 # 4xx (other than 408/429) is not retriable.
                 if 400 <= resp.status_code < 500 and resp.status_code not in (408, 429):
                     raise err
@@ -83,6 +96,7 @@ class StreamsHttpClient:
 
             if attempt >= self.retry_attempts:
                 break
+            attempt += 1
             await sleep(backoff.next())
 
         if isinstance(last_err, StreamsHttpError):

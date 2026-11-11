@@ -118,6 +118,15 @@ class LockNotHeldError(QueenError):
     code = "LOCK_NOT_HELD"
 
 
+class TokenSourceError(QueenError):
+    """The ``bearer_token`` function gave no token to send: it raised, or it
+    answered something that is not a non-empty string.
+
+    The request it was called for was not sent. ``__cause__`` is what the
+    function raised, when it raised.
+    """
+
+
 class EphemeralError(QueenHttpError):
     """A refusal from the ephemeral surface (EPHEMERAL_QUEUES.md §3.1, §4).
 

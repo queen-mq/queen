@@ -21,7 +21,9 @@ def _format_log(operation: str, details: Union[str, dict[str, Any]], level: str 
     """Format log message with timestamp and operation"""
     timestamp = _get_timestamp()
     if isinstance(details, dict):
-        details_str = json.dumps(details)
+        # default=str: a config dict can hold a token function or a transport,
+        # which JSON has no form for; a log line must not raise.
+        details_str = json.dumps(details, default=str)
     else:
         details_str = str(details)
     return f"[{timestamp}] [{level}] [{operation}] {details_str}"

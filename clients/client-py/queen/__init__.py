@@ -28,6 +28,7 @@ from .errors import (
     QueenError,
     QueenHttpError,
     TimerError,
+    TokenSourceError,
     TransactionError,
 )
 from .feed import FeedReader
@@ -37,6 +38,7 @@ from .reads import ChangedPartition, ChangedPartitions, FetchedPartition, Fetche
 from .streams.stream import Stream
 from .streams.helpers.rate_limiter import token_bucket_gate, sliding_window_gate
 from .timers import TimerBuilder, TimerResult, Timers
+from .tokens import Grant, MintTokenResponse, TokenSource, Tokens
 from .types import Message, AckResponse, BufferStats, DLQResponse, TransactionResponse
 from .utils.defaults import (
     CLIENT_DEFAULTS,
@@ -64,12 +66,17 @@ __all__ = [
     "TimerBuilder",
     "TimerResult",
     "TransactionResult",
+    "Tokens",
+    "TokenSource",
+    "MintTokenResponse",
+    "Grant",
     "QueenError",
     "QueenHttpError",
     "KvError",
     "LockError",
     "LockNotHeldError",
     "TimerError",
+    "TokenSourceError",
     "TransactionError",
     "FeedReader",
     "EphemeralError",

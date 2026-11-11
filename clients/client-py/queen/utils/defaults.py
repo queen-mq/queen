@@ -16,7 +16,9 @@ CLIENT_DEFAULTS: Dict[str, Any] = {
     "affinity_hash_ring": 128,  # Number of virtual nodes per server for affinity strategy
     "enable_failover": True,  # Auto-failover to other servers
     "health_retry_after_millis": 5000,  # Retry unhealthy backends after 5 seconds
-    "bearer_token": None,  # Bearer token for proxy authentication
+    # Bearer token for proxy authentication: a string, or a function that
+    # fetches one (refreshed before it expires and after a 401)
+    "bearer_token": None,
     "headers": {},  # Custom headers to include in every request
     # The three below need a broker that has the binary push body and the
     # framed pop answer. Off, the client sends and reads the JSON every broker

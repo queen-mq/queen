@@ -381,7 +381,9 @@ class Stream:
             reset: True to wipe existing state if config_hash mismatches
             consumer_group: override the default 'streams.<queryId>' group
             on_error: callable(err, ctx) for cycle error hook
-            bearer_token: JWT for auth-enabled brokers
+            bearer_token: credential for auth-enabled brokers: a string, a
+                function that fetches a token, or the TokenSource a Queen
+                client was given, to share its token and its calls
         """
         if query_id is None:
             query_id = opts.pop("queryId", None)

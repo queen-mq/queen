@@ -20,9 +20,11 @@ from .http.load_balancer import LoadBalancer
 from .kv.kv import KV
 from .locks.locks import Lock, Locks
 from .timers.timers import TimerBuilder, Timers
+from .tokens.tokens import Tokens
 from .utils import logger
 from .utils.autopilot import pop_autopilot_disabled_by_env
 from .utils.defaults import CLIENT_DEFAULTS
+from .utils.token_source import BearerToken, as_token_source
 from .utils.validation import validate_url, validate_urls
 
 
@@ -95,7 +97,7 @@ class Queen:
         affinity_hash_ring: Optional[int] = None,
         enable_failover: Optional[bool] = None,
         health_retry_after_millis: Optional[int] = None,
-        bearer_token: Optional[str] = None,
+        bearer_token: Optional[BearerToken] = None,
         headers: Optional[Dict[str, str]] = None,
         retry_429: Optional[Dict[str, Any]] = None,
         transport: Optional[Any] = None,
@@ -117,7 +119,14 @@ class Queen:
             affinity_hash_ring: Virtual nodes per server for affinity
             enable_failover: Enable automatic failover
             health_retry_after_millis: Retry unhealthy backends after N ms
-            bearer_token: Bearer token for proxy authentication
+            bearer_token: The credential: a fixed string (an API key, a
+                token), or a function that fetches a token -- plain or a
+                coroutine function, typically asking the application's backend
+                for a client token. The function is called before the first
+                request, again shortly before a client token expires, and
+                after a 401, when that request is sent once more. One call at
+                a time, shared by every request of this client. A TokenSource
+                (queen/utils/token_source.py) shares one with a stream's run().
             headers: Custom headers to include in every request
             retry_429: Backoff policy for HTTP 429 (rate limited) responses
                 from a queen_proxy deployment, e.g.
@@ -182,6 +191,11 @@ class Queen:
         # shape halfway through. A per-call .autopilot(...) still outranks it.
         self.autopilot_off = pop_autopilot_disabled_by_env()
 
+        # The credential, shared by every HTTP client this instance makes (the
+        # main one and the per-node ones of the feed): a token function is
+        # called once per refresh, not once per node.
+        self._token_source = as_token_source(self._config.get("bearer_token"))
+
         # Create HTTP client
         self._http_client = self._create_http_client()
 
@@ -190,6 +204,9 @@ class Queen:
 
         # Admin API (lazily initialized)
         self._admin: Optional[Admin] = None
+
+        # Client tokens API (lazily initialized, same discipline as Admin)
+        self._tokens: Optional[Tokens] = None
 
         # KV and timer surfaces (lazily initialized, same discipline as Admin)
         self._kv: Optional[KV] = None
@@ -248,7 +265,7 @@ class Queen:
         affinity_hash_ring = self._config["affinity_hash_ring"]
         health_retry_after_millis = self._config["health_retry_after_millis"]
         enable_failover = self._config["enable_failover"]
-        bearer_token = self._config.get("bearer_token")
+        bearer_token = self._token_source
         custom_headers = self._config.get("headers") or {}
         retry_429 = self._config.get("retry_429")
         transport = self._config.get("transport")
@@ -368,6 +385,25 @@ class Queen:
         if self._admin is None:
             self._admin = Admin(self._http_client)
         return self._admin
+
+    # ===========================
+    # Client tokens
+    # ===========================
+
+    @property
+    def tokens(self) -> Tokens:
+        """
+        Client tokens: a credential for one entity (a device, a browser user),
+        minted from a scoped key (queen/tokens/tokens.py).
+
+            minted = await client.tokens.mint("dev-8f3a", ttl_seconds=3600)
+
+        Returns:
+            Tokens API instance (lazily initialized, singleton)
+        """
+        if self._tokens is None:
+            self._tokens = Tokens(self._http_client)
+        return self._tokens
 
     # ===========================
     # KV and Timer API Entry Points
@@ -527,7 +563,7 @@ class Queen:
             timeout_millis=self._config["timeout_millis"],
             retry_attempts=self._config["retry_attempts"],
             retry_delay_millis=self._config["retry_delay_millis"],
-            bearer_token=self._config.get("bearer_token"),
+            bearer_token=self._token_source,
             headers=self._config.get("headers") or {},
             retry_429=self._config.get("retry_429"),
             transport=self._config.get("transport"),
