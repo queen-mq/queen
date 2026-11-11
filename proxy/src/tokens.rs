@@ -122,6 +122,11 @@ pub async fn handle(st: St, req: Request) -> Response {
         ));
     }
     if let Some(allow) = &ask.allow {
+        // A token that reaches nothing is a mistake, most often an SDK that
+        // sends an empty list where it meant none.
+        if allow.is_empty() {
+            return bad_request("allow is empty: leave it out for the key's own grants");
+        }
         if allow.len() > MAX_TOKEN_GRANTS {
             return bad_request(&format!(
                 "allow holds {} grants, at most {MAX_TOKEN_GRANTS}",
@@ -799,6 +804,12 @@ mod tests {
                 json!({"sub": "dev1", "allow": [{"queue": "q", "partition": "{sub}*", "ops": ["produce"]}]}),
                 StatusCode::BAD_REQUEST,
                 "a grant that would leak",
+            ),
+            (
+                w.devices.as_str(),
+                json!({"sub": "dev1", "allow": []}),
+                StatusCode::BAD_REQUEST,
+                "an empty allow: a token that reaches nothing",
             ),
             (
                 w.devices.as_str(),
