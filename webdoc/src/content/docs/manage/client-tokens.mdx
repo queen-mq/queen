@@ -20,6 +20,8 @@ sourceOfTruth:
   - proxy/src/store/schema.rs
   - clients/client-js/client-v2/utils/tokenSource.js
   - clients/client-js/client-v2/tokens/Tokens.js
+# sourceOfTruth re-read 2026-11-11 (clippy on the proxy, f79bf80a0): config.rs looks a shared host up with
+# contains(), the same answer. Nothing this page states changes.
 ---
 
 A device in the field, or a user's browser, cannot hold an API key: anyone can read the key out of it, and a key reaches the whole cluster. With the [built-in proxy](/manage/tenants/) on, give such clients a **client token** instead. Your backend holds a **scoped key**, a role that names what its clients may reach. It mints one token per device or user, and the token reaches only that client's own names: its partition, its KV keys, its timers.

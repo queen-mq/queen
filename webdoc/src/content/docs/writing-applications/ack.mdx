@@ -75,6 +75,7 @@ verifiedBy:
 # and refuse a name outside it 403 scope_denied before any command is built (server/src/scope.rs,
 # b24b53599); queen_client.hpp gains ClientConfig::token_source and tokens().mint() (9f218acf7).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-11 (clients 2.8.1): queen_client.hpp's version macro says 2.8.1. Nothing this page states changes.
 ---
 
 An ack tells the broker what happened to a message. A `completed` ack moves the consumer group's cursor past it, and that is all: the message stays in its partition until retention removes it.
