@@ -6,7 +6,7 @@
 // says it does.
 //
 // Run it against a node:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.0
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.1
 //   node book-use-cases.mjs
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 

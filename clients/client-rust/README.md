@@ -5,7 +5,7 @@ its data in its own replicated log.
 
 ```toml
 [dependencies]
-queen-mq = "2.8.0"
+queen-mq = "2.8.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
 ```

@@ -65,7 +65,7 @@ metadata:
   name: queen
   namespace: queen
 spec:
-  version: "2.8.0"
+  version: "2.8.1"
   replicas: 3
   secretName: queen
   storage:
@@ -78,7 +78,7 @@ kubectl -n queen get queencluster
 
 ```text
 NAME    VERSION   VOTERS    COMMITS   PHASE   AGE
-queen   2.8.0     [1,2,3]   true      Ready   40s
+queen   2.8.1     [1,2,3]   true      Ready   40s
 ```
 
 The pods and the Services have the names of the [manifest](/manage/kubernetes/)
