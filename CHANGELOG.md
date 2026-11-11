@@ -71,6 +71,10 @@ Overview said what was wrong, but not where the work was or how the nodes under 
 acked in the last hour, the dead letters, the partitions, the consumer groups and one traffic line
 for the whole namespace. Why: with dozens of queues in a namespace, you read the namespace first.
 
+**The audit log keeps its order.** Settings › Audit log lists the newest entry first, but logouts,
+and a scoped key's policy, rotation and block entries, were stamped by a second clock and could
+list below an entry recorded just before them. Every entry now reads one clock.
+
 ## 2.8.0 - 2026-11-08
 
 **Upgrading from 2.7.1: a rolling restart, nothing else.** Nothing on disk changes (cluster version
