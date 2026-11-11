@@ -16,6 +16,10 @@
 
 export { Queen } from './Queen.js'
 export { Admin } from './admin/Admin.js'
+// Client tokens: `queen.tokens.mint()` on the backend that holds a scoped key;
+// `bearerToken` may be a function (TokenSource) on the device that uses one.
+export { Tokens } from './tokens/Tokens.js'
+export { TokenSource, expiresAtMs, CLIENT_TOKEN_PREFIX } from './utils/tokenSource.js'
 // Locks and semaphores. Reached as `queen.lock()`, `queen.semaphore()` and
 // `queen.locks`; the classes are exported for typing. `LOCK_NOT_HELD` is the
 // `.code` of the error a guard throws for a handle that holds nothing, and of

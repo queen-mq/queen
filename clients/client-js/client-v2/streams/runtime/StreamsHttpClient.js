@@ -9,19 +9,21 @@
  */
 
 import { makeBackoff, sleep } from '../util/backoff.js'
+import { TokenSource } from '../../utils/tokenSource.js'
 
 export class StreamsHttpClient {
   /**
    * @param {object} options
    * @param {string} options.url - base URL of Queen, e.g. http://localhost:6632
-   * @param {string} [options.bearerToken]
+   * @param {string|(() => string|Promise<string>)} [options.bearerToken] - a
+   *   fixed credential, or a function that fetches a token (utils/tokenSource.js)
    * @param {number} [options.timeoutMs=30000]
    * @param {number} [options.retryAttempts=3]
    */
   constructor({ url, bearerToken, timeoutMs = 30000, retryAttempts = 3 }) {
     if (!url) throw new Error('StreamsHttpClient requires url')
     this.url = url.replace(/\/$/, '')
-    this.bearerToken = bearerToken
+    this.tokens = new TokenSource(bearerToken)
     this.timeoutMs = timeoutMs
     this.retryAttempts = retryAttempts
   }
@@ -35,12 +37,14 @@ export class StreamsHttpClient {
     const fullUrl = this.url + path
     const backoff = makeBackoff({ initialMs: 100, maxMs: 5000 })
 
+    let refreshed = false
     for (let attempt = 0; attempt <= this.retryAttempts; attempt++) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), this.timeoutMs)
 
       const headers = { 'Content-Type': 'application/json' }
-      if (this.bearerToken) headers['Authorization'] = `Bearer ${this.bearerToken}`
+      const token = await this.tokens.get()
+      if (token) headers['Authorization'] = `Bearer ${token}`
 
       try {
         const res = await fetch(fullUrl, {
@@ -59,6 +63,13 @@ export class StreamsHttpClient {
           const err = new Error(parsed && parsed.error ? parsed.error : `HTTP ${res.status}`)
           err.status = res.status
           err.body = parsed
+          // A token the broker no longer takes: one new one, once.
+          if (res.status === 401 && this.tokens.refreshable && !refreshed) {
+            refreshed = true
+            await this.tokens.get({ failed: token })
+            attempt--
+            continue
+          }
           // 4xx (other than 408/429) is not retriable.
           if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
             throw err

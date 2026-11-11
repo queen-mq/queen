@@ -5,6 +5,7 @@
 import * as logger from '../utils/logger.js'
 import { binaryPushBody, transactionFrames, restoreResultOrder, PUSH_BINARY_CONTENT_TYPE } from './pushBinary.js'
 import { decodePopFrames, isPopFrames } from './popFrames.js'
+import { TokenSource } from '../utils/tokenSource.js'
 
 /**
  * The error a request ends with when its caller aborted it (a consumer being
@@ -128,7 +129,9 @@ export class HttpClient {
   #retryAttempts
   #retryDelayMillis
   #enableFailover
-  #bearerToken
+  // The credential: a fixed string, or a function that fetches a token and is
+  // called again before it expires and after a 401 (utils/tokenSource.js).
+  #tokens
   #headers
   #retry429
   // Per-client undici Agent (Node only). Owning our own dispatcher is what
@@ -200,7 +203,9 @@ export class HttpClient {
     this.#retryAttempts = retryAttempts
     this.#retryDelayMillis = retryDelayMillis
     this.#enableFailover = enableFailover
-    this.#bearerToken = bearerToken
+    // One source per client: a TokenSource given here is shared (the Queen
+    // instance hands the same one to every node client it makes).
+    this.#tokens = bearerToken instanceof TokenSource ? bearerToken : new TokenSource(bearerToken)
     this.#retry429 = retry429 || {}
     this.#binaryPush = binaryPush === true
     this.#pushCompression = pushCompression === true
@@ -227,7 +232,7 @@ export class HttpClient {
       timeoutMillis,
       retryAttempts,
       enableFailover,
-      hasAuth: !!bearerToken,
+      hasAuth: this.#tokens.configured,
       customHeaders: Object.keys(this.#headers).length,
       hostHeader: this.#hostOverride ? this.#hostOverride.authority : null,
       retry429: this.#retry429
@@ -280,13 +285,25 @@ export class HttpClient {
   async #executeWithRetry429(url, method, body, requestTimeoutMillis, retryKind, signal = null) {
     const { maxAttempts, baseMs, capMs } = this.#retry429PolicyFor(retryKind)
     let tries = 0
+    let refreshed = false
     // eslint-disable-next-line no-constant-condition
     while (true) {
       if (signal?.aborted) throw callerAborted(method, url)
       tries++
+      const token = await this.#tokens.get()
       try {
-        return await this.#executeRequest(url, method, body, requestTimeoutMillis, signal)
+        return await this.#executeRequest(url, method, body, requestTimeoutMillis, signal, token)
       } catch (error) {
+        // A token the broker no longer takes (expired, or its key changed):
+        // with a token function, one new token and the request once more. It
+        // counts as no attempt; a second 401 is the caller's.
+        if (error.status === 401 && this.#tokens.refreshable && !refreshed) {
+          refreshed = true
+          tries--
+          logger.warn('HttpClient.refreshToken', { method, url, code: error.code ?? null })
+          await this.#tokens.get({ failed: token })
+          continue
+        }
         if (error.status !== 429) throw error
 
         if (tries >= maxAttempts) {
@@ -390,7 +407,7 @@ export class HttpClient {
     }
   }
 
-  async #executeRequest(url, method, body = null, requestTimeoutMillis = null, signal = null) {
+  async #executeRequest(url, method, body = null, requestTimeoutMillis = null, signal = null, token = null) {
     if (signal?.aborted) throw callerAborted(method, url)
     const effectiveTimeout = requestTimeoutMillis || this.#timeoutMillis
     logger.log('HttpClient.request', { method, url, hasBody: !!body, timeout: effectiveTimeout, host: this.#hostOverride ? this.#hostOverride.authority : undefined })
@@ -404,8 +421,8 @@ export class HttpClient {
 
     try {
       const headers = { 'Content-Type': 'application/json' }
-      if (this.#bearerToken) {
-        headers['Authorization'] = `Bearer ${this.#bearerToken}`
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
       }
       Object.assign(headers, this.#headers)
 

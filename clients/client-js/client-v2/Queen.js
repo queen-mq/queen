@@ -16,6 +16,8 @@ import { FeedReader } from './feed/Feed.js'
 import { StreamBuilder } from './stream/StreamBuilder.js'
 import { StreamConsumer } from './stream/StreamConsumer.js'
 import { Admin } from './admin/Admin.js'
+import { Tokens } from './tokens/Tokens.js'
+import { TokenSource } from './utils/tokenSource.js'
 import { popAutopilotDisabledByEnv } from './utils/autopilot.js'
 import { consumerGroupOf, sharedConsumerGroupOf } from './utils/consumerGroup.js'
 import { CLIENT_DEFAULTS } from './utils/defaults.js'
@@ -94,6 +96,11 @@ export class Queen {
   #config
   #shutdownHandlers = []
   #admin = null
+  #tokensApi = null
+  // The credential, shared by every HTTP client this instance makes (the
+  // main one and the per-node ones): a token function is called once per
+  // refresh, not once per node.
+  #tokens = null
   #kv = null
   #locks = null
   #ephemeral = null
@@ -121,6 +128,7 @@ export class Queen {
     this.#autopilotOff = popAutopilotDisabledByEnv()
 
     // Create HTTP client
+    this.#tokens = new TokenSource(this.#config.bearerToken)
     this.#httpClient = this.#createHttpClient()
 
     // Create buffer manager: one bound for the whole client's buffered pushes,
@@ -184,7 +192,8 @@ export class Queen {
   }
 
   #createHttpClient() {
-    const { urls, timeoutMillis, retryAttempts, retryDelayMillis, loadBalancingStrategy, affinityHashRing, healthRetryAfterMillis, enableFailover, bearerToken, headers, hostHeader, retry429, binaryPush, pushCompression, framedPop } = this.#config
+    const { urls, timeoutMillis, retryAttempts, retryDelayMillis, loadBalancingStrategy, affinityHashRing, healthRetryAfterMillis, enableFailover, headers, hostHeader, retry429, binaryPush, pushCompression, framedPop } = this.#config
+    const bearerToken = this.#tokens
 
     if (urls.length === 1) {
       // Single server
@@ -281,6 +290,26 @@ export class Queen {
       this.#admin = new Admin(this.#httpClient)
     }
     return this.#admin
+  }
+
+  // ===========================
+  // Client tokens
+  // ===========================
+
+  /**
+   * Client tokens: a credential for one entity (a device, a browser user),
+   * minted from a scoped key (tokens/Tokens.js).
+   *
+   *     const { token } = await queen.tokens.mint({ sub: 'dev-8f3a', ttlSeconds: 3600 })
+   *
+   * Lazily initialized, singleton, like `admin`.
+   * @returns {Tokens}
+   */
+  get tokens() {
+    if (!this.#tokensApi) {
+      this.#tokensApi = new Tokens(this.#httpClient)
+    }
+    return this.#tokensApi
   }
 
   // ===========================
@@ -479,13 +508,13 @@ export class Queen {
 
   /** A client to one node, with this client's credentials and timeouts. */
   #nodeClient(baseUrl) {
-    const { timeoutMillis, retryAttempts, retryDelayMillis, bearerToken, headers, retry429 } = this.#config
+    const { timeoutMillis, retryAttempts, retryDelayMillis, headers, retry429 } = this.#config
     return new HttpClient({
       baseUrl: validateUrl(baseUrl),
       timeoutMillis,
       retryAttempts,
       retryDelayMillis,
-      bearerToken,
+      bearerToken: this.#tokens,
       headers,
       retry429
     })

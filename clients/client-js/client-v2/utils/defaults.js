@@ -14,7 +14,7 @@ export const CLIENT_DEFAULTS = {
   affinityHashRing: 128,               // Number of virtual nodes per server for affinity strategy
   enableFailover: true,                // Auto-failover to other servers
   healthRetryAfterMillis: 5000,        // Retry unhealthy backends after 5 seconds
-  bearerToken: null,                   // Bearer token for proxy authentication
+  bearerToken: null,                   // Bearer token for proxy authentication: a string, or a function that fetches one (refreshed before it expires and after a 401)
   headers: {},                         // Custom headers to include in every request
   // Host to advertise on every request, independent of the address dialed.
   // A queen_proxy deployment picks the tenant cluster from the Host header's
