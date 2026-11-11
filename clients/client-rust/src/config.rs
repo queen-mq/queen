@@ -155,6 +155,12 @@ pub struct Config {
 
     pub bearer_token: Option<String>,
 
+    /// Where the bearer token comes from when it is not a fixed string: a
+    /// function that fetches one (a client token, minted by the application's
+    /// backend), called again before the token expires and after a 401
+    /// ([`crate::TokenSource`]). Exclusive with `bearer_token`.
+    pub token_source: Option<crate::tokens::TokenSource>,
+
     /// Sent on every request. A `Host` entry here is rejected — use
     /// [`Config::host_header`], which actually works.
     pub headers: Vec<(String, String)>,
@@ -198,6 +204,7 @@ impl Default for Config {
             failover: true,
             health_retry_after: Duration::from_secs(5),
             bearer_token: None,
+            token_source: None,
             headers: Vec::new(),
             host_header: None,
             retry_429: Retry429::default(),
@@ -236,6 +243,13 @@ impl Config {
 
     pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
         self.bearer_token = Some(token.into());
+        self
+    }
+
+    /// Fetch the bearer token with `source` instead of sending a fixed one:
+    /// see [`crate::TokenSource`].
+    pub fn token_source(mut self, source: crate::tokens::TokenSource) -> Self {
+        self.token_source = Some(source);
         self
     }
 
@@ -317,6 +331,11 @@ impl Config {
         }
         if self.retry_attempts == 0 {
             return Err(Error::Config("retry_attempts must be at least 1".into()));
+        }
+        if self.bearer_token.is_some() && self.token_source.is_some() {
+            return Err(Error::Config(
+                "bearer_token and token_source are two answers to one question: set one".into(),
+            ));
         }
         Ok(())
     }

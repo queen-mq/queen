@@ -72,6 +72,14 @@ pub(crate) struct HttpClient {
     config: Config,
 }
 
+/// The credential of one attempt: a token from the source, sensitive.
+fn bearer(token: &str) -> Result<reqwest::header::HeaderValue> {
+    let mut v = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| Error::Token("the token is not a valid header value".into()))?;
+    v.set_sensitive(true);
+    Ok(v)
+}
+
 impl HttpClient {
     pub fn new(config: Config) -> Result<Self> {
         config.validate()?;
@@ -293,13 +301,39 @@ impl HttpClient {
         };
 
         let mut tries: u32 = 0;
+        let mut refreshed = false;
         loop {
             tries += 1;
+            // A fixed credential rides in the client's default headers; a
+            // source's token is asked for on every attempt (it is cached).
+            let token = match &self.config.token_source {
+                Some(s) => Some(s.get(None).await?),
+                None => None,
+            };
             match self
-                .attempt_once(method.clone(), backend, path, body.clone(), opts)
+                .attempt_once(
+                    method.clone(),
+                    backend,
+                    path,
+                    body.clone(),
+                    opts,
+                    token.as_deref(),
+                )
                 .await
             {
                 Ok(v) => return Ok(v),
+                // A token the broker no longer takes (expired, or its key
+                // changed): one new token and the request once more. It
+                // counts as no attempt; a second 401 is the caller's.
+                Err(e) if e.status() == Some(401) && !refreshed => {
+                    let (Some(source), Some(used)) = (&self.config.token_source, &token) else {
+                        return Err(e);
+                    };
+                    refreshed = true;
+                    tries -= 1;
+                    tracing::warn!(path, "401 with a token source: fetching a new token");
+                    source.get(Some(used)).await?;
+                }
                 Err(e) if e.status() != Some(429) => return Err(e),
                 Err(e) => {
                     if let Some(max) = max_attempts {
@@ -343,6 +377,7 @@ impl HttpClient {
         path: &str,
         body: Option<Vec<u8>>,
         opts: &Opts,
+        token: Option<&str>,
     ) -> Result<Option<Vec<u8>>> {
         let url = self.request_url(backend, path);
         let timeout = opts.timeout.unwrap_or(self.config.timeout);
@@ -351,6 +386,9 @@ impl HttpClient {
             .client_for(backend)
             .request(method, &url)
             .timeout(timeout);
+        if let Some(t) = token {
+            req = req.header(reqwest::header::AUTHORIZATION, bearer(t)?);
+        }
         if let Some(content_type) = opts.content_type {
             req = req.header(reqwest::header::CONTENT_TYPE, content_type);
         }

@@ -52,6 +52,10 @@ pub enum Error {
     /// A feed stream refused to run, with the JS SDK's code
     /// (`feed_chain_changed`, `feed_layout_changed`, `feed_view_timeout`, ...).
     Feed { code: ErrorCode, message: String },
+
+    /// The configured [`crate::TokenSource`] gave no usable token: its
+    /// function failed, or answered an empty or unsendable one.
+    Token(String),
 }
 
 impl Error {
@@ -150,6 +154,7 @@ impl fmt::Display for Error {
             }
             Self::Invalid(m) => write!(f, "{m}"),
             Self::Feed { message, .. } => write!(f, "{message}"),
+            Self::Token(m) => write!(f, "token source: {m}"),
         }
     }
 }

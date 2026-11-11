@@ -76,6 +76,7 @@ pub mod reads;
 pub mod streams;
 pub mod supervision;
 pub mod timers;
+pub mod tokens;
 pub mod transaction;
 pub mod uuid;
 
@@ -98,6 +99,7 @@ pub use reads::{
 };
 pub use supervision::SupervisionConfig;
 pub use timers::Timers;
+pub use tokens::{TokenError, TokenSource, Tokens};
 pub use transaction::TransactionBuilder;
 
 // Re-exported so callers do not need a direct dependency on the protocol crate
@@ -111,6 +113,8 @@ pub use queen_protocol::{
     SubscriptionMode, TimerListRow, TimerOpKind, TimerOperation, TimerPage, TimerPeek, TimerResult,
     TimerStatus, TraceRequest, TransactionResponse, TxnPushItem, TxnResultItem,
 };
+// Client tokens and the grants a scoped key holds (`tokens`).
+pub use queen_protocol::{Grant, GrantOp, MintTokenRequest, MintTokenResponse};
 
 use crate::buffer::BufferManager;
 use crate::http::HttpClient;
@@ -176,6 +180,12 @@ impl Queen {
     /// Administrative and observability endpoints.
     pub fn admin(&self) -> Admin {
         Admin::new(Arc::clone(&self.inner))
+    }
+
+    /// Client tokens: a credential for one entity, minted from a scoped key
+    /// ([`tokens`]).
+    pub fn tokens(&self) -> Tokens {
+        Tokens::new(Arc::clone(&self.inner))
     }
 
     /// Key/value state, in the same broker as the queue.
