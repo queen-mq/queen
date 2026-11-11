@@ -866,11 +866,13 @@ mod tests {
         assert_eq!(s, StatusCode::CREATED, "{minted}");
         let token = minted["token"].as_str().unwrap().to_string();
 
-        let push = |p: &str| {
-            json!({"items": [{"queue": "telemetry", "partition": p, "payload": {"t": 1}}]})
-        };
+        let push = |p: &str| json!({"items": [{"queue": "telemetry", "partition": p, "payload": {"t": 1}}]});
         let (s, v) = send(Method::POST, "/api/v1/push", &token, Some(push("dev1"))).await;
-        assert_eq!(s, StatusCode::CREATED, "its own partition, through both: {v}");
+        assert_eq!(
+            s,
+            StatusCode::CREATED,
+            "its own partition, through both: {v}"
+        );
         assert_eq!(v[0]["status"], "queued", "{v}");
         let r = send(Method::POST, "/api/v1/push", &token, Some(push("dev2"))).await;
         denied(&r, "another partition, refused by the broker");

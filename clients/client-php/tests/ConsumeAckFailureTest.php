@@ -88,11 +88,13 @@ final class ConsumeAckFailureTest extends TestCase
             'handler' => HandlerStack::create($handler),
         ]);
 
-        // The renewal is due before the second message.
+        // The renewal is due before the second message, and only then: 100 ms
+        // after the pop, while the first message takes 150 ms. (With 1 ms, a
+        // slow runner crossed it before the first message too.)
         $logged = self::errorLogOf(fn () => $queen->queue('orders')->group('workers')->limit(2)
-            ->renewLease(true, 1)->each()
+            ->renewLease(true, 100)->each()
             ->consume(function (): void {
-                usleep(5_000);
+                usleep(150_000);
             })->execute());
 
         $extends = array_keys(array_filter(

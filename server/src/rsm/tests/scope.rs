@@ -930,4 +930,3 @@ async fn the_in_process_scope_is_enforced_like_the_header() {
     let (s, v) = call(&n, Method::GET, "/api/v1/resources/queues", Via::None, None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
 }
-

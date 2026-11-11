@@ -77,7 +77,10 @@ async fn a_fixed_credential_is_not_retried_on_a_401() {
     assert_eq!(pop(&queen).await.unwrap_err().status(), Some(401));
     let hits = broker.hits();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].header("authorization"), Some("Bearer qk_live_static"));
+    assert_eq!(
+        hits[0].header("authorization"),
+        Some("Bearer qk_live_static")
+    );
 }
 
 #[tokio::test]
@@ -87,7 +90,10 @@ async fn a_source_that_fails_is_a_token_error_and_sends_nothing() {
         TokenSource::new(|| async { Err::<String, queen_mq::TokenError>("backend down".into()) });
     let queen = Queen::connect(Config::new(broker.url()).token_source(source)).unwrap();
     let e = pop(&queen).await.unwrap_err();
-    assert!(matches!(&e, Error::Token(m) if m.contains("backend down")), "{e}");
+    assert!(
+        matches!(&e, Error::Token(m) if m.contains("backend down")),
+        "{e}"
+    );
     assert_eq!(broker.hit_count(), 0);
 }
 
@@ -120,7 +126,10 @@ async fn a_mint_posts_the_entity_and_reads_the_answer() {
     assert_eq!(minted.token, "qt_a.b.c");
     assert_eq!(minted.expires_in, 600);
     let hit = &broker.hits()[0];
-    assert_eq!((hit.method.as_str(), hit.route()), ("POST", "/api/v1/tokens"));
+    assert_eq!(
+        (hit.method.as_str(), hit.route()),
+        ("POST", "/api/v1/tokens")
+    );
     assert_eq!(
         hit.json(),
         serde_json::json!({"sub": "dev-8f3a", "ttlSeconds": 600})
