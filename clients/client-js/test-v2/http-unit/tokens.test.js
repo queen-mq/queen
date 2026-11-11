@@ -13,6 +13,7 @@ import { createServer } from 'node:http'
 
 import { Queen, TokenSource, expiresAtMs } from '../../client-v2/index.js'
 import { HttpClient } from '../../client-v2/http/HttpClient.js'
+import { LoadBalancer } from '../../client-v2/http/LoadBalancer.js'
 
 /** A client token whose `exp` is `secondsFromNow` away (signature fake). */
 function clientToken (secondsFromNow, sub = 'dev1') {
@@ -124,6 +125,29 @@ describe('HttpClient — a token function', () => {
     })
   })
 
+  it('fails a request at once when the token function fails: no retry, no failover, no unhealthy node', async () => {
+    await withPlanServer([], async (urlA, hitsA) => {
+      await withPlanServer([], async (urlB, hitsB) => {
+        let calls = 0
+        const failing = () => { calls++; throw new Error('backend down') }
+
+        const single = new HttpClient({ baseUrl: urlA, bearerToken: failing, retryAttempts: 3, retryDelayMillis: 1 })
+        await assert.rejects(single.get('/api/v1/resources/queues'), (e) => e.tokenSource === true && /token source: .*backend down/.test(e.message))
+        assert.equal(calls, 1, 'not retried')
+
+        calls = 0
+        const loadBalancer = new LoadBalancer([urlA, urlB], 'round-robin')
+        const pair = new HttpClient({ loadBalancer, bearerToken: failing })
+        await assert.rejects(pair.get('/api/v1/resources/queues'), (e) => e.tokenSource === true)
+        assert.equal(calls, 1, 'not failed over to the other node')
+        assert.equal(hitsA.length + hitsB.length, 0, 'nothing was sent')
+        assert.ok([...loadBalancer.getHealthStatus().values()].every(h => h.healthy), 'no node is blamed')
+        await single.destroy()
+        await pair.destroy()
+      })
+    })
+  })
+
   it('does not retry a 401 with a fixed credential', async () => {
     await withPlanServer([expired], async (url, hits) => {
       const http = new HttpClient({ baseUrl: url, bearerToken: 'qk_live_static' })
@@ -147,6 +171,31 @@ describe('queen.tokens.mint', () => {
       assert.equal(hits[0].auth, 'Bearer qk_live_role')
       await assert.rejects(queen.tokens.mint({}), /sub is required/)
       await queen.close()
+    })
+  })
+
+  it('the documented flow: the backend mints, the device pushes with its token', async () => {
+    const minted = { token: clientToken(3600, 'dev-8f3a'), sub: 'dev-8f3a', key: 'k', expiresAt: 'x', expiresIn: 3600 }
+    const pushed = [{ index: 0, status: 'queued', message_id: 'm', transaction_id: 't', queueName: 'telemetry', offset: 0 }]
+    await withPlanServer([{ status: 201, body: minted }, { status: 201, body: pushed }], async (url, hits) => {
+      process.env.QUEEN_DEVICES_KEY = 'qk_live_devices'
+      // docs:start(js-client-token-mint)
+      // On your backend, which holds the scoped key `devices`:
+      const backend = new Queen({ url, bearerToken: process.env.QUEEN_DEVICES_KEY })
+      const { token, expiresAt } = await backend.tokens.mint({ sub: 'dev-8f3a', ttlSeconds: 3600 })
+      // docs:end
+      assert.ok(token.startsWith('qt_') && expiresAt)
+      const fetchTokenFromMyBackend = async () => token
+      // docs:start(js-client-token-device)
+      // On the device: a function, so the client fetches a new token
+      // 30 s before this one expires, and once after a 401.
+      const device = new Queen({ url, bearerToken: () => fetchTokenFromMyBackend() })
+      await device.queue('telemetry').partition('dev-8f3a').push([{ data: { tempC: 21.5 } }])
+      // docs:end
+      assert.equal(hits[1].url, '/api/v1/push')
+      assert.equal(hits[1].auth, `Bearer ${token}`)
+      await backend.close()
+      await device.close()
     })
   })
 

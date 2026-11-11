@@ -60,9 +60,14 @@ export class TokenSource {
     if (failed === null && this.#token !== null && !this.#expiring()) return this.#token
     if (!this.#pending) {
       this.#pending = (async () => {
-        const token = await this.#fetch()
+        let token
+        try {
+          token = await this.#fetch()
+        } catch (cause) {
+          throw tokenSourceError(`the token function failed: ${cause?.message ?? cause}`, cause)
+        }
         if (typeof token !== 'string' || token.trim() === '') {
-          throw new Error('bearerToken: the token function must resolve to a non-empty string')
+          throw tokenSourceError('the token function must resolve to a non-empty string')
         }
         this.#token = token.trim()
         this.#expiresAtMs = expiresAtMs(this.#token)
@@ -75,6 +80,17 @@ export class TokenSource {
   #expiring () {
     return this.#expiresAtMs !== null && this.#expiresAtMs - Date.now() < REFRESH_AHEAD_MS
   }
+}
+
+/**
+ * The error of a request that never left because its token function failed.
+ * It is no fault of the broker's: `tokenSource: true` tells the HTTP client
+ * not to retry it, fail it over, or mark the node unhealthy.
+ */
+function tokenSourceError (message, cause) {
+  const error = new Error(`token source: ${message}`, cause === undefined ? undefined : { cause })
+  error.tokenSource = true
+  return error
 }
 
 /**

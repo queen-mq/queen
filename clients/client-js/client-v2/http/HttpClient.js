@@ -581,7 +581,9 @@ export class HttpClient {
         const url = this.#getUrl() + path
         return await this.#executeWithRetry429(url, method, body, requestTimeoutMillis, retryKind, signal)
       } catch (error) {
-        if (error.aborted) throw error
+        // Stopped by its caller, or never sent because the token function
+        // failed: another attempt would not do better.
+        if (error.aborted || error.tokenSource) throw error
         lastError = error
 
         // Don't retry on client errors (4xx)
@@ -634,9 +636,10 @@ export class HttpClient {
 
         return result
       } catch (error) {
-        // Stopped by its caller: this node did nothing wrong, and another
-        // node must not get the request instead.
-        if (error.aborted) throw error
+        // Stopped by its caller, or never sent because the token function
+        // failed: this node did nothing wrong, and another node must not get
+        // the request instead.
+        if (error.aborted || error.tokenSource) throw error
         lastError = error
 
         // Mark backend as unhealthy on failure (5xx or network errors)

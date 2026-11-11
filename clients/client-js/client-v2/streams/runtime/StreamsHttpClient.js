@@ -39,12 +39,14 @@ export class StreamsHttpClient {
 
     let refreshed = false
     for (let attempt = 0; attempt <= this.retryAttempts; attempt++) {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs)
-
+      // The token first: when its function fails, nothing is sent and no
+      // timer is left behind.
       const headers = { 'Content-Type': 'application/json' }
       const token = await this.tokens.get()
       if (token) headers['Authorization'] = `Bearer ${token}`
+
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs)
 
       try {
         const res = await fetch(fullUrl, {
@@ -83,6 +85,8 @@ export class StreamsHttpClient {
         return parsed
       } catch (err) {
         clearTimeout(timer)
+        // The token function failed on a refresh: retrying would only call it again.
+        if (err && err.tokenSource) throw err
         if (err && err.status && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429) {
           throw err
         }
