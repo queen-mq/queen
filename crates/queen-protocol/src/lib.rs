@@ -33,6 +33,7 @@ pub mod locks;
 pub mod partitions;
 pub mod pop;
 pub mod push;
+pub mod scope;
 pub mod streams;
 pub mod timers;
 pub mod transaction;
@@ -76,6 +77,9 @@ pub use partitions::{
 };
 pub use pop::{AutopilotEcho, Message, PopParams, PopResponse, SubscriptionMode};
 pub use push::{PushItem, PushRequest, PushResult, PushStatus};
+pub use scope::{
+    Grant, GrantKind, GrantOp, MintTokenRequest, MintTokenResponse, Scope, SCOPE_HEADER,
+};
 pub use streams::{
     parse_state_key, session_state_key, state_key_for, ClaimRequest, ClaimResponse,
     ClaimedPartition, CycleAck, CycleAckResult, CycleRequest, CycleResponse, RegisterRequest,
