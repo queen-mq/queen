@@ -65,6 +65,11 @@ pub fn is_upstream_path(path: &str) -> bool {
 /// Router fallback: broker-bound paths to the data-plane pipeline, everything
 /// else to the auth-gated SPA.
 pub async fn route_fallback(State(st): State<St>, req: Request) -> Response {
+    // The one data-plane route this proxy answers itself: a client token is
+    // minted here, never upstream (tokens.rs).
+    if req.uri().path() == crate::tokens::PATH {
+        return crate::tokens::handle(st, req).await;
+    }
     if is_upstream_path(req.uri().path()) {
         return crate::gateway::handle(State(st), req).await;
     }

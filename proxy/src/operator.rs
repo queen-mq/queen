@@ -79,7 +79,9 @@ async fn operator_ctx(
             crate::acting::note_operator_access(user_id, &ctx.slug, path);
             Ok((ctx, user_id))
         }
-        Principal::User { .. } | Principal::ApiKey { .. } => Err(route_blocked()),
+        Principal::User { .. } | Principal::ApiKey { .. } | Principal::Client(_) => {
+            Err(route_blocked())
+        }
     }
 }
 

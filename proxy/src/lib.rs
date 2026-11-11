@@ -8,6 +8,9 @@ pub mod acting;
 pub mod app;
 pub mod auth;
 pub mod cache;
+/// Scoped clients: API keys with grants and the client tokens minted from
+/// them (queen_protocol::scope).
+pub mod clients;
 pub mod config;
 pub mod console;
 /// The control-plane API (tenants, clusters, keys) behind a token.
@@ -33,6 +36,8 @@ pub mod spool;
 pub mod state;
 /// Where the proxy keeps its state: the broker's replicated KV.
 pub mod store;
+/// `POST /api/v1/tokens`: client tokens minted from a scoped key.
+pub mod tokens;
 /// Where the data plane sends a request: a cell broker over HTTP, or the
 /// broker it runs inside.
 pub mod upstream;

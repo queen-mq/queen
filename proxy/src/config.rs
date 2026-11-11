@@ -173,6 +173,24 @@ pub fn jwt_ed25519_pub_pem() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// The PUBLIC key of the Ed25519 signing key this proxy replaced
+/// (`QUEEN_PROXY_JWT_ED25519_PREV_PUB_PEM`), or the HS256 secret it replaced
+/// (`QUEEN_PROXY_JWT_PREV_SECRET`): verify-only, so the sessions and client
+/// tokens the old key signed keep working until they expire. Taken only when
+/// it is the same algorithm as the current signer.
+pub fn jwt_prev_ed25519_pub_pem() -> Option<String> {
+    env::var("QUEEN_PROXY_JWT_ED25519_PREV_PUB_PEM")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// See [`jwt_prev_ed25519_pub_pem`].
+pub fn jwt_prev_hs_secret() -> Option<String> {
+    env::var("QUEEN_PROXY_JWT_PREV_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// The host of an absolute URL: scheme dropped, userinfo dropped, path/query/
 /// fragment cut. What is left still goes through `canonical_host` for the
 /// `:port` and root-label stripping, so a configured audience and a Host header

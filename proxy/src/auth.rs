@@ -79,6 +79,8 @@ pub fn key_hash_hex(key: &str) -> String {
 pub enum Credential {
     ApiKey(String),
     Session(String),
+    /// A client token (`clients::TOKEN_PREFIX`), the JWT after the prefix.
+    ClientToken(String),
     None,
 }
 
@@ -122,6 +124,8 @@ fn read_credential_inner(
         if !token.is_empty() {
             return if token.starts_with(API_KEY_PREFIX) {
                 Credential::ApiKey(token.to_string())
+            } else if let Some(jwt) = token.strip_prefix(crate::clients::TOKEN_PREFIX) {
+                Credential::ClientToken(jwt.to_string())
             } else {
                 Credential::Session(token.to_string())
             };
@@ -131,11 +135,18 @@ fn read_credential_inner(
         return Credential::None;
     }
     match read_session_cookie(cookie_name, secure, headers) {
-        // A cookie is only ever a HUMAN session. A `qk_` value sitting in one
-        // is nonsense (nothing mints that) and is dropped rather than promoted
-        // to a data-plane credential — a cookie is attached by the browser,
-        // not chosen per request, so it must never widen what a caller can do.
-        Some(t) if !t.is_empty() && !t.starts_with(API_KEY_PREFIX) => Credential::Session(t),
+        // A cookie is only ever a HUMAN session. A `qk_` or `qt_` value
+        // sitting in one is nonsense (nothing sets that) and is dropped rather
+        // than promoted to a data-plane credential — a cookie is attached by the
+        // browser, not chosen per request, so it must never widen what a caller
+        // can do.
+        Some(t)
+            if !t.is_empty()
+                && !t.starts_with(API_KEY_PREFIX)
+                && !t.starts_with(crate::clients::TOKEN_PREFIX) =>
+        {
+            Credential::Session(t)
+        }
         _ => Credential::None,
     }
 }
@@ -343,15 +354,19 @@ pub async fn authenticate(
         Credential::ApiKey(key) => {
             let hash = key_hash_hex(&key);
             return match st.cache.by_key_hash(&hash).await {
-                Some((ctx, key_id, scopes)) if ctx.cluster_id == cluster_id => {
-                    Ok(Principal::ApiKey { key_id, scopes })
-                }
+                Some(k) if k.ctx.cluster_id == cluster_id => Ok(k.principal()),
                 Some(_) => Err(errors::err_403(
                     errors::CODE_FORBIDDEN,
                     "key/cluster mismatch",
                 )),
                 None => Err(errors::err_401("unknown or revoked api key")),
             };
+        }
+        // --- client token path (a scoped key's entity, clients.rs) ---
+        Credential::ClientToken(t) => {
+            return crate::clients::authenticate_token(st, &t, Some(cluster_id))
+                .await
+                .map(|(_, p)| p);
         }
         Credential::Session(t) => t,
         Credential::None => return Err(errors::err_401("missing bearer credential")),
@@ -413,6 +428,17 @@ pub fn authorize(p: &Principal, class: RouteClass) -> Result<(), Response> {
         // never be one — and every tenant role fall to the same false.
         (Principal::User { operator: true, .. }, RouteClass::Operator) => true,
         (_, RouteClass::Operator) => false,
+        // A scoped client: the classes its routes carry (push and transaction,
+        // pop/ack/lease, KV and timers). The exact routes are checked next by
+        // path (`gateway.rs`, `scoped_route`), and every name by the broker.
+        (
+            Principal::Client(_),
+            RouteClass::Produce
+            | RouteClass::Consume
+            | RouteClass::Gated(crate::routes::Feature::Kv, _)
+            | RouteClass::Gated(crate::routes::Feature::Timers, _),
+        ) => true,
+        (Principal::Client(_), _) => false,
         (Principal::ApiKey { scopes, .. }, RouteClass::Produce) => scopes.produce,
         (Principal::ApiKey { scopes, .. }, RouteClass::Consume) => scopes.consume,
         (Principal::ApiKey { scopes, .. }, RouteClass::QueueAdmin) => scopes.admin,
@@ -579,7 +605,7 @@ pub(crate) enum JwtReject {
 }
 
 impl JwtReject {
-    fn log_reason(&self) -> String {
+    pub(crate) fn log_reason(&self) -> String {
         match self {
             JwtReject::NotConfigured => "jwt signer not configured".to_string(),
             JwtReject::Expired => "token expired".to_string(),
@@ -641,6 +667,8 @@ enum Signer {
 /// mutability and are never locked across an await.
 pub struct Keys {
     signer: Signer,
+    /// The signing key this proxy replaced, verify-only (see [`PrevKey`]).
+    prev: Option<PrevKey>,
     issuer: String,
     /// The `aud` a token may name, or `None` to enforce none. Resolved once, by
     /// `config::resolve_jwt_audience`.
@@ -662,6 +690,21 @@ pub struct Keys {
     /// Rate limiter for the "deny-list unavailable" line, so a store outage
     /// costs one log line per window instead of one per request.
     revoked_warn: Mutex<WarnSampler>,
+}
+
+/// The verify-only half of the signing key this proxy replaced
+/// (`config::jwt_prev_ed25519_pub_pem`, `config::jwt_prev_hs_secret`): the
+/// sessions and client tokens it signed keep verifying until they expire, so
+/// changing the key ends none of them. Always the current signer's algorithm,
+/// never a second one: a token cannot pick its verifier's algorithm.
+struct PrevKey {
+    alg: Algorithm,
+    dec: DecodingKey,
+    /// sha256[..16] of the Ed25519 public key; "hs" for HS256 (shared with
+    /// the current key, so an HS256 token is tried against both).
+    kid: String,
+    /// The JWKS `x` of an Ed25519 key.
+    x_b64: Option<String>,
 }
 
 const REVOKED_TTL: Duration = Duration::from_secs(60);
@@ -717,6 +760,55 @@ impl Keys {
             cfg.jwt_issuer.clone(),
             cfg.jwt_audience.clone(),
         )
+        .with_previous(
+            crate::config::jwt_prev_ed25519_pub_pem(),
+            crate::config::jwt_prev_hs_secret(),
+        )
+    }
+
+    /// Accept tokens of the key this proxy replaced as well: its Ed25519
+    /// public PEM when the current signer is Ed25519, its secret when it is
+    /// HS256. A previous key of the other algorithm is refused at boot with a
+    /// log line, never used.
+    fn with_previous(mut self, ed_pub_pem: Option<String>, hs_secret: Option<String>) -> Keys {
+        self.prev = match (&self.signer, ed_pub_pem, hs_secret) {
+            (Signer::Ed { .. }, Some(pem), _) => match ed_pub_pem_to_raw(&pem) {
+                Some(raw) => Some(PrevKey {
+                    alg: Algorithm::EdDSA,
+                    dec: DecodingKey::from_ed_der(&raw),
+                    kid: hex::encode(&Sha256::digest(&raw)[..16]),
+                    x_b64: Some(B64_URL.encode(&raw)),
+                }),
+                None => {
+                    tracing::error!(
+                        target: "auth",
+                        "QUEEN_PROXY_JWT_ED25519_PREV_PUB_PEM does not parse as an Ed25519 public \
+                         key: tokens of the previous key are NOT accepted"
+                    );
+                    None
+                }
+            },
+            (Signer::Hs { .. }, _, Some(secret)) => Some(PrevKey {
+                alg: Algorithm::HS256,
+                dec: DecodingKey::from_secret(secret.as_bytes()),
+                kid: "hs".to_string(),
+                x_b64: None,
+            }),
+            (_, None, None) => None,
+            _ => {
+                tracing::error!(
+                    target: "auth",
+                    "the previous JWT key is not the current signer's algorithm \
+                     (QUEEN_PROXY_JWT_ED25519_PREV_PUB_PEM goes with an Ed25519 signer, \
+                     QUEEN_PROXY_JWT_PREV_SECRET with an HS256 one): ignored"
+                );
+                None
+            }
+        };
+        if let Some(p) = &self.prev {
+            tracing::info!(target: "auth", kid = %p.kid, "accepting tokens of the previous signing key");
+        }
+        self
     }
 
     /// Construct from raw material. Split out from `from_config` so unit tests
@@ -781,6 +873,7 @@ impl Keys {
         };
         Keys {
             signer,
+            prev: None,
             issuer,
             audience,
             revoked_cache: Mutex::new(HashMap::new()),
@@ -830,7 +923,7 @@ impl Keys {
     /// Sign a claim set with the configured signer. Shared by `mint_user_jwt`
     /// (staged) and the unit tests that forge edge-case claims.
     #[allow(dead_code)]
-    fn sign(&self, claims: &UserClaims) -> Result<String, String> {
+    fn sign<T: Serialize>(&self, claims: &T) -> Result<String, String> {
         match &self.signer {
             Signer::Ed {
                 enc: Some(enc),
@@ -855,25 +948,7 @@ impl Keys {
     /// Pure crypto: no DB. The algorithm is pinned to the configured signer so a
     /// token cannot downgrade (e.g. present HS to an EdDSA verifier).
     pub(crate) fn verify_jwt_claims(&self, token: &str) -> Result<VerifiedClaims, JwtReject> {
-        let (alg, dec) = match &self.signer {
-            Signer::Ed { dec: Some(d), .. } => (Algorithm::EdDSA, d),
-            Signer::Ed { dec: None, .. } => return Err(JwtReject::NotConfigured),
-            Signer::Hs { dec, .. } => (Algorithm::HS256, dec),
-            Signer::None => return Err(JwtReject::NotConfigured),
-        };
-
-        let mut v = Validation::new(alg);
-        v.algorithms = vec![alg]; // pin — no alg confusion / downgrade
-        v.validate_exp = true; // exp is mandatory (default required_spec_claims = {exp})
-        v.validate_nbf = false;
-        // `aud` is checked by hand below, not here: jsonwebtoken's own check
-        // REQUIRES the claim once an expected audience is set, and the whole
-        // point of this one is that a token without `aud` stays valid.
-        v.validate_aud = false;
-        v.set_issuer(&[self.issuer.as_str()]);
-
-        let data = decode::<UserClaims>(token, dec, &v).map_err(|e| map_jwt_err(&e))?;
-        let c = data.claims;
+        let c: UserClaims = self.decode_verified(token)?;
 
         if !audience_ok(self.audience.as_deref(), c.aud.as_ref()) {
             return Err(JwtReject::BadAudience);
@@ -900,6 +975,75 @@ impl Keys {
             cluster,
             exp: c.exp,
         })
+    }
+
+    /// Signature, algorithm, `iss` and `exp` of `token`, and its claims as
+    /// `T`. Pure crypto: no DB. The algorithm is pinned to the configured
+    /// signer so a token cannot downgrade (e.g. present HS to an EdDSA
+    /// verifier). A token of the previous key ([`PrevKey`]) verifies too: an
+    /// Ed25519 one by its `kid`, an HS256 one (same `kid`) by its signature.
+    fn decode_verified<T: serde::de::DeserializeOwned>(&self, token: &str) -> Result<T, JwtReject> {
+        let (alg, dec, kid) = match &self.signer {
+            Signer::Ed {
+                dec: Some(d), kid, ..
+            } => (Algorithm::EdDSA, d, kid.as_str()),
+            Signer::Ed { dec: None, .. } => return Err(JwtReject::NotConfigured),
+            Signer::Hs { dec, kid, .. } => (Algorithm::HS256, dec, kid.as_str()),
+            Signer::None => return Err(JwtReject::NotConfigured),
+        };
+
+        let mut v = Validation::new(alg);
+        v.algorithms = vec![alg]; // pin — no alg confusion / downgrade
+        v.validate_exp = true; // exp is mandatory (default required_spec_claims = {exp})
+        v.validate_nbf = false;
+        // `aud` is checked by hand by the session path, not here:
+        // jsonwebtoken's own check REQUIRES the claim once an expected audience
+        // is set, and the whole point of that one is that a token without
+        // `aud` stays valid.
+        v.validate_aud = false;
+        v.set_issuer(&[self.issuer.as_str()]);
+
+        let decode_with = |key: &DecodingKey| {
+            decode::<T>(token, key, &v)
+                .map(|d| d.claims)
+                .map_err(|e| map_jwt_err(&e))
+        };
+        match self.prev.as_ref().filter(|p| p.alg == alg) {
+            Some(prev) if alg == Algorithm::EdDSA && prev.kid != kid => {
+                let named = jsonwebtoken::decode_header(token).ok().and_then(|h| h.kid);
+                if named.as_deref() == Some(prev.kid.as_str()) {
+                    return decode_with(&prev.dec);
+                }
+                decode_with(dec)
+            }
+            Some(prev) if alg == Algorithm::HS256 => match decode_with(dec) {
+                Err(JwtReject::BadSignature) => decode_with(&prev.dec),
+                other => other,
+            },
+            _ => decode_with(dec),
+        }
+    }
+
+    /// Mint a client token (`clients.rs`): the claims signed by the session
+    /// signer, behind the client-token prefix.
+    pub fn mint_client_token(
+        &self,
+        claims: &crate::clients::ClientClaims,
+    ) -> Result<String, String> {
+        self.sign(claims)
+            .map(|jwt| format!("{}{jwt}", crate::clients::TOKEN_PREFIX))
+    }
+
+    /// Verify a client token (the JWT after its prefix): signature, `iss`,
+    /// `exp`, and its shape (`ClientClaims::check`). The key it names, the
+    /// cluster and the block list are the caller's (`clients.rs`).
+    pub(crate) fn verify_client_token(
+        &self,
+        jwt: &str,
+    ) -> Result<crate::clients::ClientClaims, JwtReject> {
+        let c: crate::clients::ClientClaims = self.decode_verified(jwt)?;
+        c.check().map_err(JwtReject::BadClaim)?;
+        Ok(c)
     }
 
     /// Is this jti on the deny-list? Cached 60s. `db == None` (dev) => not
@@ -1134,23 +1278,36 @@ impl Keys {
     }
 
     pub fn jwks_json(&self) -> String {
+        let jwk = |kid: &str, x: &str| {
+            serde_json::json!({
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": x,
+                "kid": kid,
+                "alg": "EdDSA",
+                "use": "sig",
+            })
+        };
         match &self.signer {
             Signer::Ed {
                 dec: Some(_),
                 kid,
                 x_b64,
                 ..
-            } => serde_json::json!({
-                "keys": [{
-                    "kty": "OKP",
-                    "crv": "Ed25519",
-                    "x": x_b64,
-                    "kid": kid,
-                    "alg": "EdDSA",
-                    "use": "sig",
-                }]
-            })
-            .to_string(),
+            } => {
+                let mut keys = vec![jwk(kid, x_b64)];
+                // The replaced key stays published while its tokens live, so a
+                // verifier that reads this set accepts what this proxy accepts.
+                if let Some(PrevKey {
+                    kid,
+                    x_b64: Some(x),
+                    ..
+                }) = &self.prev
+                {
+                    keys.push(jwk(kid, x));
+                }
+                serde_json::json!({ "keys": keys }).to_string()
+            }
             _ => "{\"keys\":[]}".to_string(),
         }
     }
@@ -2596,5 +2753,113 @@ mod tests {
             .await
             .unwrap();
         assert!(keys.is_revoked(&store, "jti-y").await);
+    }
+}
+
+#[cfg(test)]
+mod previous_key_tests {
+    //! A signing-key change ends no session and no client token: the replaced
+    //! key, verify-only, still accepts what it signed.
+
+    use super::testkit::der_to_pem;
+    use super::*;
+    use ring::rand::SystemRandom;
+
+    /// A fresh Ed25519 key: its private PEM and its public PEM.
+    fn ed_pems() -> (String, String) {
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let kp = Ed25519KeyPair::from_pkcs8_maybe_unchecked(pkcs8.as_ref()).unwrap();
+        let mut spki: Vec<u8> = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        spki.extend_from_slice(kp.public_key().as_ref());
+        (
+            der_to_pem(pkcs8.as_ref(), "PRIVATE KEY"),
+            der_to_pem(&spki, "PUBLIC KEY"),
+        )
+    }
+
+    fn client(keys: &Keys) -> String {
+        let claims = crate::clients::ClientClaims::new(
+            "iss",
+            "dev1",
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            60,
+            None,
+        );
+        keys.mint_client_token(&claims)
+            .unwrap()
+            .strip_prefix(crate::clients::TOKEN_PREFIX)
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn an_hs256_secret_change_keeps_the_old_tokens_working() {
+        let old = Keys::build(None, None, Some("old-secret".into()), "iss".into(), None);
+        let session = old
+            .mint_user_jwt(Uuid::from_u128(9), "admin", None, 60)
+            .unwrap();
+        let token = client(&old);
+
+        let plain = Keys::build(None, None, Some("new-secret".into()), "iss".into(), None);
+        assert!(
+            plain.verify_jwt_claims(&session).is_err(),
+            "without the previous key"
+        );
+        assert!(plain.verify_client_token(&token).is_err());
+
+        let new = Keys::build(None, None, Some("new-secret".into()), "iss".into(), None)
+            .with_previous(None, Some("old-secret".into()));
+        assert!(new.verify_jwt_claims(&session).is_ok());
+        assert!(new.verify_client_token(&token).is_ok());
+        let fresh = client(&new);
+        assert!(new.verify_client_token(&fresh).is_ok(), "and its own");
+        assert!(
+            old.verify_client_token(&fresh).is_err(),
+            "the old key never verifies the new"
+        );
+        // A token signed by neither stays refused.
+        let other = Keys::build(None, None, Some("someone-else".into()), "iss".into(), None);
+        assert!(new.verify_client_token(&client(&other)).is_err());
+    }
+
+    #[test]
+    fn an_ed25519_key_change_keeps_the_old_tokens_and_publishes_both_keys() {
+        let (old_priv, old_pub) = ed_pems();
+        let (new_priv, _) = ed_pems();
+        let old = Keys::build(Some(old_priv), None, None, "iss".into(), None);
+        let session = old
+            .mint_user_jwt(Uuid::from_u128(9), "admin", None, 60)
+            .unwrap();
+        let token = client(&old);
+
+        let new = Keys::build(Some(new_priv), None, None, "iss".into(), None)
+            .with_previous(Some(old_pub), None);
+        assert!(new.verify_jwt_claims(&session).is_ok());
+        assert!(new.verify_client_token(&token).is_ok());
+        assert!(new.verify_client_token(&client(&new)).is_ok());
+        let jwks: serde_json::Value = serde_json::from_str(&new.jwks_json()).unwrap();
+        assert_eq!(jwks["keys"].as_array().unwrap().len(), 2, "{jwks}");
+
+        let (stranger, _) = ed_pems();
+        let stranger = Keys::build(Some(stranger), None, None, "iss".into(), None);
+        assert!(new.verify_client_token(&client(&stranger)).is_err());
+    }
+
+    #[test]
+    fn a_previous_key_of_the_other_algorithm_is_never_used() {
+        let (new_priv, _) = ed_pems();
+        let hs = Keys::build(None, None, Some("old-secret".into()), "iss".into(), None);
+        let token = client(&hs);
+        let new = Keys::build(Some(new_priv), None, None, "iss".into(), None)
+            .with_previous(None, Some("old-secret".into()));
+        assert!(new.prev.is_none());
+        assert!(
+            new.verify_client_token(&token).is_err(),
+            "no HS256 next to an EdDSA signer"
+        );
     }
 }

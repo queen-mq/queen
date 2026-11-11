@@ -109,6 +109,11 @@ pub enum Principal {
         role: Role,
         operator: bool,
     },
+    /// A scoped client: an API key with grants used directly, or a client
+    /// token minted from one (clients.rs). Its rights are its scope, checked
+    /// by the broker where names resolve; here only the routes that check
+    /// names are open to it. Never a console or operator principal.
+    Client(Arc<crate::clients::ClientPrincipal>),
 }
 
 /// Operation classes metered into usage_minutes.op_class.
@@ -145,6 +150,9 @@ pub struct AppState {
     pub meter: std::sync::Arc<crate::meter::Meter>,
     pub registry: crate::registry::Registry,
     pub keys: crate::auth::Keys,
+    /// Scoped clients: verified tokens, block lists, per-key and per-entity
+    /// buckets, the sampled log lines (clients.rs).
+    pub clients: crate::clients::Clients,
     /// The broker's S3 sink hook (`/api/cp/clusters/:slug/s3`); `None` on a
     /// broker built without the sink.
     pub s3: Option<Arc<dyn crate::s3::S3Sinks>>,

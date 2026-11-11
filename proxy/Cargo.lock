@@ -684,6 +684,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "queen-protocol"
+version = "1.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "queen-proxy"
 version = "1.6.0"
 dependencies = [
@@ -696,6 +704,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken",
+ "queen-protocol",
  "rand",
  "ring",
  "rust-embed",

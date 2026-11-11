@@ -38,8 +38,9 @@ use uuid::Uuid;
 
 use super::kv::{self, Doc, Expect, KvBackend, KvError, Ttl};
 use super::schema::{
-    self, ns, ApiKeyDoc, CellDoc, ClusterDoc, IdentityDoc, OperationDoc, OutboxDoc, PlanDoc,
-    QueueDoc, RevokedDoc, RoleDoc, S3SinkDoc, TenantDoc, UserDoc, K,
+    self, ns, ApiKeyDoc, BlockDoc, CellDoc, ClusterDoc, IdentityDoc, KeyLimitsDoc, KeyPolicyDoc,
+    KeyPreviousDoc, OperationDoc, OutboxDoc, PlanDoc, QueueDoc, RevokedDoc, RoleDoc, S3SinkDoc,
+    TenantDoc, UserDoc, K,
 };
 use super::Store;
 use crate::state::{ClusterCtx, EffectiveLimits, Scopes};
@@ -625,10 +626,32 @@ pub async fn lookup_cluster(store: &Store, key: &ClusterKey) -> Lookup<ClusterCt
     }
 }
 
+/// A live API key as the lookups answer it: its cluster, its id and name, its
+/// whole-cluster scopes and, for a SCOPED key, its policy row (grants,
+/// limits, token ceiling). A key with a policy is scoped whatever its scopes
+/// say: the narrower reading wins.
+#[derive(Clone, Debug)]
+pub struct KeyRecord {
+    pub ctx: ClusterCtx,
+    pub key_id: Uuid,
+    pub name: String,
+    pub scopes: Scopes,
+    pub policy: Option<KeyPolicyDoc>,
+}
+
 /// Resolve an API key by its sha256 hex (the ClusterCache miss path).
-pub async fn lookup_api_key(store: &Store, hash_hex: &str) -> Lookup<(ClusterCtx, Uuid, Scopes)> {
+pub async fn lookup_api_key(store: &Store, hash_hex: &str) -> Lookup<KeyRecord> {
     match store {
         Store::Kv(kv) => kv_lookup_key(kv.as_ref(), hash_hex).await,
+        Store::None => Lookup::Absent,
+    }
+}
+
+/// Resolve a live API key by its id: the key a client token names
+/// (`clients.rs`). Revoked, or its cluster gone, it is `Absent`.
+pub async fn lookup_api_key_by_id(store: &Store, key_id: Uuid) -> Lookup<KeyRecord> {
+    match store {
+        Store::Kv(kv) => kv_lookup_key_id(kv.as_ref(), key_id, None).await,
         Store::None => Lookup::Absent,
     }
 }
@@ -743,7 +766,7 @@ async fn kv_lookup_cluster(kv: &dyn KvBackend, key: &ClusterKey) -> Lookup<Clust
     }
 }
 
-async fn kv_lookup_key(kv: &dyn KvBackend, hash_hex: &str) -> Lookup<(ClusterCtx, Uuid, Scopes)> {
+async fn kv_lookup_key(kv: &dyn KvBackend, hash_hex: &str) -> Lookup<KeyRecord> {
     let id = match lookup_of(
         read1::<Uuid>(kv, ns::KEY_HASH, &schema::key(hash_hex)).await,
         "by_key_hash",
@@ -751,24 +774,70 @@ async fn kv_lookup_key(kv: &dyn KvBackend, hash_hex: &str) -> Lookup<(ClusterCtx
         Ok(d) => d.value,
         Err(g) => return g.lookup(),
     };
-    let key = match lookup_of(
-        read1::<ApiKeyDoc>(kv, ns::KEYS, &schema::key(id)).await,
-        "by_key_hash",
-    ) {
+    kv_lookup_key_id(kv, id, Some(hash_hex)).await
+}
+
+/// The key `id`, its policy and, when it is asked for by a secret's hash,
+/// whether that secret is still the key's: its current one, or the one a
+/// rotation replaced while its grace lasts. All three rows in one read.
+async fn kv_lookup_key_id(
+    kv: &dyn KvBackend,
+    id: Uuid,
+    hash_hex: Option<&str>,
+) -> Lookup<KeyRecord> {
+    let out = match gets(
+        kv,
+        &[
+            (ns::KEYS, schema::key(id)),
+            (ns::KEY_POLICY, schema::key(id)),
+            (ns::KEY_PREVIOUS, schema::key(id)),
+        ],
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(error = %e, "by_key: kv lookup failed");
+            return Lookup::Unavailable;
+        }
+    };
+    let key = match lookup_of(got::<ApiKeyDoc>(out.first()), "by_key") {
         Ok(d) => d.value,
         Err(g) => return g.lookup(),
     };
+    let policy = match got::<KeyPolicyDoc>(out.get(1)) {
+        Ok(p) => p.map(|d| d.value),
+        // A policy that does not decode is no answer, never "not scoped": read
+        // as absent it would turn a scoped key into a whole-cluster one.
+        Err(_) => return Lookup::Unavailable,
+    };
     // `ak.revoked_at IS NULL`, and the hash the index claims (a dangling or
-    // stale index entry is no key at all).
-    if key.revoked_at_us.is_some() || key.key_hash != hash_hex {
+    // stale index entry is no key at all), or the replaced secret in its grace.
+    if key.revoked_at_us.is_some() {
         return Lookup::Absent;
+    }
+    if let Some(hash) = hash_hex {
+        if key.key_hash != hash {
+            let previous = got::<KeyPreviousDoc>(out.get(2)).ok().flatten();
+            let in_grace =
+                previous.is_some_and(|p| p.value.key_hash == hash && p.value.until_us > now_us());
+            if !in_grace {
+                return Lookup::Absent;
+            }
+        }
     }
     let cluster = match kv_cluster_doc(kv, &ClusterKey::Id(key.cluster_id)).await {
         Ok(c) => c,
         Err(g) => return g.lookup(),
     };
     match kv_ctx_for(kv, &cluster).await {
-        Lookup::Found(ctx) => Lookup::Found((ctx, key.id, scopes_of(&key.scopes))),
+        Lookup::Found(ctx) => Lookup::Found(KeyRecord {
+            ctx,
+            key_id: key.id,
+            name: key.name,
+            scopes: scopes_of(&key.scopes),
+            policy,
+        }),
         Lookup::Absent => Lookup::Absent,
         Lookup::Unavailable => Lookup::Unavailable,
     }
@@ -1563,6 +1632,9 @@ fn user_rows(
 /// The rows of a new api key (the key, its audit row, its invalidation).
 /// `index`: `None` claims a free `px.keys.hash` entry; `Some(version)` takes
 /// over a dangling one (an entry no key holds the hash of) under that version.
+///
+/// `policy`: the grants, limits and token ceiling of a SCOPED key (its
+/// `scopes` then empty), written in the same batch as its policy row.
 #[allow(clippy::too_many_arguments)]
 fn new_api_key(
     b: &mut Batch,
@@ -1573,6 +1645,7 @@ fn new_api_key(
     key_hash: &str,
     scopes: &[String],
     index: Option<u64>,
+    policy: Option<&PolicyInput>,
 ) -> Uuid {
     let id = Uuid::new_v4();
     let doc = ApiKeyDoc {
@@ -1597,6 +1670,13 @@ fn new_api_key(
     }
     b.put_new(ns::KEYS, &schema::key(id), &doc);
     b.put(ns::KEY_CLUSTER, &schema::key2(cluster, id), &"");
+    let mut meta = json!({"name": name, "scopes": scopes});
+    if let Some(p) = policy {
+        b.put_new(ns::KEY_POLICY, &schema::key(id), &p.doc(id, now));
+        meta["grants"] = json!(p.grants);
+        meta["limits"] = json!(p.limits);
+        meta["token_ttl_max_s"] = json!(p.token_ttl_max_s);
+    }
     record_op(
         b,
         now,
@@ -1606,7 +1686,7 @@ fn new_api_key(
         None,
         "api_key_issued",
         Some(id.to_string()),
-        json!({"name": name, "scopes": scopes}),
+        meta,
     );
     id
 }
@@ -1900,6 +1980,20 @@ fn check_key_input(
     key_hash: &str,
     scopes: &[String],
 ) -> Result<(), DataError> {
+    check_key_name_hash(who, name, key_hash)?;
+    if scopes.is_empty() {
+        return Err(DataError::Invalid(format!(
+            "{who}: at least one scope is required"
+        )));
+    }
+    if let Some(bad) = scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
+        return Err(DataError::Invalid(format!("{who}: invalid scope {bad}")));
+    }
+    Ok(())
+}
+
+/// A key's name and secret hash, whatever its scopes.
+fn check_key_name_hash(who: &str, name: &str, key_hash: &str) -> Result<(), DataError> {
     if btrim(name).is_empty() {
         return Err(DataError::Invalid(format!("{who}: name must not be empty")));
     }
@@ -1908,14 +2002,6 @@ fn check_key_input(
         return Err(DataError::Invalid(format!(
             "{who}: key_hash must be 64 lowercase hex chars (sha256)"
         )));
-    }
-    if scopes.is_empty() {
-        return Err(DataError::Invalid(format!(
-            "{who}: at least one scope is required"
-        )));
-    }
-    if let Some(bad) = scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
-        return Err(DataError::Invalid(format!("{who}: invalid scope {bad}")));
     }
     Ok(())
 }
@@ -1947,6 +2033,7 @@ pub async fn issue_api_key(
                 btrim(name),
                 key_hash,
                 scopes,
+                None,
                 None,
             );
             commit(kv, b).await.map(|_| id).map_err(write_err)
@@ -2009,6 +2096,404 @@ fn revoke_batch(k: &Doc<ApiKeyDoc>, tenant: Uuid) -> Batch {
         json!({}),
     );
     b
+}
+
+// ===========================================================================
+// scoped keys: the policy, a rotation, the block list
+// ===========================================================================
+
+/// The longest token lifetime a key may allow: a year.
+pub const TOKEN_TTL_CEILING_S: u64 = 365 * 24 * 3600;
+
+/// The highest per-key or per-entity rate a key may set, requests per second.
+pub const CLIENT_RPS_CEILING: u32 = 1_000_000;
+
+/// What a writer asks a scoped key to hold: its grants, its rate limits and
+/// the longest token it may mint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PolicyInput {
+    pub grants: Vec<queen_protocol::scope::Grant>,
+    pub limits: KeyLimitsDoc,
+    pub token_ttl_max_s: Option<u64>,
+}
+
+impl PolicyInput {
+    /// At least one grant, every grant well formed (`check_grants`), limits
+    /// above zero and under [`CLIENT_RPS_CEILING`], a token ceiling between 60 s
+    /// and [`TOKEN_TTL_CEILING_S`]. `who` names the writer in the refusal.
+    pub fn check(&self, who: &str) -> Result<(), DataError> {
+        if self.grants.is_empty() {
+            return Err(DataError::Invalid(format!(
+                "{who}: a scoped key needs at least one grant"
+            )));
+        }
+        queen_protocol::scope::check_grants(&self.grants)
+            .map_err(|e| DataError::Invalid(format!("{who}: {e}")))?;
+        let l = &self.limits;
+        for (name, v) in [
+            ("key_rps", l.key_rps),
+            ("key_burst", l.key_burst),
+            ("sub_rps", l.sub_rps),
+            ("sub_burst", l.sub_burst),
+        ] {
+            if let Some(v) = v {
+                if v == 0 || v > CLIENT_RPS_CEILING {
+                    return Err(DataError::Invalid(format!(
+                        "{who}: limits.{name} is {v}: between 1 and {CLIENT_RPS_CEILING}, or absent \
+                         for no limit"
+                    )));
+                }
+            }
+        }
+        if let Some(t) = self.token_ttl_max_s {
+            if !(60..=TOKEN_TTL_CEILING_S).contains(&t) {
+                return Err(DataError::Invalid(format!(
+                    "{who}: token_ttl_max_s is {t}: between 60 and {TOKEN_TTL_CEILING_S}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn doc(&self, key_id: Uuid, now: i64) -> KeyPolicyDoc {
+        KeyPolicyDoc {
+            key_id,
+            grants: self.grants.clone(),
+            limits: self.limits.clone(),
+            token_ttl_max_s: self.token_ttl_max_s,
+            updated_at_us: now,
+        }
+    }
+}
+
+/// A live key of `cluster_id`, read with its policy row: `Ok(None)` when it is
+/// unknown, revoked or another cluster's.
+async fn live_key_of(
+    kv: &dyn KvBackend,
+    cluster_id: Uuid,
+    key_id: Uuid,
+) -> Result<Option<(Doc<ApiKeyDoc>, Option<Doc<KeyPolicyDoc>>)>, DataError> {
+    let out = gets(
+        kv,
+        &[
+            (ns::KEYS, schema::key(key_id)),
+            (ns::KEY_POLICY, schema::key(key_id)),
+        ],
+    )
+    .await?;
+    let Some(k) = got::<ApiKeyDoc>(out.first())? else {
+        return Ok(None);
+    };
+    if k.value.cluster_id != cluster_id || k.value.revoked_at_us.is_some() {
+        return Ok(None);
+    }
+    Ok(Some((k, got::<KeyPolicyDoc>(out.get(1))?)))
+}
+
+/// Replace a scoped key's grants, limits and token ceiling. Every node's
+/// cache drops the key within a second (the audit row marks the cluster), so
+/// the change reaches every token minted from it. Refuses a key that is not
+/// scoped: a whole-cluster key does not become a scoped one (issue a new key).
+pub async fn set_key_policy(
+    store: &Store,
+    cluster_id: Uuid,
+    key_id: Uuid,
+    input: &PolicyInput,
+    actor: (&str, Option<Uuid>),
+) -> Result<(), DataError> {
+    input.check("set_key_policy")?;
+    let Store::Kv(kv) = store else {
+        return Err(DataError::NoStore);
+    };
+    let kv = kv.as_ref();
+    attempts!(
+        async {
+            let Some((k, policy)) = live_key_of(kv, cluster_id, key_id).await? else {
+                return Err(WriteErr::Fail(DataError::Invalid(format!(
+                    "set_key_policy: no live key {key_id} on this cluster"
+                ))));
+            };
+            let Some(policy) = policy else {
+                return Err(WriteErr::Fail(DataError::Invalid(format!(
+                    "set_key_policy: key {key_id} is not a scoped key; issue a scoped key instead"
+                ))));
+            };
+            let Some(c) = cluster_doc(kv, cluster_id).await? else {
+                return Err(WriteErr::Fail(DataError::Invalid(format!(
+                    "set_key_policy: unknown cluster {cluster_id}"
+                ))));
+            };
+            let now = now_us();
+            let mut b = Batch::default();
+            b.put_at(
+                ns::KEY_POLICY,
+                &schema::key(key_id),
+                &input.doc(key_id, now),
+                policy.version,
+            );
+            record_op(
+                &mut b,
+                now,
+                c.value.tenant_id,
+                Some(cluster_id),
+                actor.0,
+                actor.1,
+                "api_key_policy_set",
+                Some(k.value.id.to_string()),
+                json!({
+                    "grants": input.grants,
+                    "limits": input.limits,
+                    "token_ttl_max_s": input.token_ttl_max_s,
+                }),
+            );
+            commit(kv, b).await.map(|_| ())
+        }
+        .await
+    )
+}
+
+/// The longest grace a rotation may give the replaced secret: a week.
+pub const ROTATE_GRACE_CEILING_S: u64 = 7 * 24 * 3600;
+
+/// Give a key a new secret, keeping its id: every token minted from it keeps
+/// working, and so does the replaced secret for `grace_s` seconds (0: it
+/// stops at once). `new_hash` is the new secret's sha256 hex.
+pub async fn rotate_api_key(
+    store: &Store,
+    cluster_id: Uuid,
+    key_id: Uuid,
+    new_hash: &str,
+    grace_s: u64,
+    actor: (&str, Option<Uuid>),
+) -> Result<(), DataError> {
+    if !key_hash_ok(new_hash) {
+        return Err(DataError::Invalid(
+            "rotate_api_key: key_hash must be 64 lowercase hex chars (sha256)".into(),
+        ));
+    }
+    if grace_s > ROTATE_GRACE_CEILING_S {
+        return Err(DataError::Invalid(format!(
+            "rotate_api_key: grace is {grace_s} s, at most {ROTATE_GRACE_CEILING_S}"
+        )));
+    }
+    let Store::Kv(kv) = store else {
+        return Err(DataError::NoStore);
+    };
+    let kv = kv.as_ref();
+    attempts!(
+        async {
+            let Some((k, _)) = live_key_of(kv, cluster_id, key_id).await? else {
+                return Err(WriteErr::Fail(DataError::Invalid(format!(
+                    "rotate_api_key: no live key {key_id} on this cluster"
+                ))));
+            };
+            let Some(c) = cluster_doc(kv, cluster_id).await? else {
+                return Err(WriteErr::Fail(DataError::Invalid(format!(
+                    "rotate_api_key: unknown cluster {cluster_id}"
+                ))));
+            };
+            let now = now_us();
+            let old_hash = k.value.key_hash.clone();
+            let mut doc = k.value.clone();
+            doc.key_hash = new_hash.to_string();
+            let mut b = Batch::default();
+            b.put_at(ns::KEYS, &schema::key(key_id), &doc, k.version);
+            b.claim(
+                ns::KEY_HASH,
+                &schema::key(new_hash),
+                key_id,
+                "api_keys_key_hash_key",
+            );
+            // The replaced secret's index entry stays, pointing at the key: the
+            // lookup accepts it while the grace row lives, and reads it as no
+            // key at all afterwards (the hash is no longer the key's).
+            if grace_s > 0 {
+                b.op(kv::put_op(
+                    ns::KEY_PREVIOUS,
+                    &schema::key(key_id),
+                    &KeyPreviousDoc {
+                        key_id,
+                        key_hash: old_hash,
+                        until_us: now + (grace_s as i64) * 1_000_000,
+                    },
+                    Expect::Any,
+                    Ttl::Seconds(grace_s),
+                    false,
+                ));
+            } else {
+                b.del(ns::KEY_PREVIOUS, &schema::key(key_id));
+            }
+            record_op(
+                &mut b,
+                now,
+                c.value.tenant_id,
+                Some(cluster_id),
+                actor.0,
+                actor.1,
+                "api_key_rotated",
+                Some(key_id.to_string()),
+                json!({ "grace_s": grace_s }),
+            );
+            commit(kv, b).await.map(|_| ())
+        }
+        .await
+    )
+}
+
+/// `#<cluster>/<key>/<sub>`.
+fn block_key(cluster_id: Uuid, key_id: Uuid, sub: &str) -> String {
+    format!("{K}{cluster_id}/{key_id}/{sub}")
+}
+
+/// The longest reason a block may record.
+pub const BLOCK_REASON_MAX: usize = 200;
+
+/// Refuse one entity: every token of `key_id` for `sub` stops working on
+/// every node within a second, and the key mints no new one for it, until
+/// [`unblock_client`]. The key must be a live scoped key of the cluster.
+/// Blocking twice keeps one row (the newer reason).
+pub async fn block_client(
+    store: &Store,
+    cluster_id: Uuid,
+    key_id: Uuid,
+    sub: &str,
+    reason: Option<&str>,
+    actor: (&str, Option<Uuid>),
+) -> Result<(), DataError> {
+    if !queen_protocol::scope::valid_sub(sub) {
+        return Err(DataError::Invalid(format!(
+            "block_client: `{}` is not a sub (1 to {} letters, digits and . _ - @ +)",
+            shown(sub),
+            queen_protocol::scope::SUB_MAX_BYTES
+        )));
+    }
+    let reason = reason.map(btrim).filter(|r| !r.is_empty());
+    if reason.is_some_and(|r| r.chars().count() > BLOCK_REASON_MAX) {
+        return Err(DataError::Invalid(format!(
+            "block_client: reason is longer than {BLOCK_REASON_MAX} characters"
+        )));
+    }
+    let Store::Kv(kv) = store else {
+        return Err(DataError::NoStore);
+    };
+    let kv = kv.as_ref();
+    let Some((_, Some(_))) = live_key_of(kv, cluster_id, key_id).await? else {
+        return Err(DataError::Invalid(format!(
+            "block_client: no live scoped key {key_id} on this cluster"
+        )));
+    };
+    let Some(c) = cluster_doc(kv, cluster_id).await? else {
+        return Err(DataError::Invalid(format!(
+            "block_client: unknown cluster {cluster_id}"
+        )));
+    };
+    let now = now_us();
+    let mut b = Batch::default();
+    b.put(
+        ns::BLOCKS,
+        &block_key(cluster_id, key_id, sub),
+        &BlockDoc {
+            key_id,
+            sub: sub.to_string(),
+            reason: reason.map(str::to_string),
+            at_us: now,
+        },
+    );
+    record_op(
+        &mut b,
+        now,
+        c.value.tenant_id,
+        Some(cluster_id),
+        actor.0,
+        actor.1,
+        "client_blocked",
+        Some(format!("{key_id}/{sub}")),
+        json!({ "key": key_id, "sub": sub, "reason": reason }),
+    );
+    commit(kv, b).await.map(|_| ()).map_err(write_err)
+}
+
+/// Lift a block. `Ok(false)`: there was none.
+pub async fn unblock_client(
+    store: &Store,
+    cluster_id: Uuid,
+    key_id: Uuid,
+    sub: &str,
+    actor: (&str, Option<Uuid>),
+) -> Result<bool, DataError> {
+    let Store::Kv(kv) = store else {
+        return Err(DataError::NoStore);
+    };
+    let kv = kv.as_ref();
+    if !queen_protocol::scope::valid_sub(sub) {
+        return Ok(false);
+    }
+    let at = block_key(cluster_id, key_id, sub);
+    if read1::<BlockDoc>(kv, ns::BLOCKS, &at).await?.is_none() {
+        return Ok(false);
+    }
+    let Some(c) = cluster_doc(kv, cluster_id).await? else {
+        return Ok(false);
+    };
+    let now = now_us();
+    let mut b = Batch::default();
+    b.del(ns::BLOCKS, &at);
+    record_op(
+        &mut b,
+        now,
+        c.value.tenant_id,
+        Some(cluster_id),
+        actor.0,
+        actor.1,
+        "client_unblocked",
+        Some(format!("{key_id}/{sub}")),
+        json!({ "key": key_id, "sub": sub }),
+    );
+    commit(kv, b).await.map(|_| true).map_err(write_err)
+}
+
+/// Every block of a cluster, oldest key first then by sub.
+pub async fn list_blocks(store: &Store, cluster_id: Uuid) -> Result<Vec<BlockDoc>, DataError> {
+    let Store::Kv(kv) = store else {
+        return Err(DataError::NoStore);
+    };
+    Ok(
+        kv::scan::<BlockDoc>(kv.as_ref(), ns::BLOCKS, &schema::prefix(cluster_id))
+            .await
+            .map_err(DataError::kv)?
+            .into_iter()
+            .map(|(_, d)| d.value)
+            .collect(),
+    )
+}
+
+/// The cluster a key belongs to (live or revoked); `None` for no such key.
+pub async fn key_cluster(store: &Store, key_id: Uuid) -> Result<Option<Uuid>, DataError> {
+    let Store::Kv(kv) = store else {
+        return Err(DataError::NoStore);
+    };
+    Ok(
+        read1::<ApiKeyDoc>(kv.as_ref(), ns::KEYS, &schema::key(key_id))
+            .await?
+            .map(|k| k.value.cluster_id),
+    )
+}
+
+/// The policy rows of `key_ids`, by key id (keys with none left out).
+pub async fn key_policies(
+    store: &Store,
+    key_ids: &[Uuid],
+) -> Result<HashMap<Uuid, KeyPolicyDoc>, DataError> {
+    let Store::Kv(kv) = store else {
+        return Err(DataError::NoStore);
+    };
+    Ok(
+        docs_by_id::<KeyPolicyDoc>(kv.as_ref(), ns::KEY_POLICY, key_ids)
+            .await?
+            .into_iter()
+            .map(|d| (d.value.key_id, d.value))
+            .collect(),
+    )
 }
 
 /// `grant_cluster_role(cluster, email, role)`: upsert. The user
@@ -2396,7 +2881,9 @@ async fn kv_bootstrap_once(
         let plaintext = crate::auth::generate_api_key("live");
         let hash = crate::auth::key_hash_hex(&plaintext);
         let scopes: Vec<String> = SCOPES.iter().map(|s| s.to_string()).collect();
-        new_api_key(&mut b, now, tenant, cluster, key_name, &hash, &scopes, None);
+        new_api_key(
+            &mut b, now, tenant, cluster, key_name, &hash, &scopes, None, None,
+        );
         api_key = Some(plaintext);
     }
 
@@ -3095,6 +3582,7 @@ async fn kv_provision_once(
                 &a.key_hash,
                 &a.scopes,
                 index,
+                None,
             );
             (id, true)
         }
@@ -3220,10 +3708,40 @@ pub async fn ensure_api_key(
     key_hash: &str,
     scopes: &[String],
 ) -> Result<(Uuid, bool), DataError> {
+    ensure_key(store, cluster_id, name, key_hash, scopes, None).await
+}
+
+/// [`ensure_api_key`] for a SCOPED key: no whole-cluster scopes, and the
+/// policy row in the same batch as the key.
+pub async fn ensure_scoped_key(
+    store: &Store,
+    cluster_id: Uuid,
+    name: &str,
+    key_hash: &str,
+    policy: &PolicyInput,
+) -> Result<(Uuid, bool), DataError> {
+    ensure_key(store, cluster_id, name, key_hash, &[], Some(policy)).await
+}
+
+async fn ensure_key(
+    store: &Store,
+    cluster_id: Uuid,
+    name: &str,
+    key_hash: &str,
+    scopes: &[String],
+    policy: Option<&PolicyInput>,
+) -> Result<(Uuid, bool), DataError> {
     match store {
         Store::Kv(kv) => {
             let kv = kv.as_ref();
-            check_key_input("issue_api_key", name, key_hash, scopes)?;
+            match policy {
+                None => check_key_input("issue_api_key", name, key_hash, scopes)?,
+                // A scoped key: its grants, and no whole-cluster scope at all.
+                Some(p) => {
+                    check_key_name_hash("issue_api_key", name, key_hash)?;
+                    p.check("issue_api_key")?;
+                }
+            }
             let mut last =
                 DataError::Unavailable("issue_api_key: concurrent change, gave up".into());
             for _ in 0..ATTEMPTS {
@@ -3249,6 +3767,7 @@ pub async fn ensure_api_key(
                     key_hash,
                     scopes,
                     index,
+                    policy,
                 );
                 match commit(kv, b).await {
                     Ok(_) => return Ok((id, false)),
@@ -4308,10 +4827,9 @@ mod tests {
             Lookup::Absent
         ));
 
-        let (kctx, _kid, scopes) =
-            found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await);
-        assert_eq!(kctx.cluster_id, c);
-        assert_eq!(scopes, Scopes::all());
+        let k = found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await);
+        assert_eq!(k.ctx.cluster_id, c);
+        assert_eq!(k.scopes, Scopes::all());
         assert!(matches!(
             lookup_api_key(&s, &"0".repeat(64)).await,
             Lookup::Absent
@@ -4525,7 +5043,8 @@ mod tests {
         let id = issue_api_key(&s, c, " reader ", &other, &["read".to_string()])
             .await
             .unwrap();
-        let (_, kid, sc) = found(lookup_api_key(&s, &other).await);
+        let k = found(lookup_api_key(&s, &other).await);
+        let (kid, sc) = (k.key_id, k.scopes);
         assert_eq!(
             (kid, sc),
             (
@@ -4543,7 +5062,7 @@ mod tests {
         let (s, kv) = store();
         let (_, _, _, key) = world(&s).await;
         let hash = crate::auth::key_hash_hex(&key);
-        let (_, kid, _) = found(lookup_api_key(&s, &hash).await);
+        let kid = found(lookup_api_key(&s, &hash).await).key_id;
         revoke_api_key(&s, kid).await.unwrap();
         assert!(matches!(lookup_api_key(&s, &hash).await, Lookup::Absent));
         assert_eq!(
@@ -4560,7 +5079,7 @@ mod tests {
     async fn touch_writes_last_used_once_per_window() {
         let (s, kv) = store();
         let (_, _, _, key) = world(&s).await;
-        let (_, kid, _) = found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await);
+        let kid = found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await).key_id;
         touch_api_keys(&s, &[kid, Uuid::new_v4()]).await.unwrap();
         let d: Doc<ApiKeyDoc> = read1(&kv.0, ns::KEYS, &schema::key(kid))
             .await
@@ -4704,7 +5223,7 @@ mod tests {
         persist_queue_floors(&s, &[(c, "orders".into(), 3)])
             .await
             .unwrap();
-        let (_, kid, _) = found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await);
+        let kid = found(lookup_api_key(&s, &crate::auth::key_hash_hex(&key)).await).key_id;
         touch_api_keys(&s, &[kid]).await.unwrap();
         assert_eq!(feed.poll(kv.as_ref()).await.unwrap(), InvalPoll::Quiet);
         // a tenant status fans out to every cluster of the tenant
@@ -5323,7 +5842,7 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(ix, args.user_id);
-        let (_, kid, _) = found(lookup_api_key(&s, &args.key_hash).await);
+        let kid = found(lookup_api_key(&s, &args.key_hash).await).key_id;
         assert_eq!(json!(kid), out["key_id"]);
 
         let cluster = Uuid::parse_str(out["cluster_id"].as_str().unwrap()).unwrap();
@@ -5331,7 +5850,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!existed);
-        assert_eq!(found(lookup_api_key(&s, &other).await).1, id);
+        assert_eq!(found(lookup_api_key(&s, &other).await).key_id, id);
         assert_eq!(
             ensure_api_key(&s, cluster, "x", &other, &["read".to_string()])
                 .await
@@ -5887,5 +6406,267 @@ mod tests {
             seed_default_plans(&s).await.unwrap_err(),
             DataError::NoStore
         );
+    }
+}
+
+#[cfg(test)]
+mod scoped_key_tests {
+    //! Scoped keys in the store: the policy row beside the key, a rotation's
+    //! grace, policy edits, the block list.
+
+    use super::*;
+
+    fn grants(v: Value) -> Vec<queen_protocol::scope::Grant> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn policy() -> PolicyInput {
+        PolicyInput {
+            grants: grants(
+                json!([{"queue": "telemetry", "partition": "{sub}", "ops": ["produce"]}]),
+            ),
+            limits: KeyLimitsDoc {
+                sub_rps: Some(5),
+                ..Default::default()
+            },
+            token_ttl_max_s: Some(600),
+        }
+    }
+
+    fn found<T>(l: Lookup<T>) -> T {
+        match l {
+            Lookup::Found(v) => v,
+            Lookup::Absent => panic!("absent"),
+            Lookup::Unavailable => panic!("unavailable"),
+        }
+    }
+
+    async fn scoped(s: &Store, c: Uuid) -> (Uuid, String) {
+        let hash = crate::auth::key_hash_hex(&crate::auth::generate_api_key("t"));
+        let (id, existed) = ensure_scoped_key(s, c, "devices", &hash, &policy())
+            .await
+            .unwrap();
+        assert!(!existed);
+        (id, hash)
+    }
+
+    #[tokio::test]
+    async fn a_scoped_key_is_found_with_its_policy_and_no_scopes() {
+        let (s, c, _) = test_world("acme", "http://127.0.0.1:1", "pro").await;
+        let (id, hash) = scoped(&s, c).await;
+        for k in [
+            found(lookup_api_key(&s, &hash).await),
+            found(lookup_api_key_by_id(&s, id).await),
+        ] {
+            assert_eq!(k.key_id, id);
+            assert_eq!(k.ctx.cluster_id, c);
+            assert_eq!(k.scopes, Scopes::default(), "no whole-cluster scope at all");
+            let p = k.policy.expect("the policy row");
+            assert_eq!(p.grants, policy().grants);
+            assert_eq!(p.limits.sub_rps, Some(5));
+            assert_eq!(p.token_ttl_max_s, Some(600));
+        }
+        // A retry with the same hash adopts the key.
+        let (again, existed) = ensure_scoped_key(&s, c, "devices", &hash, &policy())
+            .await
+            .unwrap();
+        assert_eq!((again, existed), (id, true));
+        // An older node reads the key document alone: empty scopes.
+        let Store::Kv(kv) = &s else { unreachable!() };
+        let doc = read1::<ApiKeyDoc>(kv.as_ref(), ns::KEYS, &schema::key(id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(doc.value.scopes.is_empty());
+        // Revoked, it is gone by id too.
+        revoke_api_key(&s, id).await.unwrap();
+        assert!(matches!(lookup_api_key_by_id(&s, id).await, Lookup::Absent));
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_does_not_decode_is_no_answer_never_a_whole_cluster_key() {
+        let (s, c, _) = test_world("acme", "http://127.0.0.1:1", "pro").await;
+        let (id, hash) = scoped(&s, c).await;
+        let Store::Kv(kv) = &s else { unreachable!() };
+        kv::write(
+            kv.as_ref(),
+            vec![kv::put_op(
+                ns::KEY_POLICY,
+                &schema::key(id),
+                &json!({"key_id": id, "grants": [{"queue": "q", "ops": ["fly"]}], "updated_at_us": 0}),
+                Expect::Any,
+                Ttl::Forever,
+                false,
+            )],
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            lookup_api_key(&s, &hash).await,
+            Lookup::Unavailable
+        ));
+        assert!(matches!(
+            lookup_api_key_by_id(&s, id).await,
+            Lookup::Unavailable
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_policy_is_checked_edited_and_refused_on_a_whole_cluster_key() {
+        let (s, c, admin) = test_world("acme", "http://127.0.0.1:1", "pro").await;
+        let bad = |v: Value| PolicyInput {
+            grants: grants(v),
+            limits: KeyLimitsDoc::default(),
+            token_ttl_max_s: None,
+        };
+        let hash = |n: &str| crate::auth::key_hash_hex(n);
+        for (input, want) in [
+            (bad(json!([])), "at least one grant"),
+            (
+                bad(json!([{"queue": "q", "partition": "{sub}*", "ops": ["produce"]}])),
+                "separator",
+            ),
+            (
+                PolicyInput {
+                    token_ttl_max_s: Some(10),
+                    ..policy()
+                },
+                "token_ttl_max_s",
+            ),
+            (
+                PolicyInput {
+                    limits: KeyLimitsDoc {
+                        key_rps: Some(0),
+                        ..Default::default()
+                    },
+                    ..policy()
+                },
+                "key_rps",
+            ),
+        ] {
+            let e = ensure_scoped_key(&s, c, "k", &hash("x"), &input)
+                .await
+                .unwrap_err();
+            assert!(e.to_string().contains(want), "{want}: {e}");
+        }
+        let (id, _) = scoped(&s, c).await;
+        let narrow = PolicyInput {
+            grants: grants(
+                json!([{"queue": "commands", "partition": "{sub}", "ops": ["consume"]}]),
+            ),
+            limits: KeyLimitsDoc::default(),
+            token_ttl_max_s: None,
+        };
+        set_key_policy(&s, c, id, &narrow, ("test", None))
+            .await
+            .unwrap();
+        let k = found(lookup_api_key_by_id(&s, id).await);
+        assert_eq!(k.policy.unwrap().grants, narrow.grants);
+        // Not another cluster's key, and not a whole-cluster key.
+        let e = set_key_policy(&s, Uuid::new_v4(), id, &narrow, ("test", None))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("no live key"), "{e}");
+        let admin_id = found(lookup_api_key(&s, &hash(&admin)).await).key_id;
+        let e = set_key_policy(&s, c, admin_id, &narrow, ("test", None))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("not a scoped key"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_rotation_keeps_the_key_and_the_old_secret_for_its_grace() {
+        let (s, c, _) = test_world("acme", "http://127.0.0.1:1", "pro").await;
+        let (id, old) = scoped(&s, c).await;
+        let new = crate::auth::key_hash_hex("the new secret");
+        rotate_api_key(&s, c, id, &new, 3600, ("test", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            found(lookup_api_key(&s, &new).await).key_id,
+            id,
+            "the new secret"
+        );
+        assert_eq!(
+            found(lookup_api_key(&s, &old).await).key_id,
+            id,
+            "the old one, in its grace"
+        );
+        assert!(
+            found(lookup_api_key(&s, &new).await).policy.is_some(),
+            "the policy stays"
+        );
+        // Rotated again with no grace: only the newest works.
+        let newest = crate::auth::key_hash_hex("the newest secret");
+        rotate_api_key(&s, c, id, &newest, 0, ("test", None))
+            .await
+            .unwrap();
+        assert!(matches!(lookup_api_key(&s, &old).await, Lookup::Absent));
+        assert!(matches!(lookup_api_key(&s, &new).await, Lookup::Absent));
+        assert_eq!(found(lookup_api_key(&s, &newest).await).key_id, id);
+        // A grace past its end is no grace.
+        let Store::Kv(kv) = &s else { unreachable!() };
+        kv::write(
+            kv.as_ref(),
+            vec![kv::put_op(
+                ns::KEY_PREVIOUS,
+                &schema::key(id),
+                &KeyPreviousDoc {
+                    key_id: id,
+                    key_hash: new.clone(),
+                    until_us: now_us() - 1,
+                },
+                Expect::Any,
+                Ttl::Forever,
+                false,
+            )],
+        )
+        .await
+        .unwrap();
+        assert!(matches!(lookup_api_key(&s, &new).await, Lookup::Absent));
+        let e = rotate_api_key(&s, c, id, "nothex", 0, ("test", None))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("sha256"), "{e}");
+        let e = rotate_api_key(&s, c, id, &old, ROTATE_GRACE_CEILING_S + 1, ("test", None))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("grace"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn the_block_list_holds_an_entity_per_key_until_it_is_lifted() {
+        let (s, c, _) = test_world("acme", "http://127.0.0.1:1", "pro").await;
+        let (id, _) = scoped(&s, c).await;
+        block_client(&s, c, id, "dev1", Some("stolen"), ("test", None))
+            .await
+            .unwrap();
+        block_client(&s, c, id, "dev2", None, ("test", None))
+            .await
+            .unwrap();
+        block_client(&s, c, id, "dev1", Some("still stolen"), ("test", None))
+            .await
+            .unwrap();
+        let rows = list_blocks(&s, c).await.unwrap();
+        assert_eq!(rows.len(), 2, "blocking twice keeps one row: {rows:?}");
+        assert_eq!(rows[0].reason.as_deref(), Some("still stolen"));
+        assert!(list_blocks(&s, Uuid::new_v4()).await.unwrap().is_empty());
+        for (sub, want) in [("dev/1", "not a sub"), ("", "not a sub")] {
+            let e = block_client(&s, c, id, sub, None, ("test", None))
+                .await
+                .unwrap_err();
+            assert!(e.to_string().contains(want), "{sub:?}: {e}");
+        }
+        let e = block_client(&s, c, Uuid::new_v4(), "dev1", None, ("test", None))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("no live scoped key"), "{e}");
+        assert!(unblock_client(&s, c, id, "dev1", ("test", None))
+            .await
+            .unwrap());
+        assert!(!unblock_client(&s, c, id, "dev1", ("test", None))
+            .await
+            .unwrap());
+        assert_eq!(list_blocks(&s, c).await.unwrap().len(), 1);
     }
 }

@@ -709,4 +709,207 @@ mod tests {
     async fn ephemeral_relays_reach_the_broker_with_the_proxy_on_port() {
         tenant_stays_on_the_owner(Layout::SharedPort).await;
     }
+
+    // -----------------------------------------------------------------------
+    // Scoped clients through the whole single binary (server/src/scope.rs,
+    // queen_proxy::clients): the proxy in front, a real one-node broker behind
+    // it in this process.
+    // -----------------------------------------------------------------------
+
+    /// A scoped key mints a token; the token pushes to its own partition and
+    /// is refused another, by the broker, with the scope the proxy handed it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_client_token_through_the_single_binary_reaches_only_its_partition() {
+        use queen_proxy::store::data;
+        use serde_json::json;
+
+        // The proxy's own settings come from the environment; this one is
+        // read by nothing else in this process.
+        std::env::set_var("QUEEN_PROXY_JWT_SECRET", "scope-e2e-secret-of-some-length");
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir = std::env::temp_dir().join(format!(
+            "queen-proxy-embed-scope-{}-{}",
+            std::process::id(),
+            uuid_free_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let facade = Arc::new(
+            crate::rsm::facade::real::RaftFacade::open(&crate::rsm::facade::RsmBuildCtx {
+                data_dir: dir.display().to_string(),
+                notifier: crate::notify::Notifier::new(false),
+                disk_high_pct: 99.0,
+                disk_low_pct: 98.0,
+            })
+            .expect("open facade"),
+        );
+        let rsm: Arc<dyn crate::rsm::facade::Rsm> = facade.clone();
+        let mut cfg = crate::config::load();
+        cfg.tenancy_header = true;
+        let state =
+            crate::handlers::raft::build_raft_state_with(&cfg, Some(rsm.clone())).expect("state");
+        let mut auth = crate::config::load().auth;
+        auth.enabled = false;
+        let inner = crate::handlers::raft::build_raft_router(
+            state,
+            crate::auth::Authenticator::new(auth),
+            true,
+        );
+        let (proxy, _public) = super::public_router(rsm, inner).expect("embedded proxy");
+
+        // A tenant, its cluster and a device role, in the proxy's store (the
+        // broker's own KV).
+        let store = proxy.store.clone();
+        let mut tries = 0;
+        while data::seed_default_plans(&store).await.is_err() {
+            tries += 1;
+            assert!(tries < 200, "the KV never answered");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        // The proxy seeds its own cell at boot, concurrently: an upsert that
+        // loses that race is simply run again.
+        let spec = data::CellSpec {
+            slug: "local".into(),
+            region: "local".into(),
+            base_url: "inprocess://self".into(),
+            class: "shared".into(),
+            capacity_slots: 1,
+            cell_secret: None,
+        };
+        let mut cell = data::upsert_cell(&store, &spec).await;
+        for _ in 0..20 {
+            if cell.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            cell = data::upsert_cell(&store, &spec).await;
+        }
+        let cell = cell.expect("cell");
+        let out = data::bootstrap_tenant(
+            &store,
+            &data::Bootstrap {
+                tenant_slug: "acme".into(),
+                tenant_name: None,
+                cluster_slug: "acme".into(),
+                plan_code: "pro".into(),
+                cell: Some(cell),
+                admin_email: "admin@acme.test".into(),
+                password: None,
+                key_name: None,
+            },
+        )
+        .await
+        .expect("tenant");
+        let data::Lookup::Found(cluster) =
+            data::cluster_row(&store, &data::ClusterKey::Slug("acme".into())).await
+        else {
+            panic!("the cluster resolves");
+        };
+        let role_key = queen_proxy::auth::generate_api_key("test");
+        data::ensure_scoped_key(
+            &store,
+            cluster.id,
+            "devices",
+            &queen_proxy::auth::key_hash_hex(&role_key),
+            &data::PolicyInput {
+                grants: serde_json::from_value(json!([
+                    {"queue": "telemetry", "partition": "{sub}", "ops": ["produce"]},
+                    {"queue": "commands", "partition": "{sub}", "ops": ["consume"]}
+                ]))
+                .unwrap(),
+                limits: Default::default(),
+                token_ttl_max_s: None,
+            },
+        )
+        .await
+        .expect("a scoped key");
+
+        let send = |method: Method, path: &str, bearer: &str, body: Option<Value>| {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "acme.local")
+                .header("authorization", format!("Bearer {bearer}"));
+            let body = match body {
+                Some(b) => {
+                    req = req.header("content-type", "application/json");
+                    Body::from(b.to_string())
+                }
+                None => Body::empty(),
+            };
+            let req = req.body(body).unwrap();
+            let proxy = proxy.clone();
+            async move {
+                let resp =
+                    queen_proxy::webapp::route_fallback(axum::extract::State(proxy), req).await;
+                let status = resp.status();
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                (
+                    status,
+                    serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+                )
+            }
+        };
+        let denied = |(s, v): &(StatusCode, Value), what: &str| {
+            assert_eq!(*s, StatusCode::FORBIDDEN, "{what}: {v}");
+            assert_eq!(v["code"], "scope_denied", "{what}: {v}");
+        };
+
+        let (s, minted) = send(
+            Method::POST,
+            "/api/v1/tokens",
+            &role_key,
+            Some(json!({"sub": "dev1"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{minted}");
+        let token = minted["token"].as_str().unwrap().to_string();
+
+        let push = |p: &str| {
+            json!({"items": [{"queue": "telemetry", "partition": p, "payload": {"t": 1}}]})
+        };
+        let (s, v) = send(Method::POST, "/api/v1/push", &token, Some(push("dev1"))).await;
+        assert_eq!(s, StatusCode::CREATED, "its own partition, through both: {v}");
+        assert_eq!(v[0]["status"], "queued", "{v}");
+        let r = send(Method::POST, "/api/v1/push", &token, Some(push("dev2"))).await;
+        denied(&r, "another partition, refused by the broker");
+        let r = send(
+            Method::GET,
+            "/api/v1/pop/queue/commands/partition/dev2?wait=false",
+            &token,
+            None,
+        )
+        .await;
+        denied(&r, "another device's commands");
+        let (s, _) = send(
+            Method::GET,
+            "/api/v1/pop/queue/commands/partition/dev1?wait=false",
+            &token,
+            None,
+        )
+        .await;
+        assert!(
+            s == StatusCode::OK || s == StatusCode::NO_CONTENT,
+            "its own commands: {s}"
+        );
+        // The tenant's whole-cluster key still reaches every partition.
+        let admin = out["api_key"].as_str().unwrap();
+        let (s, v) = send(Method::POST, "/api/v1/push", admin, Some(push("dev2"))).await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+
+        drop(proxy);
+        if let Ok(f) = Arc::try_unwrap(facade) {
+            f.shutdown().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A per-test suffix without a uuid crate: nanoseconds since the epoch.
+    fn uuid_free_suffix() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
 }

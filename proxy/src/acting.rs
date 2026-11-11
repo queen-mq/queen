@@ -226,6 +226,14 @@ pub async fn unknown_host_refusal(st: &St, headers: &HeaderMap) -> Response {
             // unchanged: a dead session is a dead session on every host.
             Err(resp) => return resp,
         },
+        // A client token names its cluster itself: live or not, the same
+        // lookups the shared host makes.
+        Credential::ClientToken(jwt) => {
+            match crate::clients::authenticate_token(st, &jwt, None).await {
+                Ok(_) => true,
+                Err(resp) => return resp,
+            }
+        }
     };
     debug_assert!(live);
     errors::err_421("no cluster for this host")
@@ -289,12 +297,13 @@ pub async fn resolve_from_credential(
             SharedRoute::ByKey => {
                 let hash = auth::key_hash_hex(&key);
                 match st.cache.by_key_hash(&hash).await {
-                    Some((ctx, key_id, scopes)) => {
+                    Some(k) => {
                         tracing::debug!(
-                            target: "auth", cluster = %ctx.slug, key = %key_id,
+                            target: "auth", cluster = %k.ctx.slug, key = %k.key_id,
                             "shared host: cluster resolved from the api key"
                         );
-                        Ok((ctx, Principal::ApiKey { key_id, scopes }))
+                        let principal = k.principal();
+                        Ok((k.ctx, principal))
                     }
                     // 401, never 421 and never 403 (decision z). There is no
                     // "wrong host" to report and no cluster to be forbidden
@@ -305,6 +314,15 @@ pub async fn resolve_from_credential(
             }
             other => Err(shared_refusal(other)),
         },
+
+        // A client token: a machine credential like a key, and it names its
+        // cluster itself (its `cluster` claim, checked against its key's).
+        Credential::ClientToken(jwt) => {
+            match decide_shared(CredKind::ApiKey, act.as_deref(), None) {
+                SharedRoute::ByKey => crate::clients::authenticate_token(st, &jwt, None).await,
+                other => Err(shared_refusal(other)),
+            }
+        }
 
         Credential::Session(token) => {
             let session = auth::verify_session(st, &token).await?;
@@ -360,7 +378,8 @@ pub async fn authenticate_for(
     let secure = crate::oauth::cookie_is_secure(st, headers);
     let cred = auth::read_credential(&st.cfg.cookie_name, secure, headers);
     let kind = match &cred {
-        Credential::ApiKey(_) => CredKind::ApiKey,
+        // A client token acts as nobody else, exactly as a key does.
+        Credential::ApiKey(_) | Credential::ClientToken(_) => CredKind::ApiKey,
         Credential::Session(_) => CredKind::Session,
         Credential::None => CredKind::None,
     };
@@ -677,6 +696,7 @@ mod tests {
             meter,
             registry,
             keys,
+            clients: Default::default(),
             s3: None,
         })
     }

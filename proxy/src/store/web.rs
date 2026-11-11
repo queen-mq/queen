@@ -1278,6 +1278,9 @@ pub struct KeyRow {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub revoked_at: Option<String>,
+    /// A scoped key's policy row (grants, limits, token ceiling); `None` for a
+    /// whole-cluster key.
+    pub policy: Option<crate::store::schema::KeyPolicyDoc>,
 }
 
 /// A cluster's API keys, newest first (revoked ones included).
@@ -1290,9 +1293,14 @@ pub async fn list_cluster_keys(store: &Store, cluster_id: Uuid) -> Result<Vec<Ke
                 .map(|d| d.value)
                 .collect();
             docs.sort_by(|a, b| b.created_at_us.cmp(&a.created_at_us));
+            let ids: Vec<Uuid> = docs.iter().map(|k| k.id).collect();
+            let mut policies = crate::store::data::key_policies(store, &ids)
+                .await
+                .map_err(WebError::from)?;
             Ok(docs
                 .into_iter()
                 .map(|k| KeyRow {
+                    policy: policies.remove(&k.id),
                     id: k.id.to_string(),
                     name: k.name,
                     scopes: k.scopes,

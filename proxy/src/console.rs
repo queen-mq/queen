@@ -43,7 +43,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
@@ -76,6 +76,14 @@ pub fn router() -> Router<St> {
         .route("/usage", get(usage))
         .route("/keys", get(list_keys).post(create_key))
         .route("/keys/:id", delete(delete_key))
+        // A scoped key's grants, its secret, and the entities it refuses
+        // (clients.rs). A sub is ASCII letters, digits and `. _ - @ +`: safe
+        // in a path segment as it is.
+        .route("/keys/:id/policy", put(set_key_policy))
+        .route("/keys/:id/rotate", post(rotate_key))
+        .route("/keys/:id/blocks", post(block_client))
+        .route("/keys/:id/blocks/:sub", delete(unblock_client))
+        .route("/blocks", get(list_blocks))
         // Members are addressed by email, not by id: an email is what an admin
         // types, and it is the only handle `grant_cluster_role` /
         // `revoke_cluster_role` take. It is carried in the
@@ -152,7 +160,7 @@ async fn console_ctx(
         return Err(errors::err_403(errors::CODE_SUSPENDED, "cluster suspended"));
     }
     match principal {
-        Principal::ApiKey { .. } => Err(errors::err_403(
+        Principal::ApiKey { .. } | Principal::Client(_) => Err(errors::err_403(
             errors::CODE_FORBIDDEN,
             "api keys cannot access the console (human session required)",
         )),
@@ -381,10 +389,24 @@ async fn list_keys(State(st): State<St>, headers: HeaderMap) -> Response {
     let items: Vec<Value> = rows
         .into_iter()
         .map(|r| {
+            let (grants, limits, ttl) = match &r.policy {
+                Some(p) => (
+                    json!(p.grants),
+                    json!(p.limits),
+                    json!(p
+                        .token_ttl_max_s
+                        .unwrap_or(crate::clients::DEFAULT_TOKEN_TTL_MAX_S)),
+                ),
+                None => (Value::Null, Value::Null, Value::Null),
+            };
             json!({
                 "id": r.id,
                 "name": r.name,
                 "scopes": r.scopes,
+                "scoped": r.policy.is_some(),
+                "grants": grants,
+                "limits": limits,
+                "token_ttl_max_s": ttl,
                 "created_at": r.created_at,
                 "last_used_at": r.last_used_at,
                 "revoked_at": r.revoked_at,
@@ -394,10 +416,56 @@ async fn list_keys(State(st): State<St>, headers: HeaderMap) -> Response {
     json_ok(json!(items))
 }
 
+/// A whole-cluster key names `scopes`; a scoped key names `grants` (and no
+/// scopes), with its optional limits and token ceiling.
 #[derive(Deserialize)]
 struct CreateKeyReq {
     name: String,
+    #[serde(default)]
     scopes: Vec<String>,
+    #[serde(default)]
+    grants: Option<Vec<queen_protocol::scope::Grant>>,
+    #[serde(default)]
+    limits: Option<crate::store::schema::KeyLimitsDoc>,
+    #[serde(default)]
+    token_ttl_max_s: Option<u64>,
+}
+
+/// The policy part of a scoped key's create or edit.
+#[derive(Deserialize)]
+struct PolicyReq {
+    grants: Vec<queen_protocol::scope::Grant>,
+    #[serde(default)]
+    limits: Option<crate::store::schema::KeyLimitsDoc>,
+    #[serde(default)]
+    token_ttl_max_s: Option<u64>,
+}
+
+fn policy_input(
+    grants: Vec<queen_protocol::scope::Grant>,
+    limits: Option<crate::store::schema::KeyLimitsDoc>,
+    token_ttl_max_s: Option<u64>,
+) -> crate::store::data::PolicyInput {
+    crate::store::data::PolicyInput {
+        grants,
+        limits: limits.unwrap_or_default(),
+        token_ttl_max_s,
+    }
+}
+
+/// A store refusal of a scoped-key write: its rule as a 400 (the message
+/// names the grant and the field), anything else the 502 every console write
+/// answers.
+fn data_refusal(what: &str, e: crate::store::data::DataError) -> Response {
+    use crate::store::data::DataError;
+    match e {
+        DataError::Invalid(m) => err_400("invalid_request", &m),
+        DataError::Conflict(m) => errors::json_error(StatusCode::CONFLICT, "conflict", &m),
+        other => {
+            tracing::warn!(target: "console", err = %other, "{what} failed");
+            errors::err_502("store unavailable")
+        }
+    }
 }
 
 async fn create_key(
@@ -416,6 +484,41 @@ async fn create_key(
         Ok(n) => n,
         Err(msg) => return err_400("invalid_request", msg),
     };
+    if let Some(grants) = body.grants {
+        if !body.scopes.is_empty() {
+            return err_400(
+                "invalid_request",
+                "a key holds scopes (the whole cluster) or grants (scoped), not both",
+            );
+        }
+        let policy = policy_input(grants, body.limits, body.token_ttl_max_s);
+        let plaintext = auth::generate_api_key("live");
+        let hash = auth::key_hash_hex(&plaintext);
+        let id = match crate::store::data::ensure_scoped_key(
+            &st.store,
+            ctx.cluster_id,
+            &name,
+            &hash,
+            &policy,
+        )
+        .await
+        {
+            Ok((id, _)) => id,
+            Err(e) => return data_refusal("create_key (scoped)", e),
+        };
+        record_user_op(
+            &st,
+            ctx.tenant_id,
+            ctx.cluster_id,
+            user_id,
+            "console_api_key_issued",
+            Some(&id.to_string()),
+            json!({ "name": name, "grants": policy.grants }),
+        )
+        .await;
+        web::invalidate_local(&st, &[ctx.cluster_id]);
+        return json_ok(json!({ "id": id, "key": plaintext }));
+    }
     if let Err(msg) = validate_scopes(&body.scopes) {
         return err_400("invalid_request", msg);
     }
@@ -498,6 +601,193 @@ async fn delete_key(
     }
     web::invalidate_local(&st, &[ctx.cluster_id]);
     json_ok(json!({ "ok": true }))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /keys/:id/policy, POST /keys/:id/rotate, the block list
+//
+// The cluster is ALWAYS this session's (the delete_key discipline): every
+// store call below takes it and refuses a key of another cluster.
+// ---------------------------------------------------------------------------
+
+fn key_id_of(raw: &str) -> Result<Uuid, Response> {
+    Uuid::parse_str(raw).map_err(|_| err_400("invalid_request", "malformed key id"))
+}
+
+async fn set_key_policy(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Path(key_id): Path<String>,
+    Json(body): Json<PolicyReq>,
+) -> Response {
+    let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Err(e) = require_admin(role) {
+        return e;
+    }
+    let key_id = match key_id_of(&key_id) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let policy = policy_input(body.grants, body.limits, body.token_ttl_max_s);
+    if let Err(e) = crate::store::data::set_key_policy(
+        &st.store,
+        ctx.cluster_id,
+        key_id,
+        &policy,
+        ("user", Some(user_id)),
+    )
+    .await
+    {
+        return data_refusal("set_key_policy", e);
+    }
+    web::invalidate_local(&st, &[ctx.cluster_id]);
+    json_ok(json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct RotateReq {
+    /// How long the replaced secret keeps working, seconds (0, the default:
+    /// it stops at once).
+    #[serde(default)]
+    grace_seconds: u64,
+}
+
+async fn rotate_key(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Path(key_id): Path<String>,
+    body: Option<Json<RotateReq>>,
+) -> Response {
+    let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Err(e) = require_admin(role) {
+        return e;
+    }
+    let key_id = match key_id_of(&key_id) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let grace = body.map(|Json(b)| b.grace_seconds).unwrap_or(0);
+    let plaintext = auth::generate_api_key("live");
+    let hash = auth::key_hash_hex(&plaintext);
+    if let Err(e) = crate::store::data::rotate_api_key(
+        &st.store,
+        ctx.cluster_id,
+        key_id,
+        &hash,
+        grace,
+        ("user", Some(user_id)),
+    )
+    .await
+    {
+        return data_refusal("rotate_key", e);
+    }
+    web::invalidate_local(&st, &[ctx.cluster_id]);
+    json_ok(json!({ "id": key_id, "key": plaintext, "grace_seconds": grace }))
+}
+
+#[derive(Deserialize)]
+struct BlockReq {
+    sub: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn block_client(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Path(key_id): Path<String>,
+    Json(body): Json<BlockReq>,
+) -> Response {
+    let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Err(e) = require_admin(role) {
+        return e;
+    }
+    let key_id = match key_id_of(&key_id) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    if let Err(e) = crate::store::data::block_client(
+        &st.store,
+        ctx.cluster_id,
+        key_id,
+        body.sub.trim(),
+        body.reason.as_deref(),
+        ("user", Some(user_id)),
+    )
+    .await
+    {
+        return data_refusal("block_client", e);
+    }
+    // This node at once; every other one through the invalidation feed.
+    st.clients.blocks.invalidate(ctx.cluster_id);
+    web::invalidate_local(&st, &[ctx.cluster_id]);
+    json_ok(json!({ "ok": true, "key": key_id, "sub": body.sub.trim() }))
+}
+
+async fn unblock_client(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Path((key_id, sub)): Path<(String, String)>,
+) -> Response {
+    let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Err(e) = require_admin(role) {
+        return e;
+    }
+    let key_id = match key_id_of(&key_id) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    match crate::store::data::unblock_client(
+        &st.store,
+        ctx.cluster_id,
+        key_id,
+        &sub,
+        ("user", Some(user_id)),
+    )
+    .await
+    {
+        Ok(true) => {
+            st.clients.blocks.invalidate(ctx.cluster_id);
+            web::invalidate_local(&st, &[ctx.cluster_id]);
+            json_ok(json!({ "ok": true }))
+        }
+        Ok(false) => errors::err_404("not_found", "no such block on this cluster"),
+        Err(e) => data_refusal("unblock_client", e),
+    }
+}
+
+async fn list_blocks(State(st): State<St>, headers: HeaderMap) -> Response {
+    let (ctx, _user_id, role) = match console_ctx(&st, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Err(e) = require_admin(role) {
+        return e;
+    }
+    match crate::store::data::list_blocks(&st.store, ctx.cluster_id).await {
+        Ok(rows) => json_ok(json!(rows
+            .into_iter()
+            .map(|b| json!({
+                "key": b.key_id,
+                "sub": b.sub,
+                "reason": b.reason,
+                "at": crate::store::data::iso_utc(b.at_us),
+            }))
+            .collect::<Vec<_>>())),
+        Err(e) => data_refusal("list_blocks", e),
+    }
 }
 
 fn validate_name(raw: &str) -> Result<String, &'static str> {

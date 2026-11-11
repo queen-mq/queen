@@ -2118,6 +2118,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken",
+ "queen-protocol",
  "rand 0.8.7",
  "ring",
  "rust-embed",

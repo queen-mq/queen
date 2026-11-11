@@ -105,7 +105,7 @@ const RESP_BUFFER_CAP: usize = 64 * 1024 * 1024;
 
 /// Step 2, as a function so the shared-host path can run the SAME gate in the
 /// same place once the credential has named a cluster.
-fn status_gate(ctx: &ClusterCtx) -> Option<Response> {
+pub(crate) fn status_gate(ctx: &ClusterCtx) -> Option<Response> {
     match ctx.status {
         ClusterStatus::Suspended | ClusterStatus::Deleting => {
             Some(errors::err_403(errors::CODE_SUSPENDED, "cluster suspended"))
@@ -355,6 +355,37 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             crate::acting::note_operator_access(*user_id, &ctx.slug, req.uri().path());
         }
     }
+    // A scoped client (clients.rs): the exact routes that check names, past the
+    // class `authorize` already matched, and only to a broker in this process,
+    // the one sure to read the scope it is handed.
+    let client = match &principal {
+        crate::state::Principal::Client(c) => Some(c.clone()),
+        _ => None,
+    };
+    if let Some(c) = &client {
+        let (method, path) = (req.method().as_str(), req.uri().path());
+        if !queen_protocol::scope::scoped_route(method, path) {
+            st.clients.log.refused(
+                &ctx.slug,
+                &c.who(),
+                method,
+                path,
+                "route not open to a scoped client",
+            );
+            return errors::err_403(
+                "scope_denied",
+                "this credential may push, pop, ack, renew a lease, and use transactions, KV and \
+                 timers, each on the names its grants cover: not this route",
+            );
+        }
+        if !st.upstream.in_process() {
+            return errors::json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "scope_unsupported",
+                "scoped credentials are served only where the broker runs in this process",
+            );
+        }
+    }
 
     // One request id threads the whole pipeline (logs + upstream + response).
     let rid = crate::obs::request_id();
@@ -386,6 +417,23 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
                 return errors::err_429(code, retry_after_s, "request rate limit exceeded");
             }
             // shadow deny: canonical would_block log emitted inside check_req
+        }
+    }
+    // ----- 4a'. a scoped client's own limits: its entity, then its key -----
+    if let Some(c) = &client {
+        if let Err(retry_after_s) = st.clients.limiter.check(c) {
+            st.clients.log.refused(
+                &ctx.slug,
+                &c.who(),
+                req.method().as_str(),
+                &path_only,
+                "rate limited",
+            );
+            return errors::err_429(
+                "client_rate_limited",
+                retry_after_s,
+                "this client's own request rate is exceeded",
+            );
         }
     }
 
@@ -715,6 +763,17 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
     for h in crate::config::BROKER_INTERNAL_HEADERS {
         parts.headers.remove(*h);
     }
+    // The scope is this proxy's word, never the client's: whatever the caller
+    // sent under its name goes, and a scoped client's own takes its place,
+    // with the same scope typed for the broker in this process (a relay to
+    // the leader carries the header).
+    parts.headers.remove(crate::clients::SCOPE_HEADER);
+    if let Some(c) = &client {
+        parts
+            .headers
+            .insert(crate::clients::SCOPE_HEADER, c.header.clone());
+        parts.extensions.insert(c.scope.clone());
+    }
     // A cluster's leader answers a feed read 421 and names its followers, which
     // nothing behind this proxy can reach: ask it to relay the read to one of
     // them instead (routes.rs, the feed arm; config.rs `FEED_RELAY_HEADER`).
@@ -764,6 +823,18 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
 
     // ----- 6. metering (M1–M6) -----
     let status = resp.status();
+    // The broker refused a name the grants do not cover: one line for it.
+    if status == StatusCode::FORBIDDEN {
+        if let Some(c) = &client {
+            st.clients.log.refused(
+                &ctx.slug,
+                &c.who(),
+                op.as_str(),
+                &path_only,
+                "a name outside the grants",
+            );
+        }
+    }
     let resp_cl = content_length(resp.headers());
 
     // M5: upstream 5xx — record reqs=1 msgs=0, log separately, never bill. Stream
@@ -3459,6 +3530,7 @@ mod tests {
             meter,
             registry,
             keys,
+            clients: Default::default(),
             s3: None,
         })
     }
@@ -3818,6 +3890,7 @@ mod tests {
             meter,
             registry,
             keys,
+            clients: Default::default(),
             s3: None,
         })
     }

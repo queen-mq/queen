@@ -141,7 +141,46 @@ struct HostEntry {
     refresh_after: Instant,
 }
 
-type KeyResult = (Arc<ClusterCtx>, Uuid, Scopes);
+/// A live API key, as the gateway uses it.
+#[derive(Clone)]
+pub struct KeyFound {
+    pub ctx: Arc<ClusterCtx>,
+    pub key_id: Uuid,
+    /// Shared, so the per-request clone of a cached key allocates nothing.
+    pub name: Arc<str>,
+    pub scopes: Scopes,
+    /// A scoped key's policy (clients.rs); `None` for a whole-cluster key.
+    /// Read again whenever the key is: an edited key is a new `Arc`.
+    pub policy: Option<Arc<crate::clients::KeyPolicy>>,
+}
+
+impl KeyFound {
+    fn from_record(r: data::KeyRecord) -> KeyFound {
+        KeyFound {
+            policy: r
+                .policy
+                .map(|p| Arc::new(crate::clients::KeyPolicy::new(r.key_id, p))),
+            ctx: Arc::new(r.ctx),
+            key_id: r.key_id,
+            name: Arc::from(r.name),
+            scopes: r.scopes,
+        }
+    }
+
+    /// The key used directly: a whole-cluster key, or a scoped one with no
+    /// entity (its grants that name no `{sub}`).
+    pub fn principal(&self) -> crate::state::Principal {
+        match &self.policy {
+            Some(p) => crate::state::Principal::Client(p.direct()),
+            None => crate::state::Principal::ApiKey {
+                key_id: self.key_id,
+                scopes: self.scopes,
+            },
+        }
+    }
+}
+
+type KeyResult = KeyFound;
 
 #[derive(Clone)]
 struct KeyEntry {
@@ -153,6 +192,7 @@ struct KeyEntry {
 
 type HostMap = RwLock<HashMap<String, HostEntry>>;
 type KeyMap = RwLock<HashMap<String, KeyEntry>>;
+type KeyIdMap = RwLock<HashMap<Uuid, KeyEntry>>;
 /// Keys a successful lookup has seen since the last `last_used_at` flush.
 type Touched = Mutex<HashSet<Uuid>>;
 
@@ -286,8 +326,12 @@ pub struct ClusterCache {
     stale_grace: Duration,
     host_cache: Arc<HostMap>,
     key_cache: Arc<KeyMap>,
+    /// Keys by id, for the client tokens that name theirs (clients.rs). Same
+    /// TTLs, same invalidation by cluster.
+    key_id_cache: Arc<KeyIdMap>,
     host_flights: Arc<Flights<Lookup<Arc<ClusterCtx>>>>,
     key_flights: Arc<Flights<Lookup<KeyResult>>>,
+    key_id_flights: Arc<Flights<Lookup<KeyResult>>>,
     touched: Arc<Touched>,
     /// Extra per-cluster state to drop alongside this cache's own entries when
     /// the store says a cluster changed. The invalidation feed is the cell's
@@ -306,16 +350,28 @@ type InvalHook = Arc<dyn Fn(Uuid) + Send + Sync>;
 impl ClusterCache {
     /// A cache over `store` (the broker's KV).
     pub fn new(cfg: &Config, store: Store) -> ClusterCache {
+        let key_id_cache: Arc<KeyIdMap> = Arc::new(RwLock::new(HashMap::new()));
+        // The by-id entries go with their cluster, through the same hook list
+        // every other cluster-keyed state uses.
+        let by_id = key_id_cache.clone();
+        let hook: InvalHook = Arc::new(move |cluster_id| {
+            by_id.write().unwrap().retain(|_, e| match &e.value {
+                Some(k) => k.ctx.cluster_id != cluster_id,
+                None => true,
+            });
+        });
         ClusterCache {
             default_cluster: cfg.default_cluster.clone(),
             store,
             stale_grace: crate::config::stale_grace(),
             host_cache: Arc::new(RwLock::new(HashMap::new())),
             key_cache: Arc::new(RwLock::new(HashMap::new())),
+            key_id_cache,
             host_flights: Flights::new(),
             key_flights: Flights::new(),
+            key_id_flights: Flights::new(),
             touched: Arc::new(Mutex::new(HashSet::new())),
-            inval_subscribers: Arc::new(RwLock::new(Vec::new())),
+            inval_subscribers: Arc::new(RwLock::new(vec![hook])),
         }
     }
 
@@ -490,6 +546,57 @@ impl ClusterCache {
         }
     }
 
+    /// Look up a live API key by id: the key a client token names. Same
+    /// three-way shape as [`Self::by_key_hash`], same TTLs, same fail-open for
+    /// a key the store cannot confirm or withdraw.
+    pub async fn by_key_id(&self, key_id: Uuid) -> Option<KeyResult> {
+        if !self.store.is_some() {
+            return None;
+        }
+        let now = Instant::now();
+        let stale = {
+            let cache = self.key_id_cache.read().unwrap();
+            match cache.get(&key_id) {
+                Some(e) if e.expires_at > now => return e.value.clone(),
+                Some(e) => Some(e.clone()),
+                None => None,
+            }
+        };
+        let flight = key_id.to_string();
+        if let Some(e) = &stale {
+            if fallback(Miss::NoAnswer, Some(e.expires_at), now, self.stale_grace)
+                == Fallback::ServeStale
+            {
+                if now >= e.refresh_after {
+                    let work = key_id_lookup_work(&self.store, &self.key_id_cache, key_id);
+                    self.key_id_flights.start(&flight, work);
+                }
+                return e.value.clone();
+            }
+        }
+        let looked = self
+            .key_id_flights
+            .join(
+                &flight,
+                key_id_lookup_work(&self.store, &self.key_id_cache, key_id),
+            )
+            .await;
+        let miss = match looked {
+            Some(Lookup::Found(result)) => return Some(result),
+            Some(Lookup::Absent) => Miss::NoSuchRow,
+            Some(Lookup::Unavailable) | None => Miss::NoAnswer,
+        };
+        match fallback(
+            miss,
+            stale.as_ref().map(|e| e.expires_at),
+            now,
+            self.stale_grace,
+        ) {
+            Fallback::ServeStale => stale.and_then(|e| e.value),
+            Fallback::FailClosed | Fallback::Deny => None,
+        }
+    }
+
     /// Invalidate a cluster (invalidation feed or admin action).
     pub fn invalidate(&self, cluster_id: Uuid) {
         fan_out_invalidation(
@@ -589,11 +696,60 @@ fn key_lookup_work(
     let hash = hash_hex.to_string();
     async move {
         let looked = match data::lookup_api_key(&store, &hash).await {
-            Lookup::Found((ctx, key_id, scopes)) => Lookup::Found((Arc::new(ctx), key_id, scopes)),
+            Lookup::Found(r) => Lookup::Found(KeyFound::from_record(r)),
             Lookup::Absent => Lookup::Absent,
             Lookup::Unavailable => Lookup::Unavailable,
         };
         apply_key_lookup(&cache, &touched, &hash, &looked);
+        looked
+    }
+}
+
+/// Same, for one key-by-id flight. Not a touch: a token's key is not the key
+/// presented (its `last_used_at` stays the key's own use).
+fn key_id_lookup_work(
+    store: &Store,
+    cache: &Arc<KeyIdMap>,
+    key_id: Uuid,
+) -> impl Future<Output = Lookup<KeyResult>> + Send + 'static {
+    let store = store.clone();
+    let cache = cache.clone();
+    async move {
+        let looked = match data::lookup_api_key_by_id(&store, key_id).await {
+            Lookup::Found(r) => Lookup::Found(KeyFound::from_record(r)),
+            Lookup::Absent => Lookup::Absent,
+            Lookup::Unavailable => Lookup::Unavailable,
+        };
+        let now = Instant::now();
+        match &looked {
+            Lookup::Found(k) => {
+                cache.write().unwrap().insert(
+                    key_id,
+                    KeyEntry {
+                        value: Some(k.clone()),
+                        expires_at: now + KEY_POSITIVE_TTL,
+                        refresh_after: now + KEY_POSITIVE_TTL,
+                    },
+                );
+            }
+            // Ids come from verified tokens only, never from an anonymous
+            // caller, so a negative entry needs no cap of its own.
+            Lookup::Absent => {
+                cache.write().unwrap().insert(
+                    key_id,
+                    KeyEntry {
+                        value: None,
+                        expires_at: now + KEY_NEGATIVE_TTL,
+                        refresh_after: now + KEY_NEGATIVE_TTL,
+                    },
+                );
+            }
+            Lookup::Unavailable => {
+                if let Some(e) = cache.write().unwrap().get_mut(&key_id) {
+                    e.refresh_after = (now + REFRESH_BACKOFF).max(e.refresh_after);
+                }
+            }
+        }
         looked
     }
 }
@@ -658,7 +814,7 @@ fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &
                     refresh_after: now + KEY_POSITIVE_TTL,
                 },
             );
-            touched.lock().unwrap().insert(result.1);
+            touched.lock().unwrap().insert(result.key_id);
         }
         // The store answered: this hash is unknown or revoked. The negative entry
         // both denies and replaces any expired positive, so the grace window
@@ -769,7 +925,7 @@ fn invalidate_caches(host_cache: &HostMap, key_cache: &KeyMap, cluster_id: Uuid)
         .unwrap()
         .retain(|_, e| e.ctx.cluster_id != cluster_id);
     key_cache.write().unwrap().retain(|_, e| match &e.value {
-        Some((ctx, _, _)) => ctx.cluster_id != cluster_id,
+        Some(k) => k.ctx.cluster_id != cluster_id,
         // Negative entries (unknown/garbage hash) aren't tied to any real
         // cluster; a cluster's invalidation has nothing to say about them.
         None => true,
@@ -811,7 +967,7 @@ fn cached_clusters(host_cache: &HostMap, key_cache: &KeyMap) -> HashSet<Uuid> {
             .read()
             .unwrap()
             .values()
-            .filter_map(|e| e.value.as_ref().map(|(ctx, _, _)| ctx.cluster_id)),
+            .filter_map(|e| e.value.as_ref().map(|k| k.ctx.cluster_id)),
     );
     ids
 }
@@ -1254,6 +1410,16 @@ mod tests {
 
     // ---- single-flight + outcome application ----
 
+    fn found(ctx: Arc<ClusterCtx>, key_id: Uuid) -> KeyFound {
+        KeyFound {
+            ctx,
+            key_id,
+            name: Arc::from("k"),
+            scopes: Scopes::all(),
+            policy: None,
+        }
+    }
+
     fn ctx(id: u128) -> Arc<ClusterCtx> {
         Arc::new(ClusterCtx {
             cluster_id: Uuid::from_u128(id),
@@ -1383,7 +1549,7 @@ mod tests {
             &cache,
             &touched,
             "h1",
-            &Lookup::Found((ctx(1), key_id, Scopes::all())),
+            &Lookup::Found(found(ctx(1), key_id)),
         );
         assert!(cache.read().unwrap()["h1"].value.is_some());
         assert!(
@@ -1424,7 +1590,7 @@ mod tests {
             &cache,
             &touched,
             "live",
-            &Lookup::Found((ctx(1), key_id, Scopes::all())),
+            &Lookup::Found(found(ctx(1), key_id)),
         );
 
         for i in 0..(KEY_NEGATIVE_MAX * 2) {
@@ -1462,7 +1628,7 @@ mod tests {
             &cache,
             &touched,
             "revoked",
-            &Lookup::Found((ctx(2), key_id, Scopes::all())),
+            &Lookup::Found(found(ctx(2), key_id)),
         );
         apply_key_lookup(&cache, &touched, "revoked", &Lookup::Absent);
         assert!(
@@ -1526,11 +1692,11 @@ mod tests {
             "acme"
         );
         assert!(cache.resolve_host("nope.eu1").await.is_none());
-        let (kctx, _, scopes) = cache
+        let k = cache
             .by_key_hash(&crate::auth::key_hash_hex(&key))
             .await
             .expect("key");
-        assert_eq!((kctx.cluster_id, scopes), (cluster, Scopes::all()));
+        assert_eq!((k.ctx.cluster_id, k.scopes), (cluster, Scopes::all()));
         assert!(cache.by_key_hash(&"0".repeat(64)).await.is_none());
     }
 
@@ -1547,7 +1713,7 @@ mod tests {
         cache.spawn_listener();
         tokio::time::sleep(Duration::from_millis(200)).await; // the feed's baseline
         let hash = crate::auth::key_hash_hex(&key);
-        let (_, key_id, _) = cache.by_key_hash(&hash).await.expect("key");
+        let key_id = cache.by_key_hash(&hash).await.expect("key").key_id;
         assert!(cache.resolve_host("acme").await.is_some());
         heard.lock().unwrap().clear();
 

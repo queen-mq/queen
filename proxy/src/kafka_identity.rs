@@ -118,6 +118,9 @@ pub async fn bearer_me(st: &St, headers: &HeaderMap) -> Option<Response> {
         // handler is the conservative answer — it is the behaviour this route
         // had for every bearer before this module existed.
         Principal::User { .. } => return None,
+        // A scoped key: what it may touch is its grants, which the Kafka door
+        // does not read. It gets the cookie handler's answer, as a session does.
+        Principal::Client(_) => return None,
     };
 
     tracing::debug!(
@@ -289,6 +292,7 @@ mod tests {
             meter,
             registry,
             keys,
+            clients: Default::default(),
             s3: None,
         })
     }

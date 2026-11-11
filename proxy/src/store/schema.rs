@@ -79,6 +79,10 @@ pub mod ns {
     pub const KEYS: &str = "px.keys"; // #<id> -> ApiKeyDoc
     pub const KEY_HASH: &str = "px.keys.hash"; // #<key_hash> -> id (UNIQUE)
     pub const KEY_CLUSTER: &str = "px.keys.cluster"; // #<cluster>/<key> -> ""
+    pub const KEY_POLICY: &str = "px.keys.policy"; // #<key> -> KeyPolicyDoc (a scoped key's grants)
+    pub const KEY_PREVIOUS: &str = "px.keys.previous"; // #<key> -> KeyPreviousDoc (TTL: a rotation's grace)
+
+    pub const BLOCKS: &str = "px.blocks"; // #<cluster>/<key>/<sub> -> BlockDoc
 
     pub const QUEUES: &str = "px.queues"; // #<id> -> QueueDoc
     pub const QUEUE_NAME: &str = "px.queues.name"; // #<cluster>/<name> -> id (UNIQUE among live rows)
@@ -226,6 +230,66 @@ pub struct ApiKeyDoc {
     pub created_at_us: i64,
     pub last_used_at_us: Option<i64>,
     pub revoked_at_us: Option<i64>,
+}
+
+/// `px.keys.policy #<key id>`: what makes an API key SCOPED — its grants
+/// (`queen_protocol::scope`), its rate limits and the longest token it may
+/// mint. A row of its own,
+/// never fields of [`ApiKeyDoc`]: a node of an older release rewrites that
+/// document whole (the batched `last_used_at` touch), and would drop fields
+/// it does not know. A scoped key's own `scopes` stay EMPTY, so such a node
+/// refuses the key on every route instead of reading it as a whole-cluster
+/// key.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyPolicyDoc {
+    pub key_id: Uuid,
+    pub grants: Vec<queen_protocol::scope::Grant>,
+    #[serde(default)]
+    pub limits: KeyLimitsDoc,
+    /// The longest lifetime a token minted from this key may ask for, in
+    /// seconds. `None`: the default (`clients::DEFAULT_TOKEN_TTL_MAX_S`).
+    #[serde(default)]
+    pub token_ttl_max_s: Option<u64>,
+    pub updated_at_us: i64,
+}
+
+/// `px.keys.previous #<key id>`: after a rotation with a grace, the secret
+/// the key replaced, still accepted until `until_us`. Written with a KV TTL of
+/// the grace, so the row goes by itself; another rotation replaces it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct KeyPreviousDoc {
+    pub key_id: Uuid,
+    /// sha256 hex of the replaced secret.
+    pub key_hash: String,
+    pub until_us: i64,
+}
+
+/// A scoped key's own rate limits, per node, in requests per second. `None`
+/// is no limit beyond the cluster's.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyLimitsDoc {
+    /// Every request made with the key or a token minted from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_rps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_burst: Option<u32>,
+    /// Every request of ONE token's entity (`sub`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_rps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_burst: Option<u32>,
+}
+
+/// `px.blocks #<cluster>/<key>/<sub>`: one entity refused. Every token of
+/// that key for that `sub` stops working, and the key mints no new one for
+/// it, until the row is deleted.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BlockDoc {
+    pub key_id: Uuid,
+    pub sub: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub at_us: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

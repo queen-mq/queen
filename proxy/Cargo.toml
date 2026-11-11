@@ -26,6 +26,9 @@ http-body-util = "0.1"
 tower = { version = "0.5", default-features = false, features = ["util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+# The grant model a scoped client's credential carries, shared with the
+# broker that enforces it (`queen_protocol::scope`).
+queen-protocol = { path = "../crates/queen-protocol" }
 bytes = "1"
 rand = "0.8"
 # Ed25519 public-key derivation from the private PKCS#8 PEM (auth.rs). ring is

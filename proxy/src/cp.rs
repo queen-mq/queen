@@ -93,6 +93,12 @@ pub fn router() -> Router<St> {
         .route("/activity", post(activity))
         .route("/keys", post(issue_key))
         .route("/keys/:id", delete(revoke_key))
+        // A scoped key's grants, its secret, and the entities it refuses.
+        .route("/keys/:id/policy", put(set_key_policy))
+        .route("/keys/:id/rotate", post(rotate_key))
+        .route("/keys/:id/blocks", post(block_client))
+        .route("/keys/:id/blocks/:sub", delete(unblock_client))
+        .route("/clusters/:id/blocks", get(list_blocks))
 }
 
 /// The codes this surface answers with besides `cluster_unknown`
@@ -1132,12 +1138,21 @@ async fn activity(State(st): State<St>, req: Request<Body>) -> Response {
     answer(StatusCode::OK, json!({"clusters": out}))
 }
 
+/// A whole-cluster key names `scopes`; a scoped key names `grants` instead
+/// (with its optional `limits` and `token_ttl_max_s`).
 #[derive(Deserialize)]
 struct KeyIn {
     cluster_id: Uuid,
     name: String,
     key_hash: String,
+    #[serde(default)]
     scopes: Vec<String>,
+    #[serde(default)]
+    grants: Option<Vec<queen_protocol::scope::Grant>>,
+    #[serde(default)]
+    limits: Option<crate::store::schema::KeyLimitsDoc>,
+    #[serde(default)]
+    token_ttl_max_s: Option<u64>,
 }
 
 /// 201 `{id, existed: false}` for a new key; 200 `{id, existed: true}` when
@@ -1145,9 +1160,170 @@ struct KeyIn {
 async fn issue_key(State(st): State<St>, req: Request<Body>) -> Response {
     let raw = tri!(guarded_body(req).await);
     let k: KeyIn = tri!(parse(&raw));
-    match data::ensure_api_key(&st.store, k.cluster_id, &k.name, &k.key_hash, &k.scopes).await {
+    let issued = match k.grants {
+        Some(grants) if k.scopes.is_empty() => {
+            let policy = data::PolicyInput {
+                grants,
+                limits: k.limits.unwrap_or_default(),
+                token_ttl_max_s: k.token_ttl_max_s,
+            };
+            data::ensure_scoped_key(&st.store, k.cluster_id, &k.name, &k.key_hash, &policy).await
+        }
+        Some(_) => {
+            return invalid("a key holds scopes (the whole cluster) or grants (scoped), not both")
+        }
+        None => {
+            data::ensure_api_key(&st.store, k.cluster_id, &k.name, &k.key_hash, &k.scopes).await
+        }
+    };
+    match issued {
         Ok((id, false)) => answer(StatusCode::CREATED, json!({"id": id, "existed": false})),
         Ok((id, true)) => answer(StatusCode::OK, json!({"id": id, "existed": true})),
+        Err(e) => fail(e),
+    }
+}
+
+/// The cluster of the key `id` names, or the 404 for no such key.
+async fn cluster_of_key(st: &St, id: Uuid) -> Result<Uuid, Response> {
+    match data::key_cluster(&st.store, id).await {
+        Ok(Some(c)) => Ok(c),
+        Ok(None) => Err(crate::errors::err_404(
+            CODE_KEY_UNKNOWN,
+            &format!("no key {id}"),
+        )),
+        Err(e) => Err(fail(e)),
+    }
+}
+
+#[derive(Deserialize)]
+struct PolicyIn {
+    grants: Vec<queen_protocol::scope::Grant>,
+    #[serde(default)]
+    limits: Option<crate::store::schema::KeyLimitsDoc>,
+    #[serde(default)]
+    token_ttl_max_s: Option<u64>,
+}
+
+/// 200 `{ok: true}`: the scoped key's grants, limits and token ceiling
+/// replaced; every node within a second.
+async fn set_key_policy(
+    State(st): State<St>,
+    Path(id): Path<String>,
+    req: Request<Body>,
+) -> Response {
+    let raw = tri!(guarded_body(req).await);
+    let id = tri!(uuid_of(&id, "key id"));
+    let p: PolicyIn = tri!(parse(&raw));
+    let cluster = tri!(cluster_of_key(&st, id).await);
+    let input = data::PolicyInput {
+        grants: p.grants,
+        limits: p.limits.unwrap_or_default(),
+        token_ttl_max_s: p.token_ttl_max_s,
+    };
+    match data::set_key_policy(&st.store, cluster, id, &input, ("control_plane", None)).await {
+        Ok(()) => answer(StatusCode::OK, json!({"ok": true})),
+        Err(e) => fail(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RotateIn {
+    /// The new secret's sha256 hex: the control plane holds the secret.
+    key_hash: String,
+    #[serde(default)]
+    grace_seconds: u64,
+}
+
+/// 200 `{ok: true}`: the key answers to its new secret, the old one works
+/// for `grace_seconds` more, and every token minted from the key keeps working.
+async fn rotate_key(State(st): State<St>, Path(id): Path<String>, req: Request<Body>) -> Response {
+    let raw = tri!(guarded_body(req).await);
+    let id = tri!(uuid_of(&id, "key id"));
+    let r: RotateIn = tri!(parse(&raw));
+    let cluster = tri!(cluster_of_key(&st, id).await);
+    match data::rotate_api_key(
+        &st.store,
+        cluster,
+        id,
+        &r.key_hash,
+        r.grace_seconds,
+        ("control_plane", None),
+    )
+    .await
+    {
+        Ok(()) => answer(StatusCode::OK, json!({"ok": true})),
+        Err(e) => fail(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct BlockIn {
+    sub: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// 200 `{ok: true}`: every token of the key for `sub` refused on every node
+/// within a second, and none minted for it, until the block is lifted.
+async fn block_client(
+    State(st): State<St>,
+    Path(id): Path<String>,
+    req: Request<Body>,
+) -> Response {
+    let raw = tri!(guarded_body(req).await);
+    let id = tri!(uuid_of(&id, "key id"));
+    let b: BlockIn = tri!(parse(&raw));
+    let cluster = tri!(cluster_of_key(&st, id).await);
+    match data::block_client(
+        &st.store,
+        cluster,
+        id,
+        b.sub.trim(),
+        b.reason.as_deref(),
+        ("control_plane", None),
+    )
+    .await
+    {
+        Ok(()) => {
+            st.clients.blocks.invalidate(cluster);
+            answer(StatusCode::OK, json!({"ok": true}))
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// 200 `{ok: true, existed}`.
+async fn unblock_client(
+    State(st): State<St>,
+    h: HeaderMap,
+    Path((id, sub)): Path<(String, String)>,
+) -> Response {
+    tri!(guard(&h));
+    let id = tri!(uuid_of(&id, "key id"));
+    let cluster = tri!(cluster_of_key(&st, id).await);
+    match data::unblock_client(&st.store, cluster, id, &sub, ("control_plane", None)).await {
+        Ok(existed) => {
+            st.clients.blocks.invalidate(cluster);
+            answer(StatusCode::OK, json!({"ok": true, "existed": existed}))
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// 200 `{blocks: [{key, sub, reason, at}]}`: a cluster's blocked entities.
+async fn list_blocks(State(st): State<St>, h: HeaderMap, Path(id): Path<String>) -> Response {
+    tri!(guard(&h));
+    let id = tri!(uuid_of(&id, "cluster id"));
+    match data::list_blocks(&st.store, id).await {
+        Ok(rows) => answer(
+            StatusCode::OK,
+            json!({"blocks": rows.into_iter().map(|b| json!({
+                "key": b.key_id,
+                "sub": b.sub,
+                "reason": b.reason,
+                "at": data::iso_utc(b.at_us),
+            })).collect::<Vec<_>>()}),
+        ),
         Err(e) => fail(e),
     }
 }
@@ -1438,6 +1614,7 @@ mod tests {
             meter,
             registry,
             keys,
+            clients: Default::default(),
             s3,
         })
     }
@@ -1644,7 +1821,12 @@ mod tests {
         let cluster = id(&a["cluster_id"]);
 
         // The caller's key is the cluster's credential, under the overrides.
-        let Lookup::Found((ctx, key_id, scopes)) = data::lookup_api_key(&st.store, &hash(1)).await
+        let Lookup::Found(data::KeyRecord {
+            ctx,
+            key_id,
+            scopes,
+            ..
+        }) = data::lookup_api_key(&st.store, &hash(1)).await
         else {
             panic!("the provisioned key resolves");
         };

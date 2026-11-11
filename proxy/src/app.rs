@@ -33,6 +33,16 @@ pub fn start_background(st: &St) {
     // queue-name set is what `max_queues` counts, and a soft-deleted queue held
     // its plan slot until the next restart while nothing invalidated it.
     st.cache.on_invalidate(st.registry.invalidator());
+    // A block or an unblock marks its cluster: the block list is read again
+    // on the next client token of that cluster, on every node.
+    {
+        let weak = Arc::downgrade(st);
+        st.cache.on_invalidate(move |cluster| {
+            if let Some(st) = weak.upgrade() {
+                st.clients.blocks.invalidate(cluster);
+            }
+        });
+    }
     st.cache.spawn_listener();
     // Batched api_keys.last_used_at: one statement per interval, off the
     // request path.
@@ -193,6 +203,7 @@ pub fn build_embedded(e: Embedded) -> Result<(St, Router), String> {
         meter,
         registry,
         keys,
+        clients: Default::default(),
         s3: e.s3,
     });
     start_background(&st);

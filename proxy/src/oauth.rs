@@ -2781,6 +2781,7 @@ mod tests {
             meter: std::sync::Arc::new(crate::meter::Meter::new(&cfg)),
             registry: crate::registry::Registry::new(crate::store::Store::None),
             keys: crate::auth::Keys::from_config(&cfg),
+            clients: Default::default(),
             upstream: crate::upstream::Upstream::InProcess(Router::new()),
             store: crate::store::Store::None,
             cfg,
