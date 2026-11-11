@@ -4853,6 +4853,19 @@ mod tests {
         }
     }
 
+    /// `px.ops` keys are newest first by time, and web.rs and data.rs both
+    /// write them, so they read one clock. A burst of reads puts that clock
+    /// ahead of the wall (now_us_is_strictly_increasing does, in a parallel
+    /// thread): data.rs's next stamp must still come after web.rs's last one.
+    #[test]
+    fn data_rs_stamps_after_web_rs_when_the_clock_runs_ahead() {
+        for _ in 0..10_000 {
+            now_us();
+        }
+        let here = now_us();
+        assert!(crate::store::data::now_us() > here);
+    }
+
     #[test]
     fn now_us_is_strictly_increasing() {
         let mut last = now_us();

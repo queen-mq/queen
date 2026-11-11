@@ -29,7 +29,6 @@
 //! and `#inval/<cluster uuid>` (marks).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -140,11 +139,13 @@ impl From<&Store> for Store {
 // small helpers
 // ===========================================================================
 
+/// web.rs's clock: wall-clock microseconds, strictly increasing within the
+/// process. Both files write the newest-first `px.ops` keys, so they read one
+/// clock: with a clock each, an operation recorded here could sort older than
+/// one web.rs recorded just before it, once a burst of reads had put web.rs's
+/// clock ahead of the wall.
 pub(crate) fn now_us() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as i64)
-        .unwrap_or(0)
+    super::web::now_us()
 }
 
 /// Days since 1970-01-01 -> (year, month, day), proleptic Gregorian.
