@@ -12,6 +12,7 @@ use GuzzleHttp\Promise\Utils as PromiseUtils;
 use JsonException;
 use Psr\Http\Message\ResponseInterface;
 use Queen\Exceptions\HttpException;
+use Queen\Exceptions\TokenSourceException;
 use UnexpectedValueException;
 
 class HttpClient
@@ -63,7 +64,12 @@ class HttpClient
     private int $retryAttempts;
     private int $retryDelayMillis;
     private bool $enableFailover;
-    private ?string $bearerToken;
+    /**
+     * The credential: a fixed string, or a callable that fetches a token and
+     * is called again before it expires and after a 401 (TokenSource). Every
+     * attempt asks it, on every path below.
+     */
+    private TokenSource $tokens;
     private array $headers;
     private array $retry429;
     /**
@@ -91,7 +97,10 @@ class HttpClient
         $this->retryAttempts = $options['retryAttempts'] ?? 3;
         $this->retryDelayMillis = $options['retryDelayMillis'] ?? 1000;
         $this->enableFailover = $options['enableFailover'] ?? true;
-        $this->bearerToken = $options['bearerToken'] ?? null;
+        // A TokenSource given here is shared with whatever else holds it; a
+        // string or a callable gets a source of its own.
+        $bearerToken = $options['bearerToken'] ?? null;
+        $this->tokens = $bearerToken instanceof TokenSource ? $bearerToken : new TokenSource($bearerToken);
         $this->headers = $options['headers'] ?? [];
         // 429 (rate-limited) backoff policy, separate from the 5xx/network
         // retryAttempts above: ['maxAttempts' => int, 'baseMs' => int,
@@ -272,7 +281,8 @@ class HttpClient
             },
             function (mixed $reason) use ($loadBalancer, $url): PromiseInterface {
                 $statusCode = $reason instanceof \Throwable ? $this->getStatusCode($reason) : 0;
-                if ($statusCode === 0 || $statusCode >= 500) {
+                // A token source that gave no token sent nothing.
+                if (($statusCode === 0 || $statusCode >= 500) && !$reason instanceof TokenSourceException) {
                     $loadBalancer->markUnhealthy($url);
                 }
 
@@ -303,11 +313,14 @@ class HttpClient
 
     private function sendDetached(string $method, string $path, array|string|null $body, ?string $affinityKey): PromiseInterface
     {
+        // One attempt here too, so a 401 reaches the caller; the synchronous
+        // request it retries with gets the new token, as any does.
+        $token = $this->tokens->get();
         if ($this->transport !== null) {
             $request = $this->transport->start(
                 $method,
                 $this->resolveUrl($affinityKey) . $path,
-                $this->requestHeaders($body),
+                $this->requestHeaders($body, $token),
                 $this->encodeBody($body),
             );
             // wait() settles like settleDetached(). The promise reaches itself
@@ -325,7 +338,7 @@ class HttpClient
             return $promise;
         }
 
-        $options = $this->buildRequestOptions($method, $body, null);
+        $options = $this->buildRequestOptions($method, $body, null, $token);
         // The answer may be settled long after it arrived, when the caller's
         // work ends: curl must not count that time against the request.
         // settleDetached() bounds the wait instead.
@@ -529,32 +542,36 @@ class HttpClient
         return is_array($body) ? json_encode($body, JSON_THROW_ON_ERROR) : $body;
     }
 
-    /** @return array<string, string|list<string>> */
-    private function requestHeaders(array|string|null $body = null): array
+    /**
+     * $token: the source's token for this attempt, null without a credential.
+     *
+     * @return array<string, string|list<string>>
+     */
+    private function requestHeaders(array|string|null $body, ?string $token): array
     {
         $headers = ['Content-Type' => is_string($body) ? PushBinary::CONTENT_TYPE : 'application/json'];
         foreach ($this->headers as $name => $value) {
             // An explicitly configured bearer token is authoritative. This is
             // especially important for the supervisor's read-only token: a
             // stale worker Authorization header must not silently override it.
-            if ($this->bearerToken !== null && strcasecmp((string) $name, 'Authorization') === 0) {
+            if ($this->tokens->configured() && strcasecmp((string) $name, 'Authorization') === 0) {
                 continue;
             }
             $headers[$name] = $value;
         }
-        if ($this->bearerToken !== null) {
-            $headers['Authorization'] = "Bearer {$this->bearerToken}";
+        if ($token !== null) {
+            $headers['Authorization'] = "Bearer {$token}";
         }
 
         return $headers;
     }
 
-    private function buildRequestOptions(string $method, array|string|null $body, ?int $requestTimeoutMillis): array
+    private function buildRequestOptions(string $method, array|string|null $body, ?int $requestTimeoutMillis, ?string $token): array
     {
         $effectiveTimeout = $requestTimeoutMillis ?? $this->timeoutMillis;
 
         $options = [
-            'headers' => $this->requestHeaders($body),
+            'headers' => $this->requestHeaders($body, $token),
             'timeout' => $effectiveTimeout / 1000,
             'connect_timeout' => 5,
             'http_errors' => false,
@@ -732,15 +749,16 @@ class HttpClient
 
     /**
      * $payload is the body as encodeBody() made it. $binary says it is a
-     * binary body and not JSON, so that it is announced as one.
+     * binary body and not JSON, so that it is announced as one. $token is the
+     * source's token for this attempt.
      */
-    private function executeRequest(string $url, string $method, ?string $payload = null, ?int $requestTimeoutMillis = null, bool $binary = false): mixed
+    private function executeRequest(string $url, string $method, ?string $payload = null, ?int $requestTimeoutMillis = null, bool $binary = false, ?string $token = null): mixed
     {
         if ($this->transport !== null) {
             $answer = $this->transport->request(
                 $method,
                 $url,
-                $this->requestHeaders($binary ? $payload : null),
+                $this->requestHeaders($binary ? $payload : null, $token),
                 $payload,
                 $requestTimeoutMillis ?? $this->timeoutMillis,
             );
@@ -748,7 +766,7 @@ class HttpClient
             return $this->parseAnswer($answer['status'], $answer['body'], $answer['retryAfter'], $url);
         }
 
-        $options = $this->buildRequestOptions($method, $binary ? $payload : null, $requestTimeoutMillis);
+        $options = $this->buildRequestOptions($method, $binary ? $payload : null, $requestTimeoutMillis, $token);
         if ($payload !== null) {
             // The bytes Guzzle's 'json' option would send, or the binary
             // body; the Content-Type header is already set for either.
@@ -761,22 +779,36 @@ class HttpClient
     /**
      * Run one logical request against a single URL, transparently retrying
      * HTTP 429 with backoff until the policy for $retryKind is exhausted (or
-     * never, for the unbounded pop policy). Every other outcome — success,
-     * network error, non-429 4xx, 5xx — passes straight through: 429 is the
-     * only status this layer retries, and 5xx/network retry plus
+     * never, for the unbounded pop policy). With a token callable, a 401 is
+     * sent once more with a new token. Every other outcome — success, network
+     * error, other 4xx, 5xx — passes straight through: 5xx/network retry plus
      * cross-backend failover stay with the callers below.
      */
     private function executeRequestWithRetry429(string $url, string $method, ?string $payload, ?int $requestTimeoutMillis, ?string $retryKind, bool $binary = false): mixed
     {
         $policy = Retry429Policy::forKind($this->retry429, $retryKind);
         $tries = 0;
+        $refreshed = false;
 
         while (true) {
             $tries++;
+            // Asked on every attempt: the source keeps its token, and fetches
+            // a new one when a client token nears its expiry.
+            $token = $this->tokens->get();
 
             try {
-                return $this->executeRequest($url, $method, $payload, $requestTimeoutMillis, $binary);
+                return $this->executeRequest($url, $method, $payload, $requestTimeoutMillis, $binary, $token);
             } catch (HttpException $error) {
+                // A token the broker no longer takes (expired, or its key
+                // changed): one new token and the request once more. A 401
+                // means the request did not run, so it is safe to send again;
+                // it counts as no attempt, and a second 401 is the caller's.
+                if ($error->statusCode === 401 && $this->tokens->refreshable() && !$refreshed) {
+                    $refreshed = true;
+                    $tries--;
+                    $this->tokens->get($token);
+                    continue;
+                }
                 if ($error->statusCode !== 429 || $policy->isExhausted($tries)) {
                     throw $error;
                 }
@@ -792,17 +824,43 @@ class HttpClient
         array|string|null $body = null,
         ?int $requestTimeoutMillis = null,
         int $delayMillis = 0,
+        bool $refreshed = false,
     ): PromiseInterface
     {
-        $options = $this->buildRequestOptions($method, $body, $requestTimeoutMillis);
+        // A promise, as every async request answers: the callers settle it
+        // with their others.
+        try {
+            $token = $this->tokens->get();
+        } catch (TokenSourceException $error) {
+            return new RejectedPromise($error);
+        }
+        $options = $this->buildRequestOptions($method, $body, $requestTimeoutMillis, $token);
         if ($delayMillis > 0) {
             // Guzzle schedules this delay on its multi handler. It does not
             // block unrelated promises in the supervisor's polling batch.
             $options['delay'] = $delayMillis;
         }
 
-        return $this->guzzle->requestAsync($method, $url, $options)->then(
+        $promise = $this->guzzle->requestAsync($method, $url, $options)->then(
             fn(ResponseInterface $response) => $this->parseResponse($response, $url)
+        );
+        if ($refreshed || !$this->tokens->refreshable()) {
+            return $promise;
+        }
+
+        // A 401, as in the synchronous API: one new token and the request
+        // once more. Several requests refused with one token refresh once.
+        // The callable runs inline, blocking like the first fetch did.
+        return $promise->then(
+            null,
+            function (mixed $reason) use ($url, $method, $body, $requestTimeoutMillis, $token): PromiseInterface {
+                if (!$reason instanceof HttpException || $reason->statusCode !== 401) {
+                    return new RejectedPromise($reason);
+                }
+                $this->tokens->get($token);
+
+                return $this->executeRequestAsync($url, $method, $body, $requestTimeoutMillis, 0, true);
+            },
         );
     }
 
@@ -826,7 +884,11 @@ class HttpClient
                     : new \RuntimeException('Queen async request failed with a non-exception rejection.');
                 $statusCode = $this->getStatusCode($error);
                 $nextAttempt = $attempt + 1;
-                if (self::isTerminalStatus($statusCode) || $nextAttempt >= $this->retryAttempts) {
+                // A token source that gave no token sent nothing, and would
+                // be asked again.
+                if (self::isTerminalStatus($statusCode)
+                    || $error instanceof TokenSourceException
+                    || $nextAttempt >= $this->retryAttempts) {
                     throw $error;
                 }
 
@@ -863,6 +925,11 @@ class HttpClient
                 $error = $reason instanceof \Throwable
                     ? $reason
                     : new \RuntimeException('Queen async request failed with a non-exception rejection.');
+                // Nothing was sent: no backend is to blame, and the next one
+                // would ask the same source.
+                if ($error instanceof TokenSourceException) {
+                    throw $error;
+                }
                 $statusCode = $this->getStatusCode($error);
                 if ($statusCode === 0 || $statusCode >= 500) {
                     $this->loadBalancer?->markUnhealthy($url);
@@ -1010,6 +1077,10 @@ class HttpClient
             try {
                 $url = $this->resolveUrl($affinityKey) . $path;
                 return $this->executeRequestWithRetry429($url, $method, $payload, $requestTimeoutMillis, $retryKind, $binary);
+            } catch (TokenSourceException $error) {
+                // Nothing was sent, and another attempt would ask the same
+                // source.
+                throw $error;
             } catch (\Throwable $error) {
                 $statusCode = $this->getStatusCode($error);
                 if (self::isTerminalStatus($statusCode) || self::isUnknownPopOutcome($path, $error)) {
@@ -1084,6 +1155,10 @@ class HttpClient
                     $result = $this->executeRequestWithRetry429($url . $path, $method, $payload, $requestTimeoutMillis, $retryKind, $binary);
                     $this->loadBalancer->markHealthy($url);
                     return $result;
+                } catch (TokenSourceException $error) {
+                    // Nothing was sent: no backend is to blame, and the next
+                    // one would ask the same source.
+                    throw $error;
                 } catch (\Throwable $error) {
                     $lastError = $error;
 

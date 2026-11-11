@@ -127,7 +127,7 @@ class QueenConnector implements ConnectorInterface
         }
 
         $clientConfig = [
-            'bearerToken' => $config['bearer_token'] ?? $config['bearerToken'] ?? null,
+            'bearerToken' => self::bearerToken($config['bearer_token'] ?? $config['bearerToken'] ?? null),
             'timeoutMillis' => $config['timeout'] ?? $config['timeoutMillis'] ?? 30000,
             'retryAttempts' => $config['retry_attempts'] ?? $config['retryAttempts'] ?? 3,
             'retryDelayMillis' => $config['retry_delay'] ?? $config['retryDelayMillis'] ?? 1000,
@@ -271,6 +271,25 @@ class QueenConnector implements ConnectorInterface
         }
 
         return $integer;
+    }
+
+    /**
+     * A configured bearer token: a string or null. A token callable is for a
+     * client built in code (`new Queen(['bearerToken' => fn () => ...])`):
+     * configuration reaches the lease renewers and the supervisor as JSON,
+     * which carries no closure, and `config:cache` refuses one.
+     *
+     * @internal Shared with QueenServiceProvider::clientConfig().
+     */
+    public static function bearerToken(mixed $value): ?string
+    {
+        if ($value !== null && !is_string($value)) {
+            throw new InvalidArgumentException(
+                'Queen Laravel bearer_token must be a string or null; a token callable is for a client built in code.',
+            );
+        }
+
+        return $value;
     }
 
     private static function boolean(mixed $value, string $label): bool

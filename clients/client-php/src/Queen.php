@@ -6,6 +6,7 @@ use GuzzleHttp\Promise\PromiseInterface;
 use Queen\Http\HttpClient;
 use Queen\Http\LoadBalancer;
 use Queen\Http\Retry429Policy;
+use Queen\Http\TokenSource;
 use Queen\Buffer\BufferManager;
 use Queen\Builders\QueueBuilder;
 use Queen\Builders\TransactionBuilder;
@@ -18,6 +19,7 @@ class Queen
     private BufferManager $bufferManager;
     private array $config;
     private ?Admin $admin = null;
+    private ?Tokens $tokens = null;
     private ?Kv $kv = null;
     private ?Locks $locks = null;
     private ?Timers $timers = null;
@@ -69,6 +71,25 @@ class Queen
             $this->admin = new Admin($this->httpClient);
         }
         return $this->admin;
+    }
+
+    // ===========================
+    // Client tokens
+    // ===========================
+
+    /**
+     * Client tokens: a credential for one entity (a device, a browser user),
+     * minted from a scoped key by the backend that holds the key. Read the
+     * note on the Tokens class once.
+     *
+     *     $minted = $queen->tokens()->mint('dev-8f3a', ['ttlSeconds' => 3600]);
+     */
+    public function tokens(): Tokens
+    {
+        if ($this->tokens === null) {
+            $this->tokens = new Tokens($this->httpClient);
+        }
+        return $this->tokens;
     }
 
     // ===========================
@@ -568,12 +589,18 @@ class Queen
                 throw new \InvalidArgumentException("{$name} must be a boolean");
             }
         }
-        if ($config['bearerToken'] !== null && (
-            !is_string($config['bearerToken'])
-            || $config['bearerToken'] === ''
-            || preg_match('/[\x00-\x20\x7F]/', $config['bearerToken']) === 1
-        )) {
-            throw new \InvalidArgumentException('bearerToken must be a non-empty header-safe string or null');
+        // A string is the token itself, even one that names a function. A
+        // callable fetches one, and is called again before a client token
+        // expires and after a 401; a TokenSource is one such source, shared
+        // by every client it is given to.
+        $bearerToken = $config['bearerToken'];
+        $usable = is_string($bearerToken)
+            ? $bearerToken !== '' && preg_match('/[\x00-\x20\x7F]/', $bearerToken) !== 1
+            : $bearerToken === null || is_callable($bearerToken) || $bearerToken instanceof TokenSource;
+        if (!$usable) {
+            throw new \InvalidArgumentException(
+                'bearerToken must be a non-empty header-safe string, a callable that returns one, or null',
+            );
         }
         if (!is_array($config['headers'])) {
             throw new \InvalidArgumentException('headers must be an array');

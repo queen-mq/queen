@@ -12,6 +12,8 @@ class Defaults
         'affinityHashRing' => 128,
         'enableFailover' => true,
         'healthRetryAfterMillis' => 5000,
+        // A string, or a callable that fetches a token: called again before a
+        // client token expires and after a 401 (Http\TokenSource).
         'bearerToken' => null,
         'headers' => [],
         // HTTP 429 backoff: ['maxAttempts' => int, 'baseMs' => int,

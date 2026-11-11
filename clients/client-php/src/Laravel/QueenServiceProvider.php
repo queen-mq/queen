@@ -158,7 +158,7 @@ class QueenServiceProvider extends ServiceProvider
         }
 
         $queenConfig = [
-            'bearerToken' => $config['bearer_token'],
+            'bearerToken' => QueenConnector::bearerToken($config['bearer_token']),
             'timeoutMillis' => $config['timeout'],
             'retryAttempts' => $config['retry_attempts'],
             'retryDelayMillis' => $config['retry_delay'] ?? 1000,
