@@ -198,7 +198,7 @@ function pushed() {
       <button v-if="canProduce && filters.queue" type="button" class="qn-btn2" aria-haspopup="dialog" @click="openPush()">Push a message…</button>
     </div>
 
-    <div class="qmv-split">
+    <div class="qmv-split" :class="{ open: !!pick }">
       <section class="qmv-list" aria-label="Newest messages" :aria-busy="pending">
         <p v-if="stale" class="qn-t2 qmv-note"><span class="qn-mark amber" aria-hidden="true" />The last read failed ({{ stale.error }}); these rows are from {{ clock(stale.at, true) }}.</p>
         <p v-if="error" class="qn-t2 qmv-empty"><span class="qn-mark red" aria-hidden="true" style="margin-right: 8px" />The broker did not answer: {{ error }}</p>
@@ -241,7 +241,7 @@ function pushed() {
       </section>
 
       <div ref="side" class="qmv-side">
-        <MessageDetail v-if="pick" :pick="pick" :row="pickedRow" :where="where" @close="closePick" @copy="openPush" @changed="load(true)" />
+        <MessageDetail v-if="pick" :pick="pick" :row="pickedRow" :where="where" fill @close="closePick" @copy="openPush" @changed="load(true)" />
         <div v-else-if="rows.length" class="qn-panel qmv-hint">
           <p class="qn-t2">Pick a message to read it: its payload, which groups read it, and what you can do with it.</p>
         </div>
@@ -268,13 +268,16 @@ function pushed() {
 .qmv-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 12px; }
 .qmv-small { font-size: 12px; margin-top: 8px; }
 .qmv-read { margin-top: 12px; overflow-wrap: anywhere; }
-/* The detail stays in view while the list scrolls under it. */
+/* The detail stays in view while the list scrolls under it. A message open
+   takes a little more than half: the list keeps its when, queue and status. */
 .qmv-side { min-width: 0; position: sticky; top: 72px; max-height: calc(100vh - 96px); overflow-y: auto; }
+.qmv-split.open { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
+.qmv-split.open .qmv-side { max-height: none; overflow: visible; }
 .qmv-hint { padding: 16px 18px; }
 @media (prefers-reduced-motion: reduce) { .qmv-scroll { transition: none; } }
 /* Narrow: the detail under the list; the hint has no place there. */
 @media (max-width: 1100px) {
-  .qmv-split { grid-template-columns: minmax(0, 1fr); }
+  .qmv-split, .qmv-split.open { grid-template-columns: minmax(0, 1fr); }
   .qmv-side { position: static; max-height: none; overflow: visible; scroll-margin-top: 16px; }
   .qmv-hint { display: none; }
 }

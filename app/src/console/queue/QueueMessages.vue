@@ -1,7 +1,9 @@
 <script setup>
 // The newest messages, 20 at a time, by status; a click opens one beside the
-// list, in the same detail as Queues › Messages (console/queues/MessageDetail.vue).
-import { computed, ref, shallowRef, watch } from 'vue'
+// list, in the same detail as Queues › Messages (console/queues/MessageDetail.vue):
+// about half the page, kept in view while the list scrolls, its payload as
+// tall as the window lets it be. Stacked under the list below 1000px.
+import { computed, nextTick, ref, shallowRef, watch } from 'vue'
 import { messages as messagesApi } from '@/api'
 import { describeApiError } from '@/api/errors'
 import { useAutoRefresh } from '@/composables/useRefresh'
@@ -60,12 +62,26 @@ const rows = computed(() => (data.value?.messages || []).map((m) => ({
   read: m.busStatus && m.busStatus.totalGroups ? `${m.busStatus.consumedBy?.length ?? m.busStatus.consumedBy ?? 0} of ${m.busStatus.totalGroups}` : '',
   raw: m,
 })))
-const sel = computed(() => rows.value.find((r) => r.key === picked.value)?.raw || null)
+// The message picked, as it was when picked: on a busy queue it leaves the
+// newest 20 within seconds, and the open message must not close with it.
+const pickedRaw = shallowRef(null)
+watch(picked, (k) => { if (!k) pickedRaw.value = null })
+const sel = computed(() => rows.value.find((r) => r.key === picked.value)?.raw || pickedRaw.value)
 const pick = computed(() => (sel.value?.partitionId && sel.value?.transactionId ? { pid: sel.value.partitionId, txn: sel.value.transactionId } : null))
+// Stacked (a phone, a narrow window), the detail opens under the list: bring it up.
+const side = ref(null)
+async function choose(key) {
+  picked.value = picked.value === key ? null : key
+  pickedRaw.value = picked.value ? rows.value.find((r) => r.key === key)?.raw || null : null
+  if (picked.value && window.matchMedia?.('(max-width: 1000px)').matches) {
+    await nextTick()
+    side.value?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+  }
+}
 </script>
 
 <template>
-  <div class="qm">
+  <div class="qm" :class="{ open: !!pick }">
     <div class="qm-list">
       <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px">
         <QcSeg v-model="status" :options="STATUSES" label="Status" />
@@ -86,7 +102,7 @@ const pick = computed(() => (sel.value?.partitionId && sel.value?.transactionId 
         </div>
         <div
           v-for="r in rows" :key="r.key" class="qn-tr click" :class="{ on: picked === r.key }" role="row"
-          tabindex="0" @click="picked = picked === r.key ? null : r.key" @keydown.enter="picked = r.key"
+          tabindex="0" @click="choose(r.key)" @keydown.enter="picked !== r.key && choose(r.key)"
         >
           <span role="cell" class="qn-mono" :title="r.id" style="font-weight: 500">{{ r.id }}</span>
           <span role="cell" class="qn-mono qn-t2" :title="r.part">{{ r.part }}</span>
@@ -103,15 +119,24 @@ const pick = computed(() => (sel.value?.partitionId && sel.value?.transactionId 
       <p class="qn-read" style="margin-top: 12px">Read from <span class="qn-mono">GET /api/v1/messages?queue={{ queue }}&amp;limit=20</span>.</p>
     </div>
 
-    <div v-if="pick" class="qm-detail">
-      <MessageDetail :pick="pick" :row="sel" :where="where" @close="picked = null" @copy="emit('copy', $event)" @changed="load" />
+    <div v-if="pick" ref="side" class="qm-detail">
+      <MessageDetail :pick="pick" :row="sel" :where="where" fill @close="picked = null" @copy="emit('copy', $event)" @changed="load" />
     </div>
   </div>
 </template>
 
 <style scoped>
-.qm { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 20px 28px; margin-top: 14px; }
-.qm-list { flex: 999 1 560px; min-width: 0; }
+.qm { margin-top: 14px; }
+.qm-list { min-width: 0; }
 .qm-table { margin-top: 12px; overflow-x: auto; }
-.qm-detail { flex: 1 1 360px; min-width: 0; max-width: 460px; }
+/* a message open: the list and the message share the page, the message a little more */
+.qm.open { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 20px 28px; align-items: start; }
+.qm-detail { min-width: 0; scroll-margin-top: 12px; }
+@media (min-width: 1001px) {
+  /* the message stays in view while the list scrolls */
+  .qm-detail { position: sticky; top: 72px; }
+}
+@media (max-width: 1000px) {
+  .qm.open { grid-template-columns: minmax(0, 1fr); }
+}
 </style>

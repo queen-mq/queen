@@ -26,6 +26,9 @@ const props = defineProps({
   pick: { type: Object, required: true }, // { pid, txn }
   row: { type: Object, default: null },   // the list's row, shown while the detail is read
   where: { type: String, default: '' },
+  // As tall as the window, under the top bar: the payload takes the room the
+  // rest leaves, and scrolls inside it (a wide panel beside the list).
+  fill: { type: Boolean, default: false },
 })
 const emit = defineEmits(['close', 'copy', 'changed'])
 const { can, standalone } = useIdentity()
@@ -153,7 +156,7 @@ async function remove() {
 </script>
 
 <template>
-  <aside class="md qn-panel" aria-label="Message details">
+  <aside class="md qn-panel" :class="{ fill }" aria-label="Message details">
     <div class="md-head">
       <h3 class="qn-mono md-id">{{ pick.txn }}</h3>
       <button type="button" class="qn-btn3 md-x" aria-label="Close the details" @click="emit('close')">✕</button>
@@ -283,4 +286,12 @@ async function remove() {
 .md-plain { font-size: 13px; margin-top: 8px; }
 .md-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
 .md-read { margin-top: 14px; overflow-wrap: anywhere; }
+/* fill: one column as tall as the window under the top bar; everything keeps
+   its height but the payload, which shrinks to what is left and scrolls */
+@media (min-width: 1001px) {
+  .md.fill { display: flex; flex-direction: column; max-height: calc(100vh - 96px); max-height: calc(100dvh - 96px); overflow-y: auto; }
+  .md.fill > * { flex: 0 0 auto; }
+  /* never shorter than the 360px a payload had before; taller as the window allows */
+  .md.fill > .md-body { flex: 0 1 auto; min-height: 360px; max-height: none; overflow: auto; }
+}
 </style>
