@@ -15,7 +15,7 @@
 export const IMAGE = "ghcr.io/queen-mq/queen:2.8.1";
 
 /**
- * The `<title>`. NimbusHead appends " | Queen MQ" because this differs from
+ * The `<title>`. NimbusHead appends " | QueenMQ" because this differs from
  * the site title, so the brand stays out of the string. It leads with the
  * words a reader searches for ("message broker"). 45 characters: with the
  * suffix it stays under the 65 that scripts/check-seo.mjs allows.
@@ -40,12 +40,12 @@ const LINE = IMAGE.slice(IMAGE.lastIndexOf(":") + 1).split(".").slice(0, 2).join
  * top half says the same at length, with the conditions beside each number.
  */
 export const hero = {
-  eyebrow: `Queen MQ ${LINE}`,
+  eyebrow: `QueenMQ ${LINE}`,
   headline: "The ACID message broker.",
   /** Second line of the `<h1>`, drawn dimmer. Empty: the headline stands alone. */
   subline: "",
   /**
-   * Under the headline: Queen as the Kafka a reader already knows, with what
+   * Under the headline: QueenMQ as the Kafka a reader already knows, with what
    * Kafka cannot do, then the name. "One transaction covers" and not "spans
    * everything": the reader's own database is outside it (the limit, below).
    */
@@ -56,7 +56,7 @@ export const hero = {
       "where one transaction covers the ack, the next messages and your state,",
       "with its own KV store and stream processing.",
     ],
-    close: "That is Queen.",
+    close: "That is QueenMQ.",
   },
   /** The proof, one short claim per pill, each a link to the page that backs it. */
   proof: [
@@ -88,9 +88,9 @@ export const hero = {
  */
 export const guideSection = {
   eyebrow: "Five-minute guide",
-  title: "Queen in five minutes",
+  title: "QueenMQ in five minutes",
   lead: [
-    "Queen was born at Smartness to run queues with a FIFO partition per entity, created on the " +
+    "QueenMQ was born at Smartness to run queues with a FIFO partition per entity, created on the " +
       "fly. In a year it grew into a distributed broker with transactions, a KV store, timers, " +
       "streams and in-memory queues.",
     "This is what you can do with it, written by its lead maintainer. Every snippet comes from a " +
@@ -257,7 +257,7 @@ export const guideSteps: GuideStep[] = [
 
 export const guideClosing =
   "Push, consume, ack, replay, fetch, transactions, KV, timers, locks, streams and ephemeral " +
-  "queues all combine. Build on them and Queen carries the logic you would otherwise write " +
+  "queues all combine. Build on them and QueenMQ carries the logic you would otherwise write " +
   "around a broker.";
 
 export const dashboardShot = {
@@ -317,7 +317,7 @@ export const provenSection = {
 };
 
 export const proven: { title: string; body: string; href: string }[] = [
-  { title: "In production", body: "At Smartness, where Queen is built.", href: "/introduction/about/" },
+  { title: "In production", body: "At Smartness, where QueenMQ is built.", href: "/introduction/about/" },
   {
     title: "226 Jepsen tests",
     body: "On 2.7, all passed. No acknowledged message lost, no lease held twice.",

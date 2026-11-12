@@ -7,7 +7,7 @@ export default sequence({
   gap: 200,
   actors: [
     { id: "a", label: "worker A", tone: "ghost" },
-    { id: "q", label: "Queen", tone: "strong" },
+    { id: "q", label: "QueenMQ", tone: "strong" },
     { id: "b", label: "worker B", tone: "ghost" },
   ],
   steps: [

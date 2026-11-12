@@ -47,7 +47,7 @@ export async function GET() {
     // recommendation yields a partial document that reads as a complete one.
     "## Read this first",
     "",
-    `Complete summary of Queen MQ, self-contained, about ${approxKb(brief)} KB: ${abs("/llms-brief.txt")}`,
+    `Complete summary of QueenMQ, self-contained, about ${approxKb(brief)} KB: ${abs("/llms-brief.txt")}`,
     "",
     "It carries the definition, installation, the data model, every benchmark figure with",
     "the conditions it was measured under, what competing systems do better, and the",
@@ -69,7 +69,7 @@ export async function GET() {
     // tested code per language, the trap checklist and the setup recipes.
     "## For coding agents",
     "",
-    `Queen's MCP server, over Streamable HTTP with no sign-in: ${abs("/mcp")}`,
+    `QueenMQ's MCP server, over Streamable HTTP with no sign-in: ${abs("/mcp")}`,
     "",
     "It answers from these docs, with tested code in every client language, the checklist of",
     "known traps, what each error means, which Kafka clients work, and setup recipes for KV,",

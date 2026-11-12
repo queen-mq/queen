@@ -1,6 +1,6 @@
 ---
-title: "When not to use Queen MQ, and what to use instead"
-description: "Queen MQ is the better choice for building applications. The one exception is a firehose of millions of messages a second, where Kafka and Pulsar are ahead."
+title: "When not to use QueenMQ, and what to use instead"
+description: "QueenMQ is the better choice for building applications. The one exception is a firehose of millions of messages a second, where Kafka and Pulsar are ahead."
 type: concept
 tier: use
 sidebar:
@@ -37,7 +37,7 @@ For building applications, QueenMQ is the better choice: services that handle ev
 
 ## The firehose
 
-One leader orders all of a queue's writes, and more nodes do not raise that. On three 24-vCPU nodes with local NVMe, one queue of 1,000 partitions carried 3,000,000 messages a second at a p99 of 15 ms, 5,000,000 at 87 ms, and not 5,500,000, with every write on two disks before its answer. On the same machines Kafka carried about 8,000,000 on one topic at a p99 near 12 ms, answering from memory before any fsync. Kafka's lead ends as partitions multiply: at 10,000 it used twice QueenMQ's CPU, and it did not carry 50,000. The runs are in [Queen vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/).
+One leader orders all of a queue's writes, and more nodes do not raise that. On three 24-vCPU nodes with local NVMe, one queue of 1,000 partitions carried 3,000,000 messages a second at a p99 of 15 ms, 5,000,000 at 87 ms, and not 5,500,000, with every write on two disks before its answer. On the same machines Kafka carried about 8,000,000 on one topic at a p99 near 12 ms, answering from memory before any fsync. Kafka's lead ends as partitions multiply: at 10,000 it used twice QueenMQ's CPU, and it did not carry 50,000. The runs are in [QueenMQ vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/).
 
 Transactions have the same kind of ceiling: one leader plans a tenant's transactions, near 12,900 a second of ten messages each on 16-vCPU machines. More raft groups raise it for a deployment, not for one tenant. If one tenant needs more, with nothing but messages in the commit, use Pulsar.
 

@@ -1,6 +1,6 @@
 ---
-title: "Kafka clients on Queen through the Kafka port"
-description: "Turn on the Kafka port and point unchanged Kafka producers and consumers at Queen: a topic is a queue, a key is a partition, and consumer groups are Queen's groups."
+title: "Kafka clients on QueenMQ through the Kafka port"
+description: "Turn on the Kafka port and point unchanged Kafka producers and consumers at QueenMQ: a topic is a queue, a key is a partition, and consumer groups are QueenMQ's groups."
 type: how-to
 tier: use
 sidebar:
@@ -32,7 +32,7 @@ sourceOfTruth:
 # same member id (clippy); the join behaves as before. Nothing this page states changes.
 ---
 
-Kafka producers, consumers and admin tools can use Queen as they are: change `bootstrap.servers`, and nothing else. A topic is a Queen queue and a Kafka consumer group is a Queen consumer group, so Kafka clients and Queen clients read and write the same data.
+Kafka producers, consumers and admin tools can use QueenMQ as they are: change `bootstrap.servers`, and nothing else. A topic is a QueenMQ queue and a Kafka consumer group is a QueenMQ consumer group, so Kafka clients and QueenMQ clients read and write the same data.
 
 <Why>moving away from Kafka should not mean rewriting every service on the same day. With the Kafka port, you move one service at a time, and the services not moved yet keep working on the same topics.</Why>
 
@@ -80,7 +80,7 @@ billing [307] offset 0 key=customer-123
 billing [307] offset 1 key=customer-123
 ```
 
-`billing` is a Queen consumer group now, with its lag in the dashboard (`/api/v1/consumer-groups` lists it with `"kind":"kafka"`). A Queen consumer of `billing` starts where the Kafka consumer stopped:
+`billing` is a QueenMQ consumer group now, with its lag in the dashboard (`/api/v1/consumer-groups` lists it with `"kind":"kafka"`). A QueenMQ consumer of `billing` starts where the Kafka consumer stopped:
 
 ```bash
 curl -s -X POST localhost:6632/api/v1/push -H 'content-type: application/json' -d '{"items":[
@@ -90,11 +90,11 @@ curl -s "$Q?consumerGroup=billing&batch=10" | jq -c '.messages[] | {offset, data
 {"offset":2,"data":{"orderId":8894,"total":99}}
 ```
 
-And a Kafka consumer reads what a Queen client pushed: a record with no key, whose value is the JSON.
+And a Kafka consumer reads what a QueenMQ client pushed: a record with no key, whose value is the JSON.
 
-## How Kafka maps onto Queen
+## How Kafka maps onto QueenMQ
 
-| Kafka | Queen |
+| Kafka | QueenMQ |
 | --- | --- |
 | Topic | A queue of the same name, created by CreateTopics or by the first request that names it |
 | Partition `n` | The partition named `"n"` |
@@ -102,12 +102,12 @@ And a Kafka consumer reads what a Queen client pushed: a record with no key, who
 | Offset, committed offset | The partition's offset; the group's position on that partition |
 | `acks=1`, `acks=all` | One path: answered when the push is committed in the raft log |
 | Replication factor | The raft voters: every voter holds every partition |
-| Idempotent producer | Queen's dedup: producer id, epoch and sequence are the transactionId |
+| Idempotent producer | QueenMQ's dedup: producer id, epoch and sequence are the transactionId |
 | Transaction | Kept in the leader's memory, committed with its offsets as one raft entry |
 | `retention.ms` | The queue's retention, set when the topic is created |
 | `cleanup.policy=compact` | Retention off: every record is kept |
 
-<Fig id="kafka-mapping" caption="What a Kafka client sees, and what Queen stores." />
+<Fig id="kafka-mapping" caption="What a Kafka client sees, and what QueenMQ stores." />
 
 On a cluster every node runs the Kafka port, and together they are one Kafka cluster. The raft leader leads every partition and coordinates every group; a client sent to another node is told to go to the leader. Give each node its own `QUEEN_KAFKA_ADVERTISED_ADDR`, and never put the nodes behind one load-balanced address: a client sent to the leader would land on another node, and loop. A load balancer is fine in `bootstrap.servers`, which a client uses once.
 
@@ -115,7 +115,7 @@ On a cluster every node runs the Kafka port, and together they are one Kafka clu
 
 ## Five things to know
 
-- **Kafka consumers take no lease.** Queen's retries and dead-letter queue do not apply to them: a Kafka consumer handles its own failures, as on Kafka. Kafka and Queen consumers share a group's position, not its work, so hand a group from one kind to the other, and do not run both at once.
+- **Kafka consumers take no lease.** QueenMQ's retries and dead-letter queue do not apply to them: a Kafka consumer handles its own failures, as on Kafka. Kafka and QueenMQ consumers share a group's position, not its work, so hand a group from one kind to the other, and do not run both at once.
 - **Committed offsets never expire.** Kafka forgets an empty group after seven days; here a group keeps its position until you delete it.
 - **Transactions live in the leader's memory**, up to 8 MiB, 50,000 records and 1,000 partitions each. A leader change aborts the transactions that were open.
 - **The Kafka port has no TLS in 2.7**, and SASL passwords travel in clear: keep it on a private network.

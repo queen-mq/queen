@@ -114,7 +114,7 @@ sourceOfTruth:
 # relayed by the leader instead of answered 421. This page: the feed_on_leader row says so.
 ---
 
-When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code
+When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code
 is the part your client should branch on: messages get reworded, codes do not. Most of the
 decisions a client has to make come down to three questions, and the tables below answer them for
 every code: can I retry this as it is, do I have to fix the request, or do I need to find out

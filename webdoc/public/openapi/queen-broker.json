@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Queen MQ broker API",
+    "title": "QueenMQ broker API",
     "version": "1.0.0",
-    "summary": "The HTTP API of the Queen MQ broker.",
+    "summary": "The HTTP API of the QueenMQ broker.",
     "description": "Generated from the broker's own source at documentation build time by\n`webdoc/scripts/gen-openapi.mjs`: paths and methods come from the raft router and\nthe generic adapter behind it, query parameters from each router handler's\nextractor, request bodies from the structs those handlers deserialize into,\nresponse codes from the `StatusCode` variants each can return, and authorization\nfrom `auth::route_access_level`.\n\nResponse bodies on the hot paths are assembled by string concatenation rather than\nserialized from a type, and the routes the generic adapter serves read their own\nquery string and body. Those carry `x-queen-schema: \"opaque\"` and are typed as an\nopen object: the field-by-field shape is documented on the reference pages instead of\nguessed at here.\n\nEvery 204 response has no body at all, not an empty JSON document.",
     "license": {
       "name": "Apache-2.0",

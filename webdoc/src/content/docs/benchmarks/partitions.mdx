@@ -1,6 +1,6 @@
 ---
 title: "Partition scaling to 10M vs Kafka, Pulsar, Redpanda"
-description: "One queue from 10 to 10,000,000 partitions on three GCP nodes with local NVMe: Queen 2.4 at 3,000,000 msg/s of 256-byte messages and 1,000,000 msg/s of 1 KB messages, beside Kafka 4.3.1, Pulsar 4.2.4 and Redpanda 26.2.3 on the same machines: latency, CPU, disk, and what a partition costs Queen in memory."
+description: "One queue from 10 to 10,000,000 partitions on three GCP nodes with local NVMe: QueenMQ 2.4 at 3,000,000 msg/s of 256-byte messages and 1,000,000 msg/s of 1 KB messages, beside Kafka 4.3.1, Pulsar 4.2.4 and Redpanda 26.2.3 on the same machines: latency, CPU, disk, and what a partition costs QueenMQ in memory."
 type: reference
 tier: operate
 sidebar:
@@ -8,9 +8,9 @@ sidebar:
   order: 3
 ---
 
-This is the test Queen was built for. Give every entity its own partition and your partition
+This is the test QueenMQ was built for. Give every entity its own partition and your partition
 count is your entity count: a million customers, ten million orders. On three GCP nodes with 24
-vCPU and local NVMe disks, Queen 2.4 carried 3,000,000 messages a second of 256 bytes in and out
+vCPU and local NVMe disks, QueenMQ 2.4 carried 3,000,000 messages a second of 256 bytes in and out
 of one queue at every partition count from 10 to 10,000,000, with an end-to-end p99 of 15 to 25
 ms on 21 to 28 cores, and 1,000,000 messages a second of 1 KB at 16 to 22 ms. On the same machines
 Kafka was the fastest up to 1,000 partitions and did not carry 50,000, Redpanda read 782 ms at
@@ -20,16 +20,16 @@ entity.
 
 ## The shape
 
-The load of [Queen vs Kafka, Pulsar and Redpanda on NVMe](/benchmarks/queen-vs-kafka/#how-we-ran-it),
+The load of [QueenMQ vs Kafka, Pulsar and Redpanda on NVMe](/benchmarks/queen-vs-kafka/#how-we-ran-it),
 where the machines and every setting are: 256-byte JSON messages pushed 100 at a time to one
 partition by nine open-loop load processes, a fresh cluster for every point, 70 seconds of load
-(90 for Queen's runs of 2026-10-16 at 1,000 and 50,000 partitions). A latency is the median of the
+(90 for QueenMQ's runs of 2026-10-16 at 1,000 and 50,000 partitions). A latency is the median of the
 three 10-second windows in seconds 30 to 60, each window the slowest load process, with the worst
-window's p99 in brackets. Every partition existed before the timed run: Queen's load generator
+window's p99 in brackets. Every partition existed before the timed run: QueenMQ's load generator
 pushed one message into each partition and drained it, and the other systems' topics were created
 and warmed first. No system was measured while it created partitions.
 
-Queen ran as 2.4.0-beta.1 with the binary push, compressed groups, framed pops and counted acks,
+QueenMQ ran as 2.4.0-beta.1 with the binary push, compressed groups, framed pops and counted acks,
 deduplication off and nothing deleted during a point; 9 consumers read 10 partitions, 99 read 100,
 and 297 read every larger count with pops of up to 10 partitions and 1,000 messages. The
 ten-million column ran with `QUEEN_CONSUME_IDLE_UNLOAD_S=30`. Every point was carried: nothing
@@ -37,7 +37,7 @@ shed, no error, and at least 99% of what was pushed consumed.
 
 ## Every count at 3,000,000 msg/s
 
-Queen 2.4 with 256-byte messages: end-to-end p50 / p99 in milliseconds, the cores of the three
+QueenMQ 2.4 with 256-byte messages: end-to-end p50 / p99 in milliseconds, the cores of the three
 brokers (the leader's and the two followers' in brackets), the resident memory of the leader and of
 a follower at the end of the point, and the mean write rate of a broker's disks with the bytes it
 wrote for each message.
@@ -84,7 +84,7 @@ were not run with 1 KB messages.
 
 The median is 6.7 to 7.4 ms from 100 partitions up and the p99 16 to 22 ms at every count, on 15
 to 18 cores. Kafka with 1 KB messages read 9.4 ms at p99 up to 1,000 partitions and 19 ms at
-10,000, on 31 cores against Queen's 17, and did not carry 50,000.
+10,000, on 31 cores against QueenMQ's 17, and did not carry 50,000.
 
 ## The other systems on the same machines
 
@@ -119,7 +119,7 @@ past 100,000 partitions.
 
 ## What a partition costs
 
-Memory is the one thing in Queen that follows the partition count. From 10 partitions to ten
+Memory is the one thing in QueenMQ that follows the partition count. From 10 partitions to ten
 million the leader went from 5.2 to 17.2 GB and a follower from 4.8 to 14.2: about 1.2 KB per
 partition on the leader and 0.9 KB on a follower, with 1 KB messages the same. The leader holds a
 little more because it also keeps each consumer group's state for the partitions it has read, for
@@ -131,7 +131,7 @@ partition ceiling: ten million partitions took 17 GB of a node's 88.
 
 ## Why the line stays flat
 
-In Queen a partition is a few rows in the store, which every node keeps in memory: the partition
+In QueenMQ a partition is a few rows in the store, which every node keeps in memory: the partition
 itself, its offsets, and a cursor for each consumer group that reads it. Its messages are records
 in its queue's log, beside every other partition's, and one fsync covers everything a group of
 entries wrote to that log. So a new partition adds memory and nothing else, neither a file nor a
@@ -169,7 +169,7 @@ each time it doubled; and the merge of the queue log's directory, synced in one 
 - Kafka, Pulsar and Redpanda past 100,000 partitions, Redpanda at 100,000, and Pulsar at 100,000
   with enough load generators to rule its client out.
 
-Runs: Queen 2.4 in
+Runs: QueenMQ 2.4 in
 [`benchmark-queen/2026-10-15-bytes-per-msg/runs/gcp/`](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-15-bytes-per-msg)
 (`fm3-*` at 3,000,000 msg/s, `f1k-*` with 1 KB messages, `grid-fix-m3.jsonl` and
 `grid-fix-1m1k.jsonl` for every node's cores, memory and disk) and the `a24-*` folders of

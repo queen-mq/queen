@@ -140,7 +140,7 @@ sourceOfTruth:
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
-on each queue and stops them cleanly at a deploy. Queen has two: a PHP engine that runs straight
+on each queue and stops them cleanly at a deploy. QueenMQ has two: a PHP engine that runs straight
 from the Composer package, and a Rust engine whose master stayed at 7.0 MiB of resident memory
 through a 45-minute soak while Horizon's held 49.1 MiB
 ([benchmark](/benchmarks/laravel/#the-soak)); with prefork, a fork server beside it holds the
@@ -666,7 +666,7 @@ QUEEN_SUPERVISOR_PREFORK=true
 ```
 
 On the Linux server, 64 forked workers with the opcache on held 1.7 MiB of private memory each
-after 60,000 jobs of 10 ms, against 28.9 MiB for a Horizon worker and 31.1 MiB for a Queen worker
+after 60,000 jobs of 10 ms, against 28.9 MiB for a Horizon worker and 31.1 MiB for a QueenMQ worker
 started on its own, and the container used 225 against 1,967 MiB
 ([benchmark](/benchmarks/laravel/#where-the-difference-comes-from)). The memory a job allocates
 stays private to its worker, so prefork saves the booted framework, about 27 MiB per worker there,

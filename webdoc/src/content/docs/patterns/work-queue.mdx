@@ -18,7 +18,7 @@ verifiedBy:
 
 Many workers share one stream of jobs, and each job is done by exactly one of them: resizing photos, sending emails, rendering invoices. This is the work queue, also called competing consumers.
 
-In Queen it is a consumer with no consumer group. Each message goes to one worker. Work runs in parallel across partitions: a partition is held by one worker at a time, so here every user's photos are a partition, and three workers share four users.
+In QueenMQ it is a consumer with no consumer group. Each message goes to one worker. Work runs in parallel across partitions: a partition is held by one worker at a time, so here every user's photos are a partition, and three workers share four users.
 
 <Fig id="work-queue" caption="Competing consumers: each job once, one user's partition per worker at a time." />
 

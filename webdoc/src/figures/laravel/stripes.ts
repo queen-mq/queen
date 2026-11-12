@@ -2,7 +2,7 @@ import { flow } from "@/lib/figure-spec";
 
 // guides/laravel/concepts.mdx, "Queues and stripes".
 export default flow({
-  alt: "How Laravel jobs map onto Queen. dispatch() pushes an ordinary job into one of the queue's stripes, laravel-0000 to laravel-0063, chosen by a hash of the job's UUID. A job that implements QueenPartitionable names its own partition, for example customer:42, so one entity's jobs run one at a time in dispatch order. Workers of the consumer group each lease one partition at a time.",
+  alt: "How Laravel jobs map onto QueenMQ. dispatch() pushes an ordinary job into one of the queue's stripes, laravel-0000 to laravel-0063, chosen by a hash of the job's UUID. A job that implements QueenPartitionable names its own partition, for example customer:42, so one entity's jobs run one at a time in dispatch order. Workers of the consumer group each lease one partition at a time.",
   caption: "Stripes spread ordinary jobs; a partition per entity orders one customer's jobs with one method and no lock.",
   source: "clients/client-php",
   cols: 3,

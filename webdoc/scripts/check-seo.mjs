@@ -37,8 +37,8 @@ const DIST = join(WEBDOC, "dist");
 const SITE = "https://queenmq.com";
 
 /**
- * Shortest `<title>` accepted, brand suffix included. "Overview | Queen MQ" is
- * 19; a title that names its subject in words a reader would search for is
+ * Shortest `<title>` accepted, brand suffix included. "Overview | QueenMQ" is
+ * 18; a title that names its subject in words a reader would search for is
  * rarely under 30.
  */
 const MIN_TITLE_CHARS = 30;
@@ -241,8 +241,8 @@ for (const page of indexable) {
   // The homepage's WebSite node is what search engines read as the site name
   // beside every result. The framework used to fill it with the page title.
   for (const site of nodes.filter((n) => n["@type"] === "WebSite" && n.url === `${SITE}/`)) {
-    if (page.urlPath === "/" && site.name !== "Queen MQ") {
-      fail(rel(page.abs), `the WebSite node is named "${site.name}", not "Queen MQ". See patches/.`);
+    if (page.urlPath === "/" && site.name !== "QueenMQ") {
+      fail(rel(page.abs), `the WebSite node is named "${site.name}", not "QueenMQ". See patches/.`);
     }
   }
 

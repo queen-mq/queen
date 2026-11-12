@@ -1,6 +1,6 @@
 ---
 title: "Configuration for different use cases"
-description: "The settings for each need: trying Queen, a small production, surviving a machine, security, many tenants, encryption, disk, short-lived partitions, Kafka, thousands of queues."
+description: "The settings for each need: trying QueenMQ, a small production, surviving a machine, security, many tenants, encryption, disk, short-lived partitions, Kafka, thousands of queues."
 type: how-to
 tier: operate
 sidebar:
@@ -68,7 +68,7 @@ Every setting is an environment variable, and most installations need very few o
 
 | You need | What to set |
 | --- | --- |
-| To try Queen, or to develop | Nothing |
+| To try QueenMQ, or to develop | Nothing |
 | A small production | One node with a volume, and backups |
 | To survive the loss of a machine | Three nodes; five to survive two |
 | To keep strangers out | Broker JWT, or the built-in proxy |
@@ -80,7 +80,7 @@ Every setting is an environment variable, and most installations need very few o
 | Thousands of queues | `QUEEN_QLOG_SHARDS`, before the first start |
 | To survive the loss of a whole site | A standby cluster |
 
-## To try Queen, or to develop
+## To try QueenMQ, or to develop
 
 One command, no settings:
 
@@ -190,7 +190,7 @@ Payloads are encrypted with AES-256-GCM. Queue and partition names, KV keys and 
 
 ## Disk that does not fill up
 
-Queen keeps every message until retention removes it, even after every group has acked it (see [Create and configure queues](/writing-applications/queues/)). Turn retention on for the queues that grow. As a last guard, a node whose disk is 85% full (`QUEEN_RAFT_DISK_HIGH_PCT`) refuses the writes that would grow it, with `507 storage_full`, and accepts them again below 80% (`QUEEN_RAFT_DISK_LOW_PCT`). Reads, acks and deletes keep working.
+QueenMQ keeps every message until retention removes it, even after every group has acked it (see [Create and configure queues](/writing-applications/queues/)). Turn retention on for the queues that grow. As a last guard, a node whose disk is 85% full (`QUEEN_RAFT_DISK_HIGH_PCT`) refuses the writes that would grow it, with `507 storage_full`, and accepts them again below 80% (`QUEEN_RAFT_DISK_LOW_PCT`). Reads, acks and deletes keep working.
 
 <Why>a broker that keeps history lets new consumer groups and replays read old messages. Retention is where you decide how long that history is worth its disk. The 85% gate leaves room to grow the volume before the node stops.</Why>
 

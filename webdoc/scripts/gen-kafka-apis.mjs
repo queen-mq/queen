@@ -152,7 +152,7 @@ const WINDOW_REASON = {
     "Ceiling: v3 carries `group_instance_id` and lets one request remove several members.",
   SyncGroup: "Ceiling: v3 carries `group_instance_id`.",
   SaslHandshake:
-    "v1 only: the handshake is followed by SaslAuthenticate requests, the framed flow current clients use. PLAIN is the one mechanism, and its password is a Queen token.",
+    "v1 only: the handshake is followed by SaslAuthenticate requests, the framed flow current clients use. PLAIN is the one mechanism, and its password is a QueenMQ token.",
   SaslAuthenticate:
     "Ceiling: v2 only changes the encoding. v1's `session_lifetime_ms` is answered 0, so no client re-authenticates on a timer.",
   CreateTopics:
@@ -160,13 +160,13 @@ const WINDOW_REASON = {
   DeleteTopics:
     "Ceiling: v6 accepts a topic id in place of a name. v5 adds `error_message`, which says in words that there is no such queue.",
   DescribeConfigs:
-    "Up to the schema's v4. It answers no entries, the retention a topic was created with included (that is read in Queen), rather than values nothing enforces; an unknown topic answers UNKNOWN_TOPIC_OR_PARTITION.",
+    "Up to the schema's v4. It answers no entries, the retention a topic was created with included (that is read in QueenMQ), rather than values nothing enforces; an unknown topic answers UNKNOWN_TOPIC_OR_PARTITION.",
   ListGroups:
     "Ceiling: v5 adds `group_type`, which tells classic groups from KIP-848 ones, and KIP-848 is not supported. v4's state filter (`--state`) is honoured.",
   DescribeGroups:
     "Ceiling: v4 carries `group_instance_id`. v3's authorized operations are answered with Kafka's own 'omitted' value, because there is no ACL model.",
   DeleteGroups:
-    "The whole schema; v2 only changes the encoding. Deleting a group with no members deletes the Queen consumer group of that name, with its position on every queue.",
+    "The whole schema; v2 only changes the encoding. Deleting a group with no members deletes the QueenMQ consumer group of that name, with its position on every queue.",
   InitProducerId:
     "Ceiling: v5 exists for KIP-890's transaction protocol 2, which the facade does not run. v3 matters: it is KIP-360's epoch bump, which lets a Java producer recover from a gap in its sequence instead of failing. A transactional id keeps its producer id across restarts, at the next epoch, from the raft leader.",
   CreatePartitions:
@@ -199,29 +199,29 @@ const WINDOW_REASON = {
  */
 const ABSENT = [
   ["ConsumerGroupHeartbeat", "The KIP-848 consumer group protocol (`group.protocol=consumer`).", "Not supported. Groups use the classic protocol, which every Kafka 4.x client still uses by default; a client set to `consumer` fails at once with an error that names `group.protocol=classic`."],
-  ["DeleteRecords", "Truncating a partition below an offset: `kafka-delete-records.sh`, the clear-messages buttons of kafka-ui and AKHQ, and Kafka Streams purging its repartition topics.", "Queen has no trim to an offset yet: a partition's start moves by retention and when the queue is deleted. Answering would report a low watermark that did not move. Delete and recreate the topic instead."],
+  ["DeleteRecords", "Truncating a partition below an offset: `kafka-delete-records.sh`, the clear-messages buttons of kafka-ui and AKHQ, and Kafka Streams purging its repartition topics.", "QueenMQ has no trim to an offset yet: a partition's start moves by retention and when the queue is deleted. Answering would report a low watermark that did not move. Delete and recreate the topic instead."],
   ["OffsetForLeaderEpoch", "Detecting log truncation after a leader change.", "Clients check ApiVersions first and skip that validation for a broker without the key. Raft never truncates an acknowledged entry."],
-  ["DescribeAcls", "Listing ACLs (`kafka-acls.sh --list`).", "There is no ACL model: authorization is Queen's, on the token."],
+  ["DescribeAcls", "Listing ACLs (`kafka-acls.sh --list`).", "There is no ACL model: authorization is QueenMQ's, on the token."],
   ["CreateAcls", "Creating ACLs.", "Same reason."],
   ["DeleteAcls", "Deleting ACLs.", "Same reason."],
-  ["AlterConfigs", "Replacing a topic's configuration (the deprecated full-replacement form).", "A topic's retention is set when it is created (`retention.ms`, `cleanup.policy`) and changed through Queen afterwards; its other configs are not applied, so a change would report a setting that nothing enforces."],
+  ["AlterConfigs", "Replacing a topic's configuration (the deprecated full-replacement form).", "A topic's retention is set when it is created (`retention.ms`, `cleanup.policy`) and changed through QueenMQ afterwards; its other configs are not applied, so a change would report a setting that nothing enforces."],
   ["IncrementalAlterConfigs", "Changing a topic's configuration (`kafka-configs.sh --alter`).", "Same reason."],
   ["DescribeLogDirs", "Log directories and the bytes each partition holds (`kafka-log-dirs.sh`). Some topic creators also wait on it until every replica has its log.", "Not offered yet. A tool that needs it reports the broker as too old; to wait for a new topic, read Metadata (leaders and in-sync replicas) instead."],
   ["OffsetDelete", "Deleting a group's committed offsets for some partitions (`kafka-consumer-groups.sh --delete-offsets`).", "Not offered yet: a group's positions go with the group (DeleteGroups)."],
-  ["CreateDelegationToken", "A broker-signed token derived from a SCRAM login.", "The facade mints no credentials: the password of a SASL/PLAIN login is a Queen token, checked by Queen."],
+  ["CreateDelegationToken", "A broker-signed token derived from a SCRAM login.", "The facade mints no credentials: the password of a SASL/PLAIN login is a QueenMQ token, checked by QueenMQ."],
   ["RenewDelegationToken", "Extending a delegation token.", "Same reason."],
   ["ExpireDelegationToken", "Revoking a delegation token.", "Same reason."],
   ["DescribeDelegationToken", "Listing a principal's delegation tokens.", "Same reason."],
   ["ElectLeaders", "Moving a partition's leadership to its preferred replica (`kafka-leader-election.sh`).", "Every partition is led by the raft leader, which raft elects on its own."],
   ["AlterPartitionReassignments", "Moving replicas between brokers (`kafka-reassign-partitions.sh`, Cruise Control).", "Every raft voter holds every partition, so there is nothing to move."],
   ["ListPartitionReassignments", "Reassignments in flight.", "Same reason."],
-  ["DescribeClientQuotas", "Produce and fetch quotas per user and client id.", "Queen's limits are per tenant; Kafka's quota entities have nothing to map onto."],
+  ["DescribeClientQuotas", "Produce and fetch quotas per user and client id.", "QueenMQ's limits are per tenant; Kafka's quota entities have nothing to map onto."],
   ["AlterClientQuotas", "Changing those quotas.", "The same mapping problem, and it would let a client raise its own tenant's limit."],
-  ["DescribeUserScramCredentials", "Listing SCRAM users.", "SASL here is PLAIN, checked against Queen, and the facade keeps no user store."],
+  ["DescribeUserScramCredentials", "Listing SCRAM users.", "SASL here is PLAIN, checked against QueenMQ, and the facade keeps no user store."],
   ["AlterUserScramCredentials", "Creating or rotating a SCRAM credential.", "Supporting SCRAM would make the facade a credential store, with secrets of its own at rest."],
-  ["DescribeQuorum", "KRaft's metadata quorum (`kafka-metadata-quorum.sh`).", "Queen's raft group is not a KRaft quorum. Its state is in `GET /health` and `GET /api/v1/raft/status`."],
+  ["DescribeQuorum", "KRaft's metadata quorum (`kafka-metadata-quorum.sh`).", "QueenMQ's raft group is not a KRaft quorum. Its state is in `GET /health` and `GET /api/v1/raft/status`."],
   ["DescribeCluster", "Cluster id, controller and brokers in one call.", "Answerable, and left out because the Java and librdkafka admin clients build `describeCluster()` from a Metadata request, which works."],
-  ["DescribeProducers", "Producer state per partition (`kafka-transactions.sh find-hanging`).", "An idempotent producer keeps no state here: each record's producer id, epoch and sequence become its Queen transaction id, and Queen's dedup window drops a retry."],
+  ["DescribeProducers", "Producer state per partition (`kafka-transactions.sh find-hanging`).", "An idempotent producer keeps no state here: each record's producer id, epoch and sequence become its QueenMQ transaction id, and QueenMQ's dedup window drops a retry."],
   ["DescribeTransactions", "One transaction's state.", "An open transaction's records wait in the raft leader's memory until its commit; there is no transaction log to describe."],
   ["ListTransactions", "Transactions in flight.", "Same reason."],
 ];

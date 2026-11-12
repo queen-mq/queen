@@ -757,9 +757,9 @@ function brokerSpec(handlers, structs) {
     doc: {
       openapi: "3.1.0",
       info: {
-        title: "Queen MQ broker API",
+        title: "QueenMQ broker API",
         version: VERSION,
-        summary: "The HTTP API of the Queen MQ broker.",
+        summary: "The HTTP API of the QueenMQ broker.",
         description: [
           "Generated from the broker's own source at documentation build time by",
           "`webdoc/scripts/gen-openapi.mjs`: paths and methods come from the raft router and",
@@ -869,7 +869,7 @@ function proxySpec() {
     doc: {
       openapi: "3.1.0",
       info: {
-        title: "Queen MQ proxy API",
+        title: "QueenMQ proxy API",
         version: VERSION,
         summary: "The proxy's own surface: service endpoints, login, and the cluster console.",
         description: [

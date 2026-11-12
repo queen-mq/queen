@@ -165,13 +165,13 @@ The cost is the writes the lost nodes had committed without the survivor: usuall
 
 ## Every node stopped on the same entry
 
-When every node refuses the same entry, it is a bug in Queen, and restarting never helps: each restart stops on it again. Every node shows the way out in `/health`, under `apply.failure`, and in its `APPLY FAILED` log line: the entry's `index` and `digest`. Check that two nodes agree, and that the `class` is `deterministic`. Then set `QUEEN_RAFT_APPLY_SKIP=<index>:<digest>` on every node and restart them all. The entry becomes a no-op: none of its effects apply, and nothing else is lost. Keep the log line for the bug report.
+When every node refuses the same entry, it is a bug in QueenMQ, and restarting never helps: each restart stops on it again. Every node shows the way out in `/health`, under `apply.failure`, and in its `APPLY FAILED` log line: the entry's `index` and `digest`. Check that two nodes agree, and that the `class` is `deterministic`. Then set `QUEEN_RAFT_APPLY_SKIP=<index>:<digest>` on every node and restart them all. The entry becomes a no-op: none of its effects apply, and nothing else is lost. Keep the log line for the bug report.
 
 ## Backups
 
 Three nodes protect you from losing a machine, not from a mistake: a deleted queue reaches every node as faithfully as a good write. A backup is the copy that lives outside the cluster. A node keeps everything it knows in one directory, and one copy of one node is enough to rebuild a whole cluster.
 
-The copy must be taken at one instant, like the state a power cut leaves behind, which Queen survives. Pause the container, copy, and resume. On a cluster, pause a follower: the other two keep committing without it.
+The copy must be taken at one instant, like the state a power cut leaves behind, which QueenMQ survives. Pause the container, copy, and resume. On a cluster, pause a follower: the other two keep committing without it.
 
 ```bash
 docker pause queen

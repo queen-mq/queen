@@ -1,10 +1,10 @@
 ---
-title: "Why Queen MQ exists: from a Postgres table to a log"
+title: "Why QueenMQ exists: from a Postgres table to a log"
 description: "Head-of-line blocking in Kafka led to a Postgres poller, then a broker in C++, then a Rust broker that writes its own log on disk and replicates it with Raft."
 type: concept
 tier: use
 sidebar:
-  label: "Why Queen MQ"
+  label: "Why QueenMQ"
   order: 2
 ---
 
@@ -33,4 +33,4 @@ This version was faster than anything we ever needed, but it had one structural 
 
 So we started to think about a new class of queue, stored on disk next to the ones in the database. The idea was sound, and after some tests we decided to remove the Postgres queue engine completely, write the storage on disk ourselves, and replicate it with Raft.
 
-The result of this rewrite is Queen today: a message broker replicated with Raft, with a single leader per tenant, able to sustain millions of messages per second at low latency, with a virtually unlimited number of partitions.
+The result of this rewrite is QueenMQ today: a message broker replicated with Raft, with a single leader per tenant, able to sustain millions of messages per second at low latency, with a virtually unlimited number of partitions.

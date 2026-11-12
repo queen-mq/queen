@@ -2,7 +2,7 @@ import { flow } from "@/lib/figure-spec";
 
 // operate/security.mdx, "What listens where".
 export default flow({
-  alt: "The ports of one Queen process and who should reach each. The proxy port, 6711 for example, faces the internet, with API keys, console sessions and TLS, and hands requests to the broker inside the same process. The broker's own port 6632 serves the API, the dashboard, /health and the metrics to trusted clients inside the network, probes and scrapers, under a JWT setting that is off by default. The raft port 7400 carries votes, entries and snapshots between the nodes and is protected by QUEEN_RAFT_TOKEN. The Kafka facade listens on 9092, with SASL plain if you turn it on.",
+  alt: "The ports of one QueenMQ process and who should reach each. The proxy port, 6711 for example, faces the internet, with API keys, console sessions and TLS, and hands requests to the broker inside the same process. The broker's own port 6632 serves the API, the dashboard, /health and the metrics to trusted clients inside the network, probes and scrapers, under a JWT setting that is off by default. The raft port 7400 carries votes, entries and snapshots between the nodes and is protected by QUEEN_RAFT_TOKEN. The Kafka facade listens on 9092, with SASL plain if you turn it on.",
   caption: "Port 6632 never faces the internet on its own: put the proxy, or another front door, in front of it.",
   source: "server/src/config.rs, proxy/src/routes.rs",
   cols: 4,
@@ -27,5 +27,5 @@ export default flow({
     { from: "c4", to: "p4" },
     { from: "p1", to: "p2" },
   ],
-  groups: [{ label: "one Queen process", nodes: ["p1", "p2", "p3", "p4"] }],
+  groups: [{ label: "one QueenMQ process", nodes: ["p1", "p2", "p3", "p4"] }],
 });

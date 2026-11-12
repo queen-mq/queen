@@ -26,7 +26,7 @@ One message per call, in a queue with retries (`retryLimit: 5` and a `retryDelay
 
 The receiver failed the first call. The message came back after the delay, the second call worked, and the receiver kept the event once, under `evt-9001`.
 
-<Why>the call happens outside any commit, so it can happen twice: a crash after the call and before the ack sends it again. The receiver dropping the second call by its key is what makes it count once. Queen gives the stable key, the retries and the dead-letter queue.</Why>
+<Why>the call happens outside any commit, so it can happen twice: a crash after the call and before the ack sends it again. The receiver dropping the second call by its key is what makes it count once. QueenMQ gives the stable key, the retries and the dead-letter queue.</Why>
 
 One thing to know: a failed message holds its partition for the delay. Use one partition per customer, so a customer whose server is down waits on its own retries alone.
 

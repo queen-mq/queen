@@ -123,8 +123,8 @@ export async function GET() {
     "",
     // Same order as the per-page alternates: summary, then index. See
     // `pages/[...slug]/index.md.ts`.
-    "> Queen MQ documentation, for AI agents",
-    `> Complete self-contained summary of Queen MQ: ${url("/llms-brief.txt")}`,
+    "> QueenMQ documentation, for AI agents",
+    `> Complete self-contained summary of QueenMQ: ${url("/llms-brief.txt")}`,
     "> Fetch that first when the question is about the product rather than about this page.",
     `> Index of all pages: ${url("/llms.txt")}`,
     "",

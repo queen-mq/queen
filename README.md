@@ -30,7 +30,7 @@ docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.1
 
 ---
 
-## Queen in five minutes
+## QueenMQ in five minutes
 
 The short version, in JavaScript. The [full guide](https://queenmq.com/#guide) has nine steps in
 JavaScript, Python, Go, Rust and PHP. Every snippet, here and on the site, is cut from
@@ -161,7 +161,7 @@ over in-memory queues, in every language.
 - **Ephemeral queues.** In memory, outside the log, for request/reply: fast, and lost on a crash by design. [Ephemeral queues](https://queenmq.com/writing-applications/ephemeral/)
 - **KV, locks and timers.** State per entity, one worker at a time, and messages scheduled for later, all inside your transactions. [KV, locks and timers](https://queenmq.com/writing-applications/kv-locks-timers/)
 - **Retries and dead letters.** A failed message comes back after a delay, a few times, then goes to the dead-letter queue and its partition moves on. Replay it once fixed. [Retries](https://queenmq.com/writing-applications/retries/)
-- **Kafka clients.** Unchanged Kafka producers and consumers work against Queen's Kafka port. [Kafka](https://queenmq.com/integrations/kafka/)
+- **Kafka clients.** Unchanged Kafka producers and consumers work against QueenMQ's Kafka port. [Kafka](https://queenmq.com/integrations/kafka/)
 - **PostgreSQL and S3, run by the broker.** A table into a queue, a queue into a table, and queues into an S3 bucket as JSONL or Parquet, with no other process to run. [PostgreSQL](https://queenmq.com/integrations/postgres/) · [S3](https://queenmq.com/integrations/s3/)
 - **Tenants and standby.** Many tenants on one cluster behind the built-in proxy, and a standby cluster that takes over with one call. [Tenants](https://queenmq.com/manage/tenants/) · [Standby](https://queenmq.com/manage/standby/)
 
@@ -179,10 +179,10 @@ it to disk (fsync). Kafka, Pulsar and Redpanda ran on the same machines.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/bench-queen-e2e-dark.svg">
-  <img src="assets/bench-queen-e2e-light.svg" alt="Queen 2.4 end to end p99 as one queue grows from 10 to 10 million partitions on three GCP nodes with local NVMe: 17 to 29 ms at 3M msg/s of 256-byte messages, 17 to 25 ms at 1M msg/s of 1 KB messages" width="820">
+  <img src="assets/bench-queen-e2e-light.svg" alt="QueenMQ 2.4 end to end p99 as one queue grows from 10 to 10 million partitions on three GCP nodes with local NVMe: 17 to 29 ms at 3M msg/s of 256-byte messages, 17 to 25 ms at 1M msg/s of 1 KB messages" width="820">
 </picture>
 
-<sub>Queen 2.4 on three GCP c4-standard-24-lssd nodes with local NVMe, 2026-10-15: end to end p99 at 3M msg/s of
+<sub>QueenMQ 2.4 on three GCP c4-standard-24-lssd nodes with local NVMe, 2026-10-15: end to end p99 at 3M msg/s of
 256-byte messages and at 1M msg/s of 1 KB messages, the worst load process in seconds 30-60 of 70 (at 3M and
 1,000 partitions, the median of five runs). 2.3.0's 3M line read 47 to 78 ms on the same axes.</sub>
 
@@ -196,7 +196,7 @@ Full details: [queenmq.com/benchmarks](https://queenmq.com/benchmarks/)
 
 ## Documentation
 
-- [The little book of QueenMQ](https://queenmq.com/book/): the whole story in one free PDF, from what Queen is to the bytes on disk.
+- [The little book of QueenMQ](https://queenmq.com/book/): the whole story in one free PDF, from what QueenMQ is to the bytes on disk.
 - [The model](https://queenmq.com/introduction/model/): partitions, leases, transactions and a plain HTTP interface; [guarantees](https://queenmq.com/introduction/guarantees/).
 - [Writing applications](https://queenmq.com/writing-applications/): queues, push, pop, acks, retries, transactions, KV, locks, timers, ephemeral queues and streams, every example in six languages.
 - [Patterns](https://queenmq.com/patterns/): work queue, pub/sub, request/reply, workflows, windowed aggregation, rate limiting, delayed messages and more.
@@ -219,4 +219,4 @@ Apache-2.0, see [LICENSE.md](LICENSE.md).
 
 **Nothing happens halfway.**
 
-Queen MQ is built at [Smartness](https://www.smartness.com/en).
+QueenMQ is built at [Smartness](https://www.smartness.com/en).

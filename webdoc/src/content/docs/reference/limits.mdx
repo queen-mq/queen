@@ -133,7 +133,7 @@ sourceOfTruth:
 # This page: the client token rows under Proxy and connectors.
 ---
 
-Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
+Most of QueenMQ's limits exist to keep one request from costing everyone else: a body cap, a ceiling
 on what one log entry may carry, a budget on how much a KV call may read. Few of them are about the
 data itself. The broker puts no cap on partitions per queue, on queues per tenant, or on how long a
 partition's history may grow: your disk and your memory bound those, and a proxy plan can cap them

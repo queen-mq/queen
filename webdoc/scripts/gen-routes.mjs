@@ -322,7 +322,7 @@ function main() {
   const order = [...GROUPS.map(([n]) => n), "Ungrouped"];
   const lines = [];
   lines.push(
-    `Queen's broker serves **${routes.length} method + path pairs**. ` +
+    `QueenMQ's broker serves **${routes.length} method + path pairs**. ` +
       `Every row below is read out of the router, the generic adapter behind it and the ` +
       `authorization table at build time.`,
     "",

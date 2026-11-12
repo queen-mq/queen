@@ -2,7 +2,7 @@ import { flow } from "@/lib/figure-spec";
 
 // concepts/index.mdx, "The five roles of a step": the usual stack against one log.
 export default flow({
-  alt: "Two ways to run one step. On the left, the usual stack: the worker acks and publishes the next events on a broker, writes the state and an outbox row in a database, schedules a reminder in a scheduler, and records the event id in an idempotency table, four systems with four separate commits. On the right, Queen: the worker sends one transaction, and the ack, the next events, the state, the timer and the identity check land in one log entry.",
+  alt: "Two ways to run one step. On the left, the usual stack: the worker acks and publishes the next events on a broker, writes the state and an outbox row in a database, schedules a reminder in a scheduler, and records the event id in an idempotency table, four systems with four separate commits. On the right, QueenMQ: the worker sends one transaction, and the ack, the next events, the state, the timer and the identity check land in one log entry.",
   caption: "Four commits can disagree when something crashes between two of them. One entry cannot: it is written whole or not at all.",
   cols: 4,
   rows: 4,
@@ -27,6 +27,6 @@ export default flow({
   ],
   groups: [
     { label: "four systems, four commits", nodes: ["w1", "broker", "db", "sched", "idem"] },
-    { label: "Queen, one commit", nodes: ["w2", "queen"] },
+    { label: "QueenMQ, one commit", nodes: ["w2", "queen"] },
   ],
 });

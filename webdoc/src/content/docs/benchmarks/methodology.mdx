@@ -1,6 +1,6 @@
 ---
 title: "Benchmark methodology: machines, settings, commands"
-description: "The machines, the load generators and what they count, each system's settings and durability, Queen's non-default settings, the commands that ran every benchmark in this section, and the archive the runs live in."
+description: "The machines, the load generators and what they count, each system's settings and durability, QueenMQ's non-default settings, the commands that ran every benchmark in this section, and the archive the runs live in."
 type: reference
 tier: operate
 sidebar:
@@ -71,11 +71,11 @@ each system ran with, and the scripts.
 
 The section has three generations of runs, and no page compares a number across two of them.
 
-- **GCP, 2026-10-14 to 16.** Queen 2.4 against Kafka 4.3.1, Pulsar 4.2.4 and Redpanda 26.2.3:
+- **GCP, 2026-10-14 to 16.** QueenMQ 2.4 against Kafka 4.3.1, Pulsar 4.2.4 and Redpanda 26.2.3:
   [the comparison](/benchmarks/queen-vs-kafka/) and [partition count](/benchmarks/partitions/).
 - **DigitalOcean, 2026-10-12 and 13.** Pre-release builds of 2.3.0: the transactions against 2.2.0
   and five Kafka-client points.
-- **DigitalOcean, September and 2026-10-01 and 02.** Queen 2.0.0-beta builds with Kafka, Redpanda and
+- **DigitalOcean, September and 2026-10-01 and 02.** QueenMQ 2.0.0-beta builds with Kafka, Redpanda and
   Pulsar in transactions, the soak, the first Kafka-client runs, and Laravel on one node.
 
 The two DigitalOcean sets are six droplets of the same size, not the same droplets.
@@ -92,10 +92,10 @@ clocks synced with chrony. The VMs were made three times, on 2026-10-14, 15 and 
 broker's disks were measured before use: a 32 KB write and `fdatasync` took 0.05 to 0.06 ms at the
 median on every broker of every set, 16,000 to 17,700 a second. A local SSD that has been written
 for hours without TRIM slows down (on 10-14 one disk of one broker went to 30 ms a write), so the
-RAID gets an `fstrim` before a series. On 10-16 Queen and Kafka ran their 1,000-partition point
+RAID gets an `fstrim` before a series. On 10-16 QueenMQ and Kafka ran their 1,000-partition point
 again and read what they had read on the earlier sets.
 
-Queen ran as 2.4.0-beta.1 (the image `ghcr.io/queen-mq/queen:2.4.0-beta.1`; the runs of 10-15 are
+QueenMQ ran as 2.4.0-beta.1 (the image `ghcr.io/queen-mq/queen:2.4.0-beta.1`; the runs of 10-15 are
 the same code built before the version commit), three voters, one tenant and one raft group,
 every broker setting at its default except `QUEEN_CONSUME_IDLE_UNLOAD_S=30` at ten million
 partitions. Its load generator turns on the wire forms that are off by default in every client
@@ -104,7 +104,7 @@ acks answered with counts, framed pops). Each queue had deduplication off and ke
 messages 1,800 seconds, so nothing was deleted during a point.
 
 A point is a fresh cluster with its partitions created and warmed, 70 seconds of load with a
-10-second ramp in them (90 for Queen's runs of 10-16), nine load processes. A latency is the
+10-second ramp in them (90 for QueenMQ's runs of 10-16), nine load processes. A latency is the
 median of the three 10-second windows in seconds 30 to 60, each window taking the slowest process,
 with the worst window in brackets; CPU is the three brokers' cores over the loaded window. A point
 is carried when at least 99.5% of the offered rate is pushed, nothing is shed or errs, and 99% of
@@ -130,7 +130,7 @@ followers, read a push p99 of 242 ms at 300,000 msg/s that belonged to one follo
 alone. With the three fast disks as brokers the same build read 5 ms. Measure every disk before
 giving roles (`scripts/fsync.py` in the archive).
 
-Queen ran as release builds (`cargo build --release --locked`, the profile of the published
+QueenMQ ran as release builds (`cargo build --release --locked`, the profile of the published
 image) of the commits that became 2.3.0, three voters, one tenant and one raft group, every
 broker setting at its default, with the brokers' kernel keeping 512 MB free
 (`vm.min_free_kbytes`, with `vm.watermark_scale_factor` 200). The load generator is `qload`, nine
@@ -151,7 +151,7 @@ its cause, the build that removed it and the tables of every matrix.
 | Role | Count | Shape |
 |---|---|---|
 | Brokers | 3 | DigitalOcean, 16 vCPU, 31 GB, one local disk with ext4. Two Xeon Gold 6548N, one Xeon Platinum 8358 |
-| Load machines | 3, and a fourth for Queen's native runs | 16 vCPU, 31 GB, Xeon Platinum 8358 |
+| Load machines | 3, and a fourth for QueenMQ's native runs | 16 vCPU, 31 GB, Xeon Platinum 8358 |
 
 All of them ran Ubuntu 24.04 in one VPC, with the same kernel settings on every machine for every
 system (`common/os-tune.sh`): swappiness 1, larger socket buffers and backlogs, a million open
@@ -159,15 +159,15 @@ files, `noatime`, transparent huge pages left at Ubuntu's `madvise`, and no IRQ 
 were synced with chrony, each within a third of a millisecond of NTP. Only one system ran on the
 brokers at a time, and every start script refuses to start while another system's ports are open.
 
-The older Platinum broker caps a raft leader about 15 to 20% lower, so Queen's harness stops that
+The older Platinum broker caps a raft leader about 15 to 20% lower, so QueenMQ's harness stops that
 node whenever it leads and starts it again as a follower, until another node leads. Kafka, Redpanda
 and Pulsar spread partition leadership over all three brokers, the older one included.
 
 ## The load generators
 
-Queen's native runs of September used `goload`, a Go program built on Queen's Go client. Kafka, Redpanda and
+QueenMQ's native runs of September used `goload`, a Go program built on QueenMQ's Go client. Kafka, Redpanda and
 Pulsar used `kload` (franz-go) and `pload` (pulsar-client-go), and the transactional runs added
-`qload` for Queen. The three share one core copied from `goload`, so all four systems are driven
+`qload` for QueenMQ. The three share one core copied from `goload`, so all four systems are driven
 and measured the same way.
 
 The producers run open loop. Each unit, 100 messages for one partition, leaves at its scheduled
@@ -192,7 +192,7 @@ process's. CPU is the system's own processes, from 2-second samples over the loa
 over the three brokers. A system fell behind when it consumed under 97% of the offered rate or its
 e2e p99 passed 5 seconds.
 
-## Queen's settings in the September runs
+## QueenMQ's settings in the September runs
 
 Each benchmark binary was built with Cargo's `fastrel` profile, which is `release` without link-time
 optimization and with 16 codegen units, so it builds in minutes between runs; the published images
@@ -242,10 +242,10 @@ What each system acknowledges after, side by side, is on
 ## Running it again
 
 Each folder below has the scripts that ran and a `README` or `SPEC.md`. Fill in the machines'
-addresses first: `cluster.env` for Queen's harness, `hosts.env` for the others.
+addresses first: `cluster.env` for QueenMQ's harness, `hosts.env` for the others.
 
 The GCP runs. VMs and disks from `benchmark-queen/2026-10-15-bytes-per-msg/scripts/gcp/`
-(`hosts.sh` filled in from `create.sh`'s table), Queen from
+(`hosts.sh` filled in from `create.sh`'s table), QueenMQ from
 `benchmark-queen/2026-10-12-three-node-new-forms/scripts/` with the broker binary in
 `/root/p3/bin/<name>/queen` on each broker, the others from `benchmark-queen/2026-09-30-kafka-pulsar/`:
 
@@ -257,7 +257,7 @@ pulsar/run.sh 1x1000-3000k 3000000 PARTITIONS=1000 SUB_TYPE=failover CONSUMERS=3
 redpanda/run.sh 1x1000-3000k 3000000 PARTITIONS=1000 CONSUMERS=33 && redpanda/cluster.sh untune
 ```
 
-The soak and the September runs of Queen, from `benchmark-queen/2026-09-30-stage03-3node/`, with
+The soak and the September runs of QueenMQ, from `benchmark-queen/2026-09-30-stage03-3node/`, with
 the broker binary in `/root/qr/` on each broker:
 
 ```bash
@@ -282,15 +282,15 @@ txn/deploy.sh && txn/grid.sh && report/report.py --txn runs/txn/*/*
 
 | Folder under `benchmark-queen/` | What it holds |
 |---|---|
-| `2026-10-15-bytes-per-msg/` | Queen 2.4 on the GCP nodes: the 3,000,000 msg/s and 1 KB matrices (`runs/gcp/fm3-*`, `f1k-*`), the ceiling (`fxc-*`), the A/B against 2.3.0, the scripts that made the VMs, and the measurement of what each message writes |
-| `2026-10-12-three-node-new-forms/` | Queen's harness for the GCP runs and Queen 2.4's points of 2026-10-16 (`runs/a24-*`); the 2.3.0 runs: `README.md`, `NIGHT.md`, the DigitalOcean matrix rows (`runs/grid-final.jsonl`), 2.2.0 on the same machines, the transactions, and the probes that found each stall |
-| `2026-09-30-stage03-3node/` | Queen's harness for 2026-09-30 and 10-01 and every Queen run on these pages: the 2.0.0-beta.2 matrix (`runs/mb2c-*`) and the soaks (`runs/soak1` to `soak5`), with the `goload` source |
+| `2026-10-15-bytes-per-msg/` | QueenMQ 2.4 on the GCP nodes: the 3,000,000 msg/s and 1 KB matrices (`runs/gcp/fm3-*`, `f1k-*`), the ceiling (`fxc-*`), the A/B against 2.3.0, the scripts that made the VMs, and the measurement of what each message writes |
+| `2026-10-12-three-node-new-forms/` | QueenMQ's harness for the GCP runs and QueenMQ 2.4's points of 2026-10-16 (`runs/a24-*`); the 2.3.0 runs: `README.md`, `NIGHT.md`, the DigitalOcean matrix rows (`runs/grid-final.jsonl`), 2.2.0 on the same machines, the transactions, and the probes that found each stall |
+| `2026-09-30-stage03-3node/` | QueenMQ's harness for 2026-09-30 and 10-01 and every QueenMQ run on these pages: the 2.0.0-beta.2 matrix (`runs/mb2c-*`) and the soaks (`runs/soak1` to `soak5`), with the `goload` source |
 | `2026-09-30-kafka-pulsar/` | `SPEC.md`, the runbook, the `mqload` loaders (`qload` among them), each system's install and configuration scripts, `report/report.py`, and the Kafka, Redpanda, Pulsar, transaction and Kafka-client runs; the folders tagged `-gcp24` are the GCP runs (Kafka's of 10-14, Pulsar's and Redpanda's `1x<partitions>-3000k-gcp24` of 10-16), and `-oct13` and `b1-` the 2026-10-13 runs on the second set of machines |
 | `2026-09-29-1m-3node/` | the 2026-09-29 runs at 1M msg/s on 500,000 partitions, deduplication on and off, and their harness |
 | `2026-09-27-jepsen-archive/` | Jepsen P8 to P10: every run, the Jepsen stores and the binaries they tested |
 
 Three older 2.0 folders are kept and not quoted, because the engine they measured has been rewritten
-since: `2026-09-23-raft-32core/` (one 32-vCPU node), `2026-09-24-raft-3node/` (Queen and Kafka by
+since: `2026-09-23-raft-32core/` (one 32-vCPU node), `2026-09-24-raft-3node/` (QueenMQ and Kafka by
 partition count at 300,000 msg/s on 32-vCPU nodes) and `2026-09-25-queue-count/` (one node, the
-queue-count problem that led to shared queue logs). Results of Queen 1.x, whose storage was
+queue-count problem that led to shared queue logs). Results of QueenMQ 1.x, whose storage was
 PostgreSQL, are in the git history of this site.

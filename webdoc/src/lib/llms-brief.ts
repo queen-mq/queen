@@ -208,7 +208,7 @@ export async function buildBrief(): Promise<string> {
     IDENTITY_LINE,
     "",
     "This is the whole product in one document, for an agent that has a question",
-    "about Queen MQ rather than about one page of its documentation. Every figure",
+    "about QueenMQ rather than about one page of its documentation. Every figure",
     "carries the conditions it was measured under, in the same sentence, because a",
     "figure without them is not a fact about this system.",
     "",

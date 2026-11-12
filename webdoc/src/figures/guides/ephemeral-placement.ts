@@ -4,7 +4,7 @@ import { flow } from "@/lib/figure-spec";
 // (queen-2 owns room-4 and room-5, queen-3 owns room-1, 2, 3 and 6). A push that
 // lands on queen-1 and a pop that lands on queen-2 both reach room-1's owner.
 export default flow({
-  alt: "Three Queen nodes serving one ephemeral queue. A producer pushes to presence/room-1 through queen-1 and a consumer pops room-1 through queen-2. Neither node owns room-1, so both forward the request to queen-3, which owns room-1 (with room-2, room-3 and room-6) and keeps its messages in memory. queen-2 owns room-4 and room-5, queen-1 owns none of the six rooms. The owner of a (queue, partition) is a highest-random-weight hash over the live members, which every node computes the same way.",
+  alt: "Three QueenMQ nodes serving one ephemeral queue. A producer pushes to presence/room-1 through queen-1 and a consumer pops room-1 through queen-2. Neither node owns room-1, so both forward the request to queen-3, which owns room-1 (with room-2, room-3 and room-6) and keeps its messages in memory. queen-2 owns room-4 and room-5, queen-1 owns none of the six rooms. The owner of a (queue, partition) is a highest-random-weight hash over the live members, which every node computes the same way.",
   caption: "Clients can use any node. The node that receives a request hashes the partition, finds the owner and forwards to it, and the owner answers through the same hop. A long-poll pop waits at the owner.",
   source: "server/src/ephemeral.rs (hrw_pick, Ephemeral::route), server/src/handlers/ephemeral.rs (forward_to_owner)",
   cols: 3,

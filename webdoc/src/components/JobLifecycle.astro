@@ -67,7 +67,7 @@ const { engine, alt: defaultAlt } = jobLifecycle(Astro.props);
 
 const LABELS: Record<"queen" | "horizon", Labels> = {
   queen: {
-    tag: "Queen",
+    tag: "QueenMQ",
     push: "push",
     ready: ["partition ", { code: "laravel-0042" }],
     pop: ["pop"],
@@ -84,7 +84,7 @@ const LABELS: Record<"queen" | "horizon", Labels> = {
     failed: {
       when: "fails after its tries",
       title: "Failed",
-      detail: [["Queen dead letter and"], [{ code: "failed_jobs" }, " row, kept in sync"]],
+      detail: [["QueenMQ dead letter and"], [{ code: "failed_jobs" }, " row, kept in sync"]],
       back: [{ code: "queue:retry" }, " pushes it back"],
     },
   },

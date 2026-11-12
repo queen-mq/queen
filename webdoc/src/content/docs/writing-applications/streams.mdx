@@ -156,7 +156,7 @@ By default a window holds the events that arrived during it. Give `eventTime` a 
 
 `.to(queue)` pushes each result to another queue, in the same commit as the state and the acks, into the partition of the same name unless you pass `{ partition }`. `.foreach(fn)` calls your function for each result, and acks only after it returns: a crash in the middle calls it again.
 
-<Why>a result that stays inside Queen can be exactly once. A call to the outside world (an email, an API) cannot, so `foreach` makes it at least once and says so. For an external effect that must happen once, send the result to a queue and let a worker do it with an idempotency key.</Why>
+<Why>a result that stays inside QueenMQ can be exactly once. A call to the outside world (an email, an API) cannot, so `foreach` makes it at least once and says so. For an external effect that must happen once, send the result to a queue and let a worker do it with an idempotency key.</Why>
 
 ## Rate limits with a gate
 
@@ -182,7 +182,7 @@ A window on a partition that goes quiet still closes on time. The client keeps t
 
 <Why>a window that never closes is a result that was never sent. It has to show before someone asks where the number went.</Why>
 
-Push, consume, ack, replay, fetch, transactions, KV, timers, locks, streams and ephemeral queues all combine. Build on them and Queen carries the logic you would otherwise write around a broker. [Patterns](/patterns/) shows them combined, one real case each.
+Push, consume, ack, replay, fetch, transactions, KV, timers, locks, streams and ephemeral queues all combine. Build on them and QueenMQ carries the logic you would otherwise write around a broker. [Patterns](/patterns/) shows them combined, one real case each.
 
 ## Streams from the tenant feed
 

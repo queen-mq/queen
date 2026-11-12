@@ -92,7 +92,7 @@ The sink cuts each queue into windows of time, on the broker's clock. A window c
 
 <Fig id="s3-sink" caption="Windows on the broker's clock, and the three-step commit." />
 
-Every node runs the sink, but only one node writes a queue: the one that holds the queue's lease, a row in Queen's KV. A window is committed in three steps: its end is written in KV, the files go up, then a commit pointer moves in KV. A node that dies halfway leaves the next one enough to finish the same window. The queues spread over the nodes by themselves.
+Every node runs the sink, but only one node writes a queue: the one that holds the queue's lease, a row in QueenMQ's KV. A window is committed in three steps: its end is written in KV, the files go up, then a commit pointer moves in KV. A node that dies halfway leaves the next one enough to finish the same window. The queues spread over the nodes by themselves.
 
 | Setting | Default | What it does |
 | --- | --- | --- |

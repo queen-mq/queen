@@ -31,7 +31,7 @@ const structuredData = {
     {
       "@type": "WebSite",
       "@id": "https://queenmq.com/#website",
-      name: "Queen MQ",
+      name: "QueenMQ",
       url: "https://queenmq.com/",
       inLanguage: "en",
       publisher: { "@id": "https://queenmq.com/#org" },
@@ -39,7 +39,7 @@ const structuredData = {
     {
       "@type": "Organization",
       "@id": "https://queenmq.com/#org",
-      name: "Queen MQ",
+      name: "QueenMQ",
       url: "https://queenmq.com/",
       logo: "https://queenmq.com/queen-tile.png",
       sameAs: ["https://github.com/queen-mq"],
@@ -47,8 +47,8 @@ const structuredData = {
     {
       "@type": "SoftwareApplication",
       "@id": "https://queenmq.com/#software",
-      name: "Queen MQ",
-      alternateName: "QueenMQ",
+      name: "QueenMQ",
+      alternateName: "Queen MQ",
       description: DESCRIPTION,
       applicationCategory: "DeveloperApplication",
       applicationSubCategory: "Message broker",
@@ -67,7 +67,7 @@ const structuredData = {
     {
       "@type": "SoftwareSourceCode",
       "@id": "https://queenmq.com/#source",
-      name: "Queen MQ source code",
+      name: "QueenMQ source code",
       codeRepository: "https://github.com/queen-mq/queen",
       programmingLanguage: "Rust",
       license: "https://www.apache.org/licenses/LICENSE-2.0",
@@ -78,13 +78,13 @@ const structuredData = {
 
 const nimbusConfig = defineNimbusConfig({
   site: "https://queenmq.com",
-  title: "Queen MQ",
+  title: "QueenMQ",
   description: DESCRIPTION,
   locale: "en",
-  homeLabel: "Queen MQ",
+  homeLabel: "QueenMQ",
   github: "https://github.com/queen-mq/queen",
   editPattern: "https://github.com/queen-mq/queen/edit/master/webdoc/{path}",
-  socialImageAlt: "Queen MQ documentation",
+  socialImageAlt: "QueenMQ documentation",
   // Brand assets are generated: the logo, the favicons and the tile by
   // assets/logo.py, the homepage's picture by assets/scene.py. The favicon
   // is the small logo, the q that is the sunflower; the SVG switches its

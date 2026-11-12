@@ -2,7 +2,7 @@ import { sequence } from "@/lib/figure-spec";
 
 // guides/laravel/concepts.mdx, "How a forked worker talks to its master".
 export default sequence({
-  alt: "The life of a forked worker. The master starts the fork server with a pipe on its stdin and another on fd 3. The fork server boots Laravel once, opens no connection, and answers ready. For each worker the master sends a fork request with the queue:work arguments and environment; the fork server forks a child, which shares the opcache and the booted heap, and answers forked with its pid. The worker pops, runs and acknowledges jobs over HTTP with Queen, like any worker. It sends the lease it holds to the master over a Unix socket, and the master renews that lease with Queen. It leaves its job runtimes and its exit reason in files of the master's state directory. When the worker exits, the fork server reaps it and reports its pid and exit status, and the master asks for a new worker. After php artisan queue:restart, the master starts a new fork server and closes the old one when its last worker exits. At shutdown the master sends SIGTERM, then SIGKILL, to each worker's process group. If the master dies, the fork server SIGKILLs every worker it forked.",
+  alt: "The life of a forked worker. The master starts the fork server with a pipe on its stdin and another on fd 3. The fork server boots Laravel once, opens no connection, and answers ready. For each worker the master sends a fork request with the queue:work arguments and environment; the fork server forks a child, which shares the opcache and the booted heap, and answers forked with its pid. The worker pops, runs and acknowledges jobs over HTTP with QueenMQ, like any worker. It sends the lease it holds to the master over a Unix socket, and the master renews that lease with QueenMQ. It leaves its job runtimes and its exit reason in files of the master's state directory. When the worker exits, the fork server reaps it and reports its pid and exit status, and the master asks for a new worker. After php artisan queue:restart, the master starts a new fork server and closes the old one when its last worker exits. At shutdown the master sends SIGTERM, then SIGKILL, to each worker's process group. If the master dies, the fork server SIGKILLs every worker it forked.",
   caption: "The worker is the fork server's child, so its birth and its exit travel on the fork server's pipes; everything else goes straight between the worker and the master, as with a worker started on its own.",
   source: "supervisor/src/prefork.rs, clients/client-php/src/Laravel/Supervisor/Prefork/ForkServer.php",
   gap: 180,
@@ -10,7 +10,7 @@ export default sequence({
     { id: "m", label: "master", sub: "queen:supervisor" },
     { id: "s", label: "fork server", sub: "queen:fork-server", tone: "strong" },
     { id: "w", label: "worker", sub: "forked queue:work" },
-    { id: "q", label: "Queen", tone: "ghost" },
+    { id: "q", label: "QueenMQ", tone: "ghost" },
   ],
   steps: [
     { from: "m", to: "s", label: "start", sub: "pipes: stdin and fd 3" },

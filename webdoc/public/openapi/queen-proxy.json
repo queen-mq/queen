@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Queen MQ proxy API",
+    "title": "QueenMQ proxy API",
     "version": "1.0.0",
     "summary": "The proxy's own surface: service endpoints, login, and the cluster console.",
     "description": "Generated from `proxy/`'s router at documentation build time. The proxy runs inside\nthe broker process when QUEEN_PROXY_EMBEDDED is on.\n\nThis document covers only the endpoints the proxy *serves*. Every other path is\nhanded to the broker, in-process, for the cluster addressed by the request's first DNS\nlabel, after classification, authentication, quota and rate-limit checks. For the\nbroker's own surface use the broker document; for which of those routes a tenant\ncredential can reach, see the route-class table in the documentation.\n\nResponse shapes are not derivable here: console handlers build their JSON inline.\nOnly paths, methods, path parameters and the credential kind are asserted.",

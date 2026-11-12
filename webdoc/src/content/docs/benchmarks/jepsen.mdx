@@ -1,6 +1,6 @@
 ---
 title: "Jepsen correctness tests and results"
-description: "How Queen MQ's correctness is tested with Jepsen: the workloads and what each checker rejects, the faults, every campaign with its build and result, the bugs the tests found and the commits that fixed them, and the limits of testing."
+description: "How QueenMQ's correctness is tested with Jepsen: the workloads and what each checker rejects, the faults, every campaign with its build and result, the bugs the tests found and the commits that fixed them, and the limits of testing."
 type: reference
 tier: operate
 sidebar:
@@ -51,7 +51,7 @@ tests on the code of 2.7.0, on 2026-10-30 and 31, stream claims and pushes
 of several messages at once among them: all 226 came back valid at their first run. The latest full
 one, with a standby cluster's failover, ran 257 tests on the code of 2.6.0, all valid. That is
 evidence, not proof. Jepsen finds bugs and cannot show there are
-none, and further down is every bug it found in Queen 2.
+none, and further down is every bug it found in QueenMQ 2.
 
 ## How a test runs
 
@@ -294,7 +294,7 @@ found all five nodes answering as voters at the end. The verdicts are in
 
 ## What the tests found
 
-Every row is a bug in Queen that a campaign caught, and the commit that fixed it names the test
+Every row is a bug in QueenMQ that a campaign caught, and the commit that fixed it names the test
 that found it.
 
 | Campaign | Workload and fault | What went wrong | Fixed in |

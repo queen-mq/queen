@@ -1,6 +1,6 @@
 ---
-title: "Benchmark: Kafka clients through Queen's facade"
-description: "Kafka clients (franz-go) producing and consuming through the facade inside Queen, beside Queen's own clients and Kafka 4.3.1 on the same machines: rate, partition count, CPU, what made the facade fast, and what is still open."
+title: "Benchmark: Kafka clients through QueenMQ's facade"
+description: "Kafka clients (franz-go) producing and consuming through the facade inside QueenMQ, beside QueenMQ's own clients and Kafka 4.3.1 on the same machines: rate, partition count, CPU, what made the facade fast, and what is still open."
 type: reference
 tier: operate
 sidebar:
@@ -34,12 +34,12 @@ sourceOfTruth:
 # reformatted, line wrapping only. Nothing this page states changes.
 ---
 
-Queen speaks the Kafka wire protocol from inside the broker process (`QUEEN_KAFKA_EMBEDDED=true`),
-so an existing producer or consumer can point at Queen and keep its code. We measured what that
+QueenMQ speaks the Kafka wire protocol from inside the broker process (`QUEEN_KAFKA_EMBEDDED=true`),
+so an existing producer or consumer can point at QueenMQ and keep its code. We measured what that
 costs with the same load generator, built on franz-go, that drove Kafka itself. After a night of
-work on the facade, Kafka clients see the latency Queen's own clients see, and at a million
+work on the facade, Kafka clients see the latency QueenMQ's own clients see, and at a million
 messages a second a little better. At 1,000,000 msg/s on 200 partitions the facade's e2e p99 was
-91 ms on the final build, against 146 ms for Queen's own clients (2.0.0-beta.2) and 18 ms for Kafka
+91 ms on the final build, against 146 ms for QueenMQ's own clients (2.0.0-beta.2) and 18 ms for Kafka
 4.3.1 itself; the facade ran the code of 2.0.0-beta.5 on 2026-10-02. On 2.3.0-beta.1 the same
 point reads 48 ms, and the facade no longer stops consuming at 2,000,000
 ([2.3.0](#230-five-points)).
@@ -57,7 +57,7 @@ carried 850,000 with that client.
 The rig and load of the other pages: one topic of 200 partitions unless stated, 256-byte messages
 produced 100 at a time to one partition, 60 seconds per point, figures over the last 30. The
 clients were nine franz-go processes on three load machines, with `acks=all`, idempotent
-producers, lz4, a 5 ms linger and classic consumer groups. The Queen cluster ran the facade on
+producers, lz4, a 5 ms linger and classic consumer groups. The QueenMQ cluster ran the facade on
 every node, with the broker settings of the native runs. The builds are those of the facade work
 that was merged as `b51e4419` (2.0.0-beta.5): `qk3` on 2026-10-01, and the final build on
 2026-10-02 for the row marked so. Runs: [`benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/`](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka)
@@ -83,7 +83,7 @@ No point had an error or shed anything. At 2,000,000 msg/s the consumers now kee
 of the nine load processes end at 220 / 350 ms; two hold consumers that fall steadily behind, to
 18 and 25 seconds in the last window, which is where the p99 of that row comes from.
 
-Kafka itself on these machines read 8 / 11 ms at 1,000,000 msg/s on 100 partitions, and Queen's
+Kafka itself on these machines read 8 / 11 ms at 1,000,000 msg/s on 100 partitions, and QueenMQ's
 own clients 10 / 19 ms.
 
 ## Rate
@@ -93,7 +93,7 @@ The tables from here to "Still open" are the runs of 2026-10-01 and 02.
 End-to-end latency, p50 / p99 in milliseconds, one topic of 200 partitions. "Behind" means
 consumption under 97% of the offered rate, or a p99 over 5 seconds.
 
-| Offered msg/s | Kafka clients through Queen | Queen's own clients | Kafka 4.3.1 |
+| Offered msg/s | Kafka clients through QueenMQ | QueenMQ's own clients | Kafka 4.3.1 |
 |---|---|---|---|
 | 300,000 | 10 / 19 | 11 / 22 | 8 / 10 |
 | 600,000 | 12 / 38 | 19 / 98 | 8 / 13 |
@@ -101,7 +101,7 @@ consumption under 97% of the offered rate, or a p99 over 5 seconds.
 | 1,500,000 | 185 / 3,785, all in and out | behind: 1.34M out | 8 / 35 |
 | 2,000,000 | behind: 1.91M in, 105k out | behind: 1.50M in, 1.23M out | 9 / 59 |
 
-Queen's own clients are the 2.0.0-beta.2 runs of September (in the git history of these pages),
+QueenMQ's own clients are the 2.0.0-beta.2 runs of September (in the git history of these pages),
 driven from four load machines. On the facade build with the same three load machines as the
 Kafka clients, they measured 89 / 212 ms at a million (recorded in `b51e4419`'s message): our HTTP
 load generator needs more CPU per message than franz-go, and on three machines it adds latency of
@@ -111,7 +111,7 @@ its own.
 
 At 1,000,000 msg/s, p50 / p99 in milliseconds.
 
-| Partitions | Kafka clients through Queen | Queen's own clients | Kafka 4.3.1 |
+| Partitions | Kafka clients through QueenMQ | QueenMQ's own clients | Kafka 4.3.1 |
 |---|---|---|---|
 | 200 | 44 / 108 | 61 / 146 | 8 / 18 |
 | 10,000 | 45 / 142 | 51 / 144 | 15 / 46 |
@@ -120,14 +120,14 @@ At 1,000,000 msg/s, p50 / p99 in milliseconds.
 
 <Figure id="benchmarks/kafka-clients-p99" />
 
-With many topics of 10,000 partitions in total, Kafka clients through Queen measured 44 / 140 ms
+With many topics of 10,000 partitions in total, Kafka clients through QueenMQ measured 44 / 140 ms
 on 10 topics of 1,000, 58 / 165 ms on 100 of 100, and 41 / 100 ms on 1,000 of 10.
 
 ## CPU
 
-Cores used by Queen's processes on the three brokers at 1M msg/s:
+Cores used by QueenMQ's processes on the three brokers at 1M msg/s:
 
-| Partitions | Kafka clients through Queen | Queen's own clients |
+| Partitions | Kafka clients through QueenMQ | QueenMQ's own clients |
 |---|---|---|
 | 200 | 22.1 | 17.2 |
 | 10,000 | 25.2 | 18.4 |
@@ -138,7 +138,7 @@ Cores used by Queen's processes on the three brokers at 1M msg/s:
 
 The gap that grows with partitions is on the fetch path. The facade answers Fetch up to version 6,
 below fetch sessions (KIP-227), so every fetch names all of its consumer's partitions, and at
-100,000 partitions the nine client processes used 22 cores against Queen and 6 against Kafka. We
+100,000 partitions the nine client processes used 22 cores against QueenMQ and 6 against Kafka. We
 left sessions out on purpose: a session is per-connection state, and the facade keeps none, so it
 can restart the way a Kafka broker does.
 
@@ -152,14 +152,14 @@ all in `b51e4419`, took that to 44 / 108 ms:
   and reads as `POST /api/v1/push` and `POST /api/v1/fetch`, with no JSON in between. A test pins
   that both paths give byte-equal answers, so the two cannot drift apart unnoticed.
 - A Kafka record travels as bytes in both directions.
-- A topic created through Kafka got `dedupWindowSeconds: 0`. A Kafka record carried no Queen
+- A topic created through Kafka got `dedupWindowSeconds: 0`. A Kafka record carried no QueenMQ
   `transactionId`, so the window could only ever check a brand-new id; the first facade's own
   duplicate suppression, the idempotent producer's sequence window, did not need it.
 - Produce requests that a connection already had buffered were written as one push and answered in
   order. `QUEEN_KAFKA_COALESCE` (default 5, Kafka's `max.in.flight.requests.per.connection`) capped
   how many, and nothing waited for a request that had not arrived.
 
-The last two are gone in 2.6: an idempotent record's producer id, epoch and sequence are its Queen
+The last two are gone in 2.6: an idempotent record's producer id, epoch and sequence are its QueenMQ
 transaction id, so a topic created through Kafka gets a dedup window of 900 seconds, and each
 produce request is its own ordered push ([how it works](/integrations/kafka/)).
 
@@ -188,5 +188,5 @@ minutes.
 The facade is also outside the [Jepsen](/benchmarks/jepsen/) tests, which drive the native HTTP
 API; it has a compatibility suite of its own.
 
-How to point a Kafka client at Queen, and what the facade supports, is in the
+How to point a Kafka client at QueenMQ, and what the facade supports, is in the
 [Kafka guide](/integrations/kafka/).

@@ -9,7 +9,7 @@ export default sequence({
   gap: 190,
   actors: [
     { id: "a", label: "w1", sub: "queue:work", tone: "ghost" },
-    { id: "q", label: "Queen", tone: "strong" },
+    { id: "q", label: "QueenMQ", tone: "strong" },
     { id: "b", label: "w2", sub: "queue:work", tone: "ghost" },
   ],
   steps: [

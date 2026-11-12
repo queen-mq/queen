@@ -140,7 +140,7 @@ in its area's table below.
 | `QUEEN_DASHBOARD_ENABLED` | Register the dashboard routes. Default off. |
 | `QUEEN_DASHBOARD_PATH` | The URL prefix of the dashboard. Default `queen`. |
 | `QUEEN_DASHBOARD_DOMAIN` | The host name the dashboard answers on. |
-| `QUEEN_DASHBOARD_CONSOLE_URL` | The Queen web console, for the links of the Workload page. |
+| `QUEEN_DASHBOARD_CONSOLE_URL` | The QueenMQ web console, for the links of the Workload page. |
 | `QUEEN_NOTIFY_MAIL` | The addresses that `queen:check-waits` mails a long wait to. |
 | `QUEEN_METRICS_ENABLED` | Serve the Prometheus endpoint. Default off. |
 | `QUEEN_METRICS_TOKEN` | The bearer token the Prometheus scraper sends. |
@@ -171,7 +171,7 @@ A few more variables are read outside `config/queen.php`, from the environment o
   `'driver' => 'queen'` starts from the same values.
 - A supervised worker takes its consumer group and `retry_after` from its pool, not from the
   connection, and a pool with `balance` `off` gives it `block_for` 0. Both engines do this, for
-  the connection the pool works alone: another Queen connection the worker resolves, to dispatch
+  the connection the pool works alone: another QueenMQ connection the worker resolves, to dispatch
   onto it from a job, keeps its own configuration (PHP client 2.4.1).
 - A pool that sets no `queues` or `consumer_group` takes its connection's `queue` and
   `consumer_group`; for a pool on `queen` those are the top-level ones, so `QUEEN_QUEUE` and
@@ -300,7 +300,7 @@ anywhere else each worker starts one PHP helper
 
 `php artisan queen:consume` reads `retry_after` as the default of its `--lease`, and these keys
 when it runs with `--auto-ack`; the timing must then fit inside `--lease`
-([consume Queen messages](/integrations/laravel/consume/#lease)).
+([consume QueenMQ messages](/integrations/laravel/consume/#lease)).
 
 ## Failed jobs
 
@@ -314,7 +314,7 @@ when it runs with `--auto-ack`; the timing must then fit inside `--lease`
 
 When failed jobs can be retried or pruned from more than one process or host, name a store that
 every worker host sees: `array` is local to one process and `file` to one host. The store's lock
-must be able to check its owner, or the command fails with `The configured Queen failed-job cache
+must be able to check its owner, or the command fails with `The configured QueenMQ failed-job cache
 lock cannot verify ownership.` Keep the TTL above the retry budget of the broker requests, since
 ownership is checked before Laravel's row changes ([failed jobs](/integrations/laravel/concepts/#failed-jobs)).
 
@@ -408,7 +408,7 @@ and [run the PHP engine](/integrations/laravel/supervisors/#run-the-php-engine).
 | `dashboard.refresh_seconds` | `5` | How often a page refreshes itself, in seconds; a value outside 2 to 60 gives 5. |
 | `dashboard.allow_local` | `true` | Let everyone in, in the `local` and `testing` environments, while no `viewQueenDashboard` Gate exists. |
 | `dashboard.failed_jobs_limit` | `50` | Rows on one page of failed jobs; a value outside 1 to 200 gives 50. |
-| `dashboard.console_url` | unset | The address of the Queen web console, which the Workload page then links each queue to. Variable: `QUEEN_DASHBOARD_CONSOLE_URL`. |
+| `dashboard.console_url` | unset | The address of the QueenMQ web console, which the Workload page then links each queue to. Variable: `QUEEN_DASHBOARD_CONSOLE_URL`. |
 
 In production the dashboard lets nobody in until the application defines the `viewQueenDashboard`
 Gate ([authorize production access](/integrations/laravel/dashboard/#authorize-production-access)). A path,
@@ -508,7 +508,7 @@ defaults they had. What changes for you depends on the file your application use
 
 The published file belongs to the application, and you can add `env()` wherever a value must differ
 per environment. For example, `'max_processes' => (int) env('QUEUE_MAX_WORKERS', 10)` in a pool
-reads `QUEUE_MAX_WORKERS`, a variable of your own: Queen does not know that name, and any name
+reads `QUEUE_MAX_WORKERS`, a variable of your own: QueenMQ does not know that name, and any name
 works. `env()` turns `true` and `false` into booleans and returns every other value as a string, so
 cast a number with `(int)` and write a switch as `true` or `false`. The connection and driver keys
 can also go on the `queen` connection in `config/queue.php`, where they win over `config/queen.php`.

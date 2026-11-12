@@ -1,6 +1,6 @@
 ---
 title: "Architecture: one leader per tenant"
-description: "A Queen node is one process, and every write is decided once, on the leader of its tenant's raft group, then applied on every node. A transaction is one log entry."
+description: "A QueenMQ node is one process, and every write is decided once, on the leader of its tenant's raft group, then applied on every node. A transaction is one log entry."
 type: overview
 tier: internals
 sidebar:
@@ -53,7 +53,7 @@ digest: >-
 # relay through). Nothing this page states changes.
 ---
 
-A Queen node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.
+A QueenMQ node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.
 
 The rule behind the whole design is: **one leader per tenant**. A tenant lives in one raft group, and one leader orders all its writes. So a transaction, even across ten queues, is one log entry: no coordinator, no two-phase commit. The price is that one tenant's writes do not spread over more nodes. To use more nodes for writes, run more raft groups (see [Many tenants on one cluster](/manage/configuration/#many-tenants-on-one-cluster)): with as many groups as nodes, every node leads one.
 

@@ -78,9 +78,9 @@ curl -s "localhost:6632/api/v1/pop/queue/orders?$Q" | jq -c '.messages[0].data'
 | `lsn`, `xid` | 0/17F85F0 | The commit position in the WAL, and the PostgreSQL transaction. |
 | `ts`, `seq` |  | The commit time, and the change's place inside its transaction. |
 
-Then we changed the table: one update, then an insert and a delete in one transaction. The insert and the delete arrived with the same `lsn` and `xid`, in one Queen transaction, so no consumer could see one without the other. Each message id is built from the change's place in the WAL (`pg:0a238c4b:00000000017F8830:0`), so it is the same however many times it is sent.
+Then we changed the table: one update, then an insert and a delete in one transaction. The insert and the delete arrived with the same `lsn` and `xid`, in one QueenMQ transaction, so no consumer could see one without the other. Each message id is built from the change's place in the WAL (`pg:0a238c4b:00000000017F8830:0`), so it is the same however many times it is sent.
 
-<Why>the source writes the messages and its WAL position in the same Queen transaction. After a crash the next owner restarts from that position and drops what is already in Queen. Only after Queen has committed does PostgreSQL get leave to recycle the WAL.</Why>
+<Why>the source writes the messages and its WAL position in the same QueenMQ transaction. After a crash the next owner restarts from that position and drops what is already in QueenMQ. Only after QueenMQ has committed does PostgreSQL get leave to recycle the WAL.</Why>
 
 <Fig id="pg-source" caption="The source: the messages and the WAL position commit together." />
 

@@ -1,5 +1,5 @@
 ---
-title: How Queen runs Laravel jobs
+title: How QueenMQ runs Laravel jobs
 description: "The ideas behind the Laravel queue connection and the supervisor, each beside what Horizon does: stripes and per-entity partitions, leases and their renewal, at-least-once delivery, delays, failed jobs, prefetch, pools, prefork, replicas, shutdown and durability."
 type: concept
 tier: use
@@ -156,7 +156,7 @@ Your job classes do not change: they implement `ShouldQueue`, keep their middlew
 
 | Term | On this page | The nearest thing in Horizon |
 | --- | --- | --- |
-| Broker | the Queen server: it stores jobs and hands them to workers over HTTP | Redis |
+| Broker | the QueenMQ server: it stores jobs and hands them to workers over HTTP | Redis |
 | Partition | an ordered lane inside a queue | none: a Redis queue is one list |
 | Stripe | one of the fixed partitions the driver spreads ordinary jobs over | none |
 | Consumer group | a name that keeps its own position in every partition | none |
@@ -309,7 +309,7 @@ A forked worker is a child of the fork server and shares no memory with the mast
 | The Unix socket `lease.sock` | worker ↔ master | the lease to renew (`track`, `forget`); the master's `tracked` or `unsafe` |
 | Files in the state directory | worker → master | job runtimes per queue; why the worker exits: `timeout`, `memory`, `restart` |
 | Signals | master → worker | SIGTERM to drain; SIGKILL to fence, to the worker's whole process group |
-| HTTP | worker ↔ Queen | pop and ACK, as any worker: the master never relays a job |
+| HTTP | worker ↔ QueenMQ | pop and ACK, as any worker: the master never relays a job |
 | stdout and stderr | worker → the master's output | inherited, so the worker's lines land where the master's do |
 
 - The fork server closes the database and Redis connections, log channels and mailers before it forks; each worker opens its own after.
@@ -320,7 +320,7 @@ A forked worker is a child of the fork server and shares no memory with the mast
 
 `fork()` gives the child the parent's memory without copying it: a 4 KiB page is copied only when one of them writes to it. The compiled code in opcache's shared memory is never copied, and the booted application is copied only where a worker writes. On the Linux server, 64 idle workers after 60,000 jobs:
 
-| Per worker | Horizon | Queen, forked |
+| Per worker | Horizon | QueenMQ, forked |
 | --- | ---: | ---: |
 | Resident set, as `ps` and `top` show it | 48.7 MiB | 32.7 MiB |
 | Private: pages no other process maps | 28.9 MiB | 1.7 MiB |

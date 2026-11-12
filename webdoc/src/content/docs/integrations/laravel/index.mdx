@@ -1,6 +1,6 @@
 ---
 title: "Laravel queue driver: install and run your jobs"
-description: "Run your Laravel jobs on Queen: install the queue connection, keep your job classes and workers, order jobs per entity, pick a delivery profile, and choose who runs the workers."
+description: "Run your Laravel jobs on QueenMQ: install the queue connection, keep your job classes and workers, order jobs per entity, pick a delivery profile, and choose who runs the workers."
 type: how-to
 tier: use
 sidebar:
@@ -147,7 +147,7 @@ QueenMQ can take over two jobs in a Horizon setup: holding the jobs, which Redis
 
 <Why>a job in Redis can be lost with the Redis process, and a Horizon master boots Laravel in every worker. With QueenMQ the backlog is on disk (in a cluster, on a majority of nodes) before `dispatch()` returns, an entity can have its own ordered lane, and forked workers share one booted framework. In our runs on one 16-vCPU server, 32 workers completed 2,753 jobs a second of 10 ms jobs against Horizon's 1,124, and 64 forked workers fit in 183 MiB against 1,892 ([benchmark](/benchmarks/laravel/)).</Why>
 
-If you run Horizon today, [Queen or Horizon](/integrations/laravel/queen-vs-horizon/) compares the two, and [migrate from Horizon](/integrations/laravel/migrate-from-horizon/) moves a running application step by step.
+If you run Horizon today, [QueenMQ or Horizon](/integrations/laravel/queen-vs-horizon/) compares the two, and [migrate from Horizon](/integrations/laravel/migrate-from-horizon/) moves a running application step by step.
 
 ## Install
 
@@ -170,7 +170,7 @@ If you run Horizon today, [Queen or Horizon](/integrations/laravel/queen-vs-hori
    php artisan vendor:publish --tag=queen-config
    ```
 
-3. **Point Laravel at Queen.**
+3. **Point Laravel at QueenMQ.**
 
    ```dotenv
    QUEUE_CONNECTION=queen
@@ -197,12 +197,12 @@ That is a working integration, with no supervisor. Keep your current systemd, Ku
 Supervisor definition if a fixed number of workers is all you need, and stop a worker with the
 signal you already use.
 
-`retry_after` in `config/queen.php`, 90 seconds by default, is the Queen lease: how long a worker
+`retry_after` in `config/queen.php`, 90 seconds by default, is the QueenMQ lease: how long a worker
 holds a job before the broker gives it to someone else. It must be longer than the worker's
 `--timeout` and than the slowest job, unless you turn on
 [lease renewal](/integrations/laravel/concepts/#lease-renewal-and-fencing). Laravel does not pass
 `queue:work --timeout` to the connection, so without lease renewal the driver checks only a job's
-own `$timeout` against the lease. A Queen supervisor refuses a pool whose `timeout` is not shorter
+own `$timeout` against the lease. A QueenMQ supervisor refuses a pool whose `timeout` is not shorter
 than `retry_after`; under any other process manager, keep `--timeout` below `retry_after`
 yourself.
 
@@ -229,7 +229,7 @@ That is a working integration, with no supervisor: keep your systemd, Kubernetes
 
 Three settings to know from the first day:
 
-- **`retry_after`** (90 seconds) is the lease: how long a worker holds a job before the broker gives it to someone else. Keep it longer than the worker's `--timeout` and the slowest job, or turn on [lease renewal](/integrations/laravel/concepts/#lease-renewal-and-fencing). Laravel does not pass `--timeout` to the connection, so keep the two in step yourself; a Queen supervisor refuses a pool whose `timeout` is not shorter than `retry_after`.
+- **`retry_after`** (90 seconds) is the lease: how long a worker holds a job before the broker gives it to someone else. Keep it longer than the worker's `--timeout` and the slowest job, or turn on [lease renewal](/integrations/laravel/concepts/#lease-renewal-and-fencing). Laravel does not pass `--timeout` to the connection, so keep the two in step yourself; a QueenMQ supervisor refuses a pool whose `timeout` is not shorter than `retry_after`.
 - **The consumer group** is the name under which your workers share the work. Two applications in one group split the jobs; two groups on one queue each get every job. Give each application and environment its own queues and its own group.
 - **`QUEEN_BEARER_TOKEN`**, when the broker asks for a credential: a JWT with the `read-write` role, or a [proxy](/manage/tenants/) API key with `produce`, `consume`, `read`, and `admin` for `queue:retry` and `queue:forget`.
 
@@ -319,10 +319,10 @@ The price is a wider at-least-once window. The connector refuses `prefetch` abov
 
 ## What Laravel keeps
 
-| Laravel | With Queen |
+| Laravel | With QueenMQ |
 | --- | --- |
 | `dispatch()`, middleware, `timeout`, `tries`, `backoff` | unchanged |
-| Delayed dispatch | a Queen [timer](/writing-applications/kv-locks-timers/) holds the job until it is due |
+| Delayed dispatch | a QueenMQ [timer](/writing-applications/kv-locks-timers/) holds the job until it is due |
 | `release()` | ACK and re-push, or ACK and timer, in one [transaction](/writing-applications/transactions/) |
 | `failed_jobs` and its commands | unchanged; the broker keeps a dead-letter copy in step (`sync_failed_jobs`) |
 | `Queue::size()`, `pendingSize()`, `reservedSize()` | the consumer group's depth in the broker, plus pending timers |
@@ -337,8 +337,8 @@ All 32 Laravel queue features we checked (chains, batches, unique jobs, rate lim
 | Choice | Use it when | Master process |
 | --- | --- | --- |
 | Your process manager | a fixed number of `queue:work` processes is enough | whatever you run today |
-| Queen PHP supervisor | you want Horizon-like pools and no native binary | Laravel stays loaded in one PHP master |
-| Queen Rust supervisor | you want the smallest master | Rust, after one temporary Artisan run |
+| QueenMQ PHP supervisor | you want Horizon-like pools and no native binary | Laravel stays loaded in one PHP master |
+| QueenMQ Rust supervisor | you want the smallest master | Rust, after one temporary Artisan run |
 
 Both supervisors read the same `supervisor` section of `config/queen.php`, publish the same status and obey the same commands, and both offer, beyond Horizon's pools, [coordinated replicas](/integrations/laravel/supervisors/#several-replicas), [prefork workers](/integrations/laravel/supervisors/#prefork-workers) and [event-driven scaling](/integrations/laravel/supervisors/#event-driven-scaling). Start with [worker supervisors](/integrations/laravel/supervisors/), then the [dashboard](/integrations/laravel/dashboard/), [Kubernetes](/integrations/laravel/kubernetes/) and [monitoring](/integrations/laravel/monitoring/). Read the [production checks](/integrations/laravel/supervisors/#before-production) before you replace Horizon.
 
@@ -354,7 +354,7 @@ The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a s
 | 2.0.0 | 0.6.0 | every transaction ACK names its own lease; the dashboard's Jobs page works with a read-only token |
 | 2.1.0 | 0.7.0 | `config/queen.php` reads 20 environment variables instead of 95 ([upgrading](/integrations/laravel/configuration/#upgrading-from-200)); `supervisor.lease_service` replaces `QUEEN_SUPERVISOR_LEASE_SERVICE`; with prefork, `queue:restart` runs the deployed code, and a fork server that is not safe to fork is not used |
 | 2.2.0 | 0.7.0 | `prefetch` `'auto'` sizes each pop from the jobs' runtime; the safe, balanced and fast profiles |
-| 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/integrations/laravel/supervisors/#prefork-for-some-pools-only)); `queen:consume` sets and renews its lease, stops on `--idle-timeout`, and reports refused acks ([consume Queen messages](/integrations/laravel/consume/)) |
+| 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/integrations/laravel/supervisors/#prefork-for-some-pools-only)); `queen:consume` sets and renews its lease, stops on `--idle-timeout`, and reports refused acks ([consume QueenMQ messages](/integrations/laravel/consume/)) |
 | 2.3.1 | 0.8.0 | `->supervision([...])` on a fluent `consume()->execute()` reports that consumer to the dashboard, off by default ([consumer status](/reference/supervisor-status/#optional-sdk-consumer-supervision)) |
 | 2.4.0 | 0.8.0 | `$queen->lock()` and `$queen->semaphore()`, `->guard($lock)` on a transaction and `kv()->check()` ([locks](/writing-applications/kv-locks-timers/)); they need a 2.1 broker |
 | 2.4.1 | 0.8.0 | a forked worker works its pool's connection; a pool's settings reach the worked connection alone, and a pool takes its connection's queue and consumer group; a worker forked after `queue:restart` leaves at once; failed jobs of other drivers stay Laravel's; the switch variables take `1` |

@@ -1,10 +1,10 @@
 ---
-title: "Consume Queen messages in Laravel with Artisan"
-description: "Hand the messages other services push to a Queen queue to a PHP class with php artisan queen:consume, outside Laravel's job system: the handler, the ack and nack, the lease and its renewal, the options, and what stops the command."
+title: "Consume QueenMQ messages in Laravel with Artisan"
+description: "Hand the messages other services push to a QueenMQ queue to a PHP class with php artisan queen:consume, outside Laravel's job system: the handler, the ack and nack, the lease and its renewal, the options, and what stops the command."
 type: how-to
 tier: use
 sidebar:
-  label: "Consume Queen messages"
+  label: "Consume QueenMQ messages"
   order: 10
 sourceOfTruth:
   - clients/client-php/src/Laravel/Commands/ConsumeCommand.php
@@ -78,8 +78,8 @@ sourceOfTruth:
 # HttpClient.php) (8c3fcd498). Nothing this page states changes.
 ---
 
-`php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it
-for messages that other services push to Queen. Laravel jobs keep going through `queue:work`
+`php artisan queen:consume` reads a QueenMQ queue and passes each message to a class of yours. Use it
+for messages that other services push to QueenMQ. Laravel jobs keep going through `queue:work`
 ([Laravel](/integrations/laravel/)).
 
 The command connects with the settings of `config/queen.php`, as the queue connection does

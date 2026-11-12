@@ -43,7 +43,7 @@ sourceOfTruth:
 # same member id (clippy); the join behaves as before. Nothing this page states changes.
 ---
 
-This is the contract a Kafka client gets from Queen, in the form you check things against: the
+This is the contract a Kafka client gets from QueenMQ, in the form you check things against: the
 settings the facade reads, what it does with topic configs, the APIs and versions it answers, the
 places where it knowingly behaves differently from Apache Kafka, and what each client library needs.
 How it all fits together, with a working example, is on [Kafka clients](/integrations/kafka/).
@@ -84,19 +84,19 @@ is out of range stops the node with the variable's name, except for `QUEEN_KAFKA
 
 ## Topic configs
 
-A topic is a Queen queue. Of the configs a client sends with CreateTopics, two become the queue's
+A topic is a QueenMQ queue. Of the configs a client sends with CreateTopics, two become the queue's
 settings, as they did before 2.6; the others are accepted and not applied yet.
 
 | Config | Accepted | What it does |
 |---|---|---|
 | `retention.ms` | `-1` (default), or 1000 and more | The queue's retention (`retentionSeconds`), rounded down to whole seconds. `-1` keeps every record. Less than a second is refused with `INVALID_CONFIG`, because it would round to nothing. |
-| `cleanup.policy` | `delete` (default), `compact`, `compact,delete` | `delete` lets `retention.ms` delete by age. `compact` keeps every record whatever `retention.ms` says, because Queen does not compact and the last value of every key has to stay. `compact,delete` deletes by age and compacts nothing. Anything else is refused with `INVALID_CONFIG`. |
+| `cleanup.policy` | `delete` (default), `compact`, `compact,delete` | `delete` lets `retention.ms` delete by age. `compact` keeps every record whatever `retention.ms` says, because QueenMQ does not compact and the last value of every key has to stay. `compact,delete` deletes by age and compacts nothing. Anything else is refused with `INVALID_CONFIG`. |
 | Anything else | | Accepted, not applied. |
 
 A topic created on first use, by a metadata request, has no configs and keeps every record. The
 facade also sets the queue's dedup window to `QUEEN_KAFKA_DEDUP_WINDOW_SECONDS`. The configs are read
 at creation only: AlterConfigs and IncrementalAlterConfigs are not offered in 2.7, so change a
-topic's retention afterwards through Queen ([queue options](/writing-applications/queues/)),
+topic's retention afterwards through QueenMQ ([queue options](/writing-applications/queues/)),
 and DescribeConfigs answers no entries.
 
 ## APIs and versions
@@ -120,8 +120,8 @@ speaks only those. This is that answer, with the reason each window stops where 
   offsets, as one raft entry. There are no commit markers, so a committed transaction of N records
   advances the log by N and an aborted one by 0, and `read_committed` and `read_uncommitted` read the
   same records. A leader change aborts the transactions that were open on the old leader.
-- An idempotent producer's record is deduplicated by Queen's dedup window: its producer id, epoch
-  and sequence are its Queen transaction id, so a retry within the window writes nothing. There is
+- An idempotent producer's record is deduplicated by QueenMQ's dedup window: its producer id, epoch
+  and sequence are its QueenMQ transaction id, so a retry within the window writes nothing. There is
   no per-partition sequence check, so a gap in a producer's sequence is not refused.
 - `acks=1` is `acks=all`. `acks=0` gets no answer; an error closes the connection instead.
 - CreateTopics refuses names that begin with `__`.
@@ -129,7 +129,7 @@ speaks only those. This is that answer, with the reason each window stops where 
   against a broker without it.
 - A timestamp lookup (ListOffsets with a time) is answered on the broker's append clock, and the
   records carry the producer's timestamps ([details](/integrations/kafka-frameworks/)).
-- Committed offsets are the Queen consumer group's positions and never expire. DeleteGroups
+- Committed offsets are the QueenMQ consumer group's positions and never expire. DeleteGroups
   removes a group with no members and its position on every queue.
 - Group membership is held in the leader's memory. When the leader changes, members are told
   `NOT_COORDINATOR` or `UNKNOWN_MEMBER_ID`, rejoin at the new leader and resume from their committed
@@ -174,7 +174,7 @@ static membership (`group.instance.id`) fails when it joins, with an error from 
 
 There is no TLS listener in 2.6: keep the Kafka port on a private network, or put a TLS-terminating
 TCP proxy in front of it. With `QUEEN_KAFKA_SASL=plain`, a client logs in with SASL/PLAIN: the
-password is a Queen token, the one an SDK sends as `Authorization: Bearer`, and the username is a
+password is a QueenMQ token, the one an SDK sends as `Authorization: Bearer`, and the username is a
 label for the logs. Until a connection has logged in it may only negotiate versions and
 authenticate; anything else closes it. Without TLS, SASL puts tokens on the wire in clear.
 

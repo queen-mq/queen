@@ -165,7 +165,7 @@ sourceOfTruth:
 # this page states changes.
 ---
 
-The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the
+The Laravel panel shows what this application's QueenMQ supervisors are doing. It reads the state the
 PHP or Rust engine writes on its host, and the copy each engine can
 [publish to the broker](#a-supervisor-on-another-host) for web servers on other hosts. Its pages
 also read the broker for what the queues hold and how many jobs ran. It is off until you turn it
@@ -192,7 +192,7 @@ link lands on the same view:
 | Jobs | `/queen/jobs` | [throughput and runtime per job class](/integrations/laravel/monitoring/#jobs-per-class) |
 | Tags | `/queen/tags` | [monitored tags](/integrations/laravel/monitoring/#monitored-tags) and their recent jobs |
 | Failed jobs | `/queen/failed-jobs` | Laravel's failed jobs, [why each failed](#why-a-job-failed), and a retry |
-| Configuration | `/queen/configuration` | [tuning advice](#tuning-advice-and-settings) and every Queen setting |
+| Configuration | `/queen/configuration` | [tuning advice](#tuning-advice-and-settings) and every QueenMQ setting |
 
 Each page refreshes itself every `dashboard.refresh_seconds` (5 s by default): a small packaged
 script fetches the page again and swaps only the header and the main region, so your scroll
@@ -289,7 +289,7 @@ liveness or replay an expired command. Restart the supervisor to change them.
 The Workload page opens with one row per supervised queue: its consumer group, the jobs waiting for
 a worker, the jobs running now, and how long the oldest unfinished job has been in the queue,
 waiting or running (PHP client 1.9.0). It is a summary; the
-[Queen dashboard](/manage/upgrades-monitoring/) lists the messages themselves.
+[QueenMQ dashboard](/manage/upgrades-monitoring/) lists the messages themselves.
 
 <Screenshot
   src="laravel/dashboard-queue-now"
@@ -311,7 +311,7 @@ these figures: one depth request per queue and one lag request per connection, i
 the supervisor's `read_bearer_token` when one is set, one attempt of at most five seconds, cached
 for five seconds in Laravel's default cache store. The card shows at most 32 queues.
 
-Set the address of the Queen dashboard and every row links to it: **Open in console** opens the
+Set the address of the QueenMQ dashboard and every row links to it: **Open in console** opens the
 queue's page, `/queues/{queue}`, and the waiting and running numbers open its messages filtered to
 `pending` and `processing` (`/messages?queue={queue}&status=pending`). The queue name is
 URL-encoded, and every link opens in a new tab with `rel="noopener noreferrer"`.
@@ -320,7 +320,7 @@ URL-encoded, and every link opens in a new tab with `rel="noopener noreferrer"`.
 QUEEN_DASHBOARD_CONSOLE_URL=https://queen.example.com
 ```
 
-That is the address you open the Queen dashboard at: the broker's own port, 6632, or the port of
+That is the address you open the QueenMQ dashboard at: the broker's own port, 6632, or the port of
 its [embedded proxy](/manage/security/) when that is your front door. The value must be an `http`
 or `https` URL without user info, query or fragment; a path is kept, for a dashboard behind a
 prefix. One address serves one broker, so when the supervised queues use more than one connection,
@@ -405,11 +405,11 @@ panel. A job that goes back onto its queue leaves the list; a retry that cannot 
 and shows Laravel's reason. Forgetting, flushing and pruning have no button: use the commands.
 
 Do not retry a Laravel job from the dead-letter page of the
-[Queen dashboard](/manage/upgrades-monitoring/): that replay knows nothing about
+[QueenMQ dashboard](/manage/upgrades-monitoring/): that replay knows nothing about
 `failed_jobs`, the attempt count or the cleanup. The two dashboards cover different ground on
 purpose:
 
-| Laravel panel | Queen dashboard |
+| Laravel panel | QueenMQ dashboard |
 | --- | --- |
 | this application's supervisors | every queue and consumer group the broker serves |
 | worker processes and restart state | backlog, partitions, lag, messages, the cluster |
@@ -449,7 +449,7 @@ supervisor will not start such a pool, so only a worker started another way runs
 run of a class comes from the job metrics' `max_ms`, which earlier workers did not record, so a
 class recorded only by earlier workers gets no deploy advice.
 
-Below the advice, **Settings** lists every Queen setting as this host resolves it, with its value,
+Below the advice, **Settings** lists every QueenMQ setting as this host resolves it, with its value,
 default and meaning, and the environment variable of the settings that read one: the connection,
 the supervisor (including `lease_service`) and the pools. The pools are the
 ones the running supervisor published, or this application's when none did. The supervisor does not

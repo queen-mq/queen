@@ -3,13 +3,13 @@ import { sequence } from "@/lib/figure-spec";
 // guides/exactly-once.mdx, "The fix": one order through the consumer on the page,
 // then the same commit after the lease ran out during the charge.
 export default sequence({
-  alt: "A sequence between a worker of the charger group, Queen and the card provider. The worker pops one order with its lease, reads the marker charge:1042 from KV and finds nothing, then asks the provider to charge the card with the order id as idempotency key and gets a chargeId back. It commits one transaction that puts the marker with putIfAbsent and required: true and acks the order under the lease. Queen writes both as one log entry if the lease still holds and no marker exists, and answers success. In the alternative where the lease ran out during the charge, the commit is refused with rejected_ack: neither the marker nor the ack is written, and the order goes to the next worker.",
+  alt: "A sequence between a worker of the charger group, QueenMQ and the card provider. The worker pops one order with its lease, reads the marker charge:1042 from KV and finds nothing, then asks the provider to charge the card with the order id as idempotency key and gets a chargeId back. It commits one transaction that puts the marker with putIfAbsent and required: true and acks the order under the lease. QueenMQ writes both as one log entry if the lease still holds and no marker exists, and answers success. In the alternative where the lease ran out during the charge, the commit is refused with rejected_ack: neither the marker nor the ack is written, and the order goes to the next worker.",
   caption: "The marker and the ack are one log entry, so the marker exists exactly when the order is acknowledged. The provider's call is outside that entry, which is why the order id goes with it as an idempotency key.",
   source: "examples/apps/js/exactly-once.mjs, clients/client-js/client-v2/builders/TransactionBuilder.js",
   gap: 210,
   actors: [
     { id: "w", label: "worker", sub: "group charger", tone: "ghost" },
-    { id: "q", label: "Queen", tone: "strong" },
+    { id: "q", label: "QueenMQ", tone: "strong" },
     { id: "p", label: "card provider", tone: "ghost" },
   ],
   steps: [

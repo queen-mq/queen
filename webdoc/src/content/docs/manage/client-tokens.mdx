@@ -1,6 +1,6 @@
 ---
 title: "Devices and browsers: scoped keys and client tokens"
-description: "Let untrusted clients reach Queen through the built-in proxy, each one only its own queues, partitions, KV keys and timers: a scoped key per role, a short-lived token per device, and a block list."
+description: "Let untrusted clients reach QueenMQ through the built-in proxy, each one only its own queues, partitions, KV keys and timers: a scoped key per role, a short-lived token per device, and a block list."
 type: how-to
 tier: operate
 sidebar:
@@ -29,7 +29,7 @@ sourceOfTruth:
 
 A device in the field, or a user's browser, cannot hold an API key: anyone can read the key out of it, and a key reaches the whole cluster. With the [built-in proxy](/manage/tenants/) on, give such clients a **client token** instead. Your backend holds a **scoped key**, a role that names what its clients may reach. It mints one token per device or user, and the token reaches only that client's own names: its partition, its KV keys, its timers.
 
-<Why>one leaked device must not read or write another device's data, and must be easy to cut off. A token per device, checked by the broker on every request, does both, with nothing to deploy beside Queen.</Why>
+<Why>one leaked device must not read or write another device's data, and must be easy to cut off. A token per device, checked by the broker on every request, does both, with nothing to deploy beside QueenMQ.</Why>
 
 | | Holds | Reaches | Lives |
 | --- | --- | --- | --- |

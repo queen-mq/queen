@@ -67,8 +67,8 @@ export async function GET({ props }: { props: SlugProps }) {
     // question about the product rather than about this page. A directory is
     // the wrong answer to that; `/llms-brief.txt` is the right one, and it is
     // small enough to fetch without a second thought.
-    "> Queen MQ documentation, for AI agents",
-    `> Complete self-contained summary of Queen MQ: ${new URL("/llms-brief.txt", config.site).href}`,
+    "> QueenMQ documentation, for AI agents",
+    `> Complete self-contained summary of QueenMQ: ${new URL("/llms-brief.txt", config.site).href}`,
     "> Fetch that first when the question is about the product rather than about this page.",
     `> Index of all pages: ${new URL("/llms.txt", config.site).href}`,
     "",

@@ -63,7 +63,7 @@ The model of QueenMQ is easy to understand. It rests on four ideas: partitions, 
 
 The core of the system are the partitions. A QueenMQ partition is a FIFO sub-queue inside a queue, created on the fly, and a queue is a named collection of those sub-queues. The first push that names a partition creates it, so there is no partition count to choose and nothing to plan: you give each entity its own partition, a customer, an order, a conversation, and one queue has held ten million of them.
 
-<Fig id="kafka-vs-queen" caption="Hashed partitions share one queue per partition; Queen gives every entity its own." />
+<Fig id="kafka-vs-queen" caption="Hashed partitions share one queue per partition; QueenMQ gives every entity its own." />
 
 QueenMQ partitions are not physical entities like in Kafka: there is no dedicated thread or file for each partition. A partition is a name, a few rows in the broker's memory and a position for each consumer group, and its messages live in the log files of its queue.
 

@@ -83,7 +83,7 @@ sourceOfTruth:
 # states changes.
 ---
 
-`POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
+`POST /api/v1/transaction` is the call QueenMQ was built around. It writes a worker's whole step
 (the acks of what it took, the events it produces, the KV state it changes, the timers it sets,
 where a consumer group should read next) as one entry of the replicated log, so all of it applies
 or none of it does. There is no outbox table to poll and no idempotency table to consult before

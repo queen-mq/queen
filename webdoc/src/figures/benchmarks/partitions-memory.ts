@@ -5,8 +5,8 @@ import { line } from "@/lib/figure-spec";
 // msg/s of 1 KB messages. The 10-16 runs at 1,000 and 50,000 partitions (90 s of load) are left out: they kept 20 s
 // more of messages' rows.
 export default line({
-  alt: "Resident memory of Queen 2.4's nodes against the partition count (log scale). At 3,000,000 msg/s of 256-byte messages the leader holds 5.1 to 6.0 GB from 10 to 100,000 partitions, 7.7 GB at 1,000,000 and 17.2 GB at 10,000,000, and a follower 4.6 to 5.0 GB, 5.8 GB and 14.2 GB. At 1,000,000 msg/s of 1 KB messages the leader holds 2.3 to 4.2 GB up to 100,000 partitions, 6.5 GB at 1,000,000 and 14.1 GB at 10,000,000.",
-  caption: "A partition costs Queen about 1.2 KB on the leader and 0.9 KB on a follower: memory hardly moves up to 100,000 partitions and reaches 17 GB of the leader's 88 at ten million.",
+  alt: "Resident memory of QueenMQ 2.4's nodes against the partition count (log scale). At 3,000,000 msg/s of 256-byte messages the leader holds 5.1 to 6.0 GB from 10 to 100,000 partitions, 7.7 GB at 1,000,000 and 17.2 GB at 10,000,000, and a follower 4.6 to 5.0 GB, 5.8 GB and 14.2 GB. At 1,000,000 msg/s of 1 KB messages the leader holds 2.3 to 4.2 GB up to 100,000 partitions, 6.5 GB at 1,000,000 and 14.1 GB at 10,000,000.",
+  caption: "A partition costs QueenMQ about 1.2 KB on the leader and 0.9 KB on a follower: memory hardly moves up to 100,000 partitions and reaches 17 GB of the leader's 88 at ten million.",
   source: "benchmark-queen/2026-10-15-bytes-per-msg/runs/gcp/grid-fix-m3.jsonl and grid-fix-1m1k.jsonl (mem_gb)",
   x: { label: "partitions in the queue", log: true, ticks: [10, 100, 1000, 10000, 100000, 1000000, 10000000], min: 7, max: 14000000 },
   y: { label: "resident memory of a node", format: "gb", ticks: [0, 5, 10, 15, 20], min: 0, max: 20 },

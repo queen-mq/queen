@@ -21,7 +21,7 @@ verifiedBy:
   - examples/apps/run.sh
 ---
 
-Four programs that show what the Queen queue connection does inside a Laravel worker. Each one is
+Four programs that show what the QueenMQ queue connection does inside a Laravel worker. Each one is
 an Artisan command that starts real `php artisan queue:work` workers, or `php artisan
 queen:supervise`, prints what they did, and ends with `PASS` or `FAIL`.
 
@@ -79,13 +79,13 @@ measures each worker's private memory.
 
 | File | What it holds |
 | --- | --- |
-| `config/queue.php` | the four Queen connections the examples use |
+| `config/queue.php` | the four QueenMQ connections the examples use |
 | `config/queen.php` | the two supervisor pools of `example:prefork` |
 | `app/Jobs/` | one job class per example |
 | `app/Console/Commands/Examples/` | the four programs |
 | `app/Examples/` | what they share: workers, job records, checks |
 
-The connections differ only in the keys an example needs. Every Queen connection takes the rest
+The connections differ only in the keys an example needs. Every QueenMQ connection takes the rest
 from `config/queen.php`, and that file takes what it does not set from the package.
 
 <Render file="snippets/app-laravel-connections" />
@@ -107,5 +107,5 @@ from `config/queen.php`, and that file takes what it does not set from the packa
 ## Next
 
 The [Laravel guide](/integrations/laravel/) sets up the connection in your own application, and
-[how Queen runs Laravel jobs](/integrations/laravel/concepts/) explains each mechanism these programs
+[how QueenMQ runs Laravel jobs](/integrations/laravel/concepts/) explains each mechanism these programs
 show.

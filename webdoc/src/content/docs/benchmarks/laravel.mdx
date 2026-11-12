@@ -1,6 +1,6 @@
 ---
-title: "Laravel queue benchmark: Queen vs Horizon on Redis"
-description: "Horizon on Redis against Queen's Laravel driver and supervisors on the 2.0 Raft broker: jobs per second, latency, memory and CPU, 15 failures, a 45-minute soak and 32 Laravel features, each with its run and conditions."
+title: "Laravel queue benchmark: QueenMQ vs Horizon on Redis"
+description: "Horizon on Redis against QueenMQ's Laravel driver and supervisors on the 2.0 Raft broker: jobs per second, latency, memory and CPU, 15 failures, a 45-minute soak and 32 Laravel features, each with its run and conditions."
 type: reference
 tier: operate
 status: preview
@@ -9,7 +9,7 @@ sidebar:
   label: Laravel workers
 ---
 
-The same Laravel application ran on Horizon with Redis and on Queen's queue driver and supervisor
+The same Laravel application ran on Horizon with Redis and on QueenMQ's queue driver and supervisor
 with the 2.0 Raft broker. These runs measure what an application team lives with: how many jobs a
 pool of workers completes, how soon a job runs after its dispatch, how much memory the workers
 take, and what happens when a worker, a master or the backend dies in the middle of a job. We
@@ -42,7 +42,7 @@ every lane.
 ## Worker capacity on a Linux server
 
 2026-10-01. The application had 8 CPUs and 8 GiB, the broker and Redis 4 CPUs and 4 GiB each.
-Queen ran the Rust supervisor with prefork workers, the command-line opcache, lease renewal in
+QueenMQ ran the Rust supervisor with prefork workers, the command-line opcache, lease renewal in
 the supervisor, `ack_async`, `pop_ahead`, prefetch 4 and the cURL transport. Horizon ran its own
 supervisor with `block_for` 1 s. Each lane ran 3 times per engine (the 15-minute lane once),
 engines alternating, each run on a fresh backend, and all 119 runs completed the exact job set
@@ -54,7 +54,7 @@ jobs/s with `appendfsync always`. So the capacity lanes hold every worker until 
 is enqueued (`run.sh --backlog-first 1`); in none of their 24 runs did a job start before the
 release.
 
-| Lane, medians of 3 | Horizon | Queen | Queen / Horizon |
+| Lane, medians of 3 | Horizon | QueenMQ | QueenMQ / Horizon |
 | --- | ---: | ---: | ---: |
 | 32 workers, 10 ms jobs, fsync on every write | 1,124 jobs/s | 2,753 jobs/s | 2.4 |
 | 32 workers, Redis `everysec` | 1,247 jobs/s | 2,752 jobs/s | 2.2 |
@@ -66,19 +66,19 @@ release.
 
 Horizon stays between 1,090 and 1,313 jobs/s whatever the worker count, the job length or the
 fsync mode of Redis, and relaxing that fsync moved it by less than a fifth. Each Horizon job cost
-about 33 Redis commands, against 1.3 HTTP requests to the Queen broker, and doubling the pool from
-32 to 64 workers took Queen from 2,753 to 4,395 jobs/s.
+about 33 Redis commands, against 1.3 HTTP requests to the QueenMQ broker, and doubling the pool from
+32 to 64 workers took QueenMQ from 2,753 to 4,395 jobs/s.
 
 With the producer included, as an application sees it:
 
-| Lane | Horizon | Queen |
+| Lane | Horizon | QueenMQ |
 | --- | ---: | ---: |
 | 50,000 jobs, 32 workers, all done after | 58.5 s | 18.0 s |
 | 100,000 empty jobs, 32 workers | 889 jobs/s | 5,989 jobs/s |
 | 30,000 jobs, autoscaling from 1 to 64 workers, all done after | 37.0 s | 9.5 s |
 | 500 jobs/s asked, one dispatch per job | 440 jobs/s reached | 500 jobs/s |
 
-In the autoscaling lane Queen ran `event_driven` and `fast_scale_up` and reached 64 workers 8.2 s
+In the autoscaling lane QueenMQ ran `event_driven` and `fast_scale_up` and reached 64 workers 8.2 s
 after the burst began; Horizon's producer sent its jobs too slowly for it to need more than about
 34 workers (33 to 37 in its three runs).
 
@@ -87,7 +87,7 @@ after the burst began; Horizon's producer sent its jobs too slowly for it to nee
 The paced lanes dispatch one job at a time at a fixed rate below capacity, with 16 workers, and
 measure from the dispatch to the end of the job (2026-10-01, Linux server).
 
-| Lane | Horizon p50 / p95 | Queen p50 / p95 |
+| Lane | Horizon p50 / p95 | QueenMQ p50 / p95 |
 | --- | ---: | ---: |
 | 500 jobs/s asked, median of 3 | 75 / 227 ms | 15 / 23 ms |
 | 400 jobs/s for 15 minutes, one run | 71 / 249 ms | 14 / 22 ms |
@@ -99,7 +99,7 @@ monitoring records.
 
 ## Memory
 
-| Workers | Horizon, application / workers | Queen, application / workers |
+| Workers | Horizon, application / workers | QueenMQ, application / workers |
 | --- | ---: | ---: |
 | 16 | 525 / 469 MiB | 83 / 58 MiB |
 | 32 | 988 / 922 MiB | 120 / 81 MiB |
@@ -111,10 +111,10 @@ monitoring records.
 (`memory.current`), read every second from the dispatch to the end of the run: every process in the
 container, the page cache of the benchmark's own result files and kernel memory such as page
 tables. Workers is the workers' summed proportional set size (PSS), which divides each shared page
-among the processes that map it; Horizon's `horizon:supervisor` and Queen's fork server count with
+among the processes that map it; Horizon's `horizon:supervisor` and QueenMQ's fork server count with
 the supervisor. The 16- and 32-worker rows come from the capacity lanes, the 64-worker row from the
 64-worker drain. Horizon ran with the command-line opcache off, as PHP ships and as is smaller for
-it, and Queen with prefork and the opcache on.
+it, and QueenMQ with prefork and the opcache on.
 
 <PreforkMemory />
 
@@ -130,16 +130,16 @@ case agree within 0.1 MiB per worker and 2 MiB per container.
 | --- | --- | ---: | ---: | ---: |
 | Horizon, spawned | off | 28.9 | 29.2 | 1,967 |
 | Horizon, spawned | on | 35.9 | 36.2 | 2,436 |
-| Queen, spawned | off | 31.1 | 31.5 | 2,062 |
-| Queen, spawned | on | 38.1 | 38.4 | 2,512 |
-| Queen, forked | off | 6.2 | 6.7 | 496 |
-| Queen, forked | on | 1.7 | 2.2 | 225 |
+| QueenMQ, spawned | off | 31.1 | 31.5 | 2,062 |
+| QueenMQ, spawned | on | 38.1 | 38.4 | 2,512 |
+| QueenMQ, forked | off | 6.2 | 6.7 | 496 |
+| QueenMQ, forked | on | 1.7 | 2.2 | 225 |
 
 A spawned worker starts PHP and boots Laravel on its own; a forked one is forked from the fork
 server. Private memory is the pages no other process maps. A spawned worker holds about 29 MiB
 of it: Laravel's compiled code and the booted application, in its heap. The opcache moves the
 compiled code into opcache memory that each such process creates for itself, 22.6 MiB in a Horizon
-worker, and costs 7 MiB more per worker. A Queen worker started on its own held 2.2 MiB more than a
+worker, and costs 7 MiB more per worker. A QueenMQ worker started on its own held 2.2 MiB more than a
 Horizon worker, so the difference is prefork, not the queue driver.
 
 A forked worker maps the fork server's pages instead. With the opcache, its 32.7 MiB resident set
@@ -164,10 +164,10 @@ to 8.3 MiB in every case and stayed there:
 | --- | ---: | ---: |
 | Horizon, spawned, off | 1,967 MiB | 2,494 MiB |
 | Horizon, spawned, on | 2,436 MiB | 2,949 MiB |
-| Queen, spawned, off | 2,062 MiB | 2,590 MiB |
-| Queen, spawned, on | 2,512 MiB | 3,019 MiB |
-| Queen, forked, off | 496 MiB | 1,026 MiB |
-| Queen, forked, on | 225 MiB | 755 MiB |
+| QueenMQ, spawned, off | 2,062 MiB | 2,590 MiB |
+| QueenMQ, spawned, on | 2,512 MiB | 3,019 MiB |
+| QueenMQ, forked, off | 496 MiB | 1,026 MiB |
+| QueenMQ, forked, on | 225 MiB | 755 MiB |
 
 Over 20 minutes at 500 jobs/s of the job that holds 8 MiB, about 9,400 jobs per worker, the private
 memory of a worker stayed at 37.1 MiB for Horizon and 10.1 MiB for a forked one; the 64 forked
@@ -189,14 +189,14 @@ the size of the booted application, which is small here: an application with mor
 providers boots bigger, and forking saves more per worker.
 
 Over the 15-minute soak, at 16 workers, the application's processes stayed flat for both engines:
-529 MiB of proportional set size for Horizon and 81 MiB for Queen, supervisor and workers together. Redis grew from 67 to 611 MiB with Horizon's job records; the
+529 MiB of proportional set size for Horizon and 81 MiB for QueenMQ, supervisor and workers together. Redis grew from 67 to 611 MiB with Horizon's job records; the
 broker grew from 59 to 117 MiB, plus the page cache of its log. In the 23-hour worker run, with
 retention off, the broker's anonymous memory grew with the messages it kept, from 59 to 741 MiB
 for 4.1 million of them, about 175 bytes each, and stopped growing when the dispatch ended.
 
 ## Delivery profiles and prefetch auto
 
-2026-10-05, Queen only: the Rust supervisor with prefork, the command-line opcache and lease
+2026-10-05, QueenMQ only: the Rust supervisor with prefork, the command-line opcache and lease
 renewal in the master, three runs per lane (five at 500 jobs/s), each on a fresh broker. Every
 worker long-polls for 1 s. The profiles are the
 [Laravel guide's](/integrations/laravel/#choose-a-delivery-profile): safe is `prefetch` 1 with
@@ -243,7 +243,7 @@ balanced and fast lanes above are that version.
 
 ## CPU
 
-| Lane, CPU per job | Horizon, application and backend | Queen, application and backend |
+| Lane, CPU per job | Horizon, application and backend | QueenMQ, application and backend |
 | --- | ---: | ---: |
 | 50,000 jobs, 32 workers | 1.83 and 0.37 ms | 0.91 and 0.23 ms |
 | 500 jobs/s, 16 workers | 1.46 and 0.49 ms | 1.35 and 0.87 ms |
@@ -263,9 +263,9 @@ latency and no change under load.
 
 ## The worker-side features, one at a time
 
-On the Linux server (2026-10-01), 50,000 jobs and 32 workers, adding one Queen setting at a time:
+On the Linux server (2026-10-01), 50,000 jobs and 32 workers, adding one QueenMQ setting at a time:
 
-| Queen settings | Jobs/s | Application memory |
+| QueenMQ settings | Jobs/s | Application memory |
 | --- | ---: | ---: |
 | prefork, the command-line opcache, a renewal helper per worker | 1,890 | 417 MiB |
 | renewal in the supervisor instead of the helpers | 1,879 | 116 MiB |
@@ -280,19 +280,19 @@ worker no longer waits for either. The cURL transport against Guzzle, with 100,0
 
 ## Failures, replicas, a soak and Laravel features
 
-2026-10-02, the Linux server of 2026-10-01, Queen on one Raft node of `2.0.0-beta.3`. The
+2026-10-02, the Linux server of 2026-10-01, QueenMQ on one Raft node of `2.0.0-beta.3`. The
 application had 4 CPUs and 1 GiB, the broker and Redis 2 CPUs and 2 GiB each, every lane on a
-fresh backend. Queen ran its production-like settings: prefetch 1, synchronous ACKs, lease renewal
+fresh backend. QueenMQ ran its production-like settings: prefetch 1, synchronous ACKs, lease renewal
 in the supervisor and prefork workers. A fourth column runs the Rust engine with prefetch 4,
 `ack_async` and `pop_ahead`. Every lane had 2 workers unless it says otherwise, a pool `timeout` of
 20 s, `retry_after` 30 s and `shutdown_grace` 35 s. Each job writes its attempts to a log on the
-lane's volume, so every check reads what the jobs did, not what an engine reports. Queen PHP is
-the PHP supervisor (`php artisan queen:supervise`), Queen Rust the native `queen-supervisor` master.
+lane's volume, so every check reads what the jobs did, not what an engine reports. QueenMQ PHP is
+the PHP supervisor (`php artisan queen:supervise`), QueenMQ Rust the native `queen-supervisor` master.
 
 A lane passes when every job ended as its kind says (completed once, or failed once into
-`failed_jobs`, and into the dead-letter queue on Queen) and no two attempts of one job overlapped.
+`failed_jobs`, and into the dead-letter queue on QueenMQ) and no two attempts of one job overlapped.
 
-| What happens | Horizon | Queen PHP | Queen Rust | Rust, prefetch 4 |
+| What happens | Horizon | QueenMQ PHP | QueenMQ Rust | Rust, prefetch 4 |
 | --- | :---: | :---: | :---: | :---: |
 | A job throws on every attempt (`tries` 3, `backoff` 2) <Expected text="3 attempts at least 2 s apart, then one failed-job row" /> | <Result /> | <Result /> | <Result /> | <Result /> |
 | A job throws on its first attempt only <Expected text="It completes on its second attempt, once" /> | <Result /> | <Result /> | <Result /> | <Result /> |
@@ -315,7 +315,7 @@ A lane passes when every job ended as its kind says (completed once, or failed o
 Horizon's two duplicates are worth understanding, because both stacks promise the same thing
 there. The two jobs finished while Redis restarted, so the worker could not remove them from
 Redis's reserved set; their reservation expired after `retry_after` and they ran again 30 s later.
-The Queen client tries a failed request up to three times, waiting 1 s and then 2 s, so the ACKs
+The QueenMQ client tries a failed request up to three times, waiting 1 s and then 2 s, so the ACKs
 sent during the broker's restart landed when it came back. Both stacks deliver at least once, and a
 job must be safe to run twice on either.
 
@@ -338,9 +338,9 @@ timeout as a crash: after five of them the crash circuit cut the pool to one wor
 | A job over PHP's `memory_limit` | Both jobs failed after one run | 1 of 2 failed without running; passed with the crash hand-back |
 
 With the supervisor fix, the four jobs of the timeout lane reached `failed_jobs` after 44 s on both
-Queen engines, against 126 to 147 s while the crash circuit held the pool back. The prefetched-batch
+QueenMQ engines, against 126 to 147 s while the crash circuit held the pool back. The prefetched-batch
 lane is the proof of the ACK fix: with the client before the fix, the first job, finished before
-the deploy, ran again; with the fix it ran once, on all three Queen profiles. An audit of the PHP
+the deploy, ran again; with the fix it ran once, on all three QueenMQ profiles. An audit of the PHP
 client and both supervisors during the same night fixed ten more defects, each with a test that
 failed before its fix.
 
@@ -364,7 +364,7 @@ succeed on the retry, 3% that always fail (`tries` 2) and 2% delayed by 10 to 60
 killed every 10 minutes, and a deploy restarted the application after 23 minutes. This table is the
 second soak, on the release candidate, with the four profiles running at once:
 
-|  | Horizon | Queen PHP | Queen Rust | Queen Rust, prefetch 4 |
+|  | Horizon | QueenMQ PHP | QueenMQ Rust | QueenMQ Rust, prefetch 4 |
 | --- | ---: | ---: | ---: | ---: |
 | Jobs dispatched | 13,501 | 13,501 | 13,501 | 13,501 |
 | Jobs that ended as their kind says | all | all | all | all |
@@ -376,7 +376,7 @@ second soak, on the release candidate, with the four profiles running at once:
 The first soak, on the three engines before the last client fixes, gave the same counts and the
 same flat masters:
 
-|  | Horizon | Queen PHP | Queen Rust |
+|  | Horizon | QueenMQ PHP | QueenMQ Rust |
 | --- | ---: | ---: | ---: |
 | Master memory, first third to last third | 48.9 to 48.9 MiB | 58.3 to 57.8 MiB | 6.9 to 6.9 MiB |
 | Median worker, first third to last third | 50.7 to 54.7 MiB | 40.9 to 47.0 MiB | 40.5 to 45.0 MiB |
@@ -389,7 +389,7 @@ Every median worker grows slowly over 45 minutes, as long-lived PHP workers do; 
 move. Both rows are resident memory, which counts a shared page in every process that maps it, so
 a forked worker's row includes the pages it shares with the fork server. The master row is one
 process: Horizon also runs a `horizon:supervisor` process the size of its master, and with prefork
-each Queen engine runs a fork server that holds the booted Laravel. [Memory](#memory) counts them
+each QueenMQ engine runs a fork server that holds the booted Laravel. [Memory](#memory) counts them
 together.
 
 ### Laravel queue features
@@ -409,7 +409,7 @@ Horizon was a mistake in the test, and was fixed. All 32 passed on the four prof
 
 Laravel's Redis queue stores a due time in whole seconds, so a Horizon retry can start up to a
 second early or late: for `backoff` `[1, 3]`, Horizon's retries came 1.81 and 4.03 s after the
-failure, Queen's 1.02 to 1.04 and 3.05 s. `queue:clear` is not supported on Queen: the command
+failure, QueenMQ's 1.02 to 1.04 and 3.05 s. `queue:clear` is not supported on QueenMQ: the command
 fails, and the jobs still run.
 
 ## More partition stripes, 2026-10-02
@@ -442,9 +442,9 @@ run and the scripts, is `benchmark-queen/2026-10-02-laravel-partition-stripes/`.
   moves them.
 - The longest soak with a verdict lasted 45 minutes; a 2.5-hour soak of the release candidate ran
   to its end, but its report failed, so it has none. Forked workers ran for 23 hours, once, with
-  Queen only; longer runs, Horizon over the same time and a broker with retention on over hours
+  QueenMQ only; longer runs, Horizon over the same time and a broker with retention on over hours
   were not measured.
 - The benchmark job is tiny, and the job that holds 8 MiB is one way to allocate. Real jobs keep
   more private memory per worker, which prefork does not share, and pull the throughput ratios
   towards one as the job itself dominates.
-- The Queen team wrote these lanes and their checks; nobody else has repeated them yet.
+- The QueenMQ team wrote these lanes and their checks; nobody else has repeated them yet.

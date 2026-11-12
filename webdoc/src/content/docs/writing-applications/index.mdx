@@ -1,6 +1,6 @@
 ---
 title: "Write applications: a local broker and a client"
-description: "Start one Queen node with Docker, open the dashboard, and add the client for JavaScript, Python, Go, Rust, PHP or C++. Every code block on these pages runs in all six."
+description: "Start one QueenMQ node with Docker, open the dashboard, and add the client for JavaScript, Python, Go, Rust, PHP or C++. Every code block on these pages runs in all six."
 type: quickstart
 tier: use
 sidebar:
@@ -20,7 +20,7 @@ docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.1
 
 Open `http://localhost:6632` and watch every step of these pages land in the dashboard.
 
-<Screenshot src="dashboard-overview" alt="The Queen dashboard's overview of a running broker: a one-line verdict (nothing needs you), messages in and acked per second over the last 15 minutes, and what the cluster holds: queues, partitions, consumer groups, messages, dead letters, KV keys and timers." caption="The dashboard, served on the same port as the API." />
+<Screenshot src="dashboard-overview" alt="The QueenMQ dashboard's overview of a running broker: a one-line verdict (nothing needs you), messages in and acked per second over the last 15 minutes, and what the cluster holds: queues, partitions, consumer groups, messages, dead letters, KV keys and timers." caption="The dashboard, served on the same port as the API." />
 
 <Fig id="one-node" caption="One process serves the API, the dashboard, health and metrics on port 6632." />
 

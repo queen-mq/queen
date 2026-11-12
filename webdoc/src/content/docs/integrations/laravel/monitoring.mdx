@@ -139,7 +139,7 @@ put it there on purpose: the numbers then cover every worker of every host or po
 supervises it, a dashboard on any host reads the same numbers, and there is no Redis to keep and no
 snapshot command to schedule.
 
-| | Horizon | Queen |
+| | Horizon | QueenMQ |
 | --- | --- | --- |
 | Per-job metrics | snapshots taken by the scheduled `horizon:snapshot` | live, from every worker, over the last hour, six hours or day |
 | Tags | automatic and `tags()`, monitored from the dashboard | automatic and `tags()`, monitored from the dashboard |
@@ -154,7 +154,7 @@ processed, failed attempts, jobs per minute and the average runtime of an attemp
 starts its workers with `--quiet` (a pool's `quiet`, on by default), so Laravel prints no line per
 job: these numbers are the runtimes such a worker leaves.
 
-Each worker of a Queen connection counts these per class in memory and writes them at most once
+Each worker of a QueenMQ connection counts these per class in memory and writes them at most once
 every ten seconds (also while it waits for its next job, and when it stops) to one key of its own,
 in a five-minute bucket:
 
@@ -177,7 +177,7 @@ own counts after its fork.
 
 An attempt's runtime runs from Laravel's `JobProcessing` event to the end of the attempt: the job's
 middleware, its `handle()`, and the broker ACK when the worker sends it before the next job
-(`ack_batch` 1 and `ack_async` off, the default). Only the jobs of Queen connections are counted,
+(`ack_batch` 1 and `ack_async` off, the default). Only the jobs of QueenMQ connections are counted,
 not those of a Horizon worker of the same application.
 
 | The attempt ends when | It counts as |
@@ -191,7 +191,7 @@ not those of a Horizon worker of the same application.
 | Key of `config/queen.php` | Default | Meaning |
 | --- | --- | --- |
 | `job_metrics.enabled` | `true` | record per-class metrics |
-| `job_metrics.connection` | `queen` | the Queen connection whose broker stores them |
+| `job_metrics.connection` | `queen` | the QueenMQ connection whose broker stores them |
 | `job_metrics.namespace` | `queen-metrics` | the key/value namespace |
 
 The dashboard reads them in pages from the window's first bucket, cached for fifteen seconds. One
@@ -235,15 +235,15 @@ Horizon's Metrics page shows each class's throughput and average runtime from th
 job's reservation to its deletion, and an attempt that ends released is left out. Compare the
 averages over the same window, and keep three differences in mind:
 
-- Queen counts every attempt: a released one as processed, one that threw and is retried as
+- QueenMQ counts every attempt: a released one as processed, one that threw and is retried as
   failed, both with their runtime. A class that `WithoutOverlapping` or a rate limiter releases
   often shows more runs here, and shorter ones.
-- Queen's runtime includes the broker ACK, a few milliseconds, where Horizon's includes a Redis
+- QueenMQ's runtime includes the broker ACK, a few milliseconds, where Horizon's includes a Redis
   delete. For short jobs, compare `max_ms` and the runs too.
 - An attempt that outlives its timeout counts here, as failed, since PHP client 2.4.2.
 
 Neither keeps percentiles. For a p50 or a p95, take per-job runtimes: Horizon's recent jobs carry
-them, and on Queen a [monitored tag](#monitored-tags) that the class's jobs carry from their
+them, and on QueenMQ a [monitored tag](#monitored-tags) that the class's jobs carry from their
 `tags()` method records each job's runtime for `tags.retention_minutes`, at one write per job.
 
 ## Monitored tags
@@ -278,7 +278,7 @@ Horizon's silenced jobs have no equivalent.
 | Key of `config/queen.php` | Default | Meaning |
 | --- | --- | --- |
 | `tags.enabled` | `true` | tag jobs and record the monitored ones |
-| `tags.connection` | `queen` | the Queen connection whose broker stores them |
+| `tags.connection` | `queen` | the QueenMQ connection whose broker stores them |
 | `tags.namespace` | `queen-metrics` | the key/value namespace |
 | `tags.retention_minutes` | `1440` | how long a recorded job stays listed, in minutes |
 
@@ -324,7 +324,7 @@ again at the next run. Listen to the event to send the alert anywhere else, such
 
 ## Queue sizes
 
-On a Queen connection, Laravel's size methods read the consumer group's depth from the broker
+On a QueenMQ connection, Laravel's size methods read the consumer group's depth from the broker
 (`GET /api/v1/resources/queues/:queue/depth`) and the queue's [timers](/writing-applications/kv-locks-timers/):
 
 | Method | Counts |

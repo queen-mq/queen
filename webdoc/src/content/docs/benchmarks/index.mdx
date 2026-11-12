@@ -1,6 +1,6 @@
 ---
 title: "Benchmarks against Kafka, Redpanda and Pulsar"
-description: "Queen MQ 2.4 against Kafka 4.3.1, Pulsar 4.2.4 and Redpanda 26.2.3 on three GCP nodes with local NVMe, the runs of 2.3.0 on 16-vCPU nodes: throughput, partition count, transactions, Kafka clients, hours under faults and Jepsen, every number with the run it came from."
+description: "QueenMQ 2.4 against Kafka 4.3.1, Pulsar 4.2.4 and Redpanda 26.2.3 on three GCP nodes with local NVMe, the runs of 2.3.0 on 16-vCPU nodes: throughput, partition count, transactions, Kafka clients, hours under faults and Jepsen, every number with the run it came from."
 type: overview
 tier: operate
 sidebar:
@@ -24,20 +24,20 @@ digest: >-
   graceful restarts of the leader. Jepsen: 226 tests on the code of 2.7.0, all valid.
 ---
 
-Queen replicates every write through raft, so we measure it as a cluster: three nodes, every
+QueenMQ replicates every write through raft, so we measure it as a cluster: three nodes, every
 write fsynced on two of them before the client hears back, and a load generator that keeps its
 schedule when the broker slows down, so a stall shows up as latency instead of quietly lowering
 the load. Then we run the other systems on the same machines with the same load and the same
 report. These pages hold what came out, each number with the conditions that make it true,
 including the places where another system did better.
 
-Queen 2.4, in its first beta, ran against Kafka, Pulsar and Redpanda on three GCP nodes with 24
+QueenMQ 2.4, in its first beta, ran against Kafka, Pulsar and Redpanda on three GCP nodes with 24
 vCPU and local NVMe disks on 2026-10-14 to 16
-([Queen vs Kafka, Pulsar and Redpanda on NVMe](/benchmarks/queen-vs-kafka/)); the released 2.3.0
+([QueenMQ vs Kafka, Pulsar and Redpanda on NVMe](/benchmarks/queen-vs-kafka/)); the released 2.3.0
 ran there against Kafka on 10-14, and its tables are in the git history of that page. The partition
 count page holds the same runs. The pages on transactions and Kafka clients hold the runs of
 2026-10-12 and 13, on pre-release builds of 2.3.0 and three DigitalOcean nodes with 16 vCPU, and
-September's runs of Kafka, Redpanda and Pulsar in transactions against Queen 2.0.0-beta.2 on other
+September's runs of Kafka, Redpanda and Pulsar in transactions against QueenMQ 2.0.0-beta.2 on other
 16-vCPU machines. Every table names its machines and build, and no number is compared across two
 kinds of machines.
 
@@ -45,38 +45,38 @@ kinds of machines.
 
 | Result | Conditions | Page |
 |---|---|---|
-| 3,000,000 msg/s of 256-byte messages at an e2e p99 of 15 to 25 ms from 10 to 10,000,000 partitions, on 21 to 28 cores. On the same machines Kafka had the lowest latency up to 1,000 partitions (p99 7.5 to 11 ms), 53 cores at 10,000, and did not carry 50,000; Pulsar read 20 to 25 ms up to 50,000 on 5 to 22 cores and did not carry 100,000; Redpanda read 14 ms at 100 and 1,000, 782 ms at 10,000, and did not carry 50,000 | Queen 2.4.0-beta.1, Kafka 4.3.1, Pulsar 4.2.4 and Redpanda 26.2.3 on three GCP `c4-standard-24-lssd` brokers with local NVMe in RAID0 and XFS, 2026-10-14 to 16; 70 s per point, the median of the windows in seconds 30 to 60; Queen, Pulsar and Redpanda answer after two fsyncs, Kafka from memory | [Queen vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/) |
-| 1,000,000 msg/s of 1 KB messages, about 1 GB/s, at an e2e p50 of 6.7 to 9.7 ms and a p99 of 16 to 22 ms from 10 to 10,000,000 partitions. Kafka on the same machines: 9.4 ms up to 1,000 partitions, 19 ms at 10,000 and 45 ms at 25,000, not carried at 50,000 | Queen 2.4 and Kafka; JSON messages of 1,027 bytes on average | [Queen vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/#1000000-msgs-of-1-kb-messages) |
-| One queue of 1,000 partitions: e2e p50 / p99 of 6.6 / 15 ms at 3,000,000 msg/s, 16 / 52 ms at 4,000,000 and 39 / 87 ms at 5,000,000; 5,500,000 not carried. Kafka on one topic of 1,000 partitions: 6.0 / 8.1 ms at 3,000,000 and 5.8 / 12.5 ms at 8,000,000. At 5,000,000 on the same day: Kafka 5.7 / 8.9 ms, Redpanda 30 / 82, Queen 41 / 91, and Pulsar not carried, its disks full | Queen 2.4 and Kafka 4.3.1 on the same machines, a fresh cluster for each rate, the median window; the 5,000,000 point for all four on 2026-10-16 | [Queen vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/#the-ceiling-at-1000-partitions) |
-| What a partition costs Queen: about 1.2 KB of the leader's memory and 0.9 KB of a follower's; at 3,000,000 msg/s the leader held 5.2 GB at 10 partitions, 7.7 GB at a million and 17.2 GB at ten million, with the same 13 cores | Queen 2.4 on the same machines, 2026-10-15; resident memory at the end of a 70 s point, nothing deleted | [Partition count](/benchmarks/partitions/#what-a-partition-costs) |
+| 3,000,000 msg/s of 256-byte messages at an e2e p99 of 15 to 25 ms from 10 to 10,000,000 partitions, on 21 to 28 cores. On the same machines Kafka had the lowest latency up to 1,000 partitions (p99 7.5 to 11 ms), 53 cores at 10,000, and did not carry 50,000; Pulsar read 20 to 25 ms up to 50,000 on 5 to 22 cores and did not carry 100,000; Redpanda read 14 ms at 100 and 1,000, 782 ms at 10,000, and did not carry 50,000 | QueenMQ 2.4.0-beta.1, Kafka 4.3.1, Pulsar 4.2.4 and Redpanda 26.2.3 on three GCP `c4-standard-24-lssd` brokers with local NVMe in RAID0 and XFS, 2026-10-14 to 16; 70 s per point, the median of the windows in seconds 30 to 60; QueenMQ, Pulsar and Redpanda answer after two fsyncs, Kafka from memory | [QueenMQ vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/) |
+| 1,000,000 msg/s of 1 KB messages, about 1 GB/s, at an e2e p50 of 6.7 to 9.7 ms and a p99 of 16 to 22 ms from 10 to 10,000,000 partitions. Kafka on the same machines: 9.4 ms up to 1,000 partitions, 19 ms at 10,000 and 45 ms at 25,000, not carried at 50,000 | QueenMQ 2.4 and Kafka; JSON messages of 1,027 bytes on average | [QueenMQ vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/#1000000-msgs-of-1-kb-messages) |
+| One queue of 1,000 partitions: e2e p50 / p99 of 6.6 / 15 ms at 3,000,000 msg/s, 16 / 52 ms at 4,000,000 and 39 / 87 ms at 5,000,000; 5,500,000 not carried. Kafka on one topic of 1,000 partitions: 6.0 / 8.1 ms at 3,000,000 and 5.8 / 12.5 ms at 8,000,000. At 5,000,000 on the same day: Kafka 5.7 / 8.9 ms, Redpanda 30 / 82, QueenMQ 41 / 91, and Pulsar not carried, its disks full | QueenMQ 2.4 and Kafka 4.3.1 on the same machines, a fresh cluster for each rate, the median window; the 5,000,000 point for all four on 2026-10-16 | [QueenMQ vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/#the-ceiling-at-1000-partitions) |
+| What a partition costs QueenMQ: about 1.2 KB of the leader's memory and 0.9 KB of a follower's; at 3,000,000 msg/s the leader held 5.2 GB at 10 partitions, 7.7 GB at a million and 17.2 GB at ten million, with the same 13 cores | QueenMQ 2.4 on the same machines, 2026-10-15; resident memory at the end of a 70 s point, nothing deleted | [Partition count](/benchmarks/partitions/#what-a-partition-costs) |
 | An exactly-once step of 10 messages commits in 3.6 ms at the median at 12,000 transactions a second, a third less than 2.2.0; the ceiling is near 12,900 a second | the 16-vCPU nodes, a pre-release build of 2.3.0 with the binary transaction body, 2026-10-12; 200 partitions in and out; a verifier found every input exactly once in the output | [Transactions](/benchmarks/transactions/) |
 | Kafka clients at 1,000,000 msg/s through the facade inside the broker, e2e p99 48 ms; at 2,000,000 the consumers keep the rate | the 16-vCPU nodes; franz-go, `acks=all`, idempotent; 2.3.0-beta.1, 2026-10-13 | [Kafka clients](/benchmarks/kafka-clients/) |
-| 2,753 Laravel jobs/s with 32 workers on Queen's driver and supervisor, against 1,124 for Horizon on Redis | one raft node, 2.0.0-beta.2, 2026-10-01; 10 ms jobs, Redis fsyncing every write; medians of 3 runs | [Laravel workers](/benchmarks/laravel/) |
+| 2,753 Laravel jobs/s with 32 workers on QueenMQ's driver and supervisor, against 1,124 for Horizon on Redis | one raft node, 2.0.0-beta.2, 2026-10-01; 10 ms jobs, Redis fsyncing every write; medians of 3 runs | [Laravel workers](/benchmarks/laravel/) |
 | 500,000 msg/s for 3 h 23 min over 1,000,000 partitions, e2e p50 20 ms and p99 86 ms in the median window, through a kill -9 of the leader, a graceful leader restart and a kill -9 of a follower | deduplication and retention on; the builds that became 2.0.0-beta.1, 2026-10-01 | [Soak and failover](/benchmarks/soak/) |
 | 226 Jepsen tests, all valid at their first run: no acknowledged message lost, no lease held twice, KV linearizable, transactions atomic | the code of 2.7.0, 2026-10-30 and 31; five nodes; kill -9, pauses, partitions, clock jumps, power loss; 13 tests push several messages of a partition at once, and the stream tests close quiet partitions under a claim. The 31 standby failovers last ran on 2.6.0, all valid | [Jepsen](/benchmarks/jepsen/) |
 
-## Where Queen leads, and where it does not
+## Where QueenMQ leads, and where it does not
 
-Queen hardly notices the partition count. A partition costs every node about 1 KB of memory, and
+QueenMQ hardly notices the partition count. A partition costs every node about 1 KB of memory, and
 its messages go into its queue's log next to every other partition's, so ten million partitions
 are written and fsynced the way ten are. We are proudest of this result, because it is the reason
-Queen exists: one partition per entity, as many entities as you have. Kafka gives each partition
+QueenMQ exists: one partition per entity, as many entities as you have. Kafka gives each partition
 a log and a replication state of its own. On the GCP nodes at 3,000,000 msg/s it used 53 cores
-at 10,000 partitions against Queen's 25, and 57 at 25,000 for a p99 of 105 ms; at 50,000 and
+at 10,000 partitions against QueenMQ's 25, and 57 at 25,000 for a p99 of 105 ms; at 50,000 and
 100,000 it pushed 601,000 and 174,000 of the 3,000,000 messages a second offered. Redpanda, a raft
 group per partition, read 782 ms at 10,000 and fell behind at 50,000; Pulsar held 20 to 25 ms up
-to 50,000 and fell behind at 100,000. Queen ran the same load over ten million partitions with a
+to 50,000 and fell behind at 100,000. QueenMQ ran the same load over ten million partitions with a
 p99 of 25 ms on 25 cores.
 
 Up to 1,000 partitions Kafka answers sooner and goes further. At 3,000,000 msg/s its median was
-about 6 ms and its p99 7.5 to 11 ms, where Queen 2.4's were 6.9 to 10 ms and 16.5 to 24, and up to
-1,000 partitions it used less CPU (15 to 21 cores against Queen's 21 to 28). On one topic of 1,000
-partitions Kafka carried about 8,000,000 msg/s at a p99 near 12 ms; one Queen queue carried
+about 6 ms and its p99 7.5 to 11 ms, where QueenMQ 2.4's were 6.9 to 10 ms and 16.5 to 24, and up to
+1,000 partitions it used less CPU (15 to 21 cores against QueenMQ's 21 to 28). On one topic of 1,000
+partitions Kafka carried about 8,000,000 msg/s at a p99 near 12 ms; one QueenMQ queue carried
 5,000,000 and not 5,500,000, with neither the disks nor the leader's CPU full, and what stops it
 there is not profiled yet. Kafka answers from memory: with an fsync on every append it still read
-7.5 / 12 ms at 100 partitions, but 198 ms at 1,000 and 281 at 10,000, where Queen read 16.5 and 20
+7.5 / 12 ms at 100 partitions, but 198 ms at 1,000 and 281 at 10,000, where QueenMQ read 16.5 and 20
 ([fsync runs](/benchmarks/queen-vs-kafka/#an-fsync-before-the-answer)). The rest of its lead comes
-from Queen's design: a Queen pop is a write too, because the lease it hands out commits through
+from QueenMQ's design: a QueenMQ pop is a write too, because the lease it hands out commits through
 the log before the consumer sees a message, and one leader orders every write of a raft group.
 
 Transactions are where that design pays. A step's acks and pushes are one log entry, so a
@@ -84,16 +84,16 @@ transaction costs about one write: 3 to 4 ms at the median. In September's compa
 single-message transactions a second went through where Kafka, Redpanda and Pulsar all fell
 behind. The ceiling is the one thread that plans them: near 12,900 transactions of 10 messages a
 second on the 16-vCPU nodes, and more workers do not raise it; in September Pulsar doubled its
-rate with 900 partitions and 900 workers where Queen's fell.
+rate with 900 partitions and 900 workers where QueenMQ's fell.
 
 ## The rig, in short
 
-Queen 2.4 ran against Kafka, Pulsar and Redpanda on GCP VMs in one zone and one VPC: three
+QueenMQ 2.4 ran against Kafka, Pulsar and Redpanda on GCP VMs in one zone and one VPC: three
 `c4-standard-24-lssd` brokers with 24 vCPU, 88 GB and four local NVMe disks in one RAID0 with XFS,
 and three `c4-highcpu-16` load machines, six for Pulsar's largest points. The 2.3.0 runs of
 2026-10-12 and 13, the transactions and the Kafka
 clients used six DigitalOcean droplets with 16 vCPU and 31 GB each, in one VPC, the three with the
-fastest disks as brokers: a Xeon Gold 6548N that leads Queen's raft group and two Xeon Platinum
+fastest disks as brokers: a Xeon Gold 6548N that leads QueenMQ's raft group and two Xeon Platinum
 8358. Kafka spreads its partition leaders over all three brokers. Each system ran alone on the
 brokers, with the same OS settings, except page cache writeback on the GCP nodes (from 1 GiB for
 Kafka, which its tail needed there, and for Pulsar and Redpanda) and Redpanda's own tuners.
@@ -105,12 +105,12 @@ window in seconds 30 to 60 of 90, and on the GCP nodes the median of the three w
 30 to 60 of 70, with the worst in brackets. A rate is carried when nothing was shed, nothing
 erred and 99% of what was pushed was consumed; September's runs took the last 30 seconds
 of 60 and called a system behind under 97%. Every number names its build and date, and the engine
-moves fast: read a figure as what that build did on that rig. The GCP figures are Queen
+moves fast: read a figure as what that build did on that rig. The GCP figures are QueenMQ
 2.4.0-beta.1; the DigitalOcean ones are the builds of the two days before 2.3.0. Both ran with the
 binary wire forms a client turns on; the default JSON forms have not been run through the matrix.
 The Jepsen campaign ran on the code of 2.7.0. The full method, each system's settings and the
 commands to run it again are in [how we measure](/benchmarks/methodology/), and for the GCP runs
-on [Queen vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/#how-we-ran-it).
+on [QueenMQ vs Kafka, Pulsar and Redpanda](/benchmarks/queen-vs-kafka/#how-we-ran-it).
 
-Results measured on Queen 1.x, whose storage was PostgreSQL, stay in the git history of this site.
+Results measured on QueenMQ 1.x, whose storage was PostgreSQL, stay in the git history of this site.
 They are not 2.x numbers.
