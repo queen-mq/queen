@@ -20,6 +20,8 @@ MySQL 8.0+ (in Docker, here or on another machine), real kill -9.
      carries the row twice): what goes through, and how a refusal shows
   h  catch-up: the broker stopped while MySQL writes a backlog (one
      1M-row transaction, then many 5,000-row ones); how fast it drains
+  n  a silent network: the broker's packets to MySQL dropped (iptables,
+     no reset) for 30 s while it streams; it must notice and come back
   s  soak: three nodes for --soak-minutes under writes, a random node
      killed every one to two minutes; memory and lag along the way
 
@@ -149,13 +151,20 @@ class Writer(threading.Thread):
                 time.sleep(self.pause)
 
     def finish(self):
+        """Stop writing. The client is given a while to run what it has
+        queued, then stopped: MySQL rolls back a transaction it was in, and
+        the checks read the table as it is, so nothing is lost to them."""
         self.stop_flag.set()
         self.join(10)
         try:
             self.p.stdin.close()
         except OSError:
             pass
-        self.p.wait(120)
+        try:
+            self.p.wait(300)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+            self.p.wait(30)
 
 
 class Vip:
@@ -684,7 +693,8 @@ def scenario_s(h, rng):
             n.wait_healthy()
         wait_leader(nodes).put_connector(name, doc(h, db, queue))
         wait("an owner", 60, lambda: owner_of(nodes, name))
-        ws = [Writer(h.my, db, random.Random(rng.random()), 60000, tag=f"w{k}x", per_txn=(1, 10)) for k in range(2)]
+        ws = [Writer(h.my, db, random.Random(rng.random()), 60000, tag=f"w{k}x", per_txn=(1, 10), pause=0.02)
+              for k in range(2)]
         for w in ws:
             w.start()
         end = time.time() + a.soak_minutes * 60
@@ -737,7 +747,10 @@ def scenario_h(h, rng):
         seed_table(h.my, db, a.load_rows)
         b = Broker(h, "h-node").start()
         b.wait_healthy()
-        b.put_connector(name, doc(h, db, queue, snapshot="never"))
+        extra = {}
+        if a.max_bundle_messages:
+            extra = {"maxBundleMessages": a.max_bundle_messages, "maxBundleBytes": 64 * 1024 * 1024}
+        b.put_connector(name, doc(h, db, queue, snapshot="never", **extra))
         wait("streaming", 120, lambda: phase_of(entry(b, name)) == "streaming")
         b.stop()
         t0 = time.time()
@@ -766,8 +779,55 @@ def scenario_h(h, rng):
         h.my.run(f"DROP DATABASE IF EXISTS {db}", check=False)
 
 
+def scenario_n(h, rng):
+    """A silent network: while the source streams under writes, every packet
+    from this machine to MySQL's port is dropped for 30 s (no reset, the
+    connection just goes quiet). The source must see the silence, retry, and
+    go on once the path is back: the queue ends as the table."""
+    a = h.args
+    # Both ways: no packet out to MySQL, none back from it (heartbeats
+    # included), as on a dead link.
+    rules = [["OUTPUT", "-p", "tcp", "-d", a.mysql_host, "--dport", str(a.mysql_port), "-j", "DROP"],
+             ["INPUT", "-p", "tcp", "-s", a.mysql_host, "--sport", str(a.mysql_port), "-j", "DROP"]]
+    db, name, queue = fresh_db(h, "myc_n"), "shop-n", "my-n"
+    b = Broker(h, "n-node").start()
+    b.wait_healthy()
+    try:
+        seed_table(h.my, db, 5000)
+        b.put_connector(name, doc(h, db, queue))
+        wait("streaming", 120, lambda: phase_of(entry(b, name)) == "streaming")
+        time.sleep(2)
+        for r in rules:
+            subprocess.run(["iptables", "-A", *r], check=True)
+        t0 = time.time()
+        h.say("n: packets to MySQL dropped")
+        seen = wait("the source to notice", 120,
+                    lambda: phase_of(entry(b, name)) in ("error", "connecting") or entry(b, name) and
+                    (status_of(entry(b, name)).get("error") or {}).get("code"), every=0.5)
+        h.say(f"n: noticed after {time.time() - t0:.0f} s: {phase_of(entry(b, name))} "
+              f"{(status_of(entry(b, name)).get('error') or {}).get('message', '')[:120]}")
+        time.sleep(max(0, 30 - (time.time() - t0)))
+        for r in rules:
+            subprocess.run(["iptables", "-D", *r], check=True)
+        t1 = time.time()
+        h.say("n: path back; writes resume")
+        w = Writer(h.my, db, rng, 6000)
+        w.start()
+        wait("streaming again", 180, lambda: phase_of(entry(b, name)) == "streaming", every=0.5)
+        h.say(f"n: streaming again {time.time() - t1:.0f} s after the path came back")
+        time.sleep(3)
+        w.finish()
+        n = check(h, b, db, queue)
+        h.say(f"n: PASS: {w.writes} writes after the outage, {n} messages, the queue is the table")
+    finally:
+        for r in rules:
+            subprocess.run(["iptables", "-D", *r], capture_output=True)
+        b.stop()
+        h.my.run(f"DROP DATABASE IF EXISTS {db}", check=False)
+
+
 SCENARIOS = {"a": scenario_a, "b": scenario_b, "c": scenario_c, "d": scenario_d, "e": scenario_e, "f": scenario_f,
-             "g": scenario_g, "h": scenario_h, "s": scenario_s}
+             "g": scenario_g, "h": scenario_h, "n": scenario_n, "s": scenario_s}
 
 
 def main():
@@ -793,6 +853,7 @@ def main():
     ap.add_argument("--load-seconds", type=int, default=300)
     ap.add_argument("--load-batch", type=int, default=2, help="writes per writer transaction, on average")
     ap.add_argument("--soak-minutes", type=int, default=30)
+    ap.add_argument("--max-bundle-messages", type=int, default=None, help="h: the source's maxBundleMessages")
     args = ap.parse_args()
     if not os.path.exists(args.bin):
         print(f"no broker binary at {args.bin}", file=sys.stderr)

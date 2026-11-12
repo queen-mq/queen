@@ -141,11 +141,12 @@ The `connection` block takes `host`, `port` (3306), `database`, `user`, `passwor
 
 Text is read in the column's own charset: utf8mb4, latin1, the UTF-16 and UTF-32 forms, GBK, GB18030, Big5, Shift-JIS, EUC-JP, EUC-KR, and the Windows, ISO-8859 and KOI8 pages. A column in any other charset is read as UTF-8.
 
-## Six things to know
+## Seven things to know
 
 - **MySQL keeps its binlog for a time, not for the source.** A stopped source never fills the database's disk. One stopped for longer than `binlog_expire_logs_seconds` (30 days by default) finds its binlog purged and stops with `binlog_purged`: `POST /api/v1/connectors/shop-src/resync` copies the tables again under a new epoch.
 - **A failover keeps the place.** A GTID is the same on every server of a replication group, so after a failover the source goes on from its pointer on the new primary.
 - **A schema change follows; a rename stops the source.** After `ALTER TABLE`, the next messages carry the new columns, and a copy still running reads them again for each chunk. A `RENAME` or `DROP` of a source table stops the source with `table_gone`, naming the statement: put the new name in `source.tables` and it goes on from where it stopped. A swap in one statement, as gh-ost and pt-online-schema-change make (`RENAME TABLE orders TO _del, _new TO orders`), keeps the name and does not stop it.
+- **A row change must fit in one QueenMQ transaction:** 96 MiB by default (`QUEEN_RAFT_ENTRY_MAX_BYTES`). An update carries the row twice, before and after, and binary values travel as hex at twice their size, so the update of a row holding a 24 MB BLOB is about 96 MiB. A bigger one stops the source with `queen_refused` (`too_large`) until the limit is raised; each node then holds entries that big in memory while it replicates them.
 - **Two readers with one replica id push each other out.** If your own replicas use ids above 2^31, set `serverId`.
 - **Watch `queen_mysql_source_lag_seconds`.** It is the time since the commit of the last transaction the source has sent, and 0 once it has read to the end of the binlog.
 - **Not covered:** MariaDB, partial JSON updates (`binlog_row_value_options = PARTIAL_JSON`), and a sink into MySQL. An XA transaction is sent at its `XA PREPARE`: a later `XA ROLLBACK` is not undone.
