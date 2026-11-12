@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use crate::source::events::PartitionRule;
 
 use super::catalog::{ColumnInfo, MyTableName, TableInfo};
-use super::values::Kind;
+use super::values::{Charset, Kind};
 
 /// One configured table, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,8 +127,9 @@ pub fn shape(idx: usize, t: &MyTable, tme: &TableMapEvent<'_>) -> Result<Shape> 
     let n = tme.columns_count() as usize;
     let bad = |e: std::io::Error| Error::io(format!("the table map of {}: {e}", t.name));
     let mut names: Vec<String> = Vec::with_capacity(n);
-    let mut enums: Vec<Vec<String>> = Vec::new();
-    let mut sets: Vec<Vec<String>> = Vec::new();
+    // ENUM and SET values as stored, decoded below with the column's charset.
+    let mut enums: Vec<Vec<Vec<u8>>> = Vec::new();
+    let mut sets: Vec<Vec<Vec<u8>>> = Vec::new();
     for field in tme.iter_optional_meta() {
         match field.map_err(bad)? {
             OptionalMetadataField::ColumnName(c) => {
@@ -139,13 +140,13 @@ pub fn shape(idx: usize, t: &MyTable, tme: &TableMapEvent<'_>) -> Result<Shape> 
             OptionalMetadataField::EnumStrValue(e) => {
                 for v in e.iter_values() {
                     let v = v.map_err(bad)?;
-                    enums.push(v.values().iter().map(|x| x.value().into_owned()).collect());
+                    enums.push(v.values().iter().map(|x| x.value_raw().to_vec()).collect());
                 }
             }
             OptionalMetadataField::SetStrValue(s) => {
                 for v in s.iter_values() {
                     let v = v.map_err(bad)?;
-                    sets.push(v.values().iter().map(|x| x.value().into_owned()).collect());
+                    sets.push(v.values().iter().map(|x| x.value_raw().to_vec()).collect());
                 }
             }
             _ => {}
@@ -194,14 +195,18 @@ pub fn shape(idx: usize, t: &MyTable, tme: &TableMapEvent<'_>) -> Result<Shape> 
                 }
                 other => other,
             })?;
+        let decode = |cs: Charset, v: Option<&Vec<Vec<u8>>>| -> Vec<String> {
+            v.map(|v| v.iter().map(|b| cs.decode(b)).collect())
+                .unwrap_or_default()
+        };
         let names = match kind {
-            Kind::Enum => {
+            Kind::Enum(cs) => {
                 ei += 1;
-                enums.get(ei - 1).cloned().unwrap_or_default()
+                decode(cs, enums.get(ei - 1))
             }
-            Kind::Set => {
+            Kind::Set(cs) => {
                 si += 1;
-                sets.get(si - 1).cloned().unwrap_or_default()
+                decode(cs, sets.get(si - 1))
             }
             _ => Vec::new(),
         };

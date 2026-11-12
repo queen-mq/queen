@@ -68,6 +68,9 @@ mysql_async = { version = "0.37", default-features = false, features = ["minimal
 # The binlog's types (events, row values, GTID blocks), the version
 # mysql_async uses.
 mysql_common = { version = "0.37", default-features = false, features = ["binlog"] }
+# A MySQL column's text in its own charset (src/mysql/values.rs): GBK, Big5,
+# Shift-JIS, the Windows pages... Already in the broker's build.
+encoding_rs = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

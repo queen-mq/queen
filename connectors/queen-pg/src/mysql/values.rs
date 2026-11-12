@@ -12,7 +12,11 @@
 //! charsets, ENUM and SET names: `binlog_row_metadata=FULL`) and from
 //! `information_schema.COLUMNS` for the snapshot. Strings are compared and
 //! rendered from the bytes as stored: the snapshot connection runs with
-//! `character_set_results = binary`, so both paths decode the same bytes.
+//! `character_set_results = binary`, so both paths decode the same bytes,
+//! with the column's own charset (UTF-8, latin1 = Windows-1252, the UTF-16
+//! and UTF-32 forms, and the legacy ones `encoding_rs` knows: GBK, GB18030,
+//! Big5, Shift-JIS, EUC-JP, EUC-KR, the Windows and ISO-8859 pages, KOI8).
+//! A charset none of these covers is read as UTF-8.
 //!
 //! Renderings (the Postgres source's where the types meet):
 //!
@@ -33,7 +37,9 @@
 
 use std::fmt::Write as _;
 
+use encoding_rs::Encoding;
 use mysql_common::binlog::value::BinlogValue;
+use mysql_common::collations::{Collation, CollationId};
 use mysql_common::constants::ColumnType;
 use mysql_common::value::Value;
 
@@ -43,27 +49,79 @@ use crate::values::append_json_string;
 /// How a column's bytes are text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Charset {
-    /// utf8mb4, utf8mb3, ascii, and anything else that is valid UTF-8.
+    /// utf8mb4, utf8mb3, ascii, and any charset not named below.
     Utf8,
-    /// MySQL's latin1, which is Windows-1252.
-    Latin1,
+    /// utf16 and ucs2 (big-endian).
+    Utf16Be,
+    Utf16Le,
+    Utf32,
+    /// A legacy charset `encoding_rs` decodes (MySQL's latin1 is
+    /// Windows-1252, which is what `encoding_rs` decodes for it).
+    Legacy(&'static Encoding),
 }
 
 impl Charset {
-    /// From a collation id (table map events and result sets carry
-    /// collations, not charsets).
+    /// From a collation id (table map events carry collations, not
+    /// charsets).
     pub fn from_collation(id: u16) -> Charset {
-        match id {
-            5 | 8 | 15 | 31 | 47 | 48 | 49 | 94 => Charset::Latin1,
-            _ => Charset::Utf8,
-        }
+        let c: Collation<'static> = CollationId::from(id).into();
+        Charset::from_name(c.charset())
     }
 
-    /// From `information_schema.COLUMNS.CHARACTER_SET_NAME`.
+    /// From a charset name (`information_schema.COLUMNS.CHARACTER_SET_NAME`).
     pub fn from_name(name: &str) -> Charset {
-        match name {
-            "latin1" => Charset::Latin1,
-            _ => Charset::Utf8,
+        use encoding_rs::*;
+        let e = match name.to_ascii_lowercase().as_str() {
+            "utf16" | "ucs2" => return Charset::Utf16Be,
+            "utf16le" => return Charset::Utf16Le,
+            "utf32" => return Charset::Utf32,
+            "latin1" => WINDOWS_1252,
+            "latin2" => ISO_8859_2,
+            "latin5" => WINDOWS_1254,
+            "latin7" => ISO_8859_13,
+            "greek" => ISO_8859_7,
+            "hebrew" => ISO_8859_8,
+            "cp1250" => WINDOWS_1250,
+            "cp1251" => WINDOWS_1251,
+            "cp1256" => WINDOWS_1256,
+            "cp1257" => WINDOWS_1257,
+            "cp866" => IBM866,
+            "koi8r" => KOI8_R,
+            "koi8u" => KOI8_U,
+            "macroman" => MACINTOSH,
+            "tis620" => WINDOWS_874,
+            "gbk" | "gb2312" => GBK,
+            "gb18030" => GB18030,
+            "big5" => BIG5,
+            "sjis" | "cp932" => SHIFT_JIS,
+            "ujis" | "eucjpms" => EUC_JP,
+            "euckr" => EUC_KR,
+            _ => return Charset::Utf8,
+        };
+        Charset::Legacy(e)
+    }
+
+    /// The text of a value's bytes (an unmappable byte becomes U+FFFD,
+    /// never an error).
+    pub fn decode(self, b: &[u8]) -> String {
+        match self {
+            Charset::Utf8 => String::from_utf8_lossy(b).into_owned(),
+            Charset::Utf16Be => encoding_rs::UTF_16BE
+                .decode_without_bom_handling(b)
+                .0
+                .into_owned(),
+            Charset::Utf16Le => encoding_rs::UTF_16LE
+                .decode_without_bom_handling(b)
+                .0
+                .into_owned(),
+            Charset::Utf32 => b
+                .chunks(4)
+                .map(|c| {
+                    let n = c.iter().fold(0u32, |n, &x| (n << 8) | u32::from(x));
+                    char::from_u32(n).unwrap_or('\u{FFFD}')
+                })
+                .collect(),
+            Charset::Legacy(e) => e.decode_without_bom_handling(b).0.into_owned(),
         }
     }
 }
@@ -83,8 +141,8 @@ pub enum Kind {
     Timestamp(u8),
     Time(u8),
     Json,
-    Enum,
-    Set,
+    Enum(Charset),
+    Set(Charset),
     Text(Charset),
     /// `CHAR(n)`: trailing spaces are padding (a SELECT strips them).
     Char(Charset),
@@ -117,8 +175,8 @@ impl Kind {
             "timestamp" => Kind::Timestamp(fsp),
             "time" => Kind::Time(fsp),
             "json" => Kind::Json,
-            "enum" => Kind::Enum,
-            "set" => Kind::Set,
+            "enum" => Kind::Enum(cs()),
+            "set" => Kind::Set(cs()),
             "char" if charset.is_some() => Kind::Char(cs()),
             "varchar" | "tinytext" | "text" | "mediumtext" | "longtext" if charset.is_some() => {
                 Kind::Text(cs())
@@ -165,8 +223,8 @@ impl Kind {
             MYSQL_TYPE_TIME => Kind::Time(0),
             MYSQL_TYPE_TIME2 => Kind::Time(fsp),
             MYSQL_TYPE_JSON => Kind::Json,
-            MYSQL_TYPE_ENUM => Kind::Enum,
-            MYSQL_TYPE_SET => Kind::Set,
+            MYSQL_TYPE_ENUM => Kind::Enum(Charset::from_collation(collation)),
+            MYSQL_TYPE_SET => Kind::Set(Charset::from_collation(collation)),
             // CHAR and BINARY: the table map logs both as STRING.
             MYSQL_TYPE_STRING => match text(collation) {
                 Kind::Text(c) => Kind::Char(c),
@@ -192,7 +250,7 @@ impl Kind {
     /// with its `ORDER BY` (an ENUM orders by its index but compares a
     /// string by text; JSON and geometry do not order).
     pub fn keyable(self) -> bool {
-        !matches!(self, Kind::Enum | Kind::Set | Kind::Json)
+        !matches!(self, Kind::Enum(_) | Kind::Set(_) | Kind::Json)
     }
 }
 
@@ -258,7 +316,7 @@ impl Cell {
             return Ok(Cell::Null);
         }
         match kind {
-            Kind::Enum => {
+            Kind::Enum(_) => {
                 let Value::Int(i) = v else {
                     return Err(bad(kind, "a non-index ENUM value"));
                 };
@@ -270,7 +328,7 @@ impl Cell {
                     },
                 ))
             }
-            Kind::Set => {
+            Kind::Set(_) => {
                 let Value::Bytes(b) = v else {
                     return Err(bad(kind, "a non-bitmap SET value"));
                 };
@@ -400,18 +458,16 @@ impl Cell {
                     .map_err(|e| Error::io(format!("a JSON column held non-JSON ({e})")))?;
                 Cell::Json(v.to_string())
             }
-            (Kind::Enum | Kind::Set | Kind::Text(Charset::Utf8), Value::Bytes(b)) => {
-                Cell::Str(utf8(b))
+            (Kind::Enum(cs) | Kind::Set(cs) | Kind::Text(cs), Value::Bytes(b)) => {
+                Cell::Str(cs.decode(&b))
             }
-            (Kind::Text(Charset::Latin1), Value::Bytes(b)) => Cell::Str(latin1(&b)),
-            (Kind::Char(cs), Value::Bytes(mut b)) => {
-                while b.last() == Some(&b' ') {
-                    b.pop();
-                }
-                Cell::Str(match cs {
-                    Charset::Utf8 => utf8(b),
-                    Charset::Latin1 => latin1(&b),
-                })
+            // Trailing spaces of a CHAR are padding: a SELECT strips them,
+            // the binlog may not. Stripped from the text, so a UTF-16 space
+            // is one too.
+            (Kind::Char(cs), Value::Bytes(b)) => {
+                let mut t = cs.decode(&b);
+                t.truncate(t.trim_end_matches(' ').len());
+                Cell::Str(t)
             }
             (Kind::Bin, Value::Bytes(b)) => Cell::Bin(b),
             (Kind::BinFixed(n), Value::Bytes(mut b)) => {
@@ -576,12 +632,8 @@ pub fn param_value(kind: Kind, text: &str) -> Result<Value> {
         Kind::Year => Value::Int(text.parse::<i64>().map_err(|_| bad())?),
         Kind::Float | Kind::Double => Value::Double(text.parse::<f64>().map_err(|_| bad())?),
         Kind::Bin | Kind::BinFixed(_) => Value::Bytes(hex::decode(text).map_err(|_| bad())?),
-        Kind::Text(Charset::Latin1) | Kind::Char(Charset::Latin1) => Value::Bytes(
-            text.chars()
-                .map(latin1_byte)
-                .collect::<Option<Vec<u8>>>()
-                .ok_or_else(bad)?,
-        ),
+        // Text goes as UTF-8, the connection's charset: the server converts
+        // it to the column's for the comparison.
         _ => Value::Bytes(text.as_bytes().to_vec()),
     })
 }
@@ -629,40 +681,6 @@ fn decimal_cast(column_type: &str) -> String {
         .filter(|a| a.chars().all(|c| c.is_ascii_digit() || c == ','))
         .unwrap_or("65,30");
     format!("DECIMAL({inner})")
-}
-
-fn utf8(b: Vec<u8>) -> String {
-    match String::from_utf8(b) {
-        Ok(s) => s,
-        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-    }
-}
-
-/// Windows-1252 (MySQL's latin1): 0x80..0x9F are the punctuation block, the
-/// five holes map to the C1 controls as MySQL does.
-const CP1252_HIGH: [char; 32] = [
-    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
-    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
-    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
-    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
-];
-
-fn latin1(b: &[u8]) -> String {
-    b.iter()
-        .map(|&c| match c {
-            0x80..=0x9F => CP1252_HIGH[usize::from(c - 0x80)],
-            _ => char::from(c),
-        })
-        .collect()
-}
-
-fn latin1_byte(c: char) -> Option<u8> {
-    if let Some(i) = CP1252_HIGH.iter().position(|&h| h == c) {
-        return Some(0x80 + i as u8);
-    }
-    u8::try_from(u32::from(c))
-        .ok()
-        .filter(|b| !(0x80..=0x9F).contains(b))
 }
 
 /// `-?(0|[1-9][0-9]*)(\.[0-9]+)?`: what a DECIMAL prints, and valid JSON.
@@ -781,18 +799,15 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let e = Cell::from_binlog(Kind::Enum, &BinlogValue::Value(Value::Int(2)), &names).unwrap();
+        let (en, se) = (Kind::Enum(Charset::Utf8), Kind::Set(Charset::Utf8));
+        let e = Cell::from_binlog(en, &BinlogValue::Value(Value::Int(2)), &names).unwrap();
         assert_eq!(e, Cell::Str("paid".into()));
-        let e0 = Cell::from_binlog(Kind::Enum, &BinlogValue::Value(Value::Int(0)), &names).unwrap();
+        let e0 = Cell::from_binlog(en, &BinlogValue::Value(Value::Int(0)), &names).unwrap();
         assert_eq!(e0, Cell::Str(String::new()));
-        let s = Cell::from_binlog(
-            Kind::Set,
-            &BinlogValue::Value(Value::Bytes(vec![0b101])),
-            &names,
-        )
-        .unwrap();
+        let s =
+            Cell::from_binlog(se, &BinlogValue::Value(Value::Bytes(vec![0b101])), &names).unwrap();
         assert_eq!(s, Cell::Str("new,gone".into()));
-        let row = Cell::from_value(Kind::Set, Value::Bytes(b"new,gone".to_vec())).unwrap();
+        let row = Cell::from_value(se, Value::Bytes(b"new,gone".to_vec())).unwrap();
         assert_eq!(s, row);
     }
 
@@ -801,12 +816,27 @@ mod tests {
         let c =
             Cell::from_value(Kind::Char(Charset::Utf8), Value::Bytes(b"ab  ".to_vec())).unwrap();
         assert_eq!(c, Cell::Str("ab".into()));
-        let l = Cell::from_value(
-            Kind::Text(Charset::Latin1),
-            Value::Bytes(vec![0x80, b'a', 0xE9]),
+        let latin1 = Charset::from_name("latin1");
+        let l = Cell::from_value(Kind::Text(latin1), Value::Bytes(vec![0x80, b'a', 0xE9])).unwrap();
+        assert_eq!(l, Cell::Str("€aé".into()));
+        // The same charset from a collation id (8: latin1_swedish_ci).
+        assert_eq!(Charset::from_collation(8), latin1);
+        let gbk = Cell::from_value(
+            Kind::Text(Charset::from_collation(28)),
+            Value::Bytes(vec![0xD6, 0xD0, 0xCE, 0xC4]),
         )
         .unwrap();
-        assert_eq!(l, Cell::Str("€aé".into()));
+        assert_eq!(gbk, Cell::Str("中文".into()));
+        let u16 = Cell::from_value(
+            Kind::Char(Charset::from_name("utf16")),
+            Value::Bytes(vec![0, b'a', 0, b'b', 0x20, 0xAC, 0, b' ']),
+        )
+        .unwrap();
+        assert_eq!(u16, Cell::Str("ab€".into()));
+        assert_eq!(
+            Charset::Utf32.decode(&[0, 0, 0x4E, 0x2D, 0, 0, 0, b'x']),
+            "中x"
+        );
         let b = Cell::from_value(Kind::Bin, Value::Bytes(vec![0, 0xAB])).unwrap();
         assert_eq!(json(Kind::Bin, &b), "\"\\\\x00ab\"");
         let bits = Cell::from_value(Kind::Bit, Value::Bytes(vec![1, 2])).unwrap();
@@ -825,7 +855,10 @@ mod tests {
             (Kind::Int, Cell::Int(-5)),
             (Kind::Int, Cell::UInt(u64::MAX)),
             (Kind::Bin, Cell::Bin(vec![0, 1, 255])),
-            (Kind::Text(Charset::Latin1), Cell::Str("€é".into())),
+            (
+                Kind::Text(Charset::from_name("latin1")),
+                Cell::Str("€é".into()),
+            ),
         ];
         for (k, c) in cases {
             let t = c.param_text(k).unwrap();
@@ -834,7 +867,8 @@ mod tests {
                 (Cell::Int(i), Value::Int(j)) => assert_eq!(*i, j),
                 (Cell::UInt(i), Value::UInt(j)) => assert_eq!(*i, j),
                 (Cell::Bin(a), Value::Bytes(b)) => assert_eq!(a, &b),
-                (Cell::Str(_), Value::Bytes(b)) => assert_eq!(b, vec![0x80, 0xE9]),
+                // Sent as UTF-8: the server converts it to the column's.
+                (Cell::Str(s), Value::Bytes(b)) => assert_eq!(b, s.as_bytes()),
                 (c, v) => panic!("{c:?} {v:?}"),
             }
         }

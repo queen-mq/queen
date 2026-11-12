@@ -15,6 +15,7 @@ sourceOfTruth:
   - connectors/queen-pg/src/mysql/values.rs
   - connectors/queen-pg/src/mysql/snapshot.rs
   - connectors/queen-pg/src/mysql/engine.rs
+  - connectors/queen-pg/src/mysql/pipeline.rs
   - connectors/queen-pg/src/metrics.rs
   - server/src/handlers/connectors.rs
 ---
@@ -27,7 +28,7 @@ The broker can stream a MySQL table into a queue, with no other process. The **s
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| Version | MySQL 8.0 or later (not MariaDB) | the binlog format and GTIDs the source reads |
+| Version | MySQL 8.0 or later, tested on 8.0, 8.4 and 9.7 (not MariaDB) | the binlog format and GTIDs the source reads |
 | `binlog_format`, `binlog_row_image` | `ROW`, `FULL` (MySQL's defaults) | every event carries the whole row |
 | `binlog_row_metadata` | `FULL` | column names and the key come from the binlog itself |
 | `gtid_mode`, `enforce_gtid_consistency` | `ON` | the source keeps its place by GTID |
@@ -138,10 +139,13 @@ The `connection` block takes `host`, `port` (3306), `database`, `user`, `passwor
 
 <Why>the copy runs while the binlog streams, so a large table needs no lock and no pause in writes. A row that a transaction changes while it is being copied is left to that transaction's message, which carries the whole row.</Why>
 
-## Five things to know
+Text is read in the column's own charset: utf8mb4, latin1, the UTF-16 and UTF-32 forms, GBK, GB18030, Big5, Shift-JIS, EUC-JP, EUC-KR, and the Windows, ISO-8859 and KOI8 pages. A column in any other charset is read as UTF-8.
+
+## Six things to know
 
 - **MySQL keeps its binlog for a time, not for the source.** A stopped source never fills the database's disk. One stopped for longer than `binlog_expire_logs_seconds` (30 days by default) finds its binlog purged and stops with `binlog_purged`: `POST /api/v1/connectors/shop-src/resync` copies the tables again under a new epoch.
 - **A failover keeps the place.** A GTID is the same on every server of a replication group, so after a failover the source goes on from its pointer on the new primary.
+- **A schema change follows; a rename stops the source.** After `ALTER TABLE`, the next messages carry the new columns, and a copy still running reads them again for each chunk. A `RENAME` or `DROP` of a source table stops the source with `table_gone`, naming the statement: put the new name in `source.tables` and it goes on from where it stopped. A swap in one statement, as gh-ost and pt-online-schema-change make (`RENAME TABLE orders TO _del, _new TO orders`), keeps the name and does not stop it.
 - **Two readers with one replica id push each other out.** If your own replicas use ids above 2^31, set `serverId`.
 - **Watch `queen_mysql_source_lag_seconds`.** It is the time since the commit of the last transaction the source has sent, and 0 once it has read to the end of the binlog.
 - **Not covered:** MariaDB, partial JSON updates (`binlog_row_value_options = PARTIAL_JSON`), and a sink into MySQL. An XA transaction is sent at its `XA PREPARE`: a later `XA ROLLBACK` is not undone.

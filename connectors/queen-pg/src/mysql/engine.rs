@@ -24,7 +24,7 @@ use crate::source::lease::Lease;
 use crate::source::pointer::Held;
 use crate::stop::Stop;
 
-use super::catalog::{binlog_status, ServerInfo};
+use super::catalog::{self, binlog_status, ServerInfo};
 use super::conn::classify;
 use super::gtid::Gtid;
 use super::pipeline::{Pipeline, RowsKind};
@@ -437,8 +437,19 @@ impl<'a> Engine<'a> {
     }
 
     /// One chunk: `lw`, the read in its own consistent snapshot, `hw`.
+    /// The table's columns are read again first: an ALTER since the start
+    /// (or since the last chunk) is in this chunk's SELECT and rendering.
     async fn read_chunk(&mut self, idx: usize, after: Option<Vec<String>>) -> Result<()> {
-        let t = self.pipe.tables[idx].clone();
+        let tn = self.pipe.tables[idx].tn.clone();
+        let t = match catalog::table_info(&mut self.q, &tn).await? {
+            Some(info) => super::table::resolve(&self.src.spec.tables[idx], &info)?,
+            None => {
+                return Err(Error::fatal(
+                    "table_missing",
+                    format!("the table {tn} is gone (dropped or renamed) during its snapshot"),
+                ))
+            }
+        };
         let limit = self.chunk_rows;
         let lw = binlog_status(&mut self.q, &self.info).await?.executed;
         self.q

@@ -2201,6 +2201,7 @@ name = "queen-pg"
 version = "2.0.0"
 dependencies = [
  "bytes",
+ "encoding_rs",
  "futures-util",
  "hex",
  "mysql_async",

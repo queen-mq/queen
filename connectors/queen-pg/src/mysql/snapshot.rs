@@ -54,6 +54,9 @@ pub struct Touch {
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub table: usize,
+    /// The table as the chunk read it (its columns re-read for the chunk,
+    /// so an ALTER during the snapshot is in the rows it renders).
+    pub t: MyTable,
     pub limit: usize,
     /// In the table's column order.
     pub rows: Vec<Vec<Cell>>,
@@ -108,6 +111,7 @@ impl Chunk {
         let last_key = rows.last().map(|r| key_params(t, r));
         Chunk {
             table,
+            t: t.clone(),
             limit,
             dropped: vec![false; rows.len()],
             rows,

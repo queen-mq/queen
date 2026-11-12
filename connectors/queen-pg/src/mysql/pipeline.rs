@@ -90,64 +90,289 @@ pub enum Statement {
     Commit,
     /// `TRUNCATE [TABLE] [db.]t`.
     Truncate(Option<String>, String),
+    /// Tables this statement leaves without their name: renamed away and not
+    /// renamed back in the same statement (an atomic swap keeps the name),
+    /// or dropped. `DROP DATABASE d` is `(Some(d), None)`.
+    Gone(Vec<(Option<String>, Option<String>)>),
     Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Tok {
+    /// A bare word, as written (keywords compare lowercase).
+    Word(String),
+    /// A backquoted name, unquoted.
+    Quoted(String),
+    Dot,
+    Comma,
+    Open,
+    Close,
+    Other,
+}
+
+impl Tok {
+    fn is(&self, kw: &str) -> bool {
+        matches!(self, Tok::Word(w) if w.eq_ignore_ascii_case(kw))
+    }
+}
+
+/// The statement's tokens: comments and string literals skipped, names
+/// unquoted. Enough to read the DDL that moves tables.
+fn tokens(sql: &str) -> Vec<Tok> {
+    let mut out = Vec::new();
+    let mut it = sql.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            c if c.is_whitespace() => {}
+            '/' if it.peek() == Some(&'*') => {
+                it.next();
+                let mut prev = ' ';
+                for c in it.by_ref() {
+                    if prev == '*' && c == '/' {
+                        break;
+                    }
+                    prev = c;
+                }
+            }
+            '#' => {
+                for c in it.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            '-' if it.peek() == Some(&'-') => {
+                for c in it.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            '\'' | '"' => {
+                let q = c;
+                while let Some(c) = it.next() {
+                    if c == '\\' {
+                        it.next();
+                    } else if c == q {
+                        if it.peek() == Some(&q) {
+                            it.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                out.push(Tok::Other);
+            }
+            '`' => {
+                let mut name = String::new();
+                while let Some(c) = it.next() {
+                    if c == '`' {
+                        if it.peek() == Some(&'`') {
+                            it.next();
+                            name.push('`');
+                        } else {
+                            break;
+                        }
+                    } else {
+                        name.push(c);
+                    }
+                }
+                out.push(Tok::Quoted(name));
+            }
+            '.' => out.push(Tok::Dot),
+            ',' => out.push(Tok::Comma),
+            '(' => out.push(Tok::Open),
+            ')' => out.push(Tok::Close),
+            ';' => break,
+            c if c.is_alphanumeric() || c == '_' || c == '$' => {
+                let mut w = String::from(c);
+                while let Some(&n) = it.peek() {
+                    if n.is_alphanumeric() || n == '_' || n == '$' {
+                        w.push(n);
+                        it.next();
+                    } else {
+                        break;
+                    }
+                }
+                out.push(Tok::Word(w));
+            }
+            _ => out.push(Tok::Other),
+        }
+    }
+    out
+}
+
+/// A table name at `t[i..]`: `name` or `db.name`, and the index after it.
+fn table_ref(t: &[Tok], i: usize) -> Option<((Option<String>, String), usize)> {
+    let name = |k: usize| match t.get(k) {
+        Some(Tok::Word(w)) | Some(Tok::Quoted(w)) => Some(w.clone()),
+        _ => None,
+    };
+    let a = name(i)?;
+    if t.get(i + 1) == Some(&Tok::Dot) {
+        let b = name(i + 2)?;
+        return Some(((Some(a), b), i + 3));
+    }
+    Some(((None, a), i + 1))
 }
 
 /// What a statement says, cheaply: the binlog holds what the client sent.
 pub fn statement(sql: &str) -> Statement {
-    let s = sql.trim().trim_end_matches(';').trim();
-    let lower = s.to_ascii_lowercase();
-    match lower.as_str() {
-        "begin" | "xa start" => return Statement::Begin,
-        "commit" | "rollback" => return Statement::Commit,
-        _ => {}
+    let t = tokens(sql);
+    let first = |kw: &str| t.first().is_some_and(|x| x.is(kw));
+    if t.len() == 1 && (first("begin") || first("commit") || first("rollback")) {
+        return if first("begin") {
+            Statement::Begin
+        } else {
+            Statement::Commit
+        };
     }
-    let Some(rest) = lower.strip_prefix("truncate") else {
-        return Statement::Other;
-    };
-    if !rest.starts_with(char::is_whitespace) {
-        return Statement::Other;
+    if first("xa") && t.get(1).is_some_and(|x| x.is("start") || x.is("begin")) {
+        return Statement::Begin;
     }
-    // Keep the original case of the name: offsets in `s` match `lower`
-    // (ASCII lowering keeps lengths).
-    let mut name = s[s.len() - rest.len()..].trim();
-    if name.len() >= 5 && name[..5].eq_ignore_ascii_case("table") {
-        let after = &name[5..];
-        if after.starts_with(char::is_whitespace) || after.starts_with('`') {
-            name = after.trim();
+    if first("truncate") {
+        let at = if t.get(1).is_some_and(|x| x.is("table")) {
+            2
+        } else {
+            1
+        };
+        return match table_ref(&t, at) {
+            Some(((db, name), end)) if end == t.len() => Statement::Truncate(db, name),
+            _ => Statement::Other,
+        };
+    }
+    if first("rename") && t.get(1).is_some_and(|x| x.is("table") || x.is("tables")) {
+        // RENAME TABLE a TO b, c TO d: what is renamed away and not back.
+        let mut moves = Vec::new();
+        let mut i = 2;
+        loop {
+            let Some((from, j)) = table_ref(&t, i) else {
+                return Statement::Other;
+            };
+            if !t.get(j).is_some_and(|x| x.is("to")) {
+                return Statement::Other;
+            }
+            let Some((to, k)) = table_ref(&t, j + 1) else {
+                return Statement::Other;
+            };
+            moves.push((from, to));
+            if t.get(k) == Some(&Tok::Comma) {
+                i = k + 1;
+            } else {
+                break;
+            }
         }
+        return gone_after_moves(&moves);
     }
-    let parts = split_name(name);
-    match parts.as_slice() {
-        [t] => Statement::Truncate(None, t.clone()),
-        [d, t] => Statement::Truncate(Some(d.clone()), t.clone()),
-        _ => Statement::Other,
+    if first("alter") {
+        // ALTER [ONLINE] [IGNORE] TABLE t …, RENAME [TO|AS] u, …
+        let Some(at) = t.iter().take(4).position(|x| x.is("table")) else {
+            return Statement::Other;
+        };
+        let Some((from, mut i)) = table_ref(&t, at + 1) else {
+            return Statement::Other;
+        };
+        let mut depth = 0i32;
+        let mut clause_start = true;
+        while i < t.len() {
+            match &t[i] {
+                Tok::Open => depth += 1,
+                Tok::Close => depth -= 1,
+                Tok::Comma if depth == 0 => {
+                    clause_start = true;
+                    i += 1;
+                    continue;
+                }
+                x if clause_start && depth == 0 && x.is("rename") => {
+                    let mut j = i + 1;
+                    if t.get(j)
+                        .is_some_and(|x| x.is("column") || x.is("index") || x.is("key"))
+                    {
+                        clause_start = false;
+                        i += 1;
+                        continue;
+                    }
+                    if t.get(j).is_some_and(|x| x.is("to") || x.is("as")) {
+                        j += 1;
+                    }
+                    if let Some((to, _)) = table_ref(&t, j) {
+                        return gone_after_moves(&[(from, to)]);
+                    }
+                }
+                _ => {}
+            }
+            clause_start = false;
+            i += 1;
+        }
+        return Statement::Other;
     }
+    if first("drop") {
+        let mut i = 1;
+        if t.get(i).is_some_and(|x| x.is("temporary")) {
+            // A temporary table never reaches the source.
+            return Statement::Other;
+        }
+        if t.get(i).is_some_and(|x| x.is("database") || x.is("schema")) {
+            i += 1;
+            if t.get(i).is_some_and(|x| x.is("if")) && t.get(i + 1).is_some_and(|x| x.is("exists"))
+            {
+                i += 2;
+            }
+            return match table_ref(&t, i) {
+                Some(((None, db), _)) => Statement::Gone(vec![(Some(db), None)]),
+                _ => Statement::Other,
+            };
+        }
+        if !t.get(i).is_some_and(|x| x.is("table") || x.is("tables")) {
+            return Statement::Other;
+        }
+        i += 1;
+        if t.get(i).is_some_and(|x| x.is("if")) && t.get(i + 1).is_some_and(|x| x.is("exists")) {
+            i += 2;
+        }
+        let mut gone = Vec::new();
+        while let Some(((db, name), j)) = table_ref(&t, i) {
+            gone.push((db, Some(name)));
+            if t.get(j) == Some(&Tok::Comma) {
+                i = j + 1;
+            } else {
+                break;
+            }
+        }
+        return if gone.is_empty() {
+            Statement::Other
+        } else {
+            Statement::Gone(gone)
+        };
+    }
+    Statement::Other
 }
 
-/// `` `a`.`b` `` / `a.b` / `b` → its parts, backticks undone.
-fn split_name(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quoted = false;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '`' if quoted && chars.peek() == Some(&'`') => {
-                chars.next();
-                cur.push('`');
-            }
-            '`' => quoted = !quoted,
-            '.' if !quoted => out.push(std::mem::take(&mut cur)),
-            c if !quoted && c.is_whitespace() => return Vec::new(),
-            c => cur.push(c),
+type Name = (Option<String>, String);
+
+/// Renames applied in order: the names that end up without a table.
+fn gone_after_moves(moves: &[(Name, Name)]) -> Statement {
+    let mut present: Vec<Name> = Vec::new();
+    let mut moved: Vec<Name> = Vec::new();
+    for (from, to) in moves {
+        present.retain(|n| n != from);
+        if !moved.contains(from) {
+            moved.push(from.clone());
+        }
+        if !present.contains(to) {
+            present.push(to.clone());
         }
     }
-    if quoted || cur.is_empty() {
-        return Vec::new();
+    let gone: Vec<(Option<String>, Option<String>)> = moved
+        .into_iter()
+        .filter(|n| !present.contains(n))
+        .map(|(db, name)| (db, Some(name)))
+        .collect();
+    if gone.is_empty() {
+        Statement::Other
+    } else {
+        Statement::Gone(gone)
     }
-    out.push(cur);
-    out
 }
 
 impl Pipeline {
@@ -430,8 +655,63 @@ impl Pipeline {
                 self.on_truncate(&db, &name, now)?;
                 self.on_commit(now)
             }
+            Statement::Gone(names) => {
+                if !txn.covered {
+                    self.check_gone(schema, &names, sql)?;
+                }
+                self.on_commit(now)
+            }
             Statement::Other => self.on_commit(now),
         }
+    }
+
+    /// A statement left configured tables without their name: the source
+    /// would read nothing more from them and say nothing. It stops instead,
+    /// naming the statement, until the document follows the change.
+    fn check_gone(
+        &self,
+        schema: &str,
+        names: &[(Option<String>, Option<String>)],
+        sql: &str,
+    ) -> Result<()> {
+        let mut hit: Vec<&str> = Vec::new();
+        for (db, name) in names {
+            let db = db.as_deref().unwrap_or(schema);
+            match name {
+                Some(n) => {
+                    if let Some(i) = self.table_of(db, n) {
+                        hit.push(&self.tables[i].name);
+                    }
+                }
+                None => hit.extend(
+                    self.tables
+                        .iter()
+                        .filter(|t| t.tn.db == db || t.tn.db.eq_ignore_ascii_case(db))
+                        .map(|t| t.name.as_str()),
+                ),
+            }
+        }
+        if hit.is_empty() {
+            return Ok(());
+        }
+        let mut stmt: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        if stmt.len() > 200 {
+            let cut = (0..=200)
+                .rev()
+                .find(|&i| stmt.is_char_boundary(i))
+                .unwrap_or(0);
+            stmt.truncate(cut);
+            stmt.push('…');
+        }
+        Err(Error::fatal(
+            "table_gone",
+            format!(
+                "the binlog renames or drops {} (`{stmt}`): the source would read nothing \
+                 more from it; name the table it became in source.tables, remove it, or \
+                 POST …/resync once a table of that name is back",
+                hit.join(", ")
+            ),
+        ))
     }
 
     fn on_truncate(&mut self, db: &str, name: &str, now: Instant) -> Result<()> {
@@ -583,10 +863,9 @@ impl Pipeline {
         let s = self.snap.as_mut()?;
         let chunk = s.chunk.take()?;
         self.snapshot_dropped += (chunk.rows.len() - chunk.surviving()) as u64;
-        let t = &self.tables[chunk.table];
         let (units, end) = chunk_units(
             &chunk,
-            t,
+            &chunk.t,
             &self.epoch,
             &self.tail,
             &s.progress,
@@ -678,5 +957,58 @@ mod tests {
         assert_eq!(statement("TRUNCATEX t"), Statement::Other);
         assert_eq!(statement("ALTER TABLE t ADD c INT"), Statement::Other);
         assert_eq!(statement("truncate table a b"), Statement::Other);
+        assert_eq!(statement("XA START 'x1'"), Statement::Begin);
+        assert_eq!(statement("ROLLBACK TO SAVEPOINT s"), Statement::Other);
+    }
+
+    fn gone(v: &[(Option<&str>, Option<&str>)]) -> Statement {
+        Statement::Gone(
+            v.iter()
+                .map(|(d, n)| (d.map(str::to_string), n.map(str::to_string)))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn renames_and_drops_that_leave_a_name_empty() {
+        assert_eq!(
+            statement("RENAME TABLE `orders` TO `orders_old`"),
+            gone(&[(None, Some("orders"))])
+        );
+        // An atomic swap (gh-ost, pt-online-schema-change) keeps the name.
+        assert_eq!(
+            statement("RENAME TABLE orders TO _orders_del, _orders_gho TO orders"),
+            gone(&[(None, Some("_orders_gho"))])
+        );
+        assert_eq!(
+            statement("rename table shop.a to shop.b, shop.b to shop.c"),
+            gone(&[(Some("shop"), Some("a")), (Some("shop"), Some("b"))])
+        );
+        assert_eq!(
+            statement("ALTER TABLE shop.orders ADD COLUMN x INT DEFAULT (1), RENAME TO archive"),
+            gone(&[(Some("shop"), Some("orders"))])
+        );
+        assert_eq!(
+            statement("ALTER TABLE orders RENAME COLUMN a TO b"),
+            Statement::Other
+        );
+        assert_eq!(
+            statement("ALTER TABLE orders RENAME INDEX i TO j"),
+            Statement::Other
+        );
+        assert_eq!(
+            statement("DROP TABLE IF EXISTS `a`,`shop`.`b` /* generated by server */"),
+            gone(&[(None, Some("a")), (Some("shop"), Some("b"))])
+        );
+        assert_eq!(statement("DROP TEMPORARY TABLE t"), Statement::Other);
+        assert_eq!(
+            statement("DROP DATABASE IF EXISTS shop"),
+            gone(&[(Some("shop"), None)])
+        );
+        assert_eq!(statement("DROP INDEX i ON t"), Statement::Other);
+        assert_eq!(
+            statement("/* a comment */ DROP -- why\n TABLE t # more\n"),
+            gone(&[(None, Some("t"))])
+        );
     }
 }
