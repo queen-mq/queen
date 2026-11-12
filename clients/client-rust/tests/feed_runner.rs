@@ -428,7 +428,13 @@ async fn a_function_that_fails_then_passes_is_not_poison_and_a_retry_starts_from
             Some(json!({ "sum": 0, "count": 0 })),
             move |acc, v| -> Result<Value, String> {
                 let mut acc = acc.unwrap();
-                acc["sum"] = json!(acc["sum"].as_i64().unwrap() + v["n"].as_i64().unwrap());
+                // The message on "other" only moves the clock past the window. It
+                // lands in the next window, and it must fold there: a fold that
+                // panicked on it made the window's result wait on timing.
+                let Some(n) = v["n"].as_i64() else {
+                    return Ok(acc);
+                };
+                acc["sum"] = json!(acc["sum"].as_i64().unwrap() + n);
                 acc["count"] = json!(acc["count"].as_i64().unwrap() + 1);
                 let mut f = f2.lock().unwrap();
                 if v["n"] == 2 && !*f {
