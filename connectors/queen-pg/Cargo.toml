@@ -59,6 +59,15 @@ sha2 = "0.10"
 hex = "0.4"
 # Log lines only; the broker owns the subscriber. Target `queen-pg`.
 tracing = "0.1"
+# The MySQL source (src/mysql): connections, the snapshot's prepared
+# statements and the binlog stream (`binlog`: COM_BINLOG_DUMP_GTID and the
+# event decoder). TLS through rustls with `ring`, deflate in Rust: no OpenSSL,
+# no zlib. `binlog` brings zstd (compressed transactions), already in the
+# broker's build.
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "binlog", "rustls-tls", "ring", "tls12"] }
+# The binlog's types (events, row values, GTID blocks), the version
+# mysql_async uses.
+mysql_common = { version = "0.37", default-features = false, features = ["binlog"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

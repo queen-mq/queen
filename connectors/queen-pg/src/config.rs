@@ -36,11 +36,47 @@ impl Kind {
     }
 }
 
+/// The database a connector talks to. `postgres` when the document does not
+/// say (every document written before MySQL existed), and left out of a
+/// Postgres document when it is written back, so those read as they always
+/// did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    #[default]
+    Postgres,
+    /// MySQL 8.0 or later, source only (the binlog, src/mysql).
+    Mysql,
+}
+
+impl Engine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Engine::Postgres => "postgres",
+            Engine::Mysql => "mysql",
+        }
+    }
+
+    pub fn is_postgres(&self) -> bool {
+        *self == Engine::Postgres
+    }
+
+    /// The server's port when the document names none.
+    pub fn default_port(self) -> u16 {
+        match self {
+            Engine::Postgres => 5432,
+            Engine::Mysql => 3306,
+        }
+    }
+}
+
 /// The whole document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectorDoc {
     pub kind: Kind,
+    #[serde(default, skip_serializing_if = "Engine::is_postgres")]
+    pub engine: Engine,
     #[serde(default = "yes")]
     pub enabled: bool,
     pub connection: ConnectionSpec,
@@ -193,6 +229,12 @@ pub struct SourceSpec {
     pub publication: Option<String>,
     #[serde(default = "yes")]
     pub manage_publication: bool,
+    /// MySQL only: the server id the source registers with as a replica.
+    /// Default: derived from the tenant and the connector name, in
+    /// 2^31..2^32 (src/mysql/mod.rs `server_id`), away from the small ids
+    /// people give their replicas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<u32>,
     #[serde(default)]
     pub snapshot: SnapshotMode,
     #[serde(default = "d_chunk")]
@@ -318,11 +360,21 @@ impl ConnectorDoc {
     /// `password` itself would be stored as the password.)
     pub fn from_json(v: &serde_json::Value) -> Result<ConnectorDoc> {
         let mut v = v.clone();
+        // The port the document leaves out is the engine's (serde's default
+        // is Postgres's 5432). A url's port, when it has one, wins later in
+        // `normalize`.
+        let port = match v.get("engine").and_then(serde_json::Value::as_str) {
+            Some("mysql") => Some(Engine::Mysql.default_port()),
+            _ => None,
+        };
         if let Some(c) = v
             .get_mut("connection")
             .and_then(serde_json::Value::as_object_mut)
         {
             c.remove("passwordSet");
+            if let Some(p) = port {
+                c.entry("port").or_insert(serde_json::Value::from(p));
+            }
         }
         serde_json::from_value(v).map_err(|e| Error::config(e.to_string()))
     }

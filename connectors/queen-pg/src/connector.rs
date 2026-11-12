@@ -4,15 +4,16 @@
 //! from a stored document ([`Connector::new`], which validates it again — a
 //! document written by an older broker must not run with rules it never
 //! met), run it until its stop signal, read its status. The engines
-//! ([`Source`], [`Sink`]) own everything else.
+//! ([`Source`], [`MySource`], [`Sink`]) own everything else.
 
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use crate::config::{ConnectorDoc, Kind, NodeKnobs};
+use crate::config::{ConnectorDoc, Engine, Kind, NodeKnobs};
 use crate::error::Result;
 use crate::metrics::{ConnMetrics, Metrics};
+use crate::mysql::MySource;
 use crate::queen::QueenApi;
 use crate::sink::Sink;
 use crate::source::Source;
@@ -38,6 +39,12 @@ impl Context {
         self.metrics
             .handle(self.tenant_label.as_deref(), &self.name, kind)
     }
+
+    /// [`Context::conn_metrics`] for a connector of `engine`.
+    pub fn conn_metrics_of(&self, kind: Kind, engine: Engine) -> Arc<ConnMetrics> {
+        self.metrics
+            .handle_of(self.tenant_label.as_deref(), &self.name, kind, engine)
+    }
 }
 
 /// How [`Connector::run`] ended without an error.
@@ -51,8 +58,9 @@ pub enum RunEnd {
     TornDown,
 }
 
-enum Engine {
+enum Runner {
     Source(Arc<Source>),
+    MySource(Arc<MySource>),
     Sink(Arc<Sink>),
 }
 
@@ -61,7 +69,7 @@ pub struct Connector {
     name: String,
     kind: Kind,
     enabled: bool,
-    engine: Engine,
+    engine: Runner,
 }
 
 impl Connector {
@@ -75,9 +83,10 @@ impl Connector {
         doc.validate(&ctx.name)?;
         let name = ctx.name.clone();
         let (kind, enabled) = (doc.kind, doc.enabled);
-        let engine = match kind {
-            Kind::Source => Engine::Source(Source::new(ctx, doc, password)?),
-            Kind::Sink => Engine::Sink(Sink::new(ctx, doc, password)?),
+        let engine = match (kind, doc.engine) {
+            (Kind::Source, Engine::Postgres) => Runner::Source(Source::new(ctx, doc, password)?),
+            (Kind::Source, Engine::Mysql) => Runner::MySource(MySource::new(ctx, doc, password)?),
+            (Kind::Sink, _) => Runner::Sink(Sink::new(ctx, doc, password)?),
         };
         Ok(Connector {
             name,
@@ -96,8 +105,9 @@ impl Connector {
     /// the broker restarts the connector after its own backoff.
     pub async fn run(&self, stop: Stop) -> Result<RunEnd> {
         match &self.engine {
-            Engine::Source(s) => Arc::clone(s).run(stop).await,
-            Engine::Sink(s) => Arc::clone(s).run(stop).await,
+            Runner::Source(s) => Arc::clone(s).run(stop).await,
+            Runner::MySource(s) => Arc::clone(s).run(stop).await,
+            Runner::Sink(s) => Arc::clone(s).run(stop).await,
         }
     }
 
@@ -108,8 +118,9 @@ impl Connector {
     /// what it is looking at.
     pub fn status(&self) -> Value {
         let engine = match &self.engine {
-            Engine::Source(s) => s.status(),
-            Engine::Sink(s) => s.status(),
+            Runner::Source(s) => s.status(),
+            Runner::MySource(s) => s.status(),
+            Runner::Sink(s) => s.status(),
         };
         let mut out = Map::new();
         out.insert("name".into(), Value::String(self.name.clone()));

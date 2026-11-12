@@ -41,6 +41,7 @@
     "/integrations/laravel/monitoring",
     "/integrations/laravel/queen-vs-horizon",
     "/integrations/laravel/supervisors",
+    "/integrations/mysql",
     "/integrations/postgres",
     "/integrations/s3",
     "/introduction",

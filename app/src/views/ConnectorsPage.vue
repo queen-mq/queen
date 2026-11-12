@@ -1,6 +1,6 @@
 <script setup>
-// Connectors, in the new console (queen-mq/queen#155): every PostgreSQL
-// source (a table's changes into a queue) and sink (a queue into a table),
+// Connectors, in the new console (queen-mq/queen#155): every PostgreSQL or
+// MySQL source (a table's changes into a queue) and sink (a queue into a table),
 // whether it runs, what it moves where and how much, read-only. A row opens
 // the connector on the right (?name=): its state, its error and what fixes
 // it, its work, and its document as stored (never the password).
@@ -42,6 +42,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
 
 const sources = computed(() => c.rows.value.filter((r) => r.kind === 'Source').length)
 const sinks = computed(() => c.rows.value.length - sources.value)
+// The databases the connectors talk to, PostgreSQL when there are none yet.
+const engines = computed(() => [...new Set(c.rows.value.map((r) => r.engine))].sort().reverse())
 const retryText = (ms) => (ms == null ? '' : ms < 1000 ? 'It tries again in a moment.' : `It tries again in ${Math.round(ms / 1000)} s.`)
 </script>
 
@@ -52,7 +54,7 @@ const retryText = (ms) => (ms == null ? '' : ms < 1000 ? 'It tries again in a mo
         <h1 class="cx-title">Connectors</h1>
         <span v-if="c.rows.value.length" class="qn-tag qn-num">{{ sources }} source{{ sources === 1 ? '' : 's' }}</span>
         <span v-if="c.rows.value.length" class="qn-tag qn-num">{{ sinks }} sink{{ sinks === 1 ? '' : 's' }}</span>
-        <span class="qn-tag">PostgreSQL</span>
+        <span v-for="e in (engines.length ? engines : ['PostgreSQL'])" :key="e" class="qn-tag">{{ e }}</span>
       </header>
 
       <template v-if="!admin">
@@ -77,7 +79,8 @@ const retryText = (ms) => (ms == null ? '' : ms < 1000 ? 'It tries again in a mo
         <p v-else-if="!c.loading.value && !c.rows.value.length" class="cx-empty">
           No connectors yet. A source streams a table’s committed changes into a queue, a sink writes a queue into a table:
           <span class="qn-mono">PUT /api/v1/connectors/&lt;name&gt;</span> creates one
-          (<a href="https://queenmq.com/integrations/postgres/" target="_blank" rel="noopener" class="qn-link">how</a>).
+          (how, for <a href="https://queenmq.com/integrations/postgres/" target="_blank" rel="noopener" class="qn-link">PostgreSQL</a>
+          and <a href="https://queenmq.com/integrations/mysql/" target="_blank" rel="noopener" class="qn-link">MySQL</a>).
         </p>
 
         <div v-if="c.rows.value.length" class="cx-grid" :class="{ open: !!picked }">
@@ -89,7 +92,7 @@ const retryText = (ms) => (ms == null ? '' : ms < 1000 ? 'It tries again in a mo
                   <span role="columnheader">State</span>
                   <span role="columnheader">Moves</span>
                   <span role="columnheader" class="r" title="Messages a source pushed, or a sink applied, since it started on the node that runs it">Moved</span>
-                  <span role="columnheader" class="r" title="A source’s WAL the database keeps for its slot: what it has still to read">Slot lag</span>
+                  <span role="columnheader" class="r" title="How far a source trails its database: the WAL a Postgres slot still keeps, or a MySQL source’s seconds behind the binlog">Behind</span>
                   <span role="columnheader" class="r">Last</span>
                 </div>
                 <div
@@ -100,7 +103,7 @@ const retryText = (ms) => (ms == null ? '' : ms < 1000 ? 'It tries again in a mo
                     <span class="cx-markslot" aria-hidden="true"><span v-if="r.tone" class="qn-mark" :class="r.tone" /></span>
                     <span style="min-width: 0">
                       <span class="qn-mono cx-n" :title="r.name">{{ r.name }}</span>
-                      <span class="qn-t3 cx-kind">{{ r.kind }}</span>
+                      <span class="qn-t3 cx-kind">{{ r.label }}</span>
                     </span>
                   </span>
                   <span role="cell" :class="r.tone || (r.phase === 'disabled' || r.phase === 'stopped' ? 'qn-t3' : '')" :title="r.title || undefined">

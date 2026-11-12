@@ -11,10 +11,11 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::config::{
-    valid_connector_name, ConnectionSpec, ConnectorDoc, Kind, MetadataColumns, NodeKnobs,
+    valid_connector_name, ConnectionSpec, ConnectorDoc, Engine, Kind, MetadataColumns, NodeKnobs,
     PartitionBy, SinkMode, SinkSpec, SourceSpec, SslMode, TruncatePolicy,
 };
 use crate::error::{Error, Result};
+use crate::mysql::catalog::MyTableName;
 use crate::pg::catalog::{valid_identifier, TableName};
 
 /// The longest queue or consumer group name a connector may use. The broker
@@ -49,7 +50,7 @@ pub(crate) fn normalize(doc: &mut ConnectorDoc) -> Result<()> {
     let Some(url) = doc.connection.url.take() else {
         return Ok(());
     };
-    let parts = parse_url(&url).map_err(|m| err("connection.url", m))?;
+    let parts = parse_url(&url, doc.engine).map_err(|m| err("connection.url", m))?;
     let c = &mut doc.connection;
     if let Some(h) = parts.host {
         c.host = h;
@@ -93,11 +94,20 @@ struct UrlParts {
 /// (`host`, `port`, `dbname`, `user`, `password`). Anything else is refused
 /// rather than ignored: a parameter the connector would silently drop
 /// (`sslrootcert=/path`, `target_session_attrs`) is a surprise later.
-fn parse_url(url: &str) -> std::result::Result<UrlParts, String> {
-    let rest = url
-        .strip_prefix("postgresql://")
-        .or_else(|| url.strip_prefix("postgres://"))
-        .ok_or("must start with postgres:// or postgresql://")?;
+///
+/// A MySQL document takes `mysql://` with the same parts; its TLS parameter
+/// is `ssl-mode` (MySQL's names `DISABLED`, `PREFERRED`, `REQUIRED`,
+/// `VERIFY_IDENTITY`, in any case) or `sslmode` (the names above).
+fn parse_url(url: &str, engine: Engine) -> std::result::Result<UrlParts, String> {
+    let rest = match engine {
+        Engine::Postgres => url
+            .strip_prefix("postgresql://")
+            .or_else(|| url.strip_prefix("postgres://"))
+            .ok_or("must start with postgres:// or postgresql://")?,
+        Engine::Mysql => url
+            .strip_prefix("mysql://")
+            .ok_or("must start with mysql:// (the document's engine is mysql)")?,
+    };
     let (main, query) = match rest.split_once('?') {
         Some((m, q)) => (m, Some(q)),
         None => (rest, None),
@@ -172,6 +182,25 @@ fn parse_url(url: &str) -> std::result::Result<UrlParts, String> {
                     other => {
                         return Err(format!(
                             "sslmode {other:?}: expected disable, prefer, require or verify-full"
+                        ))
+                    }
+                })
+            }
+            "ssl-mode" if engine == Engine::Mysql => {
+                out.ssl_mode = Some(match v.to_ascii_uppercase().as_str() {
+                    "DISABLED" => SslMode::Disable,
+                    "PREFERRED" => SslMode::Prefer,
+                    "REQUIRED" => SslMode::Require,
+                    "VERIFY_IDENTITY" => SslMode::VerifyFull,
+                    "VERIFY_CA" => {
+                        return Err("ssl-mode VERIFY_CA is not supported: use VERIFY_IDENTITY \
+                                    (the certificate must also name the host)"
+                            .into())
+                    }
+                    other => {
+                        return Err(format!(
+                            "ssl-mode {other:?}: expected DISABLED, PREFERRED, REQUIRED or \
+                             VERIFY_IDENTITY"
                         ))
                     }
                 })
@@ -255,7 +284,13 @@ pub(crate) fn validate(doc: &ConnectorDoc, name: &str) -> Result<()> {
             ))
         }
     }
-    validate_connection(&doc.connection)?;
+    if doc.engine == Engine::Mysql && doc.kind == Kind::Sink {
+        return Err(err(
+            "engine",
+            "a MySQL connector is a source (table → queue); a MySQL sink is not built",
+        ));
+    }
+    validate_connection(&doc.connection, doc.engine)?;
     if let Some(s) = &doc.source {
         validate_source(doc, s, name)?;
     }
@@ -265,7 +300,7 @@ pub(crate) fn validate(doc: &ConnectorDoc, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_connection(c: &ConnectionSpec) -> Result<()> {
+fn validate_connection(c: &ConnectionSpec, engine: Engine) -> Result<()> {
     if c.url.is_some() {
         return Err(err(
             "connection.url",
@@ -297,18 +332,34 @@ fn validate_connection(c: &ConnectionSpec) -> Result<()> {
     if c.port == 0 {
         return Err(err("connection.port", "must be 1..=65535"));
     }
-    for (field, v) in [
-        ("connection.database", &c.database),
-        ("connection.user", &c.user),
+    for (field, v, mysql_max) in [
+        ("connection.database", &c.database, 64),
+        ("connection.user", &c.user, 32),
     ] {
         if v.is_empty() {
             return Err(err(field, "is required"));
         }
-        if v.len() > 63 || v.chars().any(char::is_control) {
-            return Err(err(
-                field,
-                "must be at most 63 bytes (PostgreSQL's identifier limit) without control characters",
-            ));
+        match engine {
+            Engine::Postgres => {
+                if v.len() > 63 || v.chars().any(char::is_control) {
+                    return Err(err(
+                        field,
+                        "must be at most 63 bytes (PostgreSQL's identifier limit) without \
+                         control characters",
+                    ));
+                }
+            }
+            Engine::Mysql => {
+                if v.chars().count() > mysql_max || v.chars().any(char::is_control) {
+                    return Err(err(
+                        field,
+                        format!(
+                            "must be at most {mysql_max} characters (MySQL's limit) without \
+                             control characters"
+                        ),
+                    ));
+                }
+            }
         }
     }
     if !(1_000..=120_000).contains(&c.connect_timeout_ms) {
@@ -394,6 +445,32 @@ fn check_columns(field: &str, cols: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// MySQL column names: 1..=64 characters, no control characters, no trailing
+/// space (MySQL refuses one), no repeats.
+fn check_mysql_columns(field: &str, cols: &[String]) -> Result<()> {
+    if cols.is_empty() {
+        return Err(err(field, "needs at least one column"));
+    }
+    for (i, c) in cols.iter().enumerate() {
+        if !crate::mysql::catalog::valid_identifier(c) {
+            return Err(err(
+                &format!("{field}[{i}]"),
+                format!(
+                    "{c:?} is not a MySQL column name (1 to 64 characters, no control \
+                     characters, no trailing space)"
+                ),
+            ));
+        }
+        if cols[..i].contains(c) {
+            return Err(err(
+                &format!("{field}[{i}]"),
+                format!("{c:?} is listed twice"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_source(doc: &ConnectorDoc, s: &SourceSpec, name: &str) -> Result<()> {
     if s.tables.is_empty() || s.tables.len() > 256 {
         return Err(err(
@@ -401,11 +478,17 @@ fn validate_source(doc: &ConnectorDoc, s: &SourceSpec, name: &str) -> Result<()>
             format!("has {} tables, expected 1..=256", s.tables.len()),
         ));
     }
-    let mut seen: HashMap<TableName, usize> = HashMap::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
     for (i, t) in s.tables.iter().enumerate() {
         let field = format!("source.tables[{i}]");
-        let tn =
-            TableName::parse(&t.table).map_err(|e| err(&format!("{field}.table"), sentence(e)))?;
+        let tn = match doc.engine {
+            Engine::Postgres => TableName::parse(&t.table)
+                .map(|n| n.to_string())
+                .map_err(|e| err(&format!("{field}.table"), sentence(e)))?,
+            Engine::Mysql => MyTableName::parse(&t.table, &doc.connection.database)
+                .map(|n| n.to_string())
+                .map_err(|e| err(&format!("{field}.table"), sentence(e)))?,
+        };
         if let Some(first) = seen.insert(tn.clone(), i) {
             return Err(err(
                 &format!("{field}.table"),
@@ -414,18 +497,51 @@ fn validate_source(doc: &ConnectorDoc, s: &SourceSpec, name: &str) -> Result<()>
         }
         check_queue_name(&format!("{field}.queue"), &t.queue)?;
         if let PartitionBy::Columns(cols) = &t.partition_by {
-            check_columns(&format!("{field}.partitionBy"), cols)?;
+            match doc.engine {
+                Engine::Postgres => check_columns(&format!("{field}.partitionBy"), cols)?,
+                Engine::Mysql => check_mysql_columns(&format!("{field}.partitionBy"), cols)?,
+            }
         }
     }
-    for (field, value) in [
-        ("source.slot", doc.slot_name(name)),
-        ("source.publication", doc.publication_name(name)),
-    ] {
-        if !valid_slot_name(&value) {
-            return Err(err(
-                field,
-                format!("{value:?} does not match ^[a-z_][a-z0-9_]{{0,62}}$"),
-            ));
+    match doc.engine {
+        Engine::Postgres => {
+            if s.server_id.is_some() {
+                return Err(err(
+                    "source.serverId",
+                    "is for a MySQL source (a Postgres source reads a slot)",
+                ));
+            }
+            for (field, value) in [
+                ("source.slot", doc.slot_name(name)),
+                ("source.publication", doc.publication_name(name)),
+            ] {
+                if !valid_slot_name(&value) {
+                    return Err(err(
+                        field,
+                        format!("{value:?} does not match ^[a-z_][a-z0-9_]{{0,62}}$"),
+                    ));
+                }
+            }
+        }
+        Engine::Mysql => {
+            for (field, set) in [
+                ("source.slot", s.slot.is_some()),
+                ("source.publication", s.publication.is_some()),
+            ] {
+                if set {
+                    return Err(err(
+                        field,
+                        "is for a Postgres source (a MySQL source reads the binlog: no slot, \
+                         no publication)",
+                    ));
+                }
+            }
+            if s.server_id == Some(0) {
+                return Err(err(
+                    "source.serverId",
+                    "must be 1..=4294967295 (0 is not a replica id)",
+                ));
+            }
         }
     }
     in_range(
@@ -667,6 +783,93 @@ mod tests {
 
     fn doc(v: Value) -> ConnectorDoc {
         ConnectorDoc::from_json(&v).unwrap()
+    }
+
+    #[test]
+    fn a_mysql_source_document() {
+        let ok = json!({
+            "kind": "source",
+            "engine": "mysql",
+            "connection": {"host": "db.example.com", "database": "shop", "user": "repl"},
+            "source": {"tables": [
+                {"table": "orders", "queue": "orders"},
+                {"table": "inventory.items", "queue": "items", "partitionBy": ["sku"]}
+            ]}
+        });
+        let d = doc(ok.clone());
+        assert_eq!(d.engine, Engine::Mysql);
+        // The port a MySQL document leaves out is MySQL's.
+        assert_eq!(d.connection.port, 3306);
+        d.validate("shop-src").unwrap();
+        // Written back, the engine stays; a Postgres document has none.
+        assert_eq!(serde_json::to_value(&d).unwrap()["engine"], "mysql");
+        let pg = doc(json!({
+            "kind": "source",
+            "connection": {"host": "h", "database": "d", "user": "u"},
+            "source": {"tables": [{"table": "t", "queue": "q"}]}
+        }));
+        assert_eq!(pg.connection.port, 5432);
+        assert!(serde_json::to_value(&pg).unwrap().get("engine").is_none());
+        // A url's port wins over the default.
+        let mut u = doc(json!({
+            "kind": "source",
+            "engine": "mysql",
+            "connection": {"url": "mysql://repl:pw@db:3310/shop"},
+            "source": {"tables": [{"table": "t", "queue": "q"}]}
+        }));
+        u.normalize().unwrap();
+        assert_eq!(
+            (u.connection.port, u.connection.password.as_deref()),
+            (3310, Some("pw"))
+        );
+
+        let with = |path: &[&str], v: Value| {
+            let mut x = ok.clone();
+            let mut at = &mut x;
+            for p in &path[..path.len() - 1] {
+                at = at.get_mut(*p).unwrap();
+            }
+            at[path[path.len() - 1]] = v;
+            x
+        };
+        refused(with(&["source", "slot"], json!("s")), "source.slot");
+        refused(
+            with(&["source", "publication"], json!("p")),
+            "source.publication",
+        );
+        refused(with(&["source", "serverId"], json!(0)), "source.serverId");
+        refused(
+            with(
+                &["source", "tables"],
+                json!([{"table": "a.b.c", "queue": "q"}]),
+            ),
+            "source.tables[0].table",
+        );
+        refused(
+            with(
+                &["source", "tables"],
+                json!([{"table": "orders", "queue": "q"}, {"table": "shop.orders", "queue": "r"}]),
+            ),
+            "source.tables[1].table",
+        );
+        refused(
+            with(&["connection", "user"], json!("x".repeat(33))),
+            "connection.user",
+        );
+        let mut sink = ok.clone();
+        sink["kind"] = json!("sink");
+        sink.as_object_mut().unwrap().remove("source");
+        sink["sink"] = json!({"queue": "q", "table": "t", "mode": "append"});
+        refused(sink, "engine");
+        // serverId belongs to MySQL.
+        refused(
+            json!({
+                "kind": "source",
+                "connection": {"host": "h", "database": "d", "user": "u"},
+                "source": {"tables": [{"table": "t", "queue": "q"}], "serverId": 5}
+            }),
+            "source.serverId",
+        );
     }
 
     fn refused(v: Value, field: &str) {
@@ -1124,16 +1327,20 @@ mod tests {
         assert_eq!(c.connect_timeout_ms, 7_000);
         d.validate("c").unwrap();
 
-        let p = parse_url("postgres://[::1]:5433/d").unwrap();
+        let p = parse_url("postgres://[::1]:5433/d", Engine::Postgres).unwrap();
         assert_eq!((p.host.as_deref(), p.port), (Some("::1"), Some(5433)));
-        let p = parse_url("postgres://u@h").unwrap();
+        let p = parse_url("postgres://u@h", Engine::Postgres).unwrap();
         assert_eq!(
             (p.user.as_deref(), p.password, p.port, p.database),
             (Some("u"), None, None, None)
         );
-        let p = parse_url("postgres://u:p@ss@h/db").unwrap();
+        let p = parse_url("postgres://u:p@ss@h/db", Engine::Postgres).unwrap();
         assert_eq!(p.password.as_deref(), Some("p@ss"));
-        let p = parse_url("postgres:///db?host=h&port=1&user=u&password=x&dbname=other").unwrap();
+        let p = parse_url(
+            "postgres:///db?host=h&port=1&user=u&password=x&dbname=other",
+            Engine::Postgres,
+        )
+        .unwrap();
         assert_eq!(p.host.as_deref(), Some("h"));
         assert_eq!(p.database.as_deref(), Some("other"));
         for bad in [
@@ -1149,8 +1356,37 @@ mod tests {
             "postgres://h/d%zz",
             "postgres://[::1/d",
         ] {
-            assert!(parse_url(bad).is_err(), "{bad}");
+            assert!(parse_url(bad, Engine::Postgres).is_err(), "{bad}");
         }
+        // A MySQL document takes mysql:// and MySQL's own TLS names.
+        let p = parse_url(
+            "mysql://repl:pw@db:3307/shop?ssl-mode=VERIFY_IDENTITY",
+            Engine::Mysql,
+        )
+        .unwrap();
+        assert_eq!(
+            (p.host.as_deref(), p.port, p.database.as_deref(), p.ssl_mode),
+            (
+                Some("db"),
+                Some(3307),
+                Some("shop"),
+                Some(SslMode::VerifyFull)
+            )
+        );
+        let p = parse_url(
+            "mysql://u@h/d?ssl-mode=disabled&sslmode=require",
+            Engine::Mysql,
+        )
+        .unwrap();
+        assert_eq!(p.ssl_mode, Some(SslMode::Require));
+        for bad in [
+            "postgres://h/d",
+            "mysql://h/d?ssl-mode=VERIFY_CA",
+            "mysql://h/d?ssl-mode=sometimes",
+        ] {
+            assert!(parse_url(bad, Engine::Mysql).is_err(), "{bad}");
+        }
+        assert!(parse_url("postgres://h/d?ssl-mode=REQUIRED", Engine::Postgres).is_err());
         // A URL without a password keeps the document's.
         let mut d = doc(json!({
             "kind": "sink",

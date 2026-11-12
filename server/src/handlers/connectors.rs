@@ -1,13 +1,14 @@
-//! `/api/v1/connectors` — the Postgres connectors' configuration
-//! (PLAN_PG_CONNECTORS.md §3.1). Feature `pg`.
+//! `/api/v1/connectors` — the database connectors' configuration
+//! (PLAN_PG_CONNECTORS.md §3.1): Postgres sources and sinks, MySQL sources
+//! (`"engine": "mysql"`, connectors/queen-pg/src/mysql). Feature `pg`.
 //!
 //! | Route | Access | Does |
 //! |---|---|---|
 //! | `GET /api/v1/connectors` | read | the calling tenant's connectors, redacted, each with this node's `status` and a source's `state` |
 //! | `GET /api/v1/connectors/:name` | read | one |
 //! | `PUT /api/v1/connectors/:name` | admin | create or replace: validated, the password sealed; 200 with the redacted document |
-//! | `DELETE /api/v1/connectors/:name[?dropSlot=true\|false]` | admin | a sink: gone. A source: its owner drops the slot and the managed publication first (202), or, with `dropSlot=false`, gone now with the slot left on the database (200) |
-//! | `POST /api/v1/connectors/:name/resync` | admin | a source: forget the pointer, recreate the slot, snapshot again under a new epoch (202) |
+//! | `DELETE /api/v1/connectors/:name[?dropSlot=true\|false]` | admin | a sink, a MySQL source: gone (200). A Postgres source: its owner drops the slot and the managed publication first (202), or, with `dropSlot=false`, gone now with the slot left on the database (200) |
+//! | `POST /api/v1/connectors/:name/resync` | admin | a source: forget the pointer (Postgres: recreate the slot), snapshot again under a new epoch (202) |
 //!
 //! ## Where the documents live, and why there
 //! In the broker-internal tenant [`SYSTEM_TENANT`], KV namespace `queen-pg`,
@@ -52,7 +53,7 @@ use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use queen_pg::config::{valid_connector_name, ConnectorDoc, DeleteRequest, Kind};
+use queen_pg::config::{valid_connector_name, ConnectorDoc, DeleteRequest, Engine, Kind};
 use queen_pg::queen::KV_NAMESPACE;
 use serde_json::{Map, Value};
 
@@ -739,6 +740,24 @@ pub(crate) async fn delete(
             Err(resp) => resp,
         };
     };
+    if doc.engine == Engine::Mysql {
+        // A MySQL source keeps nothing on the database (MySQL holds no
+        // state for its readers): gone now, with its runtime state.
+        if let Err(resp) = delete_doc(st, tenant, name, stored.version).await {
+            return resp;
+        }
+        let runtime = vec![
+            serde_json::json!({"op": "delete", "ns": KV_NAMESPACE, "key": pointer_key(name)}),
+            serde_json::json!({"op": "delete", "ns": KV_NAMESPACE, "key": lease_key(name)}),
+        ];
+        if let Err(resp) = kv(st, tenant, runtime).await {
+            return resp;
+        }
+        return json(
+            StatusCode::OK,
+            serde_json::json!({"name": name, "deleted": true}).to_string(),
+        );
+    }
     let slot = doc.slot_name(name);
     if drop_slot {
         // The owner drops the slot and a managed publication, removes the
@@ -840,7 +859,7 @@ pub(crate) async fn resync(st: &AppState, tenant: &str, name: &str) -> Response 
             StatusCode::BAD_REQUEST,
             "not_a_source",
             format!(
-                "connector `{name}` is a sink: only a source has a slot and a snapshot to redo"
+                "connector `{name}` is a sink: only a source has a pointer and a snapshot to redo"
             ),
         );
     }
@@ -1222,6 +1241,71 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"], "conflict", "{body}");
         assert!(stored(&st, DEFAULT_TENANT, "x").await.expect("stored")["connection"].is_object());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_mysql_source_is_stored_with_its_port_and_deleted_at_once() {
+        let st = state("mysql");
+        let enc = Encryption::for_test([6u8; 32]);
+        let doc = json!({
+            "kind": "source",
+            "engine": "mysql",
+            "connection": {"host": "db.example.com", "database": "shop", "user": "repl",
+                           "password": "pw", "sslMode": "require"},
+            "source": {"tables": [{"table": "orders", "queue": "orders"}]},
+        });
+        let body = put_ok(&st, &enc, DEFAULT_TENANT, "shop", &doc).await;
+        assert_eq!(body["engine"], "mysql", "{body}");
+        assert_eq!(body["connection"]["port"], 3306, "{body}");
+        assert_eq!(body["connection"]["passwordSet"], true, "{body}");
+        // A MySQL sink is refused with the field it is about.
+        let mut sink = doc.clone();
+        sink["kind"] = json!("sink");
+        sink.as_object_mut().expect("object").remove("source");
+        sink["sink"] = json!({"queue": "q", "table": "t", "mode": "append"});
+        let (status, body) = answer(
+            put(
+                &st,
+                Some(&enc),
+                DEFAULT_TENANT,
+                "shop-sink",
+                sink.to_string().as_bytes(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.to_string().contains("engine"), "{body}");
+        // Nothing lives on the database: DELETE removes it and its runtime
+        // state at once, whatever dropSlot says.
+        kv_as(
+            &st,
+            DEFAULT_TENANT,
+            vec![
+                json!({"op": "put", "ns": "queen-pg", "key": "src:shop:pointer",
+                       "value": {"engine": "mysql"}, "forever": true}),
+                json!({"op": "put", "ns": "queen-pg", "key": "src:shop:lease",
+                       "value": {"node": "n1"}, "ttlSeconds": 60}),
+            ],
+        )
+        .await;
+        let (status, body) = answer(delete(&st, DEFAULT_TENANT, "shop", None).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["deleted"], true, "{body}");
+        assert!(body.get("warning").is_none(), "{body}");
+        assert!(stored(&st, DEFAULT_TENANT, "shop").await.is_none());
+        let left = kv_as(
+            &st,
+            DEFAULT_TENANT,
+            vec![json!({"op": "getMany", "ns": "queen-pg",
+                        "keys": ["src:shop:pointer", "src:shop:lease"]})],
+        )
+        .await;
+        assert_eq!(
+            left[0]["rows"].as_array().map(Vec::len),
+            Some(0),
+            "{left:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]

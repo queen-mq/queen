@@ -1,0 +1,155 @@
+---
+title: "MySQL source: CDC from the binlog"
+description: "Stream a MySQL table into a queue from the binlog, with exactly-once effects, set up with one HTTP call to the broker and no other process."
+type: how-to
+tier: use
+sidebar:
+  label: "MySQL"
+  order: 5
+sourceOfTruth:
+  - connectors/queen-pg/src/config.rs
+  - connectors/queen-pg/src/config_validate.rs
+  - connectors/queen-pg/src/mysql/mod.rs
+  - connectors/queen-pg/src/mysql/catalog.rs
+  - connectors/queen-pg/src/mysql/events.rs
+  - connectors/queen-pg/src/mysql/values.rs
+  - connectors/queen-pg/src/mysql/snapshot.rs
+  - connectors/queen-pg/src/mysql/engine.rs
+  - connectors/queen-pg/src/metrics.rs
+  - server/src/handlers/connectors.rs
+---
+
+The broker can stream a MySQL table into a queue, with no other process. The **source** reads the binlog the way a replica does and turns each committed row change into a message, in a partition named after the row's key, in commit order. It is set up with one HTTP call, runs on every node of a cluster, and gives exactly-once effects.
+
+<Why>getting changes out of MySQL usually means Debezium, a Kafka Connect cluster and Kafka. Here it is one call on the broker you already run.</Why>
+
+## What MySQL needs
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Version | MySQL 8.0 or later (not MariaDB) | the binlog format and GTIDs the source reads |
+| `binlog_format`, `binlog_row_image` | `ROW`, `FULL` (MySQL's defaults) | every event carries the whole row |
+| `binlog_row_metadata` | `FULL` | column names and the key come from the binlog itself |
+| `gtid_mode`, `enforce_gtid_consistency` | `ON` | the source keeps its place by GTID |
+| The source's user | `REPLICATION SLAVE, REPLICATION CLIENT, SELECT` | it reads the binlog, the server's position, and the tables |
+
+The broker checks each one when the source starts, and a source that finds one wrong stops with the setting's name and the fix. It also needs `QUEEN_ENCRYPTION_KEY`, because it stores the database password sealed with that key.
+
+## The source
+
+Start a MySQL with the settings above:
+
+```bash
+docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=secret mysql:8.4 \
+  --gtid-mode=ON --enforce-gtid-consistency=ON --binlog-row-metadata=FULL
+```
+
+Take a table with two rows:
+
+```bash
+docker exec -i mysql mysql -uroot -psecret <<'SQL'
+CREATE DATABASE shop;
+CREATE TABLE shop.orders (
+  id         BIGINT PRIMARY KEY,
+  customer   JSON NOT NULL,
+  status     VARCHAR(20) NOT NULL,
+  total      DECIMAL(12,2) NOT NULL,
+  created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+);
+INSERT INTO shop.orders (id, customer, status, total) VALUES
+  (1, '{"name": "Ada", "tier": "gold"}', 'new', 42.00),
+  (2, '{"name": "Linus", "tier": "silver"}', 'new', 17.50);
+SQL
+```
+
+Create the source. `"engine": "mysql"` is what makes it a MySQL source; the port is 3306 when the document does not name one:
+
+```bash
+curl -s -X PUT localhost:6632/api/v1/connectors/shop-src \
+  -H 'content-type: application/json' -d '{
+  "kind": "source",
+  "engine": "mysql",
+  "connection": {"host": "mysql", "database": "shop", "user": "root",
+                 "password": "secret", "sslMode": "require"},
+  "source": {"tables": [{"table": "orders", "queue": "shop.orders"}]}
+}' >/dev/null
+curl -s localhost:6632/api/v1/connectors/shop-src \
+  | jq -c '.status | {phase, pointerGtids, messages}'
+{"phase":"streaming","pointerGtids":"c2a725d4-de77-11f1-8a01-72a0352623ab:1-8","messages":2}
+```
+
+Within a few seconds the source copied the two rows already there and started streaming from the server's GTID set. Each row is a message in the partition named after its key:
+
+```bash
+Q='batch=10&partitions=10&consumerGroup=reader&subscriptionMode=all'
+curl -s "localhost:6632/api/v1/pop/queue/shop.orders?$Q" | jq -c '.messages[0].data'
+{"op":"r","table":"shop.orders","key":{"id":1},
+ "after":{"id":1,"customer":{"name":"Ada","tier":"gold"},"status":"new","total":42.00,
+          "created_at":"2026-11-12T09:02:25.354534+00:00"},
+ "before":null,"ts":"2026-11-12T09:02:25.653429Z","seq":0}
+```
+
+| Field | Example | What it is |
+| --- | --- | --- |
+| `op` | r | `c` insert, `u` update, `d` delete, `r` a row copied at the start. |
+| `key`, `after`, `before` |  | The row's key, the new row (`null` for a delete), the old row (`null` for an insert). |
+| `gtid` | c2a7…23ab:9 | The MySQL transaction. A copied row has none. |
+| `ts`, `seq` |  | The commit time, and the change's place inside its transaction. |
+
+The message is the PostgreSQL source's, with `gtid` in place of `lsn` and `xid`, so a consumer reads both the same way. Then we changed the table: one update, then an insert and a delete in one transaction:
+
+```bash
+docker exec -i mysql mysql -uroot -psecret shop <<'SQL'
+UPDATE orders SET status = 'paid' WHERE id = 1;
+START TRANSACTION;
+INSERT INTO orders (id, customer, status, total) VALUES (3, '{"name": "Grace", "tier": "gold"}', 'new', 99.90);
+DELETE FROM orders WHERE id = 2;
+COMMIT;
+SQL
+```
+
+```bash
+{"op":"u","key":{"id":1},"gtid":"c2a725d4-de77-11f1-8a01-72a0352623ab:9"}
+{"op":"d","key":{"id":2},"gtid":"c2a725d4-de77-11f1-8a01-72a0352623ab:10"}
+{"op":"c","key":{"id":3},"gtid":"c2a725d4-de77-11f1-8a01-72a0352623ab:10"}
+```
+
+The insert and the delete arrived with the same `gtid`, in one QueenMQ transaction, so no consumer could see one without the other. Each message id is built from the GTID and the change's place in it (`my:9984e7b3:c2a725d4de7711f18a0172a0352623ab:10:1`), so it is the same however many times it is sent.
+
+<Why>the source writes the messages and the GTID set it reached in the same QueenMQ transaction. After a crash the next owner asks MySQL for every transaction outside that set: nothing is lost and nothing is sent twice.</Why>
+
+## Options
+
+The `source` block:
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `tables[].table` |  | `database.table`, or `table` in `connection.database`. Every table needs a primary key. |
+| `tables[].queue` |  | The queue its messages go to. |
+| `tables[].partitionBy` | `"key"` | `"key"` (the primary key), `"single"` (one partition, `all`: total commit order), or a list of columns. |
+| `snapshot` | `"initial"` | `"initial"` copies the rows already there first; `"never"` sends only new changes. |
+| `snapshotChunkRows` | 2000 | Rows per read while copying. |
+| `onTruncate` | `"skip"` | `"emit"` sends a `t` message for a `TRUNCATE` (it needs `partitionBy: "single"`). |
+| `serverId` | from the name | The replica id the source registers with, in 2^31..2^32 unless you set it. |
+| `heartbeatSeconds` | 10 | How often an idle MySQL says so. A connection silent for three of them and ten seconds more is opened again. |
+| `maxBundleMessages`, `maxBundleBytes`, `lingerMs` | 1000, 4 MiB, 20 | How big a QueenMQ transaction gets and how long it waits to fill. |
+
+The `connection` block takes `host`, `port` (3306), `database`, `user`, `password`, `sslMode` (`disable`, `prefer`, `require`, `verify-full`), `sslRootCert` and `connectTimeoutMs`, or a `url` such as `mysql://repl:pw@db:3306/shop?ssl-mode=REQUIRED`.
+
+<Why>the copy runs while the binlog streams, so a large table needs no lock and no pause in writes. A row that a transaction changes while it is being copied is left to that transaction's message, which carries the whole row.</Why>
+
+## Five things to know
+
+- **MySQL keeps its binlog for a time, not for the source.** A stopped source never fills the database's disk. One stopped for longer than `binlog_expire_logs_seconds` (30 days by default) finds its binlog purged and stops with `binlog_purged`: `POST /api/v1/connectors/shop-src/resync` copies the tables again under a new epoch.
+- **A failover keeps the place.** A GTID is the same on every server of a replication group, so after a failover the source goes on from its pointer on the new primary.
+- **Two readers with one replica id push each other out.** If your own replicas use ids above 2^31, set `serverId`.
+- **Watch `queen_mysql_source_lag_seconds`.** It is the time since the commit of the last transaction the source has sent, and 0 once it has read to the end of the binlog.
+- **Not covered:** MariaDB, partial JSON updates (`binlog_row_value_options = PARTIAL_JSON`), and a sink into MySQL. An XA transaction is sent at its `XA PREPARE`: a later `XA ROLLBACK` is not undone.
+
+`DELETE /api/v1/connectors/shop-src` removes a MySQL source at once: nothing of it lives on the database.
+
+## See also
+
+- [PostgreSQL](/integrations/postgres/): the source and the sink for PostgreSQL.
+- [HTTP API](/reference/http/): the `/api/v1/connectors` endpoints.
+- [Metrics](/reference/metrics/): `queen_mysql_source_*` and `queen_mysql_connector_*`.
