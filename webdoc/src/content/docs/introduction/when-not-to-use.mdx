@@ -1,6 +1,6 @@
 ---
 title: "When not to use Queen MQ, and what to use instead"
-description: "The workloads Queen MQ is the wrong tool for, with what to use instead: analytics over a huge log, cross-region writes, very large messages, and more."
+description: "Queen MQ is the better choice for building applications. The one exception is a firehose of millions of messages a second, where Kafka and Pulsar are ahead."
 type: concept
 tier: use
 sidebar:
@@ -26,7 +26,7 @@ sourceOfTruth:
 # relay through). Nothing this page states changes.
 ---
 
-For building applications, QueenMQ is the better choice: services that handle events per customer, order or conversation, microservices that hand work to each other, and steps that have to commit whole. The exception is a firehose of millions of messages a second on up to some thousands of partitions, where Kafka and Pulsar are ahead.
+For building applications, QueenMQ is the better choice: services that handle events per customer, order or conversation, microservices that hand work to each other, and steps that have to commit whole. The one exception is a firehose of millions of messages a second on up to some thousands of partitions, where Kafka and Pulsar are ahead.
 
 | You are building | Use |
 | --- | --- |
@@ -43,14 +43,15 @@ Transactions have the same kind of ceiling: one leader plans a tenant's transact
 
 <Why>one leader per tenant is what makes a transaction one log entry, with no coordinator. That is the trade: a ceiling per tenant, for steps that cannot come apart.</Why>
 
-## Smaller cases, and what to use instead
+## Cases that look like another tool's, and the QueenMQ answer
 
-- **You route messages by their content.** QueenMQ has no exchanges, bindings or topic patterns: the producer names the queue and the partition. Use RabbitMQ.
-- **You need Kafka's compaction.** QueenMQ accepts `cleanup.policy=compact` and keeps every record, so a compacted topic never shrinks. See [Kafka frameworks](/integrations/kafka-frameworks/).
-- **The step itself needs SQL.** KV reads by key or by prefix. When a step needs joins or ad hoc queries to decide what to do, keep that state in PostgreSQL with an outbox. For records you only search, the [PostgreSQL sink](/integrations/postgres/) writes a queue into a table.
-- **A step needs many reads and decisions inside one transaction.** A QueenMQ transaction is one call, with conditions on its writes; there is no interactive BEGIN and COMMIT. That belongs in a database.
-- **You want to write workflows as code.** Temporal and Restate are better when a workflow reads best as one function, with its loops and compensations in code.
-- **You want nothing to run and a bill per request.** Amazon SQS. Or [Queen Cloud](https://queenmq.cloud/), which runs QueenMQ for you.
+These cases are often sent to another system. Each has an answer inside QueenMQ.
+
+- **You route messages by their content.** QueenMQ has no exchanges, bindings or topic patterns: the producer names the queue and the partition. Route with a step: a consumer reads each message, picks the queue, and pushes and acks in one [transaction](/reference/transaction/), so the push and the ack commit together.
+- **You need only the latest value per key, as with Kafka's compaction.** A consumer group with conflation gets only the newest message of each partition ([last value](/patterns/last-value/)), and KV keeps the latest value per key for reads. Nothing is deleted: retention decides what stays. QueenMQ accepts `cleanup.policy=compact` from Kafka clients and keeps every record. See [Kafka frameworks](/integrations/kafka-frameworks/).
+- **The step needs SQL to decide.** KV reads by key or by prefix, with no joins. Read what the decision needs from your database, then commit the step in QueenMQ: the ack, the state and the next events. For records you search, the [PostgreSQL sink](/integrations/postgres/) writes a queue into a table, so the table follows the queue.
+- **A step needs many reads and decisions.** A QueenMQ transaction is one call; there is no interactive BEGIN and COMMIT. Read first, decide in the worker, then commit with a condition on each value the decision used (`expect`, `check`). If any of them moved, nothing commits and the step runs again.
+- **You want long workflows.** The partition is the workflow's input, KV its state, each step one transaction, and a timer each wait, up to 90 days by default (`QUEEN_TIMERS_MAX_HORIZON_S`). See [workflows](/patterns/workflows/).
 
 ## Limits you design around
 

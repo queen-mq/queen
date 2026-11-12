@@ -83,4 +83,4 @@ We ran QueenMQ, Kafka, Pulsar and Redpanda on the same three machines with the s
 - A transaction is one call, inside one tenant: there is no interactive BEGIN and COMMIT.
 - One leader orders every write of a raft group, which bounds one tenant's write rate. A hot partition is sequential by design.
 
-[When not to use it](/introduction/when-not-to-use/) lists the cases where another system fits better, with what to use instead.
+[When not to use it](/introduction/when-not-to-use/) names the one case where another system fits better, the firehose, and the QueenMQ answer to the others.
