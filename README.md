@@ -10,13 +10,11 @@
 Imagine a Kafka with millions of named partitions, created on the fly, where you ack or nack each message, where one transaction covers the ack, the next messages and your state, with its own KV store and stream processing.<br>
 **That is QueenMQ.**
 
-</div>
-
-**Proof:** [226 Jepsen tests passed](https://queenmq.com/benchmarks/jepsen/)<br>
-[3M msg/s](https://queenmq.com/benchmarks/queen-vs-kafka/#3000000-msgs-of-256-byte-messages) on three nodes and ten million queues, with every write synced to disk on two.<br>
-**The limit:** a [transaction](https://queenmq.com/writing-applications/transactions/) is one call, not a SQL session. Your own database is outside it.
+**Proof:** [226 Jepsen tests passed](https://queenmq.com/benchmarks/jepsen/) · [3M msg/s](https://queenmq.com/benchmarks/queen-vs-kafka/#3000000-msgs-of-256-byte-messages) on three nodes and ten million queues, with every write synced to disk on two.
 
 Open source (Apache-2.0), Rust, one binary. In production at [Smartness](https://www.smartness.com/en).
+
+</div>
 
 ```bash
 docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.1
