@@ -1,0 +1,93 @@
+    <!-- 1.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 1 · One booking = one partition" data-title="One booking = one partition">
+      <div>
+        <p class="eyebrow">Chapter 1 of 8</p>
+        <h1>One booking =<br>one partition</h1>
+        <p class="lead">In Kafka a partition is a shard you size up front. In QueenMQ it is <strong>the thing you work on</strong>: one booking, one customer, one conversation.</p>
+        <ol class="agenda">
+          <li><span>1.1</span>Kafka today: bookings share partitions</li>
+          <li><span>1.2</span>QueenMQ: configure, then a partition per booking</li>
+          <li><span>1.3</span>A retry is not a second booking</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">queue&nbsp; bookings</p>
+        <div class="lanes" id="cover-lanes"></div>
+        <p class="fig-cap">Each booking is a partition: an ordered list of its events.</p>
+      </figure>
+    </section>
+
+    <!-- 1.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 1 · One booking = one partition" data-title="Today">
+      <header class="s-head">
+        <p class="eyebrow">1.1 · Today, on Kafka</p>
+        <h2>A fixed number of partitions. Bookings share them.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>You pick the partition count when you create the topic.</li>
+          <li>The key is hashed: <code>hash(key) % 4</code>. Here booking-9137 and booking-4410 land in partition&nbsp;2.</li>
+          <li>One consumer works a partition, in order. A slow message holds up every booking behind it.</li>
+          <li>Add partitions later, and keys move to other partitions.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>Competing consumers on one queue lose the order per key. Keeping it takes a queue per key, or a consistent-hash exchange with one consumer per queue.</dd><dt>SQS FIFO</dt><dd>Message groups keep the order per group: the closest thing to a QueenMQ partition.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo sim" data-sim="kafka"></div>
+      </div>
+    </section>
+
+    <!-- 1.2 QueenMQ -->
+    <section class="slide split" data-chapter="Chapter 1 · One booking = one partition" data-title="The partition is the booking">
+      <header class="s-head">
+        <p class="eyebrow">1.2 · QueenMQ</p>
+        <h2>Configure once. Then every booking is a partition.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// once, before the first push: name every option</span>
+<span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>).<span class="f">config</span>({
+  leaseTime: <span class="n">30</span>, retryLimit: <span class="n">5</span>, retryDelay: <span class="n">5000</span>,
+  dedupWindowSeconds: <span class="n">86400</span>,
+  retentionEnabled: <span class="n">true</span>,
+  retentionSeconds: <span class="n">604800</span>,
+}).<span class="f">create</span>()
+
+<span class="c">// then: one partition per booking</span>
+<span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">partition</span>(<span class="s">'booking-9137'</span>)
+  .<span class="f">push</span>([{ data: { event: <span class="s">'created'</span> } }])</pre>
+        <ul class="facts">
+          <li>Configure first, every option named: a queue a push creates gets a 60&nbsp;s lease and no retention.</li>
+          <li>Then the first push to a booking creates its partition: no count to pick. Order holds inside it; workers take any partition with work.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo sim" data-sim="queen"></div>
+      </div>
+    </section>
+
+    <!-- 1.3 Dedup -->
+    <section class="slide split" data-chapter="Chapter 1 · One booking = one partition" data-title="A retry is not a second booking">
+      <header class="s-head">
+        <p class="eyebrow">1.3 · QueenMQ</p>
+        <h2>A retry is not a second booking.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">partition</span>(<span class="s">'booking-9137'</span>)
+  .<span class="f">push</span>([{
+    transactionId: <span class="s">'booking-9137-created'</span>,
+    data: { event: <span class="s">'created'</span> }
+  }])</pre>
+        <ul class="facts">
+          <li>The same <code>transactionId</code> in the same partition, within <code>dedupWindowSeconds</code> (3600&nbsp;s by default, 7&nbsp;days at most), writes nothing.</li>
+          <li>Build the id from the work, never from a fresh UUID.</li>
+          <li>Kafka's idempotent producer covers its own retries in one session. An app that retries after a crash writes the event again.</li>
+        </ul>
+        <div class="why trap"><b>Trap</b><p>HTTP answers 201 even when an item is refused. Read each item's <code>status</code>: queued, duplicate or error.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="dedup"></div>
+      </div>
+    </section>
+

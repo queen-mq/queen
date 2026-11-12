@@ -1,0 +1,134 @@
+
+    <!-- 4.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 4 · Waiting without cron" data-title="Waiting without cron">
+      <div>
+        <p class="eyebrow">Chapter 4 of 8</p>
+        <h1>Waiting<br>without cron</h1>
+        <p class="lead">"Remind the guest in 15 minutes if they have not paid" is a message that arrives later. In QueenMQ it is a <strong>timer</strong>, written by the step that wants it.</p>
+        <ol class="agenda">
+          <li><span>4.1</span>Kafka today: a scheduler on the side</li>
+          <li><span>4.2</span>Timers</li>
+          <li><span>4.3</span>Timers inside the transaction</li>
+          <li><span>4.4</span>A delay for a whole queue</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">timer&nbsp; payment-reminders / booking-9137</p>
+        <div class="tl">
+          <div class="tl-row"><span class="tl-name">booking-9137</span><div class="tl-track"><span class="tl-mark ok" style="left:2%">10:00 created</span><span class="tl-mark" style="left:52%">no payment yet</span></div></div>
+          <div class="tl-row"><span class="tl-name">timer</span><div class="tl-track"><span class="tl-bar held" style="left:2%;width:76%">scheduled for 10:15</span></div></div>
+          <div class="tl-row"><span class="tl-name">reminders</span><div class="tl-track"><span class="tl-mark ok" style="left:79%">a message</span></div></div>
+        </div>
+        <div class="tl-axis"><span style="left:4%">10:00</span><span style="left:41%">10:07</span><span style="left:79%">10:15</span></div>
+        <p class="fig-cap">The timer fires as a message, in the booking's own partition.</p>
+      </figure>
+    </section>
+
+    <!-- 4.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 4 · Waiting without cron" data-title="Today: a scheduler on the side">
+      <header class="s-head">
+        <p class="eyebrow">4.1 · Today, on Kafka</p>
+        <h2>Kafka delivers now. "Later" is another system.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Kafka has no delay per message.</li>
+          <li>Teams add a table of due reminders and a cron job that scans it every minute.</li>
+          <li>Or one delay topic per duration, with consumers that wait until each message is due.</li>
+          <li>Moving or cancelling a reminder means finding it again.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>A message TTL plus a dead-letter exchange, or the delayed-message plugin, which keeps delayed messages on one node.</dd><dt>SQS</dt><dd>DelaySeconds, up to 15 minutes per message.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-later"></div>
+      </div>
+    </section>
+
+    <!-- 4.2 Timers -->
+    <section class="slide split" data-chapter="Chapter 4 · Waiting without cron" data-title="Timers">
+      <header class="s-head">
+        <p class="eyebrow">4.2 · QueenMQ</p>
+        <h2>A timer is a message for later.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// booking-9137 is created</span>
+<span class="k">await</span> queen.<span class="f">timer</span>(<span class="s">'payment-reminders'</span>)
+  .<span class="f">key</span>(<span class="s">'booking-9137'</span>)
+  .<span class="f">partition</span>(<span class="s">'booking-9137'</span>)
+  .<span class="f">delay</span>(<span class="s">'15m'</span>)
+  .<span class="f">payload</span>({ id: <span class="s">'booking-9137'</span> })
+  .<span class="f">schedule</span>()          <span class="c">// 'scheduled'</span>
+
+<span class="c">// the guest paid</span>
+<span class="k">await</span> queen.<span class="f">timer</span>(<span class="s">'payment-reminders'</span>)
+  .<span class="f">key</span>(<span class="s">'booking-9137'</span>).<span class="f">cancel</span>()</pre>
+        <ul class="facts">
+          <li>Named by its queue and key. The same key scheduled again moves it.</li>
+          <li>It fires as a real message, through the log: never early, a little late (checked every 50&nbsp;ms).</li>
+          <li>With the booking's partition, it arrives in order with the booking's events.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="timer"></div>
+      </div>
+    </section>
+
+    <!-- 4.3 Timers in the transaction -->
+    <section class="slide split" data-chapter="Chapter 4 · Waiting without cron" data-title="Timers inside the transaction">
+      <header class="s-head">
+        <p class="eyebrow">4.3 · QueenMQ</p>
+        <h2>Schedule it in the step that wants it.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// the booking step</span>
+<span class="k">await</span> queen.<span class="f">transaction</span>()
+  .<span class="f">ack</span>(msg, <span class="s">'completed'</span>,
+    { consumerGroup: <span class="s">'bookings'</span> })
+  .<span class="f">timer</span>(<span class="s">'payment-reminders'</span>).<span class="f">key</span>(id)
+  .<span class="f">partition</span>(id).<span class="f">delay</span>(<span class="s">'15m'</span>)
+  .<span class="f">payload</span>({ id }).<span class="f">schedule</span>()
+  .<span class="f">commit</span>()
+
+<span class="c">// the payment step</span>
+<span class="k">await</span> queen.<span class="f">transaction</span>()
+  .<span class="f">ack</span>(pay, <span class="s">'completed'</span>,
+    { consumerGroup: <span class="s">'payments'</span> })
+  .kv.<span class="f">put</span>(<span class="s">'bookings'</span>, id, { status: <span class="s">'paid'</span> },
+    { ttl: <span class="s">'30d'</span> })
+  .<span class="f">timer</span>(<span class="s">'payment-reminders'</span>).<span class="f">key</span>(id).<span class="f">cancel</span>()
+  .<span class="f">commit</span>()</pre>
+        <div class="why trap"><b>Trap</b><p><code>absent</code> on a cancel may mean the timer already fired: the reminder's handler checks the booking first.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="race"></div>
+      </div>
+    </section>
+
+    <!-- 4.4 Queue-wide delays -->
+    <section class="slide split" data-chapter="Chapter 4 · Waiting without cron" data-title="A delay for a whole queue">
+      <header class="s-head">
+        <p class="eyebrow">4.4 · QueenMQ</p>
+        <h2>The same wait for every message: two queue options.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'room-updates'</span>)
+  .<span class="f">config</span>({
+    leaseTime: <span class="n">30</span>,
+    retryLimit: <span class="n">5</span>,
+    retryDelay: <span class="n">5000</span>,
+    dedupWindowSeconds: <span class="n">86400</span>,
+    retentionEnabled: <span class="n">true</span>,
+    retentionSeconds: <span class="n">604800</span>,
+    delayedProcessing: <span class="n">300</span>, <span class="c">// 5 min each</span>
+    windowBuffer: <span class="n">3</span>,        <span class="c">// bursts</span>
+  })
+  .<span class="f">create</span>()</pre>
+        <ul class="facts">
+          <li><code>delayedProcessing</code>: every new message waits that many seconds after its push.</li>
+          <li><code>windowBuffer</code>: a burst waits that long, then is handed over as one batch. A delay per message is a timer.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="delays"></div>
+      </div>
+    </section>

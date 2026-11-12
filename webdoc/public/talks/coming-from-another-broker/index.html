@@ -1,0 +1,1846 @@
+<!doctype html>
+<html lang="en" data-mode="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coming from another message broker?</title>
+<meta name="description" content="An interactive talk: one booking through eight chapters, each done first on Kafka, RabbitMQ or SQS, then in QueenMQ.">
+<meta name="robots" content="noindex">
+<script src="theme.js"></script>
+<style>
+@font-face { font-family: "Inter Variable"; font-style: normal; font-display: swap; font-weight: 100 900; src: url("fonts/inter-latin-wght-normal.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono Variable"; font-style: normal; font-display: swap; font-weight: 100 800; src: url("fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2"); }
+
+  /* The website's tokens (webdoc/src/styles/globals.css), same names, so this
+     page moves into the site as it is. Figures: figures/lib/draw.mjs. */
+  :root {
+    color-scheme: light;
+    --nb-background: #f6f5f3;
+    --nb-foreground: #1b1a18;
+    --nb-card: #ffffff;
+    --nb-muted: #ecebe8;
+    --nb-muted-foreground: #6b665f;
+    --nb-selected: #e3e1dd;
+    --nb-primary: #1b1a18;
+    --nb-primary-foreground: #f6f5f3;
+    --nb-primary-hover: #4b4741;
+    --nb-line: #e3e1dd;
+    --nb-ring: #1b1a18;
+    --nb-warning: #9a5b07;
+    --nb-danger: #c03221;
+    --nb-danger-muted: rgba(192, 50, 33, 0.08);
+    --nb-r-ctl: 8px;
+    --nb-r-card: 14px;
+    --nb-font-sans: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --nb-font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+
+    --fig-accent: #fcc620;
+    --fig-accent-fill: #fef4cf;
+    --fig-info: #2c5f8a;
+    --fig-info-fill: #e3eef7;
+
+    --code-text: #24292e;
+    --code-k: #d73a49;
+    --code-s: #032f62;
+    --code-f: #6f42c1;
+    --code-n: #005cc5;
+    --code-c: #6a737d;
+  }
+  [data-mode="dark"] {
+    color-scheme: dark;
+    --nb-background: #202020;
+    --nb-foreground: #f3f3f3;
+    --nb-card: #2b2b2b;
+    --nb-muted: #363636;
+    --nb-muted-foreground: #9e9e9e;
+    --nb-selected: #3a3a3a;
+    --nb-primary: #f3f3f3;
+    --nb-primary-foreground: #202020;
+    --nb-primary-hover: #bdbdbd;
+    --nb-line: #3a3a3a;
+    --nb-ring: #f3f3f3;
+    --nb-warning: #eaa646;
+    --nb-danger: #f26a59;
+    --nb-danger-muted: rgba(242, 106, 89, 0.16);
+
+    --fig-accent-fill: #4a3d14;
+    --fig-info: #7fb4e0;
+    --fig-info-fill: #1f3348;
+
+    --code-text: #e1e4e8;
+    --code-k: #f97583;
+    --code-s: #9ecbff;
+    --code-f: #b392f0;
+    --code-n: #79b8ff;
+    --code-c: #6a737d;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--nb-background);
+    color: var(--nb-foreground);
+    font-family: var(--nb-font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; }
+  .mono { font-family: var(--nb-font-mono); }
+
+  /* ---- The deck: one 1280x720 stage, scaled to the window ---- */
+  .deck { position: fixed; inset: 0; display: grid; place-items: center; overflow: hidden; }
+  .stage { position: relative; width: 1280px; height: 720px; flex: none; transform: scale(var(--s, 1)); }
+
+  .chrome-top {
+    position: absolute; top: 22px; left: 56px; right: 56px; height: 36px; z-index: 2;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .wordmark { display: block; color: var(--nb-foreground); }
+  .wordmark svg { display: block; height: 30px; width: auto; }
+  .deck-name { font-size: 14px; color: var(--nb-muted-foreground); padding-left: 14px; border-left: 1px solid var(--nb-line); }
+  .chrome-top .sp { flex: 1; }
+  .chap { font-size: 13.5px; color: var(--nb-muted-foreground); }
+  .count { font-family: var(--nb-font-mono); font-size: 13px; color: var(--nb-muted-foreground); min-width: 3.2em; text-align: right; }
+  .icon-btn {
+    width: 34px; height: 34px; border-radius: var(--nb-r-ctl); border: 0; background: transparent;
+    display: grid; place-items: center; cursor: pointer; color: var(--nb-muted-foreground);
+  }
+  .icon-btn:hover { background: var(--nb-muted); color: var(--nb-foreground); }
+  .icon-btn svg { width: 17px; height: 17px; }
+  [data-mode="dark"] .i-sun, [data-mode="light"] .i-moon { display: none; }
+
+  .chrome-bot {
+    position: absolute; bottom: 22px; left: 56px; right: 56px; z-index: 2;
+    display: flex; align-items: center; gap: 18px;
+  }
+  .prog { flex: 1; display: flex; gap: 6px; }
+  .prog button { flex: 1; height: 4px; padding: 0; border: 0; border-radius: 2px; background: var(--nb-line); cursor: pointer; }
+  .prog button.done { background: var(--nb-muted-foreground); }
+  .prog button.on { background: var(--nb-foreground); }
+  .keys { font-size: 12.5px; color: var(--nb-muted-foreground); white-space: nowrap; }
+  .keys kbd { font-family: var(--nb-font-mono); font-size: 11.5px; background: var(--nb-muted); border-radius: 5px; padding: 1px 6px; }
+  :focus-visible { outline: 2px solid var(--nb-ring); outline-offset: 2px; }
+
+  /* ---- Slides ---- */
+  .slide { position: absolute; inset: 0; padding: 92px 56px 66px; display: none; }
+  .slide.on { display: grid; }
+  .slide.split { grid-template-columns: 430px 1fr; grid-template-rows: auto minmax(0, 1fr); column-gap: 44px; row-gap: 24px; }
+  .s-head { grid-column: 1 / -1; }
+  .s-left { display: flex; flex-direction: column; gap: 18px; min-height: 0; }
+  .s-right { min-height: 0; display: flex; }
+
+  .eyebrow { margin: 0 0 10px; font-size: 12.5px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--nb-muted-foreground); }
+  h1 { margin: 0; font-size: 62px; line-height: 1.04; font-weight: 600; letter-spacing: -.03em; }
+  h2 { margin: 0; font-size: 38px; line-height: 1.12; font-weight: 600; letter-spacing: -.025em; }
+  .lead { margin: 22px 0 0; font-size: 20px; line-height: 1.5; color: var(--nb-muted-foreground); max-width: 34ch; }
+  .lead strong { color: var(--nb-foreground); font-weight: 600; }
+
+  p code, li code, td code, .why code {
+    font-family: var(--nb-font-mono); font-size: .86em; background: var(--nb-muted);
+    padding: .08em .38em; border-radius: 5px;
+  }
+  .facts { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 16px; line-height: 1.5; }
+  .facts li { position: relative; padding-left: 18px; }
+  .facts li::before { content: "–"; position: absolute; left: 0; color: var(--nb-muted-foreground); }
+  .proof { margin: 0; font-size: 14px; color: var(--nb-muted-foreground); }
+
+  .code {
+    margin: 0; padding: 14px 18px; background: var(--nb-card); border-radius: var(--nb-r-card);
+    font-family: var(--nb-font-mono); font-size: 13.5px; line-height: 1.62; color: var(--code-text);
+    white-space: pre; overflow-x: auto; tab-size: 2;
+  }
+  .code .k { color: var(--code-k); } .code .s { color: var(--code-s); } .code .f { color: var(--code-f); }
+  .code .n { color: var(--code-n); } .code .c { color: var(--code-c); }
+
+  /* The site's "Why" aside: a small caps label, a rule, italic text. */
+  .why { display: grid; grid-template-columns: 74px 1fr; align-items: start; margin-top: auto; }
+  .why b { padding-top: 4px; font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--nb-muted-foreground); }
+  .why p { margin: 0; padding-left: 14px; border-left: 2px solid var(--nb-line); font-size: 16px; line-height: 1.5; font-style: italic; }
+  .why.trap { margin-top: 0; }
+  .why.trap b { color: var(--nb-warning); }
+
+  /* ---- Cards, lanes, cells (the figures' partition strips) ---- */
+  .card { background: var(--nb-card); border-radius: var(--nb-r-card); padding: 18px 20px; }
+  .demo { flex: 1; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .demo-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--nb-muted-foreground); }
+  .demo-head .mono { font-size: 12.5px; }
+  .legend { display: flex; align-items: center; gap: 6px; font-size: 12.5px; white-space: nowrap; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-left: 8px; }
+  .legend .lg-me { background: var(--fig-accent-fill); outline: 1.5px solid var(--fig-accent); outline-offset: -1.5px; }
+  .legend .lg-slow { background: var(--nb-danger-muted); outline: 1.5px solid var(--nb-danger); outline-offset: -1.5px; }
+
+  .lanes { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; }
+  .lane { display: grid; grid-template-columns: 124px minmax(0, 1fr) 34px; align-items: center; gap: 10px; min-height: 30px; }
+  .lane-name { font-family: var(--nb-font-mono); font-size: 12.5px; color: var(--nb-muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lane.me .lane-name { color: var(--nb-foreground); font-weight: 600; }
+  .lane.new .lane-name { color: var(--nb-foreground); }
+  .cells { display: flex; gap: 4px; min-width: 0; overflow: hidden; align-items: center; }
+  .more { font-family: var(--nb-font-mono); font-size: 11.5px; color: var(--nb-muted-foreground); text-align: right; }
+  .hint { font-size: 12.5px; color: var(--nb-foreground); white-space: nowrap; padding-left: 6px; }
+
+  .cell {
+    position: relative; flex: none; width: 34px; height: 28px; border-radius: 6px; overflow: hidden;
+    display: grid; place-items: center; background: var(--nb-muted);
+    font-family: var(--nb-font-mono); font-size: 11.5px; font-weight: 500;
+  }
+  .cell b { position: relative; font-weight: 500; }
+  .cell i { position: absolute; left: 0; bottom: 0; height: 3px; width: 0; background: var(--nb-foreground); }
+  .cell.busy { background: var(--nb-selected); }
+  .cell.done { opacity: .38; }
+  .cell.me { background: var(--fig-accent-fill); outline: 1.5px solid var(--fig-accent); outline-offset: -1.5px; }
+  .cell.slow { background: var(--nb-danger-muted); outline: 1.5px solid var(--nb-danger); outline-offset: -1.5px; }
+  .cell.slow i { background: var(--nb-danger); }
+  .cell.bad { background: var(--nb-danger-muted); outline: 1.5px solid var(--nb-danger); outline-offset: -1.5px; }
+  .cell.fresh { outline: 1.5px solid var(--nb-foreground); outline-offset: -1.5px; }
+  .cell.ghost { background: transparent; outline: 1.5px dashed var(--nb-muted-foreground); outline-offset: -1.5px; color: var(--nb-muted-foreground); }
+  @media (prefers-reduced-motion: no-preference) {
+    .cell { animation: in .18s ease-out; }
+    @keyframes in { from { opacity: 0; transform: translateX(6px); } }
+  }
+  .sim[data-mode="kafka"] .lanes { justify-content: space-evenly; }
+  .sim[data-mode="kafka"] .lane { min-height: 44px; }
+  .sim[data-mode="kafka"] .cell { height: 34px; }
+  .sim[data-mode="queen"] .lanes { gap: 3px; }
+  .sim[data-mode="queen"] .lane { min-height: 25px; }
+  .sim[data-mode="queen"] .cell { height: 25px; }
+  .sim-msg:empty { display: none; }
+  #dedup .lanes, #multi .lanes { flex: none; gap: 10px; }
+  #dedup .answers, #multi .answers { flex: 1; }
+  #dedup .sub-label, #multi .sub-label { margin-top: 10px; }
+  #multi .answers .row { color: var(--nb-foreground); }
+
+  .demo-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .ro { display: grid; gap: 1px; min-width: 250px; }
+  .ro-label { font-size: 12.5px; color: var(--nb-muted-foreground); }
+  .ro-num { font-family: var(--nb-font-mono); font-size: 30px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .ro-note { font-size: 13px; color: var(--nb-muted-foreground); min-height: 1.5em; }
+  .ro.bad .ro-num, .ro.bad .ro-note { color: var(--nb-danger); }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn {
+    height: 34px; padding: 0 14px; border: 0; border-radius: var(--nb-r-ctl); cursor: pointer; white-space: nowrap;
+    font-size: 13.5px; font-weight: 500; background: var(--nb-muted); color: var(--nb-foreground);
+  }
+  .btn:hover { background: var(--nb-selected); }
+  .btn.primary { background: var(--nb-primary); color: var(--nb-primary-foreground); }
+  .btn.primary:hover { background: var(--nb-primary-hover); }
+  .btn[aria-pressed="true"] { background: var(--nb-selected); outline: 1.5px solid var(--nb-foreground); outline-offset: -1.5px; }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .sim-msg { font-size: 13px; min-height: 1.5em; color: var(--nb-foreground); }
+
+  .answers { display: grid; gap: 4px; font-family: var(--nb-font-mono); font-size: 12.5px; line-height: 1.55; min-height: 88px; align-content: start; }
+  .answers .row { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; color: var(--nb-muted-foreground); }
+  .answers .row:first-child { color: var(--nb-foreground); }
+  .answers .what { grid-column: 2; font-family: var(--nb-font-sans); font-size: 12.5px; color: var(--nb-muted-foreground); }
+  .answers .what.bad { color: var(--nb-danger); }
+  .answers .empty { color: var(--nb-muted-foreground); font-family: var(--nb-font-sans); }
+  .sub-label { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--nb-muted-foreground); margin: 0; }
+
+  .request {
+    align-self: flex-start; font-family: var(--nb-font-mono); font-size: 12.5px; padding: 6px 10px;
+    border-radius: var(--nb-r-ctl); background: var(--nb-muted); color: var(--nb-muted-foreground);
+  }
+  .request.sent { background: var(--nb-selected); color: var(--nb-foreground); outline: 1.5px solid var(--nb-foreground); outline-offset: -1.5px; }
+
+  .opts { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  .opts th { text-align: left; font-weight: 600; font-size: 12px; color: var(--nb-muted-foreground); padding: 0 10px 8px 0; border-bottom: 1px solid var(--nb-line); }
+  .opts td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--nb-line); font-family: var(--nb-font-mono); font-size: 13px; }
+  .opts td:first-child { color: var(--nb-foreground); }
+  .opts td.v2 { color: var(--nb-muted-foreground); }
+  .opts td.v2.changed { color: var(--nb-warning); font-weight: 600; }
+  .opts td.v2.gone { color: var(--nb-muted-foreground); font-style: italic; font-family: var(--nb-font-sans); }
+  .tabs { display: flex; gap: 4px; }
+  .tab { height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--nb-muted-foreground); font-size: 13px; cursor: pointer; }
+  .tab[aria-selected="true"] { background: var(--nb-muted); color: var(--nb-foreground); }
+  .defaults { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--nb-muted-foreground); }
+
+  /* ---- Cover ---- */
+  .slide.cover { grid-template-columns: 1fr 500px; column-gap: 56px; align-items: center; }
+  .agenda { list-style: none; margin: 30px 0 0; padding: 0; display: grid; gap: 7px; font-size: 16px; }
+  .agenda li { display: grid; grid-template-columns: 44px 1fr; }
+  .agenda span { font-family: var(--nb-font-mono); font-size: 13.5px; color: var(--nb-muted-foreground); padding-top: 2px; }
+  .fig-title { font-family: var(--nb-font-mono); font-size: 15px; font-weight: 700; margin: 0 0 16px; }
+  .fig-cap { margin: 14px 0 0; font-size: 13.5px; color: var(--nb-muted-foreground); text-align: center; }
+  .cover .lane { grid-template-columns: 112px minmax(0, 1fr); }
+
+  /* ---- Phones: the slides one under the other, no deck ---- */
+  @media (max-width: 759px) {
+    html, body { height: auto; }
+    .deck { position: static; display: block; overflow: visible; }
+    .stage { width: auto; height: auto; transform: none; }
+    .chrome-top { position: sticky; top: 0; left: auto; right: auto; height: auto; padding: 10px 16px; background: var(--nb-background); z-index: 5; }
+    .chap, .count, .deck-name, .chrome-bot { display: none; }
+    .slide, .slide.on { position: relative; inset: auto; display: flex; flex-direction: column; gap: 20px; padding: 36px 16px 44px; }
+    .slide + .slide { border-top: 1px solid var(--nb-line); }
+    .s-left { gap: 16px; }
+    h1 { font-size: 40px; }
+    h2 { font-size: 27px; }
+    .lead { font-size: 17px; }
+    .facts, .why p { font-size: 15px; }
+    .code { font-size: 12px; padding: 12px 14px; }
+    .card { padding: 14px; }
+    .lane, .cover .lane { grid-template-columns: 96px minmax(0, 1fr) 28px; gap: 8px; }
+    .lane-name { font-size: 11.5px; }
+    .demo-head { flex-direction: column; align-items: flex-start; gap: 6px; }
+    .legend i:first-child { margin-left: 0; }
+    .ro { min-width: 0; }
+    .why { grid-template-columns: 60px 1fr; }
+  }
+
+  /* ---- Chapters 2 to 5 ---- */
+  .prog button.first { margin-left: 10px; }
+  .facts em { font-style: normal; font-family: var(--nb-font-mono); font-size: .9em; }
+
+  /* An event chip: a cell wide enough for "9137 created". */
+  .chip {
+    position: relative; flex: none; height: 30px; padding: 0 9px; border-radius: 6px; overflow: hidden;
+    display: inline-flex; align-items: center; background: var(--nb-muted);
+    font-family: var(--nb-font-mono); font-size: 11.5px; white-space: nowrap;
+  }
+  .chip i { position: absolute; left: 0; bottom: 0; height: 3px; width: 0; background: var(--nb-foreground); }
+  .chip.me { background: var(--fig-accent-fill); outline: 1.5px solid var(--fig-accent); outline-offset: -1.5px; }
+  .chip.busy { background: var(--nb-selected); }
+  .chip.done { opacity: .38; }
+  .chip.bad { background: var(--nb-danger-muted); outline: 1.5px solid var(--nb-danger); outline-offset: -1.5px; }
+  .chip.bad i { background: var(--nb-danger); }
+  .chip.ghost { background: transparent; outline: 1.5px dashed var(--nb-muted-foreground); outline-offset: -1.5px; color: var(--nb-muted-foreground); }
+  .chips { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; min-height: 30px; }
+
+  /* Systems you run, for the "Kafka today" pictures: solid = given, dashed = yours to build. */
+  .sys { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .box { padding: 9px 12px; border-radius: 10px; background: var(--nb-muted); font-size: 13px; line-height: 1.35; }
+  .box small { display: block; font-size: 11.5px; color: var(--nb-muted-foreground); }
+  .box.yours { background: transparent; outline: 1.5px dashed var(--nb-muted-foreground); outline-offset: -1.5px; }
+  .box.bad { background: var(--nb-danger-muted); outline: 1.5px solid var(--nb-danger); outline-offset: -1.5px; }
+  .box.mono, .box .mono { font-family: var(--nb-font-mono); font-size: 12px; }
+  .arrow { color: var(--nb-muted-foreground); font-size: 14px; }
+  .yours-note { font-size: 12.5px; color: var(--nb-muted-foreground); }
+  [hidden] { display: none !important; }
+
+  /* Workers and what they hold. */
+  .workers { display: flex; gap: 10px; }
+  .worker { flex: 1; min-width: 0; padding: 9px 12px; border-radius: 10px; background: var(--nb-muted); display: grid; gap: 3px; font-size: 12.5px; }
+  .worker b { font-family: var(--nb-font-mono); font-weight: 600; font-size: 12.5px; }
+  .worker span { color: var(--nb-muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .worker.holds { outline: 1.5px solid var(--fig-accent); outline-offset: -1.5px; }
+  .worker.off { background: transparent; outline: 1.5px dashed var(--nb-muted-foreground); outline-offset: -1.5px; }
+  .worker.off b { color: var(--nb-muted-foreground); text-decoration: line-through; }
+
+  /* A list box: the dead-letter queue, a table's rows, a log. */
+  .listbox { border-radius: 10px; background: var(--nb-muted); padding: 9px 12px; font-size: 12.5px; display: grid; gap: 4px; }
+  .listbox .lb-title { font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--nb-muted-foreground); }
+  .listbox .lb-row { font-family: var(--nb-font-mono); font-size: 12px; }
+  .listbox .lb-empty { color: var(--nb-muted-foreground); }
+
+  /* Group cursors under a strip: one track per group. */
+  .tracks { display: grid; gap: 6px; }
+  .track { display: grid; grid-template-columns: 124px minmax(0, 1fr); align-items: center; gap: 10px; height: 26px; }
+  .track-name { font-family: var(--nb-font-mono); font-size: 12.5px; color: var(--nb-muted-foreground); }
+  .track-line { position: relative; height: 26px; }
+  .marker {
+    position: absolute; top: 2px; transform: translateX(-6px); white-space: nowrap;
+    font-family: var(--nb-font-mono); font-size: 11.5px; color: var(--nb-foreground);
+    display: flex; align-items: center; gap: 5px;
+  }
+  .marker::before { content: ""; width: 0; height: 0; border: 6px solid transparent; border-bottom: 9px solid currentColor; border-top: 0; transform: translateY(-3px); }
+  @media (prefers-reduced-motion: no-preference) { .marker { transition: left .35s ease; } }
+
+  /* A segmented control. */
+  .seg { display: inline-flex; background: var(--nb-muted); border-radius: var(--nb-r-ctl); padding: 3px; gap: 2px; }
+  .seg button { height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--nb-muted-foreground); font-size: 13px; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--nb-card); color: var(--nb-foreground); }
+  .seg-label { font-size: 12.5px; color: var(--nb-muted-foreground); margin-right: 6px; }
+  .ctl-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+  /* An axis under a strip, and timelines. */
+  .axis { position: relative; height: 18px; font-family: var(--nb-font-mono); font-size: 11px; color: var(--nb-muted-foreground); }
+  .axis span { position: absolute; top: 0; white-space: nowrap; }
+  .tl { display: grid; gap: 8px; }
+  .tl-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 10px; }
+  .tl-name { font-family: var(--nb-font-mono); font-size: 12.5px; color: var(--nb-muted-foreground); }
+  .tl-track { position: relative; height: 30px; border-radius: 6px; background: var(--nb-muted); }
+  .tl-bar { position: absolute; top: 0; bottom: 0; border-radius: 6px; background: var(--nb-selected); font-size: 11.5px; display: flex; align-items: center; padding: 0 8px; white-space: nowrap; overflow: hidden; }
+  .tl-bar.held { background: var(--fig-accent-fill); outline: 1.5px solid var(--fig-accent); outline-offset: -1.5px; }
+  .tl-bar.paused { background: transparent; outline: 1.5px dashed var(--nb-muted-foreground); outline-offset: -1.5px; color: var(--nb-muted-foreground); }
+  .tl-mark { position: absolute; top: 3px; bottom: 3px; padding: 0 7px; border-radius: 5px; font-size: 11.5px; display: flex; align-items: center; white-space: nowrap; background: var(--nb-card); }
+  .tl-mark.bad { background: var(--nb-danger-muted); color: var(--nb-danger); outline: 1.5px solid var(--nb-danger); outline-offset: -1.5px; }
+  .tl-mark.ok { outline: 1.5px solid var(--nb-foreground); outline-offset: -1.5px; }
+  .tl-now { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--nb-foreground); border-radius: 1px; }
+  .tl-axis { position: relative; height: 16px; margin-left: 106px; font-family: var(--nb-font-mono); font-size: 11px; color: var(--nb-muted-foreground); }
+  .tl-axis span { position: absolute; transform: translateX(-50%); }
+
+  /* Steps of a step, for the transaction slides. */
+  .steps { display: grid; gap: 8px; }
+  .stp { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; background: var(--nb-muted); font-size: 13px; }
+  .stp .n { font-family: var(--nb-font-mono); font-size: 12px; color: var(--nb-muted-foreground); }
+  .stp .sys-name { font-size: 12px; color: var(--nb-muted-foreground); }
+  .stp code { font-family: var(--nb-font-mono); font-size: 12px; }
+  .stp.done { outline: 1.5px solid var(--nb-foreground); outline-offset: -1.5px; }
+  .stp.lost { opacity: .45; }
+  .stp.bad { background: var(--nb-danger-muted); outline: 1.5px solid var(--nb-danger); outline-offset: -1.5px; }
+  .commit-box { border-radius: 12px; outline: 1.5px dashed var(--nb-muted-foreground); outline-offset: -1.5px; padding: 10px; display: grid; gap: 8px; }
+  .commit-box.done { outline: 1.5px solid var(--nb-foreground); }
+  .commit-box .cb-title { font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--nb-muted-foreground); padding: 0 2px; }
+  .crash { height: 0; border-top: 2px dashed var(--nb-danger); position: relative; margin: 2px 0; }
+  .crash span { position: absolute; right: 0; top: -10px; background: var(--nb-card); color: var(--nb-danger); font-size: 11.5px; padding: 0 6px; }
+  .verdict { font-size: 14px; line-height: 1.5; min-height: 3em; }
+  .verdict.bad { color: var(--nb-danger); }
+  .verdict b { font-weight: 600; }
+
+  .clock { font-family: var(--nb-font-mono); font-size: 30px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .tag { display: inline-block; font-family: var(--nb-font-mono); font-size: 11.5px; padding: 1px 7px; border-radius: 5px; background: var(--nb-muted); color: var(--nb-foreground); }
+  .tag.bad { background: var(--nb-danger-muted); color: var(--nb-danger); }
+  .tag.warn { color: var(--nb-warning); }
+  .speed { font-size: 12px; color: var(--nb-muted-foreground); }
+
+  @media (max-width: 759px) {
+    .workers { flex-direction: column; }
+    .track, .tl-row { grid-template-columns: 84px minmax(0, 1fr); }
+    .tl-axis { margin-left: 94px; }
+    .stp { grid-template-columns: 22px minmax(0, 1fr); }
+    .stp .sys-name { grid-column: 2; }
+  }
+  .lane.claimed .lane-name { color: var(--nb-foreground); font-weight: 600; }
+  .demo > .demo-foot { margin-top: auto; }
+  .chip { height: 34px; font-size: 12.5px; padding: 0 11px; }
+  .opts td.v2.bad { color: var(--nb-danger); font-weight: 600; }
+  .opts.state td { padding: 6px 10px 6px 0; }
+  .answers.log .row { grid-template-columns: 92px minmax(0, 1fr); }
+  .demo .code { background: var(--nb-muted); font-size: 12px; padding: 10px 14px; border-radius: 10px; }
+  .legend .lg-yours { outline: 1.5px dashed var(--nb-muted-foreground); outline-offset: -1.5px; margin-left: 0; }
+  .diagram { gap: 12px; }
+  .verdict:empty { min-height: 0; }
+  .tl { position: relative; }
+  .tl-overlay { position: absolute; top: -4px; bottom: -4px; left: 106px; right: 0; pointer-events: none; }
+  .tl-overlay .tl-now { top: 0; bottom: 0; }
+  @media (max-width: 759px) { .tl-overlay { left: 94px; } }
+  #cfg .opts td { padding: 6px 10px 6px 0; }
+  .marker.flip { flex-direction: row-reverse; transform: translateX(calc(-100% + 6px)); }
+  #groups .lanes, #seek .lanes, #timer .lanes, #delays .lanes { flex: none; }
+  #groups .tracks { margin-top: 2px; }
+  .s-left > *, .demo > * { flex-shrink: 0; }
+  .s-left .code { font-size: 13px; line-height: 1.55; }
+  .tl-axis span { white-space: nowrap; }
+  .tl-axis span:last-child { transform: translateX(-100%); }
+  @media (max-width: 759px) { .deck { place-items: normal; } }
+  .demo { min-width: 0; }
+  .demo .code { max-width: 100%; }
+  @media (max-width: 759px) {
+    .track-line, .axis, .tl-track { overflow: hidden; }
+    .tl-axis { overflow: hidden; }
+  }
+
+  /* ---- Opening, chapters 6 to 8, closing ---- */
+  .slide.title { grid-template-columns: 1fr 470px; }
+  .proofs { list-style: none; margin: 30px 0 0; padding: 0; display: flex; gap: 10px; flex-wrap: wrap; }
+  .proofs li { font-size: 14px; padding: 6px 12px; border-radius: var(--nb-r-ctl); background: var(--nb-muted); }
+  .scene { margin: 0; height: 560px; border-radius: var(--nb-r-card); overflow: hidden; }
+  .scene img { width: 100%; height: 100%; object-fit: cover; object-position: 50% 35%; display: block; }
+  [data-mode="dark"] .scene-light, [data-mode="light"] .scene-dark { display: none; }
+
+  .glue-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .box.pick { position: relative; text-align: left; border: 0; cursor: pointer; color: var(--nb-foreground); font: inherit; font-size: 13.5px; padding: 10px 12px 10px 12px; }
+  .box.pick:hover { background: var(--nb-selected); }
+  .box.pick.on { outline: 1.5px solid var(--nb-foreground); outline-offset: -1.5px; }
+  .box .ch { float: right; margin-left: 8px; font-family: var(--nb-font-mono); font-size: 11px; color: var(--nb-muted-foreground); }
+  .box.struck { opacity: .45; text-decoration: line-through; text-decoration-color: var(--nb-muted-foreground); }
+  .box.struck small, .box.struck .ch { text-decoration: none; }
+
+  .nodes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .node { padding: 12px; border-radius: 10px; background: var(--nb-muted); display: grid; gap: 2px; }
+  .node b { font-family: var(--nb-font-mono); font-size: 13px; }
+  .node span { font-size: 12.5px; color: var(--nb-muted-foreground); }
+  .node small { font-size: 11.5px; color: var(--nb-muted-foreground); }
+  .node.leader { outline: 1.5px solid var(--nb-foreground); outline-offset: -1.5px; }
+  .node.down { background: transparent; outline: 1.5px dashed var(--nb-muted-foreground); outline-offset: -1.5px; }
+  .node.down b { text-decoration: line-through; color: var(--nb-muted-foreground); }
+  .node .chips { margin-top: 6px; min-height: 0; }
+  .node .chip { height: 24px; font-size: 11px; padding: 0 7px; }
+
+  @media (max-width: 759px) {
+    .scene { height: 360px; }
+    .glue-grid, .nodes { grid-template-columns: 1fr; }
+  }
+  .big-num { font-family: var(--nb-font-mono); font-size: 24px !important; font-weight: 600; }
+  .lane-name small { display: block; font-size: 10.5px; font-weight: 400; color: var(--nb-muted-foreground); }
+  .legend .lg-fresh { outline: 1.5px solid var(--nb-foreground); outline-offset: -1.5px; background: var(--nb-muted); }
+  .legend .lg-skip { background: var(--nb-muted); opacity: .38; }
+  input[type="range"] { accent-color: var(--nb-foreground); width: 160px; }
+  .opts.compare td { font-family: var(--nb-font-sans); font-size: 14px; padding: 10px 12px 10px 0; }
+  .opts.compare td:first-child { color: var(--nb-muted-foreground); }
+  .opts.compare td.warn { color: var(--nb-warning); }
+  #reply .code { font-size: 11.5px; }
+  #reply .verdict, #k-tx .verdict, #q-tx .verdict { min-height: 1.5em; }
+  .feed-table td { font-family: var(--nb-font-mono); font-size: 12px; padding: 6px 10px 6px 0; }
+  .feed-table td:first-child { color: var(--nb-muted-foreground); }
+  .shards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .shards .node small { font-size: 12px; color: var(--nb-foreground); }
+  .flow { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
+  .flow .arrow { padding-left: 14px; font-size: 12.5px; }
+  .term { border-radius: 10px; background: var(--nb-muted); padding: 10px 14px; font-family: var(--nb-font-mono); font-size: 12px; line-height: 1.6; min-height: 92px; }
+  .term .muted { color: var(--nb-muted-foreground); }
+  .answers.msgs .row { grid-template-columns: 18px minmax(0, 1fr); }
+  .answers.msgs .row span:last-child { overflow-wrap: anywhere; }
+  .cards4 { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-content: start; }
+  .cards4 .card { padding: 20px 22px; }
+  .cards4 .card p:not(.sub-label) { margin: 8px 0 0; font-size: 16px; line-height: 1.55; }
+  .code.try { margin-top: 26px; font-size: 14px; }
+  @media (max-width: 759px) { .cards4 { grid-template-columns: 1fr; } }
+  #reply .answers.log .row { grid-template-columns: 60px minmax(0, 1fr); }
+  .answers .note-line { font-family: var(--nb-font-sans); font-size: 12.5px; color: var(--nb-foreground); }
+  .slide > * { min-width: 0; }
+  .code { max-width: 100%; }
+  @media (max-width: 759px) { .slide.cover { align-items: stretch; } }
+  /* ---- 0.3 Two architectures ---- */
+  .slide.arch { grid-template-columns: 1fr 1fr; grid-template-rows: auto minmax(0, 1fr) auto; column-gap: 20px; row-gap: 18px; }
+  .arch-card { display: flex; flex-direction: column; gap: 12px; min-height: 0; padding: 16px 18px; }
+  .arch-card .nodes { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .arch-card .node { gap: 4px; align-content: start; padding: 10px; }
+  .arch-card .node.hl { outline: 1.5px solid var(--nb-foreground); outline-offset: -1.5px; }
+  .arch-card .node .tag { justify-self: start; font-size: 11px; }
+  .arch-card .parts { display: grid; gap: 4px; margin-top: 4px; }
+  .arch-card .pt { font-family: var(--nb-font-mono); font-size: 11px; padding: 3px 7px; border-radius: 5px; background: var(--nb-card); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .arch-card .pt.is-leader { font-weight: 600; }
+  .arch-card .pt.hl { background: var(--fig-accent-fill); outline: 1.5px solid var(--fig-accent); outline-offset: -1.5px; }
+  .arch-notes { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13.5px; line-height: 1.45; }
+  .arch-notes li { position: relative; padding-left: 14px; }
+  .arch-notes li::before { content: "–"; position: absolute; left: 0; color: var(--nb-muted-foreground); }
+  .arch-step { margin: auto 0 0; font-size: 13.5px; line-height: 1.5; min-height: 4.5em; padding-top: 10px; border-top: 1px solid var(--nb-line); }
+  .arch-foot { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .arch-trade { margin: 0; font-size: 14px; color: var(--nb-muted-foreground); max-width: 70ch; }
+  @media (max-width: 759px) {
+    .arch-card .nodes { grid-template-columns: 1fr; }
+    .arch-foot { flex-direction: column; align-items: flex-start; }
+  }
+  .arch-card .node .tag { background: var(--nb-card); color: var(--nb-muted-foreground); }
+  .arch-card .node:first-child .tag, .arch-card .node .tag:only-of-type { color: var(--nb-foreground); }
+  .arch-notes { font-size: 13px; gap: 4px; }
+  .arch-step { min-height: 3.2em; font-size: 13px; }
+
+  /* ---- In production: a big flow per product ---- */
+  .slide.prod { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr) auto; row-gap: 14px; }
+  .prod-card { display: flex; flex-direction: column; gap: 10px; padding: 14px; min-height: 0; }
+  .fd-scroll { flex: 1; min-height: 0; }
+  .fd { position: relative; width: 1140px; height: 312px; }
+  .fd svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+  .fd-edge { fill: none; stroke: var(--nb-muted-foreground); stroke-width: 1.4; opacity: .65; }
+  .fd-edge.eph { stroke-dasharray: 5 4; }
+  .fd-edge.read { stroke-dasharray: 2 4; }
+  .fd-edge.on { stroke: var(--fig-accent); stroke-width: 2.2; opacity: 1; }
+  .fd-arrowhead { fill: var(--nb-muted-foreground); }
+  .fd-arrowhead.on { fill: var(--fig-accent); }
+  .fd-node { position: absolute; width: 160px; padding: 8px 10px; border-radius: 10px; background: var(--nb-muted); display: grid; gap: 3px; }
+  .fd-node b { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; line-height: 1.25; }
+  .fd-node.q b, .fd-node.eph b { font-family: var(--nb-font-mono); font-size: 12px; font-weight: 600; }
+  .fd-node small { font-size: 11px; line-height: 1.3; color: var(--nb-muted-foreground); }
+  .fd-node.ext { background: transparent; outline: 1.5px solid var(--nb-line); outline-offset: -1.5px; }
+  .fd-node.eph { outline: 1.5px dashed var(--nb-muted-foreground); outline-offset: -1.5px; }
+  .fd-node .tags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+  .fd-node .tags span { font-size: 10.5px; line-height: 1.35; padding: 1px 6px; border-radius: 4px; background: var(--nb-card); }
+  .fd-node.on { background: var(--fig-accent-fill); outline: 1.5px solid var(--fig-accent); outline-offset: -1.5px; }
+  .fd-label { position: absolute; transform: translate(-50%, -50%); font-size: 10.5px; color: var(--nb-muted-foreground); background: var(--nb-card); padding: 0 4px; border-radius: 3px; white-space: nowrap; }
+  .fd-token { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--fig-accent); outline: 2px solid var(--nb-card); }
+  .fd-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .fd-caption { margin: 0; font-size: 14.5px; line-height: 1.45; min-height: 2.9em; display: flex; align-items: center; }
+  .prod-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .prod-foot p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--nb-muted-foreground); }
+  .prod-foot b { display: block; font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--nb-muted-foreground); margin-bottom: 2px; }
+  .prod-foot p:last-child b { color: var(--nb-warning); }
+  @media (max-width: 759px) {
+    .fd-scroll { overflow-x: auto; }
+    .fd-bar { flex-direction: column; align-items: flex-start; }
+    .prod-foot { grid-template-columns: 1fr; gap: 12px; }
+  }
+  .fd { height: 340px; }
+  .fd-node { padding: 9px 11px; }
+  .fd-node b { font-size: 14px; }
+  .fd-node.q b, .fd-node.eph b { font-size: 13px; }
+  .fd-node small { font-size: 11.5px; }
+  .fd-node .tags span { font-size: 11px; }
+  .fd-scroll { flex: none; }
+  .fd-bar .fd-caption { flex: 1; min-width: 0; }
+  .fd-bar .btns { flex: none; flex-wrap: nowrap; }
+  @media (max-width: 759px) { .fd-bar .btns { flex-wrap: wrap; } }
+  .plan-table tbody tr { cursor: pointer; }
+  .plan-table tbody tr:hover td { background: var(--nb-muted); }
+  .plan-table td { font-size: 13.5px; padding: 8px 10px 8px 6px; }
+  .plan-table td:first-child { font-family: var(--nb-font-mono); color: var(--nb-muted-foreground); width: 26px; }
+  .plan-table td:nth-child(2) { color: var(--nb-foreground); font-weight: 500; }
+  .plan-table td:nth-child(3) { color: var(--nb-muted-foreground); }
+
+  /* Kinds in the production flows: a service is a grey block, a queue a blue capsule,
+     an ephemeral queue a dashed capsule, an outside system a dotted box. */
+  .fd-node.svc { background: var(--nb-muted); border-radius: 6px; }
+  .fd-node.q { background: var(--fig-info-fill); outline: 1.5px solid var(--fig-info); outline-offset: -1.5px; border-radius: 22px; padding-left: 14px; padding-right: 14px; }
+  .fd-node.eph { background: transparent; outline: 1.5px dashed var(--fig-info); outline-offset: -1.5px; border-radius: 22px; padding-left: 14px; padding-right: 14px; }
+  .fd-node.ext { background: transparent; outline: 1.5px dotted var(--nb-muted-foreground); outline-offset: -1.5px; border-radius: 6px; }
+  .fd-node.ext b { color: var(--nb-muted-foreground); }
+  .fd-node.q b, .fd-node.eph b { color: var(--fig-info); }
+  .fd-node.q .tags span { background: var(--nb-card); }
+  .fd-node.on { background: var(--fig-accent-fill); outline: 1.5px solid var(--fig-accent); outline-offset: -1.5px; }
+  .fd-node.on b { color: var(--nb-foreground); }
+  .s-head { position: relative; }
+  .fd-legend { position: absolute; right: 0; top: 0; display: flex; gap: 16px; font-size: 12.5px; color: var(--nb-muted-foreground); }
+  .fd-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .fd-legend i { display: inline-block; width: 22px; height: 12px; }
+  .fd-legend .lg-svc { background: var(--nb-muted); border-radius: 3px; }
+  .fd-legend .lg-q { background: var(--fig-info-fill); outline: 1.5px solid var(--fig-info); outline-offset: -1.5px; border-radius: 8px; }
+  .fd-legend .lg-eph { outline: 1.5px dashed var(--fig-info); outline-offset: -1.5px; border-radius: 8px; }
+  .fd-legend .lg-ext { outline: 1.5px dotted var(--nb-muted-foreground); outline-offset: -1.5px; border-radius: 3px; }
+  @media (max-width: 759px) { .fd-legend { position: static; flex-wrap: wrap; margin-bottom: 10px; } }
+  .plan-table td { padding: 7px 10px 7px 6px; font-size: 13px; }
+  .plan-table td { padding: 6px 10px 6px 6px; line-height: 1.35; }
+  .plan-table th { padding-bottom: 6px; }
+  .opts.compare.plan-table td { font-size: 13px; padding: 6px 10px 6px 6px; line-height: 1.35; }
+
+  /* "Elsewhere": how other brokers handle the same thing, on the Today slides. */
+  .why.elsewhere dl { margin: 0; padding-left: 14px; border-left: 2px solid var(--nb-line); display: grid; grid-template-columns: auto 1fr; gap: 5px 10px; }
+  .why.elsewhere dt { font-family: var(--nb-font-mono); font-size: 12px; font-weight: 600; padding-top: 2px; white-space: nowrap; }
+  .why.elsewhere dd { margin: 0; font-size: 14px; line-height: 1.45; color: var(--nb-muted-foreground); }
+  .why.elsewhere.one p { font-style: normal; font-size: 14px; color: var(--nb-muted-foreground); }
+  @media (max-width: 759px) { .why.elsewhere dl { grid-template-columns: 1fr; } }
+  .why.elsewhere { grid-template-columns: 1fr; gap: 6px; }
+  .why.elsewhere b { padding-top: 0; }
+
+</style>
+</head>
+<body>
+<div class="deck">
+  <div class="stage" id="stage">
+
+    <div class="chrome-top">
+      <a class="wordmark" href="/" aria-label="QueenMQ"><svg xmlns="http://www.w3.org/2000/svg" viewBox="25.25 131.9821 317.85 159.653" aria-hidden="true" focusable="false"><path fill="#fcc620" fill-rule="evenodd" d="M102.217 288.664C100.575 286.785 97.984 282.677 96.516 279.625C94.56 275.557 94.286 274.875 93.856 272.997C93.651 272.105 93.38 270.925 93.253 270.375C92.164 265.667 93.458 257.699 96.041 253.206C96.568 252.289 97 251.482 97 251.415C97 251.091 99.59 247.471 99.957 247.282C100.268 247.122 107.675 247.089 110.41 247.235C111.195 247.277 114.262 254.55 115.265 258.751C116.164 262.514 115.71 270.08 114.396 273.25C114.197 273.731 113.731 274.91 113.361 275.869C111.763 280.016 108.647 284.838 105.403 288.188C103.635 290.012 103.423 290.044 102.217 288.664ZM64.888 278.179C63.758 276.456 63.58 265.737 64.598 260.846C66.528 251.583 71.333 245.292 79.834 240.9C83.117 239.204 83.097 239.205 84.916 240.7C86.452 241.964 88.579 243.403 89.93 244.094C91.124 244.704 91.25 245.152 91.248 248.796C91.242 260.08 85.964 268.567 75.049 274.844C74.182 275.342 73.402 275.75 73.316 275.75C73.229 275.75 72.7 275.966 72.141 276.231C70.364 277.072 65.857 278.75 65.375 278.75C65.313 278.75 65.093 278.493 64.888 278.179ZM45.25 250.226C43.806 250.102 41.781 249.788 40.75 249.529C39.719 249.27 38.566 248.986 38.188 248.899C37.181 248.667 37.236 248.192 38.628 245.125C38.94 244.438 39.263 243.706 39.346 243.5C39.429 243.294 39.605 242.956 39.737 242.75C39.869 242.544 40.675 241.137 41.529 239.625C44.353 234.621 48.479 229.84 51.995 227.5C52.304 227.294 52.798 226.947 53.091 226.73C58.929 222.404 72.923 220.749 73.842 224.275C74.233 225.777 75.272 228.331 76.148 229.946C77.228 231.938 77.217 232.286 76 234.5C75.45 235.501 75 236.351 75 236.39C75 236.429 74.488 237.229 73.861 238.168C70.094 243.816 65.645 246.869 57.553 249.36C54.915 250.171 49.253 250.57 45.25 250.226ZM47.481 220.119C46.44 219.943 45.058 219.62 44.41 219.4C43.762 219.18 43.118 219 42.979 219C40.419 219 27.25 209.625 27.25 207.804C27.25 207.34 32.434 203.447 34.975 202.002C48.17 194.5 61.489 195.97 71.192 206C72.583 207.437 72.748 207.712 72.621 208.375C72.542 208.787 72.387 209.688 72.276 210.375C71.966 212.3 71.677 212.604 67.151 215.767C61.648 219.611 54.215 221.256 47.481 220.119ZM68.846 197.118C67.455 196.939 65.792 196.614 65.15 196.396C64.508 196.178 63.802 196 63.581 196C63.36 196 62.661 195.76 62.027 195.467C61.394 195.173 60.256 194.648 59.5 194.299C55.533 192.469 50.328 187.66 47.812 183.5C45.565 179.786 42.524 171.88 42.504 169.702C42.483 167.433 58.662 168.015 63.875 170.471C64.15 170.6 65.162 171.073 66.125 171.521C71.885 174.2 77.093 179.553 79.484 185.25C79.917 186.281 80.439 187.502 80.644 187.963C81.44 189.753 81.375 190.772 80.395 191.875C79.907 192.425 78.869 193.808 78.09 194.949C76.162 197.771 75.366 197.958 68.846 197.118ZM87.625 182.482C80.694 178.998 74.473 172.871 73.127 168.204C73.035 167.885 72.755 167.062 72.504 166.375C70.889 161.946 70.875 161.844 70.881 155C70.885 150.495 70.983 148.295 71.215 147.5C71.395 146.881 71.689 145.738 71.869 144.959C72.395 142.667 72.44 142.649 74.98 143.645C75.885 144 76.963 144.421 77.375 144.582C88.656 148.974 97.071 159.233 98.018 169.75C98.462 174.681 98.178 180.82 97.485 181.271C97.287 181.399 96.506 181.679 95.75 181.892C94.176 182.335 92.691 182.881 91.667 183.395C90.626 183.918 90.362 183.858 87.625 182.482ZM118.625 183.056C116.812 182.287 114.402 181.58 112.375 181.224C109.426 180.706 109.496 180.749 107.759 178.44C100.263 168.481 98.621 158.776 102.629 148.125C103.404 146.065 105.128 142.549 105.641 141.983C105.838 141.764 106 141.519 106 141.437C106 140.985 108.85 137.122 110.979 134.69C112.15 133.352 112.611 133.655 115.766 137.843C118.527 141.508 118.872 142.037 120.188 144.625C125.728 155.52 126.514 168.937 122.319 181C121.274 184.005 121.094 184.105 118.625 183.056Z"/><path fill="currentColor" fill-rule="evenodd" d="M119 190.7C114.9 188.7 110.6 187.6 105.8 187.6C90.6 187.6 78.5 199.5 78.5 215C78.5 230.1 90 242 104.8 242C109.8 242 114.5 240.7 119 237.7L131 237.7L119 244.5L119 261.3L132.5 261.3L132.5 190.7ZM119 214.2C119 221.5 113.1 227.3 105.9 227.3C98.6 227.3 92.8 221.5 92.8 214.2C92.8 207 98.6 201.1 105.9 201.1C113.1 201.1 119 207 119 214.2ZM139.1 190.9L152.2 190.9L152.2 215.8C152.2 222.2 155.5 225.8 161.3 225.8C167.1 225.8 170.5 222.2 170.5 215.8L170.5 190.9L183.5 190.9L183.5 215.8C183.5 229.8 175.1 238.3 161.3 238.3C147.5 238.3 139.1 229.8 139.1 215.8ZM237.5 218L202.2 218C204.1 223.2 208 226.1 213 226.1C216.8 226.1 219.5 224.3 222 221.5L234.8 225.2C230.3 233.6 222.4 238.4 213 238.4C198.8 238.4 188 227.8 188 214.2C188 200.5 198.9 189.8 213 189.8C227.4 189.8 237.6 200.5 237.6 214.2C237.6 215.6 237.6 216.8 237.5 218ZM202.6 209L222.8 209C221.1 204.6 217.7 201.6 212.8 201.6C208.1 201.6 204.7 204.4 202.6 209ZM291.35 218L256.05 218C257.95 223.2 261.85 226.1 266.85 226.1C270.65 226.1 273.35 224.3 275.85 221.5L288.65 225.2C284.15 233.6 276.25 238.4 266.85 238.4C252.65 238.4 241.85 227.8 241.85 214.2C241.85 200.5 252.75 189.8 266.85 189.8C281.25 189.8 291.45 200.5 291.45 214.2C291.45 215.6 291.45 216.8 291.35 218ZM256.45 209L276.65 209C274.95 204.6 271.55 201.6 266.65 201.6C261.95 201.6 258.55 204.4 256.45 209ZM296.1 237.4L296.1 212.5C296.1 199 305.2 189.8 318.6 189.8C332.4 189.8 341.1 199.2 341.1 212.5L341.1 237.4L328.1 237.4L328.1 213.2C328.1 206.4 324.6 202.8 318.6 202.8C312.8 202.8 308.9 206.4 308.9 213.2L308.9 237.4Z"/></svg></a>
+      <span class="deck-name">Coming from another broker?</span>
+      <span class="sp"></span>
+      <span class="chap" id="chap"></span>
+      <span class="count" id="count">1 / 6</span>
+      <button class="icon-btn" id="mode" aria-label="Switch light or dark">
+        <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5Z"/></svg>
+        <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+    </div>
+
+
+    <!-- 0.1 Title -->
+    <section class="slide cover title" data-chapter="Coming from another broker" data-title="Coming from another message broker?">
+      <div>
+        <p class="eyebrow">QueenMQ 2.8</p>
+        <h1>Coming from another<br>message broker?</h1>
+        <p class="lead"><strong>QueenMQ, the ACID message broker.</strong> Most examples start from Kafka; RabbitMQ and SQS join where they differ.</p>
+        <ul class="proofs">
+          <li>226 Jepsen tests passed</li>
+          <li>3M msg/s on three nodes</li>
+          <li>Rust, one binary, Apache-2.0</li>
+        </ul>
+      </div>
+      <figure class="scene" aria-hidden="true">
+        <img class="scene-dark" src="/queen-scene-on-dark.svg" alt="">
+        <img class="scene-light" src="/queen-scene-on-light.svg" alt="">
+      </figure>
+    </section>
+
+    <!-- 0.2 The plan -->
+    <section class="slide split" data-chapter="Coming from another broker" data-title="The plan">
+      <header class="s-head">
+        <p class="eyebrow">The plan</p>
+        <h2>Eight things you build around a broker, eight chapters.</h2>
+      </header>
+      <div class="s-left">
+        <p class="lead" style="margin:0">One hotel booking, <strong>booking-9137</strong>, goes through every chapter. Click a row to jump there.</p>
+        <ul class="facts">
+          <li>Each chapter starts with what you build today, mostly on Kafka, with RabbitMQ and SQS where they differ. Then the same thing inside QueenMQ, with code you can run.</li>
+          <li>At the end, three products we run on QueenMQ in production.</li>
+        </ul>
+        <div class="why"><b>Why</b><p>Brokers move messages very well. What happens to one message, and around it, is yours to build.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="plan"></div>
+      </div>
+    </section>
+
+    <!-- 0.3 Two architectures, three nodes each -->
+    <section class="slide arch" data-chapter="Coming from another broker" data-title="Two architectures">
+      <header class="s-head">
+        <p class="eyebrow">Architecture · three nodes each</p>
+        <h2>Kafka with KRaft and ISR. QueenMQ with one raft log.</h2>
+      </header>
+      <div class="card arch-card" id="arch-kafka">
+        <div class="demo-head"><span class="mono">Kafka · KRaft + ISR</span><span class="speed">combined mode: broker and controller on each node</span></div>
+        <div class="nodes"></div>
+        <ul class="arch-notes">
+          <li>Each partition: a leader, and followers that fetch from it. The caught-up ones are the ISR.</li>
+          <li>Metadata: a second raft log, among the controllers. Offsets: the topic <code>__consumer_offsets</code>.</li>
+          <li>Transactions: a coordinator, and markers in every partition.</li>
+        </ul>
+        <p class="arch-step"></p>
+      </div>
+      <div class="card arch-card" id="arch-queen">
+        <div class="demo-head"><span class="mono">QueenMQ · one binary, one raft log</span><span class="speed">every node holds a full copy</span></div>
+        <div class="nodes"></div>
+        <ul class="arch-notes">
+          <li>One leader orders all the tenant's writes. Followers prepare their clients' requests and answer from their copy.</li>
+          <li>One log: messages, acks, KV, timers. Positions and leases: in the leader's memory, checkpointed.</li>
+          <li>A transaction is one log entry: no coordinator, no markers.</li>
+        </ul>
+        <p class="arch-step"></p>
+      </div>
+      <div class="arch-foot">
+        <p class="arch-trade">Kafka spreads partition leaders over the nodes, so writes use all three. QueenMQ has one leader per tenant: more tenants (raft groups) spread the leaders.</p>
+        <div class="btns">
+          <button class="btn primary" data-act="write">Send a write</button>
+          <button class="btn" data-act="fail">node-1 crashes</button>
+          <button class="btn" data-act="reset">Reset</button>
+        </div>
+      </div>
+    </section>
+    <!-- 1.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 1 · One booking = one partition" data-title="One booking = one partition">
+      <div>
+        <p class="eyebrow">Chapter 1 of 8</p>
+        <h1>One booking =<br>one partition</h1>
+        <p class="lead">In Kafka a partition is a shard you size up front. In QueenMQ it is <strong>the thing you work on</strong>: one booking, one customer, one conversation.</p>
+        <ol class="agenda">
+          <li><span>1.1</span>Kafka today: bookings share partitions</li>
+          <li><span>1.2</span>QueenMQ: configure, then a partition per booking</li>
+          <li><span>1.3</span>A retry is not a second booking</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">queue&nbsp; bookings</p>
+        <div class="lanes" id="cover-lanes"></div>
+        <p class="fig-cap">Each booking is a partition: an ordered list of its events.</p>
+      </figure>
+    </section>
+
+    <!-- 1.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 1 · One booking = one partition" data-title="Today">
+      <header class="s-head">
+        <p class="eyebrow">1.1 · Today, on Kafka</p>
+        <h2>A fixed number of partitions. Bookings share them.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>You pick the partition count when you create the topic.</li>
+          <li>The key is hashed: <code>hash(key) % 4</code>. Here booking-9137 and booking-4410 land in partition&nbsp;2.</li>
+          <li>One consumer works a partition, in order. A slow message holds up every booking behind it.</li>
+          <li>Add partitions later, and keys move to other partitions.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>Competing consumers on one queue lose the order per key. Keeping it takes a queue per key, or a consistent-hash exchange with one consumer per queue.</dd><dt>SQS FIFO</dt><dd>Message groups keep the order per group: the closest thing to a QueenMQ partition.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo sim" data-sim="kafka"></div>
+      </div>
+    </section>
+
+    <!-- 1.2 QueenMQ -->
+    <section class="slide split" data-chapter="Chapter 1 · One booking = one partition" data-title="The partition is the booking">
+      <header class="s-head">
+        <p class="eyebrow">1.2 · QueenMQ</p>
+        <h2>Configure once. Then every booking is a partition.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// once, before the first push: name every option</span>
+<span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>).<span class="f">config</span>({
+  leaseTime: <span class="n">30</span>, retryLimit: <span class="n">5</span>, retryDelay: <span class="n">5000</span>,
+  dedupWindowSeconds: <span class="n">86400</span>,
+  retentionEnabled: <span class="n">true</span>,
+  retentionSeconds: <span class="n">604800</span>,
+}).<span class="f">create</span>()
+
+<span class="c">// then: one partition per booking</span>
+<span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">partition</span>(<span class="s">'booking-9137'</span>)
+  .<span class="f">push</span>([{ data: { event: <span class="s">'created'</span> } }])</pre>
+        <ul class="facts">
+          <li>Configure first, every option named: a queue a push creates gets a 60&nbsp;s lease and no retention.</li>
+          <li>Then the first push to a booking creates its partition: no count to pick. Order holds inside it; workers take any partition with work.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo sim" data-sim="queen"></div>
+      </div>
+    </section>
+
+    <!-- 1.3 Dedup -->
+    <section class="slide split" data-chapter="Chapter 1 · One booking = one partition" data-title="A retry is not a second booking">
+      <header class="s-head">
+        <p class="eyebrow">1.3 · QueenMQ</p>
+        <h2>A retry is not a second booking.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">partition</span>(<span class="s">'booking-9137'</span>)
+  .<span class="f">push</span>([{
+    transactionId: <span class="s">'booking-9137-created'</span>,
+    data: { event: <span class="s">'created'</span> }
+  }])</pre>
+        <ul class="facts">
+          <li>The same <code>transactionId</code> in the same partition, within <code>dedupWindowSeconds</code> (3600&nbsp;s by default, 7&nbsp;days at most), writes nothing.</li>
+          <li>Build the id from the work, never from a fresh UUID.</li>
+          <li>Kafka's idempotent producer covers its own retries in one session. An app that retries after a crash writes the event again.</li>
+        </ul>
+        <div class="why trap"><b>Trap</b><p>HTTP answers 201 even when an item is refused. Read each item's <code>status</code>: queued, duplicate or error.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="dedup"></div>
+      </div>
+    </section>
+
+
+    <!-- 2.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="Work it, fail it, retry it">
+      <div>
+        <p class="eyebrow">Chapter 2 of 8</p>
+        <h1>Work it,<br>fail it, retry it</h1>
+        <p class="lead">Kafka gives a group <strong>one offset per partition</strong>. QueenMQ gives every message a lease, an answer, retries and a dead-letter queue, in the broker.</p>
+        <ol class="agenda">
+          <li><span>2.1</span>Kafka today: you commit a position</li>
+          <li><span>2.2</span>A lease, an answer, a retry</li>
+          <li><span>2.3</span>Batches, partitions, concurrency</li>
+          <li><span>2.4</span>Replay: new groups and seek</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">queue&nbsp; bookings&nbsp; · group&nbsp; confirm</p>
+        <div class="lanes" id="c2-lanes"></div>
+        <div class="workers" style="margin-top:14px">
+          <div class="worker holds"><b>worker-a</b><span>holds 9137 #3 · lease 30 s</span></div>
+          <div class="worker"><b>worker-b</b><span>holds booking-2203 #6</span></div>
+        </div>
+        <div class="listbox" style="margin-top:10px">
+          <span class="lb-title">Dead-letter queue · confirm</span>
+          <span class="lb-row">booking-4410 #2 · card service timeout · 5 failures</span>
+        </div>
+        <p class="fig-cap">Every message: a lease, an answer, and a place to go when it keeps failing.</p>
+      </figure>
+    </section>
+
+    <!-- 2.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="Today: one offset per partition">
+      <header class="s-head">
+        <p class="eyebrow">2.1 · Today, on Kafka</p>
+        <h2>One offset per partition. A failure blocks it, or breaks order.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// KafkaJS: you commit a position, not an answer</span>
+<span class="k">const</span> c = kafka.<span class="f">consumer</span>({ groupId: <span class="s">'confirm'</span> })
+<span class="k">await</span> c.<span class="f">subscribe</span>({ topics: [<span class="s">'bookings'</span>] })
+<span class="k">await</span> c.<span class="f">run</span>({
+  autoCommit: <span class="n">false</span>,
+  eachMessage: <span class="k">async</span> (m) <span class="k">=&gt;</span> {
+    <span class="k">await</span> <span class="f">confirm</span>(m.message) <span class="c">// throw: blocks</span>
+    <span class="k">const</span> n = <span class="f">BigInt</span>(m.message.offset) + <span class="n">1n</span>
+    <span class="k">await</span> c.<span class="f">commitOffsets</span>([{ topic: m.topic,
+      partition: m.partition, offset: <span class="s">`${</span>n<span class="s">}`</span> }])
+  },
+})</pre>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>An ack per message, and dead letters after a delivery limit (quorum queues). The order across consumers is not kept.</dd><dt>SQS</dt><dd>A visibility timeout per message, a lease, and a redrive to a DLQ after maxReceiveCount. In a FIFO queue a failing message holds its group, as in QueenMQ.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-retry"></div>
+      </div>
+    </section>
+
+    <!-- 2.2 Lease, ack, retry, DLQ -->
+    <section class="slide split" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="A lease, an answer, a retry">
+      <header class="s-head">
+        <p class="eyebrow">2.2 · QueenMQ</p>
+        <h2>Every message gets a lease and an answer.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">group</span>(<span class="s">'confirm'</span>)
+  .<span class="f">each</span>()
+  .<span class="f">consume</span>(<span class="k">async</span> (msg) <span class="k">=&gt;</span> {
+    <span class="k">await</span> <span class="f">confirm</span>(msg.data)  <span class="c">// throw = failed</span>
+  })  <span class="c">// return = completed</span></pre>
+        <ul class="facts">
+          <li>A pop leases the message to one worker for <code>leaseTime</code> (30&nbsp;s). A worker that dies: the lease runs out, another worker gets it, and no retry is spent.</li>
+          <li>A throw is a <code>failed</code> answer: the message comes back after <code>retryDelay</code> (5&nbsp;s), and only its booking waits.</li>
+          <li>After <code>retryLimit</code> failures (5), it goes to the dead-letter queue with its error, and the booking moves on.</li>
+          <li>Every group gets every message and its workers compete, as in Kafka. Two more answers: <code>retry</code> (no retry spent) and <code>dlq</code> (now).</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="q-retry"></div>
+      </div>
+    </section>
+
+    <!-- 2.3 Batches -->
+    <section class="slide split" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="Batches, partitions, concurrency">
+      <header class="s-head">
+        <p class="eyebrow">2.3 · QueenMQ</p>
+        <h2>Fewer round trips, the same order.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">group</span>(<span class="s">'confirm'</span>)
+  .<span class="f">batch</span>(<span class="n">100</span>)        <span class="c">// messages per pop</span>
+  .<span class="f">partitions</span>(<span class="n">10</span>)    <span class="c">// bookings per pop</span>
+  .<span class="f">concurrency</span>(<span class="n">4</span>)    <span class="c">// handlers at once</span>
+  .<span class="f">renewLease</span>(<span class="n">true</span>, <span class="n">10000</span>)
+  .<span class="f">each</span>()
+  .<span class="f">consume</span>(confirm)</pre>
+        <ul class="facts">
+          <li><code>.partitions(N)</code>: one pop drains up to N bookings, each one still in order.</li>
+          <li>Leave <code>batch</code> and <code>partitions</code> out, and the broker sizes every pop (autopilot).</li>
+          <li><code>.renewLease(true, 10000)</code> keeps the lease while a long handler runs.</li>
+          <li><code>.partition('booking-9137')</code> pops one booking only.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="drain"></div>
+      </div>
+    </section>
+
+    <!-- 2.4 Replay -->
+    <section class="slide split" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="Replay: new groups and seek">
+      <header class="s-head">
+        <p class="eyebrow">2.4 · QueenMQ</p>
+        <h2>The history stays. A seek moves a group.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// a new group can start in the past</span>
+<span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">group</span>(<span class="s">'audit'</span>)
+  .<span class="f">subscriptionFrom</span>(<span class="s">'2026-11-10T10:00:00Z'</span>)
+  .<span class="f">consume</span>(audit)
+
+<span class="c">// a group that exists moves with a seek</span>
+<span class="k">await</span> queen.admin.<span class="f">seekConsumerGroup</span>(
+  <span class="s">'confirm'</span>, <span class="s">'bookings'</span>,
+  { timestamp: <span class="s">'2026-11-10T10:00:00Z'</span> })
+<span class="c">// { toEnd: true }: skip all it has not read</span></pre>
+        <ul class="facts">
+          <li>An answer moves the group's cursor. The message stays until retention removes it.</li>
+        </ul>
+        <div class="why trap"><b>Trap</b><p>A new group starts at the end (<code>new</code>), like <code>auto.offset.reset=latest</code>. <code>.subscriptionMode('all')</code> reads the history; <code>.subscriptionFrom(time)</code> starts at a time.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="seek"></div>
+      </div>
+    </section>
+
+    <!-- 3.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 3 · One step = one commit" data-title="One step = one commit">
+      <div>
+        <p class="eyebrow">Chapter 3 of 8</p>
+        <h1>One step =<br>one commit</h1>
+        <p class="lead">Confirming a booking is several writes: its state, the next event, the ack. In QueenMQ they are <strong>one log entry</strong>, all of them or none.</p>
+        <ol class="agenda">
+          <li><span>3.1</span>Kafka today: three systems, no commit</li>
+          <li><span>3.2</span>One transaction</li>
+          <li><span>3.3</span>State next to the messages: KV</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <div class="commit-box done">
+          <span class="cb-title">One log entry</span>
+          <div class="stp"><span class="n">ack</span><span><code>bookings</code> · booking-9137 #3 · group confirm</span><span></span></div>
+          <div class="stp"><span class="n">kv</span><span><code>bookings/booking-9137</code> = confirmed</span><span></span></div>
+          <div class="stp"><span class="n">push</span><span><code>emails</code> · booking-9137 · confirm-mail</span><span></span></div>
+          <div class="stp"><span class="n">timer</span><span><code>payment-reminders</code> · booking-9137 · 15 min</span><span></span></div>
+        </div>
+        <p class="fig-cap">One call commits all four, or none of them.</p>
+      </figure>
+    </section>
+
+    <!-- 3.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 3 · One step = one commit" data-title="Today: three systems, no commit">
+      <header class="s-head">
+        <p class="eyebrow">3.1 · Today, on Kafka</p>
+        <h2>Three systems, and no commit across them.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Confirming a booking: update Postgres, produce to <em>emails</em>, commit the offset.</li>
+          <li>A crash between two of them leaves the step half done.</li>
+          <li>Kafka transactions cover Kafka's writes and offsets, not your database.</li>
+          <li>The usual fix: an outbox table, a relay to read it, an idempotency table. More systems.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>Publisher confirms, and channel transactions that cover its own publishes and acks. Never your database.</dd><dt>SQS</dt><dd>Send and delete are separate calls: nothing commits them together.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-tx"></div>
+      </div>
+    </section>
+
+    <!-- 3.2 One transaction -->
+    <section class="slide split" data-chapter="Chapter 3 · One step = one commit" data-title="One transaction">
+      <header class="s-head">
+        <p class="eyebrow">3.2 · QueenMQ</p>
+        <h2>The ack, the state, the next event: one commit.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code">.<span class="f">consume</span>(<span class="k">async</span> (msg) <span class="k">=&gt;</span> {
+  <span class="k">const</span> id = msg.partition   <span class="c">// booking-9137</span>
+  <span class="k">await</span> queen.<span class="f">transaction</span>()
+    .<span class="f">ack</span>(msg, <span class="s">'completed'</span>,
+      { consumerGroup: <span class="s">'confirm'</span> })
+    .kv.<span class="f">put</span>(<span class="s">'bookings'</span>, id,
+      { status: <span class="s">'confirmed'</span> }, { ttl: <span class="s">'30d'</span> })
+    .<span class="f">queue</span>(<span class="s">'emails'</span>).<span class="f">partition</span>(id)
+    .<span class="f">push</span>([{ transactionId: <span class="s">`mail-${</span>id<span class="s">}`</span>,
+      data: { id } }])
+    .<span class="f">commit</span>()
+})</pre>
+        <ul class="facts">
+          <li>One call, one log entry: all of it commits, or none.</li>
+          <li>A call to the outside (a payment, an email provider) is not in the commit: give it an idempotency key from the message.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="q-tx"></div>
+      </div>
+    </section>
+
+    <!-- 3.3 KV -->
+    <section class="slide split" data-chapter="Chapter 3 · One step = one commit" data-title="State next to the messages: KV">
+      <header class="s-head">
+        <p class="eyebrow">3.3 · QueenMQ</p>
+        <h2>The state lives next to the messages.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">const</span> id = <span class="s">'booking-9137'</span>
+<span class="k">const</span> b = <span class="k">await</span> queen.kv.<span class="f">get</span>(<span class="s">'bookings'</span>, id)
+<span class="c">// { found, value, version: 3 }</span>
+
+<span class="k">const</span> r = <span class="k">await</span> queen.kv.<span class="f">put</span>(<span class="s">'bookings'</span>, id,
+  { status: <span class="s">'checked-in'</span> },
+  { ttl: <span class="s">'30d'</span>, expect: b.version })
+r.applied  <span class="c">// false if someone wrote since</span>
+
+<span class="k">await</span> queen.kv.<span class="f">incr</span>(<span class="s">'quota'</span>, <span class="s">'hotel-7'</span>, <span class="n">1</span>,
+  { max: <span class="n">500</span>, ttl: <span class="s">'1d'</span> })</pre>
+        <ul class="facts">
+          <li>Every write names its lifetime: a <code>ttl</code>, or <code>forever</code>.</li>
+          <li>Every write raises the version. <code>expect</code> makes a write depend on it.</li>
+          <li>A write that did not apply answers <code>applied: false</code> and the current value. It is not an error.</li>
+          <li>KV has no queries: records you search stay in your database.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="kv"></div>
+      </div>
+    </section>
+
+
+    <!-- 4.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 4 · Waiting without cron" data-title="Waiting without cron">
+      <div>
+        <p class="eyebrow">Chapter 4 of 8</p>
+        <h1>Waiting<br>without cron</h1>
+        <p class="lead">"Remind the guest in 15 minutes if they have not paid" is a message that arrives later. In QueenMQ it is a <strong>timer</strong>, written by the step that wants it.</p>
+        <ol class="agenda">
+          <li><span>4.1</span>Kafka today: a scheduler on the side</li>
+          <li><span>4.2</span>Timers</li>
+          <li><span>4.3</span>Timers inside the transaction</li>
+          <li><span>4.4</span>A delay for a whole queue</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">timer&nbsp; payment-reminders / booking-9137</p>
+        <div class="tl">
+          <div class="tl-row"><span class="tl-name">booking-9137</span><div class="tl-track"><span class="tl-mark ok" style="left:2%">10:00 created</span><span class="tl-mark" style="left:52%">no payment yet</span></div></div>
+          <div class="tl-row"><span class="tl-name">timer</span><div class="tl-track"><span class="tl-bar held" style="left:2%;width:76%">scheduled for 10:15</span></div></div>
+          <div class="tl-row"><span class="tl-name">reminders</span><div class="tl-track"><span class="tl-mark ok" style="left:79%">a message</span></div></div>
+        </div>
+        <div class="tl-axis"><span style="left:4%">10:00</span><span style="left:41%">10:07</span><span style="left:79%">10:15</span></div>
+        <p class="fig-cap">The timer fires as a message, in the booking's own partition.</p>
+      </figure>
+    </section>
+
+    <!-- 4.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 4 · Waiting without cron" data-title="Today: a scheduler on the side">
+      <header class="s-head">
+        <p class="eyebrow">4.1 · Today, on Kafka</p>
+        <h2>Kafka delivers now. "Later" is another system.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Kafka has no delay per message.</li>
+          <li>Teams add a table of due reminders and a cron job that scans it every minute.</li>
+          <li>Or one delay topic per duration, with consumers that wait until each message is due.</li>
+          <li>Moving or cancelling a reminder means finding it again.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>A message TTL plus a dead-letter exchange, or the delayed-message plugin, which keeps delayed messages on one node.</dd><dt>SQS</dt><dd>DelaySeconds, up to 15 minutes per message.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-later"></div>
+      </div>
+    </section>
+
+    <!-- 4.2 Timers -->
+    <section class="slide split" data-chapter="Chapter 4 · Waiting without cron" data-title="Timers">
+      <header class="s-head">
+        <p class="eyebrow">4.2 · QueenMQ</p>
+        <h2>A timer is a message for later.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// booking-9137 is created</span>
+<span class="k">await</span> queen.<span class="f">timer</span>(<span class="s">'payment-reminders'</span>)
+  .<span class="f">key</span>(<span class="s">'booking-9137'</span>)
+  .<span class="f">partition</span>(<span class="s">'booking-9137'</span>)
+  .<span class="f">delay</span>(<span class="s">'15m'</span>)
+  .<span class="f">payload</span>({ id: <span class="s">'booking-9137'</span> })
+  .<span class="f">schedule</span>()          <span class="c">// 'scheduled'</span>
+
+<span class="c">// the guest paid</span>
+<span class="k">await</span> queen.<span class="f">timer</span>(<span class="s">'payment-reminders'</span>)
+  .<span class="f">key</span>(<span class="s">'booking-9137'</span>).<span class="f">cancel</span>()</pre>
+        <ul class="facts">
+          <li>Named by its queue and key. The same key scheduled again moves it.</li>
+          <li>It fires as a real message, through the log: never early, a little late (checked every 50&nbsp;ms).</li>
+          <li>With the booking's partition, it arrives in order with the booking's events.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="timer"></div>
+      </div>
+    </section>
+
+    <!-- 4.3 Timers in the transaction -->
+    <section class="slide split" data-chapter="Chapter 4 · Waiting without cron" data-title="Timers inside the transaction">
+      <header class="s-head">
+        <p class="eyebrow">4.3 · QueenMQ</p>
+        <h2>Schedule it in the step that wants it.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// the booking step</span>
+<span class="k">await</span> queen.<span class="f">transaction</span>()
+  .<span class="f">ack</span>(msg, <span class="s">'completed'</span>,
+    { consumerGroup: <span class="s">'bookings'</span> })
+  .<span class="f">timer</span>(<span class="s">'payment-reminders'</span>).<span class="f">key</span>(id)
+  .<span class="f">partition</span>(id).<span class="f">delay</span>(<span class="s">'15m'</span>)
+  .<span class="f">payload</span>({ id }).<span class="f">schedule</span>()
+  .<span class="f">commit</span>()
+
+<span class="c">// the payment step</span>
+<span class="k">await</span> queen.<span class="f">transaction</span>()
+  .<span class="f">ack</span>(pay, <span class="s">'completed'</span>,
+    { consumerGroup: <span class="s">'payments'</span> })
+  .kv.<span class="f">put</span>(<span class="s">'bookings'</span>, id, { status: <span class="s">'paid'</span> },
+    { ttl: <span class="s">'30d'</span> })
+  .<span class="f">timer</span>(<span class="s">'payment-reminders'</span>).<span class="f">key</span>(id).<span class="f">cancel</span>()
+  .<span class="f">commit</span>()</pre>
+        <div class="why trap"><b>Trap</b><p><code>absent</code> on a cancel may mean the timer already fired: the reminder's handler checks the booking first.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="race"></div>
+      </div>
+    </section>
+
+    <!-- 4.4 Queue-wide delays -->
+    <section class="slide split" data-chapter="Chapter 4 · Waiting without cron" data-title="A delay for a whole queue">
+      <header class="s-head">
+        <p class="eyebrow">4.4 · QueenMQ</p>
+        <h2>The same wait for every message: two queue options.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'room-updates'</span>)
+  .<span class="f">config</span>({
+    leaseTime: <span class="n">30</span>,
+    retryLimit: <span class="n">5</span>,
+    retryDelay: <span class="n">5000</span>,
+    dedupWindowSeconds: <span class="n">86400</span>,
+    retentionEnabled: <span class="n">true</span>,
+    retentionSeconds: <span class="n">604800</span>,
+    delayedProcessing: <span class="n">300</span>, <span class="c">// 5 min each</span>
+    windowBuffer: <span class="n">3</span>,        <span class="c">// bursts</span>
+  })
+  .<span class="f">create</span>()</pre>
+        <ul class="facts">
+          <li><code>delayedProcessing</code>: every new message waits that many seconds after its push.</li>
+          <li><code>windowBuffer</code>: a burst waits that long, then is handed over as one batch. A delay per message is a timer.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="delays"></div>
+      </div>
+    </section>
+
+    <!-- 5.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 5 · Only one worker" data-title="Only one worker">
+      <div>
+        <p class="eyebrow">Chapter 5 of 8</p>
+        <h1>Only one<br>worker</h1>
+        <p class="lead">Some work no message starts: the nightly report, the channel sync. A cron job on three replicas runs it three times. A <strong>lock</strong> runs it once, and a <strong>guard</strong> keeps out a holder that froze.</p>
+        <ol class="agenda">
+          <li><span>5.1</span>Kafka today: a lock on the side</li>
+          <li><span>5.2</span>A lock and a guard</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">lock&nbsp; nightly-report</p>
+        <table class="opts">
+          <tbody>
+            <tr><td>holder</td><td class="v2">worker-b</td></tr>
+            <tr><td>since · until</td><td class="v2">02:00:00 · 02:00:30, renewed</td></tr>
+            <tr><td>token</td><td class="v2">42</td></tr>
+          </tbody>
+        </table>
+        <div class="workers" style="margin-top:14px">
+          <div class="worker"><b>worker-a</b><span>acquire → false</span></div>
+          <div class="worker holds"><b>worker-b</b><span>holds it</span></div>
+          <div class="worker"><b>worker-c</b><span>acquire → false</span></div>
+        </div>
+        <p class="fig-cap">Three replicas, one holder.</p>
+      </figure>
+    </section>
+
+    <!-- 5.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 5 · Only one worker" data-title="Today: a lock on the side">
+      <header class="s-head">
+        <p class="eyebrow">5.1 · Today, on Kafka</p>
+        <h2>A lock that expires does not stop its holder.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Kafka has no lock. Teams take one in Redis, ZooKeeper or the database.</li>
+          <li>A lock with a TTL can expire during a GC pause or a network stall, and nobody tells the holder.</li>
+          <li>Another worker takes it. The old holder wakes up and writes anyway.</li>
+          <li>The fix is a fencing token that the storage checks. Your code, again.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>Single active consumer gives a queue one reader. Work that no message starts still needs a lock.</dd><dt>SQS</dt><dd>No lock: a conditional write in another store, often DynamoDB.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-lock"></div>
+      </div>
+    </section>
+
+    <!-- 5.2 Lock + guard -->
+    <section class="slide split" data-chapter="Chapter 5 · Only one worker" data-title="A lock and a guard">
+      <header class="s-head">
+        <p class="eyebrow">5.2 · QueenMQ</p>
+        <h2>The guard keeps out a holder that froze.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">const</span> lock = queen.<span class="f">lock</span>(<span class="s">'nightly-report'</span>,
+  { ttl: <span class="s">'30s'</span> })
+<span class="k">if</span> (!(<span class="k">await</span> lock.<span class="f">acquire</span>({ wait: <span class="s">'5s'</span> })))
+  <span class="k">return</span>             <span class="c">// another worker has it</span>
+<span class="k">try</span> {
+  <span class="k">const</span> r = <span class="k">await</span> queen.<span class="f">transaction</span>()
+    .<span class="f">guard</span>(lock)    <span class="c">// only while it is ours</span>
+    .<span class="f">queue</span>(<span class="s">'reports'</span>)
+    .<span class="f">push</span>([{ transactionId: <span class="s">'report-11-11'</span>,
+      data: report }])
+    .<span class="f">commit</span>()
+} <span class="k">finally</span> {
+  <span class="k">await</span> lock.<span class="f">release</span>()
+}</pre>
+        <ul class="facts">
+          <li>The handle renews the lock every third of its lifetime. A frozen process cannot, and <code>.guard(lock)</code> rolls its commit back.</li>
+          <li><code>queen.semaphore(name, n)</code>: n holders. Outside QueenMQ, fence with <code>lock.token</code>.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="q-lock"></div>
+      </div>
+    </section>
+
+    <!-- 6.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 6 · The booking page: now, not history" data-title="The booking page: now, not history">
+      <div>
+        <p class="eyebrow">Chapter 6 of 8</p>
+        <h1>The booking page:<br>now, not history</h1>
+        <p class="lead">A page wants the <strong>latest</strong> availability and a price <strong>within half a second</strong>. It does not need the history of either.</p>
+        <ol class="agenda">
+          <li><span>6.1</span>Kafka today: every value, and a reply topic</li>
+          <li><span>6.2</span>Only the newest value: conflation</li>
+          <li><span>6.3</span>Ask and answer: ephemeral queues</li>
+          <li><span>6.4</span>The trade</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">Hotel 7 · Deluxe room · tonight</p>
+        <table class="opts">
+          <tbody>
+            <tr><td>rooms left</td><td class="big-num">9</td><td class="v2">the newest value · conflation</td></tr>
+            <tr><td>price</td><td class="big-num">€129</td><td class="v2">asked now · an ephemeral reply</td></tr>
+          </tbody>
+        </table>
+        <p class="fig-cap">Two numbers that must be fresh, and nothing to keep.</p>
+      </figure>
+    </section>
+
+    <!-- 6.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 6 · The booking page: now, not history" data-title="Today: every value, and a reply topic">
+      <header class="s-head">
+        <p class="eyebrow">6.1 · Today, on Kafka</p>
+        <h2>Every value is delivered. A reply needs its own topic.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>A compacted topic keeps the last value per key, later, on closed segments. A live consumer still reads every value.</li>
+          <li>A request and its reply over Kafka: a request topic, a reply topic, a correlation id, and a consumer that waits. All of it on disk.</li>
+          <li>Or a direct HTTP call, which ties the page to the pricing service.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>Direct reply-to is built in, close to QueenMQ's ephemeral queues. The latest value per key needs a plugin.</dd><dt>SQS</dt><dd>No request/reply: a reply queue per caller, or AWS's temporary-queue client.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-page"></div>
+      </div>
+    </section>
+
+    <!-- 6.2 Conflation -->
+    <section class="slide split" data-chapter="Chapter 6 · The booking page: now, not history" data-title="Only the newest value: conflation">
+      <header class="s-head">
+        <p class="eyebrow">6.2 · QueenMQ</p>
+        <h2>Only the newest value: conflation.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'availability'</span>)
+  .<span class="f">group</span>(<span class="s">'screen'</span>)
+  .<span class="f">conflation</span>(<span class="n">true</span>)  <span class="c">// the newest, per partition</span>
+  .<span class="f">partitions</span>(<span class="n">64</span>)
+  .<span class="f">consume</span>(<span class="k">async</span> (msg) <span class="k">=&gt;</span> {
+    <span class="k">await</span> <span class="f">redraw</span>(msg.data)
+  })</pre>
+        <ul class="facts">
+          <li>A pop of a partition delivers one message, the newest, and moves the cursor past the ones it skipped.</li>
+          <li>It belongs to the group. Another group on the same queue still gets every message.</li>
+          <li>Nothing is deleted: it is not compaction. Retention decides what stays.</li>
+        </ul>
+        <div class="why"><b>Promise</b><p>After the last push to a partition, at least one handler run starts after it.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="conf"></div>
+      </div>
+    </section>
+
+    <!-- 6.3 Ephemeral request/reply -->
+    <section class="slide split" data-chapter="Chapter 6 · The booking page: now, not history" data-title="Ask and answer: ephemeral queues">
+      <header class="s-head">
+        <p class="eyebrow">6.3 · QueenMQ</p>
+        <h2>Ask, and wait half a second at most.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">async function</span> <span class="f">quote</span>(room) {
+  <span class="k">const</span> inbox = <span class="s">`inbox-${</span>crypto.<span class="f">randomUUID</span>()<span class="s">}`</span>
+  <span class="k">await</span> queen.ephemeral.<span class="f">push</span>(<span class="s">'quotes'</span>,
+    [{ room, replyTo: inbox }])
+  <span class="k">const</span> reply = <span class="k">await</span> queen.ephemeral.<span class="f">pop</span>(inbox,
+    { wait: <span class="n">true</span>, timeout: <span class="n">500</span>,
+      commitOnDelivery: <span class="n">true</span> })
+  <span class="k">return</span> reply.messages[<span class="n">0</span>]?.payload
+    ?? { room, price: <span class="n">null</span> }   <span class="c">// "ask us"</span>
+}</pre>
+        <ul class="facts">
+          <li>Ephemeral queues live in memory, outside the log, created on first use. Same groups, leases and acks.</li>
+          <li>Every node serves every queue: a partition has one owner node, and the others forward to it.</li>
+          <li>The caller makes a private inbox, sends it as <code>replyTo</code>, and waits with a timeout.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="reply"></div>
+      </div>
+    </section>
+
+    <!-- 6.4 The trade -->
+    <section class="slide split" data-chapter="Chapter 6 · The booking page: now, not history" data-title="The trade">
+      <header class="s-head">
+        <p class="eyebrow">6.4 · QueenMQ</p>
+        <h2>Fast, because it forgets.</h2>
+      </header>
+      <div class="s-left">
+        <table class="opts compare">
+          <thead><tr><th></th><th>queue</th><th>ephemeral</th></tr></thead>
+          <tbody>
+            <tr><td>kept in</td><td>the raft log, on disk</td><td>memory of one node</td></tr>
+            <tr><td>a node crashes</td><td>nothing lost</td><td class="warn">its share is lost</td></tr>
+            <tr><td>a node stops</td><td>nothing lost</td><td>it hands its partitions over</td></tr>
+            <tr><td>transactions, DLQ, replay</td><td>yes</td><td>no</td></tr>
+            <tr><td>groups, leases, acks</td><td>yes</td><td>yes</td></tr>
+          </tbody>
+        </table>
+        <div class="why"><b>Why</b><p>An answer that comes too late is worth nothing, so it does not need a disk. Anything that must survive a crash goes on a regular queue.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="eph-nodes"></div>
+      </div>
+    </section>
+
+    <!-- 7.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 7 · The whole history, live" data-title="The whole history, live">
+      <div>
+        <p class="eyebrow">Chapter 7 of 8</p>
+        <h1>The whole history,<br>live</h1>
+        <p class="lead">Every push of every queue, in the order the log committed it: <strong>one feed</strong>, to ask what happened and to compute as it happens.</p>
+        <ol class="agenda">
+          <li><span>7.1</span>Kafka today: ask three topics</li>
+          <li><span>7.2</span>The feed</li>
+          <li><span>7.3</span>A join between queues</li>
+          <li><span>7.4</span>Patterns, joins, windows</li>
+          <li><span>7.5</span>Live state and shards</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">queen.feed()</p>
+        <table class="opts feed-table">
+          <thead><tr><th>position</th><th>queue</th><th>partition</th><th>data</th></tr></thead>
+          <tbody>
+            <tr><td>1041</td><td>bookings</td><td>booking-9137</td><td>created</td></tr>
+            <tr><td>1042</td><td>bookings</td><td>booking-4410</td><td>created</td></tr>
+            <tr><td>1043</td><td>payments</td><td>booking-9137</td><td>paid · €387</td></tr>
+            <tr><td>1043</td><td>emails</td><td>booking-9137</td><td>confirm-mail</td></tr>
+            <tr><td>1044</td><td>availability</td><td>hotel-7</td><td>9 rooms</td></tr>
+          </tbody>
+        </table>
+        <p class="fig-cap">One position across every queue. The pushes of one transaction share it.</p>
+      </figure>
+    </section>
+
+    <!-- 7.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="Today: ask three topics">
+      <header class="s-head">
+        <p class="eyebrow">7.1 · Today, on Kafka</p>
+        <h2>What happened to booking-9137? Ask three topics.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Each topic is its own log with its own offsets. There is no order across topics.</li>
+          <li>Finding one booking means reading every partition of every topic, or exporting to a search index first.</li>
+          <li>Stream processing is Kafka Streams: Java only, state in RocksDB and changelog topics, repartition topics to join by key.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ, SQS</dt><dd>A message is gone once it is acked: no history to ask (RabbitMQ Streams aside).</dd><dt>Pulsar</dt><dd>History is kept; stream processing is Pulsar Functions or Flink.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-find"></div>
+      </div>
+    </section>
+
+    <!-- 7.2 The feed -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="The feed">
+      <header class="s-head">
+        <p class="eyebrow">7.2 · QueenMQ</p>
+        <h2>One log of everything, in commit order.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// what happened to one booking, in the last day</span>
+<span class="k">for await</span> (<span class="k">const</span> e <span class="k">of</span> queen.<span class="f">feed</span>({
+  partitions: [<span class="s">'booking-9137'</span>],
+  since: <span class="s">'1d'</span>, follow: <span class="n">false</span>,
+})) {
+  console.<span class="f">log</span>(e.position, e.queue, e.data)
+}
+
+<span class="c">// live: every Italian booking from now on</span>
+queen.<span class="f">feed</span>({ queues: [<span class="s">'bookings'</span>],
+  where: [[<span class="s">'data.country'</span>, <span class="s">'='</span>, <span class="s">'IT'</span>]] })</pre>
+        <ul class="facts">
+          <li>One <code>position</code> across all queues. Nothing is leased or acked: every group still gets its messages.</li>
+          <li>Followers serve it, not the leader. <code>where</code> is checked by the broker.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="feed"></div>
+      </div>
+    </section>
+
+    <!-- 7.3 A join between queues -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="A join between queues">
+      <header class="s-head">
+        <p class="eyebrow">7.3 · QueenMQ</p>
+        <h2>Join two queues by booking.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> Stream
+  .<span class="f">fromFeed</span>(queen,
+    { queues: [<span class="s">'bookings'</span>, <span class="s">'payments'</span>] })
+  .<span class="f">join</span>({
+    sides: { booking: <span class="s">'bookings'</span>,
+             paid: <span class="s">'payments'</span> },
+    within: <span class="s">'1h'</span>,
+    select: (got, id) <span class="k">=&gt;</span> ({ id,
+      amount: got.paid.data.amount }),
+    onTimeout: (got, missing, id) <span class="k">=&gt;</span>
+      ({ id, missing }),
+  })
+  .<span class="f">to</span>(queen.<span class="f">queue</span>(<span class="s">'paid-bookings'</span>))
+  .<span class="f">run</span>({ queryId: <span class="s">'paid-bookings'</span> })</pre>
+        <ul class="facts">
+          <li>The key is the partition: booking-9137 in bookings meets booking-9137 in payments, in either order.</li>
+          <li>The position commits with the outputs. After a restart the open joins come back from a snapshot, and nothing is sent twice.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="join"></div>
+      </div>
+    </section>
+
+    <!-- 7.4 Patterns -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="Patterns, joins, windows">
+      <header class="s-head">
+        <p class="eyebrow">7.4 · QueenMQ</p>
+        <h2>A booking, then its payment within 15 minutes.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code">Stream.<span class="f">fromFeed</span>(queen,
+    { queues: [<span class="s">'bookings'</span>, <span class="s">'payments'</span>] })
+  .<span class="f">pattern</span>({
+    key: (m) <span class="k">=&gt;</span> m.partition,
+    start: (m) <span class="k">=&gt;</span> m.queue === <span class="s">'bookings'</span>,
+    then: (m) <span class="k">=&gt;</span> m.queue === <span class="s">'payments'</span>,
+    within: <span class="s">'15m'</span>,
+    onMatch: (b) <span class="k">=&gt;</span> ({ paid: b.partition }),
+    onTimeout: (b) <span class="k">=&gt;</span> ({ remind: b.partition }),
+  })
+  .<span class="f">to</span>(queen.<span class="f">queue</span>(<span class="s">'payment-followups'</span>))
+  .<span class="f">run</span>({ queryId: <span class="s">'payment-followups'</span> })</pre>
+        <ul class="facts">
+          <li>Chapter 4's reminder, as a stream: a booking, then its payment, or a reminder. <code>.joinTable</code> adds the latest row of a table queue to each message.</li>
+          <li>Windows run on the log's clock: a quiet feed still closes them on time.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="pattern"></div>
+      </div>
+    </section>
+
+    <!-- 7.5 Live state and shards -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="Live state and shards">
+      <header class="s-head">
+        <p class="eyebrow">7.5 · QueenMQ</p>
+        <h2>Read a stream's state live, from any process.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> Stream
+  .<span class="f">fromFeed</span>(queen, { queues: [<span class="s">'availability'</span>] })
+  .<span class="f">windowTumbling</span>({ seconds: <span class="n">60</span> })
+  .<span class="f">aggregate</span>({ count: () <span class="k">=&gt;</span> <span class="n">1</span> })
+  .<span class="f">name</span>(<span class="s">'perMinute'</span>)
+  .<span class="f">run</span>({ queryId: <span class="s">'per-minute'</span>, shards: <span class="n">4</span> })
+
+<span class="c">// anywhere else</span>
+<span class="k">const</span> { found, value } = <span class="k">await</span> Stream
+  .<span class="f">view</span>(queen, <span class="s">'per-minute'</span>)
+  .<span class="f">get</span>(<span class="s">'perMinute'</span>, <span class="s">'hotel-7'</span>)</pre>
+        <ul class="facts">
+          <li><code>shards: 4</code>: four processes, each with its partitions, its position and its lock.</li>
+          <li>Event time: a step can order messages by a time inside them (<code>eventTime</code>, <code>allowedLateness</code>).</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="view"></div>
+      </div>
+    </section>
+
+    <!-- 8.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="Postgres in, Postgres out">
+      <div>
+        <p class="eyebrow">Chapter 8 of 8</p>
+        <h1>Postgres in,<br>Postgres out</h1>
+        <p class="lead">The broker streams a table into a queue, and a queue into a table. <strong>No Debezium, no Connect cluster</strong>, no consumer to write.</p>
+        <ol class="agenda">
+          <li><span>8.1</span>Kafka today: three systems to move a row</li>
+          <li><span>8.2</span>The source</li>
+          <li><span>8.3</span>The sink</li>
+          <li><span>8.4</span>Four things to know</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">one HTTP call each, on the broker</p>
+        <div class="flow">
+          <div class="box">PostgreSQL<small>public.bookings</small></div>
+          <span class="arrow">↓ source · logical replication</span>
+          <div class="box mono">queue bookings<small>a partition per row key</small></div>
+          <span class="arrow">↓ sink · a group the broker runs</span>
+          <div class="box">PostgreSQL<small>public.bookings_report</small></div>
+        </div>
+        <p class="fig-cap">Both run on every node of the cluster, with exactly-once effects.</p>
+      </figure>
+    </section>
+
+    <!-- 8.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="Today: three systems to move a row">
+      <header class="s-head">
+        <p class="eyebrow">8.1 · Today, on Kafka</p>
+        <h2>Debezium, Connect, Kafka: three systems to move a row.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Change data capture is Debezium, running on a Kafka Connect cluster, writing to Kafka.</li>
+          <li>Back into a table: a JDBC sink connector, or a consumer you write.</li>
+          <li>Each one has its own configuration, its own offsets and its own ways to fail.</li>
+        </ul>
+        <div class="why elsewhere one"><b>Elsewhere</b><p>Debezium Server, a process of its own, writes changes to RabbitMQ, Kinesis, Pub/Sub and others.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-cdc"></div>
+      </div>
+    </section>
+
+    <!-- 8.2 The source -->
+    <section class="slide split" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="The source">
+      <header class="s-head">
+        <p class="eyebrow">8.2 · QueenMQ</p>
+        <h2>A table becomes a queue, in commit order.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">PUT</span> /api/v1/connectors/bookings-src
+{
+  <span class="s">"kind"</span>: <span class="s">"source"</span>,
+  <span class="s">"connection"</span>: {
+    <span class="s">"host"</span>: <span class="s">"pg"</span>, <span class="s">"database"</span>: <span class="s">"app"</span>,
+    <span class="s">"user"</span>: <span class="s">"queen"</span>, <span class="s">"password"</span>: <span class="s">"…"</span> },
+  <span class="s">"source"</span>: { <span class="s">"tables"</span>: [
+    { <span class="s">"table"</span>: <span class="s">"public.bookings"</span>,
+      <span class="s">"queue"</span>: <span class="s">"bookings"</span> } ] }
+}</pre>
+        <ul class="facts">
+          <li>Each committed change is a message, in the partition named after the row's key. One Postgres transaction is one QueenMQ transaction.</li>
+          <li>The WAL position commits with the messages: after a crash, nothing is sent twice.</li>
+          <li>Needs PostgreSQL 17+, <code>wal_level=logical</code>, and <code>QUEEN_ENCRYPTION_KEY</code> on the broker.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="pg-src"></div>
+      </div>
+    </section>
+
+    <!-- 8.3 The sink -->
+    <section class="slide split" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="The sink">
+      <header class="s-head">
+        <p class="eyebrow">8.3 · QueenMQ</p>
+        <h2>A queue becomes a table, exactly once.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">PUT</span> /api/v1/connectors/bookings-report
+{
+  <span class="s">"kind"</span>: <span class="s">"sink"</span>,
+  <span class="s">"connection"</span>: { … },
+  <span class="s">"sink"</span>: { <span class="s">"queue"</span>: <span class="s">"bookings"</span>,
+            <span class="s">"table"</span>: <span class="s">"public.bookings_report"</span>,
+            <span class="s">"mode"</span>: <span class="s">"upsert"</span> }
+}</pre>
+        <table class="opts compare">
+          <tbody>
+            <tr><td>append</td><td>each message is a new row</td></tr>
+            <tr><td>upsert</td><td>insert, or update the row with its key, with the columns it names</td></tr>
+            <tr><td>cdc</td><td>a source event, applied: insert, update, delete</td></tr>
+            <tr><td>sql</td><td>your statement, with parameters from the message</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="pg-sink"></div>
+      </div>
+    </section>
+
+    <!-- 8.4 Four things to know -->
+    <section class="slide split" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="Four things to know">
+      <header class="s-head">
+        <p class="eyebrow">8.4 · QueenMQ</p>
+        <h2>Four things to know before you turn it on.</h2>
+      </header>
+      <div class="cards4">
+        <div class="card"><p class="sub-label">The slot keeps WAL</p><p>A replication slot keeps WAL while the source is down, and can fill the database's disk. Set <code>max_slot_wal_keep_size</code>, and alert on <code>queen_pg_source_slot_lag_bytes</code>.</p></div>
+        <div class="card"><p class="sub-label">Every table needs a key</p><p>A primary key, or a unique index as replica identity. A table without one is refused.</p></div>
+        <div class="card"><p class="sub-label">A refused row</p><p>A message Postgres refuses (a constraint, a wrong type) is tried a few times, then dead-lettered with the database's error. Its partition goes on.</p></div>
+        <div class="card"><p class="sub-label">Key = partition</p><p>In <code>upsert</code> and <code>cdc</code> mode, keep the table's key aligned with the partition. Order holds inside a partition: two partitions writing one row would race.</p></div>
+      </div>
+    </section>
+
+    <!-- 9.0 Cover -->
+    <section class="slide cover" data-chapter="In production" data-title="In production">
+      <div>
+        <p class="eyebrow">In production</p>
+        <h1>Three systems<br>we run on QueenMQ</h1>
+        <p class="lead">Not a booking we made up: <strong>a guest chat, a channel manager and a tracing service</strong>, as they run today. Names are simplified; the flows are real.</p>
+        <ol class="agenda">
+          <li><span>9.1</span>A guest chat: a partition per conversation</li>
+          <li><span>9.2</span>A channel manager: one door in, one door out, a gate</li>
+          <li><span>9.3</span>A tracing service: QueenMQ and object storage</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <table class="opts compare">
+          <thead><tr><th>system</th><th>it shows</th></tr></thead>
+          <tbody>
+            <tr><td>guest chat</td><td>partitions · one commit per step · groups · windowBuffer · ephemeral request/reply</td></tr>
+            <tr><td>channel manager</td><td>partitions by state · conflation · timers · KV as a rate limit</td></tr>
+            <tr><td>tracing service</td><td>a stream with session windows · groups · reads by offset</td></tr>
+          </tbody>
+        </table>
+        <p class="fig-cap">Each flow as it runs; the names are not the real ones.</p>
+      </figure>
+    </section>
+
+    <!-- 9.1 A guest chat -->
+    <section class="slide prod" data-chapter="In production" data-title="A guest chat">
+      <header class="s-head">
+        <p class="eyebrow">In production · a guest chat</p>
+        <h2>One conversation, one partition, one commit per step.</h2>
+      </header>
+      <div class="card prod-card">
+        <div class="fd-scroll"><div class="fd" id="fd-chat"></div></div>
+        <div class="fd-bar">
+          <p class="fd-caption"></p>
+          <div class="btns">
+            <button class="btn primary" data-play="guest">A guest writes</button>
+            <button class="btn" data-play="ai">The AI answers</button>
+            <button class="btn" data-play="rpc">Ask the channel manager</button>
+          </div>
+        </div>
+      </div>
+      <div class="prod-foot">
+        <p><b>Uses</b>partition = chat · ack + push in one transaction · a group per client · DLQ · windowBuffer · ephemeral request/reply · KV, lock, timer</p>
+        <p><b>Lesson</b>Carry one id through every step. A hop that drops it can only be followed by guesswork.</p>
+      </div>
+    </section>
+
+    <!-- 9.2 A channel manager -->
+    <section class="slide prod" data-chapter="In production" data-title="A channel manager">
+      <header class="s-head">
+        <p class="eyebrow">In production · a channel manager and Gate</p>
+        <h2>One door in, one door out, and a gate to the travel sites.</h2>
+      </header>
+      <div class="card prod-card">
+        <div class="fd-scroll"><div class="fd" id="fd-channel"></div></div>
+        <div class="fd-bar">
+          <p class="fd-caption"></p>
+          <div class="btns">
+            <button class="btn primary" data-play="op">An operation</button>
+            <button class="btn" data-play="push">A calendar push</button>
+            <button class="btn" data-play="burst">A burst of hints</button>
+          </div>
+        </div>
+      </div>
+      <div class="prod-foot">
+        <p><b>Uses</b>partition by state · ack + push + KV in one transaction · conflation · timers · ephemeral request/reply · Gate: kv.incr as the rate limit</p>
+        <p><b>Lesson</b>A message is a key, not a payload. A partition whose messages carried every past version kept growing.</p>
+      </div>
+    </section>
+
+    <!-- 9.3 A tracing service -->
+    <section class="slide prod" data-chapter="In production" data-title="A tracing service">
+      <header class="s-head">
+        <p class="eyebrow">In production · a tracing service</p>
+        <h2>Tracing on QueenMQ and object storage, nothing else.</h2>
+      </header>
+      <div class="card prod-card">
+        <div class="fd-scroll"><div class="fd" id="fd-tracing"></div></div>
+        <div class="fd-bar">
+          <p class="fd-caption"></p>
+          <div class="btns">
+            <button class="btn primary" data-play="trace">A trace</button>
+            <button class="btn" data-play="read">The dashboard reads</button>
+          </div>
+        </div>
+      </div>
+      <div class="prod-foot">
+        <p><b>Uses</b>partition = trace id · dedup by event key · a session-window stream · an archiver group · reads by offset · KV</p>
+        <p><b>Lesson</b>Keep big bodies out of window state: very large traces held whole in a window pushed the brokers past their memory. Since 2.7.0 QueenMQ reads state without copying it.</p>
+      </div>
+    </section>
+
+    <!-- 9.1 What we removed -->
+    <section class="slide split" data-chapter="The end" data-title="What we removed">
+      <header class="s-head">
+        <p class="eyebrow">The end</p>
+        <h2>Eight systems became one broker.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Retries and dead letters: a lease and an answer per message.</li>
+          <li>Outbox and idempotency table: one commit.</li>
+          <li>Reminders table and cron: timers.</li>
+          <li>Redis locks: a lock, and a guard on the commit.</li>
+          <li>Reply queues: ephemeral queues.</li>
+          <li>A stream processor and a search index: the feed.</li>
+          <li>Debezium and Connect: connectors in the broker.</li>
+        </ul>
+        <div class="why"><b>Why</b><p>Each box was a system to run, and a seam where a step could come apart.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="removed"></div>
+      </div>
+    </section>
+
+    <!-- 9.2 The Kafka port -->
+    <section class="slide split" data-chapter="The end" data-title="Move one service at a time">
+      <header class="s-head">
+        <p class="eyebrow">The end</p>
+        <h2>Move one service at a time.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code">docker run -p <span class="n">6632</span>:<span class="n">6632</span> -p <span class="n">127.0.0.1</span>:<span class="n">9092</span>:<span class="n">9092</span> \
+  -v /var/lib/queen:/var/lib/queen/raft \
+  -e <span class="f">QUEEN_KAFKA_EMBEDDED</span>=<span class="n">true</span> \
+  -e <span class="f">QUEEN_KAFKA_ADVERTISED_ADDR</span>=<span class="s">127.0.0.1:9092</span> \
+  ghcr.io/queen-mq/queen:<span class="n">2.8.1</span></pre>
+        <ul class="facts">
+          <li>Kafka producers, consumers and admin tools work as they are: change <code>bootstrap.servers</code>, nothing else.</li>
+          <li>A topic is a queue, a Kafka consumer group is a QueenMQ group. Kafka clients and QueenMQ clients read and write the same data.</li>
+          <li>From RabbitMQ or SQS there is no port: move one service at a time with the SDKs.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="port"></div>
+      </div>
+    </section>
+
+    <!-- 9.3 When Kafka is still right -->
+    <section class="slide split" data-chapter="The end" data-title="Unless it is a firehose">
+      <header class="s-head">
+        <p class="eyebrow">The end</p>
+        <h2>Build on QueenMQ, unless it is a firehose.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>One leader orders all of a queue's writes, and more nodes do not raise that. Transactions too: about 12,900 a second per tenant on 16 vCPU.</li>
+          <li>Three 24-vCPU nodes, one queue of 1,000 partitions: QueenMQ carried 3,000,000 msg/s at a p99 of 15&nbsp;ms, and not 5,500,000. Kafka carried about 8,000,000 at 12&nbsp;ms, answering before any fsync.</li>
+          <li>Kafka's lead ends as partitions multiply: at 10,000 it used twice QueenMQ's CPU, and it did not carry 50,000.</li>
+        </ul>
+        <div class="why"><b>Why</b><p>One leader per tenant is what makes a transaction one log entry. That is the trade: a ceiling, for steps that cannot come apart.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo">
+          <table class="opts compare">
+            <thead><tr><th>you are building</th><th>use</th></tr></thead>
+            <tbody>
+              <tr><td>services that handle events per customer, order or booking</td><td>QueenMQ: a partition each</td></tr>
+              <tr><td>steps that must commit whole: the ack, the state, the next event, the timer</td><td>QueenMQ: one transaction</td></tr>
+              <tr><td>routing by content</td><td>QueenMQ: a router step reads, picks the queue, pushes and acks in one commit</td></tr>
+              <tr><td>only the latest value per key</td><td>QueenMQ: conflation, or KV</td></tr>
+              <tr><td>a step that needs SQL to decide</td><td>QueenMQ: query your database, commit the step with KV conditions</td></tr>
+              <tr><td>long workflows</td><td>QueenMQ: a transaction per step, KV state, timers for the waits</td></tr>
+              <tr><td>a firehose: millions of messages a second, where every millisecond counts</td><td class="warn">Kafka or Pulsar</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 9.4 Try it -->
+    <section class="slide cover title" data-chapter="The end" data-title="Try it">
+      <div>
+        <p class="eyebrow">The end</p>
+        <h1>Try it in<br>five minutes</h1>
+<pre class="code try">docker run -p <span class="n">6632</span>:<span class="n">6632</span> ghcr.io/queen-mq/queen:<span class="n">2.8.1</span>
+npm install queen-mq</pre>
+        <p class="lead" style="margin-top:18px">The dashboard is at <strong>localhost:6632</strong>, served by the same process.</p>
+        <ul class="proofs">
+          <li>queenmq.com</li>
+          <li>the five-minute guide</li>
+          <li>the little book (PDF)</li>
+          <li>226 Jepsen tests</li>
+        </ul>
+      </div>
+      <figure class="scene" aria-hidden="true">
+        <img class="scene-dark" src="/queen-scene-on-dark.svg" alt="">
+        <img class="scene-light" src="/queen-scene-on-light.svg" alt="">
+      </figure>
+    </section>
+    <div class="chrome-bot">
+      <button class="icon-btn" id="prev" aria-label="Previous slide"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+      <div class="prog" id="prog"></div>
+      <button class="icon-btn" id="next" aria-label="Next slide"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+      <span class="keys"><kbd>←</kbd> <kbd>→</kbd> to move · <kbd>F</kbd> full screen</span>
+    </div>
+  </div>
+</div>
+
+<script src="deck.js"></script>
+</body>
+</html>

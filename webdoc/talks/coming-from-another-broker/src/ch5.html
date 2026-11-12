@@ -1,0 +1,80 @@
+
+    <!-- 5.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 5 · Only one worker" data-title="Only one worker">
+      <div>
+        <p class="eyebrow">Chapter 5 of 8</p>
+        <h1>Only one<br>worker</h1>
+        <p class="lead">Some work no message starts: the nightly report, the channel sync. A cron job on three replicas runs it three times. A <strong>lock</strong> runs it once, and a <strong>guard</strong> keeps out a holder that froze.</p>
+        <ol class="agenda">
+          <li><span>5.1</span>Kafka today: a lock on the side</li>
+          <li><span>5.2</span>A lock and a guard</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">lock&nbsp; nightly-report</p>
+        <table class="opts">
+          <tbody>
+            <tr><td>holder</td><td class="v2">worker-b</td></tr>
+            <tr><td>since · until</td><td class="v2">02:00:00 · 02:00:30, renewed</td></tr>
+            <tr><td>token</td><td class="v2">42</td></tr>
+          </tbody>
+        </table>
+        <div class="workers" style="margin-top:14px">
+          <div class="worker"><b>worker-a</b><span>acquire → false</span></div>
+          <div class="worker holds"><b>worker-b</b><span>holds it</span></div>
+          <div class="worker"><b>worker-c</b><span>acquire → false</span></div>
+        </div>
+        <p class="fig-cap">Three replicas, one holder.</p>
+      </figure>
+    </section>
+
+    <!-- 5.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 5 · Only one worker" data-title="Today: a lock on the side">
+      <header class="s-head">
+        <p class="eyebrow">5.1 · Today, on Kafka</p>
+        <h2>A lock that expires does not stop its holder.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Kafka has no lock. Teams take one in Redis, ZooKeeper or the database.</li>
+          <li>A lock with a TTL can expire during a GC pause or a network stall, and nobody tells the holder.</li>
+          <li>Another worker takes it. The old holder wakes up and writes anyway.</li>
+          <li>The fix is a fencing token that the storage checks. Your code, again.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>Single active consumer gives a queue one reader. Work that no message starts still needs a lock.</dd><dt>SQS</dt><dd>No lock: a conditional write in another store, often DynamoDB.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-lock"></div>
+      </div>
+    </section>
+
+    <!-- 5.2 Lock + guard -->
+    <section class="slide split" data-chapter="Chapter 5 · Only one worker" data-title="A lock and a guard">
+      <header class="s-head">
+        <p class="eyebrow">5.2 · QueenMQ</p>
+        <h2>The guard keeps out a holder that froze.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">const</span> lock = queen.<span class="f">lock</span>(<span class="s">'nightly-report'</span>,
+  { ttl: <span class="s">'30s'</span> })
+<span class="k">if</span> (!(<span class="k">await</span> lock.<span class="f">acquire</span>({ wait: <span class="s">'5s'</span> })))
+  <span class="k">return</span>             <span class="c">// another worker has it</span>
+<span class="k">try</span> {
+  <span class="k">const</span> r = <span class="k">await</span> queen.<span class="f">transaction</span>()
+    .<span class="f">guard</span>(lock)    <span class="c">// only while it is ours</span>
+    .<span class="f">queue</span>(<span class="s">'reports'</span>)
+    .<span class="f">push</span>([{ transactionId: <span class="s">'report-11-11'</span>,
+      data: report }])
+    .<span class="f">commit</span>()
+} <span class="k">finally</span> {
+  <span class="k">await</span> lock.<span class="f">release</span>()
+}</pre>
+        <ul class="facts">
+          <li>The handle renews the lock every third of its lifetime. A frozen process cannot, and <code>.guard(lock)</code> rolls its commit back.</li>
+          <li><code>queen.semaphore(name, n)</code>: n holders. Outside QueenMQ, fence with <code>lock.token</code>.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="q-lock"></div>
+      </div>
+    </section>

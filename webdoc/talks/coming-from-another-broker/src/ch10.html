@@ -1,0 +1,99 @@
+
+    <!-- 9.1 What we removed -->
+    <section class="slide split" data-chapter="The end" data-title="What we removed">
+      <header class="s-head">
+        <p class="eyebrow">The end</p>
+        <h2>Eight systems became one broker.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Retries and dead letters: a lease and an answer per message.</li>
+          <li>Outbox and idempotency table: one commit.</li>
+          <li>Reminders table and cron: timers.</li>
+          <li>Redis locks: a lock, and a guard on the commit.</li>
+          <li>Reply queues: ephemeral queues.</li>
+          <li>A stream processor and a search index: the feed.</li>
+          <li>Debezium and Connect: connectors in the broker.</li>
+        </ul>
+        <div class="why"><b>Why</b><p>Each box was a system to run, and a seam where a step could come apart.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="removed"></div>
+      </div>
+    </section>
+
+    <!-- 9.2 The Kafka port -->
+    <section class="slide split" data-chapter="The end" data-title="Move one service at a time">
+      <header class="s-head">
+        <p class="eyebrow">The end</p>
+        <h2>Move one service at a time.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code">docker run -p <span class="n">6632</span>:<span class="n">6632</span> -p <span class="n">127.0.0.1</span>:<span class="n">9092</span>:<span class="n">9092</span> \
+  -v /var/lib/queen:/var/lib/queen/raft \
+  -e <span class="f">QUEEN_KAFKA_EMBEDDED</span>=<span class="n">true</span> \
+  -e <span class="f">QUEEN_KAFKA_ADVERTISED_ADDR</span>=<span class="s">127.0.0.1:9092</span> \
+  ghcr.io/queen-mq/queen:<span class="n">2.8.1</span></pre>
+        <ul class="facts">
+          <li>Kafka producers, consumers and admin tools work as they are: change <code>bootstrap.servers</code>, nothing else.</li>
+          <li>A topic is a queue, a Kafka consumer group is a QueenMQ group. Kafka clients and QueenMQ clients read and write the same data.</li>
+          <li>From RabbitMQ or SQS there is no port: move one service at a time with the SDKs.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="port"></div>
+      </div>
+    </section>
+
+    <!-- 9.3 When Kafka is still right -->
+    <section class="slide split" data-chapter="The end" data-title="Unless it is a firehose">
+      <header class="s-head">
+        <p class="eyebrow">The end</p>
+        <h2>Build on QueenMQ, unless it is a firehose.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>One leader orders all of a queue's writes, and more nodes do not raise that. Transactions too: about 12,900 a second per tenant on 16 vCPU.</li>
+          <li>Three 24-vCPU nodes, one queue of 1,000 partitions: QueenMQ carried 3,000,000 msg/s at a p99 of 15&nbsp;ms, and not 5,500,000. Kafka carried about 8,000,000 at 12&nbsp;ms, answering before any fsync.</li>
+          <li>Kafka's lead ends as partitions multiply: at 10,000 it used twice QueenMQ's CPU, and it did not carry 50,000.</li>
+        </ul>
+        <div class="why"><b>Why</b><p>One leader per tenant is what makes a transaction one log entry. That is the trade: a ceiling, for steps that cannot come apart.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo">
+          <table class="opts compare">
+            <thead><tr><th>you are building</th><th>use</th></tr></thead>
+            <tbody>
+              <tr><td>services that handle events per customer, order or booking</td><td>QueenMQ: a partition each</td></tr>
+              <tr><td>steps that must commit whole: the ack, the state, the next event, the timer</td><td>QueenMQ: one transaction</td></tr>
+              <tr><td>routing by content</td><td>QueenMQ: a router step reads, picks the queue, pushes and acks in one commit</td></tr>
+              <tr><td>only the latest value per key</td><td>QueenMQ: conflation, or KV</td></tr>
+              <tr><td>a step that needs SQL to decide</td><td>QueenMQ: query your database, commit the step with KV conditions</td></tr>
+              <tr><td>long workflows</td><td>QueenMQ: a transaction per step, KV state, timers for the waits</td></tr>
+              <tr><td>a firehose: millions of messages a second, where every millisecond counts</td><td class="warn">Kafka or Pulsar</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 9.4 Try it -->
+    <section class="slide cover title" data-chapter="The end" data-title="Try it">
+      <div>
+        <p class="eyebrow">The end</p>
+        <h1>Try it in<br>five minutes</h1>
+<pre class="code try">docker run -p <span class="n">6632</span>:<span class="n">6632</span> ghcr.io/queen-mq/queen:<span class="n">2.8.1</span>
+npm install queen-mq</pre>
+        <p class="lead" style="margin-top:18px">The dashboard is at <strong>localhost:6632</strong>, served by the same process.</p>
+        <ul class="proofs">
+          <li>queenmq.com</li>
+          <li>the five-minute guide</li>
+          <li>the little book (PDF)</li>
+          <li>226 Jepsen tests</li>
+        </ul>
+      </div>
+      <figure class="scene" aria-hidden="true">
+        <img class="scene-dark" src="__PUBLIC__/queen-scene-on-dark.svg" alt="">
+        <img class="scene-light" src="__PUBLIC__/queen-scene-on-light.svg" alt="">
+      </figure>
+    </section>

@@ -1,0 +1,134 @@
+
+    <!-- 2.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="Work it, fail it, retry it">
+      <div>
+        <p class="eyebrow">Chapter 2 of 8</p>
+        <h1>Work it,<br>fail it, retry it</h1>
+        <p class="lead">Kafka gives a group <strong>one offset per partition</strong>. QueenMQ gives every message a lease, an answer, retries and a dead-letter queue, in the broker.</p>
+        <ol class="agenda">
+          <li><span>2.1</span>Kafka today: you commit a position</li>
+          <li><span>2.2</span>A lease, an answer, a retry</li>
+          <li><span>2.3</span>Batches, partitions, concurrency</li>
+          <li><span>2.4</span>Replay: new groups and seek</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">queue&nbsp; bookings&nbsp; · group&nbsp; confirm</p>
+        <div class="lanes" id="c2-lanes"></div>
+        <div class="workers" style="margin-top:14px">
+          <div class="worker holds"><b>worker-a</b><span>holds 9137 #3 · lease 30 s</span></div>
+          <div class="worker"><b>worker-b</b><span>holds booking-2203 #6</span></div>
+        </div>
+        <div class="listbox" style="margin-top:10px">
+          <span class="lb-title">Dead-letter queue · confirm</span>
+          <span class="lb-row">booking-4410 #2 · card service timeout · 5 failures</span>
+        </div>
+        <p class="fig-cap">Every message: a lease, an answer, and a place to go when it keeps failing.</p>
+      </figure>
+    </section>
+
+    <!-- 2.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="Today: one offset per partition">
+      <header class="s-head">
+        <p class="eyebrow">2.1 · Today, on Kafka</p>
+        <h2>One offset per partition. A failure blocks it, or breaks order.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// KafkaJS: you commit a position, not an answer</span>
+<span class="k">const</span> c = kafka.<span class="f">consumer</span>({ groupId: <span class="s">'confirm'</span> })
+<span class="k">await</span> c.<span class="f">subscribe</span>({ topics: [<span class="s">'bookings'</span>] })
+<span class="k">await</span> c.<span class="f">run</span>({
+  autoCommit: <span class="n">false</span>,
+  eachMessage: <span class="k">async</span> (m) <span class="k">=&gt;</span> {
+    <span class="k">await</span> <span class="f">confirm</span>(m.message) <span class="c">// throw: blocks</span>
+    <span class="k">const</span> n = <span class="f">BigInt</span>(m.message.offset) + <span class="n">1n</span>
+    <span class="k">await</span> c.<span class="f">commitOffsets</span>([{ topic: m.topic,
+      partition: m.partition, offset: <span class="s">`${</span>n<span class="s">}`</span> }])
+  },
+})</pre>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>An ack per message, and dead letters after a delivery limit (quorum queues). The order across consumers is not kept.</dd><dt>SQS</dt><dd>A visibility timeout per message, a lease, and a redrive to a DLQ after maxReceiveCount. In a FIFO queue a failing message holds its group, as in QueenMQ.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-retry"></div>
+      </div>
+    </section>
+
+    <!-- 2.2 Lease, ack, retry, DLQ -->
+    <section class="slide split" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="A lease, an answer, a retry">
+      <header class="s-head">
+        <p class="eyebrow">2.2 · QueenMQ</p>
+        <h2>Every message gets a lease and an answer.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">group</span>(<span class="s">'confirm'</span>)
+  .<span class="f">each</span>()
+  .<span class="f">consume</span>(<span class="k">async</span> (msg) <span class="k">=&gt;</span> {
+    <span class="k">await</span> <span class="f">confirm</span>(msg.data)  <span class="c">// throw = failed</span>
+  })  <span class="c">// return = completed</span></pre>
+        <ul class="facts">
+          <li>A pop leases the message to one worker for <code>leaseTime</code> (30&nbsp;s). A worker that dies: the lease runs out, another worker gets it, and no retry is spent.</li>
+          <li>A throw is a <code>failed</code> answer: the message comes back after <code>retryDelay</code> (5&nbsp;s), and only its booking waits.</li>
+          <li>After <code>retryLimit</code> failures (5), it goes to the dead-letter queue with its error, and the booking moves on.</li>
+          <li>Every group gets every message and its workers compete, as in Kafka. Two more answers: <code>retry</code> (no retry spent) and <code>dlq</code> (now).</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="q-retry"></div>
+      </div>
+    </section>
+
+    <!-- 2.3 Batches -->
+    <section class="slide split" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="Batches, partitions, concurrency">
+      <header class="s-head">
+        <p class="eyebrow">2.3 · QueenMQ</p>
+        <h2>Fewer round trips, the same order.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">group</span>(<span class="s">'confirm'</span>)
+  .<span class="f">batch</span>(<span class="n">100</span>)        <span class="c">// messages per pop</span>
+  .<span class="f">partitions</span>(<span class="n">10</span>)    <span class="c">// bookings per pop</span>
+  .<span class="f">concurrency</span>(<span class="n">4</span>)    <span class="c">// handlers at once</span>
+  .<span class="f">renewLease</span>(<span class="n">true</span>, <span class="n">10000</span>)
+  .<span class="f">each</span>()
+  .<span class="f">consume</span>(confirm)</pre>
+        <ul class="facts">
+          <li><code>.partitions(N)</code>: one pop drains up to N bookings, each one still in order.</li>
+          <li>Leave <code>batch</code> and <code>partitions</code> out, and the broker sizes every pop (autopilot).</li>
+          <li><code>.renewLease(true, 10000)</code> keeps the lease while a long handler runs.</li>
+          <li><code>.partition('booking-9137')</code> pops one booking only.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="drain"></div>
+      </div>
+    </section>
+
+    <!-- 2.4 Replay -->
+    <section class="slide split" data-chapter="Chapter 2 · Work it, fail it, retry it" data-title="Replay: new groups and seek">
+      <header class="s-head">
+        <p class="eyebrow">2.4 · QueenMQ</p>
+        <h2>The history stays. A seek moves a group.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// a new group can start in the past</span>
+<span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'bookings'</span>)
+  .<span class="f">group</span>(<span class="s">'audit'</span>)
+  .<span class="f">subscriptionFrom</span>(<span class="s">'2026-11-10T10:00:00Z'</span>)
+  .<span class="f">consume</span>(audit)
+
+<span class="c">// a group that exists moves with a seek</span>
+<span class="k">await</span> queen.admin.<span class="f">seekConsumerGroup</span>(
+  <span class="s">'confirm'</span>, <span class="s">'bookings'</span>,
+  { timestamp: <span class="s">'2026-11-10T10:00:00Z'</span> })
+<span class="c">// { toEnd: true }: skip all it has not read</span></pre>
+        <ul class="facts">
+          <li>An answer moves the group's cursor. The message stays until retention removes it.</li>
+        </ul>
+        <div class="why trap"><b>Trap</b><p>A new group starts at the end (<code>new</code>), like <code>auto.offset.reset=latest</code>. <code>.subscriptionMode('all')</code> reads the history; <code>.subscriptionFrom(time)</code> starts at a time.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="seek"></div>
+      </div>
+    </section>

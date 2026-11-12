@@ -1,0 +1,165 @@
+
+    <!-- 7.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 7 · The whole history, live" data-title="The whole history, live">
+      <div>
+        <p class="eyebrow">Chapter 7 of 8</p>
+        <h1>The whole history,<br>live</h1>
+        <p class="lead">Every push of every queue, in the order the log committed it: <strong>one feed</strong>, to ask what happened and to compute as it happens.</p>
+        <ol class="agenda">
+          <li><span>7.1</span>Kafka today: ask three topics</li>
+          <li><span>7.2</span>The feed</li>
+          <li><span>7.3</span>A join between queues</li>
+          <li><span>7.4</span>Patterns, joins, windows</li>
+          <li><span>7.5</span>Live state and shards</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">queen.feed()</p>
+        <table class="opts feed-table">
+          <thead><tr><th>position</th><th>queue</th><th>partition</th><th>data</th></tr></thead>
+          <tbody>
+            <tr><td>1041</td><td>bookings</td><td>booking-9137</td><td>created</td></tr>
+            <tr><td>1042</td><td>bookings</td><td>booking-4410</td><td>created</td></tr>
+            <tr><td>1043</td><td>payments</td><td>booking-9137</td><td>paid · €387</td></tr>
+            <tr><td>1043</td><td>emails</td><td>booking-9137</td><td>confirm-mail</td></tr>
+            <tr><td>1044</td><td>availability</td><td>hotel-7</td><td>9 rooms</td></tr>
+          </tbody>
+        </table>
+        <p class="fig-cap">One position across every queue. The pushes of one transaction share it.</p>
+      </figure>
+    </section>
+
+    <!-- 7.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="Today: ask three topics">
+      <header class="s-head">
+        <p class="eyebrow">7.1 · Today, on Kafka</p>
+        <h2>What happened to booking-9137? Ask three topics.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Each topic is its own log with its own offsets. There is no order across topics.</li>
+          <li>Finding one booking means reading every partition of every topic, or exporting to a search index first.</li>
+          <li>Stream processing is Kafka Streams: Java only, state in RocksDB and changelog topics, repartition topics to join by key.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ, SQS</dt><dd>A message is gone once it is acked: no history to ask (RabbitMQ Streams aside).</dd><dt>Pulsar</dt><dd>History is kept; stream processing is Pulsar Functions or Flink.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-find"></div>
+      </div>
+    </section>
+
+    <!-- 7.2 The feed -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="The feed">
+      <header class="s-head">
+        <p class="eyebrow">7.2 · QueenMQ</p>
+        <h2>One log of everything, in commit order.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="c">// what happened to one booking, in the last day</span>
+<span class="k">for await</span> (<span class="k">const</span> e <span class="k">of</span> queen.<span class="f">feed</span>({
+  partitions: [<span class="s">'booking-9137'</span>],
+  since: <span class="s">'1d'</span>, follow: <span class="n">false</span>,
+})) {
+  console.<span class="f">log</span>(e.position, e.queue, e.data)
+}
+
+<span class="c">// live: every Italian booking from now on</span>
+queen.<span class="f">feed</span>({ queues: [<span class="s">'bookings'</span>],
+  where: [[<span class="s">'data.country'</span>, <span class="s">'='</span>, <span class="s">'IT'</span>]] })</pre>
+        <ul class="facts">
+          <li>One <code>position</code> across all queues. Nothing is leased or acked: every group still gets its messages.</li>
+          <li>Followers serve it, not the leader. <code>where</code> is checked by the broker.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="feed"></div>
+      </div>
+    </section>
+
+    <!-- 7.3 A join between queues -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="A join between queues">
+      <header class="s-head">
+        <p class="eyebrow">7.3 · QueenMQ</p>
+        <h2>Join two queues by booking.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> Stream
+  .<span class="f">fromFeed</span>(queen,
+    { queues: [<span class="s">'bookings'</span>, <span class="s">'payments'</span>] })
+  .<span class="f">join</span>({
+    sides: { booking: <span class="s">'bookings'</span>,
+             paid: <span class="s">'payments'</span> },
+    within: <span class="s">'1h'</span>,
+    select: (got, id) <span class="k">=&gt;</span> ({ id,
+      amount: got.paid.data.amount }),
+    onTimeout: (got, missing, id) <span class="k">=&gt;</span>
+      ({ id, missing }),
+  })
+  .<span class="f">to</span>(queen.<span class="f">queue</span>(<span class="s">'paid-bookings'</span>))
+  .<span class="f">run</span>({ queryId: <span class="s">'paid-bookings'</span> })</pre>
+        <ul class="facts">
+          <li>The key is the partition: booking-9137 in bookings meets booking-9137 in payments, in either order.</li>
+          <li>The position commits with the outputs. After a restart the open joins come back from a snapshot, and nothing is sent twice.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="join"></div>
+      </div>
+    </section>
+
+    <!-- 7.4 Patterns -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="Patterns, joins, windows">
+      <header class="s-head">
+        <p class="eyebrow">7.4 · QueenMQ</p>
+        <h2>A booking, then its payment within 15 minutes.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code">Stream.<span class="f">fromFeed</span>(queen,
+    { queues: [<span class="s">'bookings'</span>, <span class="s">'payments'</span>] })
+  .<span class="f">pattern</span>({
+    key: (m) <span class="k">=&gt;</span> m.partition,
+    start: (m) <span class="k">=&gt;</span> m.queue === <span class="s">'bookings'</span>,
+    then: (m) <span class="k">=&gt;</span> m.queue === <span class="s">'payments'</span>,
+    within: <span class="s">'15m'</span>,
+    onMatch: (b) <span class="k">=&gt;</span> ({ paid: b.partition }),
+    onTimeout: (b) <span class="k">=&gt;</span> ({ remind: b.partition }),
+  })
+  .<span class="f">to</span>(queen.<span class="f">queue</span>(<span class="s">'payment-followups'</span>))
+  .<span class="f">run</span>({ queryId: <span class="s">'payment-followups'</span> })</pre>
+        <ul class="facts">
+          <li>Chapter 4's reminder, as a stream: a booking, then its payment, or a reminder. <code>.joinTable</code> adds the latest row of a table queue to each message.</li>
+          <li>Windows run on the log's clock: a quiet feed still closes them on time.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="pattern"></div>
+      </div>
+    </section>
+
+    <!-- 7.5 Live state and shards -->
+    <section class="slide split" data-chapter="Chapter 7 · The whole history, live" data-title="Live state and shards">
+      <header class="s-head">
+        <p class="eyebrow">7.5 · QueenMQ</p>
+        <h2>Read a stream's state live, from any process.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> Stream
+  .<span class="f">fromFeed</span>(queen, { queues: [<span class="s">'availability'</span>] })
+  .<span class="f">windowTumbling</span>({ seconds: <span class="n">60</span> })
+  .<span class="f">aggregate</span>({ count: () <span class="k">=&gt;</span> <span class="n">1</span> })
+  .<span class="f">name</span>(<span class="s">'perMinute'</span>)
+  .<span class="f">run</span>({ queryId: <span class="s">'per-minute'</span>, shards: <span class="n">4</span> })
+
+<span class="c">// anywhere else</span>
+<span class="k">const</span> { found, value } = <span class="k">await</span> Stream
+  .<span class="f">view</span>(queen, <span class="s">'per-minute'</span>)
+  .<span class="f">get</span>(<span class="s">'perMinute'</span>, <span class="s">'hotel-7'</span>)</pre>
+        <ul class="facts">
+          <li><code>shards: 4</code>: four processes, each with its partitions, its position and its lock.</li>
+          <li>Event time: a step can order messages by a time inside them (<code>eventTime</code>, <code>allowedLateness</code>).</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="view"></div>
+      </div>
+    </section>

@@ -1,0 +1,116 @@
+
+    <!-- 8.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="Postgres in, Postgres out">
+      <div>
+        <p class="eyebrow">Chapter 8 of 8</p>
+        <h1>Postgres in,<br>Postgres out</h1>
+        <p class="lead">The broker streams a table into a queue, and a queue into a table. <strong>No Debezium, no Connect cluster</strong>, no consumer to write.</p>
+        <ol class="agenda">
+          <li><span>8.1</span>Kafka today: three systems to move a row</li>
+          <li><span>8.2</span>The source</li>
+          <li><span>8.3</span>The sink</li>
+          <li><span>8.4</span>Four things to know</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">one HTTP call each, on the broker</p>
+        <div class="flow">
+          <div class="box">PostgreSQL<small>public.bookings</small></div>
+          <span class="arrow">↓ source · logical replication</span>
+          <div class="box mono">queue bookings<small>a partition per row key</small></div>
+          <span class="arrow">↓ sink · a group the broker runs</span>
+          <div class="box">PostgreSQL<small>public.bookings_report</small></div>
+        </div>
+        <p class="fig-cap">Both run on every node of the cluster, with exactly-once effects.</p>
+      </figure>
+    </section>
+
+    <!-- 8.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="Today: three systems to move a row">
+      <header class="s-head">
+        <p class="eyebrow">8.1 · Today, on Kafka</p>
+        <h2>Debezium, Connect, Kafka: three systems to move a row.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Change data capture is Debezium, running on a Kafka Connect cluster, writing to Kafka.</li>
+          <li>Back into a table: a JDBC sink connector, or a consumer you write.</li>
+          <li>Each one has its own configuration, its own offsets and its own ways to fail.</li>
+        </ul>
+        <div class="why elsewhere one"><b>Elsewhere</b><p>Debezium Server, a process of its own, writes changes to RabbitMQ, Kinesis, Pub/Sub and others.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-cdc"></div>
+      </div>
+    </section>
+
+    <!-- 8.2 The source -->
+    <section class="slide split" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="The source">
+      <header class="s-head">
+        <p class="eyebrow">8.2 · QueenMQ</p>
+        <h2>A table becomes a queue, in commit order.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">PUT</span> /api/v1/connectors/bookings-src
+{
+  <span class="s">"kind"</span>: <span class="s">"source"</span>,
+  <span class="s">"connection"</span>: {
+    <span class="s">"host"</span>: <span class="s">"pg"</span>, <span class="s">"database"</span>: <span class="s">"app"</span>,
+    <span class="s">"user"</span>: <span class="s">"queen"</span>, <span class="s">"password"</span>: <span class="s">"…"</span> },
+  <span class="s">"source"</span>: { <span class="s">"tables"</span>: [
+    { <span class="s">"table"</span>: <span class="s">"public.bookings"</span>,
+      <span class="s">"queue"</span>: <span class="s">"bookings"</span> } ] }
+}</pre>
+        <ul class="facts">
+          <li>Each committed change is a message, in the partition named after the row's key. One Postgres transaction is one QueenMQ transaction.</li>
+          <li>The WAL position commits with the messages: after a crash, nothing is sent twice.</li>
+          <li>Needs PostgreSQL 17+, <code>wal_level=logical</code>, and <code>QUEEN_ENCRYPTION_KEY</code> on the broker.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="pg-src"></div>
+      </div>
+    </section>
+
+    <!-- 8.3 The sink -->
+    <section class="slide split" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="The sink">
+      <header class="s-head">
+        <p class="eyebrow">8.3 · QueenMQ</p>
+        <h2>A queue becomes a table, exactly once.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">PUT</span> /api/v1/connectors/bookings-report
+{
+  <span class="s">"kind"</span>: <span class="s">"sink"</span>,
+  <span class="s">"connection"</span>: { … },
+  <span class="s">"sink"</span>: { <span class="s">"queue"</span>: <span class="s">"bookings"</span>,
+            <span class="s">"table"</span>: <span class="s">"public.bookings_report"</span>,
+            <span class="s">"mode"</span>: <span class="s">"upsert"</span> }
+}</pre>
+        <table class="opts compare">
+          <tbody>
+            <tr><td>append</td><td>each message is a new row</td></tr>
+            <tr><td>upsert</td><td>insert, or update the row with its key, with the columns it names</td></tr>
+            <tr><td>cdc</td><td>a source event, applied: insert, update, delete</td></tr>
+            <tr><td>sql</td><td>your statement, with parameters from the message</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="pg-sink"></div>
+      </div>
+    </section>
+
+    <!-- 8.4 Four things to know -->
+    <section class="slide split" data-chapter="Chapter 8 · Postgres in, Postgres out" data-title="Four things to know">
+      <header class="s-head">
+        <p class="eyebrow">8.4 · QueenMQ</p>
+        <h2>Four things to know before you turn it on.</h2>
+      </header>
+      <div class="cards4">
+        <div class="card"><p class="sub-label">The slot keeps WAL</p><p>A replication slot keeps WAL while the source is down, and can fill the database's disk. Set <code>max_slot_wal_keep_size</code>, and alert on <code>queen_pg_source_slot_lag_bytes</code>.</p></div>
+        <div class="card"><p class="sub-label">Every table needs a key</p><p>A primary key, or a unique index as replica identity. A table without one is refused.</p></div>
+        <div class="card"><p class="sub-label">A refused row</p><p>A message Postgres refuses (a constraint, a wrong type) is tried a few times, then dead-lettered with the database's error. Its partition goes on.</p></div>
+        <div class="card"><p class="sub-label">Key = partition</p><p>In <code>upsert</code> and <code>cdc</code> mode, keep the table's key aligned with the partition. Order holds inside a partition: two partitions writing one row would race.</p></div>
+      </div>
+    </section>

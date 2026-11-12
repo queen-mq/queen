@@ -1,0 +1,93 @@
+
+    <!-- 9.0 Cover -->
+    <section class="slide cover" data-chapter="In production" data-title="In production">
+      <div>
+        <p class="eyebrow">In production</p>
+        <h1>Three systems<br>we run on QueenMQ</h1>
+        <p class="lead">Not a booking we made up: <strong>a guest chat, a channel manager and a tracing service</strong>, as they run today. Names are simplified; the flows are real.</p>
+        <ol class="agenda">
+          <li><span>9.1</span>A guest chat: a partition per conversation</li>
+          <li><span>9.2</span>A channel manager: one door in, one door out, a gate</li>
+          <li><span>9.3</span>A tracing service: QueenMQ and object storage</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <table class="opts compare">
+          <thead><tr><th>system</th><th>it shows</th></tr></thead>
+          <tbody>
+            <tr><td>guest chat</td><td>partitions · one commit per step · groups · windowBuffer · ephemeral request/reply</td></tr>
+            <tr><td>channel manager</td><td>partitions by state · conflation · timers · KV as a rate limit</td></tr>
+            <tr><td>tracing service</td><td>a stream with session windows · groups · reads by offset</td></tr>
+          </tbody>
+        </table>
+        <p class="fig-cap">Each flow as it runs; the names are not the real ones.</p>
+      </figure>
+    </section>
+
+    <!-- 9.1 A guest chat -->
+    <section class="slide prod" data-chapter="In production" data-title="A guest chat">
+      <header class="s-head">
+        <p class="eyebrow">In production · a guest chat</p>
+        <h2>One conversation, one partition, one commit per step.</h2>
+      </header>
+      <div class="card prod-card">
+        <div class="fd-scroll"><div class="fd" id="fd-chat"></div></div>
+        <div class="fd-bar">
+          <p class="fd-caption"></p>
+          <div class="btns">
+            <button class="btn primary" data-play="guest">A guest writes</button>
+            <button class="btn" data-play="ai">The AI answers</button>
+            <button class="btn" data-play="rpc">Ask the channel manager</button>
+          </div>
+        </div>
+      </div>
+      <div class="prod-foot">
+        <p><b>Uses</b>partition = chat · ack + push in one transaction · a group per client · DLQ · windowBuffer · ephemeral request/reply · KV, lock, timer</p>
+        <p><b>Lesson</b>Carry one id through every step. A hop that drops it can only be followed by guesswork.</p>
+      </div>
+    </section>
+
+    <!-- 9.2 A channel manager -->
+    <section class="slide prod" data-chapter="In production" data-title="A channel manager">
+      <header class="s-head">
+        <p class="eyebrow">In production · a channel manager and Gate</p>
+        <h2>One door in, one door out, and a gate to the travel sites.</h2>
+      </header>
+      <div class="card prod-card">
+        <div class="fd-scroll"><div class="fd" id="fd-channel"></div></div>
+        <div class="fd-bar">
+          <p class="fd-caption"></p>
+          <div class="btns">
+            <button class="btn primary" data-play="op">An operation</button>
+            <button class="btn" data-play="push">A calendar push</button>
+            <button class="btn" data-play="burst">A burst of hints</button>
+          </div>
+        </div>
+      </div>
+      <div class="prod-foot">
+        <p><b>Uses</b>partition by state · ack + push + KV in one transaction · conflation · timers · ephemeral request/reply · Gate: kv.incr as the rate limit</p>
+        <p><b>Lesson</b>A message is a key, not a payload. A partition whose messages carried every past version kept growing.</p>
+      </div>
+    </section>
+
+    <!-- 9.3 A tracing service -->
+    <section class="slide prod" data-chapter="In production" data-title="A tracing service">
+      <header class="s-head">
+        <p class="eyebrow">In production · a tracing service</p>
+        <h2>Tracing on QueenMQ and object storage, nothing else.</h2>
+      </header>
+      <div class="card prod-card">
+        <div class="fd-scroll"><div class="fd" id="fd-tracing"></div></div>
+        <div class="fd-bar">
+          <p class="fd-caption"></p>
+          <div class="btns">
+            <button class="btn primary" data-play="trace">A trace</button>
+            <button class="btn" data-play="read">The dashboard reads</button>
+          </div>
+        </div>
+      </div>
+      <div class="prod-foot">
+        <p><b>Uses</b>partition = trace id · dedup by event key · a session-window stream · an archiver group · reads by offset · KV</p>
+        <p><b>Lesson</b>Keep big bodies out of window state: very large traces held whole in a window pushed the brokers past their memory. Since 2.7.0 QueenMQ reads state without copying it.</p>
+      </div>
+    </section>

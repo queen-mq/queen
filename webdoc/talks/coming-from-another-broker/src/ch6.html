@@ -1,0 +1,122 @@
+
+    <!-- 6.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 6 · The booking page: now, not history" data-title="The booking page: now, not history">
+      <div>
+        <p class="eyebrow">Chapter 6 of 8</p>
+        <h1>The booking page:<br>now, not history</h1>
+        <p class="lead">A page wants the <strong>latest</strong> availability and a price <strong>within half a second</strong>. It does not need the history of either.</p>
+        <ol class="agenda">
+          <li><span>6.1</span>Kafka today: every value, and a reply topic</li>
+          <li><span>6.2</span>Only the newest value: conflation</li>
+          <li><span>6.3</span>Ask and answer: ephemeral queues</li>
+          <li><span>6.4</span>The trade</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <p class="fig-title">Hotel 7 · Deluxe room · tonight</p>
+        <table class="opts">
+          <tbody>
+            <tr><td>rooms left</td><td class="big-num">9</td><td class="v2">the newest value · conflation</td></tr>
+            <tr><td>price</td><td class="big-num">€129</td><td class="v2">asked now · an ephemeral reply</td></tr>
+          </tbody>
+        </table>
+        <p class="fig-cap">Two numbers that must be fresh, and nothing to keep.</p>
+      </figure>
+    </section>
+
+    <!-- 6.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 6 · The booking page: now, not history" data-title="Today: every value, and a reply topic">
+      <header class="s-head">
+        <p class="eyebrow">6.1 · Today, on Kafka</p>
+        <h2>Every value is delivered. A reply needs its own topic.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>A compacted topic keeps the last value per key, later, on closed segments. A live consumer still reads every value.</li>
+          <li>A request and its reply over Kafka: a request topic, a reply topic, a correlation id, and a consumer that waits. All of it on disk.</li>
+          <li>Or a direct HTTP call, which ties the page to the pricing service.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>Direct reply-to is built in, close to QueenMQ's ephemeral queues. The latest value per key needs a plugin.</dd><dt>SQS</dt><dd>No request/reply: a reply queue per caller, or AWS's temporary-queue client.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-page"></div>
+      </div>
+    </section>
+
+    <!-- 6.2 Conflation -->
+    <section class="slide split" data-chapter="Chapter 6 · The booking page: now, not history" data-title="Only the newest value: conflation">
+      <header class="s-head">
+        <p class="eyebrow">6.2 · QueenMQ</p>
+        <h2>Only the newest value: conflation.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">await</span> queen.<span class="f">queue</span>(<span class="s">'availability'</span>)
+  .<span class="f">group</span>(<span class="s">'screen'</span>)
+  .<span class="f">conflation</span>(<span class="n">true</span>)  <span class="c">// the newest, per partition</span>
+  .<span class="f">partitions</span>(<span class="n">64</span>)
+  .<span class="f">consume</span>(<span class="k">async</span> (msg) <span class="k">=&gt;</span> {
+    <span class="k">await</span> <span class="f">redraw</span>(msg.data)
+  })</pre>
+        <ul class="facts">
+          <li>A pop of a partition delivers one message, the newest, and moves the cursor past the ones it skipped.</li>
+          <li>It belongs to the group. Another group on the same queue still gets every message.</li>
+          <li>Nothing is deleted: it is not compaction. Retention decides what stays.</li>
+        </ul>
+        <div class="why"><b>Promise</b><p>After the last push to a partition, at least one handler run starts after it.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="conf"></div>
+      </div>
+    </section>
+
+    <!-- 6.3 Ephemeral request/reply -->
+    <section class="slide split" data-chapter="Chapter 6 · The booking page: now, not history" data-title="Ask and answer: ephemeral queues">
+      <header class="s-head">
+        <p class="eyebrow">6.3 · QueenMQ</p>
+        <h2>Ask, and wait half a second at most.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">async function</span> <span class="f">quote</span>(room) {
+  <span class="k">const</span> inbox = <span class="s">`inbox-${</span>crypto.<span class="f">randomUUID</span>()<span class="s">}`</span>
+  <span class="k">await</span> queen.ephemeral.<span class="f">push</span>(<span class="s">'quotes'</span>,
+    [{ room, replyTo: inbox }])
+  <span class="k">const</span> reply = <span class="k">await</span> queen.ephemeral.<span class="f">pop</span>(inbox,
+    { wait: <span class="n">true</span>, timeout: <span class="n">500</span>,
+      commitOnDelivery: <span class="n">true</span> })
+  <span class="k">return</span> reply.messages[<span class="n">0</span>]?.payload
+    ?? { room, price: <span class="n">null</span> }   <span class="c">// "ask us"</span>
+}</pre>
+        <ul class="facts">
+          <li>Ephemeral queues live in memory, outside the log, created on first use. Same groups, leases and acks.</li>
+          <li>Every node serves every queue: a partition has one owner node, and the others forward to it.</li>
+          <li>The caller makes a private inbox, sends it as <code>replyTo</code>, and waits with a timeout.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="reply"></div>
+      </div>
+    </section>
+
+    <!-- 6.4 The trade -->
+    <section class="slide split" data-chapter="Chapter 6 · The booking page: now, not history" data-title="The trade">
+      <header class="s-head">
+        <p class="eyebrow">6.4 · QueenMQ</p>
+        <h2>Fast, because it forgets.</h2>
+      </header>
+      <div class="s-left">
+        <table class="opts compare">
+          <thead><tr><th></th><th>queue</th><th>ephemeral</th></tr></thead>
+          <tbody>
+            <tr><td>kept in</td><td>the raft log, on disk</td><td>memory of one node</td></tr>
+            <tr><td>a node crashes</td><td>nothing lost</td><td class="warn">its share is lost</td></tr>
+            <tr><td>a node stops</td><td>nothing lost</td><td>it hands its partitions over</td></tr>
+            <tr><td>transactions, DLQ, replay</td><td>yes</td><td>no</td></tr>
+            <tr><td>groups, leases, acks</td><td>yes</td><td>yes</td></tr>
+          </tbody>
+        </table>
+        <div class="why"><b>Why</b><p>An answer that comes too late is worth nothing, so it does not need a disk. Anything that must survive a crash goes on a regular queue.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="eph-nodes"></div>
+      </div>
+    </section>

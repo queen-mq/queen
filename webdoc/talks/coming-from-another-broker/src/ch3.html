@@ -1,0 +1,104 @@
+
+    <!-- 3.0 Cover -->
+    <section class="slide cover" data-chapter="Chapter 3 · One step = one commit" data-title="One step = one commit">
+      <div>
+        <p class="eyebrow">Chapter 3 of 8</p>
+        <h1>One step =<br>one commit</h1>
+        <p class="lead">Confirming a booking is several writes: its state, the next event, the ack. In QueenMQ they are <strong>one log entry</strong>, all of them or none.</p>
+        <ol class="agenda">
+          <li><span>3.1</span>Kafka today: three systems, no commit</li>
+          <li><span>3.2</span>One transaction</li>
+          <li><span>3.3</span>State next to the messages: KV</li>
+        </ol>
+      </div>
+      <figure class="card" style="margin:0">
+        <div class="commit-box done">
+          <span class="cb-title">One log entry</span>
+          <div class="stp"><span class="n">ack</span><span><code>bookings</code> · booking-9137 #3 · group confirm</span><span></span></div>
+          <div class="stp"><span class="n">kv</span><span><code>bookings/booking-9137</code> = confirmed</span><span></span></div>
+          <div class="stp"><span class="n">push</span><span><code>emails</code> · booking-9137 · confirm-mail</span><span></span></div>
+          <div class="stp"><span class="n">timer</span><span><code>payment-reminders</code> · booking-9137 · 15 min</span><span></span></div>
+        </div>
+        <p class="fig-cap">One call commits all four, or none of them.</p>
+      </figure>
+    </section>
+
+    <!-- 3.1 Kafka today -->
+    <section class="slide split" data-chapter="Chapter 3 · One step = one commit" data-title="Today: three systems, no commit">
+      <header class="s-head">
+        <p class="eyebrow">3.1 · Today, on Kafka</p>
+        <h2>Three systems, and no commit across them.</h2>
+      </header>
+      <div class="s-left">
+        <ul class="facts">
+          <li>Confirming a booking: update Postgres, produce to <em>emails</em>, commit the offset.</li>
+          <li>A crash between two of them leaves the step half done.</li>
+          <li>Kafka transactions cover Kafka's writes and offsets, not your database.</li>
+          <li>The usual fix: an outbox table, a relay to read it, an idempotency table. More systems.</li>
+        </ul>
+        <div class="why elsewhere"><b>Elsewhere</b><dl><dt>RabbitMQ</dt><dd>Publisher confirms, and channel transactions that cover its own publishes and acks. Never your database.</dd><dt>SQS</dt><dd>Send and delete are separate calls: nothing commits them together.</dd></dl></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="k-tx"></div>
+      </div>
+    </section>
+
+    <!-- 3.2 One transaction -->
+    <section class="slide split" data-chapter="Chapter 3 · One step = one commit" data-title="One transaction">
+      <header class="s-head">
+        <p class="eyebrow">3.2 · QueenMQ</p>
+        <h2>The ack, the state, the next event: one commit.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code">.<span class="f">consume</span>(<span class="k">async</span> (msg) <span class="k">=&gt;</span> {
+  <span class="k">const</span> id = msg.partition   <span class="c">// booking-9137</span>
+  <span class="k">await</span> queen.<span class="f">transaction</span>()
+    .<span class="f">ack</span>(msg, <span class="s">'completed'</span>,
+      { consumerGroup: <span class="s">'confirm'</span> })
+    .kv.<span class="f">put</span>(<span class="s">'bookings'</span>, id,
+      { status: <span class="s">'confirmed'</span> }, { ttl: <span class="s">'30d'</span> })
+    .<span class="f">queue</span>(<span class="s">'emails'</span>).<span class="f">partition</span>(id)
+    .<span class="f">push</span>([{ transactionId: <span class="s">`mail-${</span>id<span class="s">}`</span>,
+      data: { id } }])
+    .<span class="f">commit</span>()
+})</pre>
+        <ul class="facts">
+          <li>One call, one log entry: all of it commits, or none.</li>
+          <li>A call to the outside (a payment, an email provider) is not in the commit: give it an idempotency key from the message.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="q-tx"></div>
+      </div>
+    </section>
+
+    <!-- 3.3 KV -->
+    <section class="slide split" data-chapter="Chapter 3 · One step = one commit" data-title="State next to the messages: KV">
+      <header class="s-head">
+        <p class="eyebrow">3.3 · QueenMQ</p>
+        <h2>The state lives next to the messages.</h2>
+      </header>
+      <div class="s-left">
+<pre class="code"><span class="k">const</span> id = <span class="s">'booking-9137'</span>
+<span class="k">const</span> b = <span class="k">await</span> queen.kv.<span class="f">get</span>(<span class="s">'bookings'</span>, id)
+<span class="c">// { found, value, version: 3 }</span>
+
+<span class="k">const</span> r = <span class="k">await</span> queen.kv.<span class="f">put</span>(<span class="s">'bookings'</span>, id,
+  { status: <span class="s">'checked-in'</span> },
+  { ttl: <span class="s">'30d'</span>, expect: b.version })
+r.applied  <span class="c">// false if someone wrote since</span>
+
+<span class="k">await</span> queen.kv.<span class="f">incr</span>(<span class="s">'quota'</span>, <span class="s">'hotel-7'</span>, <span class="n">1</span>,
+  { max: <span class="n">500</span>, ttl: <span class="s">'1d'</span> })</pre>
+        <ul class="facts">
+          <li>Every write names its lifetime: a <code>ttl</code>, or <code>forever</code>.</li>
+          <li>Every write raises the version. <code>expect</code> makes a write depend on it.</li>
+          <li>A write that did not apply answers <code>applied: false</code> and the current value. It is not an error.</li>
+          <li>KV has no queries: records you search stay in your database.</li>
+        </ul>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="kv"></div>
+      </div>
+    </section>
+

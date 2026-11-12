@@ -1,0 +1,73 @@
+
+    <!-- 0.1 Title -->
+    <section class="slide cover title" data-chapter="Coming from another broker" data-title="Coming from another message broker?">
+      <div>
+        <p class="eyebrow">QueenMQ 2.8</p>
+        <h1>Coming from another<br>message broker?</h1>
+        <p class="lead"><strong>QueenMQ, the ACID message broker.</strong> Most examples start from Kafka; RabbitMQ and SQS join where they differ.</p>
+        <ul class="proofs">
+          <li>226 Jepsen tests passed</li>
+          <li>3M msg/s on three nodes</li>
+          <li>Rust, one binary, Apache-2.0</li>
+        </ul>
+      </div>
+      <figure class="scene" aria-hidden="true">
+        <img class="scene-dark" src="__PUBLIC__/queen-scene-on-dark.svg" alt="">
+        <img class="scene-light" src="__PUBLIC__/queen-scene-on-light.svg" alt="">
+      </figure>
+    </section>
+
+    <!-- 0.2 The plan -->
+    <section class="slide split" data-chapter="Coming from another broker" data-title="The plan">
+      <header class="s-head">
+        <p class="eyebrow">The plan</p>
+        <h2>Eight things you build around a broker, eight chapters.</h2>
+      </header>
+      <div class="s-left">
+        <p class="lead" style="margin:0">One hotel booking, <strong>booking-9137</strong>, goes through every chapter. Click a row to jump there.</p>
+        <ul class="facts">
+          <li>Each chapter starts with what you build today, mostly on Kafka, with RabbitMQ and SQS where they differ. Then the same thing inside QueenMQ, with code you can run.</li>
+          <li>At the end, three products we run on QueenMQ in production.</li>
+        </ul>
+        <div class="why"><b>Why</b><p>Brokers move messages very well. What happens to one message, and around it, is yours to build.</p></div>
+      </div>
+      <div class="s-right">
+        <div class="card demo" id="plan"></div>
+      </div>
+    </section>
+
+    <!-- 0.3 Two architectures, three nodes each -->
+    <section class="slide arch" data-chapter="Coming from another broker" data-title="Two architectures">
+      <header class="s-head">
+        <p class="eyebrow">Architecture · three nodes each</p>
+        <h2>Kafka with KRaft and ISR. QueenMQ with one raft log.</h2>
+      </header>
+      <div class="card arch-card" id="arch-kafka">
+        <div class="demo-head"><span class="mono">Kafka · KRaft + ISR</span><span class="speed">combined mode: broker and controller on each node</span></div>
+        <div class="nodes"></div>
+        <ul class="arch-notes">
+          <li>Each partition: a leader, and followers that fetch from it. The caught-up ones are the ISR.</li>
+          <li>Metadata: a second raft log, among the controllers. Offsets: the topic <code>__consumer_offsets</code>.</li>
+          <li>Transactions: a coordinator, and markers in every partition.</li>
+        </ul>
+        <p class="arch-step"></p>
+      </div>
+      <div class="card arch-card" id="arch-queen">
+        <div class="demo-head"><span class="mono">QueenMQ · one binary, one raft log</span><span class="speed">every node holds a full copy</span></div>
+        <div class="nodes"></div>
+        <ul class="arch-notes">
+          <li>One leader orders all the tenant's writes. Followers prepare their clients' requests and answer from their copy.</li>
+          <li>One log: messages, acks, KV, timers. Positions and leases: in the leader's memory, checkpointed.</li>
+          <li>A transaction is one log entry: no coordinator, no markers.</li>
+        </ul>
+        <p class="arch-step"></p>
+      </div>
+      <div class="arch-foot">
+        <p class="arch-trade">Kafka spreads partition leaders over the nodes, so writes use all three. QueenMQ has one leader per tenant: more tenants (raft groups) spread the leaders.</p>
+        <div class="btns">
+          <button class="btn primary" data-act="write">Send a write</button>
+          <button class="btn" data-act="fail">node-1 crashes</button>
+          <button class="btn" data-act="reset">Reset</button>
+        </div>
+      </div>
+    </section>
