@@ -88,7 +88,10 @@
   .mono { font-family: var(--nb-font-mono); }
 
   /* ---- The deck: one 1280x720 stage, scaled to the window ---- */
-  .deck { position: fixed; inset: 0; display: grid; place-items: center; overflow: hidden; }
+  /* One track the size of the window: an auto track would grow to the stage's
+     1280 px, and the stage, scaled about its own centre, would sit right of the
+     middle and lose its right edge on any window narrower than 1280. */
+  .deck { position: fixed; inset: 0; display: grid; grid-template: 100% / 100%; place-items: center; overflow: hidden; }
   .stage { position: relative; width: 1280px; height: 720px; flex: none; transform: scale(var(--s, 1)); }
 
   .chrome-top {
@@ -433,6 +436,9 @@
   .slide.title { grid-template-columns: 1fr 470px; }
   .proofs { list-style: none; margin: 30px 0 0; padding: 0; display: flex; gap: 10px; flex-wrap: wrap; }
   .proofs li { font-size: 14px; padding: 6px 12px; border-radius: var(--nb-r-ctl); background: var(--nb-muted); }
+  /* A pill is a link to the page that backs it: the whole pill is the target. */
+  .proofs a { display: block; margin: -6px -12px; padding: 6px 12px; border-radius: inherit; color: inherit; text-decoration: none; }
+  .proofs a:hover { background: var(--nb-selected); }
   .scene { margin: 0; height: 560px; border-radius: var(--nb-r-card); overflow: hidden; }
   .scene img { width: 100%; height: 100%; object-fit: cover; object-position: 50% 35%; display: block; }
   [data-mode="dark"] .scene-light, [data-mode="light"] .scene-dark { display: none; }
@@ -627,9 +633,9 @@
         <h1>Coming from another<br>message broker?</h1>
         <p class="lead"><strong>QueenMQ, the ACID message broker.</strong> Most examples start from Kafka; RabbitMQ and SQS join where they differ.</p>
         <ul class="proofs">
-          <li>226 Jepsen tests passed</li>
-          <li>3M msg/s on three nodes</li>
-          <li>Rust, one binary, Apache-2.0</li>
+          <li><a href="/benchmarks/jepsen/">226 Jepsen tests passed</a></li>
+          <li><a href="/benchmarks/queen-vs-kafka/">3M msg/s on three nodes</a></li>
+          <li><a href="https://github.com/queen-mq/queen">Rust, one binary, Apache-2.0</a></li>
         </ul>
       </div>
       <figure class="scene" aria-hidden="true">
@@ -1821,10 +1827,10 @@ queen.<span class="f">feed</span>({ queues: [<span class="s">'bookings'</span>],
 npm install queen-mq</pre>
         <p class="lead" style="margin-top:18px">The dashboard is at <strong>localhost:6632</strong>, served by the same process.</p>
         <ul class="proofs">
-          <li>queenmq.com</li>
-          <li>the five-minute guide</li>
-          <li>the little book (PDF)</li>
-          <li>226 Jepsen tests</li>
+          <li><a href="/">queenmq.com</a></li>
+          <li><a href="/#guide">the five-minute guide</a></li>
+          <li><a href="/book/">the little book (PDF)</a></li>
+          <li><a href="/benchmarks/jepsen/">226 Jepsen tests</a></li>
         </ul>
       </div>
       <figure class="scene" aria-hidden="true">
