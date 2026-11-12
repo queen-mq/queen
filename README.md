@@ -7,13 +7,12 @@
 
 ## The ACID message broker.
 
+Imagine a Kafka with millions of named partitions, created on the fly, where you ack or nack each message, where one transaction covers the ack, the next messages and your state, with its own KV store and stream processing.<br>
+**That is QueenMQ.**
+
 </div>
 
-Every customer, order and conversation gets its own queue, so one slow customer never blocks the others.<br>
-Every step commits as one: the ack, the next message, the state, the timer.<br>
-No Redis lock, no cron job, no retry table.
-
-**Proof:** [226 Jepsen tests passed](https://queenmq.com/benchmarks/jepsen/), and every bug they found is published.<br>
+**Proof:** [226 Jepsen tests passed](https://queenmq.com/benchmarks/jepsen/)<br>
 [3M msg/s](https://queenmq.com/benchmarks/queen-vs-kafka/#3000000-msgs-of-256-byte-messages) on three nodes and ten million queues, with every write synced to disk on two.<br>
 **The limit:** a [transaction](https://queenmq.com/writing-applications/transactions/) is one call, not a SQL session. Your own database is outside it.
 

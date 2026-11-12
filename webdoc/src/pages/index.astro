@@ -58,15 +58,17 @@ const cardStatic = "block rounded-card bg-card p-5";
 
     <main class="w-full flex-1">
       {/* Hero: full height, two halves from lg up; the scene fills the right
-          42% under the clear header. Below lg the scene sits under the text. */}
+          42% under the clear header. Below lg the scene sits under the text.
+          The text is the talk's title slide: a big line, the promise under it,
+          the proof as pills, the way in, and the limit in small. */}
       <section class="lg:-mt-[calc(3.5rem+1px)] lg:grid lg:min-h-svh lg:grid-cols-[minmax(0,1fr)_42%]">
         <div class="flex lg:items-center lg:justify-center lg:px-16 xl:px-24">
-          <div class="mx-auto w-full max-w-6xl px-6 pb-12 pt-12 lg:max-w-[31rem] lg:px-0 lg:py-20">
-            <p class={eyebrow}>{hero.eyebrow}</p>
+          <div class="mx-auto w-full max-w-6xl px-6 pb-14 pt-14 lg:max-w-[40rem] lg:px-0 lg:py-24">
+            <p class="text-[0.75rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">{hero.eyebrow}</p>
             <h1 data-md class="mt-5 text-foreground">
               <span
                 class="block"
-                style="font-size: clamp(2.25rem, 3.4vw, 3.125rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
+                style="font-size: clamp(2.5rem, 4.4vw, 4rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
               >
                 {hero.headline}
               </span>
@@ -75,58 +77,73 @@ const cardStatic = "block rounded-card bg-card p-5";
                   {" "}
                   <span
                     class="block text-muted-foreground"
-                    style="font-size: clamp(2.25rem, 3.4vw, 3.125rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
+                    style="font-size: clamp(2.5rem, 4.4vw, 4rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
                   >
                     {hero.subline}
                   </span>
                 </>
               )}
             </h1>
-            {/* One idea per line: the promise, then the proof and the limit, each
-                proof line ending with the page that backs it. */}
-            <div class="mt-6 space-y-2">
-              {hero.lines.map((t) => <p data-md class="text-[1.0625rem] leading-snug text-foreground/85">{t}</p>)}
-            </div>
-            <div class="mt-5 space-y-1.5">
-              {hero.proof.map((p) => (
-                <p data-md class="text-[0.875rem] leading-relaxed text-muted-foreground">
-                  {p.text}{" "}
-                  <a
-                    href={p.link.href}
-                    class="whitespace-nowrap text-foreground/80 no-underline transition-colors hover:text-foreground"
-                  >
-                    {p.link.label} →
-                  </a>
-                </p>
-              ))}
-            </div>
-            <p data-md class="mt-5 text-[0.875rem] leading-relaxed text-muted-foreground">{hero.facts}</p>
+            {/* The setup dimmer, the name on a line of its own: the line lands there. */}
+            <p data-md class="mt-6 max-w-[38rem] text-[1.125rem] leading-normal text-muted-foreground lg:text-[1.25rem]">
+              {hero.lead.text.join(" ")}
+              <strong class="mt-2 block font-semibold text-foreground">{hero.lead.close}</strong>
+            </p>
+            {/* The proof as pills: filled with the card tone, a step quieter than the
+                buttons below, each a link to the page that backs it. Two by two
+                from sm up, so four of them make a block rather than 3 + 1. */}
+            <ul class="mt-8 flex flex-wrap gap-2.5 sm:grid sm:grid-cols-[repeat(2,max-content)]">
+              {
+                hero.proof.map((p) => (
+                  <li>
+                    <a
+                      href={p.href}
+                      class="block rounded-ctl bg-card px-3 py-1.5 text-[0.875rem] text-foreground no-underline transition-colors hover:bg-selected"
+                    >
+                      {p.label}
+                    </a>
+                  </li>
+                ))
+              }
+            </ul>
 
-            <div class="mt-8 flex flex-wrap items-center gap-3">
+            <div class="mt-10 flex flex-wrap items-center gap-3">
               <a
                 href={hero.primary.href}
-                class="rounded-ctl bg-primary px-4 py-2 text-[0.8125rem] font-medium text-primary-foreground no-underline transition-colors hover:bg-primary-hover"
+                class="rounded-ctl bg-primary px-5 py-2.5 text-[0.875rem] font-medium text-primary-foreground no-underline transition-colors hover:bg-primary-hover"
               >
                 {hero.primary.label}
               </a>
               <a
                 href={hero.secondary.href}
-                class="rounded-ctl bg-muted px-4 py-2 text-[0.8125rem] font-medium text-foreground no-underline transition-colors hover:bg-selected"
+                class="rounded-ctl bg-muted px-5 py-2.5 text-[0.875rem] font-medium text-foreground no-underline transition-colors hover:bg-selected"
               >
                 {hero.secondary.label}
               </a>
               <a
                 href="https://github.com/queen-mq/queen"
-                class="px-2 py-2 text-[0.8125rem] text-muted-foreground no-underline transition-colors hover:text-foreground"
+                class="px-2 py-2.5 text-[0.875rem] text-muted-foreground no-underline transition-colors hover:text-foreground"
               >
                 GitHub →
               </a>
             </div>
-
-            <div class="mt-8 rounded-ctl bg-card px-4 py-3">
-              <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
-            </div>
-            <p class="mt-3 text-[0.8125rem] text-muted-foreground">{hero.runNote}</p>
+            {/* The talk, on a line of its own under the buttons: the way in for a
+                reader who already runs another broker. */}
+            <a
+              href={hero.talk.href}
+              class="mt-5 inline-block text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
+            >
+              {hero.talk.label} <span class="text-muted-foreground">{hero.talk.more}</span> →
+            </a>
+            <p data-md class="mt-8 text-[0.8125rem] leading-relaxed text-muted-foreground">
+              {hero.limit.text}{" "}
+              <a
+                href={hero.limit.link.href}
+                class="whitespace-nowrap text-foreground/80 no-underline transition-colors hover:text-foreground"
+              >
+                {hero.limit.link.label} →
+              </a>
+            </p>
           </div>
         </div>
 
@@ -185,7 +202,7 @@ const cardStatic = "block rounded-card bg-card p-5";
                 <h3 data-md class="guide-title">{guideRun.title}</h3>
                 {guideRun.body.map((t) => <p data-md class="guide-text">{t}</p>)}
                 <div class="mt-5 rounded-ctl bg-card px-4 py-3">
-                  <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
+                  <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{guideRun.run}</code></pre>
                 </div>
                 <p data-md class="guide-text mt-5">{guideRun.installNote}</p>
                 {

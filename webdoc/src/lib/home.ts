@@ -7,8 +7,8 @@
  * transcribe twice. `scripts/check-markdown.mjs` still reads the built page
  * and checks that every element marked `data-md` reached `dist/index.md`.
  *
- * Voice: plain and short, the same text as the README's top half. Every number
- * with its conditions. No em dashes (scripts/check-prose.mjs reads this file).
+ * Voice: plain and short. Every number with its conditions, or a link to the
+ * page that gives them. No em dashes (scripts/check-prose.mjs reads this file).
  */
 
 /** The image every copy-paste command on the page runs. One place to bump it. */
@@ -31,40 +31,54 @@ export const HOME_SUMMARY =
   "once under a lock, aggregate with a stream, request/reply over an ephemeral queue), the " +
   "measured numbers with their conditions, and where to go next.";
 
+/** The release line the hero names, "2.8" from the image's tag, so the two move together. */
+const LINE = IMAGE.slice(IMAGE.lastIndexOf(":") + 1).split(".").slice(0, 2).join(".");
+
+/**
+ * The first screen, laid out like the title slide of the talk: the line, the
+ * promise under it, the proof as pills, the way in, and the limit. The README's
+ * top half says the same at length, with the conditions beside each number.
+ */
 export const hero = {
-  eyebrow: "Queen MQ",
+  eyebrow: `Queen MQ ${LINE}`,
   headline: "The ACID message broker.",
   /** Second line of the `<h1>`, drawn dimmer. Empty: the headline stands alone. */
   subline: "",
-  /** The promise, one idea per line: joined into a paragraph it reads as a wall of text. */
-  lines: [
-    "Every customer, order and conversation gets its own queue, so one slow customer never " +
-      "blocks the others.",
-    "Every step commits as one: the ack, the next message, the state, the timer.",
-    "No Redis lock, no cron job, no retry table.",
-  ],
-  /** The proof and the limit. Each line ends with a link to the page that backs it. */
+  /**
+   * Under the headline: Queen as the Kafka a reader already knows, with what
+   * Kafka cannot do, then the name. "One transaction covers" and not "spans
+   * everything": the reader's own database is outside it (the limit, below).
+   */
+  lead: {
+    text: [
+      "Imagine a Kafka with millions of named partitions, created on the fly,",
+      "where you ack or nack each message,",
+      "where one transaction covers the ack, the next messages and your state,",
+      "with its own KV store and stream processing.",
+    ],
+    close: "That is Queen.",
+  },
+  /** The proof, one short claim per pill, each a link to the page that backs it. */
   proof: [
-    {
-      text: "Proof: 226 Jepsen tests passed, and every bug they found is published.",
-      link: { label: "The tests", href: "/benchmarks/jepsen/" },
-    },
-    {
-      text:
-        "3M msg/s on three nodes and ten million queues, with every write synced to disk on two.",
-      link: { label: "The benchmark", href: "/benchmarks/queen-vs-kafka/" },
-    },
-    {
-      text:
-        "The limit: a transaction is one call, not a SQL session. Your own database is outside it.",
-      link: { label: "Transactions", href: "/writing-applications/transactions/" },
-    },
+    { label: "226 Jepsen tests passed", href: "/benchmarks/jepsen/" },
+    { label: "3M msg/s on three nodes", href: "/benchmarks/queen-vs-kafka/" },
+    { label: "In production at Smartness", href: "/introduction/about/" },
+    { label: "Rust, one binary, Apache-2.0", href: "https://github.com/queen-mq/queen" },
   ],
-  facts: "Open source (Apache-2.0), Rust, one binary. In production at Smartness.",
   primary: { label: "Run it in five minutes", href: "#guide" },
   secondary: { label: "See the model", href: "/introduction/model/" },
-  run: `docker run -p 6632:6632 ${IMAGE}`,
-  runNote: "Then open localhost:6632: the dashboard is served by the same process.",
+  /** The talk, for a reader who knows another broker: built by webdoc/talks/, served from public/. */
+  talk: {
+    label: "Coming from another broker?",
+    more: "See the talk",
+    href: "/talks/coming-from-another-broker/",
+  },
+  /** Under the buttons, small: "ACID" and its price on the same screen. */
+  limit: {
+    text:
+      "The limit: a transaction is one call, not a SQL session. Your own database is outside it.",
+    link: { label: "Transactions", href: "/writing-applications/transactions/" },
+  },
 };
 
 /**
@@ -105,6 +119,7 @@ export interface GuideStep {
 
 export const guideRun = {
   title: "Run a node",
+  run: `docker run -p 6632:6632 ${IMAGE}`,
   body: [
     "One binary serves the HTTP API and the dashboard on one port. Open localhost:6632 and watch " +
       "every step below land.",

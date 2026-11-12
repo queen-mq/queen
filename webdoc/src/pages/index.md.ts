@@ -54,14 +54,14 @@ export function homepageBody(): string {
   const link = (l: { label: string; href: string }) => `[${l.label}](${url(l.href)})`;
 
   lines.push(`*${hero.eyebrow}*`, "");
-  for (const t of hero.lines) lines.push(t, "");
-  for (const p of hero.proof) lines.push(`${p.text} ${link(p.link)}`, "");
-  lines.push(hero.facts, "");
+  lines.push(`${hero.lead.text.join(" ")} **${hero.lead.close}**`, "");
+  lines.push(hero.proof.map((p) => link(p)).join(" · "), "");
   lines.push(
     `${link(hero.primary)} · ${link(hero.secondary)} · [GitHub](https://github.com/queen-mq/queen)`,
     "",
   );
-  lines.push("```bash", hero.run, "```", "", hero.runNote, "");
+  lines.push(`${hero.talk.label} [${hero.talk.more}](${url(hero.talk.href)})`, "");
+  lines.push(`${hero.limit.text} ${link(hero.limit.link)}`, "");
 
   // The guide: every step in every language, since a reader of the markdown has
   // no language picker. Each language's code is the program that ran it.
@@ -69,7 +69,7 @@ export function homepageBody(): string {
   for (const t of guideSection.lead) lines.push(t, "");
   lines.push(`### 1. ${guideRun.title}`, "");
   for (const t of guideRun.body) lines.push(t, "");
-  lines.push("```bash", hero.run, "```", "", guideRun.installNote, "");
+  lines.push("```bash", guideRun.run, "```", "", guideRun.installNote, "");
   for (const l of GUIDE_LANGS) lines.push(`${l.label}:`, "", "```bash", l.install, "```", "");
   lines.push(`**Screenshot.** ${dashboardShot.alt} ${dashboardShot.caption}`, "");
   guideSteps.forEach((step, n) => {
