@@ -1,0 +1,14 @@
+[19:20:59] abplan-spread start
+[19:20:59] == spread on 281
+sp-spread-281 [19:22:34] 1,000,000: offered 999,973 | pushed 999,997 | consumed 999,970 | shed 0 errors 0 | push p50 4.1 p99 10.8 | e2e p50 10.6 p99 26.4 | cores 11.2 / 5.1 / 4.0 | loader 10.3c  OK 
+sp-spread-281 [19:23:48] 2,000,000: offered 1,999,951 | pushed 1,908,930 | consumed 1,903,178 | shed 1,099,500 errors 0 | push p50 192.5 p99 2687.0 | e2e p50 299.0 p99 2785.3 | cores 17.5 / 7.0 / 4.6 | loader 18.0c  NOT CARRIED 
+sp-spread-281 [19:23:48] stopping at 2000000
+[19:23:51] == spread on sched5
+sp-spread-sched5 [19:25:31] 1,000,000: offered 999,951 | pushed 1,000,005 | consumed 999,981 | shed 0 errors 0 | push p50 4.2 p99 9.7 | e2e p50 11.3 p99 24.1 | cores 11.4 / 5.4 / 4.1 | loader 10.2c  OK 
+sp-spread-sched5 [19:26:45] 2,000,000: offered 2,000,041 | pushed 1,853,923 | consumed 1,851,222 | shed 1,409,000 errors 0 | push p50 319.5 p99 2293.8 | e2e p50 413.7 p99 2392.1 | cores 17.9 / 7.4 / 5.0 | loader 18.0c  NOT CARRIED 
+sp-spread-sched5 [19:26:45] stopping at 2000000
+[19:26:48] == push on sched5
+sp-push-sched5 [19:28:25] 3,000,000: offered 2,999,895 | pushed 2,999,778 | consumed 2,999,485 | shed 0 errors 0 | push p50 8.8 p99 102.4 | e2e p50 21.0 p99 141.3 | cores 16.0 / 7.7 / 5.5 | loader 19.0c  OK 
+sp-push-sched5 [19:29:39] 3,500,000: offered 3,499,991 | pushed 3,232,698 | consumed 3,232,182 | shed 5,078,300 errors 0 | push p50 647.2 p99 1343.5 | e2e p50 688.1 p99 1376.3 | cores 18.0 / 9.8 / 6.1 | loader 21.0c  NOT CARRIED 
+sp-push-sched5 [19:29:39] stopping at 3500000
+[19:29:42] ABPLAN_SPREAD_DONE

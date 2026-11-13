@@ -1,0 +1,6 @@
+pid 69217 planner tid 69270 busy at 18:10:23
+planner record start 18:10:27
+[ perf record: Woken up 1152 times to write data ]
+[ perf record: Captured and wrote 291.220 MB /root/p3/prof/planner.data (4659 samples) ]
+script 18:10:41
+done 18:10:42

@@ -1,0 +1,36 @@
+[12:40:10] abplan-base13 start
+[12:40:10] == push on 281
+b13-push-281 [12:41:30] 3,000,000: offered 2,999,988 | pushed 2,999,788 | consumed 2,999,841 | shed 0 errors 0 | push p50 6.9 p99 95.2 | e2e p50 16.3 p99 147.5 | cores 15.1 / 7.4 / 5.2 | loader 18.8c  OK 
+b13-push-281 [12:42:37] 3,250,000: offered 3,249,908 | pushed 3,250,171 | consumed 3,250,450 | shed 0 errors 0 | push p50 10.0 p99 109.6 | e2e p50 24.6 p99 161.8 | cores 16.3 / 7.9 / 5.6 | loader 19.9c  OK 
+b13-push-281 [12:43:44] 3,500,000: offered 3,499,918 | pushed 3,501,044 | consumed 3,498,617 | shed 0 errors 0 | push p50 15.9 p99 155.6 | e2e p50 43.5 p99 215.0 | cores 17.4 / 8.6 / 6.0 | loader 20.9c  OK 
+b13-push-281 [12:44:51] 3,750,000: offered 3,749,912 | pushed 3,477,467 | consumed 3,475,294 | shed 5,287,500 errors 0 | push p50 565.2 p99 1245.2 | e2e p50 622.6 p99 1294.3 | cores 17.8 / 10.9 / 6.1 | loader 21.5c  NOT CARRIED 
+b13-push-281 [12:44:51] stopping at 3750000
+[12:44:54] == push on sched7
+b13-push-sched7 [12:46:18] 3,000,000: offered 2,999,924 | pushed 2,999,194 | consumed 2,998,268 | shed 0 errors 0 | push p50 8.3 p99 112.6 | e2e p50 19.5 p99 165.9 | cores 15.9 / 7.9 / 5.5 | loader 18.7c  OK 
+b13-push-sched7 [12:47:25] 3,250,000: offered 3,250,031 | pushed 3,249,311 | consumed 3,249,269 | shed 0 errors 0 | push p50 13.3 p99 151.6 | e2e p50 36.4 p99 196.6 | cores 17.1 / 8.5 / 6.0 | loader 19.8c  OK 
+b13-push-sched7 [12:48:32] 3,500,000: offered 3,499,928 | pushed 3,300,845 | consumed 3,298,947 | shed 3,031,600 errors 0 | push p50 458.8 p99 1294.3 | e2e p50 507.9 p99 1343.5 | cores 18.0 / 10.9 / 6.2 | loader 20.8c  NOT CARRIED 
+b13-push-sched7 [12:48:32] stopping at 3500000
+[12:48:35] == spread on sched7
+b13-spread-sched7 [12:49:56] 1,000,000: offered 999,997 | pushed 999,993 | consumed 1,000,043 | shed 0 errors 0 | push p50 4.4 p99 11.4 | e2e p50 11.6 p99 27.4 | cores 11.3 / 5.5 / 4.0 | loader 9.9c  OK 
+b13-spread-sched7 [12:51:03] 1,500,000: offered 1,500,027 | pushed 1,499,877 | consumed 1,499,387 | shed 0 errors 0 | push p50 6.7 p99 79.9 | e2e p50 21.2 p99 143.4 | cores 14.1 / 6.9 / 4.9 | loader 14.2c  OK 
+b13-spread-sched7 [12:52:10] 2,000,000: offered 2,000,008 | pushed 1,814,983 | consumed 1,812,745 | shed 2,569,400 errors 0 | push p50 434.2 p99 2392.1 | e2e p50 516.1 p99 2490.4 | cores 17.2 / 7.5 / 4.9 | loader 17.5c  NOT CARRIED 
+b13-spread-sched7 [12:52:10] stopping at 2000000
+[12:52:13] == t10 on sched7
+b13-t10-sched7 [12:53:26]   240,000: offered 240,025 | workers 23,997 txn/s = 239,969 msg/s | read 239,968 | shed 0 errors 0 aborts 0 | commit p50 3.1 p99 5.8 | e2e p50 44 p99 86 | feed push p50 3.5 p99 6.2 | cores 11.8 / 6.4 / 4.8 | loaders 10.5c  OK 
+b13-t10-sched7 [12:54:33]   280,000: offered 279,986 | workers 24,142 txn/s = 241,424 msg/s | read 241,399 | shed 0 errors 0 aborts 0 | commit p50 3.5 p99 6.4 | e2e p50 2621 p99 5374 | feed push p50 3.7 p99 6.7 | cores 12.1 / 6.6 / 5.0 | loaders 10.8c  NOT CARRIED 
+b13-t10-sched7 [12:54:33] stopping at 280000
+[12:54:36] == t100 on sched7
+b13-t100-sched7 [12:55:49]   750,000: offered 749,979 | workers 7,500 txn/s = 749,986 msg/s | read 749,972 | shed 0 errors 0 aborts 0 | commit p50 3.7 p99 6.3 | e2e p50 16 p99 23 | feed push p50 3.8 p99 6.3 | cores 10.1 / 5.4 / 4.0 | loaders 10.2c  OK 
+b13-t100-sched7 [12:56:48]   900,000: offered 899,990 | workers 9,001 txn/s = 900,084 msg/s | read 900,000 | shed 0 errors 0 aborts 0 | commit p50 4.9 p99 9.2 | e2e p50 21 p99 33 | feed push p50 4.7 p99 8.6 | cores 11.8 / 6.3 / 4.6 | loaders 12.1c  OK 
+b13-t100-sched7 [12:57:48] 1,050,000: offered 1,049,989 | workers 10,502 txn/s = 1,050,193 msg/s | read 1,050,039 | shed 0 errors 0 aborts 0 | commit p50 6.7 p99 12.3 | e2e p50 31 p99 49 | feed push p50 6.3 p99 11.5 | cores 13.4 / 7.1 / 5.1 | loaders 14.0c  OK 
+b13-t100-sched7 [12:58:51] 1,200,000: offered 1,200,040 | workers 10,873 txn/s = 1,087,330 msg/s | read 1,087,297 | shed 0 errors 0 aborts 0 | commit p50 7.8 p99 14.6 | e2e p50 1540 p99 3375 | feed push p50 7.4 p99 13.8 | cores 14.4 / 7.7 / 5.5 | loaders 14.9c  NOT CARRIED 
+b13-t100-sched7 [12:58:51] stopping at 1200000
+[12:58:56] == t10kv on sched7
+b13-t10kv-sched7 [13:00:10]   200,000: offered 199,989 | workers 20,001 txn/s = 200,008 msg/s | read 199,982 | shed 0 errors 0 aborts 0 | commit p50 4.7 p99 8.4 | e2e p50 56 p99 120 | feed push p50 3.8 p99 6.8 | cores 12.5 / 6.9 / 5.1 | loaders 9.2c  OK 
+b13-t10kv-sched7 [13:01:17]   240,000: offered 240,021 | workers 19,742 txn/s = 197,415 msg/s | read 197,425 | shed 0 errors 0 aborts 0 | commit p50 5.2 p99 9.1 | e2e p50 3375 p99 7340 | feed push p50 4.1 p99 7.2 | cores 12.8 / 7.0 / 5.2 | loaders 9.3c  NOT CARRIED 
+b13-t10kv-sched7 [13:01:17] stopping at 240000
+[13:01:19] == t10w on sched7
+b13-t10w-sched7 [13:02:33]   280,000: offered 280,012 | workers 27,993 txn/s = 279,932 msg/s | read 279,937 | shed 0 errors 0 aborts 0 | commit p50 5.1 p99 8.8 | e2e p50 70 p99 143 | feed push p50 4.7 p99 8.1 | cores 12.8 / 7.1 / 5.2 | loaders 11.9c  OK 
+b13-t10w-sched7 [13:03:36]   320,000: offered 320,018 | workers 29,305 txn/s = 293,053 msg/s | read 293,110 | shed 0 errors 0 aborts 0 | commit p50 6.5 p99 11.1 | e2e p50 1491 p99 3441 | feed push p50 5.6 p99 9.9 | cores 13.2 / 7.7 / 5.7 | loaders 12.4c  NOT CARRIED 
+b13-t10w-sched7 [13:03:36] stopping at 320000
+[13:03:41] ABPLAN_BASE13_DONE

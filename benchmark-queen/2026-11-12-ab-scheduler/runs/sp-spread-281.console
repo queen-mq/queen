@@ -1,0 +1,4 @@
+[19:21:18] run sp-spread-281: build 281, push, 1000 partitions, steps of 40s at: 1000000 2000000 3000000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 SPREAD=10 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[19:22:34] 1,000,000: offered 999,973 | pushed 999,997 | consumed 999,970 | shed 0 errors 0 | push p50 4.1 p99 10.8 | e2e p50 10.6 p99 26.4 | cores 11.2 / 5.1 / 4.0 | loader 10.3c  OK 
+[19:23:48] 2,000,000: offered 1,999,951 | pushed 1,908,930 | consumed 1,903,178 | shed 1,099,500 errors 0 | push p50 192.5 p99 2687.0 | e2e p50 299.0 p99 2785.3 | cores 17.5 / 7.0 / 4.6 | loader 18.0c  NOT CARRIED 
+[19:23:48] stopping at 2000000

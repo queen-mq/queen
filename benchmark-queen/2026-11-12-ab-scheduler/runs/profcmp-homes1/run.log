@@ -1,0 +1,4 @@
+[13:37:12] run profcmp-homes1: build homes1, push, 1000 partitions, steps of 40s at: 3250000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 SPREAD=1 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1 x 1000 partitions
+[13:38:20] 3,250,000: offered 3,250,013 | pushed 3,249,480 | consumed 3,247,409 | shed 0 errors 0 | push p50 13.4 p99 182.3 | e2e p50 36.4 p99 223.2 | cores 17.2 / 8.4 / 5.8 | loader 19.8c  OK 
+RUN_DONE

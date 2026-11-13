@@ -1,0 +1,38 @@
+{"status":"healthy","engine":"raft","version":"2.8.1","raft":{"role":"leader","leader":true,"term":1,"applied":805822,"commit":805822,"lag":0,"quorumAckMs":119,"storageReady":true,"clusterVersion":8,"kinds":8,"apply":{"failure":null,"skipped":[]}}}
+
+WARN_ERROR=10
+2026-11-12T16:13:30.585455229Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=24 serial=219 fallback=0 route_us=2 group_us=106
+2026-11-12T16:13:40.585522708Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=7155 serial=7248 fallback=0 route_us=6 group_us=35
+2026-11-12T16:13:50.585775926Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=34122 serial=21178 fallback=0 route_us=9 group_us=42
+2026-11-12T16:14:00.585854666Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=33415 serial=20175 fallback=0 route_us=10 group_us=42
+2026-11-12T16:14:10.586437953Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=33638 serial=20139 fallback=0 route_us=10 group_us=42
+2026-11-12T16:14:20.635364544Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=20509 serial=12234 fallback=0 route_us=10 group_us=42
+2026-11-12T16:14:40.63549981Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=28 serial=341 fallback=0 route_us=2 group_us=90
+2026-11-12T16:14:50.635650918Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=18306 serial=11621 fallback=0 route_us=10 group_us=46
+2026-11-12T16:15:00.635795797Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=31684 serial=14714 fallback=0 route_us=13 group_us=52
+2026-11-12T16:15:10.635818271Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=31854 serial=14625 fallback=0 route_us=13 group_us=52
+2026-11-12T16:15:20.636016961Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=31927 serial=14447 fallback=0 route_us=13 group_us=52
+2026-11-12T16:15:30.685958317Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=9133 serial=4398 fallback=0 route_us=13 group_us=52
+2026-11-12T16:15:50.735887688Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=185 serial=720 fallback=0 route_us=3 group_us=46
+2026-11-12T16:16:00.735914059Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=25909 serial=12496 fallback=0 route_us=15 group_us=59
+2026-11-12T16:16:10.736813467Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=27297 serial=10315 fallback=0 route_us=18 group_us=67
+2026-11-12T16:16:20.736865178Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=26941 serial=9910 fallback=0 route_us=18 group_us=69
+2026-11-12T16:16:30.785661865Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=26310 serial=9678 fallback=0 route_us=18 group_us=68
+2026-11-12T16:16:50.835329918Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=25 serial=223 fallback=0 route_us=3 group_us=97
+2026-11-12T16:17:00.836742742Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=7590 serial=5412 fallback=0 route_us=10 group_us=45
+2026-11-12T16:17:10.836960465Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=21250 serial=7897 fallback=0 route_us=24 group_us=91
+2026-11-12T16:17:20.837099012Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=19611 serial=7563 fallback=0 route_us=26 group_us=97
+2026-11-12T16:17:30.837209973Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=20016 serial=7648 fallback=0 route_us=26 group_us=96
+2026-11-12T16:17:40.844537275Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=13319 serial=5026 fallback=0 route_us=26 group_us=93
+2026-11-12T16:18:00.844829348Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=25 serial=352 fallback=0 route_us=2 group_us=103
+2026-11-12T16:18:10.844849035Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=13096 serial=6841 fallback=0 route_us=18 group_us=72
+2026-11-12T16:18:20.845420745Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=11671 serial=6170 fallback=0 route_us=41 group_us=142
+2026-11-12T16:18:30.846905038Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=11276 serial=6020 fallback=0 route_us=42 group_us=146
+2026-11-12T16:18:40.847035473Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=11435 serial=6043 fallback=0 route_us=41 group_us=146
+2026-11-12T16:18:50.884214984Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=4035 serial=2203 fallback=0 route_us=41 group_us=142
+2026-11-12T16:19:10.939847228Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=27 serial=644 fallback=0 route_us=1 group_us=89
+2026-11-12T16:19:20.939923393Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=14909 serial=7442 fallback=0 route_us=28 group_us=102
+2026-11-12T16:19:30.940319938Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=10308 serial=5606 fallback=0 route_us=47 group_us=168
+2026-11-12T16:19:40.941611507Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=10353 serial=5554 fallback=0 route_us=47 group_us=168
+2026-11-12T16:19:50.942176117Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=10289 serial=5635 fallback=0 route_us=47 group_us=168
+2026-11-12T16:20:00.98867336Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=3223 serial=676 fallback=0 route_us=56 group_us=163

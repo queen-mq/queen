@@ -1,0 +1,5 @@
+[14:41:44] run h-push-homes3: build homes3, push, 1000 partitions, steps of 40s at: 3000000 3250000 3500000 3750000 4000000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 SPREAD=1 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[14:42:52] 3,000,000: offered 2,999,950 | pushed 3,000,057 | consumed 3,000,364 | shed 0 errors 0 | push p50 8.1 p99 128.0 | e2e p50 19.2 p99 176.1 | cores 15.7 / 8.2 / 5.6 | loader 18.7c  OK 
+[14:43:59] 3,250,000: offered 3,249,925 | pushed 3,249,712 | consumed 3,249,199 | shed 0 errors 0 | push p50 13.1 p99 192.5 | e2e p50 35.3 p99 243.7 | cores 17.0 / 8.8 / 5.9 | loader 19.9c  OK 
+[14:45:06] 3,500,000: offered 3,500,027 | pushed 3,299,467 | consumed 3,297,615 | shed 3,038,500 errors 0 | push p50 479.2 p99 1294.3 | e2e p50 520.2 p99 1343.5 | cores 18.0 / 10.9 / 6.1 | loader 20.8c  NOT CARRIED 
+[14:45:06] stopping at 3500000

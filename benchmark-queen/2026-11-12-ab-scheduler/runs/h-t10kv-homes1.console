@@ -1,0 +1,3 @@
+[13:31:32] run h-t10kv-homes1: build homes1, txn, 200 partitions, steps of 40s at: 200000 240000 280000 320000 | TXN_SIZE=10 KV=1 CONS=25 PROCS=8 BATCH=100 SPREAD=1 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-kv | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[13:32:33]   200,000: offered 199,998 | workers 19,332 txn/s = 193,321 msg/s | read 193,316 | shed 0 errors 0 aborts 0 | commit p50 5.2 p99 9.6 | e2e p50 291 p99 1835 | feed push p50 4.2 p99 7.6 | cores 11.8 / 6.7 / 5.0 | loaders 9.0c  NOT CARRIED 
+[13:32:33] stopping at 200000

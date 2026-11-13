@@ -1,0 +1,16 @@
+{"status":"healthy","engine":"raft","version":"2.8.1","raft":{"role":"leader","leader":true,"term":1,"applied":109132,"commit":109132,"lag":0,"quorumAckMs":38,"storageReady":true,"clusterVersion":8,"kinds":8,"apply":{"failure":null,"skipped":[]}}}
+
+WARN_ERROR=10
+2026-11-12T19:24:03.405509316Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=5 serial=219 fallback=0 cycle_us=32 idle_us=44609 route_us=1 land_us=0 group_us=1 asm_us=0 merge_us=0 tail_us=0
+2026-11-12T19:24:33.460924225Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=5180 serial=215 fallback=0 cycle_us=181 idle_us=1668 route_us=14 land_us=14 group_us=67 asm_us=17 merge_us=38 tail_us=0
+2026-11-12T19:24:43.461145212Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=26118 serial=185 fallback=0 cycle_us=258 idle_us=118 route_us=19 land_us=21 group_us=105 asm_us=22 merge_us=53 tail_us=0
+2026-11-12T19:24:53.461351687Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=24890 serial=151 fallback=0 cycle_us=314 idle_us=81 route_us=23 land_us=26 group_us=133 asm_us=27 merge_us=63 tail_us=0
+2026-11-12T19:25:03.461602234Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=25365 serial=135 fallback=0 cycle_us=307 idle_us=80 route_us=22 land_us=26 group_us=129 asm_us=27 merge_us=61 tail_us=0
+2026-11-12T19:25:13.487624548Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=12504 serial=178 fallback=0 cycle_us=303 idle_us=482 route_us=22 land_us=24 group_us=129 asm_us=26 merge_us=60 tail_us=0
+2026-11-12T19:25:33.538063464Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=3 serial=287 fallback=0 cycle_us=50 idle_us=34430 route_us=1 land_us=0 group_us=0 asm_us=1 merge_us=0 tail_us=27
+2026-11-12T19:25:43.538689568Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=165 serial=644 fallback=0 cycle_us=150 idle_us=12206 route_us=8 land_us=5 group_us=33 asm_us=14 merge_us=16 tail_us=56
+2026-11-12T19:25:53.540138321Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=7820 serial=386 fallback=0 cycle_us=703 idle_us=510 route_us=72 land_us=38 group_us=271 asm_us=98 merge_us=131 tail_us=8
+2026-11-12T19:26:03.540988084Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=2448 serial=0 fallback=0 cycle_us=3485 idle_us=593 route_us=420 land_us=112 group_us=1425 asm_us=557 merge_us=653 tail_us=4
+2026-11-12T19:26:13.542457032Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=1759 serial=0 fallback=0 cycle_us=4826 idle_us=853 route_us=636 land_us=163 group_us=1890 asm_us=777 merge_us=941 tail_us=2
+2026-11-12T19:26:23.546533745Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=1787 serial=0 fallback=0 cycle_us=4738 idle_us=853 route_us=632 land_us=175 group_us=1848 asm_us=746 merge_us=917 tail_us=2
+2026-11-12T19:26:33.56463633Z  INFO rsm: planner: cycles since the last line (times per cycle, µs) parallel=108 serial=296 fallback=0 cycle_us=1355 idle_us=23447 route_us=131 land_us=57 group_us=431 asm_us=162 merge_us=187 tail_us=262

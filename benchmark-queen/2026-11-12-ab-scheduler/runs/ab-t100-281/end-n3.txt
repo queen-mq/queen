@@ -1,0 +1,4 @@
+{"status":"healthy","engine":"raft","version":"2.8.1","raft":{"role":"follower","leader":true,"term":3,"applied":742738,"commit":742738,"lag":0,"quorumAckMs":91,"storageReady":true,"clusterVersion":7,"kinds":7,"apply":{"failure":null,"skipped":[]}}}
+
+WARN_ERROR=12
+2026-11-12T15:45:20.802623566Z  INFO rsm: lanes: commands planned since the last line (per-cycle means) lane=0 control=1 cycles=215 router_us=1 lanes_us=0 control_us=1 merge_us=0 job_wall_us=0 job_cpu_us=0 job_max_us=0 job_start_max_us=0 job_tail_us=0 advance_us=0 create=0 create_us=0 resets=0 sync_resets=0 skips=1720

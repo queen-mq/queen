@@ -1,0 +1,5 @@
+pid 45175 busy at 13:37:33
+record start 13:37:43
+[ perf record: Captured and wrote 4.980 MB /root/p3/prof/flat.data (126369 samples) ]
+reports 13:37:59
+done 13:38:01

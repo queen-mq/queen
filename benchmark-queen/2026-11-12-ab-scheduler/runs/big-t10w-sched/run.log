@@ -1,0 +1,15 @@
+[16:13:25] run big-t10w-sched: build sched, txn, 900 partitions, steps of 40s at: 120000 160000 200000 240000 280000 320000 | TXN_SIZE=10 KV=0 CONS=55 PROCS=8 BATCH=100 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-wire bin | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1-in, b1-out x 900 partitions
+[16:14:32]   120,000: offered 119,998 | workers 12,000 txn/s = 119,999 msg/s | read 120,002 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.7 | e2e p50 22 p99 40 | feed push p50 2.4 p99 3.8 | cores 8.9 / 5.0 / 4.1 | loaders 6.3c  OK 
+[create] done: b2-in, b2-out x 900 partitions
+[16:15:39]   160,000: offered 160,001 | workers 16,001 txn/s = 160,005 msg/s | read 160,002 | shed 0 errors 0 aborts 0 | commit p50 1.8 p99 3.4 | e2e p50 27 p99 50 | feed push p50 2.6 p99 4.3 | cores 10.3 / 5.7 / 4.6 | loaders 7.9c  OK 
+[create] done: b3-in, b3-out x 900 partitions
+[16:16:46]   200,000: offered 200,000 | workers 19,998 txn/s = 199,983 msg/s | read 199,989 | shed 0 errors 0 aborts 0 | commit p50 2.3 p99 4.5 | e2e p50 33 p99 62 | feed push p50 2.9 p99 5.1 | cores 11.3 / 6.2 / 4.8 | loaders 9.4c  OK 
+[create] done: b4-in, b4-out x 900 partitions
+[16:17:53]   240,000: offered 240,009 | workers 24,006 txn/s = 240,059 msg/s | read 240,034 | shed 0 errors 0 aborts 0 | commit p50 3.3 p99 6.0 | e2e p50 46 p99 88 | feed push p50 3.5 p99 6.1 | cores 12.3 / 6.7 / 5.1 | loaders 10.8c  OK 
+[create] done: b5-in, b5-out x 900 partitions
+[16:19:00]   280,000: offered 279,983 | workers 27,994 txn/s = 279,935 msg/s | read 279,950 | shed 0 errors 0 aborts 0 | commit p50 5.7 p99 10.1 | e2e p50 78 p99 156 | feed push p50 5.1 p99 9.0 | cores 12.9 / 7.3 / 5.4 | loaders 12.1c  OK 
+[create] done: b6-in, b6-out x 900 partitions
+[16:20:10]   320,000: offered 319,981 | workers 29,303 txn/s = 293,033 msg/s | read 293,014 | shed 0 errors 0 aborts 0 | commit p50 6.5 p99 11.4 | e2e p50 1556 p99 3506 | feed push p50 5.6 p99 10.1 | cores 13.2 / 7.8 / 5.7 | loaders 12.6c  NOT CARRIED 
+[16:20:10] stopping at 320000
+RUN_DONE

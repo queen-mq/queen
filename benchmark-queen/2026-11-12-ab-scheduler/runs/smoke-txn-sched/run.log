@@ -1,0 +1,4 @@
+[15:02:29] run smoke-txn-sched: build sched, txn, 200 partitions, steps of 20s at: 10000 | TXN_SIZE=10 KV=0 CONS=50 PROCS=4 BATCH=100 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-wire bin | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1-in, b1-out x 200 partitions
+[15:03:12]    10,000: offered 10,000 | workers 1,000 txn/s = 10,000 msg/s | read 10,002 | shed 0 errors 0 aborts 0 | commit p50 1.1 p99 1.5 | e2e p50 15 p99 27 | feed push p50 2.2 p99 3.2 | cores ? / ? / ? | loaders 0.7c  OK 
+RUN_DONE

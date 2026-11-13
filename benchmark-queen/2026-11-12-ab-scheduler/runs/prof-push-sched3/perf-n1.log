@@ -1,0 +1,9 @@
+pid 67115 planner tid 67222 busy at 18:06:53
+planner record start 18:06:57
+[ perf record: Woken up 287 times to write data ]
+[ perf record: Captured and wrote 74.826 MB /root/p3/prof/planner.data (9300 samples) ]
+whole record start 18:07:11
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 1.888 MB /root/p3/prof/all.data (46119 samples) ]
+reports 18:07:18
+done 18:07:22

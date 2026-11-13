@@ -1,0 +1,28 @@
+qload tag=big-t10kv-281-160000-p2 loader=2/8 mode=batch rate=20000 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=5s duration=40s report=10s drain=40s GOMAXPROCS=24 GOGC=400(default) seed=1794499313093259572
+  offered: 20000 msg/s = 200.0 units/s (avg 100.0 msgs/unit) across 5 pacer workers (40.00 units/s each)
+  topics: 1 x 200 partitions (b3..b3), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 50
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":2,...}), pool 64x100
+  consumers: 25 here (ci 50..74 of 200), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0 1 2 3 4 5 6 7]
+  queen: url=http://10.250.0.11:6632 (of 3) conns=2048 timeout=30s pop-width=10 pop-batch=1000 pop-timeout=2s lease=10s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | txn: b3-in -> workers (txn-size 10, linger 1s, one /transaction = acks with leases + pushes) -> b3-out, 25 read-committed readers
+  [queen] http://10.250.0.11:6632 healthy: version 2.8.1, this node follower
+  [txn] 25 workers (ci 50..74 of 200): b3-in -> b3-out, txn-size 10, linger 1s, pop width 10, lease 10s
+  [consume] 25 consumers of b3-out: pop width 10, batch 1000, long poll 2s, lease 10s, async batch acks (ack-inflight 256)
+READY 1794499306586
+[start] waiting 7.029s for the common start 1794499313616
+[start] GO 16:01:53.616 (unix ms 1794499313616)
+[16:02:03] offered=    15000/s achieved=    15000/s shed=        0/s inflight=     0 | p50=   4.32 p99=   12.61 p999=   14.66 ms | push=150000 pop=118900 lag=31100 | errs push=0 pop=0 empty=100 gor=214 | ack=    11886/s ackErr=0 ackAvg=6.09ms | e2e p50=248.83 p99=1499.14 p999=1581.06 n=118900 | e2e_local p50=248.83 p99=1499.14 n=118900
+[txn] 16:02:03 txn=    1184/s msgs=    11842/s avg= 10.00 msg/txn | commit p50=6.56 p99=15.42 p999=16.51 ms | aborts=0 errs=0 open=7 | in=    11849/s | total txns=11842 msgs=118420 aborts=0 errs=0
+[16:02:13] offered=    20000/s achieved=    20000/s shed=        0/s inflight=     0 | p50=   6.43 p99=   13.63 p999=   14.66 ms | push=350000 pop=255870 lag=94130 | errs push=0 pop=0 empty=100 gor=214 | ack=    13687/s ackErr=0 ackAvg=7.67ms | e2e p50=2932.74 p99=4489.22 p999=4620.29 n=136970 | e2e_local p50=2932.74 p99=4489.22 n=136970
+[txn] 16:02:13 txn=    1401/s msgs=    14012/s avg= 10.00 msg/txn | commit p50=10.30 p99=16.19 p999=17.54 ms | aborts=0 errs=0 open=25 | in=    14030/s | total txns=25854 msgs=258540 aborts=0 errs=0
+[16:02:23] offered=    19999/s achieved=    19979/s shed=        0/s inflight=     2 | p50=   6.75 p99=   13.50 p999=   15.42 ms | push=549800 pop=393260 lag=156540 | errs push=0 pop=0 empty=100 gor=220 | ack=    13745/s ackErr=0 ackAvg=8.14ms | e2e p50=5734.40 p99=7569.41 p999=7700.48 n=137390 | e2e_local p50=5734.40 p99=7569.41 n=137390
+[txn] 16:02:23 txn=    1397/s msgs=    13967/s avg= 10.00 msg/txn | commit p50=10.30 p99=15.94 p999=17.54 ms | aborts=0 errs=0 open=20 | in=    13962/s | total txns=39822 msgs=398220 aborts=0 errs=0
+[drain] workers and readers keep going for up to 40s (ends early after 3s idle; lag now 214180)
+[16:02:33] offered=    20001/s achieved=    20021/s shed=        0/s inflight=     0 | p50=   6.37 p99=   13.12 p999=   15.04 ms | push=750000 pop=535820 lag=214180 | errs push=0 pop=0 empty=100 gor=219 | ack=    14246/s ackErr=0 ackAvg=8.34ms | e2e p50=8716.29 p99=10420.22 p999=10682.37 n=142560 | e2e_local p50=8716.29 p99=10420.22 n=142560
+[txn] 16:02:33 txn=    1428/s msgs=    14282/s avg= 10.00 msg/txn | commit p50=10.05 p99=15.42 p999=16.77 ms | aborts=0 errs=0 open=20 | in=    14282/s | total txns=54103 msgs=541030 aborts=0 errs=0
+[16:02:43] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=750000 pop=731390 lag=18610 | errs push=0 pop=0 empty=100 gor=209 | ack=    19573/s ackErr=0 ackAvg=7.77ms | e2e p50=10289.15 p99=10944.51 p999=10944.51 n=195570 | e2e_local p50=10289.15 p99=10944.51 n=195570
+[txn] 16:02:43 txn=    1986/s msgs=    19860/s avg= 10.00 msg/txn | commit p50=6.56 p99=11.58 p999=12.99 ms | aborts=0 errs=0 open=0 | in=    19840/s | total txns=73963 msgs=739630 aborts=0 errs=0
+[drain] idle for 3s after 13.0s: ending the drain (lag 18540)
+[info] steady window 30s (after the ramp, before the producers stopped): offered 20000/s pushed 20000/s popped 13897/s cpu 70.6% = 3.53 cores per 100k msg/s (produce+consume)
+[final] offered=7500 achieved=7500 shed=0 (msgs: offered=750000 achieved=750000 shed=0) pushErr=0 | pushed=750000 popped=731460 lag=18540 | popErr=0 empty=150 | overall p50=6.18 p99=13.25 p999=14.91 ms | acked=731460 ackErr=0 ackLag=18540 ackAvg=7.77ms | e2e p50=6651.90 p99=10813.44 p999=10944.51 ms
+load_cpu=58.6%
+[txn-final] txns=73966 msgs=739660 aborts=0 errs=0 in=739660 avg=10.00 msg/txn | commit p50=8.64 p99=15.55 p999=17.28 max=19.33 ms

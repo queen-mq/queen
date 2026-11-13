@@ -1,0 +1,16 @@
+[14:41:32] abplan-homes start: homes3 | push spread t10kv
+[14:41:32] == push on homes3
+h-push-homes3 [14:42:52] 3,000,000: offered 2,999,950 | pushed 3,000,057 | consumed 3,000,364 | shed 0 errors 0 | push p50 8.1 p99 128.0 | e2e p50 19.2 p99 176.1 | cores 15.7 / 8.2 / 5.6 | loader 18.7c  OK 
+h-push-homes3 [14:43:59] 3,250,000: offered 3,249,925 | pushed 3,249,712 | consumed 3,249,199 | shed 0 errors 0 | push p50 13.1 p99 192.5 | e2e p50 35.3 p99 243.7 | cores 17.0 / 8.8 / 5.9 | loader 19.9c  OK 
+h-push-homes3 [14:45:06] 3,500,000: offered 3,500,027 | pushed 3,299,467 | consumed 3,297,615 | shed 3,038,500 errors 0 | push p50 479.2 p99 1294.3 | e2e p50 520.2 p99 1343.5 | cores 18.0 / 10.9 / 6.1 | loader 20.8c  NOT CARRIED 
+h-push-homes3 [14:45:06] stopping at 3500000
+[14:45:08] == spread on homes3
+h-spread-homes3 [14:46:29] 1,000,000: offered 1,000,005 | pushed 999,992 | consumed 999,888 | shed 0 errors 0 | push p50 4.3 p99 12.4 | e2e p50 11.6 p99 30.5 | cores 11.4 / 5.4 / 4.1 | loader 10.0c  OK 
+h-spread-homes3 [14:47:36] 1,500,000: offered 1,499,999 | pushed 1,500,033 | consumed 1,500,051 | shed 0 errors 0 | push p50 6.5 p99 66.6 | e2e p50 20.5 p99 128.0 | cores 14.0 / 6.8 / 5.1 | loader 14.2c  OK 
+h-spread-homes3 [14:48:43] 2,000,000: offered 2,000,033 | pushed 1,843,152 | consumed 1,841,107 | shed 1,705,400 errors 0 | push p50 340.0 p99 2326.5 | e2e p50 434.2 p99 2424.8 | cores 17.4 / 7.3 / 4.9 | loader 17.7c  NOT CARRIED 
+h-spread-homes3 [14:48:43] stopping at 2000000
+[14:48:48] == t10kv on homes3
+h-t10kv-homes3 [14:50:02]   200,000: offered 200,004 | workers 19,995 txn/s = 199,947 msg/s | read 199,914 | shed 0 errors 0 aborts 0 | commit p50 4.4 p99 7.6 | e2e p50 50 p99 101 | feed push p50 3.7 p99 6.5 | cores 12.6 / 6.9 / 5.2 | loaders 9.3c  OK 
+h-t10kv-homes3 [14:51:09]   240,000: offered 240,020 | workers 20,134 txn/s = 201,342 msg/s | read 201,313 | shed 0 errors 0 aborts 0 | commit p50 5.1 p99 9.0 | e2e p50 3047 p99 6750 | feed push p50 4.0 p99 7.2 | cores 13.0 / 7.2 / 5.4 | loaders 9.5c  NOT CARRIED 
+h-t10kv-homes3 [14:51:09] stopping at 240000
+[14:51:12] ABPLAN_HOMES_DONE homes3

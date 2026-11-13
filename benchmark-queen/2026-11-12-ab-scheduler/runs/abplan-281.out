@@ -1,0 +1,14 @@
+[14:24:57] abplan-homes start: 281 | t10kv t10 t100 t10w
+[14:24:57] == t10kv on 281
+h-t10kv-281 [14:26:33]   200,000: offered 199,996 | workers 10,690 txn/s = 106,903 msg/s | read 106,882 | shed 0 errors 0 aborts 0 | commit p50 8.1 p99 16.4 | e2e p50 14942 p99 21234 | feed push p50 6.5 p99 14.3 | cores 7.0 / 3.6 / 2.6 | loaders 5.6c  NOT CARRIED 
+h-t10kv-281 [14:26:33] stopping at 200000
+[14:26:35] == t10 on 281
+h-t10-281 [14:27:54]   240,000: offered 239,983 | workers 15,277 txn/s = 152,775 msg/s | read 152,782 | shed 0 errors 0 aborts 0 | commit p50 5.2 p99 11.4 | e2e p50 9437 p99 14811 | feed push p50 5.4 p99 11.5 | cores 7.2 / 3.6 / 2.7 | loaders 7.0c  NOT CARRIED 
+h-t10-281 [14:27:54] stopping at 240000
+[14:27:56] == t100 on 281
+h-t100-281 [14:29:42]   750,000: offered 750,000 | workers 2,419 txn/s = 241,875 msg/s | read 241,861 | shed 0 errors 0 aborts 0 | commit p50 20.5 p99 151.6 | e2e p50 26477 p99 31982 | feed push p50 495.6 p99 622.6 | cores 5.3 / 2.0 / 2.0 | loaders 5.9c  NOT CARRIED 
+h-t100-281 [14:29:42] stopping at 750000
+[14:29:44] == t10w on 281
+h-t10w-281 [14:31:38]   280,000: offered 279,999 | workers 7,999 txn/s = 79,988 msg/s | read 79,984 | shed 0 errors 0 aborts 0 | commit p50 13.8 p99 48.1 | e2e p50 29622 p99 39846 | feed push p50 12.8 p99 16.6 | cores 4.8 / 2.1 / 1.5 | loaders 4.7c  NOT CARRIED 
+h-t10w-281 [14:31:38] stopping at 280000
+[14:31:40] ABPLAN_HOMES_DONE 281

@@ -1,0 +1,5 @@
+[13:53:07] run h-spread-homes1x: build homes1x, push, 1000 partitions, steps of 40s at: 1000000 1500000 2000000 2250000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 SPREAD=10 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[13:54:14] 1,000,000: offered 999,992 | pushed 999,946 | consumed 999,836 | shed 0 errors 0 | push p50 4.2 p99 12.4 | e2e p50 11.0 p99 29.2 | cores 11.1 / 5.2 / 4.0 | loader 10.0c  OK 
+[13:55:21] 1,500,000: offered 1,500,001 | pushed 1,499,988 | consumed 1,499,790 | shed 0 errors 0 | push p50 6.5 p99 70.7 | e2e p50 19.7 p99 131.1 | cores 13.6 / 6.6 / 4.9 | loader 14.3c  OK 
+[13:56:28] 2,000,000: offered 1,999,929 | pushed 1,875,253 | consumed 1,873,979 | shed 760,300 errors 0 | push p50 376.8 p99 2261.0 | e2e p50 462.8 p99 2359.3 | cores 17.3 / 7.4 / 4.6 | loader 17.9c  NOT CARRIED 
+[13:56:28] stopping at 2000000

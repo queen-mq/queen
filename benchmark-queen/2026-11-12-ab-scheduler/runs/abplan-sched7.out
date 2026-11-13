@@ -1,0 +1,4 @@
+[21:04:44] abplan-sched7 start
+[21:04:44] == push on sched7
+s7-push-sched7 [21:06:17] 3,000,000: offered 2,999,889 | pushed 2,999,979 | consumed 2,998,379 | shed 0 errors 0 | push p50 10.2 p99 141.3 | e2e p50 24.6 p99 180.2 | cores 16.3 / 7.9 / 5.7 | loader 19.0c  OK 
+[21:06:18] ABPLAN_SCHED7_DONE

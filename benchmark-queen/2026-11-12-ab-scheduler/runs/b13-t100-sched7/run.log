@@ -1,0 +1,11 @@
+[12:54:49] run b13-t100-sched7: build sched7, txn, 200 partitions, steps of 40s at: 750000 900000 1050000 1200000 | TXN_SIZE=100 KV=0 CONS=25 PROCS=8 BATCH=100 SPREAD=1 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-wire bin | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1-in, b1-out x 200 partitions
+[12:55:49]   750,000: offered 749,979 | workers 7,500 txn/s = 749,986 msg/s | read 749,972 | shed 0 errors 0 aborts 0 | commit p50 3.7 p99 6.3 | e2e p50 16 p99 23 | feed push p50 3.8 p99 6.3 | cores 10.1 / 5.4 / 4.0 | loaders 10.2c  OK 
+[create] done: b2-in, b2-out x 200 partitions
+[12:56:48]   900,000: offered 899,990 | workers 9,001 txn/s = 900,084 msg/s | read 900,000 | shed 0 errors 0 aborts 0 | commit p50 4.9 p99 9.2 | e2e p50 21 p99 33 | feed push p50 4.7 p99 8.6 | cores 11.8 / 6.3 / 4.6 | loaders 12.1c  OK 
+[create] done: b3-in, b3-out x 200 partitions
+[12:57:48] 1,050,000: offered 1,049,989 | workers 10,502 txn/s = 1,050,193 msg/s | read 1,050,039 | shed 0 errors 0 aborts 0 | commit p50 6.7 p99 12.3 | e2e p50 31 p99 49 | feed push p50 6.3 p99 11.5 | cores 13.4 / 7.1 / 5.1 | loaders 14.0c  OK 
+[create] done: b4-in, b4-out x 200 partitions
+[12:58:51] 1,200,000: offered 1,200,040 | workers 10,873 txn/s = 1,087,330 msg/s | read 1,087,297 | shed 0 errors 0 aborts 0 | commit p50 7.8 p99 14.6 | e2e p50 1540 p99 3375 | feed push p50 7.4 p99 13.8 | cores 14.4 / 7.7 / 5.5 | loaders 14.9c  NOT CARRIED 
+[12:58:51] stopping at 1200000
+RUN_DONE

@@ -1,0 +1,3 @@
+{"status":"healthy","engine":"raft","version":"2.8.1","raft":{"role":"follower","leader":true,"term":1,"applied":638018,"commit":638018,"lag":0,"quorumAckMs":165,"storageReady":true,"clusterVersion":7,"kinds":7,"apply":{"failure":null,"skipped":[]}}}
+
+WARN_ERROR=2
