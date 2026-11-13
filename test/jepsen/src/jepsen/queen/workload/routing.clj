@@ -569,7 +569,12 @@
     (pop-and-ack! client test op (:reader op) reader-group nil)
 
     :make-reader
-    (make-reader! client test op (some #(when (= (:reader op) (:queue %)) %) readers))
+    (let [res (make-reader! client test op (some #(when (= (:reader op) (:queue %)) %) readers))]
+      ; From now on it is popped (it is not before: a pop would make it an
+      ; ordinary queue).
+      (when (and (= :ok (:type res)) (:made client))
+        (swap! (:made client) conj (:reader op)))
+      res)
 
     :finish-catch-up
     ; Configure again until the reader answers catchingUp false (each call
@@ -744,16 +749,32 @@
 (defn reading-workload
   [opts]
   (reset! pad-bytes (long (:pad-bytes opts 0)))
-  (let [mid (long (/ (:time-limit opts 300) 3))]
+  (let [mid   (long (/ (:time-limit opts 300) 3))
+        ; The readers that exist: those made at setup, and jepsen-r3 once its
+        ; :make-reader answered. A pop of a queue that does not exist makes
+        ; it an ordinary queue (answers 204), and a reading queue is then
+        ; refused that name ("exists as an ordinary queue": the rig's first
+        ; W16 runs, 2026-11-13).
+        made  (atom (set (map :queue (filter #(= :setup (:at %)) readers))))
+        ; jepsen-r3 is made a third of the way in, by the wall clock: a
+        ; gen/phases inside gen/any waited for every thread to be free, which
+        ; the mix never left them, and the op often never ran.
+        t0    (atom nil)
+        asked (atom false)
+        due?  (fn []
+                (let [now (System/nanoTime)]
+                  (compare-and-set! t0 nil now)
+                  (and (<= (* 1000000000 mid) (- now (long @t0)))
+                       (compare-and-set! asked false true))))]
     {:client          (map->Client {:invoke-fn reading-invoke!
-                                    :setup-fn  reading-setup!})
+                                    :setup-fn  reading-setup!
+                                    :made      made})
      :checker         (checker/compose {:readers (reading-checker), :framed (framed-checker)})
-     :generator       (gen/any
-                        (gen/phases (gen/sleep mid)
-                                    (gen/once {:f :make-reader, :value nil, :reader "jepsen-r3"}))
-                        (gen/mix [(enqueue-gen ["jepsen-0" "jepsen-1"])
-                                  (fn [] {:f :dequeue, :value nil
-                                          :reader (:queue (rand/nth readers))})]))
+     :generator       (gen/mix [(enqueue-gen ["jepsen-0" "jepsen-1"])
+                                (fn [] (if (due?)
+                                         {:f :make-reader, :value nil, :reader "jepsen-r3"}
+                                         {:f :dequeue, :value nil
+                                          :reader (rand/nth (vec (sort @made)))}))])
      :final-generator (gen/phases
                         (gen/once {:f :finish-catch-up, :value nil, :reader "jepsen-r3"})
                         (gen/each-thread
