@@ -50,7 +50,7 @@
   "One admin request: {:status s :body b}, or {:error [type msg]} when it got
   no answer."
   [node method suffix body timeout-ms]
-  (try (qh/request! @http method (str (qh/base-url node) path suffix) body timeout-ms)
+  (try (qh/request! @http method (str (qh/broker-url node) path suffix) body timeout-ms)
        (catch clojure.lang.ExceptionInfo e
          (let [{:keys [type msg]} (ex-data e)]
            (if (#{::qh/refused ::qh/timeout ::qh/io} type)
@@ -131,7 +131,7 @@
   [node timeout-ms]
   (let [t0 (System/currentTimeMillis)]
     (loop []
-      (let [r (try (qh/request! @http :get (str (qh/base-url node) "/health") nil 1000)
+      (let [r (try (qh/request! @http :get (str (qh/broker-url node) "/health") nil 1000)
                    (catch Exception _ nil))]
         (cond r                                               true
               (< timeout-ms (- (System/currentTimeMillis) t0)) false

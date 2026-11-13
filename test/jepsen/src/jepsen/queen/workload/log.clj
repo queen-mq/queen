@@ -39,6 +39,7 @@
                     [util :as util]]
             [jepsen.tests.kafka :as kafka]
             [jepsen.tests.cycle.append :as append]
+            [jepsen.queen.binary :as bin]
             [jepsen.queen.http :as qh]))
 
 ;; ---------------------------------------------------------------------------
@@ -96,9 +97,15 @@
                        :partition     (partition-name k)
                        :payload       v
                        :transactionId (txn-id k v)}]}
-        r    (qh/request! (:http client) :post
-                          (str (:base client) "/api/v1/push")
-                          body (:client-timeout-ms test))]
+        url  (str (:base client) "/api/v1/push")
+        ; --binary: the same item as a binary push (QPB1); the answer is the
+        ; JSON push answer.
+        r    (if (:binary test)
+               (bin/request! (:http client) :post url
+                             (bin/push-body [{:queue (queue-name test k), :partition (partition-name k)
+                                              :items [{:transactionId (txn-id k v), :payload v}]}])
+                             "application/x-queen-push" (:client-timeout-ms test))
+               (qh/request! (:http client) :post url body (:client-timeout-ms test)))]
     (if (= 201 (:status r))
       (let [item (first (:body r))]
         (case (:status item)

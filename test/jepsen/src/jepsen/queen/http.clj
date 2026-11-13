@@ -9,6 +9,7 @@
     ::timeout  no answer within the request timeout (indefinite)
     ::io       the connection broke mid-request (indefinite)"
   (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [jepsen.control.net :as cn])
   (:import (java.io IOException)
            (java.net ConnectException URI)
@@ -22,10 +23,31 @@
                           HttpTimeoutException)
            (java.time Duration)))
 
-(def http-port 6632)
+(def http-port
+  "The broker's HTTP port on every node: 6632. QUEEN_JEPSEN_HTTP_PORT moves it,
+  for a smoke run of a client against a scratch broker on a laptop."
+  (or (some-> (System/getenv "QUEEN_JEPSEN_HTTP_PORT") parse-long)
+      6632))
+
+(defonce ^{:doc "The port clients use: http-port, or the embedded proxy's port with
+  --via-proxy (set by jepsen.queen.core when it builds the test)."}
+  client-port
+  (atom http-port))
+
+(defonce ^{:doc "Headers every request to the client port carries (--via-proxy: the
+  API key)."}
+  client-headers
+  (atom {}))
 
 (defn base-url
-  "http://<private ip>:6632 for a node name (resolved on the control node)."
+  "The URL clients use on a node: http://<private ip>:<client port>. The
+  bare broker unless --via-proxy, then the embedded proxy."
+  [node]
+  (str "http://" (cn/ip node) ":" @client-port))
+
+(defn broker-url
+  "http://<private ip>:6632, the bare broker, whatever clients use: for
+  health, membership, link and metrics calls the harness makes itself."
   [node]
   (str "http://" (cn/ip node) ":" http-port))
 
@@ -61,7 +83,13 @@
   (let [b (-> (HttpRequest/newBuilder (URI/create url))
               (.timeout (Duration/ofMillis (long timeout-ms)))
               (.header "Content-Type" "application/json"))
-        b (reduce-kv (fn [^HttpRequest$Builder b k v] (.header b (str k) (str v))) b (or headers {}))
+        ; The client port's own headers (the proxy's API key) go only to
+        ; the client port: the bare broker never sees a credential.
+        dflt (when (and (not= @client-port http-port)
+                        (str/includes? (str url) (str ":" @client-port "/")))
+               @client-headers)
+        b (reduce-kv (fn [^HttpRequest$Builder b k v] (.header b (str k) (str v))) b
+                     (merge dflt headers))
         b (case method
             :get    (.GET b)
             :delete (.DELETE b)
@@ -89,5 +117,5 @@
 (defn health
   "GET /health of a node: the parsed body (also on 503 settling), or nil."
   [^HttpClient c node timeout-ms]
-  (try (:body (request! c :get (str (base-url node) "/health") nil timeout-ms))
+  (try (:body (request! c :get (str (broker-url node) "/health") nil timeout-ms))
        (catch clojure.lang.ExceptionInfo _ nil)))

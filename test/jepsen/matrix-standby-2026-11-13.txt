@@ -1,0 +1,81 @@
+# W12 standby variants (workload/failover.clj), before a paid Jepsen analysis
+# (2026-11-13): what the failover campaigns of October left out. Six nodes:
+# n1 to n3 are the source, n4 to n6 the standby.
+#
+#   NODES=n1,n2,n3,n4,n5,n6 RUNS=/root/runs-standby BIN=/root/bin/queen-fix1 \
+#     ./run-campaign.sh matrix-standby-2026-11-13.txt
+#
+# Then the October suite on the same build: matrix-failover.txt.
+#
+# What each section adds to the October checks (no write answered by a standby
+# before its promotion; the promoted log a prefix of the source's; a
+# transaction whole or absent; a planned switch loses nothing; after a crash
+# nothing older than the lost tail; the promoted cluster keeps its writes):
+#
+# 1. Smoke, no other fault. Read them before the rest: `replayed` and
+#    `own-acked` above 0; a seeded test shows `seeded` and `grown` with every
+#    group's voters [1 2 3]; a --w12-kv test shows `kv-counted` on both
+#    clusters.
+# 2. --w12-kv: every send is one transaction that also increments a KV
+#    counter, so a replay and a promotion carry a record and its count
+#    together. Judged: in each cluster every counter equals its partition's
+#    record count, and the nodes of one cluster read the same counters.
+# 3. --standby-seed: a standby of a source that already purged the start of
+#    its log (QUEEN_RAFT_LOG_KEEP=16, QUEEN_RAFT_PURGE_HOLD_S=5), seeded from
+#    a snapshot at a quarter of the run (every standby node starts; node 1
+#    seeds once the others answer that they hold nothing), grown to three
+#    voters 15 s later, under the same faults. Judged besides: the seed and
+#    the growth went through, and no follower halted. Between the seed and
+#    the standby's first read only the source node that sent the snapshot
+#    holds its log for the standby: the kills of section 3 test that window.
+# 4. Four tenants on two raft groups on both clusters: each group is followed
+#    and promoted at its own point. The crash check compares the sends of one
+#    group only; a transaction stays in one tenant.
+# 5. A rolling upgrade of both clusters from /root/bin/queen-old, the standby
+#    first (the documented order) or the source first (the standby then
+#    waits, counted in `link-waiting-seen`), and the failover after it or in
+#    the middle of it.
+#
+# 6 tests of 180 to 240 s, 19 of 300 s, 6 of 300 to 400 s, each with about 2 minutes of
+# setup and final reads: about 3 hours 40.
+
+# --- 1. smoke
+sb-kv-crash-smoke           --workload failover --standby-nodes 3 --failover crash --w12-kv --nemesis none --time-limit 180 --rate 200
+sb-kv-planned-smoke         --workload failover --standby-nodes 3 --failover planned --w12-kv --nemesis none --time-limit 180 --rate 200
+sb-seed-crash-smoke         --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis none --time-limit 240 --rate 200
+sb-seed-planned-smoke       --workload failover --standby-nodes 3 --failover planned --standby-seed --nemesis none --time-limit 240 --rate 200
+sb-groups-crash-smoke       --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --nemesis none --time-limit 180 --rate 200
+sb-groups-planned-smoke     --workload failover --standby-nodes 3 --failover planned --tenants 4 --raft-groups 2 --txn --nemesis none --time-limit 180 --rate 200
+
+# --- 2. KV and log agree after a promotion
+sb-kv-crash-kill            --workload failover --standby-nodes 3 --failover crash --w12-kv --txn --nemesis kill --time-limit 300 --rate 200
+sb-kv-crash-part            --workload failover --standby-nodes 3 --failover crash --w12-kv --txn --nemesis partition --time-limit 300 --rate 200
+sb-kv-crash-pause           --workload failover --standby-nodes 3 --failover crash --w12-kv --txn --nemesis pause --time-limit 300 --rate 200
+sb-kv-crash-lz-kill         --workload failover --standby-nodes 3 --failover crash --w12-kv --txn --lazyfs --nemesis kill --time-limit 300 --rate 200
+sb-kv-planned-kill          --workload failover --standby-nodes 3 --failover planned --w12-kv --txn --nemesis kill --time-limit 300 --rate 200
+sb-kv-behind                --workload failover --standby-nodes 3 --failover crash-behind --w12-kv --txn --nemesis none --time-limit 300 --rate 200
+
+# --- 3. a seeded standby
+sb-seed-crash-kill          --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis kill --time-limit 300 --rate 200
+sb-seed-crash-part          --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis partition --time-limit 300 --rate 200
+sb-seed-crash-pause         --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis pause --time-limit 300 --rate 200
+sb-seed-crash-lz-kill       --workload failover --standby-nodes 3 --failover crash --standby-seed --lazyfs --nemesis kill --time-limit 300 --rate 200
+sb-seed-crash-snapkill      --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis snap-kill --time-limit 300 --rate 200
+sb-seed-planned-kill        --workload failover --standby-nodes 3 --failover planned --standby-seed --nemesis kill --time-limit 300 --rate 200
+sb-seed-kv-crash-kill       --workload failover --standby-nodes 3 --failover crash --standby-seed --w12-kv --txn --nemesis kill --time-limit 300 --rate 200
+
+# --- 4. several raft groups
+sb-groups-crash-kill        --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --nemesis kill --time-limit 300 --rate 200
+sb-groups-crash-part        --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --nemesis partition --time-limit 300 --rate 200
+sb-groups-crash-pause       --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --nemesis pause --time-limit 300 --rate 200
+sb-groups-planned-kill      --workload failover --standby-nodes 3 --failover planned --tenants 4 --raft-groups 2 --txn --nemesis kill --time-limit 300 --rate 200
+sb-groups-behind            --workload failover --standby-nodes 3 --failover crash-behind --tenants 4 --raft-groups 2 --txn --nemesis none --time-limit 300 --rate 200
+sb-groups-seed-kv-kill      --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --standby-seed --w12-kv --nemesis kill --time-limit 300 --rate 200
+
+# --- 5. across a rolling upgrade
+sb-up-sbfirst-planned       --workload failover --standby-nodes 3 --failover planned --failover-at 250 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode standby-first --upgrade-interval 20 --time-limit 400 --rate 200
+sb-up-sbfirst-crash         --workload failover --standby-nodes 3 --failover crash --failover-at 250 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode standby-first --upgrade-interval 20 --time-limit 400 --rate 200
+sb-up-srcfirst-planned      --workload failover --standby-nodes 3 --failover planned --failover-at 250 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode source-first --upgrade-interval 20 --time-limit 400 --rate 200
+sb-up-srcfirst-crash        --workload failover --standby-nodes 3 --failover crash --failover-at 250 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode source-first --upgrade-interval 20 --time-limit 400 --rate 200
+sb-up-mid-crash             --workload failover --standby-nodes 3 --failover crash --failover-at 130 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode standby-first --upgrade-interval 40 --time-limit 300 --rate 200
+sb-up-kv-planned            --workload failover --standby-nodes 3 --failover planned --failover-at 250 --w12-kv --txn --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode standby-first --upgrade-interval 20 --time-limit 400 --rate 200

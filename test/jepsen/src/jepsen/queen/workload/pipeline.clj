@@ -33,7 +33,8 @@
                     [generator :as gen]
                     [history :as h]
                     [random :as rand]]
-            [jepsen.queen [http :as qh]
+            [jepsen.queen [binary :as bin]
+                          [http :as qh]
                           [kv :as kv]]
             [jepsen.queen.workload [log :as log]
                                    [queue :as queue]])
@@ -96,9 +97,20 @@
                       :kv [{:op "incr", :ns kv/ns-name*, :key (str "c:" k)
                             :delta 1, :forever true}]}
                 op   (assoc op :value v, :attempt (:deliveryAttempt msg))
-                t    (try (qh/request! (:http client) :post
-                                       (str (:base client) "/api/v1/transaction")
-                                       body (:client-timeout-ms test))
+                url  (str (:base client) "/api/v1/transaction")
+                ; --binary: the same transaction as QTB1, its push as a
+                ; framed group (zstd, built here) after the JSON head.
+                t    (try (if (:binary test)
+                            (bin/request! (:http client) :post url
+                                          (bin/txn-body (update body :operations
+                                                                (fn [ops] (filterv #(not= "push" (:type %)) ops)))
+                                                        (for [o (:operations body) :when (= "push" (:type o))
+                                                              it (:items o)]
+                                                          {:queue (:queue it), :partition (:partition it)
+                                                           :items [{:transactionId (:transactionId it)
+                                                                    :payload (:payload it)}]}))
+                                          "application/octet-stream" (:client-timeout-ms test))
+                            (qh/request! (:http client) :post url body (:client-timeout-ms test)))
                           (catch clojure.lang.ExceptionInfo e
                             (if (#{::qh/refused ::qh/timeout ::qh/io} (:type (ex-data e)))
                               {:exception (ex-data e)}

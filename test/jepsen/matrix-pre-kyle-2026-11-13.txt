@@ -1,0 +1,273 @@
+# The campaign before a paid Jepsen analysis (2026-11-13): every workload and setting
+# the earlier campaigns left out. Run on the build under test (BIN), then the full
+# earlier suite (matrix-prio-2026-10-30.txt, matrix-w13-2026-11-07.txt, W12 failovers)
+# on the same build. Needs: rig/ctl-services.sh (connectors), /root/runners.tgz
+# (feedstream), /root/bin/queen-old (upgrade tests).
+
+# W14 kafka: the Kafka facade through the Java client
+k-assign-none                     --workload kafka --nemesis none --time-limit 300 --rate 200
+k-assign-txn-none                 --workload kafka --txn --nemesis none --time-limit 300 --rate 200
+k-assign-kill                     --workload kafka --nemesis kill --time-limit 300 --rate 200
+k-assign-txn-kill                 --workload kafka --txn --nemesis kill --time-limit 300 --rate 200
+k-assign-part                     --workload kafka --nemesis partition --time-limit 300 --rate 200
+k-assign-txn-part                 --workload kafka --txn --nemesis partition --time-limit 300 --rate 200
+k-assign-pause                    --workload kafka --nemesis pause --time-limit 300 --rate 200
+k-assign-txn-pause                --workload kafka --txn --nemesis pause --time-limit 300 --rate 200
+k-assign-clock                    --workload kafka --nemesis clock --time-limit 300 --rate 200
+k-assign-txn-clock                --workload kafka --txn --nemesis clock --time-limit 300 --rate 200
+k-assign-deaf                     --workload kafka --nemesis leader-deaf --time-limit 300 --rate 200
+k-assign-txn-deaf                 --workload kafka --txn --nemesis leader-deaf --time-limit 300 --rate 200
+k-assign-restart                  --workload kafka --nemesis restart --time-limit 300 --rate 200
+k-assign-txn-restart              --workload kafka --txn --nemesis restart --time-limit 300 --rate 200
+k-assign-member                   --workload kafka --nemesis membership --time-limit 300 --rate 200
+k-assign-txn-member               --workload kafka --txn --nemesis membership --time-limit 300 --rate 200
+k-assign-lz-kill                  --workload kafka --lazyfs --nemesis kill --time-limit 300 --rate 200
+k-assign-txn-lz-kill              --workload kafka --txn --lazyfs --nemesis kill --time-limit 300 --rate 200
+k-assign-packet                   --workload kafka --nemesis packet --time-limit 300 --rate 200
+k-assign-txn-packet               --workload kafka --txn --nemesis packet --time-limit 300 --rate 200
+k-sub-kill                        --workload kafka --sub-via-kafka subscribe --nemesis kill --time-limit 300 --rate 200
+k-sub-txn-kill                    --workload kafka --sub-via-kafka assign,subscribe --txn --nemesis kill --time-limit 300 --rate 200
+k-sub-part                        --workload kafka --sub-via-kafka subscribe --nemesis partition --time-limit 300 --rate 200
+k-sub-txn-part                    --workload kafka --sub-via-kafka assign,subscribe --txn --nemesis partition --time-limit 300 --rate 200
+k-sub-pause                       --workload kafka --sub-via-kafka subscribe --nemesis pause --time-limit 300 --rate 200
+k-sub-txn-pause                   --workload kafka --sub-via-kafka assign,subscribe --txn --nemesis pause --time-limit 300 --rate 200
+k-sub-restart                     --workload kafka --sub-via-kafka subscribe --nemesis restart --time-limit 300 --rate 200
+k-sub-txn-restart                 --workload kafka --sub-via-kafka assign,subscribe --txn --nemesis restart --time-limit 300 --rate 200
+k-sub-packet                      --workload kafka --sub-via-kafka subscribe --nemesis packet --time-limit 300 --rate 200
+k-sub-txn-packet                  --workload kafka --sub-via-kafka assign,subscribe --txn --nemesis packet --time-limit 300 --rate 200
+
+# W15 filtered groups, W16 reading queues, W17 link (cluster version 8)
+rt-filtered-none                  --workload filtered --nemesis none --time-limit 300 --rate 200
+rt-reading-none                   --workload reading --nemesis none --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-none                      --workload link --nemesis none --time-limit 300 --rate 200
+rt-filtered-kill                  --workload filtered --nemesis kill --time-limit 300 --rate 200
+rt-reading-kill                   --workload reading --nemesis kill --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-kill                      --workload link --nemesis kill --time-limit 300 --rate 200
+rt-filtered-part                  --workload filtered --nemesis partition --time-limit 300 --rate 200
+rt-reading-part                   --workload reading --nemesis partition --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-part                      --workload link --nemesis partition --time-limit 300 --rate 200
+rt-filtered-pause                 --workload filtered --nemesis pause --time-limit 300 --rate 200
+rt-reading-pause                  --workload reading --nemesis pause --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-pause                     --workload link --nemesis pause --time-limit 300 --rate 200
+rt-filtered-clock                 --workload filtered --nemesis clock --time-limit 300 --rate 200
+rt-reading-clock                  --workload reading --nemesis clock --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-clock                     --workload link --nemesis clock --time-limit 300 --rate 200
+rt-filtered-deaf                  --workload filtered --nemesis leader-deaf --time-limit 300 --rate 200
+rt-reading-deaf                   --workload reading --nemesis leader-deaf --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-deaf                      --workload link --nemesis leader-deaf --time-limit 300 --rate 200
+rt-filtered-restart               --workload filtered --nemesis restart --time-limit 300 --rate 200
+rt-reading-restart                --workload reading --nemesis restart --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-restart                   --workload link --nemesis restart --time-limit 300 --rate 200
+rt-filtered-member                --workload filtered --nemesis membership --time-limit 300 --rate 200
+rt-reading-member                 --workload reading --nemesis membership --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-member                    --workload link --nemesis membership --time-limit 300 --rate 200
+rt-filtered-lz-kill               --workload filtered --lazyfs --nemesis kill --time-limit 300 --rate 200
+rt-reading-lz-kill                --workload reading --lazyfs --nemesis kill --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-lz-kill                   --workload link --lazyfs --nemesis kill --time-limit 300 --rate 200
+rt-filtered-packet                --workload filtered --nemesis packet --time-limit 300 --rate 200
+rt-reading-packet                 --workload reading --nemesis packet --time-limit 300 --rate 200 --final-time-limit 300
+rt-link-packet                    --workload link --nemesis packet --time-limit 300 --rate 200
+
+# W18 txnmix: transactions with rollbacks on purpose, planner threads 8 (and 1)
+tm8-none                          --workload txnmix --nemesis none --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm8-kill                          --workload txnmix --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm8-part                          --workload txnmix --nemesis partition --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm8-pause                         --workload txnmix --nemesis pause --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm8-clock                         --workload txnmix --nemesis clock --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm8-deaf                          --workload txnmix --nemesis leader-deaf --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm8-restart                       --workload txnmix --nemesis restart --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm8-member                        --workload txnmix --nemesis membership --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm8-lz-kill                       --workload txnmix --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm8-packet                        --workload txnmix --nemesis packet --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+tm1-none                          --workload txnmix --nemesis none --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
+tm1-kill                          --workload txnmix --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
+tm1-part                          --workload txnmix --nemesis partition --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
+
+# W19 feedstream: the SDK runners under faults (--nemesis runner kills and pauses the active one)
+fs-runner-js-go                   --workload feedstream --nemesis runner --feed-sdks js,go --time-limit 300 --rate 200 --nemesis-interval 20
+fs-runner-py-rust                 --workload feedstream --nemesis runner --feed-sdks python,rust --time-limit 300 --rate 200 --nemesis-interval 20
+fs-runner-kill-all4               --workload feedstream --nemesis runner,kill --feed-sdks js,python,go,rust --time-limit 300 --rate 200 --nemesis-interval 20
+fs-runner-part-all4               --workload feedstream --nemesis runner,partition --feed-sdks js,python,go,rust --time-limit 300 --rate 200 --nemesis-interval 20
+fs-runner-pause-js-py             --workload feedstream --nemesis runner,pause --feed-sdks js,python --time-limit 300 --rate 200 --nemesis-interval 20
+fs-clock-js-go                    --workload feedstream --nemesis clock --feed-sdks js,go --time-limit 300 --rate 200
+fs-deaf-all4                      --workload feedstream --nemesis leader-deaf --feed-sdks js,python,go,rust --time-limit 300 --rate 200
+fs-restart-all4                   --workload feedstream --nemesis restart --feed-sdks js,python,go,rust --time-limit 300 --rate 200
+
+# W20 ephemeral queues (loss judged only with graceful restarts or no faults)
+eph-none                          --workload ephemeral --nemesis none --time-limit 300 --rate 200
+eph-restart                       --workload ephemeral --nemesis restart --time-limit 300 --rate 200
+eph-kill                          --workload ephemeral --nemesis kill --time-limit 300 --rate 200
+eph-part                          --workload ephemeral --nemesis partition --time-limit 300 --rate 200
+eph-pause                         --workload ephemeral --nemesis pause --time-limit 300 --rate 200
+
+# W21 tenants, and several raft groups
+ten3-kill                         --workload tenants --tenants 3 --nemesis kill --time-limit 300 --rate 200
+ten3-part                         --workload tenants --tenants 3 --nemesis partition --time-limit 300 --rate 200
+ten6-g3-none                      --workload tenants --tenants 6 --raft-groups 3 --nemesis none --time-limit 300 --rate 200
+ten6-g3-kill                      --workload tenants --tenants 6 --raft-groups 3 --nemesis kill --time-limit 300 --rate 200
+ten6-g3-part                      --workload tenants --tenants 6 --raft-groups 3 --nemesis partition --time-limit 300 --rate 200
+ten6-g3-pause                     --workload tenants --tenants 6 --raft-groups 3 --nemesis pause --time-limit 300 --rate 200
+ten6-g3-clock                     --workload tenants --tenants 6 --raft-groups 3 --nemesis clock --time-limit 300 --rate 200
+ten6-g3-deaf                      --workload tenants --tenants 6 --raft-groups 3 --nemesis leader-deaf --time-limit 300 --rate 200
+ten6-g3-restart                   --workload tenants --tenants 6 --raft-groups 3 --nemesis restart --time-limit 300 --rate 200
+ten6-g3-lz-kill                   --workload tenants --tenants 6 --raft-groups 3 --lazyfs --nemesis kill --time-limit 300 --rate 200
+
+# W22 scoped keys and client tokens, through the proxy
+scoped-none                       --workload scoped --via-proxy --nemesis none --time-limit 300 --rate 200
+scoped-kill                       --workload scoped --via-proxy --nemesis kill --time-limit 300 --rate 200
+scoped-part                       --workload scoped --via-proxy --nemesis partition --time-limit 300 --rate 200
+scoped-restart                    --workload scoped --via-proxy --nemesis restart --time-limit 300 --rate 200
+
+# W23 dlqops: ack retry, DLQ replay, dead-letter delete
+dlqops-none                       --workload dlqops --nemesis none --time-limit 300 --rate 200
+dlqops-kill                       --workload dlqops --nemesis kill --time-limit 300 --rate 200
+dlqops-part                       --workload dlqops --nemesis partition --time-limit 300 --rate 200
+dlqops-pause                      --workload dlqops --nemesis pause --time-limit 300 --rate 200
+dlqops-restart                    --workload dlqops --nemesis restart --time-limit 300 --rate 200
+dlqops-lz-kill                    --workload dlqops --lazyfs --nemesis kill --time-limit 300 --rate 200
+
+# W24 queueopts: delayedProcessing, windowBuffer, maxWaitTimeSeconds
+qo-delayed-none                   --workload queueopts --queue-opt delayed --nemesis none --time-limit 300 --rate 200
+qo-delayed-kill                   --workload queueopts --queue-opt delayed --nemesis kill --time-limit 300 --rate 200
+qo-delayed-part                   --workload queueopts --queue-opt delayed --nemesis partition --time-limit 300 --rate 200
+qo-window-none                    --workload queueopts --queue-opt window --nemesis none --time-limit 300 --rate 200
+qo-window-kill                    --workload queueopts --queue-opt window --nemesis kill --time-limit 300 --rate 200
+qo-window-part                    --workload queueopts --queue-opt window --nemesis partition --time-limit 300 --rate 200
+qo-maxwait-none                   --workload queueopts --queue-opt maxwait --nemesis none --time-limit 300 --rate 200
+qo-maxwait-kill                   --workload queueopts --queue-opt maxwait --nemesis kill --time-limit 300 --rate 200
+qo-maxwait-part                   --workload queueopts --queue-opt maxwait --nemesis partition --time-limit 300 --rate 200
+
+# W25 kvttl, W26 seek, W27 lifecycle
+kvttl-none                        --workload kvttl --nemesis none --time-limit 300 --rate 200
+kvttl-kill                        --workload kvttl --nemesis kill --time-limit 300 --rate 200
+kvttl-part                        --workload kvttl --nemesis partition --time-limit 300 --rate 200
+kvttl-pause                       --workload kvttl --nemesis pause --time-limit 300 --rate 200
+kvttl-deaf                        --workload kvttl --nemesis leader-deaf --time-limit 300 --rate 200
+seek-none                         --workload seek --nemesis none --time-limit 300 --rate 200
+seek-kill                         --workload seek --nemesis kill --time-limit 300 --rate 200
+seek-part                         --workload seek --nemesis partition --time-limit 300 --rate 200
+seek-pause                        --workload seek --nemesis pause --time-limit 300 --rate 200
+lc-none                           --workload lifecycle --nemesis none --time-limit 300 --rate 200
+lc-kill                           --workload lifecycle --nemesis kill --time-limit 300 --rate 200
+lc-part                           --workload lifecycle --nemesis partition --time-limit 300 --rate 200
+lc-restart                        --workload lifecycle --nemesis restart --time-limit 300 --rate 200
+
+# W28-W30 connectors (services on the control node: --services-host)
+pgsource-none                     --workload pgsource --nemesis none --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsource-kill                     --workload pgsource --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsource-part                     --workload pgsource --nemesis partition --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsource-pause                    --workload pgsource --nemesis pause --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsource-restart                  --workload pgsource --nemesis restart --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsource-lz-kill                  --workload pgsource --lazyfs --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-none                       --workload pgsink --nemesis none --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-kill                       --workload pgsink --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-part                       --workload pgsink --nemesis partition --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-pause                      --workload pgsink --nemesis pause --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-restart                    --workload pgsink --nemesis restart --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-lz-kill                    --workload pgsink --lazyfs --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+s3sink-none                       --workload s3sink --nemesis none --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+s3sink-kill                       --workload s3sink --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+s3sink-part                       --workload s3sink --nemesis partition --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+s3sink-pause                      --workload s3sink --nemesis pause --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+s3sink-restart                    --workload s3sink --nemesis restart --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+s3sink-lz-kill                    --workload s3sink --lazyfs --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+s3sink-crash-after_upload         --workload s3sink --nemesis restart --env QUEEN_S3_CRASH_AT=after_upload --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+s3sink-crash-before_commit        --workload s3sink --nemesis restart --env QUEEN_S3_CRASH_AT=before_commit --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+
+# Settings on the core workloads: proxy, binary bodies, encryption
+proxy-log-kill                    --workload log --via-proxy --nemesis kill --time-limit 300 --rate 200
+proxy-log-part                    --workload log --via-proxy --nemesis partition --time-limit 300 --rate 200
+bin-log-none                      --workload log --binary --nemesis none --time-limit 300 --rate 200
+bin-log-kill                      --workload log --binary --nemesis kill --time-limit 300 --rate 200
+bin-log-part                      --workload log --binary --nemesis partition --time-limit 300 --rate 200
+bin-log-lz-kill                   --workload log --binary --lazyfs --nemesis kill --time-limit 300 --rate 200
+enc-log-kill                      --workload log --encrypt --nemesis kill --time-limit 300 --rate 200
+enc-log-lz-kill                   --workload log --encrypt --lazyfs --nemesis kill --time-limit 300 --rate 200
+proxy-queue-kill                  --workload queue --via-proxy --nemesis kill --time-limit 300 --rate 200
+proxy-queue-part                  --workload queue --via-proxy --nemesis partition --time-limit 300 --rate 200
+bin-queue-none                    --workload queue --binary --nemesis none --time-limit 300 --rate 200
+bin-queue-kill                    --workload queue --binary --nemesis kill --time-limit 300 --rate 200
+bin-queue-part                    --workload queue --binary --nemesis partition --time-limit 300 --rate 200
+bin-queue-lz-kill                 --workload queue --binary --lazyfs --nemesis kill --time-limit 300 --rate 200
+enc-queue-kill                    --workload queue --encrypt --nemesis kill --time-limit 300 --rate 200
+enc-queue-lz-kill                 --workload queue --encrypt --lazyfs --nemesis kill --time-limit 300 --rate 200
+proxy-pipeline-kill               --workload pipeline --via-proxy --nemesis kill --time-limit 300 --rate 200
+proxy-pipeline-part               --workload pipeline --via-proxy --nemesis partition --time-limit 300 --rate 200
+bin-pipeline-none                 --workload pipeline --binary --nemesis none --time-limit 300 --rate 200
+bin-pipeline-kill                 --workload pipeline --binary --nemesis kill --time-limit 300 --rate 200
+bin-pipeline-part                 --workload pipeline --binary --nemesis partition --time-limit 300 --rate 200
+bin-pipeline-lz-kill              --workload pipeline --binary --lazyfs --nemesis kill --time-limit 300 --rate 200
+enc-pipeline-kill                 --workload pipeline --encrypt --nemesis kill --time-limit 300 --rate 200
+enc-pipeline-lz-kill              --workload pipeline --encrypt --lazyfs --nemesis kill --time-limit 300 --rate 200
+
+# W2 options: queue mode, fan-out, lease renewal; W10 timers in a transaction
+w2-qmode-kill                     --workload queue --w2-group none --nemesis kill --time-limit 300 --rate 200
+w2-fanout3-kill                   --workload queue --w2-groups 3 --nemesis kill --time-limit 300 --rate 200
+w2-qmode-part                     --workload queue --w2-group none --nemesis partition --time-limit 300 --rate 200
+w2-fanout3-part                   --workload queue --w2-groups 3 --nemesis partition --time-limit 300 --rate 200
+w2-qmode-pause                    --workload queue --w2-group none --nemesis pause --time-limit 300 --rate 200
+w2-fanout3-pause                  --workload queue --w2-groups 3 --nemesis pause --time-limit 300 --rate 200
+w2-extend-kill                    --workload queue --w2-extend --nemesis kill --time-limit 300 --rate 200
+w2-extend-part                    --workload queue --w2-extend --nemesis partition --time-limit 300 --rate 200
+w2-extend-pause                   --workload queue --w2-extend --nemesis pause --time-limit 300 --rate 200
+w2-extend-clock                   --workload queue --w2-extend --nemesis clock --time-limit 300 --rate 200
+w10-intxn-none                    --workload timers --timers-in-txn --nemesis none --time-limit 300 --rate 200
+w10-intxn-kill                    --workload timers --timers-in-txn --nemesis kill --time-limit 300 --rate 200
+w10-intxn-part                    --workload timers --timers-in-txn --nemesis partition --time-limit 300 --rate 200
+w10-intxn-pause                   --workload timers --timers-in-txn --nemesis pause --time-limit 300 --rate 200
+
+# New faults on the core workloads: packet, two corrupt nodes, disk full, upgrade under load, long runs
+packet-log                        --workload log --nemesis packet --time-limit 300 --rate 200
+packet-queue                      --workload queue --nemesis packet --time-limit 300 --rate 200
+packet-register                   --workload register --nemesis packet --time-limit 300 --rate 200
+packet-elle                       --workload elle --nemesis packet --time-limit 300 --rate 200
+packet-pipeline                   --workload pipeline --nemesis packet --time-limit 300 --rate 200
+packet-dedup                      --workload dedup --nemesis packet --time-limit 300 --rate 200
+corrupt2-log                      --workload log --nemesis corrupt --corrupt-nodes 2 --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 30
+diskfull-log                      --workload log --nemesis disk-full --db-targets one,minority --time-limit 300 --rate 200 --nemesis-interval 20
+upgrade-log                       --workload log --nemesis upgrade --bin-old /root/bin/queen-old --time-limit 300 --rate 200
+long-log                          --workload log --nemesis all --time-limit 1800 --rate 200
+corrupt2-queue                    --workload queue --nemesis corrupt --corrupt-nodes 2 --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 30
+diskfull-queue                    --workload queue --nemesis disk-full --db-targets one,minority --time-limit 300 --rate 200 --nemesis-interval 20
+upgrade-queue                     --workload queue --nemesis upgrade --bin-old /root/bin/queen-old --time-limit 300 --rate 200
+long-queue                        --workload queue --nemesis all --time-limit 1800 --rate 200
+corrupt2-pipeline                 --workload pipeline --nemesis corrupt --corrupt-nodes 2 --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 30
+diskfull-pipeline                 --workload pipeline --nemesis disk-full --db-targets one,minority --time-limit 300 --rate 200 --nemesis-interval 20
+upgrade-pipeline                  --workload pipeline --nemesis upgrade --bin-old /root/bin/queen-old --time-limit 300 --rate 200
+long-pipeline                     --workload pipeline --nemesis all --time-limit 1800 --rate 200
+
+# The fix1 snapshot (2026-11-13): push dedup no longer keeps a row per message in
+# flight; it trusts the dedup front when it answers "new" and otherwise scans the
+# partition's appends in flight. W31 duppush sends copies of one push together
+# (2-4 copies on their own connections and nodes, within ms, half on a partition
+# the first copy creates; as one push, a two-item push, the same id twice in one
+# push, or a transaction): one record per transactionId, one winner, one offset.
+# At planner threads 8 and 1, and QUEEN_RAFT_DEDUP_FRONT=0 (every push scans) as
+# the control. Then framed pops (--binary) of records holding headers (W15) and
+# links (W16), padded past the 512 bytes the queue log compresses from: no framed
+# answer may hold a frame with headers or a link.
+dup-none-t8                       --workload duppush --nemesis none --env QUEEN_PLANNER_THREADS=8 --time-limit 300 --rate 200
+dup-kill-t8                       --workload duppush --nemesis kill --env QUEEN_PLANNER_THREADS=8 --time-limit 300 --rate 200
+dup-part-t8                       --workload duppush --nemesis partition --env QUEEN_PLANNER_THREADS=8 --time-limit 300 --rate 200
+dup-deaf-t8                       --workload duppush --nemesis leader-deaf --env QUEEN_PLANNER_THREADS=8 --time-limit 300 --rate 200
+dup-pause-t8                      --workload duppush --nemesis pause --env QUEEN_PLANNER_THREADS=8 --time-limit 300 --rate 200
+dup-restart-t8                    --workload duppush --nemesis restart --env QUEEN_PLANNER_THREADS=8 --time-limit 300 --rate 200 --nemesis-interval 20
+dup-lz-kill-t8                    --workload duppush --lazyfs --nemesis kill --env QUEEN_PLANNER_THREADS=8 --time-limit 300 --rate 200
+dup-none-t1                       --workload duppush --nemesis none --env QUEEN_PLANNER_THREADS=1 --time-limit 300 --rate 200
+dup-kill-t1                       --workload duppush --nemesis kill --env QUEEN_PLANNER_THREADS=1 --time-limit 300 --rate 200
+dup-part-t1                       --workload duppush --nemesis partition --env QUEEN_PLANNER_THREADS=1 --time-limit 300 --rate 200
+dup-deaf-t1                       --workload duppush --nemesis leader-deaf --env QUEEN_PLANNER_THREADS=1 --time-limit 300 --rate 200
+dup-pause-t1                      --workload duppush --nemesis pause --env QUEEN_PLANNER_THREADS=1 --time-limit 300 --rate 200
+dup-restart-t1                    --workload duppush --nemesis restart --env QUEEN_PLANNER_THREADS=1 --time-limit 300 --rate 200 --nemesis-interval 20
+dup-lz-kill-t1                    --workload duppush --lazyfs --nemesis kill --env QUEEN_PLANNER_THREADS=1 --time-limit 300 --rate 200
+dup-fresh-kill-t8                 --workload duppush --dup-fresh 1.0 --nemesis kill --env QUEEN_PLANNER_THREADS=8 --time-limit 300 --rate 200
+dup-txn-multi-kill-t8             --workload duppush --dup-kinds txn,multi,multi-twice --nemesis kill --env QUEEN_PLANNER_THREADS=8 --time-limit 300 --rate 200
+dup-front0-none                   --workload duppush --nemesis none --env QUEEN_RAFT_DEDUP_FRONT=0 --time-limit 300 --rate 200
+dup-front0-kill                   --workload duppush --nemesis kill --env QUEEN_RAFT_DEDUP_FRONT=0 --time-limit 300 --rate 200
+dup-front0-part                   --workload duppush --nemesis partition --env QUEEN_RAFT_DEDUP_FRONT=0 --time-limit 300 --rate 200
+fr-filtered-none                  --workload filtered --binary --pad-bytes 600 --nemesis none --time-limit 300 --rate 200
+fr-filtered-kill                  --workload filtered --binary --pad-bytes 600 --nemesis kill --time-limit 300 --rate 200
+fr-filtered-part                  --workload filtered --binary --pad-bytes 600 --nemesis partition --time-limit 300 --rate 200
+fr-reading-none                   --workload reading --binary --pad-bytes 600 --nemesis none --time-limit 300 --rate 200
+fr-reading-kill                   --workload reading --binary --pad-bytes 600 --nemesis kill --time-limit 300 --rate 200
+fr-reading-part                   --workload reading --binary --pad-bytes 600 --nemesis partition --time-limit 300 --rate 200

@@ -669,8 +669,8 @@
       (is (= [:kill 0] ((juxt :f :time) before)))
       (is (= [:stop-source 150000000000] ((juxt :f :time) after)))))
   (testing "the failover nemesis offers its ops"
-    (is (= #{:heal-all :heal-standby :cut-link :quiesce :await-standby :stop-source
-             :promote :start-source}
+    (is (= #{:seed-standby :grow-standby :heal-all :heal-standby :cut-link :quiesce
+             :await-standby :stop-source :promote :start-source}
            (n/fs (failover/nemesis (atom {})))))))
 
 ;; ---------------------------------------------------------------------------

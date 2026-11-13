@@ -80,16 +80,28 @@
 (defn- schedule!
   [client test op]
   (let [[k ver d] (:value op)
-        r (call client :post (str (:base client) "/api/v1/timers")
-                [{:op       "schedule"
-                  :queue    queue-name
-                  :timerKey (str "t" k)
-                  :delayMs  d
-                  :payload  (b64 (json/write-str {:k k, :ver ver}))
-                  :txn      (txn k ver)}]
-                (:client-timeout-ms test))
-        res (when (= 200 (:status r)) (first (:results (:body r))))]
+        top {:op       "schedule"
+             :queue    queue-name
+             :timerKey (str "t" k)
+             :delayMs  d
+             :payload  (b64 (json/write-str {:k k, :ver ver}))
+             :txn      (txn k ver)}
+        ; --timers-in-txn: the same schedule as the timers part of ONE
+        ; /api/v1/transaction; its result is the transaction's timer result.
+        r   (if (:timers-in-txn test)
+              (call client :post (str (:base client) "/api/v1/transaction")
+                    {:timers [top]} (:client-timeout-ms test))
+              (call client :post (str (:base client) "/api/v1/timers")
+                    [top] (:client-timeout-ms test)))
+        res (when (= 200 (:status r))
+              (if (:timers-in-txn test)
+                (when (true? (:success (:body r)))
+                  (first (filter #(= "timer" (:type %)) (:results (:body r)))))
+                (first (:results (:body r)))))]
     (cond
+      (and (:timers-in-txn test) (= 200 (:status r)) (false? (:success (:body r))))
+      (assoc op :type :fail, :error [:rolled-back (select-keys (:body r) [:reason :error])])
+
       (and res (:ok res)) (assoc op :type :ok, :status (:status res))
       res                 (assoc op :type :fail, :error [:verdict res])
       :else               (assoc op :type (failure test r)
@@ -98,9 +110,20 @@
 (defn- cancel!
   [client test op]
   (let [k (:value op)
-        r (call client :delete (str (:base client) "/api/v1/timers/" (enc queue-name)
-                                    "/" (enc (str "t" k)))
-                nil (:client-timeout-ms test))]
+        r (if (:timers-in-txn test)
+            (let [t (call client :post (str (:base client) "/api/v1/transaction")
+                          {:timers [{:op "cancel", :queue queue-name, :timerKey (str "t" k)}]}
+                          (:client-timeout-ms test))
+                  res (when (and (= 200 (:status t)) (true? (:success (:body t))))
+                        (first (filter #(= "timer" (:type %)) (:results (:body t)))))]
+              (cond (:exception t) t
+                    res            {:status 200, :body res}
+                    ; A transaction that rolled back applied nothing: a
+                    ; definite failure (400 below).
+                    :else          (assoc t :status (if (= 200 (:status t)) 400 (:status t)))))
+            (call client :delete (str (:base client) "/api/v1/timers/" (enc queue-name)
+                                      "/" (enc (str "t" k)))
+                  nil (:client-timeout-ms test)))]
     (if (= 200 (:status r))
       (assoc op :type :ok, :status (:status (:body r)), :txn (:txn (:body r)))
       (assoc op :type (failure test r)

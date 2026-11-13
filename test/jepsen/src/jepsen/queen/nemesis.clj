@@ -23,6 +23,7 @@
                     [util :as util]]
             [jepsen.control.net :as cn]
             [jepsen.control.util :as cu]
+            [jepsen.nemesis.combined :as nc]
             [jepsen.nemesis.file :as nf]
             [jepsen.queen [db :as qdb]
                           [membership :as qm]]))
@@ -162,8 +163,13 @@
                               (doseq [f others]
                                 (case mode
                                   :responses
+                                  ; Every raft group's port: group g listens on
+                                  ; the raft port + g (--raft-groups).
                                   (c/exec :iptables :-A :INPUT :-s (cn/ip f)
-                                          :-p :tcp :--sport raft-port
+                                          :-p :tcp :--sport (let [g (long (:raft-groups test 1))]
+                                                              (if (< 1 g)
+                                                                (str raft-port ":" (+ raft-port (dec g)))
+                                                                raft-port))
                                           :-m :length :--length "100:65535"
                                           :-j :DROP :-w)
                                   :all
@@ -336,11 +342,24 @@
     {:rejoined (boolean (some :rejoined (:rejoins r)))
      :detail   r}))
 
+(defn corrupt-trials
+  "The per-node trials of a :corrupt-file or :corrupt-heal completion: its
+  value itself with one victim, the maps under :trials with several."
+  [op]
+  (let [v (:value op)]
+    (cond (not (map? v)) []
+          (:trials v)    (:trials v)
+          :else          [v])))
+
 (defn corrupt-nemesis
-  "Damages files on ONE node, fixed for the whole test. Each :corrupt-file
-  op is one independent trial: kill the node, copy its data directory aside,
-  bitflip or truncate one random file of a class (qlog, seg, store, state),
-  start it, and watch it for --corrupt-watch seconds. Outcomes:
+  "Damages files on the victim nodes, fixed for the whole test: ONE node by
+  default (--corrupt-node names it), or --corrupt-nodes N nodes damaged at
+  the same time. Two of five is a minority: the cluster keeps its quorum, and
+  must lose nothing. Each :corrupt-file op is one independent trial on every
+  victim at once: kill them, copy each data directory aside, bitflip or
+  truncate one random file of a class (qlog, seg, store, state) on each,
+  start them, and watch them for --corrupt-watch seconds. Outcomes, per
+  node:
 
     :booted        it came up and stayed up (the damage was refused or
                    repaired, or lies where nothing read it yet);
@@ -355,23 +374,62 @@
   refusal: restore, rejoin, or mix (either, at random). A node found dead
   at the start of a trial or by :corrupt-heal (it exited later) rejoins
   too. Queen must refuse or repair the damage; it must never serve it or
-  lead with it."
+  lead with it.
+
+  With one victim an op's value is that node's trial (the shape every
+  campaign before 2026-11-13 recorded); with several it is {:trials [...]},
+  one map per node (`corrupt-trials` reads both)."
   [db]
-  (let [victim    (atom nil)
-        boot-line (atom 0)
+  (let [victims   (atom [])
+        boot-line (atom {})
+        lines-of  (fn [node] (get @boot-line node 0))
         late!     (fn [test node]
-                    ; Did the victim die on its own since its last start?
+                    ; Did this victim die on its own since its last start?
                     (let [dead (get (c/on-nodes test [node]
                                                 (fn [test node]
                                                   (when-not (alive?)
-                                                    {:why (why-since @boot-line)})))
+                                                    {:why (why-since (lines-of node))})))
                                     node)]
                       (cond
                         (nil? dead)  nil
                         (:why dead)  (assoc dead :rejoin (rejoin! test node))
                         :else        (do (c/on-nodes test [node]
                                                      (fn [test node] (db/start! db test node)))
-                                         (assoc dead :started true)))))]
+                                         (assoc dead :started true)))))
+        bak       (str data-dir ".bak")
+        ; One victim's trial, on the bound node.
+        trial!    (fn [test node class mode]
+                    (db/kill! db test node)
+                    (c/su (c/exec :rm :-rf bak)
+                          (c/exec :cp :-a data-dir bak))
+                    (let [r     (corrupt-one! class mode)
+                          lines (log-lines)
+                          _     (swap! boot-line assoc node lines)
+                          _     (db/start! db test node)
+                          up?   (await-up? node 20)]
+                      (if up?
+                        (if-let [ms (watch-exit (:corrupt-watch test 15))]
+                          (assoc r :outcome :runtime-exit, :exit-after-ms ms
+                                 :why (why-since lines), :rc (exit-rc-since lines))
+                          (do (c/su (c/exec :rm :-rf bak))
+                              (assoc r :outcome :booted)))
+                        (assoc r :outcome :refused, :why (why-since lines)
+                               :rc (exit-rc-since lines)))))
+        remedy-of (fn [test trial]
+                    (case (:outcome trial)
+                      :booted       nil
+                      :runtime-exit :rejoin
+                      :refused      (case (:corrupt-remedy test :mix)
+                                      :restore :restore
+                                      :rejoin  :rejoin
+                                      (rand/nth [:restore :rejoin]))))
+        restore!  (fn [test node]
+                    (db/kill! db test node)
+                    (c/su (c/exec :rm :-rf data-dir)
+                          (c/exec :mv bak data-dir))
+                    (swap! boot-line assoc node (log-lines))
+                    (db/start! db test node)
+                    {:restored-up? (await-up? node 30)})]
     (reify
       n/Reflection
       (fs [_] #{:corrupt-file :corrupt-heal})
@@ -379,69 +437,62 @@
       n/Nemesis
       (setup! [this test]
         (c/with-test-nodes test (n/compile-c-resource! "corrupt-file.c" "corrupt-file"))
-        (reset! victim (or (:corrupt-node test)
-                           (rand/nth (vec (sort (:nodes test))))))
-        (info "file corruption victim:" @victim)
+        (let [n (long (:corrupt-nodes test 1))]
+          (reset! victims
+                  (cond
+                    (and (= 1 n) (:corrupt-node test)) [(:corrupt-node test)]
+                    :else (vec (sort (take n (rand/shuffle (vec (sort (:nodes test))))))))))
+        (info "file corruption victims:" @victims)
         this)
 
       (invoke! [this test op]
-        (let [node @victim]
+        (let [nodes @victims
+              shape (fn [per-node]
+                      ; One victim: its map, as before; several: {:trials ...}.
+                      (if (= 1 (count nodes))
+                        (first per-node)
+                        {:trials (vec per-node)}))]
           (case (:f op)
             :corrupt-heal
-            (assoc op :value {:node node, :late-exit (late! test node)})
+            (assoc op :value (shape (for [node nodes]
+                                      {:node node, :late-exit (late! test node)})))
 
             :corrupt-file
             (let [{:keys [class mode]} (:value op)
-                  bak    (str data-dir ".bak")
-                  late   (late! test node)
-                  trial  (get (c/on-nodes
-                                test [node]
-                                (fn [test node]
-                                  (db/kill! db test node)
-                                  (c/su (c/exec :rm :-rf bak)
-                                        (c/exec :cp :-a data-dir bak))
-                                  (let [r     (corrupt-one! class mode)
-                                        lines (log-lines)
-                                        _     (reset! boot-line lines)
-                                        _     (db/start! db test node)
-                                        up?   (await-up? node 20)]
-                                    (if up?
-                                      (if-let [ms (watch-exit (:corrupt-watch test 15))]
-                                        (assoc r :outcome :runtime-exit, :exit-after-ms ms
-                                               :why (why-since lines), :rc (exit-rc-since lines))
-                                        (do (c/su (c/exec :rm :-rf bak))
-                                            (assoc r :outcome :booted)))
-                                      (assoc r :outcome :refused, :why (why-since lines)
-                                             :rc (exit-rc-since lines))))))
-                              node)
-                  remedy (case (:outcome trial)
-                           :booted       nil
-                           :runtime-exit :rejoin
-                           :refused      (case (:corrupt-remedy test :mix)
-                                           :restore :restore
-                                           :rejoin  :rejoin
-                                           (rand/nth [:restore :rejoin])))
-                  fix    (case remedy
-                           nil      nil
-                           :restore (get (c/on-nodes
-                                           test [node]
-                                           (fn [test node]
-                                             (db/kill! db test node)
-                                             (c/su (c/exec :rm :-rf data-dir)
-                                                   (c/exec :mv bak data-dir))
-                                             (reset! boot-line (log-lines))
-                                             (db/start! db test node)
-                                             {:restored-up? (await-up? node 30)}))
-                                         node)
-                           :rejoin  (do (c/on-nodes test [node]
-                                                    (fn [test node] (c/su (c/exec :rm :-rf bak))))
-                                        (let [r (rejoin! test node)]
-                                          (c/on-nodes test [node]
-                                                      (fn [test node] (reset! boot-line (log-lines))))
-                                          {:rejoin r})))]
-              (assoc op :value (cond-> (merge trial fix {:node node})
-                                 remedy (assoc :remedy remedy)
-                                 late   (assoc :late-exit late)))))))
+                  late    (into {} (for [node nodes] [node (late! test node)]))
+                  ; Every victim down and damaged at the same time.
+                  trials  (c/on-nodes test nodes
+                                      (fn [test node] (trial! test node class mode)))
+                  remedy  (into {} (for [node nodes]
+                                     [node (remedy-of test (get trials node))]))
+                  restore (->> nodes (filter #(= :restore (remedy %))))
+                  rejoin  (->> nodes (filter #(= :rejoin (remedy %))))
+                  restored (when (seq restore)
+                             (c/on-nodes test restore (fn [test node] (restore! test node))))
+                  rejoined (when (seq rejoin)
+                             (c/on-nodes test rejoin
+                                         (fn [test node] (c/su (c/exec :rm :-rf bak))))
+                             ; One replace! for all of them: it removes them one
+                             ; after another, then wipes and rejoins each.
+                             (let [r (if (= 1 (count rejoin))
+                                       {(first rejoin) (rejoin! test (first rejoin))}
+                                       (let [r (qm/replace! test (vec rejoin))]
+                                         (into {} (for [node rejoin]
+                                                    [node {:rejoined (boolean
+                                                                       (some #(and (= node (:node %)) (:rejoined %))
+                                                                             (:rejoins r)))
+                                                           :detail   r}]))))]
+                               (c/on-nodes test rejoin
+                                           (fn [test node] (swap! boot-line assoc node (log-lines))))
+                               r))]
+              (assoc op :value
+                     (shape (for [node nodes]
+                              (cond-> (merge (get trials node)
+                                             (get restored node)
+                                             (when-let [r (get rejoined node)] {:rejoin r})
+                                             {:node node})
+                                (remedy node) (assoc :remedy (remedy node))
+                                (late node)   (assoc :late-exit (late node))))))))))
 
       (teardown! [this test]))))
 
@@ -581,6 +632,195 @@
                    :color "#E9C0A0"}}}))
 
 ;; ---------------------------------------------------------------------------
+;; A full disk: the filesystem under the data directory filled to the last
+;; block, then freed.
+
+(def fill-file
+  "The file that fills a node's disk: beside the data directory, on the same
+  filesystem, never inside it."
+  "/opt/queen/fill")
+
+(defn- free-disk!
+  "On the bound node: remove the fill."
+  []
+  (c/su (util/meh (c/exec :rm :-f fill-file)))
+  :freed)
+
+(defn- fill-disk!
+  "On the bound node: fallocate one file over every free block of the
+  filesystem that holds /opt/queen, root's reserved blocks included (queen
+  runs as root, so `df`'s available space is not the limit it meets), less
+  `keep-bytes`."
+  [keep-bytes]
+  (free-disk!)
+  (c/su
+    (let [[free bsize] (->> (str/split (str/trim (c/exec :stat :-f :-c "%f %S" "/opt/queen"))
+                                       #"\s+")
+                            (map parse-long))
+          size         (max 0 (- (* free bsize) (long keep-bytes)))]
+      (when (pos? size)
+        (c/exec :fallocate :-l size fill-file))
+      {:filled-bytes size
+       :left         (str/trim (c/exec :df :-B1 :--output=avail "/opt/queen"))})))
+
+(defn disk-full-nemesis
+  "  :fill-disk  fill the disk under the data directory of the nodes in
+                :value (a node spec, resolved like the kill nemesis's), to the
+                last free block but --disk-full-keep bytes;
+     :free-disk  remove the fill on every node.
+  A full disk must cost availability, never an acknowledged write: a node
+  that cannot write refuses or stops, and once the disk has room again the
+  cluster goes on. A panic is reported by the panic checker like any other."
+  [db]
+  (reify
+    n/Reflection
+    (fs [_] #{:fill-disk :free-disk})
+
+    n/Nemesis
+    (setup! [this test]
+      (c/with-test-nodes test (free-disk!))
+      this)
+
+    (invoke! [this test op]
+      (case (:f op)
+        :fill-disk
+        (let [nodes (vec (nc/db-nodes test db (:value op)))]
+          (assoc op :value (c/on-nodes test nodes
+                                       (fn [test node]
+                                         (fill-disk! (:disk-full-keep test 0))))))
+        :free-disk
+        (assoc op :value (c/on-nodes test (fn [test node] (free-disk!))))))
+
+    (teardown! [this test]
+      (c/with-test-nodes test (free-disk!)))))
+
+(defn disk-full-package
+  [{:keys [faults interval db kill]}]
+  (let [needed? (contains? faults :disk-full)
+        targets (vec (or (seq (:targets kill)) [:one :minority]))]
+    {:nemesis (disk-full-nemesis db)
+     :generator
+     (when needed?
+       (->> (gen/flip-flop (fn [_ _] {:type :info, :f :fill-disk, :value (rand/nth targets)})
+                           (repeat {:type :info, :f :free-disk, :value nil}))
+            (gen/stagger interval)))
+     :final-generator
+     (when needed? {:type :info, :f :free-disk, :value nil})
+     :perf #{{:name  "disk-full"
+              :start #{:fill-disk}
+              :stop  #{:free-disk}
+              :color "#C9A0E9"}}}))
+
+;; ---------------------------------------------------------------------------
+;; A rolling upgrade while the clients run: every node starts on --bin-old and
+;; is restarted on --bin, one at a time (jepsen.queen.db/swap-release!).
+
+(defn- releases
+  "{node :old | :new | nil}: which release each node's binary is."
+  [test]
+  (c/on-nodes test (fn [test node] (qdb/running-release))))
+
+(defn upgrade-candidates
+  "The nodes :upgrade-node picks from (at random), of `olds` (on the old
+  release) and `running` (a set of the nodes whose process runs). Two
+  clusters (--standby-nodes) are upgraded in an order: --upgrade-mode
+  standby-first (the documented one: a standby reads a source on an older
+  release, never the other way) or source-first (the wrong one: the standby
+  waits, losing nothing, until its own nodes are new), each among the nodes
+  that run, so a source the failover stopped is not started again by an
+  upgrade. Any other mode: every old node."
+  [test olds running]
+  (let [mode (:upgrade-mode test)]
+    (if-not (#{:standby-first :source-first} mode)
+      (vec olds)
+      (let [up          (filter running olds)
+            [sb src]    ((juxt filter remove) #(qdb/standby? test %) up)
+            [now later] (if (= :standby-first mode) [sb src] [src sb])]
+        (vec (if (seq now) now later))))))
+
+(defn- upgrade-pick
+  "The node :upgrade-node restarts on the new release, of `olds`, or nil."
+  [test olds]
+  (let [running (if (and (seq olds) (#{:standby-first :source-first} (:upgrade-mode test)))
+                  (->> (c/on-nodes test olds (fn [_ _] (qdb/running?)))
+                       (keep (fn [[node up?]] (when up? node)))
+                       set)
+                  (set olds))
+        cands   (upgrade-candidates test olds running)]
+    (when (seq cands) (rand/nth cands))))
+
+(defn upgrade-nemesis
+  "  :upgrade-node    one node still on the old release (random) restarted
+                     on the new one; :all-new when none is left
+                     (:none-running when the old ones are all down, with two
+                     clusters: see upgrade-pick for their order);
+     :downgrade-node  one node on the new release back to the old one
+                     (--upgrade-mode flap: only for two releases of one
+                     cluster version, which can run side by side both ways);
+     :upgrade-all     every node still on the old release, one after another,
+                     each healthy before the next.
+  Each restart is graceful (SIGTERM: a leader hands leadership off first),
+  as an operator's rolling upgrade is. Its value holds the restart's exit
+  code, how long the node took to exit and to answer /health again, and the
+  release before and after."
+  []
+  (let [move! (fn [test node to]
+                (get (c/on-nodes test [node]
+                                 (fn [test node] (qdb/swap-release! test node to)))
+                     node))
+        on    (fn [test release]
+                (->> (releases test)
+                     (keep (fn [[node r]] (when (= release r) node)))
+                     sort
+                     vec))]
+    (reify
+      n/Reflection
+      (fs [_] #{:upgrade-node :downgrade-node :upgrade-all})
+
+      n/Nemesis
+      (setup! [this test] this)
+
+      (invoke! [this test op]
+        (case (:f op)
+          :upgrade-node
+          (let [olds (on test :old)
+                pick (upgrade-pick test olds)]
+            (assoc op :value (cond pick       (move! test pick :new)
+                                   (seq olds) :none-running
+                                   :else      :all-new)))
+
+          :downgrade-node
+          (let [news (on test :new)]
+            (assoc op :value (if (seq news)
+                               (move! test (rand/nth news) :old)
+                               :all-old)))
+
+          :upgrade-all
+          (assoc op :value (mapv #(move! test % :new) (on test :old)))))
+
+      (teardown! [this test]))))
+
+(defn upgrade-package
+  [{:keys [faults upgrade-interval upgrade-mode]}]
+  (let [needed? (contains? faults :upgrade)
+        every   (or upgrade-interval 40)]
+    {:nemesis (upgrade-nemesis)
+     :generator
+     (when needed?
+       (->> (if (= :flap upgrade-mode)
+              (gen/mix [(repeat {:type :info, :f :upgrade-node, :value nil})
+                        (repeat {:type :info, :f :downgrade-node, :value nil})])
+              (repeat {:type :info, :f :upgrade-node, :value nil}))
+            (gen/stagger every)))
+     :final-generator
+     (when needed? {:type :info, :f :upgrade-all, :value nil})
+     :perf #{{:name  "upgrade"
+              :fs    #{:upgrade-node :downgrade-node :upgrade-all}
+              :start #{}
+              :stop  #{}
+              :color "#E9E0A0"}}}))
+
+;; ---------------------------------------------------------------------------
 ;; What the fault ops did, counted (informational: always valid).
 
 (defn fault-summary-checker
@@ -594,8 +834,15 @@
       (let [done    (->> history
                          (filter #(and (= :nemesis (:process %)) (= :info (:type %))
                                        (map? (:value %)))))
-            corrupt (filter #(and (= :corrupt-file (:f %)) (:outcome (:value %))) done)
-            heals   (filter #(and (= :corrupt-heal (:f %)) (contains? (:value %) :node)) done)
+            ; One op per trial with one victim; one op holding a trial per
+            ; victim with --corrupt-nodes N. Counted per node either way.
+            per-node (fn [f pred]
+                       (->> done
+                            (filter #(= f (:f %)))
+                            (mapcat (fn [op] (map #(assoc op :value %) (corrupt-trials op))))
+                            (filter (comp pred :value))))
+            corrupt (per-node :corrupt-file :outcome)
+            heals   (per-node :corrupt-heal #(contains? % :node))
             members (filter #(and (#{:member-cycle :member-double :member-heal} (:f %))
                                   (some (:value %) [:removals :healed :skipped]))
                             done)
@@ -632,4 +879,13 @@
                                 (mapcat (comp rejoins :value))
                                 (map :rejoined)
                                 frequencies)
-         :member-final     (:after (:value (last (filter #(= :member-heal (:f %)) members))))}))))
+         :member-final     (:after (:value (last (filter #(= :member-heal (:f %)) members))))
+         :disk-fills       (count (filter #(= :fill-disk (:f %)) done))
+         :upgrades         (->> done
+                                (filter #(#{:upgrade-node :downgrade-node} (:f %)))
+                                (map (comp (juxt :from :to :rc) :value))
+                                frequencies)
+         :upgrade-final    (some->> done
+                                    (filter #(= :upgrade-all (:f %)))
+                                    last :value
+                                    (mapv #(select-keys % [:node :from :to :rc :healthy-after-ms])))}))))

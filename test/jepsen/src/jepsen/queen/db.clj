@@ -15,7 +15,8 @@
             [jepsen.control.net :as cn]
             [jepsen.control.util :as cu]
             [jepsen.queen.http :as qh]
-            [jepsen.queen.lazyfs :as qlazyfs])
+            [jepsen.queen.lazyfs :as qlazyfs]
+            [jepsen.queen.runners :as runners])
   (:import (java.security MessageDigest)
            (java.io FileInputStream)))
 
@@ -32,6 +33,8 @@
 (def pid-file         (str dir "/queen.pid"))
 (def wrapper-pid-file (str dir "/wrapper.pid"))
 (def raft-port        7400)
+(def proxy-port       6711)
+(def proxy-spool      (str dir "/proxy-spool"))
 
 ;; ---------------------------------------------------------------------------
 ;; Two clusters in one test (--standby-nodes N): the last N nodes of the node
@@ -83,18 +86,30 @@
 (defn link-env
   "What the cluster link adds (rsm/link): the source's nodes serve a standby
   that presents the link token; the standby's nodes name every raft address
-  of the source and become a standby at their first election."
+  of the source and become a standby at their first election.
+
+  --standby-seed: the standby is SEEDED instead (QUEEN_LINK_SEED=1, in place
+  of QUEEN_LINK_STANDBY): its node 1 takes the source's snapshot as its first
+  state, and its other nodes, fresh, wait to be added to it. Its source has a
+  history by then: it keeps 16 entries behind its slowest live follower, and
+  a follower that makes no progress for 5 s no longer holds its log, so the
+  start of the log is gone and only the snapshot can start the standby."
   [test node]
   (cond
     (empty? (standby-nodes test)) {}
     (standby? test node)
-    {"QUEEN_LINK_SOURCE"       (->> (source-nodes test)
-                                    (map #(str (cn/ip %) ":" raft-port))
-                                    (str/join ","))
-     "QUEEN_LINK_SOURCE_TOKEN" (:link-token test)
-     "QUEEN_LINK_STANDBY"      "true"}
+    (merge {"QUEEN_LINK_SOURCE"       (->> (source-nodes test)
+                                           (map #(str (cn/ip %) ":" raft-port))
+                                           (str/join ","))
+            "QUEEN_LINK_SOURCE_TOKEN" (:link-token test)}
+           (if (:standby-seed test)
+             {"QUEEN_LINK_SEED" "1"}
+             {"QUEEN_LINK_STANDBY" "true"}))
     :else
-    {"QUEEN_LINK_TOKEN" (:link-token test)}))
+    (merge {"QUEEN_LINK_TOKEN" (:link-token test)}
+           (when (:standby-seed test)
+             {"QUEEN_RAFT_LOG_KEEP"      "16"
+              "QUEEN_RAFT_PURGE_HOLD_S"  "5"}))))
 
 (defn env
   "The node's environment: the benchmark harness's (qc.sh) plus test knobs."
@@ -122,6 +137,33 @@
         ; socket timeout is longer, so most outcomes are known.
         "POP_DEFAULT_TIMEOUT_MS"        (:server-timeout-ms test))
       (link-env test node)
+      ; --tenants / --raft-groups (jepsen.queen.workload.tenants/db-env).
+      (when (or (pos? (long (:tenants test 0))) (< 1 (long (:raft-groups test 1))))
+        ((requiring-resolve 'jepsen.queen.workload.tenants/db-env) test))
+      ; --via-proxy: the embedded proxy on its own port; QUEEN_PROXY_ENFORCE
+      ; off (the dev plans cap requests far below a test's rate).
+      (when (:via-proxy test)
+        {"QUEEN_PROXY_EMBEDDED"          "true"
+         "QUEEN_PROXY_PORT"              (str proxy-port)
+         "QUEEN_PROXY_JWT_SECRET"        (:proxy-secret test)
+         "QUEEN_PROXY_CP_TOKEN"          (:proxy-cp-token test)
+         "QUEEN_PROXY_SPOOL_DIR"         proxy-spool
+         "QUEEN_PROXY_BOOTSTRAP_TENANT"  "jepsen"
+         "QUEEN_PROXY_BOOTSTRAP_PLAN"    "pro"
+         "QUEEN_PROXY_BOOTSTRAP_API_KEY" (:proxy-key test)
+         "QUEEN_PROXY_DEFAULT_CLUSTER"   "jepsen"
+         "QUEEN_PROXY_ENFORCE"           "false"})
+      ; W28-W30: the connectors (jepsen.queen.workload.connectors/db-env).
+      (when (:connectors? test)
+        ((requiring-resolve 'jepsen.queen.workload.connectors/db-env) test))
+      ; --encrypt: at-rest encryption, one key for the whole cluster.
+      (when (:encrypt test)
+        {"QUEEN_ENCRYPTION_KEY" (:encryption-key test)})
+      ; W14: the Kafka facade on every node, advertising its own address.
+      (when (:kafka-facade? test)
+        {"QUEEN_KAFKA_EMBEDDED"        "true"
+         "QUEEN_KAFKA_ADDR"            (str ip ":9092")
+         "QUEEN_KAFKA_ADVERTISED_ADDR" (str ip ":9092")})
       (:extra-env test)
       ; --slow-fsync-nodes: a slow disk on these nodes only (a test knob of
       ; the queue-log syncer), so they apply entries well before their fsync.
@@ -177,18 +219,58 @@
                 (recur)))))
         (apply str (map #(format "%02x" %) (.digest md)))))))
 
-(defn install-binary!
-  "Uploads --bin unless the node already has the same bytes."
+(def bin-new
+  "--nemesis upgrade: the release a node is upgraded to (--bin)."
+  (str dir "/queen-new"))
+
+(def bin-old
+  "--nemesis upgrade: the release every node starts on (--bin-old)."
+  (str dir "/queen-old"))
+
+(defn upgrade-test?
+  "Does this test upgrade its nodes while it runs (--nemesis upgrade)?"
   [test]
-  (let [local (:bin test)
-        want  (local-md5 local)
-        have  (try (first (str/split (c/exec :md5sum bin) #"\s+"))
-                   (catch Exception _ nil))]
+  (boolean (some #{:upgrade} (:nemesis test))))
+
+(defn- upload-if-changed!
+  "Uploads `local` to `remote` unless the node already has the same bytes;
+  returns the md5."
+  [local remote]
+  (let [want (local-md5 local)
+        have (try (first (str/split (c/exec :md5sum remote) #"\s+"))
+                  (catch Exception _ nil))]
     (when-not (= want have)
-      (info "uploading" local "md5" want)
-      (c/upload local bin)
-      (c/exec :chmod :+x bin))
+      (info "uploading" local "to" remote "md5" want)
+      (c/upload local remote)
+      (c/exec :chmod :+x remote))
     want))
+
+(defn install-binary!
+  "Uploads --bin unless the node already has the same bytes. With --nemesis
+  upgrade the node keeps both releases (queen-old from --bin-old, queen-new
+  from --bin) and starts on the OLD one: the nemesis upgrades the nodes while
+  the clients run."
+  [test]
+  (if (upgrade-test? test)
+    (let [old (upload-if-changed! (or (:bin-old test)
+                                      (throw (ex-info "--nemesis upgrade needs --bin-old" {})))
+                                  bin-old)
+          new (upload-if-changed! (:bin test) bin-new)]
+      (c/exec :cp :-f bin-old bin)
+      (c/exec :chmod :+x bin)
+      (info "upgrade test: starts on" old "upgrades to" new)
+      old)
+    (upload-if-changed! (:bin test) bin)))
+
+(defn running-release
+  "Which release the bound node's binary is: :old or :new (by md5), or nil."
+  []
+  (let [md5 (fn [f] (try (first (str/split (c/su (c/exec :md5sum f)) #"\s+"))
+                         (catch Exception _ nil)))
+        cur (md5 bin)]
+    (cond (nil? cur)          nil
+          (= cur (md5 bin-new)) :new
+          (= cur (md5 bin-old)) :old)))
 
 (defn running?
   "Is a queen process alive on this node?"
@@ -196,12 +278,35 @@
   (try (c/exec :pgrep :-x :queen) true
        (catch Exception _ false)))
 
+(def seed-marker
+  "--standby-seed: written on the standby's nodes when the failover nemesis
+  seeds the standby; until then nothing starts them."
+  (str dir "/seed-started"))
+
+(defn mark-seed!
+  []
+  (c/su (c/exec :touch seed-marker)))
+
+(defn- seed-started?
+  []
+  (try (c/exec :test :-e seed-marker) true
+       (catch Exception _ false)))
+
 (defn start-node!
-  "Starts the wrapper unless queen already runs here."
+  "Starts the wrapper unless queen already runs here. --standby-seed: a node
+  of the standby stays down until the failover nemesis seeds the standby,
+  whichever fault would start it before (a start of the kill nemesis, a
+  restart, an upgrade)."
   [test node]
   (c/su
-    (if (running?)
+    (cond
+      (running?)
       :already-running
+
+      (and (:standby-seed test) (standby? test node) (not (seed-started?)))
+      :waits-for-the-seed
+
+      :else
       (do (c/exec :bash :-c (str "setsid nohup " run-sh " >> " log-file
                                  " 2>&1 < /dev/null &"))
           :started))))
@@ -301,13 +406,16 @@
   wait up to timeout-s for it to exit, start the node again and wait for
   /health. Returns what happened: the exit code the wrapper logged, how long
   the exit took, whether it had to be killed, how long until healthy."
-  [test node timeout-s]
+  ([test node timeout-s]
+   (graceful-restart! test node timeout-s nil))
+  ([test node timeout-s before-start]
   (let [t0      (System/currentTimeMillis)
         lines   (try (parse-long (str/trim (c/su (c/exec :bash :-c (str "wc -l < " log-file)))))
                      (catch Exception _ 0))
         pid     (try (str/trim (c/su (c/exec :pgrep :-x :queen))) (catch Exception _ nil))]
     (if-not pid
-      {:node node, :was-running false, :start (start-node! test node)}
+      (do (when before-start (before-start))
+          {:node node, :was-running false, :start (start-node! test node)})
       (do
         (c/su (c/exec :kill :-TERM (first (str/split-lines pid))))
         (let [exited? (loop []
@@ -320,11 +428,26 @@
                                                              " | grep -o 'queen exited rc=[0-9]*' | tail -1")))
                                 (re-find #"rc=(\d+)") second parse-long)
                            (catch Exception _ nil))
+              _       (when before-start (before-start))
               _       (start-node! test node)
               up?     (try (await-healthy! node 60000) true
                            (catch Exception _ false))]
           {:node node, :exit-ms exit-ms, :forced (not exited?), :rc rc
-           :healthy-after-ms (when up? (- (System/currentTimeMillis) t0))})))))
+           :healthy-after-ms (when up? (- (System/currentTimeMillis) t0))}))))))
+
+(defn swap-release!
+  "--nemesis upgrade: restart the bound node on the other release, the way an
+  operator rolls a cluster: SIGTERM (a leader hands leadership off first),
+  wait for the exit, put `to` (:new or :old) in place, start, wait for
+  /health. Returns graceful-restart!'s map with :from and :to."
+  [test node to]
+  (let [from (running-release)
+        src  (case to :new bin-new :old bin-old)]
+    (assoc (graceful-restart! test node 30
+                              #(c/su (c/exec :cp :-f src bin)
+                                     (c/exec :chmod :+x bin)))
+           :from from
+           :to   to)))
 
 (defn await-healthy!
   "Waits until this node's /health answers 200 (a leader is known)."
@@ -332,7 +455,7 @@
   (let [http (qh/client)]
     (util/await-fn
       (fn []
-        (let [r (qh/request! http :get (str (qh/base-url node) "/health")
+        (let [r (qh/request! http :get (str (qh/broker-url node) "/health")
                              nil 2000)]
           (when-not (= 200 (:status r))
             (throw (ex-info "not healthy" r)))
@@ -357,6 +480,12 @@
    :completedRetentionSeconds 0
    :dedupWindowSeconds 86400})
 
+(defn queue-config
+  "The options every test queue is configured with."
+  [test]
+  (cond-> (assoc queue-options :dedupWindowSeconds (:dedup-window test 86400))
+    (:encrypt test) (assoc :encryptionEnabled true)))
+
 (defn configure-queues!
   "POST /api/v1/configure for each test queue, via `node`; retried until 200."
   [test node]
@@ -366,10 +495,7 @@
         (fn []
           (let [r (qh/request! http :post
                                (str (qh/base-url node) "/api/v1/configure")
-                               {:queue q
-                                :options (assoc queue-options
-                                                :dedupWindowSeconds
-                                                (:dedup-window test 86400))}
+                               {:queue q, :options (queue-config test)}
                                10000)]
             (when-not (= 200 (:status r))
               (throw (ex-info "configure failed" r)))
@@ -381,39 +507,63 @@
 (defn link-status
   "GET /api/v1/system/link of a node: the parsed body on 200, else nil."
   [http node timeout-ms]
-  (try (let [r (qh/request! http :get (str (qh/base-url node) "/api/v1/system/link")
+  (try (let [r (qh/request! http :get (str (qh/broker-url node) "/api/v1/system/link")
                             nil timeout-ms)]
          (when (and (= 200 (:status r)) (map? (:body r)))
            (:body r)))
        (catch clojure.lang.ExceptionInfo _ nil)))
 
-(defn standby-leader-status
-  "The link status of the standby's leader, as [node status], or nil when no
-  node of the standby says it leads."
+(defn link-parts
+  "Each raft group's part of a link status, with its :group: a node of
+  several groups answers {role, groups: [{group, ...} ...]} (rsm/facade/
+  groups.rs), a node of one group its one part, which is group 0's."
+  [st]
+  (cond (not (map? st))            []
+        (sequential? (:groups st)) (vec (:groups st))
+        :else                      [(assoc st :group 0)]))
+
+(defn standby-leaders
+  "{group [node part]}: for each raft group of the standby, the node that
+  says it leads that group and the group's part of its link status. Each
+  group has a leader of its own, and only that node's follower reads the
+  source's group."
   [http test]
-  (->> (standby-nodes test)
-       (util/real-pmap (fn [n] [n (link-status http n 2000)]))
-       (filter (fn [[_ st]] (true? (:leader st))))
-       first))
+  (into (sorted-map)
+        (for [[n st] (util/real-pmap (fn [n] [n (link-status http n 2000)])
+                                     (standby-nodes test))
+              part   (link-parts st)
+              :when  (true? (:leader part))]
+          [(:group part) [n part]])))
 
 (defn await-following!
-  "Waits until the standby's leader reads the source and has nothing left to
-  read. Returns its status; throws after timeout-ms, having logged what every
-  node of the standby says of the link and the lines of its log that say why
-  (the test's teardown removes the logs before they are collected)."
+  "Waits until every raft group's leader in the standby reads the source and
+  has nothing left to read. Returns {group [node part]}; throws after
+  timeout-ms, having logged what every node of the standby says of the link
+  and the lines of its log that say why (the test's teardown removes the
+  logs before they are collected)."
   [test timeout-ms]
-  (let [http (qh/client)]
+  (let [http   (qh/client)
+        groups (range (long (:raft-groups test 1)))]
     (try
       (util/await-fn
         (fn []
-          (let [[node st] (standby-leader-status http test)
-                f         (:follower st)]
-            (when-not (and (= "standby" (:role st))
-                           (= "following" (:state f))
-                           (= 0 (:lagEntries f)))
-              (throw (ex-info "the standby does not follow yet" {:node node, :status st})))
-            (info "the standby follows its source:" node (select-keys f [:source :scanned :sourceApplied]))
-            st))
+          (let [leaders (standby-leaders http test)
+                behind  (remove (fn [g]
+                                  (let [part (second (get leaders g))
+                                        f    (:follower part)]
+                                    (and (= "standby" (:role part))
+                                         (= "following" (:state f))
+                                         (= 0 (:lagEntries f)))))
+                                groups)]
+            (when (seq behind)
+              (throw (ex-info "the standby does not follow yet"
+                              {:groups (vec behind), :leaders leaders})))
+            (info "the standby follows its source:"
+                  (into (sorted-map)
+                        (map (fn [[g [n part]]]
+                               [g [n (select-keys (:follower part) [:source :scanned :sourceApplied])]]))
+                        leaders))
+            leaders))
         {:timeout        timeout-ms
          :retry-interval 500
          :log-interval   10000
@@ -471,7 +621,7 @@
     (c/su
       (disable-ntp!)
       (set-clock!)
-      (c/exec :mkdir :-p dir data-dir buf-dir)
+      (c/exec :mkdir :-p dir data-dir buf-dir proxy-spool)
       (let [md5 (install-binary! test)]
         (info node "queen md5" md5)))
     (write-run-sh! test node)
@@ -482,9 +632,12 @@
       (qlazyfs/mount! lfs))
     ; Start every node together, on empty directories: each initializes the
     ; cluster with the same member list and they elect a leader.
+    ; --standby-seed: not the standby's nodes, which the failover nemesis
+    ; seeds once the source has a history.
     (jepsen/synchronize test)
-    (start-node! test node)
-    (await-healthy! node 120000)
+    (when-not (and (:standby-seed test) (standby? test node))
+      (start-node! test node)
+      (await-healthy! node 120000))
     (start-state-loop! test node)
     (jepsen/synchronize test)
     ; The first node is always a node of the source: a standby takes no
@@ -494,7 +647,7 @@
     (jepsen/synchronize test)
     ; --standby-nodes: the test begins on a standby that reads its source.
     ; 40 s: the others wait at the next barrier, which breaks after a minute.
-    (when (= node (first (standby-nodes test)))
+    (when (and (= node (first (standby-nodes test))) (not (:standby-seed test)))
       (await-following! test 40000))
     (jepsen/synchronize test)
     (when (:disk-hog test)
@@ -513,7 +666,7 @@
     (kill-node! (dissoc test :lazyfs) node)
     (qlazyfs/umount! (qlazyfs/lazyfs-map test data-dir))
     (c/su (c/exec :rm :-rf data-dir buf-dir log-file ls-file state-file
-                  pid-file wrapper-pid-file)))
+                  pid-file wrapper-pid-file proxy-spool seed-marker)))
 
   db/LogFiles
   (log-files [this test node]
@@ -534,7 +687,9 @@
              ls-file    "data-ls.txt"
              state-file "raft-state.json"
              run-sh     "run.sh"}
-      (lazyfs test) (assoc (:log-file (lazyfs test)) "lazyfs.log")))
+      (lazyfs test) (assoc (:log-file (lazyfs test)) "lazyfs.log")
+      ; W19: the SDK runners' JSON lines and logs.
+      (= :feedstream (:workload test)) (merge (runners/log-files))))
 
   db/Process
   (start! [this test node]
