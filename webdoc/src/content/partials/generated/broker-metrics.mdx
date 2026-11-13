@@ -15,7 +15,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
       - server/src/rsm/facade/real/phase2/link.rs
 */}
 
-`GET /metrics/prometheus` exposes **140 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing, admission and forwarding families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default. The per-queue families are written only for queues that have something to report. 27 families are declared but not written by this release; their Help says so.
+`GET /metrics/prometheus` exposes **146 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing, admission and forwarding families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default. The per-queue families are written only for queues that have something to report. 27 families are declared but not written by this release; their Help says so.
 
 ### Process (this broker instance)
 
@@ -74,6 +74,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | Family | Type | Help |
 | --- | --- | --- |
 | `queen_link_entries_total` | counter | Source entries this node replayed since it started |
+| `queen_link_expired_at_source_total` | counter | Links whose message its source no longer keeps, skipped on read |
 | `queen_link_follower_state` | gauge | What this node's follower of the source is doing: 1 on its state (it follows on the standby's leader only) |
 | `queen_link_holding` | gauge | Whether this node keeps its log for its standbys: 0 while its data volume is too full (QUEEN_LINK_HOLD_DISK_PCT) |
 | `queen_link_lag_entries` | gauge | Entries of the source's log this standby had still to read when the source last answered |
@@ -83,6 +84,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_link_reader_behind_entries` | gauge | Entries of this node's log a standby had still to apply when it last said where it was |
 | `queen_link_reader_idle_seconds` | gauge | Seconds since a standby last said where it was |
 | `queen_link_readers` | gauge | Standbys this node keeps its log for |
+| `queen_link_reads_total` | counter | Links read through to their message on this node |
 | `queen_link_role` | gauge | This cluster's part in a cluster link: 1 on the role it has |
 
 ### Pipeline timing
@@ -114,6 +116,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_raft_plan_whole_cpu_seconds` | summary | Whole plan_cycle_blocking call, thread CPU |
 | `queen_raft_plan_whole_wall_seconds` | summary | Whole plan_cycle_blocking call, wall |
 | `queen_raft_planner_commands_total` | counter | Commands planned, by kind |
+| `queen_raft_planner_cycles_total` | counter | Planning cycles by how the footprint scheduler planned them |
 | `queen_raft_planner_plan_seconds` | summary | Per-command planning duration, by kind |
 | `queen_raft_planner_slow_total` | counter | Slow-planned commands, by kind (O18) |
 | `queen_raft_pop_h_total_seconds` | summary | PERF-J: whole raft pop handler (entry to response), pop-only |
@@ -208,6 +211,9 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_consumer_group_lag_messages` | gauge | Messages a consumer group has not consumed on a queue, summed over the queue's partitions, at the last metrics bucket (exported by the raft leader only) |
 | `queen_consumer_group_lag_seconds` | gauge | Age of the oldest message a consumer group has not consumed on a queue, 0 when it is caught up, at the last metrics bucket (exported by the raft leader only) |
 | `queen_consumer_group_partitions_behind` | gauge | Partitions of a queue where a consumer group has messages left to consume, at the last metrics bucket (exported by the raft leader only) |
+| `queen_holder_floor_age_seconds` | gauge | Per source queue, how old the oldest message its reading queues, filtered groups and link targets keep unconsumed is: how far back they hold its completed retention |
 | `queen_locks_op_duration_milliseconds` | gauge | Lock operation latency |
 | `queen_locks_ops_total` | counter | Lock operations by kind and outcome (rejected = held by another, or a token that is no longer the row's) |
 | `queen_network_bytes_total` | counter | Bytes received and sent on this node's network interfaces since they came up (in a container its own; loopback, bridges, veth pairs and tunnels left out) |
+| `queen_route_links_total` | counter | Links this node's planner appended to reading queues and filtered groups |
+| `queen_route_unrouted_total` | counter | Messages a reader's where took but whose partitionBy field was missing, so not routed |

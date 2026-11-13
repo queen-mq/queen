@@ -9,6 +9,7 @@ from .feed import (
     normalize_where,
     since_to_iso,
     where_condition,
+    where_value,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "normalize_where",
     "since_to_iso",
     "where_condition",
+    "where_value",
 ]

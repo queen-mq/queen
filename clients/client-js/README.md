@@ -571,8 +571,8 @@ so there is nothing to install.
 
 **What stays JSON**, with no action from you:
 
-- A push with a `traceId` on one of its items.
-- A transaction with no push, or with a `traceId` on one of its pushes.
+- A push with a `traceId` on one of its items, or, without `pushCompression`, with `headers`.
+- A transaction with no push, or with a `traceId` on one of its pushes, or with a `link` after a push.
 - A pop the broker cannot answer in frames: a pop of a conflating group, and
   every pop on a broker that runs with an encryption key
   (`QUEEN_ENCRYPTION_KEY`). The client reads the JSON answer as always.
@@ -636,6 +636,111 @@ await queen.queue('orders').consume(async (msg) => {
 
 // View traces in webapp: Traces → Search "order-12345"
 ```
+
+---
+
+## Headers and Routing Without Copies
+
+A reader takes only the messages it wants, and a message moves on without its payload: the source
+keeps the message, readers point at it, and it is the same message (same `id`, same
+`transactionId`) wherever it shows. Everything here needs every node on catalogue version 8; an
+older cluster answers `cluster_version`.
+
+### Headers
+
+```javascript
+await queen.queue('orders').partition('order-9137').push([{
+  transactionId: 'order-9137-paid',
+  data: { orderId: 9137, total: 120 },
+  headers: { type: 'order.paid', traceparent: '00-4bf92f35...-01' }
+}])
+
+const [msg] = await queen.queue('orders').group('billing').pop()
+msg.headers   // { type: 'order.paid', traceparent: '...' }; undefined when it has none
+```
+
+Strings only, on an envelope (`{ data, headers }`). Names are 1 to 64 bytes of `a-z 0-9 . _ -`, and
+`queen-` names are the broker's: the client refuses other names before sending, and the broker
+refuses more than 64 headers or 8 KiB a message (its defaults). Every push takes them (direct,
+buffered, in a transaction), and so does a timer (`.headers({ ... })` before `.schedule()`: the
+fired message keeps them); pop, `consume()`, `fetch()` records and feed entries return them.
+Headers are never encrypted and play no part in dedup, so keep secrets out of them.
+
+### Filtered consumer groups
+
+```javascript
+await queen.queue('orders').group('billing')
+  .where('data.kind', 'in', ['order.paid', 'order.refunded'])   // several calls are ANDed
+  .where('headers.region', '=', 'eu')
+  .consume(handler)
+
+// The same, as one string:
+queen.queue('orders').group('billing').where("data.kind in ('order.paid', 'order.refunded') and headers.region = 'eu'")
+```
+
+The group gets, and acks, only what its `where` takes. Fields: `queue`, `partition`,
+`transactionId`, `data`, `data.<path>`, `headers.<name>`. Ops: `= != < <= > >= in exists prefix
+!prefix`, ANDed (`in` covers most "or"). A field the message lacks matches no op, `!=` included.
+The `where` belongs to the group and is fixed at its first pop: a different one is refused with
+400 `where_mismatch`, which `pop()` raises and `consume()` stops on, and a group that already reads
+the queue unfiltered cannot start filtering (name a new group). With `.subscriptionMode('all')` the
+group starts with the matches the queue still keeps. A broker older than filtered groups is caught
+at the first pop: its answer lacks the `"filtered": true` echo, and the pop raises
+`FILTERED_GROUPS_UNSUPPORTED` (as `create()` raises `READING_QUEUES_UNSUPPORTED` for a configure
+with `from` answered without its `route`). To change a group's `where` on purpose, then deploy the
+consumers with the new one:
+
+```javascript
+await queen.admin.updateConsumerGroupWhere('billing', 'orders', "data.kind = 'order.paid'")
+```
+
+### Reading queues
+
+```javascript
+await queen.queue('orders-it').config({
+  from: 'orders',                  // a name, a list, or [{ queue, where }]; null stops reading
+  where: "data.country = 'IT'",    // a string, or conditions as .where() takes them
+  partitionBy: 'same',             // or 'data.<path>', 'headers.<name>'
+  start: 'now',                    // or 'all': start with every match the sources still keep
+  leaseTime: 30,
+  retryLimit: 5
+}).create()
+```
+
+A reading queue has its own leases, retries, DLQ and groups, and its sources decide what it keeps.
+So with `from` (or `where`, `partitionBy`, `start`) `config()` leaves out the defaults a reading
+queue refuses (retention, encryption, `maxSize` and the rest); one you set yourself goes out, and
+the broker answers `reading_queue`. Name `from` again when you configure it later. A reading queue
+takes no pushes: push to its sources. A source that reading queues read is deleted only with
+`queen.queue('orders').delete({ force: true })` (otherwise 409 `has_readers`, naming them); their
+links then read as gone.
+
+### Links
+
+```javascript
+await queen.transaction()
+  .ack(message)
+  .queue('manual-review').partition(message.partition)
+  .link([message], { headers: { 'review-reason': 'amount' } })
+  .commit()
+```
+
+The target gets the same message and the payload is not stored again. A popped message is named by
+its `partitionId`, `offset`, `transactionId` and the group it was popped with, a feed entry by its
+queue and partition; without `.partition(p)` each keeps its partition's name. A second link of a
+message into one partition is a no-op that still commits (`duplicate: true` in its result). The
+bundle rolls back with `source_gone` when the message is no longer kept, and with `reading_queue`
+for a reading queue.
+
+In Streams, `.to(queue)` links when its record is the source message unchanged (only
+where/filter/keyBy before it, or a gate on a queue source), on feed and queue sources alike;
+`.to(queue, { link: false })` pushes copies. Linked messages pop, fetch and show in the feed like
+any other (a reading queue's too), so a feed stream on the target sees them. A feed stream links
+only into queues it does not read itself, which keeps it from reading back its own outputs: a
+stream on every queue pushes copies. A broker or a credential that cannot link (`cluster_version`,
+`scope_denied`, `reading_queue`, or a broker that does not know `link`) makes the stream push
+copies from then on, as before, and it says so once; a linked message gone or changed at its
+source (`source_gone`, `source_mismatch`) makes only that commit go as pushes.
 
 ---
 
@@ -833,7 +938,7 @@ from its partition.
 // Every record of these partitions, from the oldest one still kept.
 const read = await queen.queue('orders').fetch(['customer-42', 'customer-7'])
 const part = read.get('customer-42')
-part.records          // [{ offset, transactionId, payload, ts }, ...] in offset order
+part.records          // [{ offset, transactionId, payload, ts, headers? }, ...] in offset order
 part.nextOffset       // where to start next time to read only what is new
 part.highWatermark    // the next offset the partition will assign
 part.logStartOffset   // the oldest offset retention kept
@@ -886,7 +991,7 @@ for await (const e of queen.feed({ queues: ['orders'], where: [['data.country', 
 |---|---|
 | `queues` | Names or patterns (`orders*`); every queue when absent |
 | `partitions` | Partition names |
-| `where` | Conditions the broker checks, `[field, op, value]`: fields `queue`, `partition`, `transactionId`, `offset`, `position`, `data.<path>`; ops `= != < <= > >= in exists prefix !prefix` |
+| `where` | Conditions the broker checks, `[field, op, value]`: fields `queue`, `partition`, `transactionId`, `offset`, `position`, `data.<path>`, `headers.<name>`; ops `= != < <= > >= in exists prefix !prefix` |
 | `from` | A position, `'now'` (default) or `'earliest'` (default with `since`) |
 | `since` | `'15m'`, `'1d'`, a `Date` or an ISO time: only messages created since then |
 | `follow` | `true` (default) keeps waiting for new entries; `false` stops once caught up |

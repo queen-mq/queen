@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 import httpx
 
 from .supervision import Supervision
-from ..errors import ConflationUnsupportedError
+from ..errors import ConflationUnsupportedError, FilterUnsupportedError
 from ..utils import logger
 from ..utils.autopilot import (
     empty_poll_delay_seconds,
@@ -22,6 +22,7 @@ from ..utils.autopilot import (
 from ..utils.conflation import check_pop_response as check_conflation
 from ..utils.conflation import scope_of as conflation_scope
 from ..utils.defaults import CONSUME_DEFAULTS
+from ..utils.routing import check_filtered_response as check_filtered
 
 # After a pop that failed for a reason waiting can fix, the next one waits: the
 # broker's Retry-After when it sent one (1 s on its 503s), else 1 s doubling
@@ -134,6 +135,9 @@ class ConsumerManager:
         subscription_mode = options.get("subscription_mode")
         subscription_from = options.get("subscription_from")
         conflation = bool(options.get("conflation", False))
+        # A filtered group's where, as QueueBuilder.consume resolved it: the
+        # same value on every pop of the group.
+        where = options.get("where")
         each = options.get("each", False)
         # None means the user said nothing about this dimension, which is what
         # pop autopilot acts on. The historical default of 1 is applied at
@@ -165,7 +169,7 @@ class ConsumerManager:
         path = self._build_path(queue, partition, namespace, task)
         base_params = self._build_params(
             batch, wait, timeout_millis, group, subscription_mode, subscription_from, namespace, task, max_partitions,
-            conflation, autopilot,
+            conflation, autopilot, where,
         )
 
         # Generate affinity key for consistent routing to same backend
@@ -187,6 +191,7 @@ class ConsumerManager:
             "affinity_key": affinity_key,
             "conflation": conflation,
             "conflation_scope": conflation_scope(queue, namespace, task),
+            "filtered": where is not None,
         }
 
         config = options.get("supervision")
@@ -238,6 +243,7 @@ class ConsumerManager:
         affinity_key = options["affinity_key"]
         conflation = options.get("conflation", False)
         conflation_scope_name = options.get("conflation_scope")
+        filtered = options.get("filtered", False)
 
         logger.log(
             "ConsumerManager.worker",
@@ -327,6 +333,9 @@ class ConsumerManager:
                     queue=conflation_scope_name,
                     group=group,
                 )
+                # The same for a where: an older broker would hand the group
+                # the whole queue (utils/routing.py).
+                check_filtered(result, requested=filtered)
 
                 # Handle empty response
                 if not result or not result.get("messages") or not result["messages"]:
@@ -429,7 +438,7 @@ class ConsumerManager:
                         except asyncio.CancelledError:
                             pass
 
-            except ConflationUnsupportedError:
+            except (ConflationUnsupportedError, FilterUnsupportedError) as error:
                 # Terminal, and deliberately ahead of every retry branch below.
                 # The broker will answer exactly the same way on the next poll,
                 # so retrying is an infinite loop that silently processes the
@@ -437,7 +446,12 @@ class ConsumerManager:
                 # impossible. Stop the loop and surface it to the caller.
                 logger.error(
                     "ConsumerManager.worker",
-                    {"worker_id": worker_id, "status": "conflation-unsupported"},
+                    {
+                        "worker_id": worker_id,
+                        "status": "filter-unsupported"
+                        if isinstance(error, FilterUnsupportedError)
+                        else "conflation-unsupported",
+                    },
                 )
                 raise
             except Exception as error:
@@ -769,6 +783,7 @@ class ConsumerManager:
         max_partitions: Optional[int] = None,
         conflation: bool = False,
         autopilot: bool = True,
+        where: Optional[str] = None,
     ) -> str:
         """Build query parameters"""
         # Batch, partitions and with them the autopilot flag. None/0 means the
@@ -814,6 +829,10 @@ class ConsumerManager:
         # §4 opens on that hazard, and the wire tests assert both sides.
         if conflation:
             params["conflation"] = "true"
+        # A filtered group's where (PLAN_ROUTING.md §4), last and only when
+        # set, as in QueueBuilder.pop: the same value on every pop.
+        if where is not None:
+            params["where"] = where
         # NEVER send autoAck for consume - client always manages acking
         # autoAck is only for pop() where server auto-acks immediately
 

@@ -9,7 +9,7 @@ from ..kv import ops as kv_ops
 from ..timers import ops as timer_ops
 from ..utils import logger
 from ..utils.uuid_gen import generate_uuid
-from ..utils.validation import is_valid_uuid
+from ..utils.validation import is_valid_uuid, push_item_headers, validate_headers
 
 
 class TransactionResult(dict):
@@ -463,6 +463,7 @@ class TransactionTimerBuilder:
         self._partition: Optional[str] = None
         self._txn: Optional[str] = None
         self._payload_zstd = False
+        self._headers: Optional[Dict[str, str]] = None
 
     def key(self, timer_key: str) -> "TransactionTimerBuilder":
         self._key = timer_key
@@ -490,6 +491,11 @@ class TransactionTimerBuilder:
         self._txn = txn
         return self
 
+    def headers(self, headers: Dict[str, str]) -> "TransactionTimerBuilder":
+        """The fired message's headers (a push's rules)."""
+        self._headers = headers
+        return self
+
     def _require_key(self) -> str:
         if not self._key:
             raise ValueError("timer needs .key(<timerKey>)")
@@ -502,7 +508,7 @@ class TransactionTimerBuilder:
             timer_ops.schedule(
                 self._queue, self._require_key(), self._payload,
                 delay_ms=self._delay_ms, delay=self._delay, partition=self._partition,
-                txn=self._txn, payload_zstd=self._payload_zstd,
+                txn=self._txn, payload_zstd=self._payload_zstd, headers=self._headers,
             )
         )
         return self._tx
@@ -515,6 +521,7 @@ class TransactionTimerBuilder:
                 self._queue, self._require_key(), self._payload,
                 delay_ms=self._delay_ms, delay=self._delay, partition=self._partition,
                 txn=self._txn, payload_zstd=self._payload_zstd, reschedule=True,
+                headers=self._headers,
             )
         )
         return self._tx
@@ -606,9 +613,100 @@ class TransactionQueueBuilder:
             if trace_id and is_valid_uuid(trace_id):
                 result["traceId"] = trace_id
 
+            headers = push_item_headers(item)
+            if headers:
+                result["headers"] = headers
+
             formatted_items.append(result)
 
         self._transaction_builder._operations.append({"type": "push", "items": formatted_items})
 
         return self._transaction_builder
+
+    def link(
+        self,
+        messages: Union[Dict[str, Any], List[Dict[str, Any]]],
+        headers: Optional[Dict[str, str]] = None,
+    ) -> TransactionBuilder:
+        """
+        Forward messages to this queue without sending their payloads again:
+        one ``link`` operation per message.
+
+            await (client.transaction()
+                .ack(message, context={"consumer_group": "billing"})
+                .queue("manual-review").partition(message["partition"])
+                .link([message], headers={"review-reason": "amount"})
+                .commit())
+
+        The queue gets the same message, with its id and transactionId. A
+        partition that holds it already takes nothing: that link is a no-op
+        (its result says ``"duplicate": true``) and the transaction commits,
+        so forwarding is safe to retry. ``headers`` are the link's own; a
+        reader sees the message's headers with these written over them.
+
+        A message is named as a pop returned it (``partitionId``, ``offset``,
+        ``transactionId``, and the ``consumerGroup`` it was popped with), or as
+        a feed entry (``queue``, ``partition``, ``offset``, ``transactionId``).
+        A source the broker no longer keeps rolls the transaction back
+        (``TransactionError``, reason ``source_gone``). Needs a broker at
+        catalogue version 8 (reason ``cluster_version`` before).
+
+        Args:
+            messages: Single message or list of messages
+            headers: The link's own headers, for every message of this call
+
+        Returns:
+            Parent TransactionBuilder for chaining
+        """
+        msgs = messages if isinstance(messages, list) else [messages]
+        own = validate_headers(headers)
+
+        logger.log(
+            "TransactionBuilder.queue.link",
+            {"queue": self._queue_name, "partition": self._partition, "count": len(msgs)},
+        )
+
+        for msg in msgs:
+            operation: Dict[str, Any] = {"type": "link", "queue": self._queue_name}
+            # As a push: no partition here is the broker's Default.
+            if self._partition is not None:
+                operation["partition"] = self._partition
+            operation["from"] = link_source(msg)
+            if own:
+                operation["headers"] = own
+            self._transaction_builder._operations.append(operation)
+
+        return self._transaction_builder
+
+
+def link_source(message: Any) -> Dict[str, Any]:
+    """The ``from`` of a link: a popped message by its partition id, a feed
+    entry (whose partitionId is a UUID) by its queue and partition name."""
+    if not isinstance(message, dict):
+        raise ValueError("link: pass the messages a pop or the feed returned")
+    transaction_id = message.get("transactionId")
+    offset = message.get("offset")
+    if not isinstance(transaction_id, str) or not transaction_id:
+        raise ValueError("link: a message must have its transactionId")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("link: a message must have its offset (a pop's or a feed entry's)")
+    partition_id = message.get("partitionId")
+    if isinstance(partition_id, int) and not isinstance(partition_id, bool):
+        partition_id = str(partition_id)
+    source: Dict[str, Any]
+    if isinstance(partition_id, str) and partition_id.isascii() and partition_id.isdigit():
+        source = {"partitionId": partition_id, "offset": offset, "transactionId": transaction_id}
+        # The group it was popped with: a scoped credential must be allowed to
+        # consume the source with it (queue mode when absent).
+        group = message.get("consumerGroup")
+        if isinstance(group, str) and group:
+            source["consumerGroup"] = group
+        return source
+    queue, partition = message.get("queue"), message.get("partition")
+    if isinstance(queue, str) and queue and isinstance(partition, str) and partition:
+        return {"queue": queue, "partition": partition, "offset": offset, "transactionId": transaction_id}
+    raise ValueError(
+        "link: a message names its source by the partitionId a pop returned, "
+        "or by queue and partition (a feed entry)"
+    )
 

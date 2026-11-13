@@ -117,6 +117,11 @@ pub struct PopParams {
     // still compressed) instead of rendering every message as JSON. Absent ⇒
     // the JSON answer, byte for byte.
     frames: Option<bool>,
+    /// A filtered group's conditions (PLAN_ROUTING.md §4): one string
+    /// (`data.kind in ('a', 'b')`) or a JSON list of `{field, op, value}`.
+    /// Fixed at the group's first pop; a later pop sends the same or none.
+    #[serde(rename = "where")]
+    where_filter: Option<String>,
 }
 
 impl PopParams {
@@ -262,6 +267,7 @@ pub async fn handle_pop(
             subscription_from_now: from.is_some_and(|v| v.eq_ignore_ascii_case("now")),
             conflate,
             conflate_requested: p.conflation,
+            where_filter: p.where_filter.clone(),
         },
         p.frames == Some(true),
     )
@@ -325,6 +331,7 @@ pub async fn handle_pop_partition(
             subscription_from_now: from.is_some_and(|v| v.eq_ignore_ascii_case("now")),
             conflate: p.conflation == Some(true) && p.consumer_group.is_some(),
             conflate_requested: p.conflation,
+            where_filter: p.where_filter.clone(),
         },
         p.frames == Some(true),
     )
@@ -445,6 +452,7 @@ pub async fn handle_pop_discover(
             subscription_from_now: from.is_some_and(|v| v.eq_ignore_ascii_case("now")),
             conflate,
             conflate_requested: p.conflation,
+            where_filter: None,
         },
         p.frames == Some(true),
     )

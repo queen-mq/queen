@@ -55,6 +55,9 @@ digest: >-
 # facade/real/phase2.rs carry each request's client scope (None without a client token) and refuse a
 # name outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 ---
 
 The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases, transactions and a simple interface.

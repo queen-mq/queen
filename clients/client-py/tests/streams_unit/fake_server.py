@@ -21,12 +21,21 @@ from queen.streams.runtime import streams_http_client as _shc_module
 
 
 class FakeStreamsServer:
-    """In-memory stand-in for /streams/v1/queries|cycle|state/get."""
+    """In-memory stand-in for /streams/v1/queries|cycle|state/get.
+
+    A cycle's push item may carry ``link`` (PLAN_ROUTING.md §6) instead of its
+    payload: ``links`` = "served" answers it as a broker at catalogue version 8
+    does, "cluster_version" refuses the cycle (400, code cluster_version). A
+    link to a transactionId in ``gone`` fails its cycle as a source past
+    retention does (200, success false, reason source_gone).
+    """
 
     def __init__(self, state_seeds: Optional[Any] = None):
         self.recorded: dict = {"registers": [], "cycles": [], "stateGets": []}
         self.queries: dict = {}  # name -> {"id": str, "config_hash": str}
         self.state: dict = dict(state_seeds) if isinstance(state_seeds, dict) else {}
+        self.links = "served"
+        self.gone: set = set()
         self.url = "http://fake-streams.local"  # any URL — MockTransport intercepts all
         self._transport = httpx.MockTransport(self._handler)
         # Save the original AsyncClient ctor and patch it for the lifetime
@@ -121,6 +130,19 @@ class FakeStreamsServer:
             self.recorded["cycles"].append(parsed)
             query_id = parsed.get("query_id")
             partition_id = parsed.get("partition_id")
+            linked = any("link" in p for p in (parsed.get("push_items") or []))
+            if linked and self.links == "cluster_version":
+                return httpx.Response(400, json={
+                    "error": "headers, reading queues, filtered groups and link need every node on a broker "
+                             "that reads catalogue version 8; upgrade the cluster first",
+                    "code": "cluster_version",
+                })
+            if any((p.get("link") or {}).get("transactionId") in self.gone for p in parsed.get("push_items") or []):
+                return httpx.Response(200, json={
+                    "success": False,
+                    "error": "push item at index 0: source_gone: offset 1 of src is not retained",
+                    "reason": "source_gone",
+                })
             for op in parsed.get("state_ops") or []:
                 k = f"{query_id}|{partition_id}|{op.get('key')}"
                 if op.get("type") == "upsert":
@@ -136,7 +158,11 @@ class FakeStreamsServer:
                     {
                         "queueName": p.get("queue"),
                         "messageId": str(uuid.uuid4()),
-                        "transactionId": p.get("transactionId") or str(uuid.uuid4()),
+                        # A link takes its message's transactionId.
+                        "transactionId": (p.get("link") or {}).get("transactionId")
+                        or p.get("transactionId")
+                        or str(uuid.uuid4()),
+                        "status": "created",
                     }
                     for p in (parsed.get("push_items") or [])
                 ],
@@ -192,10 +218,13 @@ _next_msg_idx = [0]
 
 
 def fake_message(partition_id: str, partition_name: str = "Default", data=None,
-                 created_at: Optional[str] = None, transaction_id: Optional[str] = None) -> dict:
+                 created_at: Optional[str] = None, transaction_id: Optional[str] = None,
+                 offset: Optional[int] = None) -> dict:
+    """A popped message. ``offset`` as a pop carries it, only when given: a
+    message without one is never linked, which keeps the older tests' cycles."""
     _next_msg_idx[0] += 1
     n = _next_msg_idx[0]
-    return {
+    msg = {
         "id": f"msg-{n}",
         "transactionId": transaction_id or f"tx-{n}",
         "partitionId": partition_id,
@@ -205,3 +234,6 @@ def fake_message(partition_id: str, partition_name: str = "Default", data=None,
         "data": data,
         "createdAt": created_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    if offset is not None:
+        msg["offset"] = offset
+    return msg

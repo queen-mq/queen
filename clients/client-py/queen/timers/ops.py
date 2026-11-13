@@ -17,6 +17,7 @@ from datetime import timedelta
 from typing import Any, Dict, Optional
 
 from ..utils.uuid_gen import generate_uuid
+from ..utils.validation import validate_headers
 
 __all__ = ["schedule", "cancel", "encode_payload", "delay_ms_of", "SERVER_OWNED"]
 
@@ -120,8 +121,12 @@ def schedule(
     txn: Optional[str] = None,
     payload_zstd: bool = False,
     reschedule: bool = False,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """One ``schedule`` (or ``reschedule``) op.
+
+    ``headers``: the fired message's headers (PLAN_ROUTING.md §6), the rules
+    of a push's; sent only when there are some.
 
     THEY ARE THE SAME UPSERT (§4.1), which is what makes a client retry after a
     crash safe by construction. ``attempts`` goes back to 0 and ``last_error``
@@ -153,6 +158,9 @@ def schedule(
         op["partition"] = partition
     if payload_zstd:
         op["payloadZstd"] = True
+    checked = validate_headers(headers)
+    if checked:
+        op["headers"] = checked
     return op
 
 

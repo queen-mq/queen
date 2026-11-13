@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -153,7 +154,29 @@ func (w *txnWorkers) commit(ci int, msgs []qmsg) {
 			b = jsonString(b, l)
 		}
 	}
-	b = append(b, `]}`...)
+	b = append(b, ']')
+	if w.qf.txnKV {
+		// -txn-kv: the step's state, one key per entity (partition) it touched.
+		b = append(b, `,"kv":[`...)
+		keys := map[string]bool{}
+		for i := range msgs {
+			p := msgs[i].Partition
+			if keys[p] {
+				continue
+			}
+			if len(keys) > 0 {
+				b = append(b, ',')
+			}
+			keys[p] = true
+			b = append(b, `{"op":"put","ns":"wf","key":`...)
+			b = jsonString(b, w.in+"/"+p)
+			b = append(b, `,"value":{"n":`...)
+			b = strconv.AppendInt(b, int64(len(msgs)), 10)
+			b = append(b, `},"ttlSeconds":3600}`...)
+		}
+		b = append(b, ']')
+	}
+	b = append(b, '}')
 	if bin {
 		framed, err := queen.EncodeTransactionFrames(b, batches, true)
 		if err != nil {

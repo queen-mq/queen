@@ -14,12 +14,18 @@
  * them, compressed here once:
  *
  *   body:  u32 groups | per group: u16 len, queue | u16 len, partition | u32 n | u32 z_len | z
- *   z:     one zstd frame of n frames: u32 body_len | u8 0 | u8[16] message id
- *          | u16 len, transactionId | payload
+ *   z:     one zstd frame of n frames: u32 body_len | u8 flags | u8[16] message id
+ *          | u16 len, transactionId | [u16 len, headers, flag 8] | payload
  *
  * The message id is a version-7 UUID minted by the client; a message without
  * its own transaction id uses the id's text. The broker checks every frame and
  * keeps the compressed bytes as they are, so it does not compress them again.
+ *
+ * A frame's flags are 0, or 8 for a message with headers (catalogue version
+ * 8, PLAN_ROUTING.md §6): its headers block, `u16 count | (u8 len, name |
+ * u16 len, value) x count`, sorted by name, comes after the transaction id.
+ * The plain body (no flag 8) has no room for headers: a push with headers
+ * travels in it only framed, and is JSON otherwise.
  *
  * A broker that does not know this body answers 400; a client sends it only
  * when `binaryPush` is set, so by default a push is the JSON request every
@@ -40,6 +46,7 @@
 
 import { v7 as uuidv7 } from 'uuid'
 import { zstdCompress } from './zstd.js'
+import { HEADER_NAME } from '../utils/validation.js'
 
 export const PUSH_BINARY_CONTENT_TYPE = 'application/x-queen-push'
 
@@ -49,6 +56,8 @@ const FLAG_ZSTD = 1
 const FLAG_COUNTS = 2
 const FLAG_TXN = 4
 const FLAG_FRAMES = 8
+// A message frame's own flag (not the body's): its headers block follows the transaction id.
+const FRAME_FLAG_HEADERS = 8
 
 const utf8 = new TextEncoder()
 const HEX = '0123456789abcdef'
@@ -79,6 +88,12 @@ class Out {
   u8(value) {
     this.need(1)
     this.bytes[this.length++] = value
+  }
+
+  u16(value) {
+    this.need(2)
+    this.view.setUint16(this.length, value, true)
+    this.length += 2
   }
 
   u32(value) {
@@ -137,6 +152,31 @@ function checkBatch(batch) {
   if (batch.transactionIds && batch.transactionIds.length !== batch.payloads.length) {
     throw new Error(`${batch.transactionIds.length} transaction ids for ${batch.payloads.length} payloads`)
   }
+  if (batch.headers && batch.headers.length !== batch.payloads.length) {
+    throw new Error(`${batch.headers.length} headers for ${batch.payloads.length} payloads`)
+  }
+}
+
+/**
+ * A message's headers as the frame's block, the bytes the broker writes for
+ * them (server/src/frames.rs encode_headers): `u16 count | (u8 len, name |
+ * u16 len, value) x count`, sorted by name. Null for none: a frame with an
+ * empty block is refused, so it carries no flag instead.
+ */
+export function headersBlock(headers) {
+  if (!headers) return null
+  const names = Object.keys(headers).sort()
+  if (names.length === 0) return null
+  const block = new Out(64)
+  block.u16(names.length)
+  for (const name of names) {
+    // Names are a-z 0-9 . _ - (addItem checked them): one byte a character.
+    block.u8(name.length)
+    block.text(name)
+    block.text16(headers[name], 'a header value')
+  }
+  if (block.length > 0xffff) throw tooLong("a message's headers")
+  return block.done()
 }
 
 /**
@@ -159,6 +199,9 @@ export async function encodePushBinary(batches, { compress = false, counts = fal
   body.u32(batches.length)
   for (const batch of batches) {
     checkBatch(batch)
+    if (batch.headers && batch.headers.some(Boolean)) {
+      throw new Error('the plain binary push body carries no headers: frame the batch (encodePushFrames)')
+    }
     body.text16(batch.queue, 'queue name')
     body.text16(batch.partition, 'partition name')
     body.u32(batch.payloads.length)
@@ -184,7 +227,8 @@ export async function encodePushBinary(batches, { compress = false, counts = fal
 /**
  * Encode batches as a binary push body whose groups are the messages framed
  * as the broker stores them and compressed once, here. Same batches as
- * `encodePushBinary`; `counts` asks for the short answer.
+ * `encodePushBinary`, and a batch may hold `headers` too, one per payload (an
+ * object of strings, or null for none); `counts` asks for the short answer.
  *
  * @returns {Promise<Uint8Array>}
  */
@@ -215,7 +259,8 @@ export async function encodeTransactionFrames(head, batches, { counts = false } 
 /**
  * Appends `u32 groups | per group: u16 len, queue | u16 len, partition | u32 n
  * | u32 z_len | z` to `out`: each batch's messages framed as the broker stores
- * them, with a version-7 id minted here, as one zstd frame.
+ * them, with a version-7 id minted here, as one zstd frame. A message with
+ * headers gets flag 8 and its block after the transaction id.
  */
 async function appendFrameGroups(out, batches) {
   out.u32(batches.length)
@@ -224,14 +269,19 @@ async function appendFrameGroups(out, batches) {
     checkBatch(batch)
     frames.length = 0
     for (let i = 0; i < batch.payloads.length; i++) {
+      const block = batch.headers ? headersBlock(batch.headers[i]) : null
       const bodyLength = frames.reserveU32()
-      frames.u8(0)
+      frames.u8(block ? FRAME_FLAG_HEADERS : 0)
       frames.need(16)
       const id = frames.length
       uuidv7(undefined, frames.bytes, id)
       frames.length += 16
       const txn = batch.transactionIds ? batch.transactionIds[i] : ''
       frames.text16(txn || uuidText(frames.bytes, id), 'transaction id')
+      if (block) {
+        frames.u16(block.length)
+        frames.raw(block)
+      }
       frames.text(batch.payloads[i])
       frames.setU32(bodyLength, frames.length - bodyLength - 4)
     }
@@ -257,10 +307,11 @@ export function uuidText(bytes, at = 0) {
 }
 
 /**
- * The items of a JSON push (`{queue, partition, payload, transactionId}`) as a
- * binary push body, or null when one of them cannot travel in it: a trace id,
- * a transaction id that is not a string, a payload JSON does not carry, a name
- * over 65535 bytes. The caller then sends the JSON body, and the broker
+ * The items of a JSON push (`{queue, partition, payload, transactionId,
+ * headers}`) as a binary push body, or null when one of them cannot travel in
+ * it: a trace id, headers without `compress` (the plain body has no room for
+ * them), a transaction id that is not a string, a payload JSON does not carry,
+ * a name over 65535 bytes. The caller then sends the JSON body, and the broker
  * answers that as it always did. Consecutive items of one partition share a
  * group, so the order of the items is the order on the wire.
  *
@@ -271,7 +322,7 @@ export async function binaryPushBody(items, compress) {
   if (items.length === 0) return null
   const batches = []
   for (const item of items) {
-    if (!addItem(batches, item)) return null
+    if (!addItem(batches, item, compress)) return null
   }
   try {
     return compress ? await encodePushFrames(batches) : await encodePushBinary(batches)
@@ -284,25 +335,46 @@ export async function binaryPushBody(items, compress) {
 
 /**
  * Adds one pushed item to `batches`, in the last one when it is the same
- * partition's. False when the item cannot travel in a binary body.
+ * partition's. False when the item cannot travel in a binary body; `framed`:
+ * the body frames its messages, and so carries their headers.
  */
-function addItem(batches, item) {
+function addItem(batches, item, framed) {
   if (!item || typeof item !== 'object' || typeof item.queue !== 'string') return false
   if (item.traceId !== undefined && item.traceId !== null) return false
   const transactionId = item.transactionId ?? ''
   if (typeof transactionId !== 'string') return false
   const partition = item.partition ?? 'Default'
   if (typeof partition !== 'string') return false
+  const headers = frameHeaders(item.headers)
+  if (headers === false || (headers !== null && !framed)) return false
   const payload = JSON.stringify(item.payload)
   if (payload === undefined) return false
   let last = batches[batches.length - 1]
   if (!last || last.queue !== item.queue || last.partition !== partition) {
-    last = { queue: item.queue, partition, payloads: [], transactionIds: [] }
+    last = { queue: item.queue, partition, payloads: [], transactionIds: [], headers: [] }
     batches.push(last)
   }
   last.payloads.push(payload)
   last.transactionIds.push(transactionId)
+  last.headers.push(headers)
   return true
+}
+
+/**
+ * An item's headers as a frame carries them: null for none, false for
+ * headers a frame cannot hold as the broker reads them (a name outside a-z
+ * 0-9 . _ -, a value that is not a string). Those stay JSON, where the broker
+ * says what is wrong in its own words.
+ */
+function frameHeaders(headers) {
+  if (headers === undefined || headers === null) return null
+  if (typeof headers !== 'object' || Array.isArray(headers)) return false
+  const names = Object.keys(headers)
+  if (names.length === 0) return null
+  for (const name of names) {
+    if (!HEADER_NAME.test(name) || typeof headers[name] !== 'string') return false
+  }
+  return headers
 }
 
 /**
@@ -310,7 +382,10 @@ function addItem(batches, item) {
  * binary one, when its pushes can travel in it: there is at least one, and
  * none carries a trace id. Everything but the pushes stays in the JSON head;
  * consecutive pushed items of one partition share a group, so the pushes keep
- * their order. Null otherwise: the caller then sends the JSON body.
+ * their order. Null otherwise: the caller then sends the JSON body. Null too
+ * for a `link` after a push: a link writes a message, and the broker writes
+ * the head's operations before the groups, so only the JSON body keeps the
+ * two in the order they were added.
  *
  * `order` is null when the broker's answer lists the operations as the caller
  * added them (every other operation before every push). Otherwise `order[k]`
@@ -328,6 +403,7 @@ export async function transactionFrames(request) {
   let flat = 0
   for (const operation of request.operations) {
     if (!operation || operation.type !== 'push') {
+      if (operation && operation.type === 'link' && pushAt.length > 0) return null
       head.operations.push(operation)
       headAt.push(flat++)
       continue
@@ -335,7 +411,7 @@ export async function transactionFrames(request) {
     // A push names its items, or is one item itself.
     const items = Array.isArray(operation.items) ? operation.items : [operation]
     for (const item of items) {
-      if (!addItem(batches, item)) return null
+      if (!addItem(batches, item, true)) return null
       pushAt.push(flat++)
     }
   }

@@ -91,11 +91,13 @@
     "/writing-applications/ai-agents",
     "/writing-applications/clients",
     "/writing-applications/ephemeral",
+    "/writing-applications/headers",
     "/writing-applications/kv-locks-timers",
     "/writing-applications/pop",
     "/writing-applications/push",
     "/writing-applications/queues",
     "/writing-applications/retries",
+    "/writing-applications/routing",
     "/writing-applications/streams",
     "/writing-applications/transactions"
   ],

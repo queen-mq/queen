@@ -58,6 +58,9 @@ verifiedBy:
 # facade/real/phase2.rs carry each request's client scope (None without a client token) and refuse a
 # name outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. phase2.rs takes a
+# reading queue's options (from, where, partitionBy, start). The page points to routing.mdx.
 ---
 
 A queue is a named set of partitions that share one configuration. You never have to create one: the first push that names a queue creates it, with the defaults. Configure it when you want other settings.
@@ -125,3 +128,7 @@ Here is a queue that sets most of them, and the table below says what each one d
 - [Push](/writing-applications/push/): the first push creates the queue and the partition.
 - [Configuration for different use cases](/manage/configuration/): retention and disk on the broker side.
 - [Limits](/reference/limits/): name rules and the bounds of every option.
+
+## Reading queues
+
+A queue can read other queues: `from`, and optionally `where`, `partitionBy` and `start`, make it a reading queue, which gets a link to every message of its sources its `where` takes, in the same commit as the message. Its keep settings are its sources'. See [Routing](/writing-applications/routing/).

@@ -104,8 +104,9 @@ struct FeedBody {
     partitions: Option<Vec<String>>,
     #[serde(default)]
     kinds: Option<Vec<String>>,
+    /// A list of `{field, op, value}` or one string (`route::cond`).
     #[serde(default, rename = "where")]
-    conditions: Option<Vec<CondBody>>,
+    conditions: Option<Value>,
     #[serde(default)]
     max_bytes: Option<u64>,
     #[serde(default)]
@@ -129,15 +130,6 @@ struct ShardBody {
     queues: Option<Vec<String>>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CondBody {
-    field: String,
-    op: String,
-    #[serde(default)]
-    value: Value,
-}
-
 /// Where a read starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Start {
@@ -149,37 +141,7 @@ enum Start {
     Earliest,
 }
 
-#[derive(Clone, Debug)]
-enum Field {
-    Queue,
-    Partition,
-    TransactionId,
-    Offset,
-    Position,
-    /// The payload, or a path into it (`data.customer.country`).
-    Data(Vec<String>),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Op {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    In,
-    Exists,
-    Prefix,
-    NotPrefix,
-}
-
-#[derive(Clone, Debug)]
-struct Cond {
-    field: Field,
-    op: Op,
-    value: Value,
-}
+use crate::rsm::route::cond::{self, Cond, Rules, Subject};
 
 /// The slice of the partitions one shard reads.
 #[derive(Clone, Debug)]
@@ -242,48 +204,6 @@ fn parse_start(v: Option<Value>) -> Result<Start, String> {
     }
 }
 
-fn parse_field(raw: &str) -> Result<Field, String> {
-    match raw {
-        "queue" => return Ok(Field::Queue),
-        "partition" => return Ok(Field::Partition),
-        "transactionId" => return Ok(Field::TransactionId),
-        "offset" => return Ok(Field::Offset),
-        "position" => return Ok(Field::Position),
-        "data" => return Ok(Field::Data(Vec::new())),
-        _ => {}
-    }
-    let Some(path) = raw.strip_prefix("data.") else {
-        return Err(format!(
-            "where: unknown field {raw:?} (queue, partition, transactionId, offset, position, data or data.<path>)"
-        ));
-    };
-    let parts: Vec<String> = path.split('.').map(str::to_string).collect();
-    if parts.iter().any(String::is_empty) || parts.len() > MAX_FIELD_DEPTH {
-        return Err(format!("where: bad field path {raw:?}"));
-    }
-    Ok(Field::Data(parts))
-}
-
-fn parse_op(raw: &str) -> Result<Op, String> {
-    Ok(match raw {
-        "=" | "==" => Op::Eq,
-        "!=" => Op::Ne,
-        "<" => Op::Lt,
-        "<=" => Op::Le,
-        ">" => Op::Gt,
-        ">=" => Op::Ge,
-        "in" => Op::In,
-        "exists" => Op::Exists,
-        "prefix" => Op::Prefix,
-        "!prefix" => Op::NotPrefix,
-        _ => {
-            return Err(format!(
-                "where: unknown op {raw:?} (=, !=, <, <=, >, >=, in, exists, prefix, !prefix)"
-            ))
-        }
-    })
-}
-
 impl FeedAsk {
     /// The body checked, and the call's long-poll wait in milliseconds.
     fn from_body(b: FeedBody) -> Result<(FeedAsk, u64), String> {
@@ -325,41 +245,10 @@ impl FeedAsk {
                 Some(p.into_iter().collect())
             }
         };
-        let raw = b.conditions.unwrap_or_default();
-        if raw.len() > MAX_CONDITIONS {
-            return Err(format!("where: at most {MAX_CONDITIONS} conditions"));
-        }
-        let mut conds = Vec::with_capacity(raw.len());
-        for c in raw {
-            let field = parse_field(&c.field)?;
-            let op = parse_op(&c.op)?;
-            match op {
-                Op::In => match &c.value {
-                    Value::Array(a) if a.len() <= MAX_IN_VALUES => {}
-                    Value::Array(_) => {
-                        return Err(format!("where: in takes at most {MAX_IN_VALUES} values"))
-                    }
-                    _ => return Err(format!("where: in on {:?} needs an array", c.field)),
-                },
-                Op::Prefix | Op::NotPrefix if !c.value.is_string() => {
-                    return Err(format!("where: {} on {:?} needs a string", c.op, c.field))
-                }
-                Op::Lt | Op::Le | Op::Gt | Op::Ge
-                    if !(c.value.is_number() || c.value.is_string()) =>
-                {
-                    return Err(format!(
-                        "where: {} on {:?} needs a number or a string",
-                        c.op, c.field
-                    ))
-                }
-                _ => {}
-            }
-            conds.push(Cond {
-                field,
-                op,
-                value: c.value,
-            });
-        }
+        let conds = match &b.conditions {
+            None => Vec::new(),
+            Some(v) => cond::parse_value(v, &Rules::FEED)?,
+        };
         let max_bytes = b
             .max_bytes
             .map_or(DEFAULT_MAX_BYTES, |n| (n as usize).clamp(1, MAX_MAX_BYTES));
@@ -462,11 +351,22 @@ impl FeedAsk {
     }
 
     fn wants_payload(&self) -> bool {
-        self.conds.iter().any(|c| matches!(c.field, Field::Data(_)))
+        cond::wants_payload(&self.conds)
     }
 
     fn matches(&self, e: &Entry, doc: Option<&Value>) -> bool {
-        self.conds.iter().all(|c| cond_holds(c, e, doc))
+        cond::all_hold(
+            &self.conds,
+            &Subject {
+                queue: &e.queue,
+                partition: &e.partition,
+                txn: &e.txn,
+                offset: Some(e.offset),
+                position: Some(e.position),
+                doc,
+                headers: e.headers.as_deref(),
+            },
+        )
     }
 }
 
@@ -497,83 +397,6 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     i == p.len()
 }
 
-fn json_eq(a: &Value, b: &Value) -> bool {
-    match (a.as_f64(), b.as_f64()) {
-        (Some(x), Some(y)) if a.is_number() && b.is_number() => x == y,
-        _ => a == b,
-    }
-}
-
-fn json_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    match (a, b) {
-        (Value::Number(_), Value::Number(_)) => a.as_f64()?.partial_cmp(&b.as_f64()?),
-        (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
-        _ => None,
-    }
-}
-
-/// Whether condition `c` holds for entry `e`. A field the entry does not have
-/// (a path its payload lacks, a payload that is not JSON) holds for no
-/// operator, `!=` included, as SQL's comparisons with NULL.
-fn cond_holds(c: &Cond, e: &Entry, doc: Option<&Value>) -> bool {
-    let owned;
-    let v: Option<&Value> = match &c.field {
-        Field::Queue => {
-            owned = Value::String(e.queue.clone());
-            Some(&owned)
-        }
-        Field::Partition => {
-            owned = Value::String(e.partition.clone());
-            Some(&owned)
-        }
-        Field::TransactionId => {
-            owned = Value::String(e.txn.clone());
-            Some(&owned)
-        }
-        Field::Offset => {
-            owned = Value::from(e.offset);
-            Some(&owned)
-        }
-        Field::Position => {
-            owned = Value::from(e.position);
-            Some(&owned)
-        }
-        Field::Data(path) => doc.and_then(|d| {
-            path.iter().try_fold(d, |cur, key| match cur {
-                Value::Object(m) => m.get(key),
-                Value::Array(a) => key.parse::<usize>().ok().and_then(|i| a.get(i)),
-                _ => None,
-            })
-        }),
-    };
-    let Some(v) = v else {
-        return false;
-    };
-    match c.op {
-        Op::Exists => true,
-        Op::Eq => json_eq(v, &c.value),
-        Op::Ne => !json_eq(v, &c.value),
-        Op::In => c
-            .value
-            .as_array()
-            .is_some_and(|a| a.iter().any(|x| json_eq(v, x))),
-        Op::Prefix => match (v.as_str(), c.value.as_str()) {
-            (Some(s), Some(p)) => s.starts_with(p),
-            _ => false,
-        },
-        // A string that does not start with it; like `!=`, a value that is
-        // not a string (or no value) holds for neither.
-        Op::NotPrefix => match (v.as_str(), c.value.as_str()) {
-            (Some(s), Some(p)) => !s.starts_with(p),
-            _ => false,
-        },
-        Op::Lt => json_cmp(v, &c.value).is_some_and(|o| o.is_lt()),
-        Op::Le => json_cmp(v, &c.value).is_some_and(|o| o.is_le()),
-        Op::Gt => json_cmp(v, &c.value).is_some_and(|o| o.is_gt()),
-        Op::Ge => json_cmp(v, &c.value).is_some_and(|o| o.is_ge()),
-    }
-}
-
 // ---------------------------------------------------------------- the read
 
 /// One message of the answer.
@@ -587,6 +410,12 @@ struct Entry {
     offset: u64,
     txn: String,
     payload: Vec<u8>,
+    /// The message's headers block, when it carries one.
+    headers: Option<Vec<u8>>,
+    /// Where the message is at its source, `(queue, partition, offset)`, when
+    /// this queue holds it by a link: a reader of every queue can tell the
+    /// copy-free second showing of a message it already has.
+    link: Option<(String, String, u64)>,
 }
 
 /// A message record a scan found, kept as stored until the partition rows
@@ -917,9 +746,25 @@ fn render(entries: &[Entry], next: u64, applied: u64, caught_up: bool, resolved_
         if i > 0 {
             out.push(',');
         }
-        out.push_str("{\"id\":");
+        out.push('{');
+        if let Some(h) = &e.headers {
+            out.push_str("\"headers\":");
+            crate::frames::headers_json_into(&mut out, h);
+            out.push(',');
+        }
+        out.push_str("\"id\":");
         push_str(&mut out, &e.id);
-        out.push_str(",\"kind\":\"push\",\"offset\":");
+        out.push_str(",\"kind\":\"push\"");
+        if let Some((q, p, o)) = &e.link {
+            out.push_str(",\"link\":{\"offset\":");
+            out.push_str(&o.to_string());
+            out.push_str(",\"partition\":");
+            push_str(&mut out, p);
+            out.push_str(",\"queue\":");
+            push_str(&mut out, q);
+            out.push('}');
+        }
+        out.push_str(",\"offset\":");
         out.push_str(&e.offset.to_string());
         out.push_str(",\"partition\":");
         push_str(&mut out, &e.partition);
@@ -1116,18 +961,35 @@ fn feed_read(
 
     // 4. The messages, filtered, in log order.
     let mut entries: Vec<Entry> = Vec::new();
+    let mut retained = crate::rsm::route::link::retained_from(store);
+    // A link's source partition, by pid: its queue and partition names.
+    let mut sources: HashMap<u64, Option<(String, String)>> = HashMap::new();
     for c in &cands {
         // A partition deleted since, another tenant's queue in a shared log,
         // a queue or partition the call did not select, another shard's
-        // partition: left before its payload is decoded.
+        // partition: left before its payload is decoded. A filtered group's
+        // hidden queue is the group's, not a queue: its messages show at
+        // their source.
         let Some(Some(row)) = rows.get(&c.pid) else {
             continue;
         };
-        if !ask.wants(tenant, &wanted, row) {
+        if !ask.wants(tenant, &wanted, row) || crate::rsm::route::is_hidden(&row.queue) {
             continue;
         }
         let rec = decode_message(&c.raw).map_err(io_error)?;
-        let Some(frames) = unpack_frames_ref(&rec.payload) else {
+        // A link is read through to its message, the same id and transaction
+        // id, as a pop reads it: a reading queue's messages and a `link`'s
+        // target show in the feed like any queue's, each saying where it is
+        // at its source.
+        let links: Vec<Option<crate::frames::LinkRef>> = if crate::frames::any_link(&rec.payload) {
+            unpack_frames_ref(&rec.payload)
+                .map(|fs| fs.iter().map(|f| f.link).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let blob = crate::rsm::route::link::resolve(qlog, rec.payload, &mut retained);
+        let Some(frames) = unpack_frames_ref(&blob) else {
             continue;
         };
         let partition_id = uuid_bytes_to_string(&row.uuid);
@@ -1137,12 +999,33 @@ fn feed_read(
             if offset < row.log_start {
                 continue;
             }
+            // A link whose message is gone at its source: nothing to show.
+            if f.is_link() {
+                continue;
+            }
             let payload = if f.encrypted {
                 encryption
                     .decrypt_payload_bytes(f.payload)
                     .unwrap_or_else(|| f.payload.to_vec())
             } else {
                 f.payload.to_vec()
+            };
+            let link = match links.get(i).copied().flatten() {
+                Some(l) => {
+                    if !sources.contains_key(&l.pid) {
+                        let names = store
+                            .read(|r| r.partition(l.pid))
+                            .map_err(super::read_error)?
+                            .map(|p| (p.queue, p.partition));
+                        sources.insert(l.pid, names);
+                    }
+                    sources
+                        .get(&l.pid)
+                        .cloned()
+                        .flatten()
+                        .map(|(q, p)| (q, p, l.offset))
+                }
+                None => None,
             };
             let entry = Entry {
                 position: c.seq,
@@ -1154,6 +1037,8 @@ fn feed_read(
                 offset,
                 txn: f.txn.to_string(),
                 payload,
+                headers: f.headers.map(<[u8]>::to_vec),
+                link,
             };
             let doc: Option<Value> = if ask.wants_payload() {
                 serde_json::from_slice(&entry.payload).ok()
@@ -1422,6 +1307,8 @@ mod tests {
             offset: 3,
             txn: "order-1".into(),
             payload: payload.as_bytes().to_vec(),
+            headers: None,
+            link: None,
         }
     }
 

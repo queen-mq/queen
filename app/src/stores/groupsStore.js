@@ -17,11 +17,18 @@
 //   const { groups, error, lastFetched, fetchGroups, publish } = useGroupsStore()
 //   await fetchGroups()          // only if nobody read it within the TTL
 //   publish(response.data)       // a page that read it anyway
+//
+// A filtered group reads through a hidden queue (PLAN_ROUTING.md §4.3); a row
+// that names one is kept on its queue, `filtered: true`, so no page ever
+// shows the hidden name (console/queues/routeView.js shownGroups).
 import { ref } from 'vue'
 
 import { consumers as consumersApi } from '@/api'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
 import { readSinceRefresh } from '@/composables/useRefresh'
+import { shownGroups } from '@/console/queues/routeView'
+
+const listOf = (d) => shownGroups(Array.isArray(d) ? d : (d?.consumer_groups || []))
 
 const DEFAULT_TTL_MS = 60_000
 
@@ -42,7 +49,7 @@ const fetchGroups = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
     try {
       const d = (await consumersApi.list()).data
       if (epochAtStart !== currentEpoch()) return groups.value
-      groups.value = Array.isArray(d) ? d : (d?.consumer_groups || [])
+      groups.value = listOf(d)
       error.value = null
       lastFetched.value = Date.now()
       return groups.value
@@ -61,7 +68,7 @@ const fetchGroups = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
 
 /** A page that read the listing itself hands it over, so nobody reads it twice. */
 const publish = (payload) => {
-  groups.value = Array.isArray(payload) ? payload : (payload?.consumer_groups || [])
+  groups.value = listOf(payload)
   error.value = null
   lastFetched.value = Date.now()
 }

@@ -93,6 +93,11 @@ type TimerSchedule struct {
 	// destination queue. Every reschedule OVERWRITES it -- a rescheduled timer
 	// is a new message (§20.2).
 	TransactionID string
+
+	// Headers are the fired message's headers (a cluster at catalogue version
+	// 8), with the rules of a push's (PushItem.Headers). The message keeps
+	// them, and Peek shows them.
+	Headers map[string]string
 }
 
 // TimerCancelOptions are the optional halves of a cancel.
@@ -127,6 +132,9 @@ type TimerOp struct {
 	DelayMs   *int64 `json:"delayMs,omitempty"`
 	Txn       string `json:"txn,omitempty"`
 	Payload   string `json:"payload,omitempty"`
+	// Headers are a schedule's: omitted when there are none, so a timer
+	// without headers is the op it was before them.
+	Headers map[string]string `json:"headers,omitempty"`
 
 	err error
 }
@@ -192,6 +200,7 @@ func scheduleOp(kind string, s TimerSchedule) TimerOp {
 	if op.Txn == "" {
 		op.Txn = GenerateUUID()
 	}
+	op.Headers = s.Headers
 	return op
 }
 
@@ -276,6 +285,9 @@ type TimerInfo struct {
 	Payload     []byte
 	PayloadZstd bool
 	Encrypted   bool
+	// Headers are the headers the fire will deliver (Peek; nil on List and
+	// when there are none).
+	Headers     map[string]string
 	ProducerSub string
 	// Attempts counts only PERMANENT and configuration failures: a transient one
 	// (a serialization failure, a connection loss) backs off without consuming
@@ -319,6 +331,8 @@ type timerInfoWire struct {
 	Claimed       bool      `json:"claimed"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
+	// headers is on a peek of a timer that has some.
+	Headers map[string]string `json:"headers"`
 }
 
 // timerPageWire is the list envelope. `rows` never carries a `found` field, so a
@@ -340,6 +354,7 @@ func (w timerInfoWire) info(found bool) (TimerInfo, error) {
 		MessageID:     w.MessageID,
 		PayloadZstd:   w.PayloadZstd,
 		Encrypted:     w.Encrypted,
+		Headers:       w.Headers,
 		ProducerSub:   w.ProducerSub,
 		Attempts:      w.Attempts,
 		LastError:     w.LastError,

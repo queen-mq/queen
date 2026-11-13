@@ -22,6 +22,19 @@ other process with the same query_id waits on it and takes over when the first
 stops or dies. Each commit is guarded by the lock (``exclusive=False`` turns
 this off: then the position's version alone decides which process commits).
 
+A sink that gets the feed's messages unchanged (only where/filter/key_by
+before ``.to()``) links them (``link`` operations, PLAN_ROUTING.md §7) instead
+of pushing copies: the same message, without its payload sent again. A link
+keeps the source's transactionId; one into a partition that holds the message
+already is a no-op, so a link is once per target partition, a reset's
+included. Only into a queue the stream does not read: a link reads in the feed
+with its source's ids, which the reads do not leave out as they leave out the
+query's own outputs, so into a queue the stream reads (no queues filter: every
+queue) it pushes a copy, as before. A commit whose links the broker refuses (a broker without them, a
+cluster before catalogue version 8, a scope) goes again with the records
+pushed, and the runner pushes from then on: it says so once. A link the broker
+could not resolve (its source past retention) pushes that commit only.
+
 A message whose function raises is tried again (``retries``, 3), each time
 against the state from before it. Then ``on_poison`` says what happens:
 'stop' (the default) commits what came before it and stops; 'skip' leaves it
@@ -54,7 +67,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ...errors import LockNotHeldError, QueenError
 from ...feed.feed import condition_holds
 from ...utils import logger
-from ..operators.sink_op import _extract_queue_name, payload_of
+from ..operators.sink_op import LINK_MISSES, _extract_queue_name, link_refusal, passes_messages_on, payload_of
 from ..util.tasks import spawn
 from ..util.js import (
     UNDEFINED,
@@ -239,6 +252,24 @@ def _as_list(v: Any) -> Optional[List[Any]]:
     return lst if lst else None
 
 
+def _steps_pass_messages_on(steps: List[Dict[str, Any]]) -> bool:
+    """Whether what these steps hand the sink is the feed message itself,
+    unchanged: stateless steps of filters and key_bys only (a where the broker
+    did not take is a filter), no map and no step that makes a result."""
+    return all(st["kind"] == "ops" and passes_messages_on(st["ops"]) for st in steps)
+
+
+def _link_from(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A feed entry as a link's source: by queue and partition (its
+    partitionId is a UUID), offset and transactionId. None without them."""
+    q, p, o, t = entry.get("queue"), entry.get("partition"), entry.get("offset"), entry.get("transactionId")
+    if not (isinstance(q, str) and q and isinstance(p, str) and p and isinstance(t, str) and t):
+        return None
+    if isinstance(o, bool) or not js_is_integer(o) or o < 0:
+        return None
+    return {"queue": q, "partition": p, "offset": int(o), "transactionId": t}
+
+
 def _poison_target(on_poison: Any) -> Dict[str, Any]:
     if on_poison is None or on_poison is UNDEFINED or on_poison == "stop":
         return {"kind": "stop"}
@@ -404,6 +435,11 @@ class FeedRunner:
         self._reader: Any = None
         self._pipeline: Any = None
         self._sink: Any = None
+        # The sink links the messages it gets (they reach it unchanged, and
+        # .to() did not say link=False); and why the broker made it push
+        # instead (None: it has not).
+        self._linking = False
+        self._links_refused: Optional[str] = None
         self._hash: Optional[str] = None
         # The reads: what the broker filters, what this process filters.
         self._broker_queues: Optional[List[str]] = None
@@ -415,6 +451,7 @@ class FeedRunner:
         self._stream_queues: Optional[List["re.Pattern[str]"]] = None
         self._local_shard = False
         self._table_queues: Dict[str, None] = {}
+        self._read_queues: Optional[List["re.Pattern[str]"]] = None
         self._lock: Any = None
         self._lock_lost = False
         self._active = False
@@ -483,6 +520,8 @@ class FeedRunner:
             "entriesRead": 0,
             "emitted": 0,
             "outputs": 0,
+            # Of the outputs, the links (a message forwarded, not copied).
+            "linked": 0,
             "effects": 0,
             "batches": 0,
             "commits": 0,
@@ -522,6 +561,7 @@ class FeedRunner:
         if not sink:
             raise ValueError("Stream.fromFeed: end the chain with .to(queen.queue(...)), .foreach(fn) or .foreach_batch(fn)")
         self._sink = sink
+        self._linking = sink.kind == "sink" and getattr(sink, "link", True) is not False and _steps_pass_messages_on(steps)
         self._pipeline = Pipeline(steps)
         self._hash = chain_hash
         self._plan_reads()
@@ -636,6 +676,8 @@ class FeedRunner:
         for t in tables:
             for q in t.queues:
                 self._table_queues[q] = None
+        # The queues this stream reads, for the sink's links (None: every queue).
+        self._read_queues = [_glob(q) for q in queues] if queues else None
         # Never read back what this query wrote: its outputs carry its prefix.
         me = {"field": "transactionId", "op": "!prefix", "value": output_prefix(self._query_id)}
         where = list(self._stream.pushdown or [])
@@ -1267,18 +1309,35 @@ class FeedRunner:
             return
         fallback = env.get("key", UNDEFINED) if derived else (entry.get("partition", UNDEFINED) if entry else env.get("key", UNDEFINED))
         targets = await self._sink.targets_for(env.get("value", UNDEFINED), ctx, fallback)
+        # The message itself, when the sink links it. The push the output would
+        # be is kept beside it, id included: what a commit sends when the
+        # broker refuses links.
+        source = _link_from(entry) if self._linking and self._links_refused is None and entry and not derived else None
         for target in targets:
             if entry:
                 transaction_id = feed_output_id(self._query_id, entry, ctr["n"], self._epoch, self._id)
                 ctr["n"] += 1
             else:
                 transaction_id = self._emit_id()
-            self._pending["outputs"].append({
+            output = {
                 "queue": target["queue"],
                 "partition": target["partition"],
                 "data": payload_of(env.get("value", UNDEFINED)),
                 "transactionId": transaction_id,
-            })
+            }
+            # A link reads in the feed with its source's ids, which this
+            # stream's reads do not leave out: into a queue it reads itself, it
+            # would come back, so that one stays a pushed copy.
+            if source is not None and not self._reads(target["queue"]):
+                output["from"] = source
+            self._pending["outputs"].append(output)
+
+    def _reads(self, queue: str) -> bool:
+        """Whether this stream reads ``queue`` from the feed: its queues filter
+        matches it (no filter: every queue does), or it is a table's."""
+        if queue in self._table_queues:
+            return True
+        return self._read_queues is None or any(p.match(queue) for p in self._read_queues)
 
     def _emit_id(self) -> str:
         seq = self._pending["emitSeq"]
@@ -1770,6 +1829,19 @@ class FeedRunner:
         """The clock a commit records. In the middle of a close it is the time the close runs up to."""
         return self._clock if self._burst_target is None else max(self._clock, self._burst_target)
 
+    def _refuse_links(self, why: str, err: BaseException) -> None:
+        """The broker made this runner push instead of link: from now on, until
+        it starts again. Said once (on_error, else stderr)."""
+        if self._links_refused is not None:
+            return
+        self._links_refused = why
+        e = FeedRunnerError(
+            f"links into the sink's queues were refused ({why}): this stream pushes copies from now on",
+            code="feed_links_refused",
+        )
+        e.__cause__ = err
+        self._report(e, {"phase": "commit", "action": "pushing", "reason": why})
+
     async def _commit(self) -> str:
         """One transaction: the outputs, the position (and the snapshot it names). 'ok', 'conflict' or 'lost'."""
         nxt = self._pending["next"] if js_is_integer(self._pending["next"]) else self._position
@@ -1790,19 +1862,37 @@ class FeedRunner:
             if not done and snap and snap.get("wrote") and snap.get("keys"):
                 self._had_stray = True
 
-    async def _commit_with(self, nxt: Any, stateful: bool, snap: Optional[Dict[str, Any]]) -> str:
+    async def _commit_with(self, nxt: Any, stateful: bool, snap: Optional[Dict[str, Any]], links: bool = True) -> str:
         tx = self._queen.transaction()
         if self._lock is not None:
             tx.guard(self._lock)
+        # Per target partition, the outputs in their order: a run of links is
+        # one link step, a run of pushes one push (with links refused, every
+        # output is a push, as before links existed).
+        linking = links and self._links_refused is None
+        linked = 0
         groups: Dict[Any, Dict[str, Any]] = {}
         for it in self._pending["outputs"]:
             k = (it["queue"], it["partition"])
             g = groups.get(k)
             if g is None:
-                g = groups[k] = {"queue": it["queue"], "partition": it["partition"], "items": []}
-            g["items"].append({"data": js_normalize(it["data"]), "transactionId": it["transactionId"]})
+                g = groups[k] = {"queue": it["queue"], "partition": it["partition"], "runs": []}
+            source = it.get("from") if linking else None
+            kind = "push" if source is None else "link"
+            if not g["runs"] or g["runs"][-1][0] != kind:
+                g["runs"].append((kind, []))
+            if source is None:
+                g["runs"][-1][1].append({"data": js_normalize(it["data"]), "transactionId": it["transactionId"]})
+            else:
+                g["runs"][-1][1].append(source)
+                linked += 1
         for g in groups.values():
-            tx.queue(g["queue"]).partition(g["partition"]).push(g["items"])
+            for kind, items in g["runs"]:
+                step = tx.queue(g["queue"]).partition(g["partition"])
+                if kind == "link":
+                    step.link(items)
+                else:
+                    step.push(items)
         value: Dict[str, Any] = {
             "position": nxt,
             "queryId": self._query_id,
@@ -1858,9 +1948,24 @@ class FeedRunner:
             # comes from, so another process on this queryId committed these
             # messages -- or this one did, and its answer was lost -- and that
             # commit moved the position in the same transaction.
+            # (A link is never the duplicate: one its target partition holds
+            # already is a no-op, and the transaction commits.)
             if getattr(err, "reason", None) == "duplicate":
                 await self._reload("duplicate")
                 return "conflict"
+            # Links the broker does not take (one without them, a cluster
+            # before catalogue version 8, a scope that may not read the
+            # source): nothing of the commit was written, so the same commit
+            # goes again with the records pushed, and the runner pushes from
+            # then on. A link it could not resolve this time (its source past
+            # retention) costs that commit only.
+            why = link_refusal(err) if linked else None
+            if why is not None:
+                if why in LINK_MISSES:
+                    logger.warn("FeedRunner.links", {"queryId": self._id, "pushed": linked, "reason": why})
+                else:
+                    self._refuse_links(why, err)
+                return await self._commit_with(nxt, stateful, snap, links=False)
             raise
         if isinstance(res, dict) and res.get("success") is False:
             if res.get("reason") != "kv_precondition":
@@ -1908,6 +2013,7 @@ class FeedRunner:
         self._last_commit_at = self._last_position_commit = self._now()
         self._metrics["commits"] += 1
         self._metrics["outputs"] += committed_outputs
+        self._metrics["linked"] += linked
         self._metrics["position"] = nxt
         if version is not None:
             self._version = version

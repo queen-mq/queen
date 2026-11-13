@@ -12,7 +12,7 @@ sourceOfTruth:
   - server/src/rsm/facade/intake.rs
   - server/src/rsm/facade/remote.rs
   - server/src/rsm/batcher.rs
-  - server/src/rsm/batcher_lanes.rs
+  - server/src/rsm/batcher_scheduler.rs
   - server/src/rsm/apply.rs
   - server/src/rsm/apply_shard.rs
   - server/src/rsm/consume/mod.rs
@@ -39,6 +39,9 @@ sourceOfTruth:
 # gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
 # leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
 # relay through). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 ---
 
 Pops, acks and leases do not go through the planner. The leader keeps each consumer group's positions and leases in memory, and gives out the oldest ready partition first.

@@ -555,6 +555,12 @@ pub struct RsmMetrics {
     pub keep_fallback: AtomicU64,
     pub keep_poisoned: AtomicU64,
     pub keep_mismatch: AtomicU64,
+    /// The footprint scheduler, per cycle: its groups planned on several
+    /// threads / planned on one (one group, or one thread) / planned on one
+    /// after the parallel result failed its check.
+    pub planner_parallel: AtomicU64,
+    pub planner_serial: AtomicU64,
+    pub planner_fallback: AtomicU64,
     pub apply_stats: ApplyStatsMirror,
     /// A monotone counter incremented per apply-channel receive, so the
     /// exporter can show the apply-thread receive rate alongside the depth.
@@ -903,6 +909,20 @@ pub fn render_prometheus(out: &mut String) {
     ] {
         out.push_str(&format!(
             "queen_raft_keep_overlay_total{{outcome=\"{outcome}\"}} {}\n",
+            c.load(Ordering::Relaxed)
+        ));
+    }
+    out.push_str(
+        "# HELP queen_raft_planner_cycles_total Planning cycles by how the footprint scheduler planned them\n",
+    );
+    out.push_str("# TYPE queen_raft_planner_cycles_total counter\n");
+    for (mode, c) in [
+        ("parallel", &m.planner_parallel),
+        ("serial", &m.planner_serial),
+        ("fallback", &m.planner_fallback),
+    ] {
+        out.push_str(&format!(
+            "queen_raft_planner_cycles_total{{mode=\"{mode}\"}} {}\n",
             c.load(Ordering::Relaxed)
         ));
     }

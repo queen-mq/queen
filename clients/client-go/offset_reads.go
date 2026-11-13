@@ -68,6 +68,9 @@ type FetchedRecord struct {
 	Payload json.RawMessage `json:"payload"`
 	// Ts is when the push that wrote the record was stored.
 	Ts time.Time `json:"ts"`
+	// Headers are the message's headers (a cluster at catalogue version 8),
+	// nil when it has none.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // FetchedPartition is what Fetch read of one partition.

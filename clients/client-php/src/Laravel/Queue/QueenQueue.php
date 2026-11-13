@@ -14,9 +14,11 @@ use Illuminate\Queue\TimeoutExceededException;
 use JsonException;
 use Queen\Builders\QueueBuilder;
 use Queen\Exceptions\HttpException;
+use Queen\Laravel\Contracts\QueenHeaders;
 use Queen\Laravel\Contracts\QueenPartitionable;
 use Queen\Laravel\Supervisor\WorkerPopGuard;
 use Queen\Queen;
+use Queen\Support\Headers;
 use Queen\Support\Uuid;
 use RuntimeException;
 use UnexpectedValueException;
@@ -360,21 +362,35 @@ class QueenQueue extends BaseQueue implements QueueContract
     public function push($job, $data = '', $queue = null): mixed
     {
         $queue = $this->getQueue($queue);
+        // The message's headers travel beside the payload, never in it.
+        $headers = $this->jobHeaders($job);
 
         return $this->enqueueUsing(
             $job,
             $this->createPayload($job, $queue, $data),
             $queue,
             null,
-            fn ($payload, $queue) => $this->pushRaw($payload, $queue),
+            fn ($payload, $queue) => $this->pushRaw($payload, $queue, $headers === [] ? [] : ['headers' => $headers]),
         );
     }
 
+    /**
+     * $options: `partition`, and `headers` for the message (QueenHeaders).
+     */
     public function pushRaw($payload, $queue = null, array $options = []): string
     {
         $queue = $this->getQueue($queue);
         $decoded = $this->decodePayload($payload);
         $partition = (string) ($options['partition'] ?? $this->partitionForPayload($decoded));
+        // A failed job's stored copy names its delivery's headers (QueenJob::
+        // getRawBody()): a queue:retry sends them as the message's again, and
+        // never inside its payload.
+        $kept = null;
+        if (is_array($decoded['_queen'] ?? null) && array_key_exists('headers', $decoded['_queen'])) {
+            $kept = $decoded['_queen']['headers'];
+            unset($decoded['_queen']['headers']);
+        }
+        $headers = $options['headers'] ?? (is_array($kept) ? $kept : []);
         $decoded['_queen'] = array_replace(
             ['attempts' => 0],
             is_array($decoded['_queen'] ?? null) ? $decoded['_queen'] : [],
@@ -404,12 +420,14 @@ class QueenQueue extends BaseQueue implements QueueContract
             $manualRetry,
             $manualRetryId,
             $jobId,
+            $headers,
         ): void {
+            $transactionId = $manualRetry
+                ? (is_string($manualRetryId) ? $manualRetryId : Uuid::v7())
+                : $jobId;
             $result = $this->queen->queue($queue)
                 ->partition($partition)
-                ->push([['data' => $decoded, 'transactionId' => $manualRetry
-                    ? (is_string($manualRetryId) ? $manualRetryId : Uuid::v7())
-                    : $jobId]])
+                ->push([['data' => $decoded, 'transactionId' => $transactionId, 'headers' => $headers]])
                 ->execute();
 
             $this->assertPushAccepted($result);
@@ -508,6 +526,7 @@ class QueenQueue extends BaseQueue implements QueueContract
                         'data' => $decoded,
                         'partition' => $partition,
                         'transactionId' => $jobId,
+                        'headers' => $this->jobHeaders($job),
                     ],
                 ];
                 $this->raiseJobQueueingEvent($queue, $job, $payload, null);
@@ -536,13 +555,15 @@ class QueenQueue extends BaseQueue implements QueueContract
     public function later($delay, $job, $data = '', $queue = null): mixed
     {
         $queue = $this->getQueue($queue);
+        // The timer's message carries them, as a push does.
+        $headers = $this->jobHeaders($job);
 
         return $this->enqueueUsing(
             $job,
             $this->createPayload($job, $queue, $data, $delay),
             $queue,
             $delay,
-            fn ($payload, $queue, $delay) => $this->laterRaw($delay, $payload, $queue),
+            fn ($payload, $queue, $delay) => $this->laterRaw($delay, $payload, $queue, $headers),
         );
     }
 
@@ -825,7 +846,7 @@ class QueenQueue extends BaseQueue implements QueueContract
                 'payload' => $payload,
                 'transactionId' => $copyId,
                 'partition' => $partition,
-            ]]];
+            ] + self::headersOf($message)]];
         };
 
         return [
@@ -973,9 +994,37 @@ class QueenQueue extends BaseQueue implements QueueContract
             $transaction->ack($entry['message'], 'completed', ['consumerGroup' => $this->consumerGroup]);
             $transaction->queue($entry['queue'])
                 ->partition($partition)
-                ->push([['data' => $payload, 'transactionId' => Uuid::v7()]]);
+                ->push([['data' => $payload, 'transactionId' => Uuid::v7()] + self::headersOf($entry['message'])]);
         }
         $transaction->commit();
+    }
+
+    /**
+     * The headers a job gives its message (QueenHeaders), checked now, so a
+     * header that is not text fails the dispatch and not a worker; none for
+     * any other job.
+     */
+    private function jobHeaders(mixed $job): array
+    {
+        if (!$job instanceof QueenHeaders) {
+            return [];
+        }
+        $headers = $job->queenHeaders();
+
+        return Headers::wire($headers) === null ? [] : $headers;
+    }
+
+    /**
+     * A delivery's headers, for the copy that replaces it (a release, a hand
+     * back), so a job keeps them however often it goes back to the queue.
+     *
+     * @return array{headers?: array|\stdClass}
+     */
+    private static function headersOf(array $message): array
+    {
+        $headers = Headers::wire(is_array($message['headers'] ?? null) ? $message['headers'] : null);
+
+        return $headers === null ? [] : ['headers' => $headers];
     }
 
     /**
@@ -1434,12 +1483,13 @@ class QueenQueue extends BaseQueue implements QueueContract
                     $timerKey,
                     $delay * 1000,
                     $decoded,
-                    ['txn' => $releaseId, 'partition' => $partition],
+                    ['txn' => $releaseId, 'partition' => $partition] + self::headersOf($message),
                 );
             } else {
+                // The copy keeps the delivery's headers, as the timer above does.
                 $transaction->queue($queue)
                     ->partition($partition)
-                    ->push([['data' => $decoded, 'transactionId' => $releaseId]]);
+                    ->push([['data' => $decoded, 'transactionId' => $releaseId] + self::headersOf($message)]);
             }
 
             $transaction->commit();
@@ -1520,7 +1570,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         return $payload;
     }
 
-    private function laterRaw(mixed $delay, string $payload, string $queue): string
+    private function laterRaw(mixed $delay, string $payload, string $queue, array $headers = []): string
     {
         $decoded = $this->decodePayload($payload);
         $partition = $this->partitionForPayload($decoded);
@@ -1536,7 +1586,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             'laravel:delay:' . $jobId,
             max(0, $this->secondsUntil($delay)) * 1000,
             $decoded,
-            ['txn' => $jobId, 'partition' => $partition],
+            ['txn' => $jobId, 'partition' => $partition, 'headers' => $headers],
         );
 
         if (!($result['ok'] ?? false)) {

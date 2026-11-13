@@ -31,6 +31,9 @@ digest: >-
 # gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
 # leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
 # relay through). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 ---
 
 QueenMQ is a distributed message broker, built in Rust, replicated with Raft, and developed at Smartness. With it you can write applications that decouple producing from consuming, do request and reply, and process streams, using transactional features that let you remove a lot of logic from the application and offload it to QueenMQ.

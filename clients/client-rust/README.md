@@ -376,6 +376,92 @@ The chain's `config_hash` is computed byte-identically to the JS, Go and Python 
 suite pins it against vectors captured from the JS implementation — so the same query can be
 redeployed in a different language without tripping the "changed operator chain" guard.
 
+## Headers, filtered groups, reading queues and link (broker catalogue version 8)
+
+A message can carry **headers**: names of 1 to 64 bytes of `a-z 0-9 . _ -` (`queen-` is the
+broker's) to string values. They are stored in clear whatever the queue's encryption, so no
+secrets in them, and they are not part of dedup.
+
+```rust
+queen.queue("orders").partition("order-9137")
+    .headers([("type", "order.paid")])         // every message push / push_many sends
+    .push(json!({ "orderId": 9137, "total": 120 }))
+    .await?;
+queen.queue("orders")
+    .push_items(vec![PushItem::new("orders", json!({ "n": 1 })).headers([("type", "a")])])
+    .await?;
+```
+
+`TxnPushItem::headers` does the same in a transaction, and `timers().schedule(..).headers(..)`
+for the message a timer fires. A popped message has them in `msg.headers`, a fetched record in
+`record.headers`, a feed entry in `entry.headers`. A name the broker would refuse fails the call
+before anything is sent or buffered. The plain binary push has no place for headers, so a push
+with some goes framed (`push_compression`) or as JSON.
+
+A **filtered group** gets only the messages its `where` takes. Conditions are ANDed:
+`.where_(field, op, value)` sends the list form, `.where_str("...")` the string form, on every pop
+of the group.
+
+```rust
+queen.queue("orders")
+    .group("billing")
+    .subscription_mode(SubscriptionMode::All)     // start with the history the queue keeps
+    .where_("headers.type", "in", json!(["order.paid", "order.refunded"]))
+    .consume(handler)
+    .await?;
+```
+
+The broker fixes the `where` at the group's first pop; change it with
+`admin().set_consumer_group_where(group, queue, where)`. Like conflation, it degrades loudly: a
+broker that filters says `"filtered": true` on every answer, and an answer without it (an older
+broker, which would hand the group the whole queue) is an error before any message is handed
+over.
+
+A **reading queue** holds links to the messages of the queues it reads, never copies:
+
+```rust
+queen.queue("orders-it").configure(QueueOptions {
+    from: Some(json!("orders")),                  // or [{"queue": .., "where": ..}, "refunds"]
+    where_: Where::text("data.country = 'IT'").to_value()?,
+    partition_by: Some("same".into()),            // or "data.<path>", "headers.<name>"
+    start: Some("all".into()),                    // or "now", the default
+    lease_time: Some(30),
+    ..Default::default()
+}).await?;
+```
+
+It keeps what its sources keep: leave `retention_*`, `max_wait_time_seconds`,
+`dedup_window_seconds`, `encryption_enabled`, `max_size` and the sink hold unset (this client
+sends only the options you set). An answer without `route`, from a broker that does not read
+other queues, is an error. A source that reading queues read is deleted only with
+`queen.queue("orders").delete_with(true)` (otherwise 409 `has_readers`, naming them); their links
+then read as gone.
+
+**`link`** hands a message on without its payload: the target gets the same message, id and
+transaction id included, and a target partition that already holds it makes the link a no-op.
+
+```rust
+queen.transaction()
+    .ack(&msg)
+    .link_with_headers("manual-review", &msg.partition, [&msg], [("review-reason", "amount")])?
+    .commit()
+    .await?;
+```
+
+A message is named as the pop returned it (`partitionId`, `offset`, `transactionId`, its
+group), a feed entry by queue and partition, or by hand with `LinkFrom`. A bundle with a link
+always goes as JSON.
+
+**Streams link by themselves.** When the chain before `.to()` lets the input message through
+unchanged (`filter`, `gate` and `where` only, a payload the sink would write as it is, into the
+message's own partition), the sink writes a link to it instead of a push:
+`RunOptions::link(false)` (queue streams) and `FeedSink::link(false)` (feed streams) turn it
+off. A queue stream keeps the
+payload in its cycle beside the link, which is what a broker older than links stores. A feed
+stream does not link into a queue it reads: the feed shows a linked message in its target like
+any other, so the stream would read its own outputs back. A broker that refuses links gets
+pushes from then on.
+
 ## Deliberate differences from the other SDKs
 
 Each of these is a place where matching the other clients would have meant shipping something
@@ -456,6 +542,7 @@ tested — plus a breadth pass of their own:
 | `tests/coverage.rs` | queue options, payload shapes, naming, ordering under concurrency |
 | `tests/kv_timers_wire.rs` | the exact JSON body of every kv and timer operation, against a scripted server, no broker needed |
 | `tests/kv_timers.rs` | kv and timers live: the transaction gate, the fence, the counter ceiling, a timer becoming a message |
+| `tests/routing_wire.rs` | headers on every push and read, a filtered group's `where` and its echo, reading-queue options, `link` in a transaction and a stream's cycle, against a scripted server, no broker needed |
 
 `tests/kv_timers.rs` needs nothing beyond `QUEEN_TEST_URL`. It used to probe the broker and skip
 when the surfaces answered 404, behind a `QUEEN_TEST_KVT` escape; both are gone with the boot

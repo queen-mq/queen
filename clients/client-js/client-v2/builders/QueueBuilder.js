@@ -9,12 +9,14 @@ export const generateUUID = () => {
 };
 
 //import { generateUUID } from '../../utils/uuid.js'
-import { isValidUUID } from '../utils/validation.js'
+import { isValidUUID, checkHeaders } from '../utils/validation.js'
 import { durableAddress } from '../buffer/sinks.js'
 import { QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS } from '../utils/defaults.js'
 import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/conflation.js'
+import { checkFilteredResponse, checkRouteAnswer, FILTERED_GROUPS_UNSUPPORTED } from '../utils/routing.js'
 import { popSizing, parseAutopilotDecision } from '../utils/autopilot.js'
 import { fetchPartitions, partitionsChangedSince } from '../reads/offsetReads.js'
+import { whereCondition, normalizeWhere, whereValue } from '../feed/Feed.js'
 import * as logger from '../utils/logger.js'
 
 // Per-item push statuses that mean the broker took the message: `queued`
@@ -49,6 +51,58 @@ export function itemPartition(item, envelope, fallback) {
 // at delivery, and silently leasing would not be what the caller asked for.
 const COMMIT_ON_DELIVERY_NOT_FOR_CONSUME =
   'commitOnDelivery() is a pop() option; consume() always leases its messages'
+
+// What .where() throws when one builder gets both forms: the conditions travel
+// as a JSON list and a string as itself, and one pop carries one of the two.
+const WHERE_FORMS_MIXED =
+  'where: use .where(field, op, value) calls or one string, not both on one group'
+
+// The options a reading queue takes from its sources (PLAN_ROUTING.md §5.2).
+// The broker refuses them on one (400 reading_queue), so config() leaves them
+// out of the defaults it fills in for a reading queue; set by the caller they
+// are sent, and refused, as they should be.
+const READER_KEEPS = [
+  'retentionEnabled', 'retentionSeconds', 'completedRetentionSeconds', 'maxWaitTimeSeconds',
+  'dedupWindowSeconds', 'encryptionEnabled', 'maxSize', 'retentionSinkHold', 'retentionSinkHoldMaxSeconds'
+]
+
+/**
+ * Whether queue options make (or change) a reading queue: `from` names its
+ * sources, and `where`, `partitionBy` and `start` belong to one. `from: null`
+ * makes it an ordinary queue again, with the ordinary defaults.
+ */
+function readsQueues(options) {
+  if (!options || typeof options !== 'object' || options.from === null) return false
+  return options.from !== undefined || options.where !== undefined ||
+    options.partitionBy !== undefined || options.start !== undefined
+}
+
+/** The defaults config() fills in for these options: a reading queue gets none of READER_KEEPS. */
+function queueDefaultsFor(options) {
+  if (!readsQueues(options)) return QUEUE_DEFAULTS
+  const defaults = { ...QUEUE_DEFAULTS }
+  for (const key of READER_KEEPS) delete defaults[key]
+  return defaults
+}
+
+/**
+ * The options with each `where` as .where() takes it and the broker reads it
+ * (feed/Feed.js whereValue): one string, or a condition, `[field, op, value]`,
+ * or a list of either. One source given as `{ queue, where }` becomes the list
+ * the broker reads `from` as.
+ */
+function routeOptions(options) {
+  if (!readsQueues(options)) return options
+  const out = { ...options }
+  if (out.where !== undefined && out.where !== null) out.where = whereValue(out.where)
+  if (out.from !== null && typeof out.from === 'object' && !Array.isArray(out.from)) out.from = [out.from]
+  if (Array.isArray(out.from)) {
+    out.from = out.from.map(source => source !== null && typeof source === 'object' && source.where !== undefined && source.where !== null
+      ? { ...source, where: whereValue(source.where) }
+      : source)
+  }
+  return out
+}
 
 export class QueueBuilder {
   #queen
@@ -86,6 +140,9 @@ export class QueueBuilder {
   #subscriptionMode = CONSUME_DEFAULTS.subscriptionMode
   #subscriptionFrom = CONSUME_DEFAULTS.subscriptionFrom
   #conflation = CONSUME_DEFAULTS.conflation
+  // A filtered group's where (.where()): its conditions, or one string.
+  #whereConds = []
+  #whereText = null
   #each = false
   #maxPartitions = null
   // Per-call override for pop autopilot: null = the client default (on unless
@@ -146,8 +203,31 @@ export class QueueBuilder {
     return this
   }
 
+  /**
+   * The queue's options, sent by create() with QUEUE_DEFAULTS for the ones
+   * not given.
+   *
+   * A reading queue (PLAN_ROUTING.md §5) takes the messages of other queues
+   * that match a `where`, by reference, with their ids:
+   *
+   *   await queen.queue('orders-it').config({
+   *     from: 'orders',                  // a name, a list, or [{ queue, where }]; null stops reading
+   *     where: "data.country = 'IT'",    // a string or conditions, as .where() takes them
+   *     partitionBy: 'same',             // or 'data.<path>', 'headers.<name>'
+   *     start: 'now',                    // or 'all': every match the sources still keep
+   *     leaseTime: 30, retryLimit: 5
+   *   }).create()
+   *
+   * Its sources decide what it keeps, so with `from` (or `where`,
+   * `partitionBy`, `start`) the defaults leave out retention, encryption,
+   * maxSize and the other settings the broker refuses on a reading queue.
+   * Name `from` (or `where`) again when you configure it later: without them
+   * the full defaults go out, and a reading queue refuses them. A broker that
+   * answers a configure with `from` without its `route` does not read other
+   * queues: create() throws `.code === READING_QUEUES_UNSUPPORTED`.
+   */
   config(options) {
-    this.#config = { ...QUEUE_DEFAULTS, ...options }
+    this.#config = { ...queueDefaultsFor(options), ...routeOptions(options) }
     return this
   }
 
@@ -164,20 +244,28 @@ export class QueueBuilder {
       options: fullConfig
     }
 
+    // A reading queue's configure is answered with its route; an older broker
+    // ignores `from` and makes an ordinary queue nothing fills (utils/routing.js).
+    const reads = fullConfig.from !== undefined && fullConfig.from !== null
     logger.log('QueueBuilder.create', { queue: this.#queueName, namespace: this.#namespace, task: this.#task })
-    return new OperationBuilder(this.#httpClient, 'POST', '/api/v1/configure', payload)
+    return new OperationBuilder(this.#httpClient, 'POST', '/api/v1/configure', payload, reads ? checkRouteAnswer : null)
   }
 
-  delete() {
+  /**
+   * Delete the queue. A queue that reading queues read is refused (409
+   * `has_readers`, the error names them) unless `{ force: true }`: their
+   * links then read as gone.
+   */
+  delete({ force = false } = {}) {
     if (!this.#queueName) {
       throw new Error('Queue name is required for delete operation')
     }
 
-    logger.log('QueueBuilder.delete', { queue: this.#queueName })
+    logger.log('QueueBuilder.delete', { queue: this.#queueName, force })
     return new OperationBuilder(
       this.#httpClient,
       'DELETE',
-      `/api/v1/resources/queues/${encodeURIComponent(this.#queueName)}`,
+      `/api/v1/resources/queues/${encodeURIComponent(this.#queueName)}${force ? '?force=true' : ''}`,
       null
     )
   }
@@ -242,6 +330,14 @@ export class QueueBuilder {
       // Include traceId if provided and valid UUID
       if (item.traceId && isValidUUID(item.traceId)) {
         result.traceId = item.traceId
+      }
+
+      // An envelope's headers (`{ data, headers }`), as its partition: a bare
+      // object is its own payload, and a payload with a `headers` field (an
+      // HTTP request log) must stay one.
+      const headers = envelope ? checkHeaders(item.headers) : null
+      if (headers) {
+        result.headers = headers
       }
 
       return result
@@ -399,6 +495,80 @@ export class QueueBuilder {
     return this
   }
 
+  /**
+   * A filtered group (PLAN_ROUTING.md §4): this group gets only the messages
+   * its `where` takes, and acks only those. Several calls are ANDed; one
+   * string says the same in the broker's words.
+   *
+   *   queen.queue('orders').group('billing')
+   *     .where('data.kind', 'in', ['order.paid', 'order.refunded'])
+   *     .where('headers.region', '=', 'eu')
+   *     .consume(handler)
+   *
+   *   queen.queue('orders').group('billing').where("data.kind = 'order.paid' and data.total > 100")
+   *
+   * Fields: queue, partition, transactionId, data, data.<path>, headers.<name>.
+   * Ops: = != < <= > >= in exists prefix !prefix. A field the message lacks
+   * holds for no op, `!=` included. The conditions are checked as Streams'
+   * `.where()` checks them; the string is the broker's to read.
+   *
+   * Like conflation, a property of the GROUP: it is sent on every pop, the
+   * broker fixes it at the group's first one, and a different `where` for the
+   * group later is refused (400 `where_mismatch`), as is a `where` on a group
+   * that already reads the queue unfiltered. pop() raises those refusals and
+   * consume() stops on them. Change it on purpose with
+   * `queen.admin.updateConsumerGroupWhere()`. With subscriptionMode('all') or
+   * subscriptionFrom() the group starts with the matches the queue still
+   * keeps (the first pops may take a few seconds).
+   *
+   * Needs a consumer group and a queue name (no namespace/task pop), and a
+   * cluster whose every node reads catalogue version 8 (`cluster_version`
+   * otherwise). A broker older than filtered groups ignores the parameter;
+   * its first answer lacks the `"filtered": true` echo, and the pop raises
+   * `.code === FILTERED_GROUPS_UNSUPPORTED` before handing out a message
+   * (utils/routing.js).
+   *
+   * @param {string|object|Array} field - a field, one string, or conditions ([field, op, value] or { field, op, value }, one or a list)
+   * @param {string} [op]
+   * @param {*} [value]
+   */
+  where(field, op, value) {
+    if (op === undefined && value === undefined && typeof field === 'string') {
+      if (this.#whereConds.length > 0) throw new Error(WHERE_FORMS_MIXED)
+      const text = field.trim()
+      if (text.length === 0) throw new Error('where: an empty string; leave .where() out for a group that takes everything')
+      this.#whereText = this.#whereText === null ? text : `${this.#whereText} and ${text}`
+      return this
+    }
+    if (this.#whereText !== null) throw new Error(WHERE_FORMS_MIXED)
+    const conds = op === undefined && value === undefined && field !== null && typeof field === 'object'
+      ? normalizeWhere(field)
+      : [whereCondition(field, op, value)]
+    this.#whereConds.push(...conds)
+    return this
+  }
+
+  /** The `where` pop parameter: the string, or the conditions as their JSON list; null for none. */
+  #whereParam() {
+    if (this.#whereText !== null) return this.#whereText
+    return this.#whereConds.length > 0 ? JSON.stringify(this.#whereConds) : null
+  }
+
+  /**
+   * Refuse, before any pop, a where the broker cannot apply: a filtered group
+   * reads a named queue, with a group. A pop() would otherwise swallow the
+   * broker's 400 into an empty answer, every time.
+   */
+  #checkWhere() {
+    if (this.#whereParam() === null) return
+    if (!this.#queueName) {
+      throw new Error('where: a filtered group reads a named queue: queen.queue(name).group(g).where(...)')
+    }
+    if (!this.#group) {
+      throw new Error('where filters a consumer group: name one with .group(name)')
+    }
+  }
+
   each() {
     this.#each = true
     return this
@@ -412,6 +582,7 @@ export class QueueBuilder {
     if (this.#commitOnDelivery) {
       throw new Error(COMMIT_ON_DELIVERY_NOT_FOR_CONSUME)
     }
+    this.#checkWhere()
 
     const consumeOptions = {
       queue: this.#queueName,
@@ -431,6 +602,7 @@ export class QueueBuilder {
       subscriptionMode: this.#subscriptionMode,
       subscriptionFrom: this.#subscriptionFrom,
       conflation: this.#conflation,
+      where: this.#whereParam(),
       each: this.#each,
       maxPartitions: this.#maxPartitions,
       // Resolved here so ConsumerManager sees a decision and not a null. batch
@@ -516,6 +688,10 @@ export class QueueBuilder {
     // reaches the wire; the broker's at-most-once autoAck travels only from
     // commitOnDelivery(). Without it a pop comes back leased.
     const effectiveWait = this.#wait ?? POP_DEFAULTS.wait
+    // Before the try: a where this pop cannot carry is the caller's fault,
+    // not an empty queue.
+    this.#checkWhere()
+    const where = this.#whereParam()
 
     logger.log('QueueBuilder.pop', { queue: this.#queueName, partition: this.#partition, namespace: this.#namespace, task: this.#task, batch: this.#batch, wait: effectiveWait, group: this.#group })
     
@@ -554,6 +730,9 @@ export class QueueBuilder {
       // builder; consume() builds its params in ConsumerManager#buildParams —
       // see the comment below #buildPopPath about exactly this hazard.
       if (this.#conflation) params.append('conflation', 'true')
+      // A filtered group's where (PLAN_ROUTING.md §4), the same on every pop
+      // of the group; sent only when set. ConsumerManager#buildParams too.
+      if (where !== null) params.append('where', where)
 
       // Generate affinity key for consistent routing to same backend
       const affinityKey = this.#getAffinityKey()
@@ -574,6 +753,9 @@ export class QueueBuilder {
           group: this.#group
         })
       }
+      // The same for a where: every answer of a filtered pop says
+      // `"filtered": true`, a 204 included (utils/routing.js).
+      if (where !== null) checkFilteredResponse(result)
 
       // The broker's own account of how it sized this pop, when the request
       // engaged autopilot and the answer had a body to carry it (a bodiless 204
@@ -598,6 +780,13 @@ export class QueueBuilder {
       // commitOnDelivery) are permanent config faults, so they raise.
       if (error.code === CONFLATION_UNSUPPORTED || (this.#conflation && error.status === 400)) {
         logger.error('QueueBuilder.pop', { error: error.message, status: error.status, code: error.code, conflation: true })
+        throw error
+      }
+      // A where not applied (no echo) or refused (400 where_mismatch or a
+      // bad where, 400/409 cluster_version) goes the same way next time:
+      // swallowed, the group would read [] forever and never say why.
+      if (where !== null && (error.code === FILTERED_GROUPS_UNSUPPORTED || error.status === 400 || error.status === 409)) {
+        logger.error('QueueBuilder.pop', { error: error.message, status: error.status, code: error.code, where: true })
         throw error
       }
       // Return empty array on error instead of throwing. This also covers a
@@ -636,7 +825,7 @@ export class QueueBuilder {
   //
   // The pair that is still live and MUST be kept in sync is pop()'s inline
   // params above and ConsumerManager#buildParams: every pop query parameter
-  // (subscriptionMode, subscriptionFrom, partitions, conflation, ...) has to be
+  // (subscriptionMode, subscriptionFrom, partitions, conflation, where, ...) has to be
   // appended in BOTH, because pop() and consume() share no builder. The one
   // exception is commitOnDelivery's autoAck=true: consume() throws instead.
 
@@ -708,15 +897,19 @@ class OperationBuilder {
   #method
   #path
   #body
+  // Throws when a successful answer is not the one asked for (a broker that
+  // ignored an option), so it fails like an error answer.
+  #verify
   #onSuccessCallback = null
   #onErrorCallback = null
   #executed = false
 
-  constructor(httpClient, method, path, body) {
+  constructor(httpClient, method, path, body, verify = null) {
     this.#httpClient = httpClient
     this.#method = method
     this.#path = path
     this.#body = body
+    this.#verify = verify
   }
 
   onSuccess(callback) {
@@ -763,6 +956,7 @@ class OperationBuilder {
         }
         throw error
       }
+      if (this.#verify) this.#verify(result)
 
       logger.log('OperationBuilder.execute', { method: this.#method, path: this.#path, status: 'success' })
       if (this.#onSuccessCallback) {

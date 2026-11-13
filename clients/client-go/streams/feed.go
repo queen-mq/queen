@@ -127,7 +127,8 @@ func FromFeed(q FeedClient, src FeedSource) *Stream {
 // Where keeps only the source messages where `field op value` holds. On a
 // feed it is sent to the broker (before any stateful step); on a queue source
 // it is evaluated here. Fields: queue, partition, transactionId, offset,
-// position, data, data.<path>. Ops: = != < <= > >= in exists prefix !prefix.
+// position, data, data.<path>, headers.<name>. Ops: = != < <= > >= in exists
+// prefix !prefix.
 func (s *Stream) Where(field, op string, value ...interface{}) *Stream {
 	cond, err := feed.WhereCondition(field, op, value...)
 	if err != nil {
@@ -272,15 +273,33 @@ func (s *Stream) ToFunc(fn RouteFn) *Stream {
 }
 
 // ToOptions are a sink's options: the partition, a fixed name or a function
-// of the value (a PartitionFn, or func(value) (interface{}, error)).
+// of the value (a PartitionFn, or func(value) (interface{}, error)), and Link.
 type ToOptions struct {
 	Partition interface{}
+	// Link: an output that is its input message unchanged (the chain before
+	// the sink only filters, wheres, keys or gates: no map, no window or other
+	// stateful step) is written as a link to that message -- the same message,
+	// with the same id, transactionId and headers, its payload stored once --
+	// instead of a copy (a cluster at catalogue version 8). nil or true, the
+	// default; streams.Bool(false) pushes a copy of every output, as before
+	// links.
+	//
+	// What changes with a link: the target's dedup window holds the source's
+	// transactionId, so the same input linked again is a no-op, and readers of
+	// the target -- pops, and the feed, which shows a linked message in its
+	// target as any message there -- see the source's id and transactionId.
+	// On a feed source, an output into a queue the stream reads itself is
+	// pushed, never linked: a stream keeps clear of its own outputs by the
+	// prefix of their ids, which a link does not have. A broker or cluster that
+	// does not take links turns linking off for the runner, which then pushes.
+	Link *bool
 }
 
 // ToWith is .to(target, opts) with any target: a Sink, a queue name, a list
 // of either, or a RouteFn.
 func (s *Stream) ToWith(target interface{}, opts ToOptions) *Stream {
 	op := operators.NewSinkOperator("", nil)
+	op.Link = opts.Link
 	switch t := target.(type) {
 	case RouteFn:
 		op.Route = t
@@ -632,8 +651,26 @@ func (s *Stream) CompileFeed() (*feedrt.Compiled, error) {
 	}
 	if sink != nil {
 		out.Sink = sinkSpec(sink)
+		if so, ok := sink.(operators.SinkOperator); ok && out.Sink != nil {
+			out.Sink.Link = so.Linking() && unchangedInput(upstream)
+		}
 	}
 	return out, nil
+}
+
+// unchangedInput reports whether every output of a chain is its input message
+// as it came: the operators before the sink only drop messages (a where, a
+// filter) or key them, and none computes a value (a map, a flatMap, a
+// stateful step's result). Such an output can be a link to its input.
+func unchangedInput(upstream []util.Operator) bool {
+	for _, op := range upstream {
+		switch op.Kind() {
+		case "filter", "keyBy":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // describe is configHash's { kind: op.kind, ...op.config }, in JS insertion order.

@@ -429,6 +429,7 @@ fn push(id: u64, queue: &str, partition: &str, txns: &[&str]) -> Command {
         partition: partition.to_string(),
         items: txns.iter().map(|t| item(t)).collect(),
         create_cfg: qcfg(),
+        links: Default::default(),
     })
 }
 
@@ -638,7 +639,7 @@ async fn a_push_planned_after_a_queue_delete_in_the_same_cycle_gets_a_new_partit
     let fx = Fx::open(
         "same-cycle",
         BatcherConfig {
-            lanes: 1,
+            planner_threads: 1,
             ..batcher_cfg(1)
         },
     )
@@ -671,18 +672,17 @@ async fn a_push_planned_after_a_queue_delete_in_the_same_cycle_gets_a_new_partit
     fx.close().await;
 }
 
-/// Same cycle, with lanes: the push goes to its partition's lane and the delete
-/// to control, which plans after the lanes, so the push comes first in the
-/// entry — its message lands in the old partition and goes with the queue.
-/// Two commands of one cycle are concurrent, so either order is a serial one;
-/// what must hold is that apply takes the entry, an append to a partition the
-/// same entry then deletes.
+/// Same cycle, on eight planning threads: the footprint scheduler plans a
+/// queue delete on its own, in batch order (S3), so the push after it sees the
+/// queue as gone and creates a new partition, exactly as the single planner
+/// does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn with_lanes_a_push_in_the_same_cycle_as_its_queue_delete_goes_with_the_queue() {
+async fn on_eight_planning_threads_a_push_after_a_queue_delete_in_the_same_cycle_gets_a_new_partition(
+) {
     let fx = Fx::open(
-        "same-cycle-lanes",
+        "same-cycle-threads",
         BatcherConfig {
-            lanes: 8,
+            planner_threads: 8,
             ..batcher_cfg(1)
         },
     )
@@ -703,18 +703,10 @@ async fn with_lanes_a_push_in_the_same_cycle_as_its_queue_delete_goes_with_the_q
     let del = reply_and_health(&fx, del, "the queue delete").await;
     let racing = reply_and_health(&fx, racing, "the racing push").await;
     assert_eq!(done(&del).1, done(&racing).1, "one entry");
-    assert_eq!(
-        created(&racing),
-        (old, 1),
-        "appended to the old partition, ahead of the delete"
-    );
+    let (new, offset) = created(&racing);
+    assert_eq!(offset, 0, "a fresh partition starts at 0");
     fx.settle(done(&racing).1).await;
-    fx.finish_chunks(&pids, GarbageScope::Queue, 1_000).await;
-    let gone = fx
-        .store
-        .read(|r| Ok(r.partition(old)?.is_none() && r.garbage(old)?.is_none()))
-        .expect("read");
-    assert!(gone, "the old partition went with the queue");
+    assert_push_survives(&fx, old, &pids, new).await;
     fx.close().await;
 }
 
@@ -883,7 +875,9 @@ async fn a_seek_planned_while_a_queue_delete_is_in_flight_is_refused() {
 struct Cycles {
     node: ApplyNode,
     state: PlannerState,
-    front: DedupFront,
+    front: Arc<DedupFront>,
+    /// Planning threads: more than one plans through the footprint scheduler.
+    threads: usize,
     inflight: Vec<(u64, Arc<Entry>)>,
     next_index: u64,
     applied: u64,
@@ -895,7 +889,8 @@ impl Cycles {
         Cycles {
             node: ApplyNode::new(tag),
             state: PlannerState::default(),
-            front: DedupFront::disabled(),
+            front: Arc::new(DedupFront::disabled()),
+            threads: 4,
             inflight: Vec::new(),
             next_index: 1,
             applied: 0,
@@ -921,10 +916,11 @@ impl Cycles {
             reset_every: 0,
         };
         let out = plan_cycle_blocking(
-            self.node.store(),
+            self.node.store_arc(),
             &self.front,
             &mut self.state,
             keep,
+            self.threads,
             None,
             None,
             self.inflight.clone(),

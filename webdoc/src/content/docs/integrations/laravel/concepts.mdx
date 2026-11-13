@@ -150,6 +150,9 @@ sourceOfTruth:
 # outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599); the PHP
 # client: the Laravel config's bearer_token stays a string (QueenConnector.php,
 # QueenServiceProvider.php) (8c3fcd498). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue`, keep their middleware, `tries`, `backoff` and failure events, and `queue:work` still runs them. What changes is where a job waits and what holds it while it runs. This page follows one job through QueenMQ, one idea at a time, with what Horizon does at the same point. The settings of each idea close its section ([configuration reference](/integrations/laravel/configuration/)).

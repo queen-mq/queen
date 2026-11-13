@@ -69,7 +69,11 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use super::{frame_hash, is_partition_state, InFlightOutcome, Overlay, Tagged};
+use super::homes::Homes;
+use super::{
+    frame_hash, is_partition_state, DedupMap, InFlightOutcome, Overlay, PartsMap, Tagged,
+    NEW_SHARD, PART_SHARDS,
+};
 use crate::rsm::effect::Effect;
 use crate::rsm::entry::Entry;
 use crate::rsm::fasthash::FxBuild;
@@ -150,8 +154,22 @@ impl KeptOverlay {
         base_pid: u64,
         base_kv: u64,
     ) -> KeptOverlay {
+        KeptOverlay::rebuild_homed(None, folded, store_applied, base_pid, base_kv)
+    }
+
+    /// [`KeptOverlay::rebuild`] with the overlay's homes ([`Homes`]): a pid's
+    /// rows live in its name's shard, for the planning threads that own it.
+    pub(crate) fn rebuild_homed(
+        homes: Option<Arc<Homes>>,
+        folded: &[(u64, Arc<Entry>)],
+        store_applied: u64,
+        base_pid: u64,
+        base_kv: u64,
+    ) -> KeptOverlay {
+        let mut ov = Overlay::new(base_pid, base_kv);
+        ov.set_homes(homes);
         let mut k = KeptOverlay {
-            ov: Overlay::new(base_pid, base_kv),
+            ov,
             entries: VecDeque::new(),
             next_tag: 1,
             exact: true,
@@ -233,11 +251,28 @@ impl KeptOverlay {
     /// the epoch and never reaches here. Anything else is an `Err`, and the
     /// caller rebuilds.
     pub(crate) fn advance(
+        self,
+        folded: &[(u64, Arc<Entry>)],
+        store_applied: u64,
+        base_pid: u64,
+        base_kv: u64,
+    ) -> Result<KeptOverlay, &'static str> {
+        self.advance_with(folded, store_applied, base_pid, base_kv, &mut |ov, gone| {
+            ov.unfold_parts_here(gone)
+        })
+    }
+
+    /// [`KeptOverlay::advance`], with the partition state of the landed
+    /// entries taken out by `unfold_parts` (the footprint scheduler spreads it
+    /// over the planning threads, shard by shard). Everything else is taken
+    /// out here, before it.
+    pub(crate) fn advance_with(
         mut self,
         folded: &[(u64, Arc<Entry>)],
         store_applied: u64,
         base_pid: u64,
         base_kv: u64,
+        unfold_parts: &mut UnfoldParts<'_>,
     ) -> Result<KeptOverlay, &'static str> {
         let desired: Vec<&Arc<Entry>> = folded
             .iter()
@@ -259,10 +294,14 @@ impl KeptOverlay {
             return Err("the kept entries are not the entries in flight");
         }
         let mut refold: HashSet<TimerKey> = HashSet::new();
+        let mut gone: Vec<Landed> = Vec::with_capacity(landed);
         for _ in 0..landed {
             let k = self.entries.pop_front().expect("counted above");
-            self.ov
-                .unfold_entry(&k.entry, k.tag, k.parts, &mut refold)?;
+            self.ov.unfold_catalog(&k.entry, k.tag, &mut refold)?;
+            gone.push((k.entry, k.tag, k.parts));
+        }
+        if !gone.is_empty() {
+            unfold_parts(&mut self.ov, &gone)?;
         }
         if !refold.is_empty() {
             self.ov
@@ -326,10 +365,14 @@ impl KeptOverlay {
             return Err("the kept entries are not the oldest entries in flight");
         }
         let mut refold: HashSet<TimerKey> = HashSet::new();
+        let mut gone: Vec<Landed> = Vec::with_capacity(landed);
         for _ in 0..landed {
             let k = self.entries.pop_front().expect("counted above");
-            self.ov
-                .unfold_entry(&k.entry, k.tag, k.parts, &mut refold)?;
+            self.ov.unfold_catalog(&k.entry, k.tag, &mut refold)?;
+            gone.push((k.entry, k.tag, k.parts));
+        }
+        if !gone.is_empty() {
+            self.ov.unfold_parts_here(&gone)?;
         }
         if !refold.is_empty() {
             self.ov
@@ -439,7 +482,7 @@ impl KeptOverlay {
             p.watermark = None;
             !p.is_empty()
         });
-        ov.dedup = HashMap::default();
+        ov.dedup = Default::default();
         for k in self.entries.iter_mut() {
             k.parts = false;
         }
@@ -555,7 +598,11 @@ impl KeptOverlay {
                 }
             })
             .or_else(|| diff_parts(a, b, &pa, &pb))
-            .or_else(|| diff_map("dedup", &a.dedup, &b.dedup, |x, y| x == y))
+            .or_else(|| {
+                (0..=NEW_SHARD).find_map(|s| {
+                    diff_map("dedup", a.dedup.shard(s), b.dedup.shard(s), |x, y| x == y)
+                })
+            })
             .or_else(|| {
                 diff_map("timers", &a.timers, &b.timers, |x, y| {
                     x.v == y.v && pa(x.last) == pb(y.last) && pa(x.base) == pb(y.base)
@@ -600,7 +647,16 @@ fn diff_parts(
     pa: &dyn Fn(u64) -> Option<usize>,
     pb: &dyn Fn(u64) -> Option<usize>,
 ) -> Option<String> {
-    diff_map("parts", &a.parts, &b.parts, |x, y| {
+    (0..=NEW_SHARD).find_map(|s| diff_part_shard(a.parts.shard(s), b.parts.shard(s), pa, pb))
+}
+
+fn diff_part_shard(
+    a: &PartsMap,
+    b: &PartsMap,
+    pa: &dyn Fn(u64) -> Option<usize>,
+    pb: &dyn Fn(u64) -> Option<usize>,
+) -> Option<String> {
+    diff_map("parts", a, b, |x, y| {
         let created = match (&x.created, &y.created) {
             (None, None) => true,
             (Some(cx), Some(cy)) => cx.v == cy.v && pa(cx.tag) == pb(cy.tag),
@@ -622,6 +678,118 @@ fn diff_parts(
                     && pa(p.tag) == pb(q.tag)
             })
     })
+}
+
+/// A landed entry, as a landing takes its partition state out: the entry, the
+/// tag its folds carry, and whether its partition log was folded (B27).
+pub(crate) type Landed = (Arc<Entry>, u64, bool);
+
+/// How [`KeptOverlay::advance_with`] takes the landed entries out of the
+/// partition state: here, or on the planning threads.
+pub(crate) type UnfoldParts<'a> =
+    dyn FnMut(&mut Overlay, &[Landed]) -> Result<(), &'static str> + 'a;
+
+/// The pid whose partition state an effect folded into, or `None`.
+fn part_effect_pid(eff: &Effect) -> Option<crate::rsm::effect::Pid> {
+    match eff {
+        Effect::PartitionCreate { pid, .. }
+        | Effect::Append { pid, .. }
+        | Effect::Watermark { pid, .. } => Some(*pid),
+        _ => None,
+    }
+}
+
+/// [`Overlay::shrink_idle`] for one shard of the partition state.
+fn shrink_shard(parts: &mut PartsMap, dedup: &mut DedupMap) {
+    fn shrink<K: Eq + Hash, V>(m: &mut HashMap<K, V, FxBuild>) {
+        if m.capacity() > 4096 && m.capacity() > 8 * m.len() {
+            m.shrink_to(2 * m.len());
+        }
+    }
+    shrink(parts);
+    shrink(dedup);
+}
+
+/// One effect's share of a landing in its pid's shard. `log`: the entry's
+/// appends and watermarks were folded (B27); a create's flag always is.
+fn unfold_part_effect(
+    parts: &mut PartsMap,
+    dedup: &mut DedupMap,
+    eff: &Effect,
+    tag: u64,
+    log: bool,
+) -> Result<(), &'static str> {
+    if !log && is_partition_state(eff) {
+        return Ok(());
+    }
+    match eff {
+        Effect::PartitionCreate { pid, .. } => {
+            if let Some(p) = parts.get_mut(pid) {
+                match &p.created {
+                    Some(c) if c.tag == tag => p.created = None,
+                    Some(c) if c.tag < tag => {
+                        return Err("a created-in-flight flag outlived its create")
+                    }
+                    _ => {}
+                }
+                if p.is_empty() {
+                    parts.remove(pid);
+                }
+            }
+        }
+        Effect::Append {
+            pid,
+            base_offset,
+            count,
+            created_at_us,
+            hashes,
+            ..
+        } => {
+            let p = parts
+                .get_mut(pid)
+                .ok_or("a landed append has no overlay partition")?;
+            let at = p
+                .appends
+                .iter()
+                .position(|a| a.tag == tag && a.base == *base_offset)
+                .ok_or("a landed append is not in the overlay")?;
+            p.appends.remove(at);
+            if p.is_empty() {
+                parts.remove(pid);
+            }
+            for i in 0..*count as usize {
+                let key = (*pid, frame_hash(hashes, i));
+                let occ = dedup
+                    .get_mut(&key)
+                    .ok_or("a landed frame has no dedup occurrence")?;
+                let want = (base_offset + i as u64, *created_at_us);
+                let j = occ
+                    .iter()
+                    .position(|o| *o == want)
+                    .ok_or("a landed frame's dedup occurrence is missing")?;
+                occ.remove(j);
+                if occ.is_empty() {
+                    dedup.remove(&key);
+                }
+            }
+        }
+        Effect::Watermark { pid, .. } => {
+            if let Some(p) = parts.get_mut(pid) {
+                match &p.watermark {
+                    Some(w) if w.tag == tag => p.watermark = None,
+                    Some(w) if w.tag < tag => {
+                        return Err("an overlay watermark outlived its entry")
+                    }
+                    _ => {}
+                }
+                if p.is_empty() {
+                    parts.remove(pid);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Drop `key` iff its value is still the one `tag` wrote. A value older than
@@ -655,28 +823,22 @@ impl Overlay {
                 m.shrink_to(2 * m.len());
             }
         }
-        shrink(&mut self.dedup);
-        shrink(&mut self.parts);
         shrink(&mut self.request_ids);
         shrink(&mut self.kv);
         shrink(&mut self.timers);
         shrink(&mut self.gone);
     }
 
-    /// Take out everything entry `e` put in when it was folded under `tag` —
-    /// its partition state only when `parts` (B27: it was folded).
-    /// Timer keys whose value was derived THROUGH `e` go to `refold`.
-    fn unfold_entry(
+    /// Take out everything entry `e` put in when it was folded under `tag`, but
+    /// for its partition state, which [`unfold_parts`] takes out shard by
+    /// shard. Timer keys whose value was derived THROUGH `e` go to `refold`.
+    fn unfold_catalog(
         &mut self,
         e: &Entry,
         tag: u64,
-        parts: bool,
         refold: &mut HashSet<TimerKey>,
     ) -> Result<(), &'static str> {
         for eff in &e.effects {
-            if !parts && is_partition_state(eff) {
-                continue;
-            }
             match eff {
                 Effect::QueueUpsert { tenant, queue, .. } => {
                     drop_if_tagged(&mut self.queues, &(tenant.clone(), queue.clone()), tag)?;
@@ -719,7 +881,6 @@ impl Overlay {
                     )?;
                 }
                 Effect::PartitionCreate {
-                    pid,
                     tenant,
                     queue,
                     partition,
@@ -730,70 +891,6 @@ impl Overlay {
                         &(tenant.clone(), queue.clone(), partition.clone()),
                         tag,
                     )?;
-                    if let Some(p) = self.parts.get_mut(pid) {
-                        match &p.created {
-                            Some(c) if c.tag == tag => p.created = None,
-                            Some(c) if c.tag < tag => {
-                                return Err("a created-in-flight flag outlived its create")
-                            }
-                            _ => {}
-                        }
-                        if p.is_empty() {
-                            self.parts.remove(pid);
-                        }
-                    }
-                }
-                Effect::Append {
-                    pid,
-                    base_offset,
-                    count,
-                    created_at_us,
-                    hashes,
-                    ..
-                } => {
-                    let p = self
-                        .parts
-                        .get_mut(pid)
-                        .ok_or("a landed append has no overlay partition")?;
-                    let at = p
-                        .appends
-                        .iter()
-                        .position(|a| a.tag == tag && a.base == *base_offset)
-                        .ok_or("a landed append is not in the overlay")?;
-                    p.appends.remove(at);
-                    if p.is_empty() {
-                        self.parts.remove(pid);
-                    }
-                    for i in 0..*count as usize {
-                        let key = (*pid, frame_hash(hashes, i));
-                        let occ = self
-                            .dedup
-                            .get_mut(&key)
-                            .ok_or("a landed frame has no dedup occurrence")?;
-                        let want = (base_offset + i as u64, *created_at_us);
-                        let j = occ
-                            .iter()
-                            .position(|o| *o == want)
-                            .ok_or("a landed frame's dedup occurrence is missing")?;
-                        occ.remove(j);
-                        if occ.is_empty() {
-                            self.dedup.remove(&key);
-                        }
-                    }
-                }
-                Effect::Watermark { pid, .. } => {
-                    if let Some(p) = self.parts.get_mut(pid) {
-                        match &p.watermark {
-                            Some(w) if w.tag == tag => p.watermark = None,
-                            Some(w) if w.tag < tag => {
-                                return Err("an overlay watermark outlived its entry")
-                            }
-                            _ => {}
-                        }
-                        if p.is_empty() {
-                            self.parts.remove(pid);
-                        }
-                    }
                 }
                 Effect::KvPut {
                     tenant, ns, key, ..
@@ -845,6 +942,46 @@ impl Overlay {
                     return Err("an in-flight request id outlived its entry");
                 }
                 _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Take the partition state of the landed entries `gone` out of every
+    /// shard, on this thread: one pass over each landed entry.
+    pub(crate) fn unfold_parts_here(&mut self, gone: &[Landed]) -> Result<(), &'static str> {
+        self.unfold_parts_in(gone, !0)
+    }
+
+    /// [`Overlay::unfold_parts_here`] for the shards of `mask` only: a
+    /// planning thread takes the landed entries out of the shards it owns,
+    /// before it plans in them. One pass over each landed entry's effects
+    /// (a few a command), the work only for its own.
+    pub(crate) fn unfold_parts_in(
+        &mut self,
+        gone: &[Landed],
+        mask: super::ShardMask,
+    ) -> Result<(), &'static str> {
+        for (e, tag, log) in gone {
+            for eff in &e.effects {
+                if let Some(pid) = part_effect_pid(eff) {
+                    let s = self.shard_of(pid);
+                    if mask & (1 << s) == 0 {
+                        continue;
+                    }
+                    unfold_part_effect(
+                        self.parts.shard_mut(s),
+                        self.dedup.shard_mut(s),
+                        eff,
+                        *tag,
+                        *log,
+                    )?;
+                }
+            }
+        }
+        for s in 0..PART_SHARDS {
+            if mask & (1 << s) != 0 {
+                shrink_shard(self.parts.shard_mut(s), self.dedup.shard_mut(s));
             }
         }
         Ok(())

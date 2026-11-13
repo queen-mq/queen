@@ -2,7 +2,7 @@
 // One queue, in the new console: its name and facts, one line saying whether it
 // is all right, the story when it needs you, its traffic over the window, and
 // its groups, partitions, messages, dead letters, timers and options.
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { queues as queuesApi } from '@/api'
 import { describeApiError } from '@/api/errors'
@@ -24,6 +24,7 @@ import QueueDead from '@/console/queue/QueueDead.vue'
 import QueueScheduled from '@/console/queue/QueueScheduled.vue'
 import QueueSettings from '@/console/queue/QueueSettings.vue'
 import QueuePush from '@/console/queue/QueuePush.vue'
+import { deleteQueueCall, filteredGroupsOf, hasReadersOf, readersParts } from '@/console/queues/routeView'
 
 const route = useRoute()
 const router = useRouter()
@@ -60,16 +61,31 @@ const prefill = ref(null)
 function openPush(p = null) { prefill.value = p; pushing.value = true }
 const moreOpen = ref(false)
 const deleting = ref(false)
+// The broker's 409 when reading queues read this one: { readers, said }. Its
+// own dialog then offers the delete with force=true, typed again.
+const forcing = ref(null)
 const busy = ref(false)
-async function remove() {
+const plainCall = computed(() => deleteQueueCall(name.value))
+const forceCall = computed(() => deleteQueueCall(name.value, { force: true }))
+// Its filtered groups' hidden queues go with it, forced or not.
+const goesWith = computed(() => filteredGroupsOf(q.route.value).map((g) => g.group))
+const forcingWho = computed(() => readersParts(forcing.value?.readers || []))
+const forcingOne = computed(() => (forcing.value?.readers?.length || 0) === 1)
+// The page is reused from queue to queue: a dialog never outlives its queue.
+watch(name, () => { deleting.value = false; forcing.value = null })
+async function remove(force = false) {
   busy.value = true
+  const call = force ? forceCall.value : plainCall.value
   try {
-    const r = await queuesApi.delete(name.value)
+    const r = await queuesApi.delete(name.value, { quiet: true, params: call.params })
     toast(`${name.value} deleted on ${where.value}`, `The broker answered ${r.status || 200}: the queue, its partitions and its messages are gone.`)
     deleting.value = false
+    forcing.value = null
     qs.invalidate?.()
     router.push('/queues')
   } catch (e) {
+    const refused = force ? null : hasReadersOf(e)
+    if (refused) { deleting.value = false; forcing.value = refused; return }
     toast('Not deleted', describeApiError(e), 'red')
   } finally { busy.value = false }
 }
@@ -100,7 +116,8 @@ const sizeLine = computed(() => {
           <h1 class="qn-mono qp-title">{{ name }}</h1>
           <span v-for="f in q.facts.value" :key="f" class="qn-tag">{{ f }}</span>
           <div style="flex: 1 1 0" />
-          <button v-if="can('produce')" type="button" class="qn-btn2" @click="openPush()">Push a message</button>
+          <!-- a reading queue takes no push: what it holds comes from its sources -->
+          <button v-if="can('produce') && !q.route.value?.reading" type="button" class="qn-btn2" @click="openPush()">Push a message</button>
           <QcPopover v-model:open="moreOpen" side="bottom-end" :width="220" label="More actions">
             <template #trigger="{ toggle }">
               <button type="button" class="qn-btn2" aria-label="More actions" aria-haspopup="dialog" :aria-expanded="moreOpen" style="width: 32px; padding: 0" @click="toggle">
@@ -131,6 +148,11 @@ const sizeLine = computed(() => {
           <span v-if="q.caughtUp.value" class="qn-t2">{{ q.caughtUp.value }}</span>
         </p>
         <p v-else class="qp-verdict qn-t2">Reading {{ name }}…</p>
+
+        <!-- its part in a route: what it reads, and who reads it -->
+        <p v-for="(line, i) in q.routeLines.value" :key="i" class="qp-route qn-t2"><template v-for="(p, j) in line" :key="j"><RouterLink v-if="p.to" :to="p.to" class="qn-mono qp-rname">{{ p.t }}</RouterLink><span v-else :class="{ 'qn-mono': p.mono }">{{ p.t }}</span></template></p>
+        <!-- a holder that holds back its retention needs a look -->
+        <p v-for="(h, i) in q.holds.value" :key="`hold${i}`" class="qp-route qp-hold"><span class="qn-mark amber" aria-hidden="true" /><span><template v-for="(p, j) in h.parts" :key="j"><RouterLink v-if="p.to" :to="p.to" class="qn-mono qp-rname">{{ p.t }}</RouterLink><span v-else :class="{ 'qn-mono': p.mono }">{{ p.t }}</span></template></span></p>
 
         <!-- why it needs you -->
         <section v-if="q.why.value" class="qp-why qn-panel" aria-labelledby="qp-why-title">
@@ -224,8 +246,16 @@ const sizeLine = computed(() => {
     </div>
 
     <QueuePush :open="pushing" :queue="name" :where="where" :prefill="prefill" @close="pushing = false" @pushed="q.refresh()" />
-    <QcDialog :open="deleting" :title="`Delete ${name}?`" :where="where" :call="`DELETE /api/v1/resources/queues/${encodeURIComponent(name)}`" :typed="name" confirm-label="Delete" danger :busy="busy" @confirm="remove" @cancel="deleting = false">
+    <QcDialog :open="deleting" :title="`Delete ${name}?`" :where="where" :call="plainCall.text" :typed="name" confirm-label="Delete" danger :busy="busy" @confirm="remove()" @cancel="deleting = false">
       <p class="qn-t2">This removes the queue with its {{ sizeLine }}. It cannot be undone.</p>
+      <p v-if="goesWith.length" class="qn-t2" style="margin-top: 8px">Its filtered group{{ goesWith.length === 1 ? '' : 's' }} <span class="qn-mono" style="color: var(--text)">{{ goesWith.join(', ') }}</span> {{ goesWith.length === 1 ? 'goes' : 'go' }} with it.</p>
+    </QcDialog>
+    <!-- the broker refused: reading queues read it -->
+    <QcDialog :open="!!forcing" :title="`Delete ${name} anyway?`" :where="where" :call="forceCall.text" :typed="name" confirm-label="Delete anyway" danger :busy="busy" @confirm="remove(true)" @cancel="forcing = null">
+      <p><template v-for="(p, j) in forcingWho" :key="j"><span :class="{ 'qn-mono': p.mono }" :style="p.mono ? 'font-weight: 500' : undefined">{{ p.t }}</span></template> {{ forcingOne ? 'reads' : 'read' }} it, so the broker refused the delete.</p>
+      <p class="qn-t2" style="margin-top: 8px">
+        Deleted anyway, its messages go, and what {{ forcingOne ? 'that queue holds' : 'those queues hold' }} of them reads as gone<template v-if="goesWith.length">; its filtered {{ goesWith.length === 1 ? 'group goes' : 'groups go' }} with it</template>. It cannot be undone.
+      </p>
     </QcDialog>
   </ConsoleShell>
 </template>
@@ -237,6 +267,14 @@ const sizeLine = computed(() => {
 .qp-verdict { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 15px; margin-top: 14px; }
 .qp-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; }
 .qp-badge .qn-mark { align-self: center; }
+/* a reading queue's sources, a source's readers: one quiet line each */
+.qp-route { font-size: 13px; margin-top: 6px; overflow-wrap: anywhere; }
+.qp-route + .qp-route { margin-top: 2px; }
+.qp-rname { color: var(--text); }
+/* the mark sits on the first line, however the sentence wraps */
+.qp-hold { display: flex; align-items: flex-start; gap: 8px; }
+.qp-route + .qp-hold { margin-top: 6px; }
+.qp-hold > .qn-mark { margin-top: 5px; }
 .qp-why { margin-top: 20px; }
 .qp-cause { font-size: 12.5px; margin-top: 6px; padding: 10px 12px; background: var(--bg2); border-radius: var(--r-ctl); overflow-wrap: anywhere; }
 .qp-share { display: flex; flex-wrap: wrap; gap: 14px 40px; align-items: flex-start; }

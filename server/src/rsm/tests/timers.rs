@@ -132,6 +132,8 @@ fn row(deliver_at_us: i64, txn: &str) -> TimerRow {
             producer_sub: None,
             payload: b"{}",
             encrypted: false,
+            headers: None,
+            link: None,
         }]),
         payload_zstd: false,
         encrypted: false,

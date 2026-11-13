@@ -134,6 +134,11 @@ class QueenJob extends Job implements JobContract
                         'transaction_id' => $this->message['transactionId'] ?? $this->message['transaction_id'] ?? null,
                     ],
                 ],
+                // The delivery's headers, which queue:retry sends again as the
+                // message's (QueenQueue::pushRaw() takes them out of the payload).
+                is_array($this->message['headers'] ?? null) && $this->message['headers'] !== []
+                    ? ['headers' => $this->message['headers']]
+                    : [],
             );
         }
 

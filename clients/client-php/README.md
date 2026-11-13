@@ -619,6 +619,94 @@ and returns `false` once the lock is gone.
 `get($name)` and `batch`. `$queen->kv()->check($ns, $key, ['expect' => $version])`
 is the precondition on its own.
 
+## Headers, filtered groups and reading queues
+
+A reader takes only the messages it wants, and nothing is copied: the source queue keeps each
+message, and every reader gets the same message, with the same id. These need a cluster whose
+brokers read catalogue version 8; an older one answers `cluster_version`. A broker that does not
+route at all is caught too: a filtered group's first pop and a reading queue's `create()` throw
+`RoutingUnsupportedException` when the answer does not say it filtered or read.
+
+**Headers** are text beside the payload. A popped message and a fetched record carry them under
+`['headers']` when they have some. Names are `a-z 0-9 . _ -`, and names that start with `queen-`
+are the broker's. Headers are never encrypted and never part of dedup: no secrets or personal
+data in them.
+
+```php
+$queen->queue('order-events')->partition('order-9137')->push([[
+    'transactionId' => 'order-9137-paid',
+    'data' => ['orderId' => 9137, 'total' => 120],
+    'headers' => ['type' => 'order.paid', 'traceparent' => $traceparent],
+]])->execute();
+```
+
+**A filtered group** gets only the messages its `where` takes, and its lag counts only those.
+`where()` calls are ANDed; one string says the same (`"data.kind in ('order.paid',
+'order.refunded') and data.total > 100"`). The group's first pop fixes it, a pop with another
+`where` is refused (`where_mismatch`), and `setConsumerGroupWhere()` changes it on purpose:
+
+```php
+$queen->queue('order-events')->group('billing')->subscriptionMode('all')
+    ->where('data.kind', 'in', ['order.paid', 'order.refunded'])
+    ->where('headers.type', 'prefix', 'order.')
+    ->consume(fn (array $messages) => bill($messages))
+    ->execute();
+
+$queen->admin()->setConsumerGroupWhere('billing', 'order-events', "data.kind = 'order.paid'");
+```
+
+**A reading queue** reads other queues through a `where`, with its own consumer groups, retries,
+DLQ and partitions. It keeps what its sources keep, so with `from` the client sends none of the
+retention, size and encryption defaults (the broker refuses them there). Name the `from` in every
+`config()` of a reading queue:
+
+```php
+$queen->queue('orders-it')->config([
+    'from' => 'orders',              // or ['orders', ['queue' => 'refunds', 'where' => ...]]
+    'where' => "data.country = 'IT'",
+    'partitionBy' => 'same',         // or 'data.customerId', 'headers.customer'
+    'start' => 'all',                // every match the sources still keep; 'now' by default
+    'leaseTime' => 30,
+    'retryLimit' => 5,
+    'priority' => 0,
+    'delayedProcessing' => 0,
+    'windowBuffer' => 0,
+])->create()->execute();
+```
+
+A source that reading queues still read is refused a plain `delete()` (409 `has_readers`);
+`delete(force: true)` deletes it, and the readers' messages from it then read as gone.
+
+**`link`** forwards a message you hold to another queue in a transaction, without sending its
+payload again. The target gets the same id and transactionId, plus the link's own headers:
+
+```php
+$queen->transaction()
+    ->ack($message, 'completed', ['consumerGroup' => 'review'])
+    ->queue('manual-review')->partition($message['partition'])
+    ->link([$message], ['review-reason' => 'amount'])
+    ->commit();
+```
+
+In Laravel, a job gives its message headers with `QueenHeaders`, and its payload does not change:
+
+```php
+use Queen\Laravel\Contracts\QueenHeaders;
+
+final class SendInvoice implements ShouldQueue, QueenHeaders
+{
+    public function __construct(public int $customerId) {}
+
+    public function queenHeaders(): array
+    {
+        return ['job' => self::class, 'customer' => (string) $this->customerId];
+    }
+}
+```
+
+A job keeps its headers through a delay, a release, a hand-back and a `queue:retry`. Timers take
+them too: `$queen->timers()->schedule($queue, $key, $delayMs, $payload, ['headers' => [...]])`.
+
 ## Configuration
 
 Every key is in the published `config/queen.php`, and

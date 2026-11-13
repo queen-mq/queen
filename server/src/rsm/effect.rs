@@ -157,11 +157,20 @@ pub const VERSION_6: u16 = 6;
 /// it a push outcome keeps its version-1 shape.
 pub const VERSION_7: u16 = 7;
 
+/// The eighth catalogue version: routing without copies (PLAN_ROUTING.md).
+/// [`Kind::QueueUpsert`] carrying a queue's [`RouteCfg`] after its fields,
+/// minted ONLY for a queue that takes part in a route, so every other
+/// queue's upsert keeps its version-1 bytes; and two message-frame flags,
+/// headers and links (`crate::frames`), which have no effect kind of their
+/// own. Reading queues, filtered groups, headers and `link` are refused
+/// (`cluster_version`) until every member reads it.
+pub const VERSION_8: u16 = 8;
+
 /// The highest catalogue version this build can decode and apply. The
 /// replicated cluster version (§12.8) may be lower; it never rises above the
 /// minimum of every member's value (D20). A node reports it to the leader on
 /// every append it answers.
-pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_7 as u32;
+pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_8 as u32;
 
 /// The cluster version of a store that holds none, and of a member that
 /// reports none: 3. Every node of a 2.0.0-beta.1 cluster or later reads it
@@ -436,6 +445,140 @@ pub struct QueueConfig {
     pub retention_sink_hold: String,
     pub retention_sink_hold_max_seconds: i32,
     pub created_at_us: i64,
+    /// Routing (catalogue version 8, PLAN_ROUTING.md): what a reading queue
+    /// reads, and who reads this one. `None` on every queue that takes no part
+    /// in a route, whose bytes then stay the version-1 shape.
+    ///
+    /// Never serialized with serde: a forwarded command's config (an implicit
+    /// creation's) never carries a route, and its shape must stay what an
+    /// older node decodes. The route travels in the effect codec only.
+    #[serde(skip)]
+    pub route: Option<Box<RouteCfg>>,
+}
+
+impl QueueConfig {
+    /// The queue's route, when it takes part in one.
+    pub fn route(&self) -> Option<&RouteCfg> {
+        self.route.as_deref().filter(|r| !r.is_empty())
+    }
+
+    /// Whether this queue reads other queues (a reading queue, or a filtered
+    /// group's hidden queue).
+    pub fn is_reader(&self) -> bool {
+        self.route().is_some_and(RouteCfg::is_reader)
+    }
+
+    /// Whether other queues read this one: reading queues and filtered groups,
+    /// which take links of its pushes. A holder (a `link`'s target) takes
+    /// nothing at push time, so it does not count: a push to a queue that only
+    /// holders hold stays in its lane.
+    pub fn has_readers(&self) -> bool {
+        self.route().is_some_and(|r| !r.readers.is_empty())
+    }
+
+    /// The route, created empty if there is none.
+    pub fn route_mut(&mut self) -> &mut RouteCfg {
+        self.route.get_or_insert_with(Default::default)
+    }
+}
+
+/// One source of a reading queue: the queue it reads and the conditions a
+/// message of it must meet (catalogue version 8).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SourceRule {
+    pub queue: String,
+    /// The conditions as the canonical list (`route::cond::to_json`); `[]`
+    /// for every message.
+    pub where_json: String,
+}
+
+/// A queue's part in routing (catalogue version 8, PLAN_ROUTING.md). A
+/// reading queue (or a filtered group's hidden queue) has `sources`; a queue
+/// that others read has `readers`, and `holders` for the queues that took
+/// links into it through a transaction's `link`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RouteCfg {
+    /// A reading queue's sources; empty for any other queue.
+    pub sources: Vec<SourceRule>,
+    /// A reading queue's partitions: `""` the source's own names, else the
+    /// field whose value names them (`data.customerId`, `headers.customer`).
+    pub partition_by: String,
+    /// The group whose hidden queue this is (a filtered group); `""` for a
+    /// visible queue.
+    pub hidden_group: String,
+    /// A reading queue still being filled from history: the planner links no
+    /// live push into it until the catch-up turns this off.
+    pub catching_up: bool,
+    /// The queues that read this one (reading queues, hidden queues).
+    pub readers: Vec<String>,
+    /// The queues that hold links into this one through `link`.
+    pub holders: Vec<String>,
+    /// While `catching_up`: where the catch-up has read each source
+    /// partition to, `(pid, next offset)`. Sent with the flip (`catching_up`
+    /// off), when the planner checks every source partition's head against
+    /// it and refuses a flip that would leave a message behind.
+    pub marks: Vec<(u64, u64)>,
+}
+
+impl RouteCfg {
+    pub fn is_reader(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+            && self.partition_by.is_empty()
+            && self.hidden_group.is_empty()
+            && !self.catching_up
+            && self.readers.is_empty()
+            && self.holders.is_empty()
+            && self.marks.is_empty()
+    }
+
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.u32(self.sources.len() as u32);
+        for s in &self.sources {
+            w.str(&s.queue);
+            w.str(&s.where_json);
+        }
+        w.str(&self.partition_by);
+        w.str(&self.hidden_group);
+        w.bool(self.catching_up);
+        w.vec_str(&self.readers);
+        w.vec_str(&self.holders);
+        w.u32(self.marks.len() as u32);
+        for (pid, next) in &self.marks {
+            w.u64(*pid);
+            w.u64(*next);
+        }
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<RouteCfg, CodecError> {
+        let n = r.u32("route.sources")? as usize;
+        let mut sources = Vec::with_capacity(n.min(64));
+        for _ in 0..n {
+            sources.push(SourceRule {
+                queue: r.str("route.source.queue")?,
+                where_json: r.str("route.source.where")?,
+            });
+        }
+        Ok(RouteCfg {
+            sources,
+            partition_by: r.str("route.partition_by")?,
+            hidden_group: r.str("route.hidden_group")?,
+            catching_up: r.bool("route.catching_up")?,
+            readers: r.vec_str("route.readers")?,
+            holders: r.vec_str("route.holders")?,
+            marks: {
+                let n = r.u32("route.marks")? as usize;
+                let mut m = Vec::with_capacity(n.min(4096));
+                for _ in 0..n {
+                    m.push((r.u64("route.mark.pid")?, r.u64("route.mark.next")?));
+                }
+                m
+            },
+        })
+    }
 }
 
 /// A consumer group's subscription mode. Three values; a fourth would be a
@@ -788,6 +931,9 @@ pub enum Effect {
         error: String,
         retry_count: u32,
         failed_at_us: i64,
+        /// The message's headers block (`crate::frames`), empty for none: an
+        /// effect that holds one is minted at version 8.
+        headers: Vec<u8>,
     },
     /// Remove a dead letter (replay, purge).
     DlqDelete {
@@ -1039,6 +1185,18 @@ impl Effect {
         if let Effect::Watermark { rows: Some(_), .. } = self {
             return VERSION_6;
         }
+        // A queue that takes part in a route is minted at version 8, and so
+        // is a dead letter with headers.
+        if let Effect::QueueUpsert { cfg, .. } = self {
+            if cfg.route().is_some() {
+                return VERSION_8;
+            }
+        }
+        if let Effect::DlqInsert { headers, .. } = self {
+            if !headers.is_empty() {
+                return VERSION_8;
+            }
+        }
         match self.kind() {
             Kind::Noop
             | Kind::QueueUpsert
@@ -1186,6 +1344,9 @@ impl Effect {
                 w.str(&cfg.retention_sink_hold);
                 w.i32(cfg.retention_sink_hold_max_seconds);
                 w.i64(cfg.created_at_us);
+                if let Some(route) = cfg.route() {
+                    route.write(&mut w);
+                }
             }
             Effect::QueueDelete { tenant, queue } => {
                 w.str(tenant);
@@ -1301,6 +1462,7 @@ impl Effect {
                 error,
                 retry_count,
                 failed_at_us,
+                headers,
             } => {
                 w.bytes16(dlq_id);
                 w.str(tenant);
@@ -1314,6 +1476,10 @@ impl Effect {
                 w.str(error);
                 w.u32(*retry_count);
                 w.i64(*failed_at_us);
+                // Version 8 (see `version`).
+                if !headers.is_empty() {
+                    w.blob(headers);
+                }
             }
             Effect::DlqDelete {
                 dlq_id,
@@ -1541,8 +1707,9 @@ impl Effect {
                 payload,
                 txn,
                 error,
+                headers,
                 ..
-            } => 128 + payload.len() + txn.len() + error.len(),
+            } => 128 + payload.len() + txn.len() + error.len() + headers.len(),
             Effect::TimerUpsert { row, .. } => 160 + row.frame.len(),
             Effect::CursorSet { row, .. } => 96 + row.delivered.len() * 16 + row.metadata.len(),
             Effect::KvPut { value, key, .. } => 96 + value.len() + key.len(),
@@ -1562,6 +1729,9 @@ impl Effect {
             Kind::CursorSet => version == VERSION_1 || version == VERSION_2 || version == VERSION_3,
             // Version 6: the watermark with its rows tail ([`RowsMark`]).
             Kind::Watermark => version == VERSION_1 || version == VERSION_6,
+            // Version 8: the queue with its route ([`RouteCfg`]), the dead
+            // letter with its headers.
+            Kind::QueueUpsert | Kind::DlqInsert => version == VERSION_1 || version == VERSION_8,
             _ => version == VERSION_1,
         };
         if !known {
@@ -1601,6 +1771,11 @@ impl Effect {
                     retention_sink_hold: r.str("retention_sink_hold")?,
                     retention_sink_hold_max_seconds: r.i32("retention_sink_hold_max_seconds")?,
                     created_at_us: r.i64("created_at")?,
+                    route: if version >= VERSION_8 {
+                        Some(Box::new(RouteCfg::read(&mut r)?))
+                    } else {
+                        None
+                    },
                 },
             },
             Kind::QueueDelete => Effect::QueueDelete {
@@ -1715,6 +1890,11 @@ impl Effect {
                 error: r.str("error")?,
                 retry_count: r.u32("retry_count")?,
                 failed_at_us: r.i64("failed_at")?,
+                headers: if version >= VERSION_8 {
+                    r.blob("headers")?
+                } else {
+                    Vec::new()
+                },
             },
             Kind::DlqDelete => Effect::DlqDelete {
                 dlq_id: r.bytes16("dlq_id")?,

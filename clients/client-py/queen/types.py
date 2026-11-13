@@ -14,6 +14,10 @@ class Message(TypedDict, total=False):
     authentication is enabled on the server. Clients CANNOT set this field on
     push - the server always derives it from the validated JWT, which is how
     impersonation is prevented.
+
+    ``headers`` is the message's headers, a dict of strings, present only when
+    it has some: ``message.get("headers")`` is None otherwise. They are never
+    encrypted.
     """
 
     transactionId: str
@@ -26,6 +30,7 @@ class Message(TypedDict, total=False):
     errorMessage: Optional[str]
     retryCount: int
     producerSub: Optional[str]
+    headers: Dict[str, str]
 
 
 class AckResponse(TypedDict, total=False):

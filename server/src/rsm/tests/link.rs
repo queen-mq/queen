@@ -504,6 +504,7 @@ fn push(id: u64, queue: &str, partition: &str, txns: &[&str]) -> Command {
         partition: partition.to_string(),
         items: txns.iter().map(|t| item(t)).collect(),
         create_cfg: qcfg(),
+        links: Default::default(),
     })
 }
 

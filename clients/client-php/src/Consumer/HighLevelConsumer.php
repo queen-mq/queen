@@ -4,12 +4,15 @@ namespace Queen\Consumer;
 
 use Queen\Exceptions\ConflationUnsupportedException;
 use Queen\Exceptions\HttpException;
+use Queen\Exceptions\RoutingUnsupportedException;
 use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
 use Queen\Queen;
 use Queen\Support\ConflationGuard;
 use Queen\Support\Defaults;
+use Queen\Support\FilterGuard;
 use Queen\Support\PopAutopilot;
+use Queen\Support\Where;
 
 /**
  * High-level consumer inspired by php-rdkafka's KafkaConsumer.
@@ -48,6 +51,8 @@ class HighLevelConsumer
     private ?string $affinityKey = null;
     /** [requested, queue, group, namespace, task] — see ConflationGuard. */
     private array $conflationScope = [false, null, null, null, null];
+    /** Whether the pops send a `where` and must say they filtered — see FilterGuard. */
+    private bool $filtered = false;
     /** The connection or transient error the pops have swallowed since the last answer; see lastPopError(). */
     private ?string $lastPopError = null;
 
@@ -92,9 +97,12 @@ class HighLevelConsumer
             'conflation' => $conflation,
             'leaseSeconds' => $leaseSeconds,
             'autopilot' => $autopilot,
+            // A filtered group's where (QueueBuilder::where()): the same on every pop.
+            'where' => $this->options['where'] ?? null,
         ];
         $this->affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
         $this->conflationScope = [$conflation, $queue, $group, $namespace, $task];
+        $this->filtered = $this->popArgs['where'] !== null;
         $this->subscribed = true;
 
         // Install signal handlers for graceful shutdown
@@ -148,6 +156,7 @@ class HighLevelConsumer
             // that is the response the degrade-loudly check exists to catch
             // (PLAN_CONFLATION §4).
             ConflationGuard::check($result, ...$this->conflationScope);
+            FilterGuard::check($result, $this->filtered, $this->conflationScope[1], $this->conflationScope[2]);
 
             if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                 return null;
@@ -167,8 +176,9 @@ class HighLevelConsumer
         } catch (\Throwable $error) {
             // Terminal by design (PLAN_CONFLATION §4), and re-thrown by TYPE
             // ahead of the message-matching branches: a consumer that asked for
-            // conflation and is not getting it must stop, not poll on.
-            if ($error instanceof ConflationUnsupportedException) {
+            // conflation, or for a filter, and is not getting it must stop, not
+            // poll on.
+            if ($error instanceof ConflationUnsupportedException || $error instanceof RoutingUnsupportedException) {
                 throw $error;
             }
 
@@ -250,6 +260,7 @@ class HighLevelConsumer
             // See consume(): the check goes ahead of the empty shortcut so an
             // old broker's bodiless 204 cannot pass for a quiet queue.
             ConflationGuard::check($result, ...$this->conflationScope);
+            FilterGuard::check($result, $this->filtered, $this->conflationScope[1], $this->conflationScope[2]);
 
             if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                 return [];
@@ -264,7 +275,7 @@ class HighLevelConsumer
 
             return $messages;
         } catch (\Throwable $error) {
-            if ($error instanceof ConflationUnsupportedException) {
+            if ($error instanceof ConflationUnsupportedException || $error instanceof RoutingUnsupportedException) {
                 throw $error;
             }
             if (str_contains($error->getMessage(), 'timeout') || str_contains($error->getMessage(), 'timed out')) {
@@ -449,6 +460,7 @@ class HighLevelConsumer
             $a['conflation'] ?? false,
             $a['leaseSeconds'] ?? null,
             $a['autopilot'] ?? true,
+            $a['where'] ?? null,
         );
     }
 
@@ -465,6 +477,7 @@ class HighLevelConsumer
         bool $conflation = false,
         ?int $leaseSeconds = null,
         bool $autopilot = true,
+        string|array|null $where = null,
     ): string {
         // Batch, partitions and with them the autopilot flag. null/0 means the
         // user set nothing (QueueBuilder leaves it that way on purpose), which is
@@ -514,6 +527,11 @@ class HighLevelConsumer
         // group whose stored policy is true.
         if ($conflation) {
             $params['conflation'] = 'true';
+        }
+        // A filtered group's where, last and only when set, as in the pop of
+        // QueueBuilder: the same value on every pop of the group.
+        if ($where !== null) {
+            $params['where'] = Where::param($where);
         }
 
         return http_build_query($params);

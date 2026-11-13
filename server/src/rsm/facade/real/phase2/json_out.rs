@@ -250,7 +250,13 @@ pub(super) fn fetch_answer(asks: &[RecordFetch], answers: &[RecordsFetched]) -> 
             if j > 0 {
                 out.push(',');
             }
-            out.push_str("{\"offset\":");
+            out.push('{');
+            if let Some(h) = &rec.headers {
+                out.push_str("\"headers\":");
+                crate::frames::headers_json_into(&mut out, h);
+                out.push(',');
+            }
+            out.push_str("\"offset\":");
             out.push_str(&rec.offset.to_string());
             out.push_str(",\"payload\":");
             push_payload(&mut out, &rec.payload);
@@ -502,6 +508,7 @@ mod tests {
                         created_at_us: 1_761_759_241_000_000 + i as i64,
                         payload: bytes::Bytes::from(d.clone()),
                         txn: (i % 3 != 0).then(|| format!("step:{i}:\u{e9}")),
+                        headers: None,
                     })
                     .collect(),
                 high_watermark: docs.len() as u64,
@@ -541,6 +548,7 @@ mod tests {
                 created_at_us: 1_761_759_241_000_000,
                 payload: bytes::Bytes::from(d.clone()),
                 txn: None,
+                headers: None,
             })
             .collect();
         assert_eq!(deep_answers[0].records.len(), 3);
@@ -645,6 +653,7 @@ mod tests {
                 created_at_us: 1_761_759_241_000_000,
                 payload: bytes::Bytes::from(payload),
                 txn: Some(format!("step:{i}:start")),
+                headers: None,
             });
         }
         let asks = [RecordFetch {

@@ -15,12 +15,16 @@ package queen
 // them, compressed here once:
 //
 //	body:  u32 groups | per group: u16 len, queue | u16 len, partition | u32 n | u32 z_len | z
-//	z:     one zstd frame of n frames: u32 body_len | u8 0 | u8[16] message id
-//	       | u16 len, transactionId | payload
+//	z:     one zstd frame of n frames: u32 body_len | u8 flags | u8[16] message id
+//	       | u16 len, transactionId | [u16 len, headers block, flag 8] | payload
 //
 // The message id is a version-7 UUID minted by the client; a message without
-// its own transaction id uses the id's text. The broker checks every frame and
-// keeps the compressed bytes as they are, so it does not compress them again.
+// its own transaction id uses the id's text. A frame's flags are 0, or 8 when
+// the message carries headers (a cluster at catalogue version 8): the block is
+// `u16 count | (u8 len, name | u16 len, value) x count`, sorted by name. The
+// broker checks every frame and keeps the compressed bytes as they are, so it
+// does not compress them again. The body without flag 8 has no room for
+// headers: a push whose messages carry some goes out framed, or as JSON.
 //
 // A broker that does not know this body answers 400; a client sends it only
 // when ClientConfig.BinaryPush is set, so by default a push is the JSON
@@ -68,6 +72,33 @@ type PushBatch struct {
 	Payloads  [][]byte // each one JSON document
 	// TransactionIDs is nil, or one transaction id per payload ("" = the broker mints it).
 	TransactionIDs []string
+	// Headers is nil, or one map per payload (nil or empty: none). Only the
+	// framed bodies carry headers (EncodePushFrames, EncodeTransactionFrames);
+	// EncodePushBinary refuses a batch that has some.
+	Headers []map[string]string
+}
+
+// hasHeaders reports whether any message of the batch carries headers.
+func (b *PushBatch) hasHeaders() bool {
+	for _, h := range b.Headers {
+		if len(h) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// addHeaders records the headers of the payload just appended. Headers stays
+// nil while no message of the batch has any, so a batch without headers is the
+// one it was before they existed.
+func (b *PushBatch) addHeaders(h map[string]string) {
+	if b.Headers == nil {
+		if len(h) == 0 {
+			return
+		}
+		b.Headers = make([]map[string]string, len(b.Payloads)-1, len(b.Payloads))
+	}
+	b.Headers = append(b.Headers, h)
 }
 
 // PushCounts is the short answer of a binary push.
@@ -95,7 +126,8 @@ func pushZstdEncoder() *zstd.Encoder {
 
 // EncodePushBinary encodes batches as a binary push body. compress: the body is
 // zstd-compressed. short: the broker answers with PushCounts instead of one
-// object per message.
+// object per message. It has no room for headers: a batch with some is refused
+// (EncodePushFrames carries them).
 func EncodePushBinary(batches []PushBatch, compress, short bool) ([]byte, error) {
 	size := 4
 	withTxn := false
@@ -103,6 +135,9 @@ func EncodePushBinary(batches []PushBatch, compress, short bool) ([]byte, error)
 		b := &batches[i]
 		if len(b.Queue) > 0xffff || len(b.Partition) > 0xffff {
 			return nil, fmt.Errorf("queue or partition name longer than 65535 bytes")
+		}
+		if b.hasHeaders() {
+			return nil, fmt.Errorf("the binary push body without frames carries no headers: use EncodePushFrames")
 		}
 		if b.TransactionIDs != nil {
 			if len(b.TransactionIDs) != len(b.Payloads) {
@@ -199,6 +234,7 @@ func EncodeTransactionFrames(head []byte, batches []PushBatch, short bool) ([]by
 // appendFrameGroups appends `u32 groups | per group: u16 len, queue | u16 len,
 // partition | u32 n | u32 z_len | z` to out: each batch's messages framed as
 // the broker stores them, with a version-7 id minted here, as one zstd frame.
+// A message with headers gets flag 8 and its block after the transaction id.
 func appendFrameGroups(out []byte, batches []PushBatch) ([]byte, error) {
 	out = binary.LittleEndian.AppendUint32(out, uint32(len(batches)))
 	var raw []byte
@@ -210,6 +246,9 @@ func appendFrameGroups(out []byte, batches []PushBatch) ([]byte, error) {
 		}
 		if b.TransactionIDs != nil && len(b.TransactionIDs) != len(b.Payloads) {
 			return nil, fmt.Errorf("%d transaction ids for %d payloads", len(b.TransactionIDs), len(b.Payloads))
+		}
+		if b.Headers != nil && len(b.Headers) != len(b.Payloads) {
+			return nil, fmt.Errorf("%d header maps for %d payloads", len(b.Headers), len(b.Payloads))
 		}
 		size := 0
 		for _, p := range b.Payloads {
@@ -234,11 +273,28 @@ func appendFrameGroups(out []byte, batches []PushBatch) ([]byte, error) {
 				encodeUUIDText(text[:], id)
 				txn = text[:]
 			}
-			raw = binary.LittleEndian.AppendUint32(raw, uint32(1+16+2+len(txn)+len(p)))
-			raw = append(raw, 0)
+			var block []byte
+			if b.Headers != nil {
+				var ok bool
+				if block, ok = headerBlock(b.Headers[j]); !ok {
+					return nil, fmt.Errorf("headers that a frame cannot carry (a name over 255 bytes, a value or the block over 65535, or not UTF-8)")
+				}
+			}
+			var flags byte
+			bodyLen := 1 + 16 + 2 + len(txn) + len(p)
+			if block != nil {
+				flags = frameFlagHeaders
+				bodyLen += 2 + len(block)
+			}
+			raw = binary.LittleEndian.AppendUint32(raw, uint32(bodyLen))
+			raw = append(raw, flags)
 			raw = append(raw, id[:]...)
 			raw = binary.LittleEndian.AppendUint16(raw, uint16(len(txn)))
 			raw = append(raw, txn...)
+			if block != nil {
+				raw = binary.LittleEndian.AppendUint16(raw, uint16(len(block)))
+				raw = append(raw, block...)
+			}
 			raw = append(raw, p...)
 		}
 		out = binary.LittleEndian.AppendUint16(out, uint16(len(b.Queue)))
@@ -286,6 +342,11 @@ func binaryPushBody(items []PushItem, compress bool) ([]byte, bool) {
 		if it.TraceID != "" {
 			return nil, false
 		}
+		// Headers travel only in frames: the plain binary body has no room
+		// for them, and the JSON body carries them.
+		if len(it.Headers) > 0 && !compress {
+			return nil, false
+		}
 		payload, err := json.Marshal(it.Payload)
 		if err != nil {
 			return nil, false
@@ -297,6 +358,7 @@ func binaryPushBody(items []PushItem, compress bool) ([]byte, bool) {
 		}
 		batches[n-1].Payloads = append(batches[n-1].Payloads, payload)
 		batches[n-1].TransactionIDs = append(batches[n-1].TransactionIDs, it.TransactionID)
+		batches[n-1].addHeaders(it.Headers)
 	}
 	if compress {
 		// Compressed = the messages framed and compressed here, kept by the broker as they are.
@@ -309,8 +371,12 @@ func binaryPushBody(items []PushItem, compress bool) ([]byte, bool) {
 
 // transactionFrames is a transaction as a binary body, when its pushes can
 // travel in one: there is at least one, and none carries a trace id. The acks
-// stay in the JSON head; consecutive pushed items of one partition share a
-// group, so the pushes keep their order.
+// and the links stay in the JSON head; consecutive pushed items of one
+// partition share a group, so the pushes keep their order.
+//
+// The broker writes the head's operations before the groups' messages, so a
+// link that comes after a push into the same partition would land before it:
+// such a transaction goes as JSON, in the order the caller wrote it.
 //
 // order is nil when the broker's answer lists the operations as the caller
 // added them (every ack before every push). Otherwise order[k] is the place,
@@ -320,10 +386,14 @@ func transactionFrames(ops []Operation, leases []string, kv []KVOp, timers []Tim
 	head := transactionRequest{Operations: []Operation{}, RequiredLeases: leases, KV: kv, Timers: timers}
 	var batches []PushBatch
 	var ackAt, pushAt []int
+	pushed := map[[2]string]bool{}
 	flat := 0
 	for i := range ops {
 		op := &ops[i]
 		if op.Type != "push" {
+			if op.Type == "link" && pushed[[2]string{op.Queue, op.Partition}] {
+				return nil, nil, false
+			}
 			head.Operations = append(head.Operations, *op)
 			ackAt = append(ackAt, flat)
 			flat++
@@ -345,6 +415,8 @@ func transactionFrames(ops []Operation, leases []string, kv []KVOp, timers []Tim
 			}
 			batches[n-1].Payloads = append(batches[n-1].Payloads, payload)
 			batches[n-1].TransactionIDs = append(batches[n-1].TransactionIDs, it.TransactionID)
+			batches[n-1].addHeaders(it.Headers)
+			pushed[[2]string{it.Queue, it.Partition}] = true
 			pushAt = append(pushAt, flat)
 			flat++
 		}

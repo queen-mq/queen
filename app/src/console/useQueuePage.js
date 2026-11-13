@@ -2,10 +2,11 @@
 // (useAttention.queueAttention over the last hour), then the facts behind it.
 //
 // Reads, every 30 s (the app's ticker):
-//   stores: resources/queues, consumer-groups, workload?groupBy=queue, alert lines
+//   stores: resources/queues (with each queue's `route`), consumer-groups, workload?groupBy=queue, alert lines
 //   GET /api/v1/analytics/queue-ops?queue=&from&to    its traffic and waiting, the window
 //   GET /api/v1/resources/partitions?queue=&limit=500 the partitions holding the most
 //   GET /api/v1/analytics/dlq-signatures?queue=       why its dead letters failed (when it has some)
+//   GET /api/v1/resources/queues/:queue               its route's ages and catch-up (when it takes part in one)
 // The tabs read their own lists (messages, dead letters, timers, options).
 import { computed, ref, shallowRef, watch } from 'vue'
 import { queues as queuesApi, system } from '@/api'
@@ -24,6 +25,7 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import { rate, span } from './useOverview'
 import { liveMean, perSecond, windowMean } from './words'
 import { feedQueueState } from './streams/feedStreams'
+import { holdLines, readByLine, readsLine, routeOf } from './queues/routeView'
 
 export const QUEUE_MODE = '__QUEUE_MODE__'
 export const fmt = (n) => (n == null || !Number.isFinite(Number(n)) ? '–' : Math.round(Number(n)).toLocaleString('en-US'))
@@ -43,6 +45,10 @@ export function useQueuePage(name, win) {
   const parts = shallowRef(null)
   const sig = shallowRef(null)
   const sigAt = ref(0)
+  // Its own read, for a queue in a route: the list's `route` without the ages
+  // of its readers and holders and a catch-up's progress, which only one
+  // queue's read pays for.
+  const detail = shallowRef(null)
   const loading = ref(true)
   const failed = ref(null)
   const missing = ref(false)
@@ -83,6 +89,11 @@ export function useQueuePage(name, win) {
     if (epoch !== currentEpoch() || q !== name.value) return
     const bad = done.find((d) => d.status === 'rejected')
     failed.value = bad ? describeApiError(bad.reason) : null
+    if (row.value?.route) {
+      queuesApi.get(q, { quiet: true, probe: true })
+        .then((r) => { if (epoch === currentEpoch() && q === name.value) detail.value = r.data })
+        .catch(() => {})
+    } else detail.value = null
     // Not in the listing: ask for it by name, so a deleted or mistyped queue says so.
     if (!row.value && qs.queues.value?.length) {
       try { await queuesApi.get(q, { quiet: true, probe: true }); missing.value = false } catch (e) { missing.value = e?.status === 404 || e?.response?.status === 404 || /404|not found/i.test(String(e?.message)) }
@@ -96,7 +107,7 @@ export function useQueuePage(name, win) {
   }
   useAutoRefresh(refresh)
   refresh()
-  watch(name, () => { ops.value = null; parts.value = null; sig.value = null; sigAt.value = 0; refresh() })
+  watch(name, () => { ops.value = null; parts.value = null; sig.value = null; sigAt.value = 0; detail.value = null; refresh() })
   watch(() => (win.value.custom ? `${win.value.from}-${win.value.to}` : win.value.id), () => refresh())
 
   // ---- the window: what arrived, what was acked, what waited ----
@@ -241,6 +252,20 @@ export function useQueuePage(name, win) {
     }
   })
 
+  // ---- its part in a route (PLAN_ROUTING.md §10): what it reads, who reads it ----
+  // Its own read when there is one (the ages and the catch-up), else the list's.
+  const route = computed(() => routeOf(detail.value?.route && row.value?.route ? detail.value : row.value))
+  const routeLines = computed(() => {
+    const r = route.value
+    if (!r) return []
+    return [
+      readsLine(r, { options: row.value?.options }),
+      readByLine(r, { queue: name.value, queues: qs.queues.value || [], groups: gs.groups.value || [] }),
+    ].filter(Boolean)
+  })
+  // The holders that hold back its retention: amber, each with its oldest unconsumed message's age.
+  const holds = computed(() => holdLines(route.value, { queue: name.value, options: row.value?.options }))
+
   const facts = computed(() => {
     const r = row.value
     if (!r) return []
@@ -260,6 +285,6 @@ export function useQueuePage(name, win) {
 
   return {
     row, groups, hour, minutes, issue, verdict, caughtUp, why, facts, traffic, parts, sig, feedOnly,
-    loading, failed, missing, refresh, linesFor,
+    route, routeLines, holds, loading, failed, missing, refresh, linesFor,
   }
 }

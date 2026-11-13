@@ -781,6 +781,7 @@ async fn the_durable_buffered_body_is_unchanged() {
             partition: Some("eu".into()),
             payload: serde_json::json!({"total":19.99}),
             transaction_id: Some("11111111-1111-4111-8111-111111111111".into()),
+            headers: None,
         }])
         .await
         .expect("durable buffered push");

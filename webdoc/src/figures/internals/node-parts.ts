@@ -1,9 +1,9 @@
 import { flow } from "@/lib/figure-spec";
 
 export default flow({
-  alt: "A command's path through a node: a client calls the HTTP edge of any node, which hands the command to the leader's intake. Pops, acks and renews go to the consumption engine; pushes, transactions, KV and timers go to the planner and its lanes, which also takes the engine's checkpoints. The planner writes one entry per cycle to the raft log, and apply, on every node, executes committed entries into the store.",
+  alt: "A command's path through a node: a client calls the HTTP edge of any node, which hands the command to the leader's intake. Pops, acks and renews go to the consumption engine; pushes, transactions, KV and timers go to the planner, which plans on eight threads and also takes the engine's checkpoints. The planner writes one entry per cycle to the raft log, and apply, on every node, executes committed entries into the store.",
   caption: "Two ways in on the leader, one way down. The consumption engine answers from memory and reaches the log only through its checkpoints; everything else is planned, and every node applies what the log commits.",
-  source: "server/src/rsm/facade/intake.rs, server/src/rsm/batcher_lanes.rs, server/src/rsm/apply.rs",
+  source: "server/src/rsm/facade/intake.rs, server/src/rsm/batcher_scheduler.rs, server/src/rsm/apply.rs",
   cols: 3,
   rows: 5,
   colWidth: 220,
@@ -14,7 +14,7 @@ export default flow({
     { id: "edge", at: [1, 0], label: "HTTP edge", sub: "any node" },
     { id: "intake", at: [1, 1], label: "Intake", sub: "leader" },
     { id: "engine", at: [2, 1], label: "Consumption engine", sub: "leader, in memory" },
-    { id: "planner", at: [1, 2], label: "Planner + 8 lanes", sub: "leader", tone: "strong" },
+    { id: "planner", at: [1, 2], label: "Planner, 8 threads", sub: "leader", tone: "strong" },
     { id: "log", at: [1, 3], label: "Raft log", sub: "queue log files", shape: "disk" },
     { id: "apply", at: [1, 4], label: "Apply", sub: "every node" },
     { id: "store", at: [2, 4], label: "Store", sub: "RAM + LMDB", shape: "disk" },

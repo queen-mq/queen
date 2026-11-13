@@ -286,7 +286,7 @@ async fn a_superseded_leader_never_acknowledges_its_uncommitted_entries(
         propose_ms: 60_000,
         request_expire_every_ms: 3_600_000,
         kv_sweep_every_ms: 3_600_000,
-        lanes,
+        planner_threads: lanes,
         driver_notify,
         ..BatcherConfig::default()
     };

@@ -16,6 +16,9 @@ type OperationBuilder struct {
 	// options set key by key with Option, overlaid on the QueueConfig bag.
 	// Nil unless Option was called. See Option for why it exists.
 	rawOptions map[string]interface{}
+	// force deletes a queue that reading queues read. See Force; read by
+	// executeDelete only.
+	force bool
 }
 
 // NewOperationBuilder creates a new OperationBuilder.
@@ -48,6 +51,14 @@ func NewOperationBuilder(qb *QueueBuilder, operation string) *OperationBuilder {
 // both cases, which is what it has always done.
 func (ob *OperationBuilder) Replace(enabled bool) *OperationBuilder {
 	ob.replace = enabled
+	return ob
+}
+
+// Force makes a Delete also drop a queue that reading queues read, which the
+// broker otherwise refuses (409 has_readers, naming them): their links then
+// read as gone.
+func (ob *OperationBuilder) Force(enabled bool) *OperationBuilder {
+	ob.force = enabled
 	return ob
 }
 
@@ -120,13 +131,25 @@ func (ob *OperationBuilder) executeCreate(ctx context.Context) (map[string]inter
 	// Add options if provided. Option() keys are overlaid last, so an explicit
 	// false / 0 / null survives buildOptions' omit-the-zero rule.
 	if ob.qb.queueConfig != nil || ob.rawOptions != nil {
-		req.Options = ob.buildOptions()
+		opts, err := ob.buildOptions()
+		if err != nil {
+			return nil, err
+		}
+		req.Options = opts
 	}
 
 	// Make request
 	result, err := ob.qb.queen.httpClient.Post(ctx, "/api/v1/configure", req)
 	if err != nil {
 		return nil, fmt.Errorf("create queue failed: %w", err)
+	}
+	// A reading queue's answer names its route. Without one the broker did not
+	// read `from` (it is older than reading queues) and stored an ordinary
+	// queue: a consumer of it would wait for messages that never come.
+	if from, sent := req.Options["from"]; sent && from != nil {
+		if _, ok := result["route"].(map[string]interface{}); !ok {
+			return result, fmt.Errorf("queue %s: %w", name, ErrReadingQueuesUnsupported)
+		}
 	}
 
 	logInfo("OperationBuilder.executeCreate", map[string]interface{}{
@@ -153,7 +176,13 @@ func (ob *OperationBuilder) executeCreate(ctx context.Context) (map[string]inter
 // config resets the other nineteen. Neither reading is wrong; they are the
 // difference between an edit and a manifest, and Replace is where a caller says
 // which one it is holding.
-func (ob *OperationBuilder) buildOptions() map[string]interface{} {
+//
+// The omit-the-zero rule is also what makes a reading queue (From) sendable:
+// the options it keeps from its sources (retention, dedup, encryption,
+// maxSize) are refused beside `from`, so an SDK that filled every option with
+// its default would never create one. Here they go out only when set, and a
+// caller who set one gets the broker's answer for it (400 reading_queue).
+func (ob *OperationBuilder) buildOptions() (map[string]interface{}, error) {
 	opts := make(map[string]interface{})
 	config := ob.qb.queueConfig
 	if config == nil {
@@ -206,13 +235,37 @@ func (ob *OperationBuilder) buildOptions() map[string]interface{} {
 		opts["encryptionEnabled"] = config.EncryptionEnabled
 	}
 
+	// A reading queue: its sources, their where, its partitions, its start.
+	if len(config.From) > 0 {
+		from, err := config.From.wire()
+		if err != nil {
+			return nil, fmt.Errorf("queue %s: %w", ob.qb.queueName, err)
+		}
+		opts["from"] = from
+	}
+	if config.Where != nil {
+		where, err := whereValue(config.Where)
+		if err != nil {
+			return nil, fmt.Errorf("queue %s: %w", ob.qb.queueName, err)
+		}
+		if where != nil {
+			opts["where"] = where
+		}
+	}
+	if config.PartitionBy != "" {
+		opts["partitionBy"] = config.PartitionBy
+	}
+	if config.Start != "" {
+		opts["start"] = config.Start
+	}
+
 	// Last, and therefore authoritative: a caller who spelled an option out with
 	// Option meant that value, zero and false and null included.
 	for k, v := range ob.rawOptions {
 		opts[k] = v
 	}
 
-	return opts
+	return opts, nil
 }
 
 // executeDelete deletes the queue.
@@ -229,6 +282,9 @@ func (ob *OperationBuilder) executeDelete(ctx context.Context) (map[string]inter
 
 	// Build path
 	path := fmt.Sprintf("/api/v1/resources/queues/%s", url.PathEscape(name))
+	if ob.force {
+		path += "?force=true"
+	}
 
 	// Make request
 	result, err := ob.qb.queen.httpClient.Delete(ctx, path)

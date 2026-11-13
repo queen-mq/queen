@@ -180,6 +180,13 @@ export const consumers = {
   // `options` is `{toEnd:true}` or `{timestamp}`, as for the whole queue.
   seekPartition: (name, queue, partition, options = { toEnd: true }, config) =>
     client.post(`/api/v1/consumer-groups/${encodeURIComponent(name)}/queues/${encodeURIComponent(queue)}/partitions/${encodeURIComponent(partition)}/seek`, options || { toEnd: true }, config),
+  /**
+   * A group's subscription. `{queue, where}` changes a filtered group's where
+   * (PLAN_ROUTING.md §4.1): it applies from the next push; 200
+   * `{success: true}`, 404 when the group does not filter that queue.
+   */
+  subscription: (name, body, config) =>
+    client.post(`/api/v1/consumer-groups/${encodeURIComponent(name)}/subscription`, body, config),
 }
 
 // ============================================

@@ -185,6 +185,38 @@ pub struct QueueOptions {
         skip_serializing_if = "Option::is_none"
     )]
     pub retention_sink_hold_max_seconds: Option<i32>,
+
+    /// Makes this a **reading queue**: it holds links to the messages of the
+    /// queues it reads, never copies. A queue name (`"orders"`), a list of
+    /// names or of `{"queue": ..., "where": ...}` objects, or `null`
+    /// (`Some(Value::Null)`) to stop reading. Catalogue version 8 and later.
+    ///
+    /// A reading queue keeps what its sources keep: the broker refuses
+    /// `retentionEnabled`, `retentionSeconds`, `completedRetentionSeconds`,
+    /// `maxWaitTimeSeconds`, `dedupWindowSeconds`, `encryptionEnabled`,
+    /// `maxSize`, `retentionSinkHold` and `retentionSinkHoldMaxSeconds` on one
+    /// (400 `reading_queue`), so leave them `None` there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<serde_json::Value>,
+
+    /// What a reading queue takes from every source named without its own:
+    /// one string (`"data.country = 'IT'"`) or a list of `{field, op, value}`.
+    #[serde(rename = "where", default, skip_serializing_if = "Option::is_none")]
+    pub where_: Option<serde_json::Value>,
+
+    /// A reading queue's partitions: `"same"` (the broker's default),
+    /// `"data.<path>"` or `"headers.<name>"`.
+    #[serde(
+        rename = "partitionBy",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub partition_by: Option<String>,
+
+    /// Where a new reading queue starts: `"now"` (the broker's default) or
+    /// `"all"`, every match its sources still keep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
 }
 
 /// Body of `POST /api/v1/configure`.
@@ -819,6 +851,50 @@ mod tests {
         .unwrap();
         assert_eq!(back.retention_sink_hold.as_deref(), Some("lake"));
         assert_eq!(back.retention_sink_hold_max_seconds, Some(60));
+    }
+
+    /// A reading queue (PLAN_ROUTING §5): four keys the broker reads beside the
+    /// usual ones, sent only when set, so every request without them is the one
+    /// this type always produced.
+    #[test]
+    fn the_reading_queue_options_are_sent_only_when_set() {
+        let req = ConfigureRequest::new("orders-it").options(QueueOptions {
+            from: Some(serde_json::json!("orders")),
+            where_: Some(serde_json::json!("data.country = 'IT'")),
+            partition_by: Some("same".into()),
+            start: Some("all".into()),
+            lease_time: Some(30),
+            ..Default::default()
+        });
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            concat!(
+                r#"{"queue":"orders-it","options":{"leaseTime":30,"from":"orders","#,
+                r#""where":"data.country = 'IT'","partitionBy":"same","start":"all"}}"#,
+            )
+        );
+        // Several sources, one with its own where.
+        let many = QueueOptions {
+            from: Some(serde_json::json!([
+                {"queue": "orders", "where": [{"field": "data.total", "op": ">", "value": 100}]},
+                "refunds"
+            ])),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&many).unwrap(),
+            r#"{"from":[{"queue":"orders","where":[{"field":"data.total","op":">","value":100}]},"refunds"]}"#
+        );
+        // `null` stops reading, and only `Some(Null)` says it.
+        let stop = QueueOptions {
+            from: Some(serde_json::Value::Null),
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_string(&stop).unwrap(), r#"{"from":null}"#);
+        assert_eq!(
+            serde_json::to_string(&QueueOptions::default()).unwrap(),
+            "{}"
+        );
     }
 
     #[test]

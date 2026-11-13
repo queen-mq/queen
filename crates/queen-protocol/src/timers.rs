@@ -26,6 +26,8 @@
 //! `{"producerSub":"billing-service"}` would get, a second later, a frame whose
 //! provenance is attested by the broker and forged by the caller.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The three operations of the batch route.
@@ -139,6 +141,12 @@ pub struct TimerOperation {
     /// encryption, or a lie to the consumer — are both wrong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted: Option<bool>,
+
+    /// The delivered message's headers (catalogue version 8): the same names
+    /// and limits as on a push, and the fired message keeps them. Schedule
+    /// only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
 }
 
 impl TimerOperation {
@@ -164,6 +172,7 @@ impl TimerOperation {
             payload: Some(base64_encode(payload)),
             payload_zstd: None,
             encrypted: None,
+            headers: None,
         }
     }
 
@@ -183,6 +192,7 @@ impl TimerOperation {
             payload: None,
             payload_zstd: None,
             encrypted: None,
+            headers: None,
         }
     }
 
@@ -212,6 +222,20 @@ impl TimerOperation {
 
     pub fn encrypted(mut self) -> Self {
         self.encrypted = Some(true);
+        self
+    }
+
+    /// Add headers to the delivered message (a name given twice keeps its
+    /// last value).
+    pub fn headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers
+            .get_or_insert_with(BTreeMap::new)
+            .extend(headers.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
 }
@@ -663,6 +687,17 @@ mod tests {
     fn the_payload_travels_as_base64() {
         let op = TimerOperation::schedule("q", "k", 1, "t", b"{\"order\":9137}");
         assert_eq!(op.payload.as_deref(), Some("eyJvcmRlciI6OTEzN30="));
+    }
+
+    #[test]
+    fn a_schedule_carries_headers_only_when_given() {
+        let bare = TimerOperation::schedule("q", "k", 1, "t", b"x");
+        assert!(!serde_json::to_string(&bare).unwrap().contains("headers"));
+        let with = bare.headers([("type", "reminder")]);
+        let v = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["headers"], serde_json::json!({ "type": "reminder" }));
+        let back: TimerOperation = serde_json::from_value(v).unwrap();
+        assert_eq!(back, with);
     }
 
     #[test]

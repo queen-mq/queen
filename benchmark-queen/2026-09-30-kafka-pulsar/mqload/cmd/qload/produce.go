@@ -37,6 +37,17 @@ func newProducers(run *core.Run, cli *qhttp, qf *queenFlags, txn bool) *producer
 
 func (p *producers) send(u *core.Unit) { go p.push(u) }
 
+// partOf is message j's partition: the unit's own, or with -push-spread N one of N consecutive partitions from it,
+// the messages in N contiguous runs.
+func (p *producers) partOf(u *core.Unit, j int) uint64 {
+	n := p.qf.pushSpread
+	if n <= 1 || p.run.Cfg.Partitions <= 1 {
+		return u.Entity
+	}
+	per := (u.N + n - 1) / n
+	return (u.Entity + uint64(j/per)) % uint64(p.run.Cfg.Partitions)
+}
+
 func (p *producers) push(u *core.Unit) {
 	if p.qf.pushWire == "bin" {
 		p.pushBinary(u)
@@ -55,7 +66,7 @@ func (p *producers) push(u *core.Unit) {
 		b = append(b, `{"queue":"`...)
 		b = append(b, p.queue...)
 		b = append(b, `","partition":"p`...)
-		b = strconv.AppendUint(b, u.Entity, 10)
+		b = strconv.AppendUint(b, p.partOf(u, j), 10)
 		b = append(b, `","payload":`...)
 		b = append(b, m...)
 		b = append(b, '}')
@@ -89,11 +100,15 @@ func (p *producers) push(u *core.Unit) {
 // pushBinary is push with the Go client's binary body (plain, or framed and compressed by the client) and its
 // counts-only answer.
 func (p *producers) pushBinary(u *core.Unit) {
-	batch := []queen.PushBatch{{
-		Queue:     p.queue,
-		Partition: "p" + strconv.FormatUint(u.Entity, 10),
-		Payloads:  u.Payloads,
-	}}
+	var batch []queen.PushBatch
+	for j, m := range u.Payloads {
+		part := "p" + strconv.FormatUint(p.partOf(u, j), 10)
+		if k := len(batch) - 1; k >= 0 && batch[k].Partition == part {
+			batch[k].Payloads = append(batch[k].Payloads, m)
+			continue
+		}
+		batch = append(batch, queen.PushBatch{Queue: p.queue, Partition: part, Payloads: [][]byte{m}})
+	}
 	var b []byte
 	var err error
 	if p.qf.pushZstd {

@@ -211,6 +211,7 @@ impl RaftFacade {
                 walk_payloads(
                     &reader,
                     qlog.as_ref(),
+                    None,
                     &tenant,
                     &queue,
                     &part,
@@ -218,7 +219,7 @@ impl RaftFacade {
                     high,
                     usize::MAX,
                     false,
-                    |offset, created_at_us, _, _, _| {
+                    |offset, created_at_us, _, _, _, _| {
                         if created_at_us >= at_us {
                             at = Some((offset, created_at_us));
                             return false;

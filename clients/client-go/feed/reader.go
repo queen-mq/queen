@@ -98,6 +98,10 @@ type Options struct {
 	Partitions []string
 	// Where: conditions sent to the broker.
 	Where []Condition
+	// WhereExpr is Where in its one-string form, ANDed conditions as the broker
+	// reads them ("data.country = 'IT' and headers.type = 'order.paid'"; a
+	// cluster at catalogue version 8). Exclusive with Where.
+	WhereExpr string
 	// Kinds: entry kinds (the broker's; "push").
 	Kinds []string
 	// From: the first position: nil (default "now", or "earliest" with Since),
@@ -136,13 +140,16 @@ type Entry struct {
 	// TS is when the log committed it (ISO, microseconds); CreatedAt is the same.
 	TS        string
 	CreatedAt string
+	// Headers are the message's headers (catalogue version 8), nil when it has none.
+	Headers map[string]string
 }
 
 // Map is the entry as the JS SDK hands it out: position, kind, queue,
 // partition, partitionId, offset, id, transactionId, data, ts, createdAt
-// (numbers as float64). Stream functions get messages in this shape.
+// (numbers as float64), and headers when the message has some. Stream
+// functions get messages in this shape.
 func (e Entry) Map() map[string]interface{} {
-	return map[string]interface{}{
+	m := map[string]interface{}{
 		"position":      float64(e.Position),
 		"kind":          e.Kind,
 		"queue":         e.Queue,
@@ -155,6 +162,14 @@ func (e Entry) Map() map[string]interface{} {
 		"ts":            e.TS,
 		"createdAt":     e.CreatedAt,
 	}
+	if len(e.Headers) > 0 {
+		h := make(map[string]interface{}, len(e.Headers))
+		for k, v := range e.Headers {
+			h[k] = v
+		}
+		m["headers"] = h
+	}
+	return m
 }
 
 // Page is one read: the entries, where the next read starts, the broker's
@@ -183,6 +198,7 @@ type Reader struct {
 	queues     []string
 	partitions []string
 	where      []Condition
+	whereExpr  string
 	kinds      []string
 	since      string
 	hasSince   bool
@@ -277,6 +293,10 @@ func NewReader(http Poster, clientFor ClientFor, scheme string, o Options) (*Rea
 		return nil, err
 	}
 	r.where = append([]Condition(nil), o.Where...)
+	r.whereExpr = strings.TrimSpace(o.WhereExpr)
+	if r.whereExpr != "" && len(r.where) > 0 {
+		return nil, fmt.Errorf("feed: where conditions and a whereExpr string are two wheres for one read: write one")
+	}
 	r.kinds = o.Kinds
 	if o.Since != nil && !jsv.IsUndefined(o.Since) {
 		if r.since, err = SinceToISO(o.Since, time.Now()); err != nil {
@@ -449,6 +469,8 @@ func (r *Reader) fetch(ctx context.Context, from interface{}, wait int) (Page, e
 			list[i] = jsv.RawJSON(mustJSON(c))
 		}
 		body = append(body, jsv.Pair{K: "where", V: list})
+	} else if r.whereExpr != "" {
+		body = append(body, jsv.Pair{K: "where", V: r.whereExpr})
 	}
 	if r.kinds != nil {
 		body = append(body, jsv.Pair{K: "kinds", V: r.kinds})

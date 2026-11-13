@@ -67,7 +67,7 @@ ifeq ($(USE_ZSTD),1)
 endif
 
 # Targets
-.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers locks run-locks conflation run-conflation buffer run-buffer ephemeral run-ephemeral autopilot run-autopilot consumer run-consumer wireforms run-wireforms reads run-reads tokens run-tokens unit run-unit clean help
+.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers locks run-locks conflation run-conflation buffer run-buffer ephemeral run-ephemeral autopilot run-autopilot consumer run-consumer wireforms run-wireforms reads run-reads tokens run-tokens routing run-routing unit run-unit clean help
 
 all: test
 
@@ -257,10 +257,27 @@ bin/test_tokens: test_tokens.cpp queen_client.hpp third_party/nlohmann/json.hpp
 run-tokens: bin/test_tokens
 	./bin/test_tokens
 
-# Every suite that needs no broker, in one command.
-unit: retry429 kvtimers locks conflation buffer ephemeral autopilot consumer wireforms reads tokens
+# Build the routing suite: message headers, filtered groups (where), reading
+# queues (QueueConfig::from) and link in transactions. Broker-free like its
+# siblings: what it pins -- the headers flag and block inside a frame, the
+# same where on every pop of a group, the settings a reading queue's configure
+# leaves out -- is about the bytes on the socket. Built with zstd when the
+# library is there, for its framed cases (see USE_ZSTD above).
+routing: bin/test_routing
+	@echo "Routing wire test suite built successfully!"
+	@echo "Run with: ./bin/test_routing"
 
-run-unit: run-retry429 run-kvtimers run-locks run-conflation run-buffer run-ephemeral run-autopilot run-consumer run-wireforms run-reads run-tokens
+bin/test_routing: test_routing.cpp queen_client.hpp third_party/nlohmann/json.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(ZSTD_FLAGS) $(INCLUDES) test_routing.cpp -o bin/test_routing $(LIBS) $(ZSTD_LIBS)
+
+run-routing: bin/test_routing
+	./bin/test_routing
+
+# Every suite that needs no broker, in one command.
+unit: retry429 kvtimers locks conflation buffer ephemeral autopilot consumer wireforms reads tokens routing
+
+run-unit: run-retry429 run-kvtimers run-locks run-conflation run-buffer run-ephemeral run-autopilot run-consumer run-wireforms run-reads run-tokens run-routing
 
 # Run tests (requires Queen server running)
 run-test: bin/test_client
@@ -327,6 +344,8 @@ help:
 	@echo "  make run-reads    - Build and run fetch / changed_since wire tests (no server needed)"
 	@echo "  make tokens       - Build client token tests (token_source refresh, tokens().mint())"
 	@echo "  make run-tokens   - Build and run client token tests (no server needed)"
+	@echo "  make routing      - Build headers / where / reading queue / link wire tests"
+	@echo "  make run-routing  - Build and run the routing wire tests (no server needed)"
 	@echo "  make unit         - Build every suite that needs no broker"
 	@echo "  make run-unit     - Build and run every suite that needs no broker"
 	@echo "  make clean        - Remove build artifacts"

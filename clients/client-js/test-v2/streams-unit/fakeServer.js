@@ -6,7 +6,12 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 
-export function createFakeStreamsServer({ stateSeeds, claims } = {}) {
+// `refuseLinks`: a cycle with a push item that links answers 400
+// cluster_version, as a cluster not on catalogue version 8 does.
+// `refuseLinksOnce`: a reason (`source_gone`): the FIRST cycle that links is
+// refused with it, 200 `{success:false, reason}`, as the broker fails a cycle.
+export function createFakeStreamsServer({ stateSeeds, claims, refuseLinks = false, refuseLinksOnce = null } = {}) {
+  let linkRefusals = refuseLinksOnce ? 1 : 0
   const recorded = {
     registers: [],
     cycles: [],
@@ -123,6 +128,13 @@ export function createFakeStreamsServer({ stateSeeds, claims } = {}) {
 
       if (req.method === 'POST' && req.url === '/streams/v1/cycle') {
         recorded.cycles.push(parsed)
+        if (refuseLinks && (parsed.push_items || []).some(p => p.link)) {
+          return send(400, { error: 'headers, reading queues, filtered groups and link need every node on a broker that reads catalogue version 8; upgrade the cluster first', code: 'cluster_version' })
+        }
+        if (linkRefusals > 0 && (parsed.push_items || []).some(p => p.link)) {
+          linkRefusals--
+          return send(200, { success: false, reason: refuseLinksOnce, error: `push item at index 0: ${refuseLinksOnce}: offset is not retained` })
+        }
         const queryId = parsed.query_id
         const partitionId = parsed.partition_id
         // Apply state ops
@@ -139,7 +151,9 @@ export function createFakeStreamsServer({ stateSeeds, claims } = {}) {
           push_results: (parsed.push_items || []).map(p => ({
             queueName: p.queue,
             messageId: randomUUID(),
-            transactionId: p.transactionId || randomUUID()
+            // A link writes the message it names, under its transactionId.
+            transactionId: p.link ? p.link.transactionId : (p.transactionId || randomUUID()),
+            status: 'created'
           })),
           ack_result: parsed.ack ? { success: true, lease_released: true, dlq: false } : null
         })

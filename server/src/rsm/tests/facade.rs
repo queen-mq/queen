@@ -2728,6 +2728,8 @@ fn frames_group_raw(
             producer_sub: None,
             payload,
             encrypted: false,
+            headers: None,
+            link: None,
         }]));
     }
     (group_of(queue, partition, msgs.len(), &raw), ids)
@@ -2966,6 +2968,8 @@ async fn a_binary_transaction_that_is_not_well_formed_is_refused_whole() {
         producer_sub: None,
         payload: b"1",
         encrypted: false,
+        headers: None,
+        link: None,
     }]);
     raw[4 + 1 + 6] = 0x40; // the version nibble
     cases.push((
@@ -2980,6 +2984,8 @@ async fn a_binary_transaction_that_is_not_well_formed_is_refused_whole() {
         producer_sub: None,
         payload: b"1",
         encrypted: false,
+        headers: None,
+        link: None,
     }]);
     cases.push((
         "more frames announced than sent",
@@ -3096,6 +3102,8 @@ fn client_group(queue: &str, txns: &[&str]) -> (Vec<u8>, Vec<u8>) {
             producer_sub: None,
             payload: payload.as_bytes(),
             encrypted: false,
+            headers: None,
+            link: None,
         }]));
     }
     let mut c = zstd::bulk::Compressor::new(19).expect("zstd");

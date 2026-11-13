@@ -30,6 +30,9 @@ sourceOfTruth:
 # reformatted, line wrapping only. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-30 (f94c649cf): groups.rs merges two join branches that answered the
 # same member id (clippy); the join behaves as before. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 ---
 
 Kafka producers, consumers and admin tools can use QueenMQ as they are: change `bootstrap.servers`, and nothing else. A topic is a QueenMQ queue and a Kafka consumer group is a QueenMQ consumer group, so Kafka clients and QueenMQ clients read and write the same data.

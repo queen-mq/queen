@@ -59,6 +59,8 @@ func (a *streamSourceAdapter) Pop(ctx context.Context) ([]runtime.Message, error
 			LeaseID:       m.LeaseID,
 			Partition:     m.Partition,
 			PartitionID:   m.PartitionID,
+			Headers:       m.Headers,
+			Offset:        m.Offset,
 		}
 	}
 	return out, nil

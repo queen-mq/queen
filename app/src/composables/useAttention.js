@@ -126,6 +126,11 @@ export function ackAttention(name, linesFor, ops = null) {
 // A feed stream's states in which it reads nothing (console/streams/feedStreams.js shardState).
 const FEED_DOWN = new Set(['gone', 'failed', 'quiet', 'never'])
 
+// A source that reading queues or filtered groups read (`route.readers`,
+// PLAN_ROUTING.md §3.5): they consume what they take, and the source keeps
+// the rest until its retention ends, so nobody popping it is not "no reader".
+const routeRead = (q) => Array.isArray(q?.route?.readers) && q.route.readers.length > 0
+
 export function queueAttention(queues = [], groups = [], linesFor, ops = null) {
   const byQueue = new Map()
   for (const g of groups || []) {
@@ -154,7 +159,7 @@ export function queueAttention(queues = [], groups = [], linesFor, ops = null) {
     if (reason) {
       out.push({ name: q.name, sev, reason, lag, pending, deadOnly: false, ops: hour })
     } else if (pending > 0 && live.length === 0 && !named && q.kafkaTopic !== true
-      && !linesOf(linesFor, q.name)?.noReaderOk) {
+      && !linesOf(linesFor, q.name)?.noReaderOk && !routeRead(q)) {
       // A feed stream reads without a consumer group (queuesStore `feedReaders`):
       // the queue has a reader while one of its streams runs, or was stopped on
       // purpose; when every one is down, nothing reads it.

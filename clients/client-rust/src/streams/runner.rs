@@ -13,7 +13,7 @@ use queen_protocol::{
     StatePartitionsRequest, StatePartitionsResponse, SubscriptionMode,
 };
 
-use super::engine::{self, Emit, Envelope};
+use super::engine::{self, Emit, Envelope, SourceRef};
 use super::ops::{EmitCtx, GateCtx, Op, Record, Sink};
 use super::{Stages, Terminal};
 use crate::consumer::Cancel;
@@ -140,6 +140,10 @@ pub struct RunOptions {
     /// Defaults to `streams.{query_id}`.
     pub consumer_group: Option<String>,
     pub cancel: Option<Cancel>,
+    /// Write a sink output that is its input message unchanged as a link to
+    /// that message, not as a push of its payload. On by default; see
+    /// [`RunOptions::link`].
+    pub link: bool,
 }
 
 impl RunOptions {
@@ -155,6 +159,7 @@ impl RunOptions {
             reset: false,
             consumer_group: None,
             cancel: None,
+            link: true,
         }
     }
 
@@ -204,6 +209,24 @@ impl RunOptions {
         self.conflation = enabled;
         self
     }
+
+    /// Whether the sink links (on by default; broker catalogue version 8):
+    /// when the chain before [`Stream::to`](super::Stream::to) is `filter`s
+    /// only (a `gate` included, no `map`, `flat_map` or window), each output
+    /// is its input message unchanged, and the sink then holds that same
+    /// message, id and transaction id included, rather than a copy of its
+    /// payload.
+    ///
+    /// Only an object payload going to its own partition links: a scalar is
+    /// pushed wrapped (`{ "value": ... }`), and a link keeps the source's
+    /// transaction id, a dedup key per partition, so outputs re-keyed into
+    /// another partition are pushed. The payload still travels in the cycle,
+    /// which is what a broker older than links stores; one that refuses a
+    /// link gets pushes from then on. `false` pushes every output.
+    pub fn link(mut self, enabled: bool) -> Self {
+        self.link = enabled;
+        self
+    }
 }
 
 pub(crate) struct Runner {
@@ -231,6 +254,9 @@ pub(crate) struct Runner {
     claims: AtomicU8,
     /// Wakes the flush task early (on stop).
     wake: tokio::sync::Notify,
+    /// The broker refused a link (catalogue version 8 not reached): the sink
+    /// pushes from then on.
+    links_off: AtomicBool,
 }
 
 /// A running stream.
@@ -351,6 +377,7 @@ pub(crate) async fn start(
         due: Mutex::new(HashMap::new()),
         claims: AtomicU8::new(CLAIMS_UNKNOWN),
         wake: tokio::sync::Notify::new(),
+        links_off: AtomicBool::new(false),
     });
 
     let loop_runner = Arc::clone(&runner);
@@ -551,6 +578,7 @@ impl Runner {
                             window_end: env.window_end,
                             window_key: env.window_key,
                             value: env.record.data,
+                            source: None,
                         });
                     }
                 }
@@ -565,6 +593,7 @@ impl Runner {
                         window_start: 0,
                         window_end: 0,
                         window_key: String::new(),
+                        source: self.source_of(&rec),
                         value: rec.data,
                     })
                     .collect(),
@@ -820,6 +849,7 @@ impl Runner {
                 window_end: 0,
                 window_key: String::new(),
                 value: rec.data.clone(),
+                source: self.source_of(rec),
             })
             .collect();
         let emits = self.apply_post(emits, &group.partition, &group.partition_id)?;
@@ -1269,6 +1299,7 @@ impl Runner {
                 match op {
                     Op::Map(f) => next.push(Emit {
                         value: f(&rec),
+                        source: None,
                         ..e
                     }),
                     Op::Filter(f) => {
@@ -1282,6 +1313,7 @@ impl Runner {
                                 value,
                                 key: e.key.clone(),
                                 window_key: e.window_key.clone(),
+                                source: None,
                                 ..e
                             });
                         }
@@ -1297,6 +1329,29 @@ impl Runner {
             working = next;
         }
         Ok(working)
+    }
+
+    /// The record's source message, when the sink may link to it: links are
+    /// on, and the chain is `filter`s only (a gate included), so every record
+    /// it lets through is its message unchanged.
+    fn source_of(&self, rec: &Record) -> Option<SourceRef> {
+        let s = &self.stages;
+        let filters_only = |ops: &[Op]| ops.iter().all(|o| matches!(o, Op::Filter(_)));
+        let links = self.opts.link
+            && !self.links_off.load(Ordering::Relaxed)
+            && s.window.is_none()
+            && s.reducer.is_none()
+            && filters_only(&s.pre)
+            && filters_only(&s.post)
+            && matches!(s.terminal, Some(Terminal::Sink(_)));
+        if !links {
+            return None;
+        }
+        let m = rec.message.as_ref()?;
+        Some(SourceRef {
+            offset: m.offset?,
+            transaction_id: m.transaction_id.clone(),
+        })
     }
 
     async fn terminal(
@@ -1366,7 +1421,7 @@ impl Runner {
             .push_items
             .fetch_add(push_items.len() as u64, Ordering::Relaxed);
 
-        let req = CycleRequest {
+        let mut req = CycleRequest {
             query_id: self.server_query_id.clone(),
             partition_id: partition_id.to_string(),
             consumer_group: consumer_group.to_string(),
@@ -1375,11 +1430,33 @@ impl Runner {
             ack,
             release_lease,
         };
-        let resp: Option<CycleResponse> = self
-            .inner
-            .http
-            .post_json("/streams/v1/cycle", &req, &Opts::default())
-            .await?;
+        let resp = loop {
+            let answer: Result<Option<CycleResponse>> = self
+                .inner
+                .http
+                .post_json("/streams/v1/cycle", &req, &Opts::default())
+                .await;
+            // A link the broker refused rolled the whole cycle back: the same
+            // cycle again, every output pushed (its payload is in the item). A
+            // broker that takes no link at all is told once, and pushed to
+            // from then on.
+            let linked = req.push_items.iter().any(|i| i.link.is_some());
+            if linked {
+                if let Some(always) = cycle_link_refusal(&answer) {
+                    if always && !self.links_off.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(
+                            query_id = %self.opts.query_id,
+                            "stream sink: the broker takes no link; outputs are pushed from now on"
+                        );
+                    }
+                    for item in &mut req.push_items {
+                        item.link = None;
+                    }
+                    continue;
+                }
+            }
+            break answer?;
+        };
         let resp = resp.ok_or_else(|| Error::Decode("cycle returned an empty body".into()))?;
         if !resp.success {
             // A rolled-back cycle is still HTTP 200; treating it as success
@@ -1408,20 +1485,53 @@ pub(crate) fn build_push_items(
 ) -> Vec<SinkPushItem> {
     emits
         .iter()
-        .map(|e| SinkPushItem {
-            queue: sink.queue.clone(),
-            partition: Some(sink.resolve_partition(&e.value, source_partition)),
-            // A scalar cannot be a message payload on its own, so wrap it the
-            // same way the other SDKs do rather than pushing a bare number.
-            payload: if e.value.is_object() {
-                e.value.clone()
-            } else {
-                serde_json::json!({ "value": e.value })
-            },
-            message_id: None,
-            transaction_id: None,
+        .map(|e| {
+            let partition = sink.resolve_partition(&e.value, source_partition);
+            // The source message itself, an object as it was pushed, into its
+            // own partition: a link to it. Into another partition it is pushed,
+            // since a link keeps the source's transaction id, a dedup key per
+            // partition, and two partitions re-keyed into one could make two
+            // messages one there.
+            let link = e
+                .source
+                .as_ref()
+                .filter(|_| e.value.is_object() && partition == source_partition)
+                .map(|s| serde_json::json!({ "offset": s.offset, "transactionId": s.transaction_id }));
+            SinkPushItem {
+                queue: sink.queue.clone(),
+                partition: Some(partition),
+                // A scalar cannot be a message payload on its own, so wrap it the
+                // same way the other SDKs do rather than pushing a bare number.
+                // Kept beside a link too: a broker older than links ignores the
+                // link and stores this.
+                payload: if e.value.is_object() {
+                    e.value.clone()
+                } else {
+                    serde_json::json!({ "value": e.value })
+                },
+                message_id: None,
+                transaction_id: None,
+                headers: None,
+                link,
+            }
         })
         .collect()
+}
+
+/// Why a cycle that linked was refused, when a link is the reason:
+/// `Some(true)` for a broker that takes none (`cluster_version`, an error
+/// before catalogue version 8), `Some(false)` for this cycle's links only
+/// (`source_gone`, `source_mismatch`).
+fn cycle_link_refusal(answer: &Result<Option<CycleResponse>>) -> Option<bool> {
+    match answer {
+        Err(e) => (e.code().map(|c| c.as_str()) == Some("cluster_version")).then_some(true),
+        Ok(Some(r)) if !r.success => match r.reason.as_deref() {
+            Some("cluster_version") => Some(true),
+            Some("source_gone" | "source_mismatch") => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub(crate) fn emit_ctx(e: &Emit, partition: &str, partition_id: &str) -> EmitCtx {
@@ -1583,6 +1693,8 @@ mod tests {
             partition: partition.into(),
             lease_id: "L1".into(),
             consumer_group: "g".into(),
+            headers: None,
+            offset: None,
         }
     }
 
@@ -1795,6 +1907,7 @@ mod tests {
                 window_end: 10,
                 window_key: "w".into(),
                 value: serde_json::json!(42),
+                source: None,
             },
             Emit {
                 key: "k".into(),
@@ -1802,6 +1915,7 @@ mod tests {
                 window_end: 10,
                 window_key: "w".into(),
                 value: serde_json::json!({ "count": 3 }),
+                source: None,
             },
         ];
         let items = build_push_items(&sink, &emits, "eu");
@@ -1823,6 +1937,7 @@ mod tests {
             window_end: 10,
             window_key: "w".into(),
             value: serde_json::json!({}),
+            source: None,
         }];
         assert_eq!(
             build_push_items(&sink, &emits, "eu")[0]
@@ -1840,6 +1955,7 @@ mod tests {
             window_end: 0,
             window_key: String::new(),
             value: serde_json::json!({}),
+            source: None,
         };
         let ctx = emit_ctx(&e, "eu", "p1");
         assert_eq!(ctx.key, "k");
@@ -1865,5 +1981,157 @@ mod tests {
         assert_eq!(o.max_wait, Duration::from_millis(1000));
         assert!(!o.reset);
         assert!(o.consumer_group.is_none());
+        assert!(o.link, "links are on by default");
+        assert!(!o.link(false).link);
+    }
+
+    fn unchanged(value: serde_json::Value) -> Emit {
+        Emit {
+            key: "p1".into(),
+            window_start: 0,
+            window_end: 0,
+            window_key: String::new(),
+            value,
+            source: Some(SourceRef {
+                offset: 41,
+                transaction_id: "t1".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn an_unchanged_message_into_its_own_partition_is_a_link_with_its_payload_kept() {
+        let sink = Sink {
+            queue: "out".into(),
+            partition: Source,
+        };
+        let item = &build_push_items(&sink, &[unchanged(serde_json::json!({ "n": 1 }))], "eu")[0];
+        assert_eq!(
+            serde_json::to_value(item).unwrap(),
+            serde_json::json!({
+                "queue": "out", "partition": "eu", "payload": { "n": 1 },
+                "link": { "offset": 41, "transactionId": "t1" }
+            })
+        );
+        // A scalar is pushed wrapped, not linked: the link would deliver `7`,
+        // the push `{"value":7}`.
+        let item = &build_push_items(&sink, &[unchanged(serde_json::json!(7))], "eu")[0];
+        assert!(item.link.is_none());
+        // Re-keyed into another partition: pushed.
+        let fixed = Sink {
+            queue: "out".into(),
+            partition: SinkPartition::Fixed("all".into()),
+        };
+        let item = &build_push_items(&fixed, &[unchanged(serde_json::json!({ "n": 1 }))], "eu")[0];
+        assert!(item.link.is_none());
+        assert_eq!(item.partition.as_deref(), Some("all"));
+    }
+
+    fn runner_for(stream: crate::streams::Stream, opts: RunOptions) -> Runner {
+        let source = source_queue();
+        Runner {
+            inner: source.inner.clone(),
+            source,
+            stages: stream.compile().unwrap(),
+            opts,
+            consumer_group: "g".into(),
+            server_query_id: "q".into(),
+            stopped: AtomicBool::new(false),
+            counters: Counters::default(),
+            locks: Mutex::new(HashMap::new()),
+            recent: Mutex::new(HashMap::new()),
+            watermarks: Mutex::new(HashMap::new()),
+            due: Mutex::new(HashMap::new()),
+            claims: AtomicU8::new(CLAIMS_UNKNOWN),
+            wake: tokio::sync::Notify::new(),
+            links_off: AtomicBool::new(false),
+        }
+    }
+
+    #[test]
+    fn only_a_chain_of_filters_links_its_messages() {
+        let sink = || source_queue();
+        let mut popped = message("p1", "eu", "m1", "2026-11-12T10:00:00.000Z");
+        popped.offset = Some(41);
+        let rec = Record::from_message(popped.clone());
+        let want = Some(SourceRef {
+            offset: 41,
+            transaction_id: "txn-m1".into(),
+        });
+
+        let filters = crate::streams::Stream::from(source_queue())
+            .filter(|_| true)
+            .to(sink());
+        let r = runner_for(filters, RunOptions::new("q"));
+        assert_eq!(r.source_of(&rec), want);
+
+        let gated = crate::streams::Stream::from(source_queue())
+            .gate(|_, _| true)
+            .to(sink());
+        assert_eq!(
+            runner_for(gated, RunOptions::new("q")).source_of(&rec),
+            want
+        );
+
+        // Off by option, after a refusal, on a mapped chain, and without an offset.
+        let plain = || crate::streams::Stream::from(source_queue()).to(sink());
+        assert_eq!(
+            runner_for(plain(), RunOptions::new("q").link(false)).source_of(&rec),
+            None
+        );
+        let refused = runner_for(plain(), RunOptions::new("q"));
+        refused.links_off.store(true, Ordering::Relaxed);
+        assert_eq!(refused.source_of(&rec), None);
+        let mapped = crate::streams::Stream::from(source_queue())
+            .map(|r| r.data.clone())
+            .to(sink());
+        assert_eq!(
+            runner_for(mapped, RunOptions::new("q")).source_of(&rec),
+            None
+        );
+        let mut no_offset = popped;
+        no_offset.offset = None;
+        assert_eq!(
+            runner_for(plain(), RunOptions::new("q")).source_of(&Record::from_message(no_offset)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_cycle_link_refusal_is_told_apart_from_the_other_verdicts() {
+        let answered = |reason: &str| -> Result<Option<CycleResponse>> {
+            Ok(Some(
+                serde_json::from_value(serde_json::json!({
+                    "success": false, "error": "no", "reason": reason
+                }))
+                .unwrap(),
+            ))
+        };
+        assert_eq!(cycle_link_refusal(&answered("source_gone")), Some(false));
+        assert_eq!(
+            cycle_link_refusal(&answered("source_mismatch")),
+            Some(false)
+        );
+        assert_eq!(cycle_link_refusal(&answered("reading_queue")), None);
+        let version: Result<Option<CycleResponse>> = Err(Error::Http {
+            status: 400,
+            message: "headers, reading queues, filtered groups and link need ...".into(),
+            code: Some(queen_protocol::ErrorCode::Other("cluster_version".into())),
+            retry_after_seconds: None,
+            body: None,
+        });
+        assert_eq!(cycle_link_refusal(&version), Some(true));
+        let other: Result<Option<CycleResponse>> = Err(Error::Http {
+            status: 400,
+            message: "bad".into(),
+            code: None,
+            retry_after_seconds: None,
+            body: None,
+        });
+        assert_eq!(cycle_link_refusal(&other), None);
+        assert_eq!(
+            cycle_link_refusal(&Ok(Some(CycleResponse::default()))),
+            None
+        );
     }
 }

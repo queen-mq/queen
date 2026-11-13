@@ -5,6 +5,8 @@
 //! * `/api/v1/pop/queue/:queue/partition/:partition` — one named partition
 //! * `/api/v1/pop` — discovery by `namespace`/`task`
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// One delivered message.
@@ -30,6 +32,12 @@ pub struct Message {
     #[serde(rename = "producerSub")]
     pub producer_sub: Option<String>,
 
+    /// The headers the message was pushed (or linked) with: names to string
+    /// values, never encrypted. The broker sends the key only when there are
+    /// some (catalogue version 8 and later), so `None` is "no headers".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
+
     /// ISO-8601 timestamp of the *segment* this message was stored in. Every
     /// message written by one push call shares it.
     #[serde(rename = "createdAt")]
@@ -47,6 +55,12 @@ pub struct Message {
 
     #[serde(rename = "consumerGroup")]
     pub consumer_group: String,
+
+    /// The message's offset in its partition, as the pop answer gives it: with
+    /// `partitionId` and `transactionId` it names the message for a `link`.
+    /// `None` when the answer did not carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
 }
 
 impl Message {
@@ -135,6 +149,14 @@ pub struct PopResponse {
         skip_serializing_if = "Option::is_none"
     )]
     pub conflation_conflict: Option<bool>,
+
+    /// PLAN_ROUTING §4 — present and true on every answer to a pop that sent a
+    /// `where` (empty ones too, which then come as a 200 with a body, never a
+    /// bodiless 204), the degrade-loudly contract conflation has: a broker
+    /// before catalogue version 8 ignores the `where` and would hand the group
+    /// the whole queue. Absent on every other answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered: Option<bool>,
 
     /// POP AUTOPILOT — what the broker chose for this pop, present only when the
     /// request sent `autopilot=true` and the broker resolved at least one knob
@@ -800,5 +822,69 @@ mod tests {
             let partitions = got.autopilot.map(|e| e.partitions).unwrap_or(0);
             assert_eq!(partitions, 0, "{body}");
         }
+    }
+
+    /// One message as the catalogue-8 renderer writes it
+    /// (`server/src/rsm/facade/real.rs`, the pop render): `headers` right
+    /// after `producerSub`, only when the message has some, and the per-message
+    /// `deliveryAttempt` and `offset` at the end.
+    const MESSAGE_WITH_HEADERS: &str = concat!(
+        r#"{"id":"0198f0aa-0000-7000-8000-000000000001","transactionId":"order-1","#,
+        r#""traceId":null,"data":{"total":19.99},"producerSub":null,"#,
+        r#""headers":{"traceparent":"00-4bf9-00f0-01","type":"order.paid"},"#,
+        r#""createdAt":"2026-08-04T09:15:00.123Z","partitionId":"7","partition":"eu","#,
+        r#""leaseId":"L1","consumerGroup":"billing","deliveryAttempt":1,"offset":41}"#,
+    );
+
+    #[test]
+    fn a_message_reads_its_headers_and_its_offset() {
+        let m: Message = serde_json::from_str(MESSAGE_WITH_HEADERS).unwrap();
+        let headers = m.headers.as_ref().expect("the headers key decodes");
+        assert_eq!(headers.get("type").map(String::as_str), Some("order.paid"));
+        assert_eq!(headers.len(), 2);
+        assert_eq!(m.offset, Some(41));
+        // Written back in the renderer's key order; `deliveryAttempt` is not
+        // modelled and is the one key that does not come back.
+        assert_eq!(
+            serde_json::to_string(&m).unwrap(),
+            MESSAGE_WITH_HEADERS.replace(r#""deliveryAttempt":1,"#, "")
+        );
+    }
+
+    #[test]
+    fn a_filtered_pop_says_so_on_an_empty_answer_too() {
+        let empty = concat!(
+            r#"{"success":true,"queue":"orders","partition":"","partitionId":"","#,
+            r#""leaseId":"","consumerGroup":"billing","messages":[],"partitionsClaimed":0,"filtered":true}"#,
+        );
+        let got: PopResponse = serde_json::from_str(empty).unwrap();
+        assert_eq!(got.filtered, Some(true));
+        assert!(got.is_empty());
+        let plain: PopResponse = serde_json::from_str(POP_BODY_FROM_THE_RENDERER).unwrap();
+        assert_eq!(
+            plain.filtered, None,
+            "absent, not false, on every other answer"
+        );
+    }
+
+    #[test]
+    fn a_message_without_headers_or_offset_writes_what_it_always_wrote() {
+        // Both keys are absent on a message from an older broker, and a message
+        // that has neither serializes byte for byte as before they existed.
+        let got: PopResponse = serde_json::from_str(POP_BODY_FROM_THE_RENDERER).unwrap();
+        assert!(got
+            .messages
+            .iter()
+            .all(|m| m.headers.is_none() && m.offset.is_none()));
+        assert_eq!(
+            serde_json::to_string(&got.messages[0]).unwrap(),
+            concat!(
+                r#"{"id":"0198f0aa-0000-7000-8000-000000000001","#,
+                r#""transactionId":"order-1","traceId":null,"data":{"total":19.99},"#,
+                r#""producerSub":null,"createdAt":"2026-08-04T09:15:00.123Z","#,
+                r#""partitionId":"0198f0aa-0000-7000-8000-0000000000e1","partition":"eu","#,
+                r#""leaseId":"0198f0aa-0000-7000-8000-00000000a001","consumerGroup":"fulfilment"}"#,
+            )
+        );
     }
 }

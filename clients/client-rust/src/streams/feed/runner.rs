@@ -33,13 +33,14 @@ use crate::feed::{
 };
 use crate::js;
 use crate::locks::{Lock, LockOptions};
+use crate::routing::{LinkFrom, LinkSource};
 use crate::streams::hash::sha256_hex;
-use crate::transaction::TxOutcome;
+use crate::transaction::{TransactionBuilder, TxOutcome};
 use crate::Queen;
 use queen_protocol::kv::{Expiry, KvOperation};
 
 use super::batch::BatchItem;
-use super::env::{snapshot_of, Env};
+use super::env::{snapshot_of, Env, EnvValue};
 use super::ops::{Fn1, FnResult};
 use super::pipeline::{Emit, Pipeline, PipelineCp, Release};
 use super::query::{query_queue_name, StateServer};
@@ -548,6 +549,9 @@ struct Output {
     partition: String,
     data: Value,
     transaction_id: String,
+    /// The input message, when this output is that message unchanged: it is
+    /// committed as a link to it (`data` is kept for a broker that takes none).
+    link: Option<LinkFrom>,
 }
 
 /// The counters of `metrics()`, by their JS names.
@@ -1118,6 +1122,8 @@ struct Core {
     steps: Vec<super::pipeline::PlanStep>,
     // The unit running now (with a .foreach_batch()): what a batch item came from.
     subject: Option<Arc<ItemSubject>>,
+    // The broker took no link (older than catalogue version 8): outputs are pushed.
+    links_off: bool,
 }
 
 type LoadFuture<'a> = std::pin::Pin<
@@ -1269,6 +1275,7 @@ impl Core {
             about_owed: false,
             steps: steps_plan,
             subject: None,
+            links_off: false,
         })
     }
 
@@ -2486,6 +2493,7 @@ impl Core {
                     partition,
                     data: Value::Object(record),
                     transaction_id: id,
+                    link: None,
                 });
                 self.count("deadLettered", 1);
                 ctx.insert("action".into(), json!("deadLettered"));
@@ -2743,6 +2751,7 @@ impl Core {
                     )
                 };
                 let targets = targets_for(&sink, value.as_ref(), ctx, fallback).await?;
+                let unchanged = unchanged_message(&sink, &env, entry, value.as_ref());
                 for (queue, partition) in targets {
                     let transaction_id = match entry {
                         Some(e) => {
@@ -2758,17 +2767,38 @@ impl Core {
                         }
                         None => self.emit_id(),
                     };
+                    // Into the message's own partition only: a link keeps the
+                    // source's transaction id, a dedup key per partition, so two
+                    // partitions re-keyed into one could make two messages one.
+                    // And never into a queue this stream reads.
+                    let link = unchanged
+                        .as_ref()
+                        .filter(|_| {
+                            entry.is_some_and(|e| e.partition == partition)
+                                && !self.reads_queue(&queue)
+                        })
+                        .cloned();
                     self.pending.outputs.push(Output {
                         queue,
                         partition,
                         data: payload_of(value.as_ref()),
                         transaction_id,
+                        link,
                     });
                 }
                 Ok(())
             }
             None => Ok(()),
         }
+    }
+
+    /// Whether this stream reads `queue` (every queue, when its source names
+    /// none). A link there would come back to it as an entry, since the feed
+    /// shows a linked message in its target like any other and a link keeps
+    /// the source's transaction id, which the guard against reading this
+    /// query's own pushes back does not cover: outputs there are pushed.
+    fn reads_queue(&self, queue: &str) -> bool {
+        reads_queue(self.source.queues.as_deref(), &self.table_queues, queue)
     }
 
     fn emit_id(&mut self) -> String {
@@ -3043,6 +3073,7 @@ impl Core {
                     partition: item.partition.clone(),
                     data: Value::Object(record),
                     transaction_id: format!("{}{}", output_prefix(&self.sh.query_id), &h[..40]),
+                    link: None,
                 });
                 self.count("deadLettered", 1);
                 ctx.insert("action".into(), json!("deadLettered"));
@@ -3317,17 +3348,19 @@ impl Core {
         r
     }
 
-    async fn commit_with(
-        &mut self,
-        next: FeedFrom,
-        stateful: bool,
-        snap: Option<&SnapFor>,
-    ) -> std::result::Result<Flow, FeedErr> {
+    /// The commit's transaction: the guard, the outputs grouped by (queue,
+    /// partition) in the order each group first appears, and `kv`. With
+    /// `links`, an output that is its input message unchanged goes as a link
+    /// to it; the second says whether one did.
+    fn outputs_tx(
+        &self,
+        kv: &[KvOperation],
+        links: bool,
+    ) -> std::result::Result<(TransactionBuilder, bool), FeedErr> {
         let mut tx = self.queen.transaction();
         if let Some(l) = &self.lock {
             tx = tx.guard(l);
         }
-        // Grouped by (queue, partition), in the order each group first appears.
         let mut order: Vec<(String, String)> = Vec::new();
         let mut groups: HashMap<(String, String), Vec<&Output>> = HashMap::new();
         for it in &self.pending.outputs {
@@ -3337,17 +3370,45 @@ impl Core {
             }
             groups.entry(k).or_default().push(it);
         }
+        // Two messages with one transaction id linked into one partition would
+        // be one message there (the second a duplicate): only the first links.
+        let mut linked: HashSet<(&str, &str, &str)> = HashSet::new();
         for k in &order {
             for it in &groups[k] {
-                tx = tx
-                    .push_item(
-                        queen_protocol::TxnPushItem::new(it.queue.clone(), it.data.clone())
-                            .partition(it.partition.clone())
-                            .transaction_id(it.transaction_id.clone()),
-                    )
-                    .map_err(FeedErr::from)?;
+                match &it.link {
+                    Some(from)
+                        if links
+                            && linked.insert((&it.queue, &it.partition, from.transaction_id())) =>
+                    {
+                        tx = tx
+                            .link(it.queue.clone(), it.partition.clone(), [from])
+                            .map_err(FeedErr::from)?;
+                    }
+                    _ => {
+                        tx = tx
+                            .push_item(
+                                queen_protocol::TxnPushItem::new(it.queue.clone(), it.data.clone())
+                                    .partition(it.partition.clone())
+                                    .transaction_id(it.transaction_id.clone()),
+                            )
+                            .map_err(FeedErr::from)?;
+                    }
+                }
             }
         }
+        for op in kv {
+            tx = tx.kv(op.clone());
+        }
+        Ok((tx, !linked.is_empty()))
+    }
+
+    async fn commit_with(
+        &mut self,
+        next: FeedFrom,
+        stateful: bool,
+        snap: Option<&SnapFor>,
+    ) -> std::result::Result<Flow, FeedErr> {
+        let mut kv: Vec<KvOperation> = Vec::new();
         let mut value = Map::new();
         value.insert("position".into(), next.to_value());
         value.insert("queryId".into(), json!(self.sh.query_id));
@@ -3403,22 +3464,26 @@ impl Core {
         // Every shard writes the same description, under the lock like the rest of the commit.
         if self.about_owed {
             if let Some(about) = self.about_value() {
-                tx = tx.kv(KvOperation::put(
-                    POSITION_NAMESPACE,
-                    super::about::about_key(&self.sh.query_id),
-                    about,
-                    Expiry::Forever,
-                )
-                .map_err(FeedErr::msg)?);
+                kv.push(
+                    KvOperation::put(
+                        POSITION_NAMESPACE,
+                        super::about::about_key(&self.sh.query_id),
+                        about,
+                        Expiry::Forever,
+                    )
+                    .map_err(FeedErr::msg)?,
+                );
             }
         }
         // A layout another deploy wrote since this process started stops it here.
-        tx = tx.kv(KvOperation::check(
-            POSITION_NAMESPACE,
-            format!("{}#layout", self.sh.query_id),
-            self.layout_version,
-        )
-        .required());
+        kv.push(
+            KvOperation::check(
+                POSITION_NAMESPACE,
+                format!("{}#layout", self.sh.query_id),
+                self.layout_version,
+            )
+            .required(),
+        );
         let value = Value::Object(value);
         let put = if self.version > 0 {
             KvOperation::put(
@@ -3440,10 +3505,31 @@ impl Core {
             .map_err(FeedErr::msg)?
             .required()
         };
-        tx = tx.kv(put);
-        let res = match tx.commit_outcome().await.map_err(FeedErr::from)? {
-            TxOutcome::LockNotHeld(n) => return Err(FeedErr::lock_not_held(&n)),
-            TxOutcome::Answered(r) => r,
+        kv.push(put);
+        let mut links = !self.links_off;
+        let res = loop {
+            let (tx, linked) = self.outputs_tx(&kv, links)?;
+            let answer = tx.commit_outcome().await;
+            // A link the broker refused rolled the whole commit back: the same
+            // commit again, every output pushed. An older broker refuses every
+            // link, so from then on this runner pushes.
+            if linked {
+                if let Some(always) = link_refusal(&answer) {
+                    if always && !self.links_off {
+                        self.links_off = true;
+                        tracing::warn!(
+                            query_id = %self.sh.id,
+                            "feed stream: the broker takes no link; outputs are pushed from now on"
+                        );
+                    }
+                    links = false;
+                    continue;
+                }
+            }
+            break match answer.map_err(FeedErr::from)? {
+                TxOutcome::LockNotHeld(n) => return Err(FeedErr::lock_not_held(&n)),
+                TxOutcome::Answered(r) => r,
+            };
         };
         if !res.success {
             match res.reason.as_deref() {
@@ -4060,6 +4146,52 @@ fn version_of(res: &queen_protocol::TransactionResponse, key: &str) -> Option<i6
 }
 
 /// A pushed payload is an object: anything else travels as `{ value }`.
+/// Where the input message is, when the result about to be written is that
+/// message unchanged and the sink links: no step but `where` and `filter`
+/// made it (`EnvValue::Data`, not derived), and its data is what
+/// [`payload_of`] writes as it is, an object or an array.
+fn unchanged_message(
+    sink: &FeedSink,
+    env: &Env,
+    entry: Option<&FeedEntry>,
+    value: Option<&Value>,
+) -> Option<LinkFrom> {
+    let e = entry?;
+    let as_is = matches!(value, Some(Value::Object(_) | Value::Array(_)));
+    let pushed = e.kind.is_empty() || e.kind == "push";
+    if !sink.link || env.derived || !matches!(env.value, EnvValue::Data) || !as_is || !pushed {
+        return None;
+    }
+    e.link_from().ok()
+}
+
+/// Whether a feed stream whose source names `queues` (every queue when it
+/// names none) and joins `tables` reads `queue`.
+fn reads_queue(queues: Option<&[String]>, tables: &[String], queue: &str) -> bool {
+    match queues.filter(|q| !q.is_empty()) {
+        None => true,
+        Some(named) => {
+            named.iter().any(|p| glob_match(p, queue)) || tables.iter().any(|t| t == queue)
+        }
+    }
+}
+
+/// Why a commit that linked was refused, when a link is the reason: `Some(true)`
+/// for a broker that takes none (a 400 from a broker that does not know the
+/// operation, or `cluster_version`), `Some(false)` for this commit's links only
+/// (`source_gone`, `source_mismatch`).
+fn link_refusal(answer: &Result<TxOutcome>) -> Option<bool> {
+    match answer {
+        Err(e) if e.status() == Some(400) => Some(true),
+        Ok(TxOutcome::Answered(r)) if !r.success => match r.reason.as_deref() {
+            Some("cluster_version") => Some(true),
+            Some("source_gone" | "source_mismatch") => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn payload_of(value: Option<&Value>) -> Value {
     match value {
         Some(v @ Value::Object(_)) | Some(v @ Value::Array(_)) => v.clone(),
@@ -4189,6 +4321,99 @@ mod tests {
         assert!(glob_match("a?c", "abc"));
         assert!(!glob_match("a?c", "ac"));
         assert!(glob_match("*", ""));
+    }
+
+    fn entry(kind: &str, offset: Value) -> FeedEntry {
+        let page = crate::feed::parse_page(
+            json!({ "entries": [{
+                "id": "m1", "kind": kind, "offset": offset, "partition": "c1", "partitionId": "pid-1",
+                "payload": { "n": 1 }, "position": 5, "queue": "orders", "transactionId": "t1",
+                "ts": "2026-11-12T09:00:00.000000Z"
+            }], "next": 6, "caughtUp": true })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        page.entries.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn only_the_input_message_unchanged_is_linked() {
+        let e = entry("push", json!(3));
+        let env = Env::of_entry(Arc::clone(e.shape()));
+        let sink = FeedSink::queue("out");
+        let data = json!({ "n": 1 });
+        assert_eq!(
+            unchanged_message(&sink, &env, Some(&e), Some(&data)),
+            Some(LinkFrom::by_name("orders", "c1", 3, "t1"))
+        );
+        // Turned off on the sink.
+        assert!(
+            unchanged_message(&sink.clone().link(false), &env, Some(&e), Some(&data)).is_none()
+        );
+        // A mapped value, a derived result, a scalar (pushed wrapped), no entry.
+        let mapped = env.with_value(Some(json!({ "n": 2 })));
+        assert!(unchanged_message(&sink, &mapped, Some(&e), mapped.value()).is_none());
+        let mut derived = env.clone();
+        derived.derived = true;
+        assert!(unchanged_message(&sink, &derived, Some(&e), Some(&data)).is_none());
+        assert!(unchanged_message(&sink, &env, Some(&e), Some(&json!(7))).is_none());
+        assert!(unchanged_message(&sink, &env, None, Some(&data)).is_none());
+        // An entry without an offset cannot be named.
+        let no_offset = entry("push", Value::Null);
+        assert!(unchanged_message(&sink, &env, Some(&no_offset), Some(&data)).is_none());
+    }
+
+    #[test]
+    fn a_stream_never_links_into_a_queue_it_reads() {
+        let named = vec!["orders".to_string()];
+        assert!(reads_queue(Some(&named), &[], "orders"));
+        assert!(
+            !reads_queue(Some(&named), &[], "orders-it"),
+            "another stream's target"
+        );
+        let pattern = vec!["orders*".to_string()];
+        assert!(
+            reads_queue(Some(&pattern), &[], "orders-it"),
+            "its glob takes the target"
+        );
+        assert!(!reads_queue(Some(&pattern), &[], "audit"));
+        assert!(
+            reads_queue(None, &[], "anything"),
+            "no queue filter: every queue"
+        );
+        assert!(reads_queue(Some(&[]), &[], "anything"));
+        let tables = vec!["prices".to_string()];
+        assert!(
+            reads_queue(Some(&named), &tables, "prices"),
+            "a table it joins"
+        );
+    }
+
+    #[test]
+    fn a_link_refusal_is_told_apart_from_the_other_verdicts() {
+        let answered = |reason: &str| {
+            Ok(TxOutcome::Answered(
+                serde_json::from_value(json!({
+                    "transactionId": "tx", "success": false, "reason": reason, "results": []
+                }))
+                .unwrap(),
+            ))
+        };
+        assert_eq!(link_refusal(&answered("cluster_version")), Some(true));
+        assert_eq!(link_refusal(&answered("source_gone")), Some(false));
+        assert_eq!(link_refusal(&answered("source_mismatch")), Some(false));
+        assert_eq!(link_refusal(&answered("duplicate")), None);
+        assert_eq!(link_refusal(&answered("kv_precondition")), None);
+        let old_broker: Result<TxOutcome> = Err(Error::Http {
+            status: 400,
+            message: "transaction supports only push and ack operations, got `link`".into(),
+            code: None,
+            retry_after_seconds: None,
+            body: None,
+        });
+        assert_eq!(link_refusal(&old_broker), Some(true));
+        assert_eq!(link_refusal(&Err(Error::Network("down".into()))), None);
     }
 
     #[test]

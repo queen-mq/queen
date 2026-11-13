@@ -189,12 +189,16 @@ impl FeedSource {
 /// `{ "queue", "partition" }` object, a list of those, or `null` for
 /// nowhere). A partition: the target's own, else the sink's, else the
 /// source partition (or the key of a window or a pattern).
+///
+/// A result that is the input message unchanged goes as a `link` to it, not
+/// as a push of its payload: see [`FeedSink::link`].
 #[derive(Clone)]
 pub struct FeedSink {
     pub(crate) queues: Vec<String>,
     pub(crate) route: Option<RouteFn>,
     pub(crate) partition: SinkPartition,
     pub(crate) error: Option<String>,
+    pub(crate) link: bool,
 }
 
 #[derive(Clone)]
@@ -237,6 +241,7 @@ impl FeedSink {
             route: None,
             partition: SinkPartition::Default,
             error,
+            link: true,
         }
     }
 
@@ -262,6 +267,7 @@ impl FeedSink {
             route: Some(route),
             partition: SinkPartition::Default,
             error: None,
+            link: true,
         }
     }
 
@@ -278,6 +284,27 @@ impl FeedSink {
         R: IntoFeedValue,
     {
         self.partition = SinkPartition::By(Arc::new(move |v| ops::call(|| f(v).into_feed_value())));
+        self
+    }
+
+    /// Whether a result that is the input message unchanged goes as a `link`
+    /// to that message (on by default; broker catalogue version 8): the target
+    /// holds the same message, with its id and transaction id, and the payload
+    /// is not sent or stored again.
+    ///
+    /// Unchanged is a message only `where` and `filter` steps let through,
+    /// whose data is an object or an array (anything else is pushed wrapped,
+    /// as `{ "value": ... }`), going to its own partition of a queue the
+    /// stream does not read. A link keeps the source's transaction id, a dedup
+    /// key per partition, so results re-keyed into another partition are
+    /// pushed; and the feed shows a linked message in its target like any
+    /// other, so a link into a queue the stream reads (every queue, when the
+    /// source names none) would come back to it: those are pushed too. A
+    /// broker that takes no link (older than catalogue version 8) gets pushes,
+    /// from that commit on. `false` pushes every result, as before links
+    /// existed.
+    pub fn link(mut self, enabled: bool) -> Self {
+        self.link = enabled;
         self
     }
 }

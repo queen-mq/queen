@@ -636,6 +636,7 @@ impl Shard {
                 error,
                 retry_count,
                 failed_at_us,
+                headers,
             } => {
                 let row = DlqRow {
                     pid: *pid,
@@ -647,6 +648,7 @@ impl Shard {
                     error: error.clone(),
                     retry_count: *retry_count,
                     failed_at_us: *failed_at_us,
+                    headers: headers.clone(),
                 };
                 // The row is keyed by id and the second index by position, so
                 // an id written twice would leave the FIRST position pointing

@@ -17,6 +17,7 @@ import { span } from '../useOverview'
 import { fmt, groupLabel, QUEUE_MODE } from '../useQueuePage'
 import { asJson, breakable, countedLine, countText, fileName, isLive, markdownHead, retriesWords, SAMPLE } from './dlCauses'
 import { deleteRows, markdownOf, purgeQueue, replayRows, saveFile } from './dlActions'
+import { headerRows } from '../queues/messagesView'
 
 const props = defineProps({
   cause: { type: Object, required: true },
@@ -111,6 +112,8 @@ const rows = computed(() => props.samples.map((m) => {
     group: m.consumerGroup ? groupLabel(m.consumerGroup) : '–',
     error: String(m.errorMessage ?? '').trim() || '(no message)',
     tries: m.retryCount ?? '–',
+    // its message's headers, as the message view shows them
+    headers: headerRows(m),
     raw: m,
   }
 }))
@@ -294,6 +297,10 @@ async function download(kind) {
               <template v-if="triesDiffer"><dt>Retries</dt><dd class="qn-num">{{ r.tries }}</dd></template>
               <template v-if="errorsDiffer || r.error !== words"><dt>Error</dt><dd class="qn-mono">{{ r.error }}</dd></template>
             </dl>
+            <template v-if="r.headers.length">
+              <h4 class="qn-h2 dl-hhead">Headers</h4>
+              <dl class="qn-dl dl-headers" aria-label="Headers"><template v-for="h in r.headers" :key="h.name"><dt class="qn-mono">{{ h.name }}</dt><dd class="qn-mono">{{ h.value }}</dd></template></dl>
+            </template>
             <p v-if="envelope(r.raw.payload ?? r.raw.data)" class="qn-t3 dl-envelope">Encrypted: this is the stored envelope, not the message.</p>
             <QcJson class="dl-pre" :value="r.raw.payload ?? r.raw.data" />
             <div class="dl-open-acts">
@@ -381,6 +388,9 @@ async function download(kind) {
 .dl-onepart { overflow-wrap: anywhere; }
 .dl-open { padding: 12px 0 16px; border-bottom: 1px solid var(--line2); min-width: var(--minw, 0px); }
 .dl-envelope { font-size: 12px; margin-top: 10px; }
+.dl-hhead { margin-top: 14px; }
+.dl-headers { margin-top: 6px; }
+.dl-headers dt { overflow-wrap: anywhere; }
 .dl-pre { margin-top: 12px; }
 .dl-open-acts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; margin-left: -8px; }
 .dl-read { margin-top: 10px; overflow-wrap: anywhere; }

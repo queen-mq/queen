@@ -166,18 +166,43 @@ class WireFormsTest extends TestCase
             $raw = Zstd::uncompress(self::take($bytes, $at, self::u32($bytes, $at)));
             $in = 0;
             while ($in < strlen($raw)) {
-                $frame = self::take($raw, $in, self::u32($raw, $in));
-                $p = 0;
-                $flags = ord(self::take($frame, $p, 1));
-                $id = self::take($frame, $p, 16);
-                $txn = self::take($frame, $p, self::u16($frame, $p));
-                $group['frames'][] = ['flags' => $flags, 'id' => $id, 'txn' => $txn, 'payload' => substr($frame, $p)];
+                $group['frames'][] = self::unframe($raw, $in);
             }
             $groups[] = $group;
         }
         self::assertSame(strlen($bytes), $at, 'bytes left after the last group');
 
         return $groups;
+    }
+
+    /**
+     * One client-built frame at $at: u32 body_len | flags | id | txn
+     * | [headers, flag 8] | payload.
+     */
+    private static function unframe(string $raw, int &$at): array
+    {
+        $frame = self::take($raw, $at, self::u32($raw, $at));
+        $p = 0;
+        $flags = ord(self::take($frame, $p, 1));
+        $id = self::take($frame, $p, 16);
+        $txn = self::take($frame, $p, self::u16($frame, $p));
+        $headers = $flags & 8 ? self::take($frame, $p, self::u16($frame, $p)) : null;
+
+        return ['flags' => $flags, 'id' => $id, 'txn' => $txn, 'headers' => $headers, 'payload' => substr($frame, $p)];
+    }
+
+    /** A headers block read back: u16 count | (u8 len, name | u16 len, value) x count. */
+    private static function headersOf(string $block): array
+    {
+        $at = 0;
+        $headers = [];
+        for ($n = self::u16($block, $at); $n > 0; $n--) {
+            $name = self::take($block, $at, ord(self::take($block, $at, 1)));
+            $headers[$name] = self::take($block, $at, self::u16($block, $at));
+        }
+        self::assertSame(strlen($block), $at, 'bytes left after the last header');
+
+        return $headers;
     }
 
     // ===========================
@@ -386,14 +411,15 @@ class WireFormsTest extends TestCase
         return pack('v', strlen($text)) . $text;
     }
 
-    /** One stored frame: u32 body_len | flags | id | [trace] | txn | [producer] | payload. */
-    private static function storedFrame(int $id, string $txn, string $payload, ?string $producer = null, ?string $trace = null): string
+    /** One stored frame: u32 body_len | flags | id | [trace] | txn | [producer] | [headers] | payload. */
+    private static function storedFrame(int $id, string $txn, string $payload, ?string $producer = null, ?string $trace = null, ?string $headers = null): string
     {
         $idBytes = chr($id) . str_repeat("\0", 5) . "\x70\0\x80" . str_repeat("\0", 7);
-        $body = chr(($trace !== null ? 1 : 0) | ($producer !== null ? 2 : 0)) . $idBytes
+        $body = chr(($trace !== null ? 1 : 0) | ($producer !== null ? 2 : 0) | ($headers !== null ? 8 : 0)) . $idBytes
             . ($trace !== null ? hex2bin(str_replace('-', '', $trace)) : '')
             . self::text($txn)
             . ($producer !== null ? self::text($producer) : '')
+            . ($headers !== null ? self::text($headers) : '')
             . $payload;
 
         return pack('V', strlen($body)) . $body;
@@ -900,5 +926,178 @@ class WireFormsTest extends TestCase
                 [1, 0],
             )['results'][1],
         );
+    }
+
+    // ===========================
+    // Headers
+    // ===========================
+    //
+    // A stored frame carries a message's headers behind flag 8, as the
+    // broker checks a client's frame (rsm/facade/real.rs, client_frames): the
+    // block right after the transaction id, its names sorted, and nothing a
+    // second encoding would write differently. The plain binary body has no
+    // place for them, so a push with headers goes as JSON there.
+
+    public function testTheHeadersBlockIsSortedByNameAsTheBrokerWritesIt(): void
+    {
+        $block = PushBinary::headersBlock(['type' => 'order.paid', 'a' => 'x', '10' => 'y', '9' => 'z', 'traceparent' => '']);
+
+        // In byte order: "10" < "9" < "a" < "traceparent" < "type".
+        $this->assertSame(
+            pack('v', 5)
+            . "\x02" . '10' . pack('v', 1) . 'y'
+            . "\x01" . '9' . pack('v', 1) . 'z'
+            . "\x01" . 'a' . pack('v', 1) . 'x'
+            . "\x0b" . 'traceparent' . pack('v', 0)
+            . "\x04" . 'type' . pack('v', 10) . 'order.paid',
+            $block,
+        );
+        $this->assertSame(['10' => 'y', '9' => 'z', 'a' => 'x', 'traceparent' => '', 'type' => 'order.paid'], self::headersOf($block));
+    }
+
+    public function testHeadersTheBlockCannotCarryLeaveItToJson(): void
+    {
+        $this->assertNull(PushBinary::headersBlock(['type' => "\xff\xfe"]), 'not UTF-8');
+        $this->assertNull(PushBinary::headersBlock([str_repeat('n', 256) => 'v']), 'a name over 255 bytes');
+        $this->assertNull(PushBinary::headersBlock(['big' => str_repeat('v', 65536)]), 'a value over 65535 bytes');
+        $this->assertNull(PushBinary::headersBlock(['a' => str_repeat('v', 40000), 'b' => str_repeat('v', 40000)]), 'a block over 65535 bytes');
+        $this->assertNull(PushBinary::headersBlock(['n' => 7]), 'a value that is not text');
+    }
+
+    public function testAFrameWithHeadersCarriesFlag8AndItsBlockAfterTheTransactionId(): void
+    {
+        $id = str_repeat("\x11", 6) . "\x70\x00\x80" . str_repeat("\x00", 7);
+        $block = PushBinary::headersBlock(['type' => 'order.paid']);
+
+        $bytes = PushBinary::frame($id, 'tx-1', '{"a":1}', $block);
+        $at = 0;
+        $this->assertSame(
+            ['flags' => 8, 'id' => $id, 'txn' => 'tx-1', 'headers' => $block, 'payload' => '{"a":1}'],
+            self::unframe($bytes, $at),
+        );
+        $this->assertSame(strlen($bytes), $at, 'body_len counts the block');
+        $this->assertSame(['type' => 'order.paid'], self::headersOf($block));
+
+        // Without headers, the frame this client always built.
+        $this->assertSame(
+            pack('V', 17 + 2 + 4 + 7) . "\0" . $id . pack('v', 4) . 'tx-1' . '{"a":1}',
+            PushBinary::frame($id, 'tx-1', '{"a":1}'),
+        );
+    }
+
+    public function testAPlainBinaryPushWithHeadersStaysJson(): void
+    {
+        $queen = $this->queen(self::queued(), ['binaryPush' => true]);
+
+        $queen->queue('orders')->partition('p1')->push(['data' => ['a' => 1], 'headers' => ['type' => 'x']])->execute();
+
+        $sent = $this->pushes()[0];
+        $this->assertSame('application/json', $sent->getHeaderLine('Content-Type'));
+        $this->assertSame(['type' => 'x'], json_decode((string) $sent->getBody(), true)['items'][0]['headers']);
+        $item = ['queue' => 'q', 'partition' => 'p', 'payload' => 1];
+        $this->assertNull(PushBinary::body([$item + ['headers' => ['type' => 'x']]], false));
+        $this->assertNotNull(PushBinary::body([$item + ['headers' => []]], false), 'no headers is none');
+
+        $this->expectException(\InvalidArgumentException::class);
+        PushBinary::encode([['queue' => 'q', 'partition' => 'p', 'payloads' => ['1'], 'headerBlocks' => [PushBinary::headersBlock(['type' => 'x'])]]]);
+    }
+
+    public function testPushCompressionFramesTheHeadersOfEachMessage(): void
+    {
+        $this->needZstd();
+        $queen = $this->queen(self::queued(2), self::FRAMED);
+
+        $queen->queue('orders')->partition('p1')->push([
+            ['data' => ['a' => 1], 'transactionId' => self::TXN, 'headers' => ['type' => 'order.paid', 'customer' => 42]],
+            ['data' => ['a' => 2]],
+        ])->execute();
+
+        $sent = $this->pushes()[0];
+        $this->assertSame('application/x-queen-push', $sent->getHeaderLine('Content-Type'));
+        $this->assertSame("QPB1\x08", substr((string) $sent->getBody(), 0, 5));
+        [$group] = self::framedGroups(substr((string) $sent->getBody(), 5));
+        [$first, $second] = $group['frames'];
+        $this->assertSame([8, self::TXN, '{"a":1}'], [$first['flags'], $first['txn'], $first['payload']]);
+        $this->assertSame(['customer' => '42', 'type' => 'order.paid'], self::headersOf($first['headers']));
+        $this->assertSame([0, null, '{"a":2}'], [$second['flags'], $second['headers'], $second['payload']]);
+    }
+
+    public function testABundleFramesItsPushesHeadersAndKeepsItsLinksInTheHead(): void
+    {
+        $this->needZstd();
+        // The caller pushes, then links. The broker answers the head's link
+        // first, then the push.
+        $queen = $this->queen(self::committed([
+            ['index' => 0, 'type' => 'link', 'success' => true, 'transactionId' => 'in-1'],
+            ['index' => 1, 'type' => 'push', 'success' => true, 'transactionId' => 'out-1'],
+        ]), self::FRAMED);
+        $popped = self::POPPED + ['offset' => 10, 'consumerGroup' => 'workers'];
+
+        $result = $queen->transaction()
+            ->queue('out')->partition('p1')->push([['data' => ['n' => 1], 'transactionId' => 'out-1', 'headers' => ['type' => 'x']]])
+            ->queue('review')->partition('p7')->link($popped, ['review-reason' => 'amount'])
+            ->commit();
+
+        $this->assertSame(
+            [[0, 'push', 'out-1'], [1, 'link', 'in-1']],
+            array_map(static fn (array $r): array => [$r['index'], $r['type'], $r['transactionId']], $result['results']),
+        );
+        $raw = (string) $this->onlyTransaction()->getBody();
+        [, $head] = self::transactionBody($raw);
+        $this->assertSame([[
+            'type' => 'link',
+            'queue' => 'review',
+            'partition' => 'p7',
+            'from' => ['partitionId' => '7', 'offset' => 10, 'transactionId' => 'in-1', 'consumerGroup' => 'workers'],
+            'headers' => ['review-reason' => 'amount'],
+        ]], $head['operations']);
+        [$group] = self::framedGroups(substr($raw, 9 + unpack('V', substr($raw, 5, 4))[1]));
+        $this->assertSame(['out', 'p1'], [$group['queue'], $group['partition']]);
+        $this->assertSame(8, $group['frames'][0]['flags']);
+        $this->assertSame(['type' => 'x'], self::headersOf($group['frames'][0]['headers']));
+    }
+
+    public function testDecodeReadsHeadersWhereTheJsonAnswerHasThem(): void
+    {
+        $block = PushBinary::headersBlock(['type' => 'order.paid', 'customer' => 'c-7']);
+        $answer = self::framedAnswer('{"frames":true}', 10, 11, false, [
+            self::storedFrame(1, 't-10', '{"n":10}'),
+            self::storedFrame(2, 't-11', '{"n":11,"s":"x"}', producer: 'svc', headers: $block),
+        ]);
+        // The same two messages as the JSON answer has them: the second's
+        // headers right after its producerSub.
+        $json = str_replace(
+            '"producerSub":"svc",',
+            '"producerSub":"svc","headers":{"customer":"c-7","type":"order.paid"},',
+            self::TWO_MESSAGES_JSON,
+        );
+
+        $this->assertSame(json_decode($json, true), PopFrames::decode($answer));
+    }
+
+    /** A framed answer says it filtered in its own keys, which decode() keeps. */
+    public function testAFramedPopOfAFilteredGroupReadsTheEchoFromTheAnswersOwnKeys(): void
+    {
+        $this->needZstd();
+        $echoed = self::framedAnswer('{"frames":true,"filtered":true}', 10, 11, false, self::twoFrames());
+        $got = $this->queen(self::framed($echoed), ['framedPop' => true])
+            ->queue('orders')->group('it')->where('data.n', '>', 1)->wait(false)->pop();
+        $this->assertSame(['t-10', 't-11'], array_column($got, 'transactionId'));
+
+        $silent = self::framedAnswer('{"frames":true}', 10, 11, false, self::twoFrames());
+        $this->expectException(\Queen\Exceptions\RoutingUnsupportedException::class);
+        $this->queen(self::framed($silent), ['framedPop' => true])
+            ->queue('orders')->group('it')->where('data.n', '>', 1)->wait(false)->pop();
+    }
+
+    public function testDecodeRefusesALinkFrame(): void
+    {
+        $frame = self::storedFrame(1, 't-10', '{"n":10}');
+        // The flags byte, right after body_len: a link the broker did not resolve.
+        $frame[4] = chr(16);
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('a frame is a link');
+        PopFrames::decode(self::framedAnswer('', 10, 10, false, [$frame]));
     }
 }

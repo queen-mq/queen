@@ -12,7 +12,7 @@ sourceOfTruth:
   - server/src/rsm/facade/intake.rs
   - server/src/rsm/facade/remote.rs
   - server/src/rsm/batcher.rs
-  - server/src/rsm/batcher_lanes.rs
+  - server/src/rsm/batcher_scheduler.rs
   - server/src/rsm/apply.rs
   - server/src/rsm/apply_shard.rs
   - server/src/rsm/consume/mod.rs
@@ -26,8 +26,9 @@ digest: >-
   (openraft in a cluster) stored in per-queue log files, a deterministic apply, and an ordered store
   held in RAM and checkpointed to LMDB. The leader turns client commands into log entries of effects
   (offsets, ids, timestamps decided once), and every node applies the committed entries in index
-  order, so each node holds a full copy. Planning is split across lanes (QUEEN_LANES, default 8) by
-  partition and still produces one entry per cycle. Pops, acks and leases are served from the
+  order, so each node holds a full copy. Commands that share no state (a partition, a queue's
+  settings, a KV key, a timer) are planned on several threads at once (QUEEN_PLANNER_THREADS,
+  default 8), and a cycle still produces one entry, in batch order. Pops, acks and leases are served from the
   leader's memory by a consumption engine that logs changed cursor rows as checkpoints, at once when
   an answer waits and at least every 5 ms by default. Each tenant lives in exactly one raft group
   with one leader, so a multi-queue transaction is one log entry with no coordinator and no
@@ -51,6 +52,9 @@ digest: >-
 # gateway.rs and config.rs ask the broker to relay it, handlers/raft.rs relays a feed read that asks from the
 # leader to a follower (feed.rs, mod.rs, real.rs and groups.rs name the followers; proxy_embed.rs lets the
 # relay through). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 ---
 
 A QueenMQ node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.

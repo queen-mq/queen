@@ -526,6 +526,13 @@ pub fn parse_timer_ops(ops: &[Value], producer_sub: Option<&str>) -> Result<Vec<
                 "QTIMER op {i}: the producer subject exceeds the frame limit"
             )));
         }
+        // The fired message's headers, in its frame (catalogue version 8:
+        // the caller refuses a frame that holds them before that).
+        let headers = match o.get("headers") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(h) => crate::frames::check_headers(h)
+                .map_err(|e| OpError::new(format!("QTIMER op {i}: {e}")))?,
+        };
         let frame = crate::frames::pack_frames(&[crate::frames::FrameIn {
             message_id,
             txn: &txn,
@@ -535,6 +542,8 @@ pub fn parse_timer_ops(ops: &[Value], producer_sub: Option<&str>) -> Result<Vec<
             producer_sub: psub,
             payload: &payload,
             encrypted,
+            headers: (!headers.is_empty()).then_some(headers.as_slice()),
+            link: None,
         }]);
         out.push(TimerOp::Schedule(TimerSchedule {
             queue,
@@ -668,7 +677,15 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         key: &str,
     ) -> Result<Option<TimerRow>, Refusal> {
         let tk = (tenant.to_string(), queue.to_string(), key.to_string());
-        match ov.timers.get(&tk).map(|slot| &slot.v) {
+        self.touched(|| super::footprint::timer(tenant, queue, key));
+        let slot = match ov.timer_lookup(&tk) {
+            super::Layered::Found(slot) => Some(&slot.v),
+            // A purge in flight deletes every timer of the tenant when it
+            // applies.
+            super::Layered::Masked => return Ok(None),
+            super::Layered::Absent => None,
+        };
+        match slot {
             Some(TimerOverlay::Row(r)) => Ok(Some(r.clone())),
             Some(TimerOverlay::Deleted) => Ok(None),
             Some(TimerOverlay::Backoff {
@@ -687,9 +704,6 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     r.updated_at_us = *updated_at_us;
                     r
                 })),
-            // A purge in flight deletes every timer of the tenant when it
-            // applies.
-            None if ov.tenant_purged(tenant) => Ok(None),
             None => self.reads().timer(tenant, queue, key).map_err(store_err),
         }
     }
@@ -1050,6 +1064,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 })
                 .collect(),
             create_cfg: implicit_queue_config_for(queue),
+            links: Default::default(),
         };
         let verdicts: Result<Vec<PushVerdict>, Refusal> = match self.plan_push(ov, &cmd) {
             Ok(Plan::Logged {
@@ -1212,6 +1227,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             error: error.to_string(),
             retry_count: attempts.max(0) as u32,
             failed_at_us: now,
+            headers: frame_headers(&row.frame),
         });
         effs.push(Effect::TimerDelete {
             tenant: tenant.to_string(),
@@ -1238,6 +1254,23 @@ pub fn frame_payload(frame: &[u8]) -> Vec<u8> {
     crate::frames::unpack_frames_ref(frame)
         .and_then(|f| f.first().map(|fr| fr.payload.to_vec()))
         .unwrap_or_default()
+}
+
+/// The headers block a timer's message carries, from its frame (empty for
+/// none).
+pub fn frame_headers(frame: &[u8]) -> Vec<u8> {
+    crate::frames::unpack_frames_ref(frame)
+        .and_then(|f| f.first().and_then(|fr| fr.headers.map(<[u8]>::to_vec)))
+        .unwrap_or_default()
+}
+
+/// Whether any schedule of `ops` gives its message headers: refused before
+/// the cluster reads catalogue version 8.
+pub fn any_headers(ops: &[TimerOp]) -> bool {
+    ops.iter().any(|op| match op {
+        TimerOp::Schedule(s) => crate::frames::any_flag(&s.frame, crate::frames::FLAG_HEADERS),
+        TimerOp::Cancel { .. } => false,
+    })
 }
 
 /// The DLQ snapshot: the payload as JSON when it is JSON,
@@ -1284,6 +1317,7 @@ pub fn implicit_queue_config() -> QueueConfig {
         retention_sink_hold: String::new(),
         retention_sink_hold_max_seconds: 0,
         created_at_us: 0,
+        route: None,
     }
 }
 
@@ -1381,6 +1415,10 @@ pub fn peek_json(queue: &str, key: &str, row: Option<&TimerRow>) -> Value {
                     base64::engine::general_purpose::STANDARD.encode(frame_payload(&row.frame)),
                 ),
             );
+            let headers = frame_headers(&row.frame);
+            if !headers.is_empty() {
+                m.insert("headers".into(), crate::frames::headers_json(&headers));
+            }
         }
         None => {
             m.insert("found".into(), Value::Bool(false));

@@ -25,7 +25,7 @@
 
 use crate::rsm::effect::Effect;
 use crate::rsm::entry::{
-    AckOutcome, KvOutcome, Outcome, Placeholder, PushOutcome, PushVerdict, RequestId,
+    AckOutcome, KvOpOutcome, KvOutcome, Outcome, Placeholder, PushOutcome, PushVerdict, RequestId,
 };
 
 use super::{
@@ -172,7 +172,194 @@ impl TxnOutcome {
     }
 }
 
+/// One planning thread's share of a transaction whose keys have several homes
+/// (the scheduler's second round, `batcher_scheduler.rs` S8): the pushes, the
+/// KV ops and the timers whose keys live in its shards.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TxnPart {
+    /// Indexes into [`TxnCommand::pushes`], ascending.
+    pub(crate) pushes: Vec<usize>,
+    /// Indexes into [`TxnCommand::kv`], ascending.
+    pub(crate) kv: Vec<usize>,
+    /// The timers rider, whole: its keys share this one home.
+    pub(crate) timers: bool,
+    /// The share that also checks the command and folds its riders
+    /// ([`TxnCommand::extra_effects`]): one of a transaction's shares.
+    pub(crate) lead: bool,
+}
+
+/// What a planning thread planned of its share ([`Planner::plan_transaction_part`]).
+#[derive(Debug, Default)]
+pub(crate) struct TxnPartPlan {
+    /// By index into [`TxnCommand::pushes`]: a push's effects (none when it
+    /// wrote nothing) and its verdicts.
+    pushes: Vec<(usize, Vec<Effect>, PushOutcome)>,
+    /// By index into [`TxnCommand::kv`], in apply order: what
+    /// [`super::kv::KvEach`] holds.
+    kv: Vec<(usize, Option<Effect>, KvOpOutcome)>,
+    /// The timers rider's effects and results.
+    timers: Option<(Vec<Effect>, Vec<serde_json::Value>)>,
+}
+
+impl TxnPartPlan {
+    /// The effects this share logs (the lead's riders are the command's own).
+    pub(crate) fn effects(&self) -> impl Iterator<Item = &Effect> {
+        self.pushes
+            .iter()
+            .flat_map(|p| p.1.iter())
+            .chain(self.kv.iter().filter_map(|k| k.1.as_ref()))
+            .chain(self.timers.iter().flat_map(|t| t.0.iter()))
+    }
+
+    /// How many effects planning this share folded into its overlay.
+    pub(crate) fn folded(&self, cmd: &TxnCommand, part: &TxnPart) -> u64 {
+        let riders = if part.lead {
+            cmd.extra_effects.len()
+        } else {
+            0
+        };
+        (self.effects().count() + riders) as u64
+    }
+}
+
+impl TxnCommand {
+    /// The shares of a transaction put back together, when every one of them
+    /// held: the effects in the order [`Planner::plan_transaction`] logs them
+    /// (the pushes in order, the KV rider in apply order, the timers, the
+    /// riders) and the outcome it answers. Empty effects are a transaction
+    /// that logs nothing (`Plan::Empty`).
+    pub(crate) fn assemble_parts(
+        &self,
+        parts: Vec<TxnPartPlan>,
+    ) -> Result<(Vec<Effect>, Outcome), Refusal> {
+        let missing = || Refusal::retry("internal", "a transaction's share was not planned");
+        let mut pushes: Vec<Option<(Vec<Effect>, PushOutcome)>> =
+            (0..self.pushes.len()).map(|_| None).collect();
+        let mut kv: Vec<(usize, Option<Effect>, KvOpOutcome)> = Vec::new();
+        let mut timers = None;
+        for part in parts {
+            for (k, effects, outcome) in part.pushes {
+                *pushes.get_mut(k).ok_or_else(missing)? = Some((effects, outcome));
+            }
+            kv.extend(part.kv);
+            if part.timers.is_some() {
+                timers = part.timers;
+            }
+        }
+        let mut effects = Vec::new();
+        let mut out = TxnOutcome::default();
+        for p in pushes {
+            let (e, o) = p.ok_or_else(missing)?;
+            effects.extend(e);
+            out.pushes.push(o);
+        }
+        if !self.kv.is_empty() {
+            // The shares' ops, back in the one order the call applies in.
+            let mut rank = vec![0usize; self.kv.len()];
+            for (r, i) in super::kv::apply_order(&self.kv).into_iter().enumerate() {
+                rank[i] = r;
+            }
+            if kv.iter().any(|k| k.0 >= rank.len()) {
+                return Err(missing());
+            }
+            kv.sort_by_key(|k| rank[k.0]);
+            let mut results = vec![KvOpOutcome::Deferred; self.kv.len()];
+            for (i, eff, verdict) in kv {
+                effects.extend(eff);
+                results[i] = verdict;
+            }
+            out.kv = KvOutcome {
+                results,
+                failed: None,
+            };
+        }
+        if !self.timers.is_empty() {
+            let (e, results) = timers.ok_or_else(missing)?;
+            effects.extend(e);
+            out.timers = results;
+        }
+        effects.extend(self.extra_effects.iter().cloned());
+        out.acks = self.engine_acks.clone();
+        Ok((effects, out.into_outcome()?))
+    }
+}
+
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
+    /// Plan `part` of `cmd`, a transaction whose keys have several homes, on
+    /// the planning thread that owns the part's keys: what
+    /// [`Planner::plan_transaction`] plans for those keys, folded into `ov`.
+    /// `None` when the transaction does not commit as this share sees it (a
+    /// refusal, a pushed message that is a duplicate, a lost `required`
+    /// precondition): it is then planned whole by the single planner's loop,
+    /// which answers what it answers. The caller holds the savepoint: a share
+    /// takes none, and a share that did not hold leaves its folds for the
+    /// caller to take back.
+    ///
+    /// A transaction's legs read only their own keys (a push its partition and
+    /// its routes' targets, a KV op its key, a timer its key), so the shares
+    /// planned apart are what the whole transaction plans:
+    /// [`TxnCommand::assemble_parts`] puts them back in its order.
+    pub(crate) fn plan_transaction_part(
+        &self,
+        ov: &mut Overlay,
+        cmd: &TxnCommand,
+        part: &TxnPart,
+    ) -> Option<TxnPartPlan> {
+        let mut plan = TxnPartPlan::default();
+        if part.lead {
+            if !cmd.acks.is_empty() || !cmd.positional_acks.is_empty() || !cmd.positions.is_empty()
+            {
+                return None;
+            }
+            self.check_partition_rows(ov, &cmd.extra_effects).ok()?;
+            self.check_effect_keys(ov, &cmd.extra_effects).ok()?;
+            check_streams_state_ops(&cmd.extra_effects).ok()?;
+        }
+        for &k in &part.pushes {
+            let p = cmd.pushes.get(k)?;
+            let (effects, o) = match self.plan_push(ov, p) {
+                Ok(Plan::Logged {
+                    effects,
+                    outcome: Outcome::Push(o),
+                }) => (effects, o),
+                Ok(Plan::Empty(Outcome::Push(o))) => (Vec::new(), o),
+                _ => return None,
+            };
+            // The step's gate: a pushed message that is a duplicate rolls the
+            // whole transaction back (a link the partition already holds does
+            // not).
+            let duplicate = o.items.iter().zip(&p.items).any(|(v, item)| {
+                matches!(v, PushVerdict::Duplicate { .. }) && !crate::frames::all_links(&item.frame)
+            });
+            if duplicate {
+                return None;
+            }
+            plan.pushes.push((k, effects, o));
+        }
+        if !part.kv.is_empty() {
+            let each = self
+                .plan_kv_each(ov, &cmd.tenant, &cmd.kv, Some(&part.kv))
+                .ok()?;
+            if each.failed.is_some() {
+                return None;
+            }
+            for (_, effect, _) in &each.each {
+                if let Some(e) = effect {
+                    ov.apply_effects(std::slice::from_ref(e));
+                }
+            }
+            plan.kv = each.each;
+        }
+        if part.timers {
+            let (effects, results) = self.plan_timer_ops(ov, &cmd.tenant, &cmd.timers).ok()?;
+            plan.timers = Some((effects, results.iter().map(|r| r.to_json()).collect()));
+        }
+        if part.lead && !cmd.extra_effects.is_empty() {
+            ov.apply_effects(&cmd.extra_effects);
+        }
+        Some(plan)
+    }
+
     /// Plan a transaction all-or-nothing (see the module header).
     pub fn plan_transaction(&self, ov: &mut Overlay, cmd: &TxnCommand) -> Planned {
         if !cmd.acks.is_empty() || !cmd.positional_acks.is_empty() {
@@ -193,11 +380,24 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         if cmd.pushes.is_empty() && cmd.timers.is_empty() {
             return self.plan_riders_bundle(ov, cmd);
         }
-        let saved = ov.clone();
-        let refuse = |ov: &mut Overlay, r: Refusal| -> Planned {
-            *ov = saved.clone();
-            Err(r)
-        };
+        // The bundle plans against the overlay as it goes (a push sees the
+        // pushes before it), and keeps what it folded only if it is logged:
+        // anything else (a refusal, a duplicate, a lost precondition) takes
+        // its folds back out. A savepoint, not a copy of the overlay: that
+        // copy was proportional to everything in flight, and with the
+        // footprint scheduler to every partition its planning thread owns.
+        let saved = ov.save();
+        let planned = self.plan_bundle(ov, cmd);
+        match &planned {
+            Ok(Plan::Logged { .. }) => ov.commit(saved),
+            _ => ov.restore(saved),
+        }
+        planned
+    }
+
+    /// [`Planner::plan_transaction`] for a bundle with pushes or timers, under
+    /// its savepoint: an answer that is not `Logged` has its folds taken back.
+    fn plan_bundle(&self, ov: &mut Overlay, cmd: &TxnCommand) -> Planned {
         let mut effects = Vec::new();
         let mut out = TxnOutcome::default();
 
@@ -208,38 +408,44 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     outcome: Outcome::Push(o),
                 }) => (effects, o),
                 Ok(Plan::Empty(Outcome::Push(o))) => (Vec::new(), o),
-                Ok(Plan::Refused(r)) | Err(r) => return refuse(ov, r),
+                Ok(Plan::Refused(r)) | Err(r) => return Err(r),
                 Ok(other) => {
-                    return refuse(
-                        ov,
-                        Refusal::retry("internal", format!("push planned {other:?}")),
-                    )
+                    return Err(Refusal::retry(
+                        "internal",
+                        format!("push planned {other:?}"),
+                    ))
                 }
             };
+            // A link the partition already holds (the same transaction id) is
+            // a no-op: what it asks for is there. Only a pushed message's
+            // duplicate rolls the bundle back, as the step's gate.
             if let Some(PushVerdict::Duplicate { offset, .. }) = o
                 .items
                 .iter()
-                .find(|v| matches!(v, PushVerdict::Duplicate { .. }))
+                .zip(&p.items)
+                .find(|(v, item)| {
+                    matches!(v, PushVerdict::Duplicate { .. })
+                        && !crate::frames::all_links(&item.frame)
+                })
+                .map(|(v, _)| v)
             {
                 if cmd.allow_duplicate {
                     out.pushes.push(o);
-                    let outcome = match out.into_outcome() {
-                        Ok(o) => o,
-                        Err(r) => return refuse(ov, r),
-                    };
+                    let outcome = out.into_outcome()?;
+                    // Empty logs nothing, so it folds nothing either: the
+                    // savepoint takes the pushes before this one back out, or
+                    // a later command of the cycle would plan on a partition
+                    // and an append no entry carries.
                     return Ok(Plan::Empty(outcome));
                 }
-                return refuse(
-                    ov,
-                    Refusal::client(
-                        "duplicate",
-                        format!(
-                            "QDUP a pushed message to {}/{} is a duplicate (original offset \
+                return Err(Refusal::client(
+                    "duplicate",
+                    format!(
+                        "QDUP a pushed message to {}/{} is a duplicate (original offset \
                              {offset}); the transaction rolled back",
-                            p.queue, p.partition
-                        ),
+                        p.queue, p.partition
                     ),
-                );
+                ));
             }
             effects.extend(effs);
             out.pushes.push(o);
@@ -248,10 +454,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // Positions on new partitions, after the bundle's messages and before
         // its keys: planned against everything above, folded like them.
         if !cmd.positions.is_empty() {
-            let effs = match self.plan_positions(ov, &cmd.tenant, &cmd.positions) {
-                Ok(e) => e,
-                Err(r) => return refuse(ov, r),
-            };
+            let effs = self.plan_positions(ov, &cmd.tenant, &cmd.positions)?;
             ov.apply_effects(&effs);
             effects.extend(effs);
         }
@@ -262,12 +465,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // answer carries the one failed precondition so the receiver renders
         // 024's detail.
         if !cmd.kv.is_empty() {
-            let kvp = match self.plan_kv_writes(ov, &cmd.tenant, &cmd.kv) {
-                Ok(p) => p,
-                Err(r) => return refuse(ov, r),
-            };
+            let kvp = self.plan_kv_writes(ov, &cmd.tenant, &cmd.kv)?;
             if let Some(f) = kvp.failed {
-                *ov = saved.clone();
                 return failed_kv(f);
             }
             ov.apply_effects(&kvp.effects);
@@ -282,10 +481,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // helper folds its effects into the overlay on success and leaves it
         // untouched on refusal; the whole bundle is refused either way.
         if !cmd.timers.is_empty() {
-            let (effs, results) = match self.plan_timer_ops(ov, &cmd.tenant, &cmd.timers) {
-                Ok(v) => v,
-                Err(r) => return refuse(ov, r),
-            };
+            let (effs, results) = self.plan_timer_ops(ov, &cmd.tenant, &cmd.timers)?;
             effects.extend(effs);
             out.timers = results.iter().map(|r| r.to_json()).collect();
         }
@@ -296,10 +492,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
 
         out.acks = cmd.engine_acks.clone();
-        let outcome = match out.into_outcome() {
-            Ok(o) => o,
-            Err(r) => return refuse(ov, r),
-        };
+        let outcome = out.into_outcome()?;
         if effects.is_empty() {
             Ok(Plan::Empty(outcome))
         } else {

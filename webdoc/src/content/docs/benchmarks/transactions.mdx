@@ -1,13 +1,13 @@
 ---
 title: "Exactly-once transaction benchmark vs Kafka"
-description: "Exactly-once consume-transform-produce on QueenMQ, Kafka, Redpanda and Pulsar on the same machines: commit and end-to-end latency, each system's ceiling, what partition count does to it, and the one thread that sets QueenMQ's limit."
+description: "Exactly-once consume-transform-produce on QueenMQ, Kafka, Redpanda and Pulsar on the same machines: commit and end-to-end latency, each system's ceiling, what partition count does to it, and what moved QueenMQ's limit."
 type: reference
 tier: operate
 sidebar:
   label: "Transactions"
   order: 4
 sourceOfTruth:
-  - server/src/rsm/batcher_lanes.rs
+  - server/src/rsm/batcher_scheduler.rs
 # sourceOfTruth re-read 2026-10-08 (standby cluster): batcher_lanes.rs fills one new field of a cycle's output and plans as before. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-13 (2.3.0): batcher_lanes.rs keeps a queue's partition names in 256
 # tables once it has 4,096 of them and frees dropped lookups off the planner thread; pushes are
@@ -16,6 +16,12 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-16 (2.4.0, cluster version 7): batcher_lanes.rs reads the cluster
 # version once per planning cycle, so the lanes write push outcomes as runs only where the cluster
 # reads 7. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
+# sourceOfTruth re-read 2026-11-12 (the footprint scheduler, PLAN_SCHEDULER.md): batcher_scheduler.rs
+# replaces batcher_lanes.rs; the lanes and the control step are gone. "The ceiling" gains the A/B
+# against 2.8.1 of 2026-11-12.
 ---
 
 A [transaction](/writing-applications/transactions/) is the step QueenMQ is built around: take a message, do the work, then ack it and
@@ -134,11 +140,12 @@ so do not read that difference as the code's.
 
 ## The ceiling, and what moves it
 
-QueenMQ plans pushes on its lanes in parallel (eight by default, sixteen in these runs), but a
-transaction that acks, writes KV or schedules a timer is planned on one thread, the control step,
-because those parts are checked against state that every partition shares. That thread is QueenMQ's
-transaction ceiling, and more workers only queue more transactions for it: with 900 partitions and
-900 workers QueenMQ committed 5,100 transactions a second, at a commit p50 of 155 ms. Pulsar spreads
+Up to 2.8.1, QueenMQ planned pushes on its lanes in parallel (eight by default, sixteen in these
+runs), but a transaction that acked, wrote KV or scheduled a timer was planned on one thread, the
+control step, because those parts are checked against state that every partition shares. That
+thread was QueenMQ's transaction ceiling, and more workers only queued more transactions for it:
+with 900 partitions and 900 workers QueenMQ committed 5,100 transactions a second, at a commit p50
+of 155 ms (2.0.0-beta.2). Pulsar spreads
 its transactions over the broker's threads, and the same change doubled its rate to 14,400 a second
 (143,700 msg/s, e2e p99 799 ms). With 1,800 partitions and 1,800 workers Pulsar reached 17,600 a
 second while falling behind.
@@ -153,9 +160,38 @@ once per transaction:
 | 576,000 | not run | behind: 572.4k, e2e p99 22 s |
 | 1,152,000 | not run | behind: 548.8k |
 
-Below about 250,000 msg/s QueenMQ commits faster; above it, Pulsar carries more. Until that thread is
-split, the way to more transactional throughput on QueenMQ is more messages per transaction. Tenants
-spread over several raft groups each get a planner of their own, which we have not measured.
+Below about 250,000 msg/s QueenMQ commits faster; above it, Pulsar carries more (2.0.0-beta.2).
+
+### The footprint scheduler against 2.8.1
+
+The next release replaces the lanes and the control step with one scheduler: commands that share no
+partition, queue setting, KV key or timer plan at the same time on eight threads, a transaction
+that acks and writes KV included, and the log entry is the one a single thread would have planned
+([the write path](/architecture/write-path/)). We measured it against 2.8.1 on 2026-11-12: both
+built from source the same way, three brokers of 22 vCPU (`c3-standard-22-lssd`, four local NVMe
+disks), one loader of 24 vCPU, the pipeline above with 200 workers (440 at 900 partitions), a fresh
+cluster for each ladder, 40-second steps. The highest rate each build carried:
+
+| Transactions | 2.8.1 | Footprint scheduler |
+|---|---|---|
+| 10 messages, 200 partitions | 160,000 msg/s (16,000 txn/s) | 240,000 msg/s (24,000 txn/s) |
+| 10 messages and one KV write, 200 partitions | 120,000 msg/s (12,000 txn/s) | 200,000 msg/s (20,000 txn/s) |
+| 10 messages, 900 partitions | 160,000 msg/s (16,000 txn/s) | 280,000 msg/s (28,000 txn/s) |
+| 100 messages, 200 partitions | 450,000 msg/s (4,500 txn/s) | 750,000 msg/s (7,500 txn/s), the top of the ladder |
+
+Below 2.8.1's ceiling both builds commit in the same time: 10 messages at 120,000 msg/s, p50 1.5 ms
+and p99 2.8 ms on both. Past it, 2.8.1 falls behind and, at 900 partitions or 100 messages a
+transaction, commits less than at the rate below (10,467 and 2,842 txn/s). At its own ceiling the
+scheduler's leader used 12 to 13 of its 22 cores, and its busiest thread was apply's.
+
+On brokers of 8 vCPU the two builds stop at about the same rate, 13,000 transactions of 10 messages
+a second: the leader runs out of CPU before its planning thread is the limit. There the scheduler
+carries 3% more with acks and pushes, 11% more with a KV write, and 51% more at 900 partitions
+under overload. Runs: `benchmark-queen/2026-11-12-ab-scheduler/` in the repository.
+
+Bigger transactions still raise the ceiling in messages, because much of the work is paid once per
+transaction. Tenants spread over several raft groups each get a planner of their own, which we have
+not measured.
 
 ## Partition count
 
@@ -176,8 +212,8 @@ passed. Both runs are in the archive.
 
 ## What this page does not show
 
-Kafka, Redpanda and Pulsar against 2.3.0: the comparison tables are September's, with QueenMQ at
-2.0.0-beta.2. Kafka and Redpanda were not run with more workers, or with 100 messages per
+Kafka, Redpanda and Pulsar against 2.3.0 or the footprint scheduler: the comparison tables are
+September's, with QueenMQ at 2.0.0-beta.2; the scheduler was measured against 2.8.1 only. Kafka and Redpanda were not run with more workers, or with 100 messages per
 transaction above 9,000 msg/s. No run used transactions through QueenMQ's Kafka facade, and the QueenMQ transactions
 carried acks and pushes only, with no KV writes or timers. Each point offered load for 70 seconds,
 a 10-second ramp included.

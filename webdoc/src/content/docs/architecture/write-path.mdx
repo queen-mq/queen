@@ -44,6 +44,10 @@ sourceOfTruth:
 # carry each request's client scope (None without a client token) and refuse a name outside it 403
 # scope_denied before any command is built (server/src/scope.rs, b24b53599). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. a push to a queue
+# that others read appends its readers' links in the same entry
+# (planner/route.rs). The page says so under Plan.
 ---
 
 A write goes through four steps.
@@ -54,8 +58,10 @@ A write goes through four steps.
 
 **Batch.** The leader collects up to 4,096 commands (or 4 MiB) and plans them together, as one log entry. Up to eight entries are in flight at the same time. A retried request is found by its id and gets the answer it missed, so nothing is planned twice.
 
-**Plan.** The planner decides what each command means right now, and writes the answer down as facts: "append these messages to partition 17, at offsets 4,210 to 4,309, at this microsecond". Ids, offsets and times are chosen here, once. To use more cores, eight lanes plan in parallel: each lane owns a share of the partitions, and one last step plans what touches more than one lane.
+**Plan.** The planner decides what each command means right now, and writes the answer down as facts: "append these messages to partition 17, at offsets 4,210 to 4,309, at this microsecond". Ids, offsets and times are chosen here, once. To use more cores, the planner first looks at what each command reads and writes: a partition, a queue's settings, a KV key, a timer. Commands that share none of these plan at the same time, on eight threads. Commands that touch the same partition or key plan one after the other, in the order they came. The entry holds every command in batch order, exactly as one thread would have planned it, and a check after planning makes sure no command touched what another group wrote; when one did, that part of the batch is planned again on one thread.
 
-<Fig id="lanes" caption="Eight lanes plan in parallel; one step plans what crosses lanes." />
+<Fig id="planner-groups" caption="Commands that share no state plan at the same time; the entry keeps their order." />
 
 **Apply.** Every node executes the committed entries, in order. Apply reads no clock and no random number, so every node ends with the same bytes. Four threads apply the work of different partitions at the same time.
+
+A push to a queue that others read (a [reading queue](/writing-applications/routing/) or a filtered group) also writes its readers' partitions: its plan appends, in the same entry, a link to every reader whose `where` takes the message, so it plans in the group of those partitions. The leader decides once; followers apply the links. What a group cannot bound (a queue's new settings, a delete, a push of links) is planned on its own, in its place in the batch.

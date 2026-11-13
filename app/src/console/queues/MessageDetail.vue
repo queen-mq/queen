@@ -11,6 +11,7 @@ import { useAutoRefresh } from '@/composables/useRefresh'
 import { fieldLine, hexDump, HEX_LIMIT, kafkaRecordPlain, recordTime } from '@/composables/kafkaRecord'
 import { payloadToText } from '@/composables/usePushVerdict'
 import { currentEpoch, useIdentity } from '@/stores/identity'
+import { useQueuesStore } from '@/stores/queuesStore'
 import QcDialog from '../QcDialog.vue'
 import QcJson from '../QcJson.vue'
 import QcSeg from '../QcSeg.vue'
@@ -19,8 +20,9 @@ import { clock, nowMs } from '../useWindow'
 import { span } from '../useOverview'
 import { fmt } from '../useQueuePage'
 import {
-  callText, copyOf, curlOf, deleteAnswer, deleteMessageRequest, groupStates, groupsDiffer, messageState, payloadOf, traceSummary,
+  callText, copyOf, curlOf, deleteAnswer, deleteMessageRequest, groupStates, groupsDiffer, headerRows, messageState, payloadOf, traceSummary,
 } from './messagesView'
+import { alsoIn } from './routeView'
 
 const props = defineProps({
   pick: { type: Object, required: true }, // { pid, txn }
@@ -88,6 +90,13 @@ const pushedAt = computed(() => {
 const ns = computed(() => (typeof m.value?.namespace === 'string' ? m.value.namespace : ''))
 const qlink = computed(() => `/queues/${encodeURIComponent(m.value?.queue || '')}`)
 const traced = computed(() => (traces.value?.key === key.value ? traceSummary(traces.value.data) : null))
+
+// ---- its headers (never encrypted: they show when the payload cannot) ----
+const headers = computed(() => headerRows(m.value))
+
+// ---- where else it shows: its queue's readers whose where takes it (routeView.alsoIn) ----
+const qs = useQueuesStore()
+const also = computed(() => (m.value ? alsoIn(m.value, { queues: qs.queues.value || [] }) : null))
 
 // ---- the payload ----
 const payload = computed(() => payloadOf(m.value))
@@ -208,6 +217,14 @@ async function remove() {
           </dd>
         </template>
       </dl>
+      <p v-if="also" class="md-also qn-t2" title="Its queue's readers whose where takes it, judged here from its data and headers"><template v-for="(p, j) in also.parts" :key="j"><RouterLink v-if="p.to" :to="p.to" class="qn-mono md-alsoname">{{ p.t }}</RouterLink><span v-else>{{ p.t }}</span></template></p>
+
+      <template v-if="headers.length">
+        <h4 class="qn-h2 md-hhead">Headers</h4>
+        <dl class="qn-dl md-rec md-headers" aria-label="Headers">
+          <template v-for="h in headers" :key="h.name"><dt class="qn-mono">{{ h.name }}</dt><dd class="qn-mono">{{ h.value }}</dd></template>
+        </dl>
+      </template>
 
       <div class="md-payhead">
         <h4 class="qn-h2">Payload</h4>
@@ -254,7 +271,7 @@ async function remove() {
       <p v-if="note" class="qn-t3 md-small">{{ note }}</p>
     </template>
 
-    <p class="qn-read md-read">Read from <span class="qn-mono">GET /api/v1/messages/{{ encodeURIComponent(pick.pid) }}/{{ encodeURIComponent(pick.txn) }}</span><template v-if="traced && traced.total"> and its traces</template>.</p>
+    <p class="qn-read md-read">Read from <span class="qn-mono">GET /api/v1/messages/{{ encodeURIComponent(pick.pid) }}/{{ encodeURIComponent(pick.txn) }}</span><template v-if="traced && traced.total"> and its traces</template>.<template v-if="also"> Also in: its queue's readers whose where takes it, judged here from its data and headers.</template></p>
 
     <QcDialog
       :open="deleting && !!req" title="Delete this dead letter?" :where="where" :call="req ? callText(req) : ''" :typed="pick.txn"
@@ -277,6 +294,10 @@ async function remove() {
 .md-group { display: block; }
 .md-gword { margin-left: 8px; }
 .md-header { display: block; overflow-wrap: anywhere; }
+.md-hhead { margin-top: 18px; }
+.md-also { font-size: 12.5px; margin-top: 10px; overflow-wrap: anywhere; }
+.md-alsoname { color: var(--text); }
+.md-headers dt { overflow-wrap: anywhere; }
 .md-payhead { display: flex; align-items: center; gap: 10px; margin-top: 18px; min-height: 30px; }
 .md-seg :deep(button) { height: 24px; font-size: 12px; }
 .md-copy { height: 28px; }

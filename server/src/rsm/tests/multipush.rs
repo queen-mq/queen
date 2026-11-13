@@ -73,7 +73,7 @@ impl Node {
         let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
         let repl = Arc::new(open_repl(&dir, store.clone()));
         let cfg = BatcherConfig {
-            lanes,
+            planner_threads: lanes,
             pipeline: 4,
             propose_ms: 5_000,
             request_expire_every_ms: 3_600_000,
@@ -116,6 +116,7 @@ fn group(id: u64, queue: &str, partition: &str, txns: &[String]) -> PushCommand 
             c.dedup_window_seconds = 600;
             c
         },
+        links: Default::default(),
     }
 }
 

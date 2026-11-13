@@ -33,6 +33,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): rsm/apply.rs,
 # rsm/maintenance.rs reformatted, line wrapping only. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-06 (tenant feed): qlog/mod.rs gains read-only helpers for the feed (QLog::feed_plan, feed_scan, decode_message); nothing it writes changes; qlog/set.rs gains QLogReader::queue_logs, a read-only lookup. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. frames.rs gains two
+# frame flags, headers (8) and link (16); a reading queue's record holds link frames
+# (writing-applications/routing.mdx). The page's frame section names them.
 ---
 
 A message is written once, in its queue's log files, and that write is what makes it durable: there is no second copy. We built it this way on purpose. An earlier design wrote every message twice, first in a consensus log and then in a segment file. Now the bytes that make a message durable are the bytes a pop reads back.
@@ -117,3 +121,7 @@ The active file is never touched, and neither is a file that recovery or a node 
 <Fig id="file-rewrite" caption="Reclaim: dead files deleted, partly live files rewritten." />
 
 <Why>a file is the unit the disk gives back. Rewriting a file with only its live records gives back the space of the dead ones without waiting for the whole file to die, and the small passes keep the rewrite from slowing down the writes.</Why>
+
+## Headers and links in a frame
+
+From catalogue version 8 a message frame may carry two more flags. Flag 8: the message's [headers](/writing-applications/headers/), a block of name and value pairs after the transaction id, stored in clear. Flag 16: the frame is a LINK, not a message: its payload is the 24-byte address (`queue log id | partition | offset`) of the message it stands for, and its id and transaction id are that message's. A reading queue's records hold links; a reader reads the source's record and hands back the message, so a routed message is written once. Positions are never in a link: the address is the same on every node.

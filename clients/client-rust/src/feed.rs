@@ -35,6 +35,7 @@ use serde_json::{json, Map, Value};
 use crate::error::{Error, Result};
 use crate::http::{HttpClient, Opts};
 use crate::js;
+use crate::routing::Headers;
 
 const FEED_ON_LEADER: &str = "feed_on_leader";
 /// The code of the error a broker without the feed route gives.
@@ -51,9 +52,9 @@ const MAX_WAIT_MILLIS: u64 = 30_000;
 /// One `where` condition, checked: `{ field, op, value }`.
 ///
 /// Fields: `queue`, `partition`, `transactionId`, `offset`, `position`,
-/// `data`, `data.<path>`. Ops: `= != < <= > >= in exists prefix !prefix`. A
-/// field the message does not have holds for no op, `!=` and `!prefix`
-/// included.
+/// `data`, `data.<path>`, `headers.<name>`. Ops: `= != < <= > >= in exists
+/// prefix !prefix`. A field the message does not have holds for no op, `!=`
+/// and `!prefix` included.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WhereCondition {
     pub field: String,
@@ -146,6 +147,9 @@ fn field_value<'a>(field: &str, msg: &'a Value) -> Option<&'a Value> {
         "position" => return msg.get("position"),
         "data" => return msg.get("data"),
         _ => {}
+    }
+    if let Some(name) = field.strip_prefix("headers.") {
+        return msg.get("headers")?.get(name);
     }
     let path = field.strip_prefix("data.")?;
     let mut cur = msg.get("data")?;
@@ -515,9 +519,11 @@ pub struct FeedEntry {
     pub transaction_id: String,
     pub data: Value,
     pub ts: String,
+    /// The message's headers, when it has some (broker catalogue version 8).
+    pub headers: Option<Headers>,
     /// The entry as the broker sent it, in the JS shape (`toEntry`):
     /// `{position, kind, queue, partition, partitionId, offset, id,
-    /// transactionId, data, ts, createdAt}`.
+    /// transactionId, data, ts, createdAt}`, and `headers` when it has some.
     pub(crate) shape: Arc<Value>,
 }
 
@@ -557,6 +563,17 @@ impl FeedEntry {
         m.insert("data".into(), in_shape);
         m.insert("ts".into(), Value::String(w.ts.clone()));
         m.insert("createdAt".into(), Value::String(w.ts.clone()));
+        let headers = w.headers.filter(|h| !h.is_empty());
+        if let Some(h) = &headers {
+            m.insert(
+                "headers".into(),
+                Value::Object(
+                    h.iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect(),
+                ),
+            );
+        }
         Self {
             position: w.position,
             kind: w.kind,
@@ -568,6 +585,7 @@ impl FeedEntry {
             transaction_id: w.transaction_id,
             data,
             ts: w.ts,
+            headers,
             shape: Arc::new(Value::Object(m)),
         }
     }
@@ -596,6 +614,8 @@ struct WireEntry {
     payload: Value,
     #[serde(default)]
     ts: String,
+    #[serde(default)]
+    headers: Option<Headers>,
 }
 
 /// The answer to a read, as the broker writes it.
@@ -1044,7 +1064,7 @@ const SPLIT_MIN_ENTRIES: usize = 8;
 /// light scan and decoded on several threads. Whatever the scan does not
 /// expect goes to the one-pass decode, which then says what is wrong.
 #[cfg(test)]
-fn parse_page(body: &[u8]) -> Result<FeedPage> {
+pub(crate) fn parse_page(body: &[u8]) -> Result<FeedPage> {
     parse_page_with(body, false)
 }
 
@@ -1297,6 +1317,45 @@ mod tests {
         assert!(!cond("data.country", "!prefix", Some(json!("I"))).holds(&msg));
         assert!(cond("transactionId", "!prefix", Some(json!("fd-")))
             .holds(&json!({"transactionId": "t1"})));
+    }
+
+    #[test]
+    fn a_condition_reads_a_header() {
+        let msg = json!({ "data": { "n": 1 }, "headers": { "type": "order.paid" } });
+        assert!(cond("headers.type", "=", Some(json!("order.paid"))).holds(&msg));
+        assert!(cond("headers.type", "prefix", Some(json!("order."))).holds(&msg));
+        assert!(cond("headers.type", "exists", None).holds(&msg));
+        // A header the message lacks holds for no op, `!=` included.
+        assert!(!cond("headers.source", "!=", Some(json!("web"))).holds(&msg));
+        assert!(!cond("headers.type", "exists", None).holds(&json!({ "data": {} })));
+    }
+
+    #[test]
+    fn an_entry_hands_its_headers_out() {
+        let page = parse_page(
+            json!({ "entries": [
+                { "id": "m1", "kind": "push", "offset": 1, "partition": "c1", "partitionId": "pid-1",
+                  "payload": { "n": 1 }, "position": 5, "queue": "orders", "transactionId": "t1",
+                  "ts": "2026-11-12T09:00:00.000000Z", "headers": { "type": "order.paid" } },
+                { "id": "m2", "kind": "push", "offset": 2, "partition": "c1", "partitionId": "pid-1",
+                  "payload": { "n": 2 }, "position": 6, "queue": "orders", "transactionId": "t2",
+                  "ts": "2026-11-12T09:00:00.000000Z" }
+            ], "next": 7, "caughtUp": true })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        let (a, b) = (&page.entries[0], &page.entries[1]);
+        assert_eq!(
+            a.headers.as_ref().map(|h| h["type"].as_str()),
+            Some("order.paid")
+        );
+        assert_eq!(a.to_value()["headers"], json!({ "type": "order.paid" }));
+        assert!(b.headers.is_none());
+        assert!(
+            b.to_value().get("headers").is_none(),
+            "only when it has some"
+        );
     }
 
     #[test]

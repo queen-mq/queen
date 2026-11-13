@@ -22,6 +22,7 @@ import { useGroupsStore } from '@/stores/groupsStore'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { groupRows, statusOf, stateWords, stateTitle, QUIET_STATES } from '../queues/groupsView'
+import { filterWords } from '../queues/routeView'
 import QgDetail from '../queues/QgDetail.vue'
 import QgAct from '../queues/QgAct.vue'
 import { span } from '../words.js'
@@ -67,6 +68,7 @@ const rows = computed(() => {
       name: r.label,
       mono: !r.queueMode,
       kafka: r.kafka,
+      filter: r.filter,
       mark: st.tone || '',
       state: stateWords(st) || '–',
       stateClass: st.tone || (QUIET_STATES.has(st.kind) ? 'qn-t3' : 'qn-t2'),
@@ -176,10 +178,14 @@ async function acted({ call, ok }) {
           @click="choose(r, $event)"
           @keydown.enter.self="choose(r)"
         >
-          <span role="cell" style="display: flex; align-items: center; gap: 8px">
+          <span role="cell" class="qg-cell" :class="{ filtered: r.filter }">
             <span v-if="r.mark" class="qn-mark" :class="r.mark" aria-hidden="true" />
-            <span :class="r.mono ? 'qn-mono' : 'qn-t2'" style="overflow: hidden; text-overflow: ellipsis">{{ r.name }}</span>
-            <span v-if="r.kafka" class="qn-tag" style="font-size: 11px">Kafka</span>
+            <span :class="r.mono ? 'qn-mono' : 'qn-t2'" class="qg-name">{{ r.name }}</span>
+            <span v-if="r.kafka" class="qn-tag qg-tag">Kafka</span>
+            <template v-if="r.filter">
+              <span class="qn-tag qg-tag" title="It gets only what its where takes">filtered</span>
+              <span class="qn-t3 qg-where" :title="r.filter.where || filterWords(r.filter)"><template v-if="r.filter.where">where <span class="qn-mono">{{ r.filter.where }}</span></template><template v-else>{{ filterWords(r.filter) }}</template></span>
+            </template>
           </span>
           <span role="cell" :class="r.stateClass" :title="r.stateTitle">{{ r.state }}</span>
           <span role="cell" class="r qn-num">{{ r.waiting }}</span>
@@ -219,6 +225,15 @@ async function acted({ call, ok }) {
 
 <style scoped>
 .qg { margin-top: 6px; }
+.qg-cell { display: flex; align-items: center; gap: 8px; }
+.qg-name { overflow: hidden; text-overflow: ellipsis; }
+.qg-tag { flex: none; font-size: 11px; }
+/* a filtered group: its where gives way first, its name not below 55% */
+.qg-cell.filtered .qg-name { flex-shrink: 0; max-width: 55%; }
+.qg-where { flex: 0 1 auto; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* a group open beside the list: the panel says its where, the narrow list keeps the name */
+.qg.split .qg-where { display: none; }
+.qg.split .qg-cell.filtered .qg-name { flex-shrink: 1; max-width: none; }
 .qg-list { min-width: 0; overflow-x: auto; }
 .qg-table { min-width: 860px; }
 /* a group open: the list keeps the group, its state and what waits; the panel has the rest */

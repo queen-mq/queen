@@ -27,10 +27,43 @@
 
 import * as logger from '../utils/logger.js'
 import { generateUUID, itemPartition } from './QueueBuilder.js'
-import { isValidUUID } from '../utils/validation.js'
+import { isValidUUID, checkHeaders } from '../utils/validation.js'
 import { kvOp, materializeKvOp } from '../kv/Kv.js'
 import { TimerBuilder } from './TimerBuilder.js'
 import { consumerGroupOf } from '../utils/consumerGroup.js'
+
+/**
+ * Where a `link` finds its message (`from`, PLAN_ROUTING.md §7): as a pop
+ * returned it, by its partitionId (a number), offset and transactionId; or,
+ * for a feed entry, whose partitionId is its partition's UUID, by its queue
+ * and partition. `consumerGroup` is the group it was popped with, when it was
+ * (a scoped credential must be allowed to consume the source with it); none
+ * is queue mode.
+ */
+export function linkSource(message, consumerGroup = null) {
+  if (message === null || typeof message !== 'object') {
+    throw new Error('link: pass messages as a pop or the feed returned them')
+  }
+  const { transactionId, partitionId } = message
+  const offset = typeof message.offset === 'string' && /^\d+$/.test(message.offset) ? Number(message.offset) : message.offset
+  if (typeof transactionId !== 'string' || transactionId.length === 0) {
+    throw new Error('link: the message has no transactionId')
+  }
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new Error(`link: the message has no offset (a 2.x pop and the feed give one), got ${JSON.stringify(message.offset)}`)
+  }
+  let from
+  if ((typeof partitionId === 'string' && /^\d+$/.test(partitionId)) || Number.isSafeInteger(partitionId)) {
+    from = { partitionId: String(partitionId), offset, transactionId }
+  } else if (typeof message.queue === 'string' && message.queue.length > 0 &&
+             typeof message.partition === 'string' && message.partition.length > 0) {
+    from = { queue: message.queue, partition: message.partition, offset, transactionId }
+  } else {
+    throw new Error('link: the message needs its partitionId as a pop returns it, or its queue and partition (a feed entry)')
+  }
+  if (consumerGroup) from.consumerGroup = consumerGroup
+  return from
+}
 
 export class TransactionBuilder {
   #httpClient
@@ -162,9 +195,65 @@ export class TransactionBuilder {
               result.traceId = item.traceId
             }
 
+            // An envelope's headers, as QueueBuilder.push reads them.
+            const headers = 'data' in item || 'payload' in item ? checkHeaders(item.headers) : null
+            if (headers) {
+              result.headers = headers
+            }
+
             return result
           })
         })
+
+        return this
+      },
+
+      /**
+       * Forward messages this worker holds into this queue, without sending
+       * their payload again (PLAN_ROUTING.md §7):
+       *
+       *     await queen.transaction()
+       *       .ack(message)
+       *       .queue('manual-review').partition(message.partition)
+       *       .link([message], { headers: { 'review-reason': 'amount' } })
+       *       .commit()
+       *
+       * Each message becomes one `link` operation: the queue gets the same
+       * message, with its id and transactionId. A second link of it into the
+       * same partition is a no-op that still commits (its result says
+       * `duplicate: true`), so a retry is safe; a pushed duplicate still
+       * rolls the bundle back. Every link's result has `type: 'link'`.
+       * `headers` are the link's own, laid over the message's. Without
+       * `.partition(p)` each message keeps its partition's name.
+       *
+       * A message is named as a pop returned it (partitionId, offset,
+       * transactionId, and the group it was popped with, `consumerGroup`, or
+       * `{ consumerGroup }` here), or a feed entry by its queue and
+       * partition. The transaction rolls back (`success:false`, which
+       * commit() throws with `.reason`) with `source_gone` when the message is
+       * no longer kept, `source_mismatch` when its offset holds another one,
+       * `reading_queue` for a reading queue (it takes only its sources), and
+       * `cluster_version` before every node reads catalogue version 8.
+       */
+      link: (messages, opts = {}) => {
+        const msgArray = Array.isArray(messages) ? messages : [messages]
+        const headers = checkHeaders(opts.headers, 'link')
+        const explicitGroup = opts.consumerGroup || opts.group || null
+
+        logger.log('TransactionBuilder.queue.link', { queue: queueName, partition, count: msgArray.length })
+
+        for (const message of msgArray) {
+          const operation = { type: 'link', queue: queueName }
+          const target = partition ?? (message && typeof message.partition === 'string' && message.partition.length > 0 ? message.partition : null)
+          if (target !== null && target !== undefined) {
+            operation.partition = String(target)
+          }
+          operation.from = linkSource(message, explicitGroup || consumerGroupOf(message))
+          if (headers) {
+            operation.headers = headers
+          }
+          this.#operations.push(operation)
+        }
 
         return this
       }
@@ -337,7 +426,7 @@ export class TransactionBuilder {
   /**
    * The lock whose guard is the precondition a rolled-back bundle names, if
    * it is one of this bundle's. `failedIndex` is in the FLAT space of
-   * `results[]`: every pushed item and every ack first, then the `kv` rider.
+   * `results[]`: every pushed item, link and ack first, then the `kv` rider.
    */
   #failedGuard(result) {
     if (this.#guards.length === 0 || !Number.isInteger(result.failedIndex)) return null
@@ -418,10 +507,11 @@ export class TransactionBuilder {
         // to match the message. The ones worth branching on from a 2.x broker:
         // bad_request, duplicate (a pushed transactionId is already stored),
         // rejected_ack (an acked message is no longer leased by this worker, or
-        // was popped under a different consumer group than the ack names), and
-        // too_large. A 1.x broker spells the ack one ack_rejected, and also
-        // sends timer_horizon_exceeded, payload_too_large, misaligned and
-        // db_error.
+        // was popped under a different consumer group than the ack names),
+        // too_large, and for a link source_gone, source_mismatch,
+        // reading_queue and cluster_version. A 1.x broker spells the ack one
+        // ack_rejected, and also sends timer_horizon_exceeded,
+        // payload_too_large, misaligned and db_error.
         if (result.reason) error.reason = result.reason
         error.result = result
         throw error

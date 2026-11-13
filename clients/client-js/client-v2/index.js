@@ -38,6 +38,10 @@ export { CLIENT_DEFAULTS, QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS, BUFFER
 // `.code`, so callers can branch on it (alert, fall back, exit) without
 // matching on the message text.
 export { CONFLATION_UNSUPPORTED } from './utils/conflation.js'
+// The same degrade-loudly codes for routing (utils/routing.js): a pop with a
+// where whose answer lacks the `filtered` echo, and a configure with `from`
+// whose answer lacks its `route`, on a broker older than these features.
+export { FILTERED_GROUPS_UNSUPPORTED, READING_QUEUES_UNSUPPORTED } from './utils/routing.js'
 
 // Tenant feed — every push of the tenant's queues in log order (queen.feed()).
 export { FeedReader, whereCondition, sinceToIso } from './feed/Feed.js'

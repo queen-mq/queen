@@ -40,6 +40,9 @@ func (cb *ConsumeBuilder) Execute(ctx context.Context) error {
 	if cb.qb.commitOnDelivery {
 		return ErrCommitOnDeliveryConsume
 	}
+	if err := cb.qb.checkWhere(); err != nil {
+		return err
+	}
 	opts := cb.qb.getConsumeOptions()
 
 	// Create consumer manager

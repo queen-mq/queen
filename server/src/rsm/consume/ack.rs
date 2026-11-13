@@ -94,6 +94,7 @@ fn file_dlq(
         error: error.to_string(),
         retry_count,
         failed_at_us: now_us,
+        headers: snap.headers,
     }
 }
 
@@ -1184,6 +1185,7 @@ impl Engine {
                 error: c.error.clone(),
                 retry_count: cur.batch_retry_count,
                 failed_at_us: now,
+                headers: c.snapshot.headers.clone(),
             };
             // GREATEST guards a stale caller from moving the cursor backward.
             cur.committed = cur.committed.max(c.offset as i64);

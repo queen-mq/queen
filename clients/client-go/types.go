@@ -27,6 +27,18 @@ type Message struct {
 	// for details.
 	ProducerSub string `json:"producerSub,omitempty"`
 
+	// Headers are the message's headers (a cluster at catalogue version 8),
+	// nil when it has none. A message read through a link -- from a reading
+	// queue, a filtered group, a Link -- has its source's headers with the
+	// link's own written over them.
+	Headers map[string]string `json:"headers,omitempty"`
+	// Offset is the message's offset in its partition, as the pop answered it.
+	// With PartitionID and TransactionID it names the message for a Link.
+	Offset int64 `json:"offset,omitempty"`
+	// ConsumerGroup is the group the pop delivered the message to
+	// (__QUEUE_MODE__ in queue mode), as the pop answered it.
+	ConsumerGroup string `json:"consumerGroup,omitempty"`
+
 	// trace is the function to add traces to this message
 	trace TraceFunc
 }
@@ -210,6 +222,32 @@ type QueueConfig struct {
 	DlqAfterMaxRetries bool `json:"dlqAfterMaxRetries,omitempty" yaml:"dlqAfterMaxRetries,omitempty"`
 	// EncryptionEnabled enables payload encryption
 	EncryptionEnabled bool `json:"encryptionEnabled,omitempty" yaml:"encryptionEnabled,omitempty"`
+
+	// From makes the queue a reading queue (a cluster at catalogue version 8):
+	// it takes no pushes, and reads the messages of these source queues that
+	// meet their where, as links -- the same message, with the same id and
+	// transactionId, its payload kept once, at the source. ReadFrom("orders")
+	// is one source; a ReadSource with a Where of its own filters that one.
+	// Option("from", nil) stops reading.
+	//
+	// A reading queue keeps what its sources keep: beside From the broker
+	// refuses (400 reading_queue) RetentionEnabled, RetentionSeconds,
+	// CompletedRetentionSeconds, MaxWaitTimeSeconds, DedupWindowSeconds,
+	// EncryptionEnabled, MaxSize and the retentionSinkHold options. This SDK
+	// sends an option only when it is set, so leaving them unset is enough.
+	From ReadSources `json:"from,omitempty" yaml:"from,omitempty"`
+	// Where is the condition the messages of the sources given by name only
+	// must meet: the one-string form ("data.country = 'IT'") or conditions (a
+	// FeedCondition, a list of them, [field, op, value] lists), ANDed. Fields:
+	// queue, partition, transactionId, data, data.<path>, headers.<name>.
+	Where interface{} `json:"where,omitempty" yaml:"where,omitempty"`
+	// PartitionBy names a reading queue's partitions: "same" (the broker's
+	// default: as at the source), "data.<path>" or "headers.<name>". A message
+	// without that field is not read (the broker counts it as unrouted).
+	PartitionBy string `json:"partitionBy,omitempty" yaml:"partitionBy,omitempty"`
+	// Start is where a new reading queue starts: "now" (the broker's default)
+	// or "all", every match its sources still keep.
+	Start string `json:"start,omitempty" yaml:"start,omitempty"`
 }
 
 // BufferConfig contains configuration for client-side message buffering.
@@ -307,6 +345,11 @@ type ConsumeOptions struct {
 	// the full backlog; the client detects that and fails loudly rather than
 	// silently draining it.
 	Conflation              bool
+	// Where is the consumer group's where, as every pop sends it: the
+	// one-string form, or the conditions as their JSON list (QueueBuilder.Where
+	// and WhereExpr build it). "" = an unfiltered group. It needs Group and
+	// Queue: see QueueBuilder.Where.
+	Where                   string
 }
 
 // PopOptions contains options for popping messages.
@@ -353,6 +396,9 @@ type PopOptions struct {
 	// unset to let the broker size the claim from Batch (capped at 64, the
 	// measured checkout width), or set it explicitly.
 	Conflation       bool
+	// Where is the consumer group's where (a filtered group). See
+	// ConsumeOptions.Where and QueueBuilder.Where.
+	Where            string
 }
 
 // AckOptions contains options for acknowledging messages.
@@ -432,12 +478,22 @@ func (r *TransactionResponse) IsKVPrecondition() bool {
 }
 
 // PushItem represents an item to be pushed to a queue.
+//
+// Given to Push (QueueBuilder.Push or a transaction's Push) in place of a bare
+// payload, it is one message with its own TransactionID, TraceID, Partition
+// and Headers.
 type PushItem struct {
 	Queue         string                 `json:"queue"`
 	Partition     string                 `json:"partition,omitempty"`
 	Payload       interface{}            `json:"payload"`
 	TransactionID string                 `json:"transactionId,omitempty"`
 	TraceID       string                 `json:"traceId,omitempty"`
+	// Headers are the message's headers (a cluster at catalogue version 8): a
+	// map of strings, names of 1-64 bytes of a-z 0-9 . _ - (names starting
+	// with "queen-" are the broker's). Never encrypted and never part of
+	// deduplication. By default the broker takes 64 headers and 8 KiB of them
+	// per message and refuses more with 400 bad_body.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // PushResponse is the response for a single pushed item.
@@ -455,7 +511,7 @@ type BatchMessageHandler func(ctx context.Context, msgs []*Message) error
 
 // Operation represents an operation in a transaction.
 type Operation struct {
-	Type          string      `json:"type"` // "ack" or "push"
+	Type          string      `json:"type"` // "ack", "push" or "link"
 	TransactionID string      `json:"transactionId,omitempty"`
 	PartitionID   string      `json:"partitionId,omitempty"`
 	// LeaseID is the lease an ack operation is fenced with: the one its message
@@ -465,6 +521,13 @@ type Operation struct {
 	Status        string      `json:"status,omitempty"`
 	ConsumerGroup string      `json:"consumerGroup,omitempty"`
 	Items         []PushItem  `json:"items,omitempty"`
+	// Queue, Partition, From and Headers are a link operation's: the queue and
+	// partition the message goes to, the message as a read returned it, and
+	// the link's own headers. Omitted on a push and an ack.
+	Queue     string            `json:"queue,omitempty"`
+	Partition string            `json:"partition,omitempty"`
+	From      *LinkSource       `json:"from,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
 }
 
 // HealthResponse is the response from a health check.
@@ -503,6 +566,8 @@ type pushRequestItem struct {
 	Payload       interface{} `json:"payload"`
 	TransactionID string      `json:"transactionId,omitempty"`
 	TraceID       string      `json:"traceId,omitempty"`
+	// omitempty: a message without headers is the request it was before them.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // ackRequest is the internal request structure for single ack operations.

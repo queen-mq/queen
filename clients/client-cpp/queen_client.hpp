@@ -7,8 +7,10 @@
  *   TransactionResult); payloads stay nlohmann::json
  * - Push, pop, consume (per message or per batch, any concurrency), ack with
  *   every status, the ack reading its consumer group and lease from the message
- * - Transactions: acks, pushes (to any partition), KV writes and timers in one
- *   log entry, guarded by a lock
+ * - Transactions: acks, pushes (to any partition), links, KV writes and timers
+ *   in one log entry, guarded by a lock
+ * - Routing without copies: message headers, filtered consumer groups
+ *   (QueueBuilder::where), reading queues (QueueConfig::from) and link
  * - KV (the eight operations), timers (schedule, cancel, peek, list), locks
  *   and semaphores with background renewal, ephemeral queues, reads by offset
  * - admin(): the management and observability routes
@@ -245,6 +247,120 @@ struct ClientConfig {
 };
 
 /**
+ * A `where`: conditions on a message, all of which must hold (AND). A filtered
+ * consumer group (QueueBuilder::where) and a reading queue (QueueConfig::where,
+ * ReadSource::where) take only the messages that pass it. Two forms, the same
+ * to the broker:
+ *
+ *   queen::Where("data.kind", "in", {"order.paid", "order.refunded"})
+ *       .add("headers.type", "=", "order")                    // a list of conditions
+ *   queen::Where("data.kind in ('order.paid', 'order.refunded') and data.total > 100")
+ *
+ * Fields: queue, partition, transactionId, data, data.<path> (depth 16) and
+ * headers.<name>. Ops: = != < <= > >= in exists prefix !prefix; `in` takes an
+ * array, prefix and !prefix a string, a comparison a number or a string. A
+ * field the message lacks matches no condition, `!=` included. AND only: `in`
+ * covers most "or". The broker checks the rest, with its limits (16
+ * conditions and 64 values in one `in` by default). Needs a cluster at
+ * catalogue version 8; an older one answers `cluster_version`.
+ */
+class Where {
+private:
+    json conditions_ = json::array();  // the list form
+    std::string text_;                 // the string form
+
+    static void mixed() {
+        throw std::invalid_argument(
+            "where: a where is a list of conditions or one string, not both: write every "
+            "condition in the string (\"... and data.total > 100\")");
+    }
+
+public:
+    /** No condition: every message. */
+    Where() = default;
+
+    /** The string form: "data.kind = 'order.paid' and data.total > 100". */
+    Where(const char* text) : text_(text ? text : "") {}
+    Where(std::string text) : text_(std::move(text)) {}
+
+    /** One condition; add() ANDs more. */
+    Where(const std::string& field, const std::string& op, const json& value = nullptr) {
+        add(field, op, value);
+    }
+
+    /**
+     * AND one condition. The value is left out for `exists`. Throws
+     * std::invalid_argument for an unknown op, an `in` without an array, a
+     * prefix without a string, or a where in the string form.
+     */
+    Where& add(const std::string& field, const std::string& op, const json& value = nullptr) {
+        static const char* const OPS[] = {"=", "!=", "<", "<=", ">", ">=", "in", "exists",
+                                          "prefix", "!prefix"};
+        if (!text_.empty()) mixed();
+        if (field.empty()) {
+            throw std::invalid_argument("where: a condition needs a field");
+        }
+        if (std::find(std::begin(OPS), std::end(OPS), op) == std::end(OPS)) {
+            throw std::invalid_argument("where: unknown op '" + op +
+                                        "' (= != < <= > >= in exists prefix !prefix)");
+        }
+        if (op == "in" && !value.is_array()) {
+            throw std::invalid_argument("where: in on " + field + " needs an array");
+        }
+        if ((op == "prefix" || op == "!prefix") && !value.is_string()) {
+            throw std::invalid_argument("where: " + op + " on " + field + " needs a string");
+        }
+        json condition = {{"field", field}, {"op", op}};
+        if (op != "exists") condition["value"] = value;
+        conditions_.push_back(std::move(condition));
+        return *this;
+    }
+
+    /** AND another where of the same form; two strings are joined with "and". */
+    Where& add(const Where& other) {
+        if (!other.text_.empty()) {
+            if (!conditions_.empty()) mixed();
+            text_ = text_.empty() ? other.text_ : text_ + " and " + other.text_;
+        } else if (!other.conditions_.empty()) {
+            if (!text_.empty()) mixed();
+            for (const auto& condition : other.conditions_) conditions_.push_back(condition);
+        }
+        return *this;
+    }
+
+    bool empty() const { return conditions_.empty() && text_.empty(); }
+
+    /** The list of {field, op, value}, or the string; null for no condition. */
+    json to_json() const {
+        if (!text_.empty()) return text_;
+        return conditions_.empty() ? json(nullptr) : conditions_;
+    }
+
+    /** As a query parameter carries it (a pop's `where`): the string, or the list as JSON. */
+    std::string to_param() const {
+        if (!text_.empty()) return text_;
+        return conditions_.empty() ? std::string() : conditions_.dump();
+    }
+};
+
+/**
+ * One source of a reading queue (QueueConfig::from): a queue name, and the
+ * where its messages must pass. Without a where of its own the source takes
+ * the reading queue's (QueueConfig::where).
+ *
+ *   cfg.from = {"orders"};
+ *   cfg.from = {{"orders", "data.country = 'IT'"}, "refunds"};
+ */
+struct ReadSource {
+    std::string queue;
+    Where where;
+
+    ReadSource(const char* queue_name) : queue(queue_name ? queue_name : "") {}
+    ReadSource(std::string queue_name, Where condition = Where())
+        : queue(std::move(queue_name)), where(std::move(condition)) {}
+};
+
+/**
  * A queue's options for configure() / create(). Every field is optional and
  * only the ones set are sent; the broker's default owns the rest (the table on
  * the docs' Queues page). Names and units are the broker's, in this client's
@@ -252,6 +368,18 @@ struct ClientConfig {
  *
  * configure() is a FULL upsert on the broker: an option left unset goes back
  * to its default, it does not keep the value an earlier configure gave it.
+ *
+ * A READING QUEUE (from, where, partition_by, start; catalogue version 8)
+ * holds no messages of its own: it reads the messages of its sources that
+ * pass `where`, the same messages with the same id and transactionId, with
+ * its own lease, retries, DLQ, priority and partitions. Its sources decide
+ * what is kept, so the broker refuses retention_enabled, retention_seconds,
+ * completed_retention_seconds, max_wait_time_seconds, dedup_window_seconds,
+ * encryption_enabled, max_size, retention_sink_hold and
+ * retention_sink_hold_max_seconds on it (400 `reading_queue`). Since only the
+ * options set are sent, a reading queue's configure carries none of them
+ * unless the caller set one. A push into a reading queue is refused: push to
+ * its sources.
  */
 struct QueueConfig {
     std::optional<int> lease_time;                  // seconds, default 300 (60 for a queue made by push)
@@ -273,6 +401,22 @@ struct QueueConfig {
     std::optional<bool> encryption_enabled;
     std::optional<std::string> retention_sink_hold;
     std::optional<int> retention_sink_hold_max_seconds;
+
+    // A reading queue (see above).
+    /// The queues it reads, each a name or {name, where}. Sent as a list.
+    std::optional<std::vector<ReadSource>> from;
+    /// What a source given by name only must pass. An empty Where is sent as
+    /// null: every message (how an existing reading queue drops its where).
+    std::optional<Where> where;
+    /// Its partitions: "same" (the default, the source's), "data.<path>" or
+    /// "headers.<name>". A message without that field is not routed.
+    std::optional<std::string> partition_by;
+    /// "now" (the default: messages pushed from now on) or "all" (start with
+    /// every match the sources still keep).
+    std::optional<std::string> start;
+    /// Sends `from: null`: a reading queue reads nothing more and becomes an
+    /// ordinary queue; what it holds stays readable. Not with `from`.
+    bool stop_reading = false;
 
     json to_json() const {
         json out = json::object();
@@ -298,6 +442,24 @@ struct QueueConfig {
         put("encryptionEnabled", encryption_enabled);
         put("retentionSinkHold", retention_sink_hold);
         put("retentionSinkHoldMaxSeconds", retention_sink_hold_max_seconds);
+        if (stop_reading && from) {
+            throw std::invalid_argument("stop_reading and from: a queue reads its sources or nothing");
+        }
+        if (stop_reading) out["from"] = nullptr;
+        if (from) {
+            json sources = json::array();
+            for (const auto& source : *from) {
+                if (source.where.empty()) {
+                    sources.push_back(source.queue);
+                } else {
+                    sources.push_back({{"queue", source.queue}, {"where", source.where.to_json()}});
+                }
+            }
+            out["from"] = std::move(sources);
+        }
+        if (where) out["where"] = where->to_json();
+        put("partitionBy", partition_by);
+        put("start", start);
         return out;
     }
 };
@@ -386,6 +548,12 @@ struct ConsumeOptions {
     bool conflation = false;
     /// Set to stop the loop from another thread.
     std::optional<Cancel> cancel;
+    /**
+     * A filtered group: the group takes only the messages that pass this
+     * (catalogue version 8). Sent on every pop of the group, the same value;
+     * the broker fixes it at the group's first pop. Needs `group` and `queue`.
+     */
+    Where where;
 };
 
 struct BufferOptions {
@@ -597,6 +765,27 @@ public:
 
     const std::string& queue() const { return queue_; }
     const std::string& group() const { return group_; }
+};
+
+/**
+ * Routing was asked of a broker that does not have it (catalogue version 8,
+ * PLAN_ROUTING.md): a pop that sent a `where` and got an answer that does not
+ * say `"filtered":true`, or a configure that sent `from` and got an answer
+ * with no `route`.
+ *
+ * Conflation's degrade-loudly rule, for the same reason: an older broker
+ * ignores the unknown `where` parameter and hands a group that asked for a few
+ * kinds of message EVERY message, and takes `from` for an unknown option and
+ * makes an ordinary, empty queue, with nothing said. A broker that filters
+ * echoes `"filtered":true` on every answer of a filtered group's pop, empty
+ * ones included (a 200 with that body, never a bodiless 204), so the missing
+ * echo is proof on the first round trip, before a message is handled. pop()
+ * and configure() throw it, and a consume loop stops with it.
+ */
+class RoutingUnsupportedError : public Error {
+public:
+    explicit RoutingUnsupportedError(const std::string& message) : Error(message) {
+    }
 };
 
 /**
@@ -1098,6 +1287,25 @@ inline void enforce_conflation_contract(bool requested, const json& response,
 }
 
 /**
+ * A filtered group's half of the same rule (RoutingUnsupportedError): no-op
+ * unless the pop sent a `where`; then the answer must say `"filtered":true`. A
+ * JSON null -- a bodiless 204, which a broker that filters never sends such a
+ * pop -- is the old broker with nothing to deliver, and fails too.
+ */
+inline void enforce_filter_contract(bool requested, const json& response, const std::string& queue,
+                                    const std::string& group) {
+    const bool filtered = response.is_object() && response.contains("filtered") &&
+                          response["filtered"].is_boolean() && response["filtered"].get<bool>();
+    if (!requested || filtered) {
+        return;
+    }
+    throw RoutingUnsupportedError(
+        "this broker does not filter consumer groups; upgrade it (queue '" + queue +
+        "', consumer group '" + group + "': the pop sent a where and the answer does not say "
+        "\"filtered\":true, so the group would get every message)");
+}
+
+/**
  * Standard base64 (RFC 4648), WITH padding.
  *
  * A timer payload travels base64 on the wire (PLAN_KV_TIMERS.md §4.1) and the
@@ -1494,6 +1702,15 @@ inline const char* to_string(AckStatus status) {
     return "completed";
 }
 
+/**
+ * A message's headers: names to strings (catalogue version 8). A name is 1 to
+ * 64 bytes of a-z 0-9 . _ -; names starting with "queen-" are the broker's.
+ * Never encrypted, never part of deduplication (the transaction id is the
+ * key): no secrets or personal data in headers. 64 headers and 8 KiB a
+ * message by default (QUEEN_MAX_HEADERS, QUEEN_MAX_HEADER_BYTES).
+ */
+using Headers = std::map<std::string, std::string>;
+
 namespace util {
 
 /** A string field of a JSON object, "" when absent, null or not a string. A number is its text. */
@@ -1504,6 +1721,18 @@ inline std::string text_of(const json& object, const char* key) {
     if (it->is_string()) return it->get<std::string>();
     if (it->is_number()) return it->dump();
     return std::string();
+}
+
+/** The `headers` object of a message or a record; empty when it has none (absent or null). */
+inline Headers headers_of(const json& object) {
+    Headers out;
+    if (!object.is_object()) return out;
+    auto it = object.find("headers");
+    if (it == object.end() || !it->is_object()) return out;
+    for (auto header = it->begin(); header != it->end(); ++header) {
+        if (header->is_string()) out[header.key()] = header->get<std::string>();
+    }
+    return out;
 }
 
 } // namespace util
@@ -1539,6 +1768,9 @@ struct Message {
     int delivery_attempt = 0;
     /// The message's offset in its partition, when the broker sent it.
     std::optional<long long> offset;
+    /// Its headers; empty when it has none. A message read through a link
+    /// carries its source's headers with the link's own over them.
+    Headers headers = {};
 
     /**
      * Read one message of a pop answer. `envelope` is the answer around it:
@@ -1573,25 +1805,28 @@ struct Message {
         if (item.is_object() && item.contains("offset") && item["offset"].is_number_integer()) {
             m.offset = item["offset"].get<long long>();
         }
+        m.headers = util::headers_of(item);
         return m;
     }
 
-    /** The broker's own shape, for logging or forwarding. */
+    /** The broker's own shape, for logging or forwarding (`headers` only when it has some). */
     json to_json() const {
         auto opt = [](const std::string& value) { return value.empty() ? json(nullptr) : json(value); };
-        return {{"id", id},
-                {"transactionId", transaction_id},
-                {"traceId", opt(trace_id)},
-                {"data", data},
-                {"producerSub", opt(producer_sub)},
-                {"createdAt", created_at},
-                {"queue", queue},
-                {"partition", partition},
-                {"partitionId", partition_id},
-                {"leaseId", lease_id},
-                {"consumerGroup", consumer_group},
-                {"deliveryAttempt", delivery_attempt},
-                {"offset", offset ? json(*offset) : json(nullptr)}};
+        json out = {{"id", id},
+                    {"transactionId", transaction_id},
+                    {"traceId", opt(trace_id)},
+                    {"data", data},
+                    {"producerSub", opt(producer_sub)},
+                    {"createdAt", created_at},
+                    {"queue", queue},
+                    {"partition", partition},
+                    {"partitionId", partition_id},
+                    {"leaseId", lease_id},
+                    {"consumerGroup", consumer_group},
+                    {"deliveryAttempt", delivery_attempt},
+                    {"offset", offset ? json(*offset) : json(nullptr)}};
+        if (!headers.empty()) out["headers"] = headers;
+        return out;
     }
 };
 
@@ -1600,10 +1835,12 @@ struct Message {
  * Give every message a transaction id derived from the work
  * ("receipt-" + order_id): a repeat inside the queue's dedup window is then
  * answered `duplicate` and writes nothing. Empty = minted here (a UUIDv7).
+ * `headers` travel beside the payload, in clear (see Headers).
  */
 struct PushItem {
     json payload;
     std::string transaction_id;
+    Headers headers = {};
 };
 
 /** What the broker did with one pushed message. */
@@ -1755,8 +1992,9 @@ struct ConsumeSummary {
 struct TransactionResult {
     bool success = false;
     std::string transaction_id;
-    /// One result per operation, in a flat index space: every pushed item and
-    /// every ack in the order added, then the kv rider, then the timers.
+    /// One result per operation, in a flat index space: every pushed item,
+    /// every link and every ack in the order added, then the kv rider, then
+    /// the timers.
     json results = json::array();
     std::string error;
     std::string reason;
@@ -2021,6 +2259,9 @@ struct TimerSchedule {
     long long delay_millis = 0;
     std::string partition;                   // empty = the broker's "Default"
     std::string txn;                         // empty = minted here
+    /// The fired message's headers (see Headers; catalogue version 8): it
+    /// keeps them, and peek() shows them. Empty = none, and none are sent.
+    Headers headers = {};
 };
 
 /**
@@ -2142,6 +2383,33 @@ struct KvPrefixOptions {
 };
 
 namespace wire {
+
+/**
+ * A message's headers as a JSON body carries them (catalogue version 8): a
+ * push, a transaction push, a link and a timer's schedule all mint them here.
+ * Checked so a mistake surfaces at the call: a name is 1 to 64 bytes of
+ * a-z 0-9 . _ - and does not start with "queen-". How many and how large is
+ * the broker's to say (its limits are settings). Throws std::invalid_argument.
+ */
+inline json headers_json(const Headers& headers) {
+    for (const auto& header : headers) {
+        const std::string& name = header.first;
+        bool ok = !name.empty() && name.size() <= 64;
+        for (size_t i = 0; ok && i < name.size(); ++i) {
+            const char c = name[i];
+            ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        }
+        if (!ok) {
+            throw std::invalid_argument("header name '" + name +
+                                        "': 1 to 64 bytes of a-z, 0-9, '.', '_' or '-'");
+        }
+        if (name.rfind("queen-", 0) == 0) {
+            throw std::invalid_argument("header name '" + name +
+                                        "': names starting with \"queen-\" are the broker's");
+        }
+    }
+    return json(headers);
+}
 
 inline json kv_get_op(const std::string& ns, const std::string& key) {
     return json{{"op", "get"}, {"ns", ns}, {"key", key}};
@@ -2354,6 +2622,9 @@ inline json timer_schedule_op(const TimerSchedule& timer) {
     if (!timer.partition.empty()) {
         op["partition"] = timer.partition;
     }
+    if (!timer.headers.empty()) {
+        op["headers"] = headers_json(timer.headers);
+    }
     return op;
 }
 
@@ -2525,6 +2796,55 @@ inline json single_result(const json& response, const char* what) {
         "alignment failure, not an absent key");
 }
 
+// ---------------------------------------------------------------------------
+// Links (catalogue version 8): a transaction operation beside push and ack.
+// ---------------------------------------------------------------------------
+
+/**
+ * One `link` operation of a transaction: `queue` (and `partition`; none =
+ * "Default") gets the message `message` names, the same message with its id
+ * and transaction id, and its payload does not cross the wire again. The
+ * source is named as a pop returned it -- partitionId, offset, transactionId,
+ * and the group it was popped with (none in queue mode) -- or, when its
+ * partition id is not a pop's (a feed entry's is a UUID), by queue and
+ * partition. `headers` are the link's own, read over the source's.
+ */
+inline json link_op(const std::string& queue, const std::string& partition, const Message& message,
+                    const Headers& headers) {
+    if (queue.empty()) {
+        throw std::invalid_argument("a transaction link needs a queue name");
+    }
+    if (message.transaction_id.empty()) {
+        throw std::invalid_argument("cannot link a message with no transaction id");
+    }
+    if (!message.offset) {
+        throw std::invalid_argument(
+            "cannot link a message with no offset: link a message as a pop returned it");
+    }
+    json from = json::object();
+    const std::string& pid = message.partition_id;
+    if (!pid.empty() && std::all_of(pid.begin(), pid.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+        from["partitionId"] = pid;
+    } else if (!message.queue.empty() && !message.partition.empty()) {
+        from["queue"] = message.queue;
+        from["partition"] = message.partition;
+    } else {
+        throw std::invalid_argument(
+            "cannot link a message with no partition id, nor a queue and a partition");
+    }
+    from["offset"] = *message.offset;
+    from["transactionId"] = message.transaction_id;
+    // A scoped credential must be allowed to consume the source with it.
+    json group = util::group_on_wire(message.consumer_group);
+    if (!group.is_null()) from["consumerGroup"] = std::move(group);
+
+    json op = {{"type", "link"}, {"queue", queue}};
+    if (!partition.empty()) op["partition"] = partition;
+    op["from"] = std::move(from);
+    if (!headers.empty()) op["headers"] = headers_json(headers);
+    return op;
+}
+
 } // namespace wire
 
 // ============================================================================
@@ -2539,19 +2859,22 @@ inline json single_result(const json& response, const char* what) {
 //
 // All integers little-endian. flags: 1 = the body is one zstd frame of raw_len
 // bytes, 2 = answer with the counts only, 4 = every item carries its
-// transaction id (empty = the broker mints it). No trace id. Each payload is
-// one JSON document.
+// transaction id (empty = the broker mints it). No trace id, no headers. Each
+// payload is one JSON document.
 //
 // With flag 8 (encode_push_frames) a group is the messages as the broker stores
 // them, compressed here once:
 //
 //   body:  u32 groups | per group: u16 len, queue | u16 len, partition | u32 n | u32 z_len | z
-//   z:     one zstd frame of n frames: u32 body_len | u8 0 | u8[16] message id
-//          | u16 len, transactionId | payload
+//   z:     one zstd frame of n frames: u32 body_len | u8 flags | u8[16] message id
+//          | u16 len, transactionId | [u16 len, headers, flag 8] | payload
 //
-// The message id is a version-7 UUID minted by the client; a message without
-// its own transaction id uses the id's text. The broker checks every frame and
-// keeps the compressed bytes as they are, so it does not compress them again.
+// A frame's flags are 0, or 8 when the message has headers (catalogue version
+// 8): the block is u16 count | (u8 len, name | u16 len, value) x count, in name
+// order (encode_headers). The message id is a version-7 UUID minted by the
+// client; a message without its own transaction id uses the id's text. The
+// broker checks every frame and keeps the compressed bytes as they are, so it
+// does not compress them again.
 //
 // A broker that does not know this body answers 400; a client sends it only
 // when ClientConfig::binary_push is set, so by default a push is the JSON
@@ -2581,7 +2904,12 @@ inline json single_result(const json& response, const char* what) {
 // A record's bytes are `count` frames:
 //
 //   u32 body_len | u8 flags | u8[16] message id | [u8[16] trace id, flag 1]
-//   | u16 len, transactionId | [u16 len, producer, flag 2] | payload
+//   | u16 len, transactionId | [u16 len, producer, flag 2]
+//   | [u16 len, headers, flag 8] | payload
+//
+// The broker answers JSON instead for a record with headers or links (flag
+// 16); a frame with headers is still read here, and a link, which only the
+// broker can resolve, fails the answer as an encrypted frame does.
 //
 // Message i of a record has offset base_offset+i and belongs to the delivery
 // when that lies in the claim's start..=end. The JSON object in front holds
@@ -2649,6 +2977,9 @@ struct PushBatch {
     std::vector<std::string> payloads;                          // each one JSON document
     // Empty optional, or one transaction id per payload ("" = the broker mints it).
     std::optional<std::vector<std::string>> transaction_ids;
+    // Empty optional, or one headers block per payload (encode_headers; "" =
+    // none). Only the framed forms carry them.
+    std::optional<std::vector<std::string>> headers = std::nullopt;
 };
 
 /** A name or a transaction id does not fit its 16-bit length. */
@@ -2676,10 +3007,36 @@ inline void put_text16(std::string& out, const std::string& text, const char* wh
     out += text;
 }
 
+/**
+ * Headers as a frame carries them (flag 8): u16 count | (u8 len, name | u16
+ * len, value) x count, in name order. No headers is no block (""), never a
+ * count of 0, which the broker refuses. Throws PushBinaryTooLong for a name
+ * over 255 bytes or a value or block over 65535: such headers travel as JSON,
+ * where the broker says what is wrong with them.
+ */
+inline std::string encode_headers(const Headers& headers) {
+    if (headers.empty()) return std::string();
+    if (headers.size() > 0xFFFF) throw PushBinaryTooLong("more than 65535 headers");
+    std::string block;
+    put_u16(block, headers.size());
+    for (const auto& header : headers) {
+        if (header.first.size() > 0xFF) throw PushBinaryTooLong("a header name longer than 255 bytes");
+        block.push_back(static_cast<char>(header.first.size()));
+        block += header.first;
+        put_text16(block, header.second, "a header value");
+    }
+    if (block.size() > 0xFFFF) throw PushBinaryTooLong("headers longer than 65535 bytes");
+    return block;
+}
+
 inline void check_push_batch(const PushBatch& batch) {
     if (batch.transaction_ids && batch.transaction_ids->size() != batch.payloads.size()) {
         throw std::invalid_argument(std::to_string(batch.transaction_ids->size()) +
             " transaction ids for " + std::to_string(batch.payloads.size()) + " payloads");
+    }
+    if (batch.headers && batch.headers->size() != batch.payloads.size()) {
+        throw std::invalid_argument(std::to_string(batch.headers->size()) +
+            " headers blocks for " + std::to_string(batch.payloads.size()) + " payloads");
     }
 }
 
@@ -2700,6 +3057,12 @@ inline std::string encode_push_binary(const std::vector<PushBatch>& batches,
     put_u32(body, batches.size());
     for (const auto& batch : batches) {
         check_push_batch(batch);
+        if (batch.headers && std::any_of(batch.headers->begin(), batch.headers->end(),
+                                         [](const std::string& block) { return !block.empty(); })) {
+            throw std::invalid_argument(
+                "the plain binary push body carries no headers: frame them (encode_push_frames) "
+                "or push JSON");
+        }
         put_text16(body, batch.queue, "queue name");
         put_text16(body, batch.partition, "partition name");
         put_u32(body, batch.payloads.size());
@@ -2758,11 +3121,13 @@ inline std::string encode_transaction_frames(const std::string& head,
 /**
  * Appends `u32 groups | per group: u16 len, queue | u16 len, partition | u32 n
  * | u32 z_len | z` to out: each batch's messages framed as the broker stores
- * them, with a version-7 id minted here, as one zstd frame.
+ * them, with a version-7 id minted here, as one zstd frame. A message with a
+ * headers block gets flag 8 and the block after its transaction id.
  */
 inline std::string append_frame_groups(std::string out, const std::vector<PushBatch>& batches) {
     put_u32(out, batches.size());
     std::string frames;
+    const std::string no_headers;
     for (const auto& batch : batches) {
         check_push_batch(batch);
         frames.clear();
@@ -2775,10 +3140,13 @@ inline std::string append_frame_groups(std::string out, const std::vector<PushBa
             if (txn.size() > 0xFFFF) {
                 throw PushBinaryTooLong("transaction id longer than 65535 bytes");
             }
-            put_u32(frames, 1 + 16 + 2 + txn.size() + batch.payloads[i].size());
-            frames.push_back('\0');
+            const std::string& headers = batch.headers ? (*batch.headers)[i] : no_headers;
+            put_u32(frames, 1 + 16 + 2 + txn.size() + (headers.empty() ? 0 : 2 + headers.size()) +
+                                batch.payloads[i].size());
+            frames.push_back(headers.empty() ? '\0' : '\x08');
             frames.append(reinterpret_cast<const char*>(id.data()), id.size());
             put_text16(frames, txn, "transaction id");
+            if (!headers.empty()) put_text16(frames, headers, "headers block");
             frames += batch.payloads[i];
         }
         put_text16(out, batch.queue, "queue name");
@@ -2793,10 +3161,12 @@ inline std::string append_frame_groups(std::string out, const std::vector<PushBa
 
 /**
  * Adds one pushed item to batches, in the last one when it is the same
- * partition's. False when the item cannot travel in a binary body; throws
- * json::exception for a payload JSON does not carry.
+ * partition's. False when the item cannot travel in a binary body: headers
+ * travel only in frames (`frames` true: encode_push_frames and the binary
+ * transaction body). Throws json::exception for a payload JSON does not
+ * carry, PushBinaryTooLong for headers a frame cannot hold.
  */
-inline bool add_push_item(std::vector<PushBatch>& batches, const json& item) {
+inline bool add_push_item(std::vector<PushBatch>& batches, const json& item, bool frames = false) {
     if (!item.is_object() || !item.contains("queue") || !item["queue"].is_string() ||
         !item.contains("payload")) {
         return false;
@@ -2814,22 +3184,39 @@ inline bool add_push_item(std::vector<PushBatch>& batches, const json& item) {
         if (!item["partition"].is_string()) return false;
         partition = item["partition"].get<std::string>();
     }
+    std::string block;
+    if (item.contains("headers") && !item["headers"].is_null()) {
+        const json& headers = item["headers"];
+        if (!headers.is_object()) return false;
+        if (!headers.empty()) {
+            if (!frames) return false;
+            Headers pairs;
+            for (auto header = headers.begin(); header != headers.end(); ++header) {
+                // The JSON push says what is wrong with it, in the broker's words.
+                if (!header->is_string()) return false;
+                pairs[header.key()] = header->get<std::string>();
+            }
+            block = encode_headers(pairs);
+        }
+    }
     const std::string queue = item["queue"].get<std::string>();
     if (batches.empty() || batches.back().queue != queue || batches.back().partition != partition) {
-        batches.push_back({queue, partition, {}, std::vector<std::string>{}});
+        batches.push_back({queue, partition, {}, std::vector<std::string>{}, std::vector<std::string>{}});
     }
     batches.back().payloads.push_back(item["payload"].dump());
     batches.back().transaction_ids->push_back(std::move(txn));
+    batches.back().headers->push_back(std::move(block));
     return true;
 }
 
 /**
- * The items of a JSON push ({queue, partition, payload, transactionId}) as a
- * binary push body, or nothing when one of them cannot travel in it: a trace
- * id, a transaction id that is not a string, a payload JSON does not carry, a
- * name over 65535 bytes. The caller then sends the JSON body, and the broker
- * answers that as it always did. Consecutive items of one partition share a
- * group, so the order of the items is the order on the wire.
+ * The items of a JSON push ({queue, partition, payload, transactionId,
+ * headers}) as a binary push body, or nothing when one of them cannot travel
+ * in it: a trace id, a transaction id that is not a string, a payload JSON
+ * does not carry, a name over 65535 bytes, headers without `compress` (the
+ * plain body has no room for them). The caller then sends the JSON body, and
+ * the broker answers that as it always did. Consecutive items of one partition
+ * share a group, so the order of the items is the order on the wire.
  *
  * compress: the messages framed and compressed here, kept by the broker as
  * they are.
@@ -2841,7 +3228,7 @@ inline std::optional<std::string> binary_push_body(const json& items, bool compr
     std::vector<PushBatch> batches;
     try {
         for (const auto& item : items) {
-            if (!add_push_item(batches, item)) {
+            if (!add_push_item(batches, item, compress)) {
                 return std::nullopt;
             }
         }
@@ -2868,9 +3255,10 @@ struct TransactionFrames {
 /**
  * A JSON transaction body ({operations, requiredLeases, kv, timers}) as the
  * binary one, when its pushes can travel in it: there is at least one, and
- * none carries a trace id. Everything but the pushes stays in the JSON head;
- * consecutive pushed items of one partition share a group, so the pushes keep
- * their order. Nothing otherwise: the caller then sends the JSON body.
+ * none carries a trace id. Everything but the pushes stays in the JSON head,
+ * links included; consecutive pushed items of one partition share a group, so
+ * the pushes keep their order, and their headers travel in their frames.
+ * Nothing otherwise: the caller then sends the JSON body.
  */
 inline std::optional<TransactionFrames> transaction_frames(const json& request) {
     if (!request.is_object() || !request.contains("operations") || !request["operations"].is_array()) {
@@ -2891,11 +3279,11 @@ inline std::optional<TransactionFrames> transaction_frames(const json& request) 
             // A push names its items, or is one item itself.
             if (operation.contains("items") && operation["items"].is_array()) {
                 for (const auto& item : operation["items"]) {
-                    if (!add_push_item(batches, item)) return std::nullopt;
+                    if (!add_push_item(batches, item, true)) return std::nullopt;
                     push_at.push_back(flat++);
                 }
             } else {
-                if (!add_push_item(batches, operation)) return std::nullopt;
+                if (!add_push_item(batches, operation, true)) return std::nullopt;
                 push_at.push_back(flat++);
             }
         }
@@ -2992,6 +3380,20 @@ public:
     std::string rest() { return bytes(left_); }
 };
 
+/** A headers block (encode_headers) as its pairs; throws Error for one that does not decode. */
+inline Headers decode_headers(const std::string& block) {
+    FrameReader reader(block.data(), block.size(), "a headers block is malformed");
+    Headers out;
+    for (size_t count = reader.u16(); count > 0; --count) {
+        std::string name = reader.bytes(reader.u8());
+        out[std::move(name)] = reader.text();
+    }
+    if (!reader.rest().empty()) {
+        throw Error("framed pop answer: a headers block is longer than its headers");
+    }
+    return out;
+}
+
 /** Microseconds since the epoch as the broker writes `createdAt`. */
 inline std::string iso_from_micros(int64_t micros) {
     std::time_t seconds = static_cast<std::time_t>(micros / 1000000);
@@ -3016,7 +3418,7 @@ inline std::string iso_from_micros(int64_t micros) {
  *   {success, queue, partition, partitionId, leaseId, consumerGroup,
  *    messages: [{id, transactionId, traceId, data, producerSub, createdAt,
  *                partitionId, partition, leaseId, consumerGroup,
- *                deliveryAttempt, offset}],
+ *                deliveryAttempt, offset, [headers]}],
  *    partitionsClaimed, ...the answer's own keys}
  *
  * The messages are in delivery order. Everything that reads a pop answer (the
@@ -3095,6 +3497,13 @@ inline json decode_pop_frames(const std::string& bytes) {
                 if (flags & 4) {
                     throw Error("framed pop answer: a frame is encrypted");
                 }
+                if (flags & 16) {
+                    throw Error("framed pop answer: a frame is a link");
+                }
+                Headers headers;
+                if (flags & 8) {
+                    headers = decode_headers(frame.text());
+                }
                 const uint64_t offset = base + i;
                 if (offset < start || offset > end) {
                     continue;
@@ -3108,7 +3517,7 @@ inline json decode_pop_frames(const std::string& bytes) {
                         throw Error(std::string("framed pop answer: a payload: ") + error.what());
                     }
                 }
-                messages.push_back({
+                json message = {
                     {"id", util::uuid_text(id)},
                     {"transactionId", std::move(transaction_id)},
                     {"traceId", trace ? json(util::uuid_text(trace)) : json(nullptr)},
@@ -3121,7 +3530,10 @@ inline json decode_pop_frames(const std::string& bytes) {
                     {"consumerGroup", consumer_group},
                     {"deliveryAttempt", delivery_attempt},
                     {"offset", offset}
-                });
+                };
+                // As the JSON answer has them: only when the message has some.
+                if (!headers.empty()) message["headers"] = std::move(headers);
+                messages.push_back(std::move(message));
             }
         }
     }
@@ -5238,12 +5650,14 @@ public:
 /**
  * One message pushed inside a transaction. Unlike a plain push, a `trace_id`
  * set here is stored and comes back at delivery; it must be a UUID. Empty
- * fields are not sent (an empty transaction_id is minted here).
+ * fields are not sent (an empty transaction_id is minted here). `headers`
+ * travel beside the payload, in clear (see Headers).
  */
 struct TxPushItem {
     json payload;
     std::string transaction_id;
     std::string trace_id;
+    Headers headers = {};
 };
 
 class TransactionBuilder {
@@ -5323,14 +5737,31 @@ private:
                 }
                 formatted["traceId"] = item.trace_id;
             }
+            if (!item.headers.empty()) {
+                formatted["headers"] = wire::headers_json(item.headers);
+            }
             push_items.push_back(std::move(formatted));
         }
         if (push_items.empty()) return;
         operations_.push_back({{"type", "push"}, {"items", std::move(push_items)}});
     }
 
+    void add_links(const std::string& queue, const std::string& partition,
+                   const std::vector<Message>& messages, const Headers& headers) {
+        // Every op is minted before any is added: a message that cannot be
+        // linked leaves the bundle as it was.
+        json ops = json::array();
+        for (const auto& message : messages) {
+            ops.push_back(wire::link_op(queue, partition, message, headers));
+        }
+        for (auto& op : ops) operations_.push_back(std::move(op));
+    }
+
 public:
-    /** The pushes of a bundle to one queue: `.queue(q).partition(p).push(payload)`. */
+    /**
+     * The pushes and links of a bundle to one queue:
+     * `.queue(q).partition(p).push(payload)`, `.queue(q).partition(p).link(messages)`.
+     */
     class QueuePushBuilder {
     private:
         TransactionBuilder* parent_;
@@ -5369,6 +5800,17 @@ public:
             return *parent_;
         }
 
+        /** One message with its own transaction id and headers. */
+        TransactionBuilder& push(const json& payload, const std::string& transaction_id,
+                                 const Headers& headers) {
+            if (payload.is_array()) {
+                throw std::invalid_argument(
+                    "push() takes ONE payload; for several messages call push_items()");
+            }
+            parent_->add_push(queue_, partition_, {TxPushItem{payload, transaction_id, "", headers}});
+            return *parent_;
+        }
+
         /** Several messages, one per payload. */
         TransactionBuilder& push_many(const std::vector<json>& payloads) {
             std::vector<TxPushItem> items;
@@ -5378,9 +5820,35 @@ public:
             return *parent_;
         }
 
-        /** Messages with their own transaction id (the dedup key) and trace id. */
+        /** Messages with their own transaction id (the dedup key), trace id and headers. */
         TransactionBuilder& push_items(const std::vector<TxPushItem>& items) {
             parent_->add_push(queue_, partition_, items);
+            return *parent_;
+        }
+
+        /**
+         * Forward delivered messages to this queue and partition (unset =
+         * "Default") without sending their payloads again: one `link` per
+         * message (catalogue version 8). The target gets the same message,
+         * with the same id and transaction id, so its dedup window answers
+         * `duplicate` to a second link of it into the same partition and a
+         * retried step forwards nothing twice. `headers` are the link's own,
+         * read over the message's. Each message is named as its pop returned
+         * it: it needs its offset and transaction id, and its group goes
+         * along, since a scoped credential must be allowed to consume the
+         * source with it. A link whose message is gone at the source, which
+         * targets a reading queue, or which the credential may not read rolls
+         * the bundle back (TransactionError, reason `source_gone`,
+         * `source_mismatch`, `reading_queue` or `scope_denied`).
+         */
+        TransactionBuilder& link(const std::vector<Message>& messages, const Headers& headers = {}) {
+            parent_->add_links(queue_, partition_, messages, headers);
+            return *parent_;
+        }
+
+        /** link() of one message. */
+        TransactionBuilder& link(const Message& message, const Headers& headers = {}) {
+            parent_->add_links(queue_, partition_, {message}, headers);
             return *parent_;
         }
     };
@@ -5567,8 +6035,8 @@ public:
      * when empty, never sent as `[]`.
      *
      * `results` is a FLAT index space with an append-only layout: the
-     * operations first (one slot per pushed item and per ack), then the KV
-     * array, then the timers.
+     * operations first (one slot per pushed item, per link and per ack), then
+     * the KV array, then the timers.
      *
      * A lost `required` KV precondition is RETURNED (success false, reason
      * "kv_precondition"), not thrown: it is the expected result of every
@@ -5860,9 +6328,10 @@ public:
 
     /**
      * Read one pending timer: {found, queue, timerKey, txn, deliverAt,
-     * partition, payload, encrypted, attempts, claimed, ...}. The payload comes
-     * back AS STORED, base64: if the queue encrypts at rest it is the envelope,
-     * and `encrypted` says so.
+     * partition, payload, encrypted, attempts, claimed, headers, ...}. The
+     * payload comes back AS STORED, base64: if the queue encrypts at rest it is
+     * the envelope, and `encrypted` says so. `headers` (in clear, always) only
+     * when the message has some.
      */
     json peek(const std::string& queue, const std::string& timer_key) {
         return http_client_->get("/api/v1/timers/" + util::url_encode(queue) + "/" +
@@ -6228,6 +6697,7 @@ struct FetchedRecord {
     std::string transaction_id;  // the id the message was pushed with
     json payload;                // as pushed (null when it was empty)
     std::string ts;              // when the push that wrote it was stored
+    Headers headers = {};        // empty when it has none
 };
 
 /** What fetch read of one partition. */
@@ -6410,6 +6880,7 @@ inline std::map<std::string, FetchedPartition> fetch(HttpClient& http, const std
                         record.transaction_id = string_of(r.value("transactionId", json()));
                         record.payload = r.value("payload", json());
                         record.ts = string_of(r.value("ts", json()));
+                        record.headers = util::headers_of(r);
                         s.read.records.push_back(std::move(record));
                     }
                     s.read.next_offset = s.read.records.back().offset + 1;
@@ -6743,6 +7214,19 @@ public:
                            json{{"subscriptionTimestamp", timestamp}});
     }
 
+    /**
+     * Change what a filtered group takes from a queue (QueueBuilder::where);
+     * it applies from the next push, and an empty Where takes every message.
+     * Its workers then pop with the new where: a pop with the old one is
+     * refused (`where_mismatch`). A group that does not filter the queue
+     * answers 404 (HttpError).
+     */
+    json set_subscription_where(const std::string& group, const std::string& queue,
+                                const Where& where) {
+        return http_->post("/api/v1/consumer-groups/" + enc(group) + "/subscription",
+                           json{{"queue", queue}, {"where", where.to_json()}});
+    }
+
     json refresh_consumer_stats() { return http_->post("/api/v1/stats/refresh", json::object()); }
 
     /** Extend a lease by `seconds` (0 = the broker's default). */
@@ -6958,9 +7442,21 @@ struct PopTarget {
     std::string subscription_from;
     bool conflation = false;
     bool commit_on_delivery = false;
+    std::string where;              // Where::to_param(); empty = an unfiltered group
 };
 
 inline std::string pop_path(const PopTarget& t) {
+    if (!t.where.empty()) {
+        // A filtered group: refused here, before anything is sent, where the
+        // broker would refuse it (no group) or not apply it (a discovery pop).
+        if (t.group.empty() || t.group == util::QUEUE_MODE_GROUP) {
+            throw std::invalid_argument("where() filters a consumer group: name one with group()");
+        }
+        if (t.queue.empty()) {
+            throw std::invalid_argument(
+                "where() filters one queue's group: name the queue (a discovery pop takes no where)");
+        }
+    }
     if (!t.queue.empty()) {
         if (!t.partition.empty()) {
             return "/api/v1/pop/queue/" + util::url_encode(t.queue) + "/partition/" +
@@ -7001,6 +7497,9 @@ inline std::string pop_query(const PopTarget& t) {
     // Commit at delivery: no lease, nothing to ack. `autoAck` is the name every
     // 2.x broker reads.
     if (t.commit_on_delivery) q += "&autoAck=true";
+    // A filtered group's where, the same on every pop: the broker fixes it at
+    // the group's first pop and refuses another (`where_mismatch`).
+    if (!t.where.empty()) q += "&where=" + util::url_encode(t.where);
     return q;
 }
 
@@ -7035,6 +7534,8 @@ inline PopResult pop_once(HttpClient& http, const PopTarget& t) {
         const std::string error = util::text_of(answer, "error");
         throw Error("pop failed: " + (error.empty() ? std::string("no reason given") : error));
     }
+    // A filtered group: every answer says the broker filtered it, a 204 none.
+    util::enforce_filter_contract(!t.where.empty(), answer, t.queue, t.group);
     PopResult out;
     out.autopilot = util::parse_autopilot_decision(answer);
     out.messages = util::messages_of(answer);
@@ -7239,6 +7740,8 @@ private:
     /// Per-builder override: unset = the client default.
     std::optional<bool> autopilot_;
     std::optional<Cancel> cancel_;
+    /// A filtered group's conditions, ANDed by where().
+    Where where_;
 
     std::optional<BufferOptions> buffer_options_;
 
@@ -7268,6 +7771,7 @@ private:
         t.subscription_from = subscription_from_;
         t.conflation = conflation_;
         t.commit_on_delivery = commit_on_delivery;
+        t.where = where_.to_param();
         return t;
     }
 
@@ -7299,6 +7803,7 @@ private:
         // Resolved here, so the loop sees a decision and not an empty optional.
         options.autopilot = autopilot_enabled();
         options.cancel = cancel_;
+        options.where = where_;
         return options;
     }
 
@@ -7351,7 +7856,9 @@ public:
     /**
      * Create or reconfigure the queue with these options. A full upsert: an
      * option left unset goes back to the broker's default. The namespace and
-     * task set on this builder go with it.
+     * task set on this builder go with it. With `from`, an answer without a
+     * `route` throws RoutingUnsupportedError: that broker does not read other
+     * queues.
      */
     json configure(const QueueConfig& cfg) {
         require_queue("configure");
@@ -7363,16 +7870,28 @@ public:
         if (out.is_object() && !util::text_of(out, "error").empty()) {
             throw Error("configure failed: " + util::text_of(out, "error"));
         }
+        // A reading queue: a broker that reads other queues answers with its
+        // route. One that does not took `from` for an unknown option.
+        if (cfg.from && !(out.is_object() && out.contains("route") && out["route"].is_object())) {
+            throw RoutingUnsupportedError(
+                "configure " + queue_name_ + ": this broker does not read other queues; upgrade "
+                "it (its answer has no route, so it configured an ordinary queue)");
+        }
         return out;
     }
 
     /** configure() with the options set by config() (none = every default). */
     json create() { return configure(config_); }
 
-    /** Drop the queue and everything in it. */
-    json del() {
+    /**
+     * Drop the queue and everything in it. A queue that reading queues read
+     * is refused (409 `has_readers`, naming them) unless `force`: their
+     * links then expire.
+     */
+    json del(bool force = false) {
         require_queue("delete");
-        return http_client_->del("/api/v1/resources/queues/" + util::url_encode(queue_name_));
+        return http_client_->del("/api/v1/resources/queues/" + util::url_encode(queue_name_) +
+                                 (force ? "?force=true" : ""));
     }
 
     // ----------------------------------------------------------------- push
@@ -7415,6 +7934,20 @@ public:
         return push_items({PushItem{payload, transaction_id}});
     }
 
+    /**
+     * One message with its own transaction id and headers: strings beside the
+     * payload, in clear, that a where reads without the payload
+     * ("headers.type = 'order.paid'"). See Headers for the rules.
+     */
+    std::vector<PushResult> push(const json& payload, const std::string& transaction_id,
+                                 const Headers& headers) {
+        if (payload.is_array()) {
+            throw std::invalid_argument(
+                "push() takes ONE payload; for several messages call push_items()");
+        }
+        return push_items({PushItem{payload, transaction_id, headers}});
+    }
+
     /** Several messages, one per payload, in order. */
     std::vector<PushResult> push_many(const std::vector<json>& payloads) {
         std::vector<PushItem> items;
@@ -7423,19 +7956,23 @@ public:
         return push_items(items);
     }
 
-    /** Messages with their own transaction ids (the dedup key). */
+    /** Messages with their own transaction ids (the dedup key) and headers. */
     std::vector<PushResult> push_items(const std::vector<PushItem>& items) {
         require_queue("push");
         if (items.empty()) return {};
         json formatted = json::array();
         for (const auto& item : items) {
-            formatted.push_back({
+            json entry = {
                 {"queue", queue_name_},
                 {"partition", partition_},
                 {"payload", item.payload},
                 {"transactionId", item.transaction_id.empty() ? util::generate_uuid_v7()
                                                               : item.transaction_id}
-            });
+            };
+            // Only when there are some: a push without headers is the request
+            // every broker knows, byte for byte.
+            if (!item.headers.empty()) entry["headers"] = wire::headers_json(item.headers);
+            formatted.push_back(std::move(entry));
         }
         if (buffer_options_.has_value()) {
             const std::string address = queue_name_ + "/" + partition_;
@@ -7587,6 +8124,33 @@ public:
      */
     QueueBuilder& conflation(bool enabled = true) {
         conflation_ = enabled;
+        return *this;
+    }
+
+    /**
+     * A filtered group: this group takes only the messages for which
+     * `field op value` holds; several calls are ANDed (see Where). Its lag,
+     * backlog and acks are its messages only; retries, the DLQ and the lease
+     * are the queue's. A setting of the GROUP, fixed by its first pop (with
+     * subscription_mode("all") or subscription_from() it starts with
+     * history), sent on every pop. A different where for the same group, or
+     * a where for a group that already reads the queue unfiltered, is refused
+     * (400 `where_mismatch`): change it with admin().set_subscription_where(),
+     * or start a new group. Needs group() and a queue; catalogue version 8. A
+     * broker that does not filter is caught on its first answer, which lacks
+     * `"filtered":true`: pop() throws RoutingUnsupportedError and consume()
+     * stops with it, before a message is handled.
+     *
+     *   .group("billing").where("data.kind", "in", {"order.paid", "order.refunded"})
+     */
+    QueueBuilder& where(const std::string& field, const std::string& op, const json& value = nullptr) {
+        where_.add(field, op, value);
+        return *this;
+    }
+
+    /** where() as one string, or a Where: `.where("data.kind = 'order.paid' and data.total > 100")`. */
+    QueueBuilder& where(const Where& condition) {
+        where_.add(condition);
         return *this;
     }
 
@@ -8188,6 +8752,12 @@ inline void ConsumerManager::worker(int id, Shared& shared, const Process& proce
             util::log_error("ConsumerManager", who + " stopping: " + e.what());
             record_error(shared);
             break;
+        } catch (const RoutingUnsupportedError& e) {
+            // Terminal for the same reason: a broker that ignores the where
+            // would hand the handler every message of the queue.
+            util::log_error("ConsumerManager", who + " stopping: " + e.what());
+            record_error(shared);
+            break;
         } catch (const HttpError& e) {
             if (e.status_code() == 403) {
                 // cluster_suspended, storage_quota_exceeded, feature_gated,
@@ -8283,6 +8853,7 @@ inline ConsumeSummary ConsumerManager::run_loop(ConsumeOptions options, Process 
     shared.target.subscription_from = options.subscription_from;
     shared.target.conflation = options.conflation;
     shared.target.commit_on_delivery = false;  // consume always leases
+    shared.target.where = options.where.to_param();
     (void)detail::pop_path(shared.target);     // a bad target throws here, not in a worker
 
     if (options.supervision) {

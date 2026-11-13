@@ -1092,6 +1092,17 @@ use crate::rsm::facade::Rsm;
 /// A whole cluster node over `dir`: the facade with its batcher, the
 /// openraft replicator of `cluster`, `opts`.
 fn open_facade(dir: &Path, cluster: ClusterConfig, opts: RaftOpts) -> RaftFacade {
+    open_facade_raising(dir, cluster, opts, 0)
+}
+
+/// [`open_facade`], whose leader raises the catalogue version every
+/// `version_every_ms` (0: never) once every member reads it.
+fn open_facade_raising(
+    dir: &Path,
+    cluster: ClusterConfig,
+    opts: RaftOpts,
+    version_every_ms: u64,
+) -> RaftFacade {
     let ctx = crate::rsm::facade::RsmBuildCtx {
         data_dir: dir.display().to_string(),
         notifier: crate::notify::Notifier::new(false),
@@ -1105,8 +1116,8 @@ fn open_facade(dir: &Path, cluster: ClusterConfig, opts: RaftOpts) -> RaftFacade
         // exercise), and above the baseline a leader first asks a learner
         // what it reads (D20) — `cluster_version.rs` and
         // `every_member_says_what_it_reads_and_one_that_reads_less_is_refused`
-        // cover that.
-        cluster_version_every_ms: 0,
+        // cover that. A test of what needs a newer version raises it.
+        cluster_version_every_ms: version_every_ms,
         ..crate::rsm::batcher::BatcherConfig::from_env()
     };
     let id = cluster.node_id;
@@ -1267,6 +1278,307 @@ async fn a_request_in_flight_across_a_leader_transfer_is_answered_quickly() {
         failed.is_empty(),
         "every push is answered (a retry is taken to the new leader): {failed:?}"
     );
+    for n in nodes.into_iter().flatten() {
+        close_facade(n).await;
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// Routing across a cluster (PLAN_ROUTING.md §12): pushes made on every node,
+/// while leadership moves, reach a reading queue once each, every match and
+/// nothing else; and a dead letter acked on a follower keeps its headers, which
+/// travel after the forwarded command (`facade/remote.rs`, `QDH1`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn routing_holds_across_nodes_and_a_leader_transfer() {
+    use crate::rsm::facade::{
+        AckReq, ApiReq, Deadline, PopOptions, PopReq, PushReq, ReqCtx, RsmError,
+    };
+    use serde_json::{json, Value};
+    let _one = serial().await;
+    log_init();
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("routing")).collect();
+    let ports = free_ports(3);
+    let opts = vec![test_opts(); 3];
+    let mut hs = Vec::new();
+    for (i, d) in dirs.iter().enumerate() {
+        let (d, c, o) = (
+            d.clone(),
+            cluster_config(&ports, i as u64 + 1),
+            opts[i].clone(),
+        );
+        hs.push(tokio::task::spawn_blocking(move || {
+            open_facade_raising(&d, c, o, 50)
+        }));
+    }
+    let mut nodes = Vec::new();
+    for h in hs {
+        nodes.push(Some(Arc::new(h.await.expect("open task"))));
+    }
+    let ctx = || {
+        ReqCtx::new(
+            crate::config::DEFAULT_TENANT,
+            Deadline::after(Duration::from_secs(10)),
+        )
+    };
+    let push = |f: Arc<RaftFacade>, items: Value| async move {
+        f.push(
+            ctx(),
+            PushReq {
+                raw: json!({ "items": items }).to_string().into_bytes(),
+            },
+        )
+        .await
+    };
+    let api = |f: Arc<RaftFacade>,
+               method: &'static str,
+               path: String,
+               query: Option<String>,
+               body: Value| async move {
+        let out = f
+            .api(
+                ctx(),
+                ApiReq {
+                    method: method.into(),
+                    path,
+                    query,
+                    body: if body.is_null() {
+                        Vec::new()
+                    } else {
+                        body.to_string().into_bytes()
+                    },
+                },
+            )
+            .await;
+        match out {
+            Ok(o) => (
+                o.status,
+                serde_json::from_str(&o.body).unwrap_or(Value::String(o.body)),
+            ),
+            Err(e) => (500, json!({ "error": e.to_string() })),
+        }
+    };
+
+    // Every node reads catalogue version 8 (a write runs the leader's cycle,
+    // which raises it once every member says it reads it).
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        if nodes
+            .iter()
+            .flatten()
+            .all(|f| f.cluster_allows(crate::rsm::effect::VERSION_8))
+        {
+            break;
+        }
+        assert!(Instant::now() < end, "the cluster never reached version 8");
+        let l = facade_leader(&nodes).await;
+        let _ = push(
+            nodes[l].clone().unwrap(),
+            json!([{ "queue": "warmup", "payload": {} }]),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let l = facade_leader(&nodes).await;
+    let leader = nodes[l].clone().unwrap();
+    let (s, v) = api(
+        leader.clone(),
+        "POST",
+        "/api/v1/configure".into(),
+        None,
+        json!({"queue": "orders", "options": {}}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = api(
+        leader.clone(),
+        "POST",
+        "/api/v1/configure".into(),
+        None,
+        json!({"queue": "orders-it", "options": {"from": "orders", "where": "data.country = 'IT'"}}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+
+    // Every node pushes, ten messages a round, half of them Italian; leadership
+    // moves between the rounds. A push that fails is sent again, the same
+    // transaction ids: the dedup window makes that safe.
+    let mut want = std::collections::BTreeSet::new();
+    for round in 0..3u64 {
+        for (n, node) in nodes.iter().flatten().enumerate() {
+            let items: Vec<Value> = (0..10u64)
+                .map(|i| {
+                    let txn = format!("r{round}-n{n}-{i}");
+                    let country = if i % 2 == 0 { "IT" } else { "FR" };
+                    if country == "IT" {
+                        want.insert(txn.clone());
+                    }
+                    json!({"queue": "orders", "partition": format!("c{}", i % 3),
+                           "transactionId": txn, "payload": {"country": country, "i": i}})
+                })
+                .collect();
+            let mut tries = 0;
+            loop {
+                match push(node.clone(), Value::Array(items.clone())).await {
+                    Ok(_) => break,
+                    Err(
+                        RsmError::Retry { .. }
+                        | RsmError::NoLeader
+                        | RsmError::Timeout
+                        | RsmError::InDoubt,
+                    ) if tries < 50 => {
+                        tries += 1;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(e) => panic!("push on node {n}: {e}"),
+                }
+            }
+        }
+        let l = facade_leader(&nodes).await;
+        let to = ((l + 1) % 3) as u64 + 1;
+        let repl = nodes[l].as_ref().unwrap().repl_for_test();
+        crate::rsm::replicator::Replicator::transfer_leadership(
+            &*repl,
+            Some(to),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("transfer");
+        drop(repl);
+        let end = Instant::now() + Duration::from_secs(10);
+        while facade_leader(&nodes).await != to as usize - 1 {
+            assert!(Instant::now() < end, "node {to} never took over");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    // The reading queue holds every Italian order once, and nothing else.
+    drop(leader);
+    let l = facade_leader(&nodes).await;
+    let leader = nodes[l].clone().unwrap();
+    let mut got: Vec<String> = Vec::new();
+    let end = Instant::now() + Duration::from_secs(20);
+    while got.len() < want.len() {
+        assert!(
+            Instant::now() < end,
+            "the reader got {} of {}",
+            got.len(),
+            want.len()
+        );
+        let out = leader
+            .pop_wildcard(
+                ctx(),
+                PopReq {
+                    queue: "orders-it".into(),
+                    group: None,
+                    batch: 100,
+                    auto_ack: true,
+                    wait: false,
+                    timeout_ms: 1000,
+                    options: PopOptions {
+                        max_parts: 16,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("pop");
+        if out.empty {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        let v: Value = serde_json::from_str(&out.body).expect("pop body");
+        for m in v["messages"].as_array().into_iter().flatten() {
+            assert_eq!(m["data"]["country"], "IT", "{m}");
+            got.push(m["transactionId"].as_str().unwrap().to_string());
+        }
+    }
+    let unique: std::collections::BTreeSet<String> = got.iter().cloned().collect();
+    assert_eq!(unique.len(), got.len(), "a message came twice: {got:?}");
+    assert_eq!(unique, want);
+
+    // A dead letter acked on a follower keeps its headers.
+    let (s, v) = api(
+        leader.clone(),
+        "POST",
+        "/api/v1/configure".into(),
+        None,
+        json!({"queue": "jobs", "options": {"deadLetterQueue": true, "retryLimit": 0}}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    push(
+        leader.clone(),
+        json!([{"queue": "jobs", "partition": "p", "transactionId": "j1",
+        "payload": {"n": 1}, "headers": {"type": "job"}}]),
+    )
+    .await
+    .expect("push");
+    let f = (l + 1) % 3;
+    let follower = nodes[f].clone().unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    let m = loop {
+        let out = follower
+            .pop_wildcard(
+                ctx(),
+                PopReq {
+                    queue: "jobs".into(),
+                    group: None,
+                    batch: 10,
+                    auto_ack: false,
+                    wait: false,
+                    timeout_ms: 1000,
+                    options: PopOptions {
+                        max_parts: 4,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("pop on a follower");
+        if !out.empty {
+            let v: Value = serde_json::from_str(&out.body).expect("pop body");
+            break v["messages"][0].clone();
+        }
+        assert!(Instant::now() < end, "the follower never popped the job");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    follower
+        .ack(
+            ctx(),
+            AckReq {
+                queue: None,
+                group: "__QUEUE_MODE__".into(),
+                raw: json!({"acknowledgments": [{"transactionId": "j1", "partitionId": m["partitionId"],
+                    "leaseId": m["leaseId"], "status": "dlq", "error": "poison"}],
+                    "consumerGroup": "__QUEUE_MODE__"})
+                .to_string()
+                .into_bytes(),
+            },
+        )
+        .await
+        .expect("ack on a follower");
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, d) = api(
+            leader.clone(),
+            "GET",
+            "/api/v1/dlq".into(),
+            Some("queue=jobs".into()),
+            Value::Null,
+        )
+        .await;
+        if let Some(row) = d["messages"].as_array().and_then(|a| a.first()) {
+            assert_eq!(row["headers"], json!({"type": "job"}), "{d}");
+            break;
+        }
+        assert!(Instant::now() < end, "no dead letter: {d}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    drop((leader, follower));
     for n in nodes.into_iter().flatten() {
         close_facade(n).await;
     }

@@ -13,6 +13,7 @@ import { fmt } from '../useQueuePage'
 import { span } from '../useOverview'
 import { clock } from '../useWindow'
 import { behindRows, keepPlaces, LAGGING_LIMIT } from './groupsView'
+import { filterWords } from './routeView'
 
 const props = defineProps({
   row: { type: Object, required: true },
@@ -59,7 +60,7 @@ const story = computed(() => {
   return null
 })
 
-// ---- its facts ----
+// ---- its facts (a filtered group's where with them: row.filter, routeView.groupFilterOf) ----
 const readsFrom = computed(() => {
   const x = r.value
   if (x.queueMode) return 'every message, from the oldest kept'
@@ -116,6 +117,7 @@ function act(kind, extra = {}) { more.value = false; emit('act', { kind, row: r.
       <h2 class="cgd-name" :class="r.queueMode ? 'qn-t2' : 'qn-mono'">{{ r.label }}</h2>
       <span v-if="r.kafka" class="qn-tag cgd-tag" title="Read through the Kafka facade">Kafka</span>
       <span v-if="r.conflates" class="qn-tag cgd-tag" title="A last-value group: it gets only the newest message of each partition">last value</span>
+      <span v-if="r.filter" class="qn-tag cgd-tag" title="It gets only what its where takes">filtered</span>
       <div style="flex: 1 1 0" />
       <button type="button" class="qn-btn3 cgd-x" aria-label="Close the group" title="Close" @click="emit('close')">
         <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" style="fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round" /></svg>
@@ -133,6 +135,11 @@ function act(kind, extra = {}) { more.value = false; emit('act', { kind, row: r.
     <dl class="qn-dl cgd-facts">
       <dt>Waiting</dt><dd class="qn-num">{{ waitingText }}</dd>
       <dt>Reads from</dt><dd>{{ readsFrom }}</dd>
+      <template v-if="r.filter">
+        <dt>Where</dt>
+        <dd v-if="r.filter.where" class="qn-mono">{{ r.filter.where }}</dd>
+        <dd v-else class="qn-t2">{{ filterWords(r.filter) }}</dd>
+      </template>
       <template v-if="r.presence">
         <dt>Live members</dt><dd class="qn-num">{{ r.presence.members == null ? '–' : fmt(r.presence.members) }}</dd>
         <dt>Last seen</dt><dd class="qn-num">{{ seen }}</dd>
@@ -179,6 +186,7 @@ function act(kind, extra = {}) { more.value = false; emit('act', { kind, row: r.
         <button type="button" class="qn-btn2" :disabled="!(r.waiting > 0)" @click="act('skip')">Skip what waits…</button>
         <button type="button" class="qn-btn2" @click="act('seek')">Seek to a time…</button>
         <button type="button" class="qn-btn2" @click="act('partition', { partition: '', waiting: null, to: 'time' })">Seek one partition…</button>
+        <button v-if="r.filter" type="button" class="qn-btn2" @click="act('where')">Change its where…</button>
         <!-- one queue: straight to its dialog; several: here, or everywhere -->
         <QcPopover v-if="count > 1 && !r.queueMode" v-model:open="more" side="bottom-start" :width="260" label="Delete">
           <template #trigger="{ toggle }">

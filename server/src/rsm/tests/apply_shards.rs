@@ -338,6 +338,7 @@ impl Wide {
             error: "boom".into(),
             retry_count: 3,
             failed_at_us: now,
+            headers: Vec::new(),
         })
     }
 

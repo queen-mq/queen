@@ -19,6 +19,7 @@ import { nextSort, perSecond, QUEUE_MODE, toneOf } from './queuesView.js'
 import { LAG_THRESHOLDS } from '../../../../shared/timeRanges.mjs'
 import { acksText } from '../../composables/queueOps.js'
 import { span } from '../words.js'
+import { groupFilterOf, shownQueueName } from './routeView.js'
 
 export { nextSort, QUEUE_MODE }
 
@@ -173,6 +174,8 @@ export function groupRows({ groups = null, queues = [], ops = null, series = nul
       ns: typeof m?.namespace === 'string' ? m.namespace : '',
       kafka,
       conflates,
+      // A filtered group: { where } ('' when no answer says it), else null (routeView.groupFilterOf).
+      filter: groupFilterOf(g, m),
       sev,
       state: groupState(g, linesFor),
       need,
@@ -409,14 +412,16 @@ export function behindRows(data, { min = 0, group = null, queue = null } = {}) {
     if (!p?.partition_name || !p.queue_name || p.consumer_group == null) continue
     const lag = num(p.time_lag_seconds)
     if (lag === null || lag <= min) continue
+    // A filtered group's partitions are its hidden queue's: shown on its queue.
+    const q = shownQueueName(p.queue_name)
     if (group != null && p.consumer_group !== group) continue
-    if (queue != null && p.queue_name !== queue) continue
+    if (queue != null && q !== queue) continue
     out.push({
-      key: `${p.queue_name}\u0000${p.consumer_group}\u0000${p.partition_name}`,
+      key: `${q}\u0000${p.consumer_group}\u0000${p.partition_name}`,
       group: p.consumer_group,
       label: groupLabel(p.consumer_group),
       queueMode: p.consumer_group === QUEUE_MODE,
-      queue: p.queue_name,
+      queue: q,
       partition: p.partition_name,
       worker: p.worker_id || null,
       waiting: num(p.offset_lag),
@@ -497,6 +502,22 @@ export function deleteCall(group, queue = null, deleteMetadata = true) {
 }
 
 /**
+ * A filtered group's new where, on one queue (the string form, as typed and
+ * trimmed; '' takes every message). It applies from the next push.
+ */
+export function whereCall(group, queue, where) {
+  const body = { queue, where: String(where ?? '').trim() }
+  const path = `${BASE}/${enc(group)}/subscription`
+  return { kind: 'where', method: 'POST', path, body, group, queue, text: `POST ${path} ${JSON.stringify(body)}` }
+}
+
+/** What the where change answered: `{ ok, problem }`; anything but `success: true` changed nothing. */
+export function whereOutcome(data) {
+  if (data && typeof data === 'object' && data.success === true) return { ok: true, problem: null }
+  return { ok: false, problem: (data && typeof data === 'object' && data.error) || 'The broker did not say it changed the where.' }
+}
+
+/**
  * Send a call through `api` (`consumers` of '@/api'), whose functions build
  * the same method, path and body from the same parts: what runs is what the
  * dialog showed.
@@ -507,6 +528,7 @@ export function sendCall(api, call, config = { quiet: true }) {
     case 'seekPartition': return api.seekPartition(call.group, call.queue, call.partition, call.body, config)
     case 'deleteForQueue': return api.deleteForQueue(call.group, call.queue, call.deleteMetadata, config)
     case 'delete': return api.delete(call.group, call.deleteMetadata, config)
+    case 'where': return api.subscription(call.group, call.body, config)
     default: return Promise.reject(new Error(`No such call: ${call?.kind}`))
   }
 }

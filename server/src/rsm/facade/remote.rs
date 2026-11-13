@@ -86,6 +86,14 @@ enum WireReply {
 /// the request and never looks past it, so nothing changes for it.
 const STORED_FORMS_MAGIC: &[u8; 4] = b"QSF1";
 
+/// First bytes of what may follow the stored forms: the headers blocks of the
+/// command's dead letters ([`crate::rsm::planner::DlqSnapshot::headers`],
+/// kept out of the serde shape), one per snapshot in
+/// [`Command::dlq_snapshots`] order. Sent only when one has headers, which
+/// only a cluster at catalogue version 8 has: every leader that gets them
+/// reads them, and an older one never does.
+const DLQ_HEADERS_MAGIC: &[u8; 4] = b"QDH1";
+
 pub(super) fn encode_request(
     command: &Command,
     budget: Duration,
@@ -111,16 +119,23 @@ pub(super) fn encode_request(
             out.extend_from_slice(&s.z);
         }
     }
+    let snapshots = command.dlq_snapshots();
+    if snapshots.iter().any(|s| !s.headers.is_empty()) {
+        out.extend_from_slice(DLQ_HEADERS_MAGIC);
+        out.extend_from_slice(&(snapshots.len() as u32).to_le_bytes());
+        for s in snapshots {
+            out.extend_from_slice(&(s.headers.len() as u32).to_le_bytes());
+            out.extend_from_slice(&s.headers);
+        }
+    }
     Ok(out)
 }
 
-/// The leader side of [`STORED_FORMS_MAGIC`]: file every stored form that is
-/// exactly one zstd frame of the size it declares with the queue-log codec,
-/// before the command is planned. Anything else is ignored: the leader then
-/// compresses those frames itself, as it always did.
-fn take_stored_forms(rest: &[u8]) {
-    use crate::rsm::qlog::codec;
-    let Some(mut b) = rest.strip_prefix(STORED_FORMS_MAGIC.as_slice()) else {
+/// The leader side of [`DLQ_HEADERS_MAGIC`]: each block back on its snapshot.
+/// A count that is not the command's, or a cut block, sets none: those dead
+/// letters keep no headers, as before headers.
+fn take_dlq_headers(rest: &[u8], command: &mut Command) {
+    let Some(mut b) = rest.strip_prefix(DLQ_HEADERS_MAGIC.as_slice()) else {
         return;
     };
     let mut take = |n: usize| -> Option<&[u8]> {
@@ -134,21 +149,61 @@ fn take_stored_forms(rest: &[u8]) {
     let Some(count) = take(4).map(|x| u32::from_le_bytes(x.try_into().expect("4 bytes"))) else {
         return;
     };
+    let mut blocks = Vec::new();
+    for _ in 0..count {
+        let Some(len) = take(4).map(|x| u32::from_le_bytes(x.try_into().expect("4 bytes"))) else {
+            return;
+        };
+        let Some(block) = take(len as usize) else {
+            return;
+        };
+        blocks.push(block.to_vec());
+    }
+    let mut snapshots = command.dlq_snapshots_mut();
+    if snapshots.len() != blocks.len() {
+        return;
+    }
+    for (s, block) in snapshots.iter_mut().zip(blocks) {
+        s.headers = block;
+    }
+}
+
+/// The leader side of [`STORED_FORMS_MAGIC`]: file every stored form that is
+/// exactly one zstd frame of the size it declares with the queue-log codec,
+/// before the command is planned. Anything else is ignored: the leader then
+/// compresses those frames itself, as it always did. Answers what follows the
+/// stored forms (all of `rest` when there are none, nothing when they are cut).
+fn take_stored_forms(rest: &[u8]) -> &[u8] {
+    use crate::rsm::qlog::codec;
+    let Some(mut b) = rest.strip_prefix(STORED_FORMS_MAGIC.as_slice()) else {
+        return rest;
+    };
+    let mut take = |n: usize| -> Option<&[u8]> {
+        if b.len() < n {
+            return None;
+        }
+        let (head, tail) = b.split_at(n);
+        b = tail;
+        Some(head)
+    };
+    let Some(count) = take(4).map(|x| u32::from_le_bytes(x.try_into().expect("4 bytes"))) else {
+        return &[];
+    };
     for _ in 0..count {
         let Some(key) = take(16).map(|x| u128::from_le_bytes(x.try_into().expect("16 bytes")))
         else {
-            return;
+            return &[];
         };
         let Some(raw_len) = take(4).map(|x| u32::from_le_bytes(x.try_into().expect("4 bytes")))
         else {
-            return;
+            return &[];
         };
         let Some(z_len) = take(4).map(|x| u32::from_le_bytes(x.try_into().expect("4 bytes")))
         else {
-            return;
+            return &[];
         };
         let Some(z) = take(z_len as usize) else {
-            return;
+            return &[];
         };
         let one_frame = zstd::zstd_safe::find_frame_compressed_size(z).ok() == Some(z.len());
         let sized = matches!(zstd::zstd_safe::get_frame_content_size(z), Ok(Some(n)) if n == raw_len as u64);
@@ -156,6 +211,7 @@ fn take_stored_forms(rest: &[u8]) {
             codec::preseed_key(key, raw_len as usize, z.to_vec());
         }
     }
+    b
 }
 
 fn encode_reply(r: Result<Reply, RsmError>, seen: u64) -> Vec<u8> {
@@ -229,8 +285,10 @@ pub(super) async fn serve(
     body: bytes::Bytes,
 ) -> Result<bytes::Bytes, String> {
     let req: SubmitReq = match postcard::take_from_bytes::<SubmitReq>(&body) {
-        Ok((req, rest)) => {
-            take_stored_forms(rest);
+        Ok((mut req, rest)) => {
+            let rest = take_stored_forms(rest);
+            take_dlq_headers(rest, &mut req.command);
+            req.command.learn_links();
             req
         }
         // A shape this build does not know (D20: a follower that sent it
@@ -497,6 +555,47 @@ mod tests {
         let back: SubmitReq = postcard::from_bytes(&bytes).expect("decode");
         match back.command {
             Command::Transaction(t) => assert_eq!(t, txn),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A dead letter's headers are not in the serde shape: they travel after
+    /// the command, and a leader puts them back on its snapshot. Without
+    /// headers the request is byte for byte what it was before them.
+    #[test]
+    fn a_forwarded_dead_letter_keeps_its_headers() {
+        use crate::rsm::planner::{DlqHeadCommand, DlqSnapshot};
+        let block = crate::frames::encode_headers([("type", "order")]);
+        let cmd = |headers: Vec<u8>| {
+            Command::DlqHead(DlqHeadCommand {
+                request_id: [3; 16],
+                pid: 9,
+                tenant: "t".into(),
+                queue: "q".into(),
+                group: "g".into(),
+                worker: "w".into(),
+                offset: 4,
+                error: "poison".into(),
+                snapshot: DlqSnapshot {
+                    message_id: Some([1; 16]),
+                    txn: "t1".into(),
+                    payload: b"{}".to_vec(),
+                    headers,
+                },
+            })
+        };
+        let plain = encode_request(&cmd(Vec::new()), Duration::from_secs(1), &[]).unwrap();
+        let with = encode_request(&cmd(block.clone()), Duration::from_secs(1), &[]).unwrap();
+        assert_eq!(
+            &with[..plain.len()],
+            &plain[..],
+            "the command itself is unchanged"
+        );
+        let (mut req, rest) = postcard::take_from_bytes::<SubmitReq>(&with).expect("decode");
+        let rest = take_stored_forms(rest);
+        take_dlq_headers(rest, &mut req.command);
+        match req.command {
+            Command::DlqHead(c) => assert_eq!(c.snapshot.headers, block),
             other => panic!("{other:?}"),
         }
     }

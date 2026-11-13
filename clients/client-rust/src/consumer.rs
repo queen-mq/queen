@@ -590,11 +590,13 @@ mod tests {
             trace_id: None,
             data: serde_json::json!({ "n": 1 }),
             producer_sub: None,
+            headers: None,
             created_at: "2026-08-04T10:00:00Z".into(),
             partition_id: "p1".into(),
             partition: "Default".into(),
             lease_id: "L1".into(),
             consumer_group: "workers".into(),
+            offset: None,
         }
     }
 

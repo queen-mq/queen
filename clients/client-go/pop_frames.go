@@ -12,12 +12,17 @@ package queen
 // All integers little-endian. A record's bytes are `count` frames:
 //
 //	u32 body_len | u8 flags | u8[16] message id | [u8[16] trace id, flag 1]
-//	| u16 len, transactionId | [u16 len, producer, flag 2] | payload
+//	| u16 len, transactionId | [u16 len, producer, flag 2]
+//	| [u16 len, headers block, flag 8] | payload
 //
 // Message i of a record has offset base_offset+i and belongs to the delivery
 // when that lies in the claim's start..=end. The JSON object in front holds what
 // the JSON answer has beside its messages: the conflation echo and the
 // autopilot's choice.
+//
+// A broker answers JSON instead whenever a record is encrypted (flag 4), holds
+// links (flag 16) or headers (flag 8); the headers block is read here all the
+// same, so a broker that one day frames them is understood.
 
 import (
 	"context"
@@ -34,6 +39,15 @@ import (
 
 const popFramesMagic = "QPF1"
 
+// The flags of a stored frame (the broker's frames.rs).
+const (
+	frameFlagTrace     byte = 1
+	frameFlagProducer  byte = 2
+	frameFlagEncrypted byte = 4
+	frameFlagHeaders   byte = 8
+	frameFlagLink      byte = 16
+)
+
 // PopFrame is one message of a framed pop answer. Payload is the message's
 // JSON document; it points into the answer's buffer.
 type PopFrame struct {
@@ -47,6 +61,8 @@ type PopFrame struct {
 	Offset          uint64
 	CreatedAtMicros int64
 	DeliveryAttempt uint32
+	// Headers are the message's headers (frame flag 8), nil when it has none.
+	Headers map[string]string
 }
 
 // IDString is the message id as lower-case hyphenated text.
@@ -179,15 +195,24 @@ func DecodePopFrames(b []byte) (*PopFrames, error) {
 				flags := body.u8()
 				m := PopFrame{PartitionID: pid, Partition: partition, Offset: base + uint64(j), CreatedAtMicros: created, DeliveryAttempt: attempt}
 				copy(m.ID[:], body.take(16))
-				if flags&1 != 0 {
+				if flags&frameFlagTrace != 0 {
 					m.TraceID = body.take(16)
 				}
 				m.TransactionID = body.text()
-				if flags&2 != 0 {
+				if flags&frameFlagProducer != 0 {
 					m.ProducerSub = body.text()
 				}
-				if body.bad || flags&4 != 0 {
-					return nil, fmt.Errorf("framed pop answer: a frame is malformed or encrypted")
+				if flags&frameFlagHeaders != 0 && !body.bad {
+					h, ok := headersOfBlock(body.take(body.u16()))
+					if !ok {
+						return nil, fmt.Errorf("framed pop answer: a frame's headers do not decode")
+					}
+					m.Headers = h
+				}
+				// An encrypted payload, or a link (its payload is the address of
+				// the message it stands for), is never answered framed.
+				if body.bad || flags&(frameFlagEncrypted|frameFlagLink) != 0 {
+					return nil, fmt.Errorf("framed pop answer: a frame is malformed, encrypted or a link")
 				}
 				m.Payload = body.b[body.p:]
 				if m.Offset >= start && m.Offset <= end {
@@ -219,6 +244,9 @@ func messagesOfFrames(f *PopFrames) []*Message {
 			Partition:     m.Partition,
 			CreatedAt:     time.UnixMicro(m.CreatedAtMicros).UTC().Format("2006-01-02T15:04:05.000Z"),
 			ProducerSub:   m.ProducerSub,
+			Headers:       m.Headers,
+			Offset:        int64(m.Offset),
+			ConsumerGroup: f.ConsumerGroup,
 		}
 		// As the JSON answer: a payload that is not an object leaves Data nil.
 		var data map[string]interface{}

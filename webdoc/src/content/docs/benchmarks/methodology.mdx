@@ -61,6 +61,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-30 (rustfmt of the server and proxy crates): rsm/maintenance.rs
 # reformatted, line wrapping only. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-06 (tenant feed): qlog/set.rs gains QLogReader::queue_logs, a read-only lookup. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one
@@ -206,7 +209,7 @@ differ from the defaults (all are in the [configuration reference](/reference/co
 | `QUEEN_RAFT_LOG_CACHE_MB` | 512 | 4096 | Applied entries leave the leader's memory past this size even if a follower still needs them, and a follower behind the cache is fed from disk. At a million messages a second, 512 MB is a second or two of log. |
 | `QUEEN_RAFT_TXN_WINDOW_MIN_S` | 900 | 300 | The least time a message's hash list and its queue-log record are kept, so no log file is freed sooner. The leader wrote about 250 MB/s at a million messages a second, so 900 seconds of log would pass 200 GB a node. |
 | `QUEEN_QLOG_SHARDS` | 0 | 4 | Every queue's records go to one of four shared logs, so a group commit fsyncs at most four files however many queues it touches. |
-| `QUEEN_LANES` | 8 | 8; 16 in the transaction runs | The planning threads that plan pushes in parallel. |
+| `QUEEN_LANES` | 8 | 8; 16 in the transaction runs | The planning threads that plan pushes in parallel (now `QUEEN_PLANNER_THREADS`). |
 
 The September matrix had deduplication off (`dedupWindowSeconds: 0`) and the soak a
 60-second window. Completed messages were kept 1,800 seconds in the 60-second runs, so retention

@@ -66,6 +66,9 @@ verifiedBy:
 # facade/real/phase2.rs carry each request's client scope (None without a client token) and refuse a
 # name outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. real.rs takes headers
+# on every push item, JSON and framed (writing-applications/headers.mdx). The page names them.
 ---
 
 In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up every customer that shares its partition. Here a partition is one entity: a customer, an order, a conversation. The push that names it creates it, order holds inside it, and one queue has held ten million.
@@ -142,3 +145,7 @@ One trap: `binaryPush` and `pushCompression` need broker 2.3.0 or later on every
 - [Queues](/writing-applications/queues/): the dedup window and the other options a push meets.
 - [Transactions](/writing-applications/transactions/): pushes that commit with an ack and state.
 - [Limits](/reference/limits/): message sizes and how many messages one push takes.
+
+## Headers
+
+Every push item takes `"headers": {"name": "value"}`, strings only, stored in clear beside the payload; a framed push marks the frame with flag 8 and carries the block after the transaction id. See [Headers](/writing-applications/headers/) for the rules and the limits.

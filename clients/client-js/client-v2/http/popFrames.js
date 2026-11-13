@@ -11,7 +11,12 @@
  * All integers little-endian. A record's bytes are `count` frames:
  *
  *   u32 body_len | u8 flags | u8[16] message id | [u8[16] trace id, flag 1]
- *   | u16 len, transactionId | [u16 len, producer, flag 2] | payload
+ *   | u16 len, transactionId | [u16 len, producer, flag 2]
+ *   | [u16 len, headers, flag 8] | payload
+ *
+ * The broker answers JSON instead whenever a record holds headers or links
+ * (catalogue version 8), as it does for encrypted ones; the headers block
+ * (`u16 count | (u8 len, name | u16 len, value) x count`) is read all the same.
  *
  * Message i of a record has offset base_offset+i and belongs to the delivery
  * when that lies in the claim's start..=end. The JSON object in front holds what
@@ -28,6 +33,8 @@ const MAGIC = 'QPF1'
 const FLAG_TRACE = 1
 const FLAG_PRODUCER = 2
 const FLAG_ENCRYPTED = 4
+const FLAG_HEADERS = 8
+const FLAG_LINK = 16
 
 const utf8 = new TextDecoder()
 
@@ -84,6 +91,18 @@ class In {
   }
 }
 
+/** A frame's headers block as the object the JSON answer has: `{ name: value }`. */
+function decodeHeaders(block) {
+  const input = new In(block, 'a headers block is malformed')
+  const headers = {}
+  for (let n = input.u16(); n > 0; n--) {
+    const name = utf8.decode(input.take(input.u8()))
+    headers[name] = input.text()
+  }
+  if (input.at !== block.length) throw damaged('a headers block is malformed')
+  return headers
+}
+
 /** Whether a pop answer's bytes are the framed one. */
 export function isPopFrames(bytes) {
   if (!bytes || bytes.length < MAGIC.length + 1) return false
@@ -99,7 +118,7 @@ export function isPopFrames(bytes) {
  *   { success, queue, partition, partitionId, leaseId, consumerGroup,
  *     messages: [{ id, transactionId, traceId, data, producerSub, createdAt,
  *                  partitionId, partition, leaseId, consumerGroup,
- *                  deliveryAttempt, offset }],
+ *                  deliveryAttempt, offset, headers? }],
  *     partitionsClaimed, ...the answer's own keys }
  *
  * The messages are in delivery order. Everything that reads a pop answer
@@ -170,11 +189,13 @@ export async function decodePopFrames(bytes) {
         const trace = flags & FLAG_TRACE ? frame.take(16) : null
         const transactionId = frame.text()
         const producerSub = flags & FLAG_PRODUCER ? frame.text() : null
+        const headers = flags & FLAG_HEADERS ? decodeHeaders(frame.take(frame.u16())) : null
         if (flags & FLAG_ENCRYPTED) throw damaged('a frame is encrypted')
+        if (flags & FLAG_LINK) throw damaged('a frame is a link')
         const offset = base + BigInt(i)
         if (offset < start || offset > end) continue
         const payload = frame.rest()
-        messages.push({
+        const message = {
           id: uuidText(id),
           transactionId,
           traceId: trace ? uuidText(trace) : null,
@@ -187,7 +208,10 @@ export async function decodePopFrames(bytes) {
           consumerGroup,
           deliveryAttempt,
           offset: Number(offset)
-        })
+        }
+        // Only when there are some, as in the JSON answer.
+        if (headers) message.headers = headers
+        messages.push(message)
       }
     }
   }

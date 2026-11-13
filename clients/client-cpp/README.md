@@ -29,8 +29,10 @@ int main() {
   autopilot sizing, multi-partition claims, conflation, commit at delivery
 - **Acks** with every status (completed, failed, retry, dlq); the ack reads the consumer group and
   the lease from the message
-- **Transactions**: acks, pushes to any partition, KV writes and timers in one log entry, guarded
-  by a lock
+- **Transactions**: acks, pushes to any partition, links, KV writes and timers in one log entry,
+  guarded by a lock
+- **Routing without copies**: message headers, filtered consumer groups (`where`), reading queues
+  and `link`
 - **KV** (the eight operations), **timers** (schedule, cancel, peek, list), **locks and
   semaphores** that renew in the background, **ephemeral queues**, **reads by offset**
 - **`admin()`**: seek a consumer group, retry a dead letter, the queue, group and status routes
@@ -245,6 +247,7 @@ auto readings = queen.queue("metrics").group("live-chart").commit_on_delivery().
 | `queue`, `partition`, `partition_id` | Where it lives. |
 | `lease_id`, `consumer_group` | Its claim. An ack reads both from here. |
 | `delivery_attempt` | 1 the first time, more after a nack or an expired lease. |
+| `headers` | Its headers (`queen::Headers`, a `std::map`); empty when it has none. |
 | `offset`, `created_at`, `trace_id`, `producer_sub` | |
 
 ```cpp
@@ -448,7 +451,7 @@ json reply = queen.ephemeral().pop(inbox, reply_wait);
 
 ```cpp
 auto read = queen.queue("orders").fetch({"customer-42", "customer-7"});   // no lease, no ack
-const auto& part = read["customer-42"];   // records {offset, transaction_id, payload, ts}, next_offset
+const auto& part = read["customer-42"];   // records {offset, transaction_id, payload, ts, headers}, next_offset
 
 queen::FetchOptions options;
 options.offsets["customer-42"] = part.next_offset;                        // only what is new
@@ -485,7 +488,8 @@ Also: `overview`, `namespaces`, `tasks`, `list_queues`, `queue`, `queue_depth`, 
 `list_messages`, `message`, `delete_message`, `dlq`, `record_trace`, `trace_names`,
 `traces_by_name`, `traces_for_message`, `list_consumer_groups`, `consumer_group`,
 `lagging_consumers`, `delete_consumer_group`, `delete_consumer_group_for_queue`,
-`seek_consumer_group_partition`, `set_subscription_timestamp`, `refresh_consumer_stats`,
+`seek_consumer_group_partition`, `set_subscription_timestamp`, `set_subscription_where`,
+`refresh_consumer_stats`,
 `renew_lease`, `status`, `queue_stats`, `queue_detail`, `analytics`, `system_metrics`,
 `worker_metrics`, `health`, `metrics` (Prometheus text). The answers are the broker's JSON. The
 writes that change what consumers see are sent once, without the transport's resend.
@@ -506,6 +510,91 @@ queen.queue("jobs").namespace_name("shop").configure(jobs);
 Every option is a `std::optional`, and only the ones set are sent; the broker's default owns the
 rest. `configure()` is a full upsert: an option left unset goes back to its default, it does not
 keep the value an earlier configure gave it. `config(cfg).create()` is the same call.
+
+## Headers, filtered groups, reading queues and link
+
+A group or a queue can read only what matches a `where`; the source keeps the messages, and a
+message is the same everywhere it shows, with the same `id` and `transaction_id`. All four need a
+cluster at catalogue version 8; an older one answers `cluster_version`.
+
+**Headers** are strings beside the payload, which a `where` reads without the payload:
+
+```cpp
+queen.queue("orders").partition("order-9137")
+     .push({{"orderId", 9137}, {"total", 120}}, "order-9137-paid",
+           {{"type", "order.paid"}, {"traceparent", "00-4bf92f35...-01"}});
+```
+
+`PushItem`, `TxPushItem` and `TimerSchedule` (the fired message keeps them, and `peek()` shows
+them) have a `headers` field too, and pops, `consume()` and `fetch()` hand them back
+(`Message::headers`, `FetchedRecord::headers`). A name is 1 to 64 bytes of
+`a-z 0-9 . _ -`, and `queen-` names are the broker's: both are checked before anything is sent.
+64 headers and 8 KiB a message by default. Headers are never encrypted and never part of dedup,
+so no secrets or personal data in them. With `binary_push` alone, a push with headers goes as
+JSON; with `push_compression` they travel in the frames.
+
+**A filtered group** takes only the messages that match; several `where()` calls are ANDed:
+
+```cpp
+queen.queue("order-events").group("billing").subscription_mode("all")
+     .where("data.kind", "in", {"order.paid", "order.refunded"})
+     .where("headers.traceparent", "exists")
+     .consume(handler);
+
+queen.queue("order-events").group("audit")                      // or one string
+     .where("data.kind in ('order.paid', 'order.refunded') and data.total > 100")
+     .consume(handler);
+```
+
+Fields: `queue`, `partition`, `transactionId`, `data`, `data.<path>`, `headers.<name>`. Ops: `=`
+`!=` `<` `<=` `>` `>=` `in` `exists` `prefix` `!prefix`. The where goes on every pop of the group
+and is fixed at its first one; `subscription_mode("all")` or `subscription_from()` starts the group
+with history. A different where, or a where for a group that already reads the queue unfiltered,
+is refused (400 `where_mismatch`): change it with
+`admin().set_subscription_where(group, queue, where)`, or start a new group. A where needs
+`group()` and a queue (not a discovery pop). Acks and renewals work as for any group; retries, the
+DLQ and priority are the queue's. A broker that filters says `"filtered":true` on every answer of
+such a pop, empty ones too; an answer without it (a 204 included) comes from a broker that would
+hand the group every message, so `pop()` throws `queen::RoutingUnsupportedError` and `consume()`
+stops with it before a message is handled.
+
+**A reading queue** reads its sources' matching messages, with its own lease, retries, DLQ,
+priority and partitions:
+
+```cpp
+queen::QueueConfig italy;
+italy.from = {"orders"};                    // or {{"orders", "data.total > 100"}, "refunds"}
+italy.where = "data.country = 'IT'";        // for the sources named alone
+italy.partition_by = "data.customerId";     // "same" (default), "data.<path>", "headers.<name>"
+italy.start = "all";                        // "now" (default), or every match the sources keep
+italy.lease_time = 30;
+italy.retry_limit = 5;
+queen.queue("orders-it").config(italy).create();
+```
+
+Its sources decide what is kept, so the broker refuses retention, dedup window, encryption and
+max size options on it (400 `reading_queue`); only the options you set are sent, so none goes
+unless you set it. A push into a reading queue is refused. The answer carries the queue's `route`;
+without one the broker does not read other queues, and `configure()` throws
+`RoutingUnsupportedError`. `stop_reading = true` makes it an ordinary queue again. Deleting a queue that reading queues read answers 409 `has_readers` unless
+`del(true)` forces it.
+
+**`link`** forwards a delivered message inside a transaction without sending its payload again:
+
+```cpp
+queen.transaction()
+     .ack(message)
+     .queue("manual-review").partition(message.partition)
+     .link(message, {{"review-reason", "amount"}})      // or link(messages, headers)
+     .commit();
+```
+
+One link per message, named as its pop returned it (partition id, offset, transaction id, group).
+The target gets the same message, so its dedup window answers `duplicate` to a second link into
+the same partition, and a retried step forwards nothing twice. A message gone at the source, a
+reading queue as the target, or a credential that may not consume the source with that group rolls
+the bundle back (`TransactionError`, reason `source_gone`, `source_mismatch`, `reading_queue` or
+`scope_denied`).
 
 ## Binary push, push compression and framed pop
 
@@ -531,7 +620,8 @@ queen::Queen fast("http://localhost:6632", config);
 without it the client throws `std::invalid_argument` at construction when one of them is on.
 `binary_push` and `push_compression` need broker 2.3.0 on every node (an older one answers 400 and
 the client does not fall back). `framed_pop` is safe against any broker. A transaction with a trace
-id on a push, a pop of a conflating group, and acks, KV, timers, locks and the DLQ stay JSON.
+id on a push, a push with headers under `binary_push` alone, a pop of a conflating group, and acks,
+KV, timers, locks and the DLQ stay JSON.
 
 ## The proxy and Queen Cloud
 
@@ -553,6 +643,7 @@ handled for you:
 | `queen::NetworkError` | No answer: the connection failed, broke or timed out. Retryable; for a write, its outcome is unknown. |
 | `queen::TransactionError` | A transaction rolled back for a reason other than a lost precondition; `.result()`. |
 | `queen::ConflationUnsupportedError` | Conflation asked of a broker older than 1.1. |
+| `queen::RoutingUnsupportedError` | A `where` or a `from` asked of a broker without routing: no `"filtered":true` on the pop's answer, no `route` on configure's. |
 | `queen::BufferFlushError`, `queen::LockNotHeldError` | A flush deadline expired; a guard with no lock held. |
 | `std::invalid_argument` | A misuse caught before anything is sent (no queue name, an ack of a message with no partition). |
 
@@ -609,6 +700,7 @@ make test && ./bin/test_client http://localhost:6632   # the live suite, against
 | `test_consumer` | The consume loop: settling, stops, limits, retries; ack and renew results. |
 | `test_wire_forms` | The binary push, the framed pop and the binary transaction body. |
 | `test_reads` | `fetch` and `changed_since`. `<url>` adds a live half. |
+| `test_routing` | Headers on every push form and read, `where` on a group's pops, a reading queue's configure, `link`. |
 | `test_client` | End to end against a live broker. |
 
 With CMake, `cmake -S clients/client-cpp -B build && cmake --build build && ctest --test-dir build`

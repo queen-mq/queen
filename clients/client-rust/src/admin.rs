@@ -327,6 +327,27 @@ impl Admin {
         .await
     }
 
+    /// Change the `where` of a filtered group on `queue`
+    /// (`POST /api/v1/consumer-groups/:group/subscription` with `{queue, where}`).
+    /// It applies from the next push; the group's workers then send the new
+    /// `where` on their pops ([`crate::QueueBuilder::where_`]), since a pop
+    /// with the old one is refused as a mismatch. An empty one takes every
+    /// message. 404 when the group does not filter `queue`. Broker catalogue
+    /// version 8 and later.
+    pub async fn set_consumer_group_where(
+        &self,
+        group: &str,
+        queue: &str,
+        where_: impl Into<crate::Where>,
+    ) -> Result<serde_json::Value> {
+        let where_ = where_.into().to_value()?.unwrap_or(serde_json::Value::Null);
+        self.post(
+            &format!("/api/v1/consumer-groups/{}/subscription", urlencode(group)),
+            &serde_json::json!({ "queue": queue, "where": where_ }),
+        )
+        .await
+    }
+
     pub async fn refresh_consumer_stats(&self) -> Result<serde_json::Value> {
         let out: Option<serde_json::Value> = self
             .inner

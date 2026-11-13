@@ -752,11 +752,13 @@ fn popped() -> queen_mq::Message {
         trace_id: None,
         data: serde_json::Value::Null,
         producer_sub: None,
+        headers: None,
         created_at: "2026-08-04T10:00:00Z".into(),
         partition_id: "7".into(),
         partition: "Default".into(),
         lease_id: "lease-1".into(),
         consumer_group: String::new(),
+        offset: None,
     }
 }
 

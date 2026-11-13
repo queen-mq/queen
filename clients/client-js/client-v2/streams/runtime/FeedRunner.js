@@ -47,6 +47,19 @@
  * outputs wait; a page the filters emptied moves the position at most every
  * `positionCommitMillis`. Reads go to followers.
  *
+ * Links. A chain with only where/filter/keyBy before `.to()` hands the sink
+ * its source messages unchanged, and those are committed as `link`
+ * operations (PLAN_ROUTING.md §7) instead of pushes: the target gets the
+ * message itself, under its own transactionId, and a second link of it into
+ * the same partition is a no-op. `.to(q, { link: false })` pushes copies. The
+ * feed shows a linked message in its target too, read through to its source
+ * and under the source's transactionId, which this query's prefix does not
+ * filter out: so the stream links only into queues it does not read, and
+ * pushes copies into the ones it does (a stream on every queue always
+ * pushes). A broker or a credential that cannot link makes the stream push
+ * copies, as before links; a linked message gone or changed at its source
+ * makes that one commit go as pushes (SinkOperator linkRefusal).
+ *
  * Windows and deadlines close on the feed's clock: the time the log committed
  * each message, which every queue shares and which only moves forward. On a
  * quiet feed the runner writes its position when a window or a deadline is
@@ -77,7 +90,7 @@
 import crypto from 'node:crypto'
 import * as logger from '../../utils/logger.js'
 import { configHashOf } from '../util/configHash.js'
-import { payloadOf } from '../operators/SinkOperator.js'
+import { payloadOf, linkRefusal } from '../operators/SinkOperator.js'
 import { LOCK_NOT_HELD } from '../../locks/Locks.js'
 import { conditionHolds } from '../../feed/Feed.js'
 import { shardOf } from './feed/state.js'
@@ -233,6 +246,15 @@ export class FeedRunner {
   #pipeline
   #sink = null
   #hash = null
+  // The sink gets its source messages unchanged, and links them (see the top).
+  #links = false
+  // Entries below this position go as pushes: a commit of their links found a
+  // message gone or changed at its source (`once`, see #commitWith).
+  #pushBelow = 0
+  // The queues this stream reads, as patterns (null: every queue). A link
+  // into one of them would come back in the feed under its source's
+  // transactionId, past the filter on this query's prefix: those get pushes.
+  #readQueues = null
   // The reads: what the broker filters, what this process filters.
   #brokerQueues = null
   #brokerPartitions = null
@@ -402,6 +424,10 @@ export class FeedRunner {
     this.#sink = sink
     this.#pipeline = new Pipeline(steps)
     this.#hash = chainHash
+    // Only filters and keys before the sink: what reaches it is the source
+    // message, so a link writes the same message and sends no payload.
+    this.#links = sink.kind === 'sink' && sink.link !== false &&
+      steps.every((st) => st.kind === 'ops' && st.ops.every((op) => op.kind === 'filter' || op.kind === 'keyBy'))
     this.#planReads()
 
     this.#reader = this.#makeReader({ from: 'now' })
@@ -500,7 +526,9 @@ export class FeedRunner {
     const partitions = asList(source.partitions ?? source.partition)
     const tables = this.#pipeline.tables
     for (const t of tables) for (const q of t.queues) this.#tableQueues.add(q)
-    // Never read back what this query wrote: its outputs carry its prefix.
+    this.#readQueues = queues ? [...queues, ...this.#tableQueues].map(glob) : null
+    // Never read back what this query wrote: its outputs carry its prefix
+    // (and it links only into queues it does not read, see #out).
     const self = { field: 'transactionId', op: '!prefix', value: outputPrefix(this.#queryId) }
     const where = this.#stream.pushdown || []
     if (tables.length === 0) {
@@ -1068,12 +1096,27 @@ export class FeedRunner {
     }
     const fallback = env.derived ? env.key : (entry ? entry.partition : env.key)
     const targets = await this.#sink.targetsFor(env.value, ctx, fallback)
+    // The source message itself: linked, under its own transactionId, into a
+    // queue this stream does not read. Every target of an entry takes its
+    // number, linked or not, so a push's id is the one it would have had if
+    // every target were pushed.
+    const link = this.#links && !!entry && !env.derived && entry.position >= this.#pushBelow
     for (const target of targets) {
+      const n = entry ? ctr.n++ : null
+      if (link && !this.#reads(target.queue)) {
+        this.#pending.outputs.push({ queue: target.queue, partition: target.partition, link: entry })
+        continue
+      }
       const transactionId = entry
-        ? feedOutputId(this.#queryId, entry, ctr.n++, this.#epoch, this.#id)
+        ? feedOutputId(this.#queryId, entry, n, this.#epoch, this.#id)
         : this.#emitId()
       this.#pending.outputs.push({ queue: target.queue, partition: target.partition, data: payloadOf(env.value), transactionId })
     }
+  }
+
+  /** Whether this stream reads `queue`: the feed would hand it back what is linked there. */
+  #reads(queue) {
+    return this.#readQueues === null || this.#readQueues.some((re) => re.test(queue))
   }
 
   #emitId() {
@@ -1563,13 +1606,24 @@ export class FeedRunner {
   async #commitWith(next, stateful, snap) {
     const tx = this.#queen.transaction()
     if (this.#lock) tx.guard(this.#lock)
+    // Per target partition, its outputs in order: runs of pushes and of
+    // links, one operation each (without links, one push per partition).
     const groups = new Map()
     for (const it of this.#pending.outputs) {
       const k = `${it.queue}\u0000${it.partition}`
-      if (!groups.has(k)) groups.set(k, { queue: it.queue, partition: it.partition, items: [] })
-      groups.get(k).items.push({ data: it.data, transactionId: it.transactionId })
+      if (!groups.has(k)) groups.set(k, { queue: it.queue, partition: it.partition, runs: [] })
+      const runs = groups.get(k).runs
+      const kind = it.link ? 'link' : 'push'
+      if (runs.length === 0 || runs[runs.length - 1].kind !== kind) runs.push({ kind, items: [] })
+      runs[runs.length - 1].items.push(it.link ? it.link : { data: it.data, transactionId: it.transactionId })
     }
-    for (const g of groups.values()) tx.queue(g.queue).partition(g.partition).push(g.items)
+    for (const g of groups.values()) {
+      for (const run of g.runs) {
+        const target = tx.queue(g.queue).partition(g.partition)
+        if (run.kind === 'link') target.link(run.items)
+        else target.push(run.items)
+      }
+    }
     const value = {
       position: next,
       queryId: this.#queryId,
@@ -1616,8 +1670,28 @@ export class FeedRunner {
       // from, so another process on this queryId committed these messages --
       // or this one did, and its answer was lost -- and that commit moved the
       // position in the same transaction. Carry on from the stored position.
+      // (A link of a message its target partition holds already is no
+      // duplicate: the broker commits it as a no-op.)
       if (err && err.reason === 'duplicate') {
         await this.#reload('duplicate')
+        return 'conflict'
+      }
+      // Links refused (SinkOperator linkRefusal): by a broker or a credential
+      // that cannot link, the stream goes on as it did before links, pushing
+      // copies, and says so once; for a message gone or changed at its
+      // source, this commit's entries go again as pushes, and the ones after
+      // them link. Nothing of this commit was written.
+      const refusal = this.#links && this.#pending.outputs.some((it) => it.link) ? linkRefusal(err) : null
+      if (refusal) {
+        if (refusal === 'off') {
+          this.#links = false
+          logger.warn('FeedRunner.links', { queryId: this.#id, reason: err.reason ?? err.code ?? err.status, error: err.message })
+          console.warn(`[queen feed] ${this.#id}: links refused (${err.reason ?? err.code ?? err.status}: ${err.message}); .to() pushes copies from now on`)
+        } else {
+          this.#pushBelow = Math.max(this.#pushBelow, next)
+          logger.log('FeedRunner.links', { queryId: this.#id, reason: err.reason, pushBelow: next })
+        }
+        await this.#reload('links')
         return 'conflict'
       }
       throw err

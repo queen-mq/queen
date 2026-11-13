@@ -9,7 +9,7 @@ import (
 
 // TransactionBuilder provides a fluent API for atomic operations.
 //
-// Beside the push and ack operations, a transaction can carry KV writes and
+// Beside the push, link and ack operations, a transaction can carry KV writes and
 // timer operations: see KV and Timers below. Those two travel as TOP-LEVEL
 // arrays of the request and never inside `operations` -- the reason is in the
 // comment on transactionRequest, and it is not a matter of taste.
@@ -23,6 +23,9 @@ type TransactionBuilder struct {
 	// renewal changes it.
 	guards []*Lock
 	timers []TimerOp
+	// err is the first operation a step could not build (a Link of something
+	// that names no message): Commit answers it before any request.
+	err error
 }
 
 // NewTransactionBuilder creates a new TransactionBuilder.
@@ -79,7 +82,7 @@ func (tb *TransactionBuilder) Ack(messages interface{}, status string, opts AckO
 	return tb
 }
 
-// Queue returns a TransactionQueueBuilder for adding push operations.
+// Queue returns a TransactionQueueBuilder for adding push and link operations.
 func (tb *TransactionBuilder) Queue(name string) *TransactionQueueBuilder {
 	return &TransactionQueueBuilder{
 		tb:        tb,
@@ -152,6 +155,9 @@ func (tb *TransactionBuilder) Timers(ops ...TimerOp) *TransactionBuilder {
 // The failing response is still handed back alongside the error, so the reason
 // stays readable without unwrapping.
 func (tb *TransactionBuilder) Commit(ctx context.Context) (*TransactionResponse, error) {
+	if tb.err != nil {
+		return nil, tb.err
+	}
 	if len(tb.operations) == 0 && len(tb.kv) == 0 && len(tb.timers) == 0 && len(tb.guards) == 0 {
 		return nil, fmt.Errorf("transaction has no operations")
 	}
@@ -374,14 +380,14 @@ func parseTransactionResponse(body []byte) (*TransactionResponse, error) {
 	return resp, nil
 }
 
-// TransactionQueueBuilder provides a fluent API for adding push operations to a transaction.
+// TransactionQueueBuilder provides a fluent API for adding push and link operations to a transaction.
 type TransactionQueueBuilder struct {
 	tb        *TransactionBuilder
 	queueName string
 	partition string
 }
 
-// Partition sets the partition for push operations.
+// Partition sets the partition for push and link operations.
 func (tqb *TransactionQueueBuilder) Partition(name string) *TransactionQueueBuilder {
 	if name == "" {
 		tqb.partition = DefaultPartition
@@ -403,6 +409,14 @@ func (tqb *TransactionQueueBuilder) Push(payload interface{}) *TransactionBuilde
 		for _, m := range p {
 			payloads = append(payloads, m)
 		}
+	case []PushItem:
+		for _, it := range p {
+			payloads = append(payloads, it)
+		}
+	case []*PushItem:
+		for _, it := range p {
+			payloads = append(payloads, it)
+		}
 	default:
 		payloads = []interface{}{payload}
 	}
@@ -410,9 +424,9 @@ func (tqb *TransactionQueueBuilder) Push(payload interface{}) *TransactionBuilde
 	// Build push items.
 	//
 	// A caller who passes a PushItem controls its own TransactionID, which is
-	// what makes a retried transaction idempotent inside the dedup window.
-	// Anything else is treated as a bare payload and gets a minted id, which
-	// is the previous behaviour.
+	// what makes a retried transaction idempotent inside the dedup window, and
+	// its own Headers. Anything else is treated as a bare payload and gets a
+	// minted id, which is the previous behaviour.
 	items := make([]PushItem, len(payloads))
 	for i, p := range payloads {
 		item := PushItem{
@@ -421,8 +435,7 @@ func (tqb *TransactionQueueBuilder) Push(payload interface{}) *TransactionBuilde
 			Payload:       p,
 			TransactionID: GenerateUUID(),
 		}
-		switch v := p.(type) {
-		case PushItem:
+		if v, ok := pushItemOf(p); ok {
 			item.Payload = v.Payload
 			if v.TransactionID != "" {
 				item.TransactionID = v.TransactionID
@@ -431,17 +444,7 @@ func (tqb *TransactionQueueBuilder) Push(payload interface{}) *TransactionBuilde
 			if v.Partition != "" {
 				item.Partition = v.Partition
 			}
-		case *PushItem:
-			if v != nil {
-				item.Payload = v.Payload
-				if v.TransactionID != "" {
-					item.TransactionID = v.TransactionID
-				}
-				item.TraceID = v.TraceID
-				if v.Partition != "" {
-					item.Partition = v.Partition
-				}
-			}
+			item.Headers = v.Headers
 		}
 		items[i] = item
 	}
@@ -453,5 +456,44 @@ func (tqb *TransactionQueueBuilder) Push(payload interface{}) *TransactionBuilde
 	}
 	tqb.tb.operations = append(tqb.tb.operations, op)
 
+	return tqb.tb
+}
+
+// Link adds link operations (a cluster at catalogue version 8): each message
+// of messages goes to this queue and partition as the same message -- the
+// same id and transactionId -- while its payload stays where it is stored, so
+// a hop costs a few bytes whatever the message weighs. It commits with the
+// rest of the transaction (the ack of the message, say) or not at all:
+//
+//	client.Transaction().
+//		Ack(msg, "completed", queen.AckOptions{ConsumerGroup: "workers"}).
+//		Queue("manual-review").Partition(msg.Partition).
+//		Link(msg, queen.LinkOptions{Headers: map[string]string{"review-reason": "amount"}}).
+//		Commit(ctx)
+//
+// messages is what Ack takes (*Message, []*Message, []Message, with their
+// Offset and ConsumerGroup as the pop answered them), a FeedEntry or a list of
+// them, or LinkSource values. A reader of the target sees the message's
+// headers with opts.Headers written over them.
+//
+// A link into a partition that already holds the message (a retried forward)
+// writes nothing and the transaction still commits: its result has "type":
+// "link" and "duplicate": true. That is what makes forwarding safe to retry. A
+// link rolls the transaction back (Commit returns an error with Success false)
+// as source_gone when the source no longer keeps the message, source_mismatch
+// when its offset holds another one, and reading_queue when the target is a
+// reading queue, which takes only its sources. A list Link cannot read fails
+// Commit before any request.
+func (tqb *TransactionQueueBuilder) Link(messages interface{}, opts LinkOptions) *TransactionBuilder {
+	sources, err := linkSourcesOf(messages)
+	if err != nil {
+		if tqb.tb.err == nil {
+			tqb.tb.err = err
+		}
+		return tqb.tb
+	}
+	for _, from := range sources {
+		tqb.tb.operations = append(tqb.tb.operations, linkOperation(tqb.queueName, tqb.partition, from, opts.Headers))
+	}
 	return tqb.tb
 }

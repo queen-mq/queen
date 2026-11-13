@@ -3,11 +3,60 @@
 // zstd-compressed together. Frame layout (little-endian):
 //   u32 body_len
 //   body: u8 flags | u8[16] message_id | [u8[16] trace_id]
-//         | u16 txn_len | txn | [u16 psub_len | psub] | payload(JSON bytes)
+//         | u16 txn_len | txn | [u16 psub_len | psub]
+//         | [u16 headers_len | headers] | payload(JSON bytes)
+//
+// Two flags came with catalogue version 8 (PLAN_ROUTING.md):
+//   - FLAG_HEADERS: the message's headers, a block of string pairs
+//     (`u16 count | (u8 key_len | key | u16 value_len | value) × count`, keys
+//     sorted), stored in clear whatever the queue's encryption.
+//   - FLAG_LINK: a LINK, not a message. Its payload is the 24-byte address of
+//     the message it stands for (`u64 qid | u64 pid | u64 offset`), and its
+//     id and transaction id are that message's. Readers resolve it
+//     (`rsm::route::link`) before they render anything.
+// A build before version 8 never meets either: they are written only where
+// the cluster version admits 8.
 
 const FLAG_TRACE: u8 = 1;
 const FLAG_PSUB: u8 = 2;
-const FLAG_ENCRYPTED: u8 = 4;
+pub const FLAG_ENCRYPTED: u8 = 4;
+pub const FLAG_HEADERS: u8 = 8;
+pub const FLAG_LINK: u8 = 16;
+
+/// The bytes of a link frame's payload: `u64 qid | u64 pid | u64 offset`.
+pub const LINK_LEN: usize = 24;
+
+/// What a link frame points at: the source message's queue log, partition and
+/// offset. All three are the same on every node (a queue log's id is a hash of
+/// its tenant and queue name, `QLogReader::queue_id_of`), so a link resolves
+/// on any node that holds the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LinkRef {
+    pub qid: u64,
+    pub pid: u64,
+    pub offset: u64,
+}
+
+impl LinkRef {
+    pub fn encode(&self) -> [u8; LINK_LEN] {
+        let mut out = [0u8; LINK_LEN];
+        out[0..8].copy_from_slice(&self.qid.to_le_bytes());
+        out[8..16].copy_from_slice(&self.pid.to_le_bytes());
+        out[16..24].copy_from_slice(&self.offset.to_le_bytes());
+        out
+    }
+
+    pub fn decode(b: &[u8]) -> Option<LinkRef> {
+        if b.len() != LINK_LEN {
+            return None;
+        }
+        Some(LinkRef {
+            qid: u64::from_le_bytes(b[0..8].try_into().ok()?),
+            pid: u64::from_le_bytes(b[8..16].try_into().ok()?),
+            offset: u64::from_le_bytes(b[16..24].try_into().ok()?),
+        })
+    }
+}
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
@@ -65,15 +114,27 @@ pub struct FrameIn<'a> {
     pub producer_sub: Option<&'a str>,
     pub payload: &'a [u8],
     pub encrypted: bool,
+    /// A headers block ([`encode_headers`]), or `None`. An empty block is
+    /// written as no block.
+    pub headers: Option<&'a [u8]>,
+    /// `Some`: a link frame, whose payload is this address and not `payload`.
+    pub link: Option<LinkRef>,
 }
 
 pub fn pack_frames(frames: &[FrameIn]) -> Vec<u8> {
     let mut est = 0usize;
     for f in frames {
-        est += f.payload.len() + f.txn.len() + 64;
+        est += f.payload.len() + f.txn.len() + 64 + f.headers.map_or(0, <[u8]>::len);
     }
     let mut out = Vec::with_capacity(est);
     for f in frames {
+        // A block of no headers (`u16 0`) is written as none.
+        let headers = f.headers.filter(|h| h.len() > 2);
+        let link = f.link.map(|l| l.encode());
+        let payload: &[u8] = match &link {
+            Some(l) => l,
+            None => f.payload,
+        };
         let mut flags = 0u8;
         if f.trace_id.is_some() {
             flags |= FLAG_TRACE;
@@ -83,6 +144,12 @@ pub fn pack_frames(frames: &[FrameIn]) -> Vec<u8> {
         }
         if f.encrypted {
             flags |= FLAG_ENCRYPTED;
+        }
+        if headers.is_some() {
+            flags |= FLAG_HEADERS;
+        }
+        if link.is_some() {
+            flags |= FLAG_LINK;
         }
         // Body length is fully determined up front, so the frame is written
         // straight into `out` — no per-frame temp Vec (that was one extra
@@ -97,12 +164,20 @@ pub fn pack_frames(frames: &[FrameIn]) -> Vec<u8> {
             txn.len() <= u16::MAX as usize,
             "txn exceeds the u16 frame limit"
         );
-        let mut body_len = 1 + 16 + 2 + txn.len() + f.payload.len();
+        let mut body_len = 1 + 16 + 2 + txn.len() + payload.len();
         if f.trace_id.is_some() {
             body_len += 16;
         }
         if let Some(ps) = f.producer_sub {
             body_len += 2 + ps.len();
+        }
+        if let Some(h) = headers {
+            // The receiver caps a block far below this (`QUEEN_MAX_HEADER_BYTES`).
+            debug_assert!(
+                h.len() <= u16::MAX as usize,
+                "headers exceed the u16 frame limit"
+            );
+            body_len += 2 + h.len();
         }
         out.extend_from_slice(&(body_len as u32).to_le_bytes());
         out.push(flags);
@@ -117,9 +192,214 @@ pub fn pack_frames(frames: &[FrameIn]) -> Vec<u8> {
             out.extend_from_slice(&(ps.len() as u16).to_le_bytes());
             out.extend_from_slice(ps);
         }
-        out.extend_from_slice(f.payload);
+        if let Some(h) = headers {
+            out.extend_from_slice(&(h.len() as u16).to_le_bytes());
+            out.extend_from_slice(h);
+        }
+        out.extend_from_slice(payload);
     }
     out
+}
+
+/// One frame re-packed from a [`FrameRef`], as stored: the same bytes
+/// [`pack_frames`] wrote for it.
+pub fn repack_into(out: &mut Vec<u8>, f: &FrameRef<'_>) {
+    out.extend_from_slice(&pack_frames(&[FrameIn {
+        message_id: f.message_id,
+        txn: f.txn,
+        trace_id: f.trace_id,
+        producer_sub: f.producer_sub,
+        payload: f.payload,
+        encrypted: f.encrypted,
+        headers: f.headers,
+        link: f.link,
+    }]));
+}
+
+// ---------------------------------------------------------------- headers
+
+/// The most headers one message may carry, by default (`QUEEN_MAX_HEADERS`).
+pub const MAX_HEADERS_DEFAULT: usize = 64;
+/// The most bytes one message's headers block may hold, by default
+/// (`QUEEN_MAX_HEADER_BYTES`). Never above the u16 the frame stores.
+pub const MAX_HEADER_BYTES_DEFAULT: usize = 8 * 1024;
+/// The longest header name.
+pub const MAX_HEADER_KEY_BYTES: usize = 64;
+
+/// `QUEEN_MAX_HEADERS`, read once.
+pub fn max_headers() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_MAX_HEADERS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(MAX_HEADERS_DEFAULT)
+    })
+}
+
+/// `QUEEN_MAX_HEADER_BYTES`, read once, at most 65,535 (the frame's u16).
+pub fn max_header_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_MAX_HEADER_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(MAX_HEADER_BYTES_DEFAULT)
+            .min(u16::MAX as usize)
+    })
+}
+
+/// Whether `key` may name a header: 1 to [`MAX_HEADER_KEY_BYTES`] bytes of
+/// `a-z 0-9 . _ -`.
+pub fn header_key_valid(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= MAX_HEADER_KEY_BYTES
+        && key.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
+}
+
+/// The prefix of the headers the broker sets; a client may not set them.
+pub const RESERVED_HEADER_PREFIX: &str = "queen-";
+
+/// Encode headers as a block, sorted by name (a name given twice keeps its
+/// last value). Checks nothing: [`check_headers`] does, on the way in.
+pub fn encode_headers<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<u8> {
+    let mut sorted: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for (k, v) in pairs {
+        sorted.insert(k, v);
+    }
+    let mut out = Vec::with_capacity(2 + sorted.len() * 16);
+    out.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
+    for (k, v) in sorted {
+        out.push(k.len() as u8);
+        out.extend_from_slice(k.as_bytes());
+        out.extend_from_slice(&(v.len() as u16).to_le_bytes());
+        out.extend_from_slice(v.as_bytes());
+    }
+    out
+}
+
+/// The pairs of a headers block, in its (name) order. `None` for a block that
+/// does not decode; [`encode_headers`] never writes one.
+pub fn decode_headers(block: &[u8]) -> Option<Vec<(&str, &str)>> {
+    if block.len() < 2 {
+        return None;
+    }
+    let n = u16::from_le_bytes([block[0], block[1]]) as usize;
+    let mut out = Vec::with_capacity(n.min(256));
+    let mut p = 2usize;
+    for _ in 0..n {
+        let kl = *block.get(p)? as usize;
+        p += 1;
+        let k = std::str::from_utf8(block.get(p..p + kl)?).ok()?;
+        p += kl;
+        let vl = u16::from_le_bytes([*block.get(p)?, *block.get(p + 1)?]) as usize;
+        p += 2;
+        let v = std::str::from_utf8(block.get(p..p + vl)?).ok()?;
+        p += vl;
+        out.push((k, v));
+    }
+    (p == block.len()).then_some(out)
+}
+
+/// One header's value in a block.
+pub fn header_get<'b>(block: &'b [u8], key: &str) -> Option<&'b str> {
+    decode_headers(block)?
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| v)
+}
+
+/// `base` with every header of `top` written over it: what a link's reader
+/// sees (the source's headers, then the link's own). `None` when both are.
+pub fn overlay_headers(base: Option<&[u8]>, top: Option<&[u8]>) -> Option<Vec<u8>> {
+    match (base, top) {
+        (None, None) => None,
+        (Some(b), None) => Some(b.to_vec()),
+        (None, Some(t)) => Some(t.to_vec()),
+        (Some(b), Some(t)) => {
+            let mut pairs = decode_headers(b).unwrap_or_default();
+            pairs.extend(decode_headers(t).unwrap_or_default());
+            Some(encode_headers(pairs))
+        }
+    }
+}
+
+/// A headers block as a JSON object (`{"type":"order.paid"}`); `{}` for an
+/// empty or broken one.
+pub fn headers_json_into(out: &mut String, block: &[u8]) {
+    out.push('{');
+    for (i, (k, v)) in decode_headers(block)
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+    {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        crate::util::json_escape_into(out, k);
+        out.push_str("\":\"");
+        crate::util::json_escape_into(out, v);
+        out.push('"');
+    }
+    out.push('}');
+}
+
+/// A headers block as a JSON value.
+pub fn headers_json(block: &[u8]) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    for (k, v) in decode_headers(block).unwrap_or_default() {
+        m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+    }
+    serde_json::Value::Object(m)
+}
+
+/// Why a client's headers are refused, checked against the limits: a name
+/// outside `a-z 0-9 . _ -` or longer than 64 bytes, a reserved `queen-` name,
+/// a value that is not a string, too many, too many bytes.
+pub fn check_headers(v: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let serde_json::Value::Object(m) = v else {
+        return Err("headers must be an object of strings".into());
+    };
+    if m.len() > max_headers() {
+        return Err(format!(
+            "at most {} headers per message (QUEEN_MAX_HEADERS)",
+            max_headers()
+        ));
+    }
+    if m.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pairs = Vec::with_capacity(m.len());
+    for (k, val) in m {
+        if !header_key_valid(k) {
+            return Err(format!(
+                "header name {k:?}: 1 to {MAX_HEADER_KEY_BYTES} bytes of a-z, 0-9, '.', '_' or '-'"
+            ));
+        }
+        if k.starts_with(RESERVED_HEADER_PREFIX) {
+            return Err(format!(
+                "header name {k:?}: names starting with \"queen-\" are the broker's"
+            ));
+        }
+        let Some(s) = val.as_str() else {
+            return Err(format!("header {k:?}: the value must be a string"));
+        };
+        pairs.push((k.as_str(), s));
+    }
+    let block = encode_headers(pairs);
+    if block.len() > max_header_bytes() {
+        return Err(format!(
+            "headers of {} B exceed {} B per message (QUEEN_MAX_HEADER_BYTES)",
+            block.len(),
+            max_header_bytes()
+        ));
+    }
+    Ok(block)
 }
 
 // Append the 36-char hyphenated hex form of a UUID without allocating (the
@@ -151,6 +431,8 @@ pub struct FrameOut {
     pub producer_sub: Option<String>,
     pub payload: Vec<u8>,
     pub encrypted: bool,
+    pub headers: Option<Vec<u8>>,
+    pub link: Option<LinkRef>,
 }
 
 // Borrowed frame view for the hot pop-render path: no per-frame String/Vec
@@ -170,6 +452,18 @@ pub struct FrameRef<'a> {
     // flag it, and CI compiles with -D warnings.
     #[allow(dead_code)]
     pub encrypted: bool,
+    /// The headers block, when the frame carries one ([`decode_headers`]).
+    pub headers: Option<&'a [u8]>,
+    /// `Some` for a link frame: the message it stands for. `payload` then
+    /// holds the 24 address bytes, never a message.
+    pub link: Option<LinkRef>,
+}
+
+impl FrameRef<'_> {
+    /// Whether this frame is a link (resolved or not by the reader).
+    pub fn is_link(&self) -> bool {
+        self.link.is_some()
+    }
 }
 
 pub fn unpack_frames_ref(raw: &[u8]) -> Option<Vec<FrameRef<'_>>> {
@@ -221,13 +515,34 @@ pub fn unpack_frames_ref(raw: &[u8]) -> Option<Vec<FrameRef<'_>>> {
             producer_sub = Some(std::str::from_utf8(&raw[p..p + ps_len]).ok()?);
             p += ps_len;
         }
+        let mut headers = None;
+        if flags & FLAG_HEADERS != 0 {
+            if p + 2 > end {
+                return None;
+            }
+            let h_len = rd_u16(raw, p) as usize;
+            p += 2;
+            if p + h_len > end {
+                return None;
+            }
+            headers = Some(&raw[p..p + h_len]);
+            p += h_len;
+        }
+        let payload = &raw[p..end];
+        let link = if flags & FLAG_LINK != 0 {
+            Some(LinkRef::decode(payload)?)
+        } else {
+            None
+        };
         out.push(FrameRef {
             message_id: mid,
             txn,
             trace_id,
             producer_sub,
-            payload: &raw[p..end],
+            payload,
             encrypted: (flags & FLAG_ENCRYPTED) != 0,
+            headers,
+            link,
         });
         o = end;
     }
@@ -238,17 +553,56 @@ pub fn unpack_frames_ref(raw: &[u8]) -> Option<Vec<FrameRef<'_>>> {
     }
 }
 
-/// Whether any frame of a segment carries the encrypted flag, reading only
-/// each frame's length and flags. A malformed segment answers true, so a caller
-/// that would send the frames as they are leaves them to the full unpack.
-pub fn any_encrypted(raw: &[u8]) -> bool {
+/// Rewrite the source pid of every link frame in `raw` with `f`, in place: the
+/// footprint scheduler numbers a partition its cycle created once the cycle is
+/// planned, and a link to a message of that partition carries its pid. A link
+/// frame's payload is its address, so the pid sits 16 bytes before the frame's
+/// end. `false` when `raw` is not a run of whole frames.
+pub fn relink(raw: &mut [u8], f: &mut impl FnMut(u64) -> u64) -> bool {
+    let mut o = 0usize;
+    while o + 4 <= raw.len() {
+        let len = u32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]) as usize;
+        let end = o + 4 + len;
+        if end > raw.len() || len < 19 {
+            return false;
+        }
+        if raw[o + 4] & FLAG_LINK != 0 {
+            if len < 19 + LINK_LEN {
+                return false;
+            }
+            let at = end - 16;
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&raw[at..at + 8]);
+            raw[at..at + 8].copy_from_slice(&f(u64::from_le_bytes(b)).to_le_bytes());
+        }
+        o = end;
+    }
+    o == raw.len()
+}
+
+/// Whether a segment is links only: it decodes, and every frame is a link.
+/// Unlike [`any_link`], a malformed segment answers false.
+pub fn all_links(raw: &[u8]) -> bool {
+    unpack_frames_ref(raw).is_some_and(|f| !f.is_empty() && f.iter().all(FrameRef::is_link))
+}
+
+/// Whether any frame of a segment is a link, reading only lengths and flags.
+/// A malformed segment answers true, as [`any_flag`].
+pub fn any_link(raw: &[u8]) -> bool {
+    any_flag(raw, FLAG_LINK)
+}
+
+/// Whether any frame of a segment carries a flag of `mask`, reading only
+/// lengths and flags. A malformed segment answers true, so a caller that would
+/// send the frames as they are leaves them to the full unpack.
+pub fn any_flag(raw: &[u8], mask: u8) -> bool {
     let mut o = 0usize;
     while o + 4 <= raw.len() {
         let len = u32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]) as usize;
         if len < 19 || len > raw.len() - (o + 4) {
             return true;
         }
-        if raw[o + 4] & FLAG_ENCRYPTED != 0 {
+        if raw[o + 4] & mask != 0 {
             return true;
         }
         o += 4 + len;
@@ -277,6 +631,8 @@ pub fn unpack_frames(raw: &[u8]) -> Option<Vec<FrameOut>> {
             producer_sub: None,
             payload: Vec::new(),
             encrypted: (flags & FLAG_ENCRYPTED) != 0,
+            headers: None,
+            link: None,
         };
         let mut mid = [0u8; 16];
         mid.copy_from_slice(&raw[p..p + 16]);
@@ -321,7 +677,22 @@ pub fn unpack_frames(raw: &[u8]) -> Option<Vec<FrameOut>> {
             });
             p += ps_len;
         }
+        if flags & FLAG_HEADERS != 0 {
+            if p + 2 > end {
+                return None;
+            }
+            let h_len = rd_u16(raw, p) as usize;
+            p += 2;
+            if p + h_len > end {
+                return None;
+            }
+            f.headers = Some(raw[p..p + h_len].to_vec());
+            p += h_len;
+        }
         f.payload = raw[p..end].to_vec();
+        if flags & FLAG_LINK != 0 {
+            f.link = Some(LinkRef::decode(&f.payload)?);
+        }
         out.push(f);
         o = end;
     }
@@ -425,6 +796,8 @@ mod tests {
                 producer_sub: Some("sub@x"),
                 payload: br#"{"a":1}"#,
                 encrypted: false,
+                headers: None,
+                link: None,
             },
             FrameIn {
                 message_id: mid2,
@@ -433,6 +806,8 @@ mod tests {
                 producer_sub: None,
                 payload: b"",
                 encrypted: true,
+                headers: None,
+                link: None,
             },
         ];
         let packed = pack_frames(&fins);
@@ -458,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn any_encrypted_reads_each_frames_flag() {
+    fn any_flag_reads_each_frames_flags() {
         let frame = |txn: &'static str, encrypted: bool| FrameIn {
             message_id: [1; 16],
             txn,
@@ -466,16 +841,20 @@ mod tests {
             producer_sub: Some("sub"),
             payload: br#"{"a":1}"#,
             encrypted,
+            headers: None,
+            link: None,
         };
-        assert!(!any_encrypted(&[]));
+        let encrypted = |raw: &[u8]| any_flag(raw, FLAG_ENCRYPTED);
+        assert!(!encrypted(&[]));
         let plain = pack_frames(&[frame("t1", false), frame("t2", false)]);
-        assert!(!any_encrypted(&plain));
+        assert!(!encrypted(&plain));
+        assert!(!any_flag(&plain, FLAG_HEADERS | FLAG_LINK));
         let second = pack_frames(&[frame("t1", false), frame("t2", true)]);
-        assert!(any_encrypted(&second));
+        assert!(encrypted(&second));
         // A segment it cannot follow answers true: the caller unpacks it whole.
-        assert!(any_encrypted(&plain[..plain.len() - 1]));
+        assert!(encrypted(&plain[..plain.len() - 1]));
         let mut short = plain.clone();
         short[..4].copy_from_slice(&3u32.to_le_bytes());
-        assert!(any_encrypted(&short));
+        assert!(encrypted(&short));
     }
 }

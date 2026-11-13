@@ -12,13 +12,16 @@ class OperationBuilder
     private ?array $body;
     private ?\Closure $onSuccessCallback = null;
     private ?\Closure $onErrorCallback = null;
+    /** Throws when the answer does not show the request took effect. */
+    private ?\Closure $check;
 
-    public function __construct(HttpClient $httpClient, string $method, string $path, ?array $body)
+    public function __construct(HttpClient $httpClient, string $method, string $path, ?array $body, ?\Closure $check = null)
     {
         $this->httpClient = $httpClient;
         $this->method = $method;
         $this->path = $path;
         $this->body = $body;
+        $this->check = $check;
     }
 
     public function onSuccess(\Closure $callback): static
@@ -50,6 +53,11 @@ class OperationBuilder
                     return ['success' => false, 'error' => $result['error']];
                 }
                 throw $error;
+            }
+
+            // As an error answer: to onError, or thrown.
+            if ($this->check !== null) {
+                ($this->check)($result);
             }
 
             if ($this->onSuccessCallback !== null) {

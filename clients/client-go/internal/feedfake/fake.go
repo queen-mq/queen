@@ -53,14 +53,22 @@ type Entry struct {
 	TransactionID string
 	Payload       interface{}
 	TS            string
+	// Link: a transaction's link op wrote it: the source's id, transaction id
+	// and payload, at the target's partition and offset. The feed shows it as
+	// any message of the target queue, as the broker's does.
+	Link bool
 }
 
 // Txn is one applied transaction.
 type Txn struct {
 	Position int64
-	Items    []map[string]interface{}
-	KV       []map[string]interface{}
-	Written  map[string]int64
+	// Items are the messages it wrote, pushed or linked ("link": true), in
+	// operation order.
+	Items []map[string]interface{}
+	// Links are its link operations, as sent.
+	Links   []map[string]interface{}
+	KV      []map[string]interface{}
+	Written map[string]int64
 }
 
 // Inject is something for the next transaction: Before runs first (another
@@ -119,6 +127,9 @@ type Broker struct {
 	ephSeq    int
 	// NoFeed: POST /api/v1/feed answers 404 (a broker older than the feed).
 	NoFeed bool
+	// NoLinks: a transaction with a link op answers 400 bad_request (a broker
+	// older than links). Set it before the first client call.
+	NoLinks bool
 	// cutOnFeed: a client is cut at its n-th feed read (that read fails too).
 	cutOnFeed map[string]int
 	feedCalls map[string]int
@@ -225,11 +236,27 @@ func (b *Broker) appendPushes(items []map[string]interface{}, position int64, t 
 		if _, ok := b.pids[pk]; !ok {
 			b.pids[pk] = fmt.Sprintf("pid-%d", len(b.pids)+1)
 		}
+		link, _ := it["link"].(bool)
+		if link && b.ids[pk+"\x00"+tx] {
+			// A link the partition already holds: a no-op, and the
+			// transaction commits (a pushed duplicate rolled it back above).
+			results = append(results, map[string]interface{}{"type": "link", "success": true, "duplicate": true, "transactionId": tx})
+			continue
+		}
 		b.offsets[pk]++
 		offset := b.offsets[pk]
 		b.ids[pk+"\x00"+tx] = true
+		id := fmt.Sprintf("m-%d-%d", position, offset)
+		if link {
+			// The same message as at the source: its id too.
+			id, _ = it["id"].(string)
+		}
 		b.log = append(b.log, &Entry{Position: position, Queue: q, Partition: part, PartitionID: b.pids[pk], Offset: offset,
-			ID: fmt.Sprintf("m-%d-%d", position, offset), TransactionID: tx, Payload: jsv.JSONClone(it["payload"]), TS: iso(t)})
+			ID: id, TransactionID: tx, Payload: jsv.JSONClone(it["payload"]), TS: iso(t), Link: link})
+		if link {
+			results = append(results, map[string]interface{}{"type": "link", "success": true, "transactionId": tx})
+			continue
+		}
 		results = append(results, map[string]interface{}{"type": "push", "status": "queued", "transactionId": tx})
 	}
 	return results
@@ -673,21 +700,63 @@ func (b *Broker) locksCall(ops []interface{}) map[string]interface{} {
 type httpFail struct {
 	status int
 	reset  bool
+	// body is the JSON answered with status (nil: the injected-failure text).
+	body map[string]interface{}
+}
+
+// linked is the message a link op names, as the broker resolves it: the
+// source by queue and partition (a feed entry) or partition id, its offset,
+// and the transaction id that proves it is the one meant. "" reason: found.
+func (b *Broker) linked(from map[string]interface{}) (*Entry, string) {
+	q, _ := from["queue"].(string)
+	p, _ := from["partition"].(string)
+	pid, _ := from["partitionId"].(string)
+	tx, _ := from["transactionId"].(string)
+	off := int64(numOr(from["offset"], -1))
+	for _, e := range b.log {
+		if e.Offset != off || e.Link {
+			continue
+		}
+		if (pid != "" && e.PartitionID == pid) || (pid == "" && e.Queue == q && e.Partition == p) {
+			if e.TransactionID != tx {
+				return nil, "source_mismatch"
+			}
+			return e, ""
+		}
+	}
+	return nil, "source_gone"
 }
 
 // transaction applies one transaction (mu held). A non-nil fail is answered instead of the result.
 func (b *Broker) transaction(body map[string]interface{}, rawKV []json.RawMessage) (map[string]interface{}, *httpFail, bool) {
 	var items []map[string]interface{}
+	var links []map[string]interface{}
 	ops, _ := body["operations"].([]interface{})
 	for _, o := range ops {
 		op, _ := o.(map[string]interface{})
-		if op["type"] == "push" {
+		switch op["type"] {
+		case "push":
 			list, _ := op["items"].([]interface{})
 			for _, it := range list {
 				if m, ok := it.(map[string]interface{}); ok {
 					items = append(items, m)
 				}
 			}
+		case "link":
+			// As the broker: a link is a message of the target with the
+			// source's transaction id (and its payload, read through the link).
+			if b.NoLinks {
+				return nil, &httpFail{status: 400, body: map[string]interface{}{"success": false, "reason": "bad_request",
+					"error": "transaction supports only push and ack operations, got `link`", "results": []interface{}{}}}, false
+			}
+			from, _ := op["from"].(map[string]interface{})
+			src, reason := b.linked(from)
+			if src == nil {
+				return map[string]interface{}{"success": false, "reason": reason, "error": reason + ": the linked message", "results": []interface{}{}}, nil, false
+			}
+			links = append(links, jsv.JSONClone(op).(map[string]interface{}))
+			items = append(items, map[string]interface{}{"queue": op["queue"], "partition": op["partition"], "payload": src.Payload,
+				"transactionId": src.TransactionID, "id": src.ID, "link": true})
 		}
 	}
 	var kvOps []map[string]interface{}
@@ -721,6 +790,11 @@ func (b *Broker) transaction(body map[string]interface{}, rawKV []json.RawMessag
 			part = "Default"
 		}
 		k := jsv.String(it["queue"]) + "\x00" + part + "\x00" + jsv.String(it["transactionId"])
+		if link, _ := it["link"].(bool); link {
+			// A link that is a duplicate is a no-op (appendPushes), not a rollback.
+			seen[k] = true
+			continue
+		}
 		if b.ids[k] || seen[k] {
 			return map[string]interface{}{"success": false, "reason": "duplicate", "error": "QDUP a pushed message is a duplicate; the transaction rolled back", "results": []interface{}{}}, nil, false
 		}
@@ -820,7 +894,7 @@ func (b *Broker) transaction(body map[string]interface{}, rawKV []json.RawMessag
 		written[key] = b.kvVersion
 		results = append(results, map[string]interface{}{"index": idx, "type": "kv", "op": op["op"], "key": key, "version": float64(b.kvVersion), "applied": true})
 	}
-	b.txns = append(b.txns, Txn{Position: position, Items: items, KV: kvOps, Written: written})
+	b.txns = append(b.txns, Txn{Position: position, Items: items, Links: links, KV: kvOps, Written: written})
 	b.wakeAll()
 	if failNow && inj.When == "after" {
 		return nil, &httpFail{status: inj.Status, reset: inj.Reset}, true
@@ -942,6 +1016,10 @@ func (b *Broker) serve(w http.ResponseWriter, r *http.Request) {
 		if fail != nil {
 			if fail.reset {
 				drop(w)
+				return
+			}
+			if fail.body != nil {
+				send(fail.status, fail.body)
 				return
 			}
 			send(fail.status, map[string]interface{}{"error": fmt.Sprintf("HTTP %d: injected", fail.status)})

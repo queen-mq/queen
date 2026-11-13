@@ -588,6 +588,7 @@ mod planner_e2e {
             retention_sink_hold: String::new(),
             retention_sink_hold_max_seconds: 0,
             created_at_us: BASE_US,
+            route: None,
         }
     }
 
@@ -608,6 +609,7 @@ mod planner_e2e {
                 })
                 .collect(),
             create_cfg: qcfg(),
+            links: Default::default(),
         }
     }
 

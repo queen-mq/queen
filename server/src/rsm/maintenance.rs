@@ -982,9 +982,14 @@ pub(crate) fn queue_cutoffs<R: Reads + ?Sized>(
     let all = (qcfg.retention_enabled && qcfg.retention_seconds > 0)
         .then(|| now_us.saturating_sub(qcfg.retention_seconds as i64 * 1_000_000))
         .map(|v| v.min(sink_floor));
+    // A queue others read (PLAN_ROUTING.md §3.5): its readers and holders
+    // count as consumer groups of it, so its completed retention waits for
+    // the oldest link any of them still keeps. Its time limits (`all`,
+    // `max_wait`) bind them as they bind a lagging group.
+    let holder_floor = holder_floor(r, now_us, tenant, queue, qcfg);
     let completed = (qcfg.retention_enabled && qcfg.completed_retention_seconds > 0)
         .then(|| now_us.saturating_sub(qcfg.completed_retention_seconds as i64 * 1_000_000))
-        .map(|v| v.min(sink_floor));
+        .map(|v| v.min(sink_floor).min(holder_floor));
     let max_wait = (qcfg.max_wait_time_seconds > 0)
         .then(|| now_us.saturating_sub(qcfg.max_wait_time_seconds as i64 * 1_000_000));
     // The txns window, how long a push keeps its row: the dedup window, and
@@ -1544,6 +1549,118 @@ fn stale_boundary_n(
         }
     }
     (target, taken)
+}
+
+/// How long a computed holder floor is used before it is read again: a floor
+/// only rises as the holders consume, so an older one is the safer one.
+const HOLDER_FLOOR_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `(tenant, queue)` -> when its floor was last read, and the age in seconds
+/// of the oldest message its readers and holders keep unconsumed.
+type HolderAges = std::collections::HashMap<(String, String), (std::time::Instant, u64)>;
+static HOLDER_AGES: std::sync::OnceLock<std::sync::Mutex<HolderAges>> = std::sync::OnceLock::new();
+
+/// `queen_holder_floor_age_seconds` (`metrics.rs`): per source queue, the age
+/// of the oldest message its readers and holders keep unconsumed, as this
+/// node's last floor read found it (the oldest across tenants for one name).
+/// A queue whose floor was not read for a minute is left out.
+pub fn holder_floor_ages() -> Vec<(String, u64)> {
+    let g = HOLDER_AGES
+        .get_or_init(Default::default)
+        .lock()
+        .expect("holder ages");
+    let mut out: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for ((_, queue), (at, age)) in g.iter() {
+        if at.elapsed() < std::time::Duration::from_secs(60) {
+            let a = out.entry(queue.clone()).or_default();
+            *a = (*a).max(*age);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The completed-retention floor a queue's readers and holders put on it: the
+/// stamp of the oldest link any of their partitions still keeps (a link has
+/// its message's stamp), `i64::MAX` when none keeps any. Leader-side and
+/// conservative: a holder not read yet holds everything.
+fn holder_floor<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    tenant: &str,
+    queue: &str,
+    cfg: &crate::rsm::effect::QueueConfig,
+) -> i64 {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    let Some(route) = cfg.route() else {
+        return i64::MAX;
+    };
+    if route.readers.is_empty() && route.holders.is_empty() {
+        return i64::MAX;
+    }
+    // (tenant, queue) -> (when it was read, the floor).
+    type Floors = HashMap<(String, String), (std::time::Instant, i64)>;
+    static CACHE: OnceLock<Mutex<Floors>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (tenant.to_string(), queue.to_string());
+    if let Some((at, floor)) = cache.lock().expect("holder floor cache").get(&key) {
+        if at.elapsed() < HOLDER_FLOOR_TTL {
+            return *floor;
+        }
+    }
+    let mut floor = i64::MAX;
+    let mut oldest: Option<i64> = None;
+    // A reader's link is written in its message's own entry, a few
+    // microseconds from its stamp: a second covers that. A holder's link (a
+    // transaction's `link`) was written later, so its stamp says nothing of
+    // its message's: while a holder keeps anything, it holds everything.
+    let readers = route.readers.iter().map(|q| (q, true));
+    let holders = route.holders.iter().map(|q| (q, false));
+    for (holder, is_reader) in readers.chain(holders) {
+        let mut pids = Vec::new();
+        if r.scan_queue_partitions(tenant, holder, None, usize::MAX, &mut |pid| {
+            pids.push(pid);
+            true
+        })
+        .is_err()
+        {
+            return i64::MIN + 1;
+        }
+        for pid in pids {
+            match r.partition(pid) {
+                Ok(Some(p)) => {
+                    if let Some(t) = p.oldest_live_at_us {
+                        oldest = Some(oldest.map_or(t, |o| o.min(t)));
+                        floor = if is_reader {
+                            floor.min(t.saturating_sub(1_000_000))
+                        } else {
+                            i64::MIN + 1
+                        };
+                    }
+                }
+                Ok(None) => {}
+                // Unknown: keep everything this round.
+                Err(_) => return i64::MIN + 1,
+            }
+        }
+    }
+    let age = oldest.map_or(0, |t| (now_us.saturating_sub(t).max(0) / 1_000_000) as u64);
+    {
+        let mut ages = HOLDER_AGES
+            .get_or_init(Default::default)
+            .lock()
+            .expect("holder ages");
+        if ages.len() > 65_536 {
+            ages.clear();
+        }
+        ages.insert(key.clone(), (std::time::Instant::now(), age));
+    }
+    let mut g = cache.lock().expect("holder floor cache");
+    if g.len() > 65_536 {
+        g.clear();
+    }
+    g.insert(key, (std::time::Instant::now(), floor));
+    floor
 }
 
 fn sink_floor<R: Reads + ?Sized>(

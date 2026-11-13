@@ -26,6 +26,8 @@ type wireEntry struct {
 	TransactionID string      `json:"transactionId"`
 	Payload       interface{} `json:"payload"`
 	TS            string      `json:"ts"`
+	// Headers is there only when the message has some (catalogue version 8).
+	Headers map[string]string `json:"headers"`
 }
 
 type wireAnswer struct {
@@ -70,6 +72,7 @@ func pageOf(a *wireAnswer, es []wireEntry) Page {
 		p.Entries[i] = Entry{
 			Position: e.Position, Kind: e.Kind, Queue: e.Queue, Partition: e.Partition, PartitionID: e.PartitionID,
 			Offset: e.Offset, ID: e.ID, TransactionID: e.TransactionID, Data: e.Payload, TS: e.TS, CreatedAt: e.TS,
+			Headers: e.Headers,
 		}
 	}
 	return p

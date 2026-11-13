@@ -18,7 +18,7 @@ clients: typed envelopes (`Message`, `PushResult`, `AckResult`, `TransactionResu
 | `QueueBuilder` | Push (direct or buffered), pop, consume, fetch, DLQ, configure. Holds the consume options. |
 | `detail::pop_once` | THE pop: path, query (`pop_query`, autopilot via `util::pop_sizing`), the conflation check, the parse into `Message`s. `pop()` and every consume worker use it, so the two cannot drift. |
 | `ConsumerManager` | The consume loop: `concurrency` std::threads, a shared limit, `Cancel`, idle, the per-message or per-batch settling rules (mirrors `client-rust/src/consumer.rs`), `LeaseRenewal` per batch, supervision. |
-| `TransactionBuilder` | Acks, pushes (with partition), KV and timer riders, lock guards; `commit()` resends once a guard lost only to its own lock's renewal. |
+| `TransactionBuilder` | Acks, pushes (with partition and headers), links (`wire::link_op`), KV and timer riders, lock guards; `commit()` resends once a guard lost only to its own lock's renewal. |
 | `KvBuilder`, `TimersBuilder`, `LocksBuilder`, `Lock` | The KV, timer and lock surfaces. Every operation body is minted in `namespace wire`, so standalone calls and transaction riders send the same bytes. `Lock` renews on a thread of its own. |
 | `EphemeralBuilder`, `reads::`, `DLQBuilder`, `Admin` | Ephemeral queues, reads by offset, the dead-letter reader, the management routes. |
 | `BufferManager`, `MessageBuffer` | Client-side push buffering: one flusher thread per queue/partition, a blocking bound, failed batches back at the front. |
@@ -35,7 +35,9 @@ precondition) is returned, never thrown. Misuse throws `std::invalid_argument` b
 
 The request bodies and paths are the ones 2.7.0 sent: `test_kv_timers`, `test_locks`,
 `test_wire_forms`, `test_autopilot`, `test_conflation` and `test_consumer` pin them against
-in-process stubs. Queue mode sends `consumerGroup: null` on acks, as before.
+in-process stubs. Queue mode sends `consumerGroup: null` on acks, as before. Headers, a group's
+`where`, a reading queue's options and links are sent only when set (`test_routing`), so a client
+that uses none of them sends the same bytes as before.
 
 ## Tests
 

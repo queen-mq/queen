@@ -54,6 +54,7 @@ __all__ = [
     "FeedUnsupportedError",
     "where_condition",
     "normalize_where",
+    "where_value",
     "condition_holds",
     "since_to_iso",
     "FEED_ON_LEADER",
@@ -101,9 +102,9 @@ def where_condition(field: Any, op: Any, value: Any = UNDEFINED) -> Dict[str, An
         where_condition("transactionId", "!prefix", "fd-")
         where_condition("data.vip", "exists")
 
-    Fields: queue, partition, transactionId, offset, position, data, data.<path>.
-    Ops: = != < <= > >= in exists prefix !prefix. A field the message does not
-    have holds for no op, ``!=`` and ``!prefix`` included.
+    Fields: queue, partition, transactionId, offset, position, data, data.<path>,
+    headers.<name>. Ops: = != < <= > >= in exists prefix !prefix. A field the
+    message does not have holds for no op, ``!=`` and ``!prefix`` included.
     """
     if not isinstance(field, str) or len(field) == 0:
         raise ValueError(f"where: field must be a non-empty string, got {_jstr(field)}")
@@ -137,6 +138,15 @@ def normalize_where(where: Any) -> List[Dict[str, Any]]:
         else:
             raise ValueError(f"where: a condition is {{ field, op, value }} or [field, op, value], got {_jstr(c)}")
     return out
+
+
+def where_value(where: Any) -> Any:
+    """A ``where`` as a filtered group or a reading queue sends it: one string
+    as it is (``"data.kind in ('a', 'b') and headers.type = 'x'"``), conditions
+    checked and as a list (normalize_where); None stays None."""
+    if where is None or where is UNDEFINED or isinstance(where, str):
+        return None if where is UNDEFINED else where
+    return normalize_where(where)
 
 
 def _json_eq(a: Any, b: Any) -> bool:
@@ -186,6 +196,10 @@ def _field_value(field: str, msg: Any) -> Any:
         return js_get(msg, "partitionName") if nullish(v) else v
     if field in ("transactionId", "offset", "position", "data"):
         return js_get(msg, field)
+    if field.startswith("headers."):
+        # One header by its whole name (names may hold dots): a string, or nothing.
+        headers = js_get(msg, "headers")
+        return headers.get(field[8:], UNDEFINED) if isinstance(headers, dict) else UNDEFINED
     if not field.startswith("data."):
         return UNDEFINED
     cur = js_get(msg, "data")
@@ -299,6 +313,8 @@ _ENTRY_FIELDS = (
     ("offset", "offset"),
     ("id", "id"),
     ("transactionId", "transactionId"),
+    # Only on an entry whose message has headers, as the broker sends it.
+    ("headers", "headers"),
     ("data", "payload"),
     ("ts", "ts"),
     ("createdAt", "ts"),

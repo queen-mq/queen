@@ -28,8 +28,11 @@ var ops = map[string]bool{"=": true, "==": true, "!=": true, "<": true, "<=": tr
 // broker evaluates it on a feed read; ConditionHolds evaluates it here.
 //
 // Fields: queue, partition, transactionId, offset, position, data,
-// data.<path>. Ops: = != < <= > >= in exists prefix !prefix. A field the
-// message does not have holds for no op, != and !prefix included.
+// data.<path>, headers.<name> (a cluster at catalogue version 8). Ops: = != <
+// <= > >= in exists prefix !prefix. A field the message does not have holds for
+// no op, != and !prefix included. The same conditions filter a consumer group
+// (QueueBuilder.Where) and a reading queue (QueueConfig.Where), where offset
+// and position mean nothing.
 type Condition struct {
 	Field string
 	Op    string
@@ -221,6 +224,20 @@ func fieldValue(field string, msg map[string]interface{}) interface{} {
 		return or(msg, "partition", "partitionName")
 	case "transactionId", "offset", "position", "data":
 		return get(field)
+	}
+	if name, ok := strings.CutPrefix(field, "headers."); ok {
+		// One header, by its whole name (a name may hold dots): a string.
+		switch h := msg["headers"].(type) {
+		case map[string]interface{}:
+			if v, ok := h[name]; ok {
+				return v
+			}
+		case map[string]string:
+			if v, ok := h[name]; ok {
+				return v
+			}
+		}
+		return jsv.Undefined
 	}
 	if !strings.HasPrefix(field, "data.") {
 		return jsv.Undefined

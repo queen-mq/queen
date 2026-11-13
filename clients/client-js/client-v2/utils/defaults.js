@@ -41,7 +41,8 @@ export const CLIENT_DEFAULTS = {
   // pop answer. Off, the client sends and reads the JSON every broker knows.
   //
   // binaryPush: a push goes out as the binary push body (http/pushBinary.js)
-  // instead of JSON. Items with a trace id stay JSON.
+  // instead of JSON. Items with a trace id stay JSON, and so do items with
+  // headers unless pushCompression frames them.
   binaryPush: false,
   // pushCompression (with binaryPush): the client frames the messages as the
   // broker stores them, mints their ids and zstd-compresses each partition's

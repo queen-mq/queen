@@ -14,6 +14,8 @@
 //! so an empty fetch doubles as the bounds probe and there is no second
 //! endpoint to call for "where does this partition start and end".
 
+use std::collections::BTreeMap;
+
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 
@@ -177,6 +179,11 @@ impl FetchRequest {
 /// One record, at its absolute offset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FetchRecord {
+    /// The message's headers, when it has some (catalogue version 8 and
+    /// later): the broker writes them as the record's first key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
+
     /// Absolute offset within the partition. Contiguous within a response
     /// except across a retention gap, and the coordinate to resume from: the
     /// next fetch asks for `records.last().offset + 1`.
@@ -200,10 +207,8 @@ pub struct FetchRecord {
 
 /// One entry's answer, positionally matching the request's `entries`.
 ///
-/// There is deliberately no `headers`: a stored frame carries no header map, so
-/// a Kafka facade round-trips record headers through the payload envelope or
-/// not at all. An always-empty key would advertise a feature the engine does
-/// not have.
+/// A record's headers are on the record ([`FetchRecord::headers`]), present
+/// only when the message has some.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FetchEntryResult {
     pub queue: String,
@@ -393,6 +398,30 @@ mod tests {
             !got.entries[1].is_offset_out_of_range() && !got.entries[1].is_unknown_partition(),
             "an unknown marker is an error the client cannot classify, not a known one"
         );
+    }
+
+    #[test]
+    fn a_record_reads_its_headers_and_writes_them_first() {
+        // As the catalogue-8 renderer writes a record: `headers` first, and only
+        // on a record that has some.
+        let wire = concat!(
+            r#"{"entries":[{"queue":"q","partition":"p","records":["#,
+            r#"{"headers":{"type":"order.paid"},"offset":1,"transactionId":"t1","payload":{"a":1},"ts":"2026-11-12T09:15:00.000000Z"},"#,
+            r#"{"offset":2,"transactionId":"t2","payload":2,"ts":"2026-11-12T09:15:00.000000Z"}"#,
+            r#"],"highWatermark":3,"logStartOffset":0}]}"#,
+        );
+        let got: FetchResponse = serde_json::from_str(wire).unwrap();
+        let records = &got.entries[0].records;
+        assert_eq!(
+            records[0]
+                .headers
+                .as_ref()
+                .and_then(|h| h.get("type"))
+                .map(String::as_str),
+            Some("order.paid")
+        );
+        assert!(records[1].headers.is_none());
+        assert_eq!(serde_json::to_string(&got).unwrap(), wire, "round-trips");
     }
 
     #[test]

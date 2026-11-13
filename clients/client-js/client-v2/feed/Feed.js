@@ -34,10 +34,12 @@ const MAX_WAIT_MILLIS = 30000
  *   whereCondition('partition', 'prefix', 'booking-')
  *   whereCondition('transactionId', '!prefix', 'fd-')
  *   whereCondition('data.vip', 'exists')
+ *   whereCondition('headers.type', '=', 'order.paid')
  *
- * Fields: queue, partition, transactionId, offset, position, data, data.<path>.
- * Ops: = != < <= > >= in exists prefix !prefix. A field the message does not
- * have holds for no op, `!=` and `!prefix` included.
+ * Fields: queue, partition, transactionId, offset, position, data, data.<path>,
+ * headers.<name> (offset and position in the feed only). Ops: = != < <= > >=
+ * in exists prefix !prefix. A field the message does not have holds for no
+ * op, `!=` and `!prefix` included.
  */
 export function whereCondition(field, op, value) {
   if (typeof field !== 'string' || field.length === 0) {
@@ -68,6 +70,23 @@ export function normalizeWhere(where) {
   })
 }
 
+/**
+ * A `where` as a filtered group, a reading queue and the subscription route
+ * send it (PLAN_ROUTING.md §9): one string as it is, for the broker to read,
+ * or conditions (a condition, `[field, op, value]`, or a list of either) as
+ * the checked list of `{ field, op, value }`. Null for none.
+ */
+export function whereValue(where) {
+  if (where === undefined || where === null) return null
+  if (typeof where === 'string') {
+    const text = where.trim()
+    if (text.length === 0) throw new Error('where: an empty string; leave where out for none')
+    return text
+  }
+  const list = normalizeWhere(where)
+  return list.length > 0 ? list : null
+}
+
 function jsonEq(a, b) {
   if (typeof a === 'number' && typeof b === 'number') return a === b
   if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return a === b
@@ -88,6 +107,12 @@ function fieldValue(field, msg) {
     case 'offset': return msg.offset
     case 'position': return msg.position
     case 'data': return msg.data
+  }
+  if (field.startsWith('headers.')) {
+    const headers = msg.headers
+    const name = field.slice(8)
+    if (headers === null || typeof headers !== 'object' || !Object.hasOwn(headers, name)) return undefined
+    return typeof headers[name] === 'string' ? headers[name] : undefined
   }
   if (!field.startsWith('data.')) return undefined
   let cur = msg.data
@@ -182,9 +207,13 @@ function shardOption(shard) {
   return out
 }
 
-/** A feed entry as the reader hands it out: the message in Queen's shape, plus its position. */
+/**
+ * A feed entry as the reader hands it out: the message in Queen's shape, plus
+ * its position, and its `headers` when it has some (absent otherwise, as on a
+ * popped message).
+ */
 function toEntry(e) {
-  return {
+  const entry = {
     position: e.position,
     kind: e.kind,
     queue: e.queue,
@@ -197,6 +226,8 @@ function toEntry(e) {
     ts: e.ts,
     createdAt: e.ts
   }
+  if (e.headers) entry.headers = e.headers
+  return entry
 }
 
 export class FeedReader {

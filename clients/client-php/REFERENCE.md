@@ -166,7 +166,7 @@ $queen->queue('orders')->delete()->execute();
 | `group(string $name)` | none | Consumer group. None means queue mode (`__QUEUE_MODE__`). |
 | `config(array $options)` | none | Queue options for `create()`. |
 | `create()` | | `POST /api/v1/configure`, returns an `OperationBuilder`. |
-| `delete()` | | `DELETE /api/v1/resources/queues/:queue`, returns an `OperationBuilder`. |
+| `delete(bool $force = false)` | | `DELETE /api/v1/resources/queues/:queue`, returns an `OperationBuilder`. A queue that reading queues read answers 409 `has_readers` unless `force`. |
 
 `OperationBuilder` has `onSuccess(Closure $cb)`, `onError(Closure $cb)` and `execute(): mixed`.
 `execute()` returns the decoded answer. A failure, or an answer with an `error` key, throws; with
@@ -197,6 +197,13 @@ existing queue resets each of them that you do not name to the client default. F
 turns encryption off on an encrypted queue. Other keys that you pass to `config()` are sent as
 they are. The options and their effects are on
 [queue options](https://queenmq.com/writing-applications/queues/).
+
+With `from`, `where`, `partitionBy` or `start`, a reading queue, the client leaves out the four of
+them that say what a queue keeps (`maxSize`, `retentionSeconds`, `completedRetentionSeconds`,
+`encryptionEnabled`) unless you set them: a reading queue keeps what its sources keep, and the
+broker refuses those keys on it with `reading_queue` (`Defaults::READING_QUEUE_KEEPS`). Name the
+`from` in every `config()` of a reading queue. With `from`, `create()` throws
+`RoutingUnsupportedException` when the answer has no `route`. See the README for the four options.
 
 ## Push
 
@@ -237,9 +244,10 @@ foreach ($results as $item) {
 | `transactionId` | The dedup key. Absent, the client mints a UUIDv7 (`Queen\Support\Uuid::v7()`). |
 | `partition` | Overrides the builder's partition for this item. |
 | `traceId` | Sent as given; see [Tracing](#tracing). |
+| `headers` | `[name => text]` beside the payload (an int or a float is sent as its text); left out when empty. See the README. |
 
 An item with neither `data` nor `payload` is the payload itself, other keys included. Use `data`
-when an item also sets `transactionId`, `partition` or `traceId`.
+when an item also sets `transactionId`, `partition`, `traceId` or `headers`.
 
 `PushBuilder` has `onSuccess(Closure)`, `onError(Closure)`, `onDuplicate(Closure)` and
 `execute(): mixed`. A direct push posts to `/api/v1/push` and returns the broker's per-item list.
@@ -364,6 +372,7 @@ These setters apply to `pop()`, `popResult()`, `consume()` and, where noted, `ge
 | `subscriptionMode(string $mode)` | broker default | `'new'` or `'all'`, read on the group's first pop. |
 | `subscriptionFrom(string $from)` | none | `'now'` or an ISO timestamp, read on the group's first pop. |
 | `conflation(bool $enabled = true)` | off | Last-value delivery; see [Conflation](#conflation). |
+| `where(string\|array $field, ?string $op = null, mixed $value = null)` | none | A filtered group: the group gets only the matching messages. Calls are ANDed; one string is the whole filter. Needs a queue and a group; an answer without `"filtered":true` throws `RoutingUnsupportedException`. See the README. |
 | `autoAck(bool $enabled)` | on | Whether `consume()` acks after the handler. No effect on `pop()`. |
 | `commitOnDelivery(bool $enabled = true)` | off | `pop()`, `popResult()` and `popDetached()` only: commit at delivery; see [Commit at delivery](#commit-at-delivery). |
 
@@ -790,7 +799,7 @@ reads as one bundle:
 
 | Sub-builder | Methods |
 | --- | --- |
-| `TransactionQueueBuilder` | `partition(string)` (returns itself), `push(array $items)` |
+| `TransactionQueueBuilder` | `partition(string)` (returns itself), `push(array $items)`, `link(array\|object $messages, array $headers = [])` |
 | `TransactionKvBuilder` | `get`, `getMany`, `put`, `putIfAbsent`, `delete`, `incr`; signatures as on [`Kv`](#keyvalue-state) without `$ns` |
 | `TransactionTimerBuilder` | `schedule`, `reschedule`, `cancel`; signatures as on [`Timers`](#timers) without `$queue` |
 
@@ -912,7 +921,8 @@ $pending = $timers->count('payments.timeout', 'order-');
   retry budget. A timer already claimed for delivery answers `ok: false`, `status: 'too_late'`.
 - `$delayMs` is relative, in milliseconds; a negative delay fires on the first cycle. `deliverAt`
   means "not before".
-- `$opts` accepts `txn` and `partition`. A missing `txn` gets a UUIDv7. Any other option, a `null`
+- `$opts` accepts `txn`, `partition` and `headers` (the fired message's, as on a push; a peek
+  shows them). A missing `txn` gets a UUIDv7. Any other option, a `null`
   option, and the broker-owned fields (`producerSub`, `messageId`, `deliverAt`, `delaySeconds`,
   `attempts` and others) throw `InvalidArgumentException`.
 - The payload is JSON-encoded and base64-encoded, so the consumer reads the same shape as a push.
@@ -1131,6 +1141,7 @@ live lease for: `$queen->ack($message, 'dlq', ['group' => 'billing'])`. See
 | `getLaggingConsumersAsync(int $minLagSeconds = 60, ?int $timeoutMillis = null)` | The same, as a promise |
 | `deleteConsumerGroupForQueue(string $consumerGroup, string $queueName, bool $deleteMetadata = true)` | `DELETE /api/v1/consumer-groups/:group/queues/:queue` |
 | `seekConsumerGroup(string $consumerGroup, string $queueName, array $options = [])` | `POST /api/v1/consumer-groups/:group/queues/:queue/seek` |
+| `setConsumerGroupWhere(string $consumerGroup, string $queueName, string\|array $where)` | `POST /api/v1/consumer-groups/:group/subscription` with `{queue, where}` |
 | `refreshConsumerStats()` | `POST /api/v1/stats/refresh` |
 
 `seekConsumerGroup()` posts `$options` as given: `['toEnd' => true]` or
@@ -1210,10 +1221,12 @@ message with `pushCompression`.
 
 These stay JSON, with nothing to do in your code:
 
-- A push with a `traceId` on one of its items.
+- A push with a `traceId` on one of its items, or with `headers` on one when `pushCompression`
+  is off (a framed push carries headers; the plain binary body has no place for them).
 - A transaction with no push, or with a `traceId` on one of its pushes.
-- A pop the broker cannot answer in frames: a pop of a conflating group, and every pop on a
-  broker that runs with an encryption key (`QUEEN_ENCRYPTION_KEY`). The client recognises a
+- A pop the broker cannot answer in frames: a pop of a conflating group, a pop of messages with
+  headers or links, and every pop on a broker that runs with an encryption key
+  (`QUEEN_ENCRYPTION_KEY`). The client recognises a
   framed answer by its first bytes and reads a JSON answer as before.
 - Acks, key/value, timers, locks and the admin API. Ephemeral queues use their own routes and do
   not change either.

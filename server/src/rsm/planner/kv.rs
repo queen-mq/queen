@@ -878,7 +878,17 @@ fn parse_one(
                     ),
                 ));
             }
-            expect = Some(n.min(u64::MAX as i128) as u64);
+            // No version reaches the top bit: the planner numbers what it
+            // writes in a cycle from there (`super::PLACEHOLDER`) before it
+            // numbers them for good, so a client value there could only ever
+            // match one of those.
+            if n >= i128::from(super::PLACEHOLDER) {
+                return Err(bad(
+                    "kv_bad_expect",
+                    format!("op at index {i}: expect is past every version a key can have"),
+                ));
+            }
+            expect = Some(n as u64);
         }
     }
 
@@ -1025,6 +1035,14 @@ pub struct KvPlan {
     pub failed: Option<KvPrecondition>,
 }
 
+/// What [`Planner::plan_kv_each`] decided: `(op index, its effect if any, its
+/// verdict)` for each op it planned, in apply order; EMPTY when `failed` is
+/// set (the call aborted).
+pub(crate) struct KvEach {
+    pub(crate) each: Vec<(usize, Option<Effect>, KvOpOutcome)>,
+    pub(crate) failed: Option<KvPrecondition>,
+}
+
 /// One write verdict under construction.
 enum Verdict {
     /// Applied: the effect to log (if any) and the answer.
@@ -1044,19 +1062,10 @@ fn got_of(row: &KvRow) -> KvGot {
     }
 }
 
-impl Overlay {
-    /// The overlay's own view of one KV row: `Some(Some)` written in flight,
-    /// `Some(None)` deleted in flight, `None` untouched (read committed).
-    fn kv_row(&self, tenant: &str, ns: &str, key: &str) -> Option<Option<KvRow>> {
-        self.kv
-            .get(&(tenant.to_string(), ns.to_string(), key.to_string()))
-            .map(|t| t.v.clone())
-    }
-}
-
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// The merged row — overlay first (a write or a delete still in flight),
-    /// then committed state. Expired or not: liveness is the caller's.
+    /// then committed state. Expired or not: liveness is the caller's. A purge
+    /// in flight deletes every row of the tenant when it applies.
     pub(crate) fn kv_row(
         &self,
         ov: &Overlay,
@@ -1064,14 +1073,12 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         ns: &str,
         key: &str,
     ) -> Result<Option<KvRow>, Refusal> {
-        if let Some(v) = ov.kv_row(tenant, ns, key) {
-            return Ok(v);
+        self.touched(|| super::footprint::kv(tenant, ns, key));
+        match ov.kv_lookup(tenant, ns, key) {
+            super::Layered::Found(v) => Ok(v.clone()),
+            super::Layered::Masked => Ok(None),
+            super::Layered::Absent => self.reads().kv(tenant, ns, key).map_err(store_err),
         }
-        // A purge in flight deletes every row of the tenant when it applies.
-        if ov.tenant_purged(tenant) {
-            return Ok(None);
-        }
-        self.reads().kv(tenant, ns, key).map_err(store_err)
     }
 
     /// THE TRANSACTION REUSE SEAM (WP-2.1): plan a list of already-validated
@@ -1094,6 +1101,41 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         tenant: &str,
         ops: &[KvOp],
     ) -> Result<KvPlan, Refusal> {
+        let each = self.plan_kv_each(ov, tenant, ops, None)?;
+        if let Some(failed) = each.failed {
+            return Ok(KvPlan {
+                effects: Vec::new(),
+                results: Vec::new(),
+                failed: Some(failed),
+            });
+        }
+        let mut results: Vec<KvOpOutcome> = vec![KvOpOutcome::Deferred; ops.len()];
+        let mut effects: Vec<Effect> = Vec::new();
+        for (i, eff, verdict) in each.each {
+            effects.extend(eff);
+            results[i] = verdict;
+        }
+        Ok(KvPlan {
+            effects,
+            results,
+            failed: None,
+        })
+    }
+
+    /// [`Planner::plan_kv_writes`], op by op: each planned op's index, its
+    /// effect if it has one and its verdict, in apply order. With `mine`
+    /// (indexes, ascending), only those ops are planned: one home's share of a
+    /// call whose keys have several homes (`TxnCommand::assemble_parts` puts
+    /// the shares back in apply order). An op's verdict depends on its own key
+    /// only, so a share planned alone is what the whole call plans for it; the
+    /// versions it draws are its overlay's, a placeholder each there.
+    pub(crate) fn plan_kv_each(
+        &self,
+        ov: &Overlay,
+        tenant: &str,
+        ops: &[KvOp],
+        mine: Option<&[usize]>,
+    ) -> Result<KvEach, Refusal> {
         let now = self.now_us;
         let max_key = self.reads().max_key_len();
         // The ordinal of the one write per (ns, key) (pass 1 guaranteed one).
@@ -1104,11 +1146,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             .filter_map(|(i, op)| Some(((op.ns(), op.key()?), i)))
             .collect();
 
-        let mut results: Vec<KvOpOutcome> = vec![KvOpOutcome::Deferred; ops.len()];
-        let mut effects: Vec<Effect> = Vec::new();
+        let mut each: Vec<(usize, Option<Effect>, KvOpOutcome)> = Vec::new();
         let mut next_version = ov.next_kv_version;
 
         for i in apply_order(ops) {
+            if mine.is_some_and(|m| m.binary_search(&i).is_err()) {
+                continue;
+            }
             let op = &ops[i];
             // Belt to the receiver's brace: a key the store cannot hold must
             // never reach apply, where `KeyTooLong` would stop the node.
@@ -1129,8 +1173,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                         .is_some_and(|&w| w > i)
                     {
                         let row = self.kv_row(ov, tenant, ns, key)?;
-                        results[i] =
-                            KvOpOutcome::Got(row.filter(|r| r.live(now)).map(|r| got_of(&r)));
+                        each.push((
+                            i,
+                            None,
+                            KvOpOutcome::Got(row.filter(|r| r.live(now)).map(|r| got_of(&r))),
+                        ));
                     }
                     continue;
                 }
@@ -1193,17 +1240,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 }
             };
             match verdict {
-                Verdict::Applied(eff, w) => {
-                    effects.extend(eff);
-                    results[i] = KvOpOutcome::Write(w);
-                }
+                Verdict::Applied(eff, w) => each.push((i, eff, KvOpOutcome::Write(w))),
                 Verdict::Lost(eff, w) => {
                     // §6.1 point 5: escalation is opt-in PER ELEMENT, and it
                     // aborts the whole call.
                     if op.required() {
-                        return Ok(KvPlan {
-                            effects: Vec::new(),
-                            results: Vec::new(),
+                        return Ok(KvEach {
+                            each: Vec::new(),
                             failed: Some(KvPrecondition {
                                 index: i as u32,
                                 reason: w.reason.unwrap_or(KvReason::Absent),
@@ -1212,16 +1255,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                             }),
                         });
                     }
-                    effects.extend(eff);
-                    results[i] = KvOpOutcome::Write(w);
+                    each.push((i, eff, KvOpOutcome::Write(w)));
                 }
             }
         }
-        Ok(KvPlan {
-            effects,
-            results,
-            failed: None,
-        })
+        Ok(KvEach { each, failed: None })
     }
 
     #[allow(clippy::too_many_arguments)]

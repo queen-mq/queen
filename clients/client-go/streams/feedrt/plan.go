@@ -156,6 +156,10 @@ type SinkSpec struct {
 	PartitionFn   func(value interface{}) (interface{}, error)
 	HasPartition  bool
 	PartitionFunc bool
+	// Link: every output is its input message unchanged, and is written as a
+	// link to it (LinkTx) instead of a copy. The compiler sets it; the runner
+	// pushes anyway when its broker cannot link.
+	Link bool
 }
 
 // BatchItem is one result a foreachBatch function gets: the value and the

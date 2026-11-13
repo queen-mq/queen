@@ -6,6 +6,7 @@ These APIs are typically used by dashboards and admin tools, not regular applica
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlencode
 
+from ..feed.feed import where_value
 from ..utils import logger
 
 
@@ -434,6 +435,32 @@ class Admin:
         )
         url = f"/api/v1/consumer-groups/{quote(consumer_group)}/queues/{quote(queue_name)}/seek"
         return await self._http_client.post(url, options or {})
+
+    async def update_consumer_group_where(
+        self, consumer_group: str, queue_name: str, where: Any
+    ) -> Dict[str, Any]:
+        """
+        Change the where of a filtered group (PLAN_ROUTING.md §4): it applies
+        from the next push. Its workers then send the new where on their pops
+        (another one is refused, 400 ``where_mismatch``).
+
+        Args:
+            consumer_group: Consumer group name
+            queue_name: The queue the group filters
+            where: One string (``"data.kind in ('a', 'b')"``) or conditions,
+                as QueueBuilder.where() takes them
+
+        Returns:
+            Result. The broker answers 404 (raised) when the group does not
+            filter that queue: its first pop with a where makes it filter.
+        """
+        body = {"queue": queue_name, "where": where_value(where)}
+        logger.log(
+            "Admin.update_consumer_group_where",
+            {"consumer_group": consumer_group, "queue_name": queue_name},
+        )
+        url = f"/api/v1/consumer-groups/{quote(consumer_group)}/subscription"
+        return await self._http_client.post(url, body)
 
     # ===========================
     # System API

@@ -42,6 +42,12 @@ func (cm *ConsumerManager) StartBatch(ctx context.Context, handler BatchMessageH
 
 // startWorkers starts the consumer workers.
 func (cm *ConsumerManager) startWorkers(ctx context.Context, opts ConsumeOptions, handler BatchMessageHandler, isBatch bool) error {
+	// A where the broker would refuse (no group) or drop unread (a namespace
+	// or task pop) stops here, before the first pop.
+	if err := checkWhereTarget(opts.Where, opts.Queue, opts.Group); err != nil {
+		return err
+	}
+
 	// Build path and params
 	path := cm.buildPath(opts)
 	baseParams := cm.buildParams(opts)
@@ -307,6 +313,16 @@ func (cm *ConsumerManager) worker(
 				"error":    cerr.Error(),
 			})
 			return cerr
+		}
+		// And a where: a broker that does not filter answers without the
+		// "filtered" echo (or a bodiless 204) and hands the group everything.
+		if ferr := checkFilteredEcho(result, opts.Where, opts.Queue, opts.Group); ferr != nil {
+			logError("ConsumerManager.worker", map[string]interface{}{
+				"workerId": workerID,
+				"status":   "where-not-applied",
+				"error":    ferr.Error(),
+			})
+			return ferr
 		}
 
 		// Parse messages
@@ -736,6 +752,11 @@ func (cm *ConsumerManager) buildParams(opts ConsumeOptions) string {
 	// option existed.
 	if opts.Conflation {
 		params.Set("conflation", "true")
+	}
+	// Where: a filtered group's conditions, on every pop of the group.
+	// Emitted only when set, so an unfiltered consumer's request is unchanged.
+	if opts.Where != "" {
+		params.Set("where", opts.Where)
 	}
 	// NEVER send autoAck for consume - client always manages acking
 

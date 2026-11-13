@@ -282,6 +282,20 @@ export function payloadOf(m) {
   return { kind: record ? 'kafka' : 'json', value, record, encrypted: m.isEncrypted === true }
 }
 
+/**
+ * A message's headers (`headers` on GET /api/v1/messages and its one-message
+ * route: an object of strings, or null), by name: [{ name, value }]. Never
+ * encrypted, so they show even when the payload cannot. [] when it has none.
+ */
+export function headerRows(m) {
+  const h = m?.headers
+  if (!h || typeof h !== 'object' || Array.isArray(h)) return []
+  return Object.keys(h).sort().map((name) => ({
+    name,
+    value: typeof h[name] === 'string' ? h[name] : JSON.stringify(h[name]),
+  }))
+}
+
 /** What "Push a copy" opens on: the same queue, partition and payload, a new transactionId. */
 export function copyOf(m) {
   const p = payloadOf(m)

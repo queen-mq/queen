@@ -48,6 +48,7 @@ import {
 import QgDetail from './QgDetail.vue'
 import QgBehind from './QgBehind.vue'
 import QgAct from './QgAct.vue'
+import { filterWords } from './routeView'
 
 defineProps({ where: { type: String, default: '' } }) // the cluster, for the dialogs
 
@@ -227,6 +228,8 @@ function cells(r) {
     queueMode: r.queueMode,
     kafka: r.kafka,
     conflates: r.conflates,
+    // A filtered group: its where, or '' when the listing does not say it.
+    filter: r.filter,
     mark: r.tone,
     queue: r.queue,
     to: `/queues/${encodeURIComponent(r.queue)}`,
@@ -370,10 +373,12 @@ async function acted({ call, ok }) {
                     <span class="cg-name" :class="[r.queueMode ? 'qn-t2' : 'qn-mono', { strong: r.mark }]" :title="r.label">{{ r.label }}</span>
                     <span v-if="r.kafka" class="qn-tag cg-tag" title="Read through the Kafka facade">Kafka</span>
                     <span v-if="r.conflates" class="qn-tag cg-tag" title="A last-value group: it gets only the newest message of each partition">last value</span>
+                    <span v-if="r.filter" class="qn-tag cg-tag" :title="r.filter.where ? `It gets only what its where takes: ${r.filter.where}` : 'It gets only what its where takes'">filtered</span>
                   </span>
                   <span class="cg-l2">
                     <RouterLink :to="r.to" class="qn-mono cg-q" :title="`Open ${r.queue}`">{{ r.queue }}</RouterLink>
                     <span v-if="r.behind" class="qn-t3 qn-num cg-behind">· {{ r.behind }}</span>
+                    <span v-if="r.filter" class="qn-t3 cg-where" :title="r.filter.where || filterWords(r.filter)">· <template v-if="r.filter.where">where <span class="qn-mono">{{ r.filter.where }}</span></template><template v-else>{{ filterWords(r.filter) }}</template></span>
                   </span>
                 </span>
                 <span role="cell" class="cg-c2">
@@ -481,6 +486,10 @@ async function acted({ call, ok }) {
 .cg-q { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text3); }
 .cg-q:hover { color: var(--text); }
 .cg-behind { flex: 0 10 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* a filtered group's where gives way first, and the queue's name never does below 70% */
+.cg-where { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cg-l2 .cg-q { flex-shrink: 0; max-width: 70%; }
+.cg-l2:has(.cg-where) .cg-behind { flex-shrink: 0; }
 .cg-c2 { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; text-align: right; }
 .cg-old { white-space: nowrap; }
 .cg-st { font-size: 12px; white-space: nowrap; }

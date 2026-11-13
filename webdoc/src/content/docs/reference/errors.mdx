@@ -112,6 +112,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-06 (JS push across partitions, buffer per queue): TransactionBuilder.js lets a pushed item name its own partition. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-07 (the feed through the proxy): a feed read that asks (x-queen-feed-relay) is
 # relayed by the leader instead of answered 421. This page: the feed_on_leader row says so.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. the routing codes are
+# new (reading_queue, where_mismatch, bad_where, route_loop, source_not_found, bad_source,
+# too_many_sources, too_many_readers, has_readers, source_gone, source_mismatch, cluster_version).
+# The page lists them.
 ---
 
 When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -153,6 +158,13 @@ The `code` of the first shape.
 | `standby` | 503 | The cluster is a [standby](/manage/standby/): it replays another cluster and takes no writes until it is promoted. Every write route answers it, on every node, and nothing was applied. | Retry after `Retry-After` (1 s) if a switch to this cluster is under way: the call is served once the standby is promoted. Otherwise you are pointed at the wrong cluster. |
 | `feed_on_leader` | 421 | `POST /api/v1/feed` reached the node that leads the tenant's raft group of a cluster: the feed is read from followers, so its readers add no load to the leader. The body lists `followers` (`nodeId`, `httpAddr`). | Ask one of the followers; the JavaScript client does. A caller that cannot reach them sends `x-queen-feed-relay: 1` and the leader relays the read to a follower; the proxy always does. On a test cluster, `QUEEN_FEED_ON_LEADER=true` lets the leader serve it. |
 | `overloaded` | 429 | The node's admission budget for writes stayed full for the whole hold. | Retry after `Retry-After` (1 to 5 s). |
+| `cluster_version` | 400 | Headers, a `where`, a reading queue or `link`, on a cluster where some node does not read catalogue version 8 yet. | Upgrade every node; the feature turns on by itself. |
+| `reading_queue` | 400 | A push into a [reading queue](/writing-applications/routing/), a keep setting on one, or a `link` into one. | Push to its source; set retention on the source. |
+| `where_mismatch` | 400 | A filtered group's pop with another `where` than the group's, or a `where` on a group that already reads the queue without one. | Send the group's `where` (the message names it), change it on purpose, or use another group. |
+| `bad_where` | 400 | A `where` that does not parse; the message says where. | Fix the condition. |
+| `route_loop`, `source_not_found`, `bad_source`, `too_many_sources`, `too_many_readers` | 400 | A reading queue that would read itself, a source that does not exist or is a filtered group's, or past the limits. | Fix the configuration. |
+| `has_readers` | 409 | A delete of a queue that reading queues read (`readers` lists them). | Delete them first, or delete with `force=true`. |
+| `source_gone`, `source_mismatch` | 200, `success: false` | A transaction's `link` to a message its source no longer keeps, or whose transaction id is not the one at that offset. | Nothing to forward; check the message named. |
 | `storage_full` | 507 | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Pushes, KV writes and timer schedules are refused; acks and deletes still work. | Free disk or add space, then retry. |
 | `name_too_long` | 413 | The tenant, queue and partition or group names together exceed the store's key budget, counting every key the command derives from them. | Shorten the name. |
 | `too_many_items` | 400 | A push carries more than `QUEEN_PUSH_MAX_ITEMS` (10,000) messages. | Split the push. |

@@ -153,9 +153,10 @@ export class Stream {
    *   .where('data.country', '=', 'IT')
    *   .where('data.total', '>', 100)
    *   .where('partition', 'prefix', 'booking-')
+   *   .where('headers.type', '=', 'order.paid')
    *
    * Fields: queue, partition, transactionId, offset, position, data,
-   * data.<path>. Ops: = != < <= > >= in exists prefix.
+   * data.<path>, headers.<name>. Ops: = != < <= > >= in exists prefix.
    */
   where(field, op, value) {
     const cond = whereCondition(field, op, value)
@@ -465,8 +466,19 @@ export class Stream {
    * `{ queue, partition }`, a list of those, or null for nowhere. Several
    * queues and functions run on `Stream.fromFeed`; a queue source sinks to one.
    *
+   * When what reaches the sink is the source message itself (only
+   * where/filter/keyBy before it, or a gate on a queue source: no map,
+   * flatMap, window or pattern), it is written as a `link`: the sink holds
+   * the same message, with its id, transactionId and headers, and the log
+   * does not store its payload again. `{ link: false }` pushes a copy
+   * instead, as before. Linked messages pop, fetch and show in the feed like
+   * any other. A feed stream links only into queues it does not read itself
+   * (it never reads back its own outputs), so on every queue it pushes. A
+   * broker or a credential that cannot link makes the stream push copies, as
+   * before; a message gone at its source makes that one commit push.
+   *
    * @param {object|string|Array|Function} target - `queen.queue('sink-name')`, a list, or a function
-   * @param {{partition?: string|((value:any)=>string)}} [opts]
+   * @param {{partition?: string|((value:any)=>string), link?: boolean}} [opts]
    */
   to(target, opts = {}) {
     return this._extend(new SinkOperator(target, opts))
