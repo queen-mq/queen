@@ -3239,6 +3239,163 @@ fn pairs(txns: &[&str]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A facade whose cluster reads catalogue version 8 (headers need it).
+async fn open_v8(tag: &str) -> (RaftFacade, PathBuf) {
+    let dir = scratch(tag);
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    for _ in 0..400 {
+        if facade.cluster_allows(crate::rsm::effect::VERSION_8) {
+            return (facade, dir);
+        }
+        // Any write runs a cycle, and the cycle raises the version.
+        let _ = facade
+            .push(
+                ctx(),
+                PushReq {
+                    raw: br#"{"items":[{"queue":"warmup","payload":{}}]}"#.to_vec(),
+                },
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the cluster version never reached 8");
+}
+
+/// [`client_group`] whose messages each carry one header.
+fn client_group_with_headers(queue: &str, txns: &[&str]) -> (Vec<u8>, Vec<u8>) {
+    let block = crate::frames::encode_headers([("kind", "order.paid")]);
+    let mut raw = Vec::new();
+    for txn in txns {
+        let payload = serde_json::json!({"txn": txn, "pad": "x".repeat(600)}).to_string();
+        raw.extend_from_slice(&crate::frames::pack_frames(&[crate::frames::FrameIn {
+            message_id: crate::util::uuidv7_bytes(),
+            txn,
+            trace_id: None,
+            producer_sub: None,
+            payload: payload.as_bytes(),
+            encrypted: false,
+            headers: Some(&block),
+            link: None,
+        }]));
+    }
+    let z = zstd::bulk::compress(&raw, 3).expect("zstd");
+    let mut g = Vec::new();
+    g.extend_from_slice(&(queue.len() as u16).to_le_bytes());
+    g.extend_from_slice(queue.as_bytes());
+    g.extend_from_slice(&7u16.to_le_bytes());
+    g.extend_from_slice(b"Default");
+    g.extend_from_slice(&(txns.len() as u32).to_le_bytes());
+    g.extend_from_slice(&(z.len() as u32).to_le_bytes());
+    g.extend_from_slice(&z);
+    (g, z)
+}
+
+/// A framed pop hands stored records out as they are, and a record whose
+/// frames carry headers is not one it may hand out: the answer is JSON, with
+/// the headers. The record here is the client's own zstd frame, which the
+/// broker keeps: it knows from the record's mark, without opening it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_record_the_client_compressed_with_headers_pops_as_json_when_frames_are_asked() {
+    let (facade, dir) = open_v8("frames-headers-client").await;
+    let (g, _z) = client_group_with_headers("hdr-client", &["h1", "h2"]);
+    push_framed(&facade, &[&g]).await;
+    let out = pop_framed(&facade, "hdr-client").await;
+    assert!(
+        out.frames.is_none(),
+        "a record with headers is not handed out as stored"
+    );
+    let msgs = popped(&parse(&out.body));
+    assert_eq!(msgs.len(), 2, "{}", out.body);
+    for m in &msgs {
+        assert_eq!(m["headers"]["kind"], "order.paid", "{}", out.body);
+    }
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same for a record the broker compressed itself (a JSON push).
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_record_the_broker_compressed_with_headers_pops_as_json_when_frames_are_asked() {
+    let (facade, dir) = open_v8("frames-headers-json").await;
+    let pad = "x".repeat(600);
+    let body = serde_json::json!({"items": [
+        {"queue": "hdr-json", "payload": {"pad": pad}, "transactionId": "j1",
+         "headers": {"kind": "order.paid"}},
+        {"queue": "hdr-json", "payload": {"pad": pad}, "transactionId": "j2",
+         "headers": {"kind": "order.paid"}},
+    ]});
+    let pushed = facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: serde_json::to_vec(&body).unwrap(),
+            },
+        )
+        .await
+        .expect("push");
+    for r in parse(&pushed.body)
+        .as_array()
+        .expect("one result per message")
+    {
+        assert_eq!(r["status"], "queued", "{}", pushed.body);
+    }
+    let out = pop_framed(&facade, "hdr-json").await;
+    assert!(
+        out.frames.is_none(),
+        "a record with headers is not handed out as stored"
+    );
+    let msgs = popped(&parse(&out.body));
+    assert_eq!(msgs.len(), 2, "{}", out.body);
+    for m in &msgs {
+        assert_eq!(m["headers"]["kind"], "order.paid", "{}", out.body);
+    }
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A plain compressed record goes out as stored: the client's own bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_plain_record_the_client_compressed_pops_framed() {
+    let dir = scratch("frames-plain-nokey");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let (g, z) = client_group("plain-nokey", &["p1", "p2"]);
+    push_framed(&facade, &[&g]).await;
+    let out = pop_framed(&facade, "plain-nokey").await;
+    let records = framed_records(out.frames.as_deref().expect("a framed answer"));
+    assert_eq!(records, vec![(1, z)], "one record: the client's zstd frame");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The framed pop does not open a compressed record to look for a link or
+/// headers: the record's mark answers. Only a flag the mark does not answer
+/// for (an encrypted message) is read from the frames.
+#[test]
+fn a_compressed_record_is_not_opened_to_look_for_a_link_or_headers() {
+    use crate::frames::{FLAG_ENCRYPTED, FLAG_HEADERS, FLAG_LINK};
+    use crate::rsm::facade::real::stored_holds;
+    // Not zstd at all: whoever opens it fails, and a failure counts as "holds
+    // it". So `false` here means nobody opened it.
+    let rec = crate::rsm::qlog::StoredRecord {
+        seq: 1,
+        pid: 1,
+        base_offset: 0,
+        count: 1,
+        created_at_us: 1,
+        zstd: true,
+        payload: b"these bytes are not a zstd frame, at all".to_vec(),
+    };
+    assert!(!stored_holds(&rec, FLAG_LINK | FLAG_HEADERS));
+    assert!(stored_holds(&rec, FLAG_ENCRYPTED));
+    assert!(stored_holds(
+        &rec,
+        FLAG_ENCRYPTED | FLAG_LINK | FLAG_HEADERS
+    ));
+}
+
 /// The key encrypts only the queues that ask for it: a framed push to any
 /// other queue is stored as the client compressed it, and a framed pop answers
 /// those bytes as they are.

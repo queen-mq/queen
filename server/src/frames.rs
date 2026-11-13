@@ -610,6 +610,27 @@ pub fn any_flag(raw: &[u8], mask: u8) -> bool {
     o != raw.len()
 }
 
+/// The flags of every frame of a segment, or-ed, reading only lengths and
+/// flags. A malformed segment answers every flag, as [`any_flag`] answers
+/// true: whoever would hand the frames out as they are leaves them to the
+/// full unpack.
+pub fn flags_union(raw: &[u8]) -> u8 {
+    let mut flags = 0u8;
+    let mut o = 0usize;
+    while o + 4 <= raw.len() {
+        let len = u32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]) as usize;
+        if len < 19 || len > raw.len() - (o + 4) {
+            return u8::MAX;
+        }
+        flags |= raw[o + 4];
+        o += 4 + len;
+    }
+    if o != raw.len() {
+        return u8::MAX;
+    }
+    flags
+}
+
 #[cfg(any(test, feature = "fuzzing"))]
 pub fn unpack_frames(raw: &[u8]) -> Option<Vec<FrameOut>> {
     let mut out = Vec::new();

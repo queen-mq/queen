@@ -5970,14 +5970,28 @@ fn render_pop_frames(
 }
 
 /// Whether a stored record holds a frame with a flag of `mask` (encrypted,
-/// headers, a link: what only the JSON render reads). A payload that does not
-/// decompress counts as one: the JSON render deals with it.
-fn stored_holds(rec: &crate::rsm::qlog::StoredRecord, mask: u8) -> bool {
+/// headers, a link: what only the JSON render reads).
+///
+/// A compressed record is not opened for a link or headers: its mark says
+/// whether it holds one ([`crate::rsm::qlog::codec::mark_of`]; no mark, none).
+/// Only a flag the mark does not answer for (an encrypted message, asked for
+/// when the broker has a key) is read from the frames, and then a payload
+/// that does not decompress counts as holding it: the JSON render deals with
+/// it.
+pub(crate) fn stored_holds(rec: &crate::rsm::qlog::StoredRecord, mask: u8) -> bool {
+    use crate::rsm::qlog::codec;
     if !rec.zstd {
         return crate::frames::any_flag(&rec.payload, mask);
     }
-    match crate::rsm::qlog::codec::decompress(&rec.payload) {
-        Ok(raw) => crate::frames::any_flag(&raw, mask),
+    if codec::mark_of(&rec.payload).is_some_and(|flags| flags & mask != 0) {
+        return true;
+    }
+    let rest = mask & !codec::MARKED_FLAGS;
+    if rest == 0 {
+        return false;
+    }
+    match codec::decompress(&rec.payload) {
+        Ok(raw) => crate::frames::any_flag(&raw, rest),
         Err(_) => true,
     }
 }

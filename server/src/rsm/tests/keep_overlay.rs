@@ -1003,6 +1003,7 @@ impl Rig {
         // defer different commands.
         PlanConfig {
             plan_budget_ms: 3_600_000,
+            index_mode: RIG_INDEX.with(|c| c.get()),
             ..PlanConfig::default()
         }
     }
@@ -1130,6 +1131,32 @@ fn keep_verified() -> KeepCfg {
         epoch: 0,
         verify: true,
         reset_every: 0,
+    }
+}
+
+thread_local! {
+    /// The dedup index the rigs of this thread plan with: `rows`, the test
+    /// default, unless a test asks for the product's ([`TxnsIndex`]). Apply
+    /// writes the txns rows in both, so either planner finds what committed.
+    static RIG_INDEX: std::cell::Cell<crate::rsm::dedup::IndexMode> =
+        const { std::cell::Cell::new(crate::rsm::dedup::IndexMode::Rows) };
+}
+
+/// While it lives, the rigs of this thread plan with the `txns` dedup index,
+/// the product default: the dedup front then plans every probe (skip, bands,
+/// whole window), which `rows` does not do.
+struct TxnsIndex;
+
+impl TxnsIndex {
+    fn on() -> TxnsIndex {
+        RIG_INDEX.with(|c| c.set(crate::rsm::dedup::IndexMode::Txns));
+        TxnsIndex
+    }
+}
+
+impl Drop for TxnsIndex {
+    fn drop(&mut self) {
+        RIG_INDEX.with(|c| c.set(crate::rsm::dedup::IndexMode::Rows));
     }
 }
 
@@ -1549,6 +1576,18 @@ fn the_scheduler_oracle_holds_when_every_second_round_is_taken_back() {
     oracle_with(42, false, 250, false, keep_verified(), Forced::Second);
 }
 
+/// The oracle with the product's dedup index: the homes plan with the dedup
+/// front on and trust its "new" for the messages in flight; the reference
+/// plans with the front off and reads the appends in flight for every hash.
+/// The entries must be the same.
+#[test]
+fn the_scheduler_oracle_holds_with_the_txns_dedup_index() {
+    let _txns = TxnsIndex::on();
+    oracle(5, true, 200, true);
+    oracle(99, true, 300, false);
+    oracle(11, false, 200, true);
+}
+
 #[test]
 fn the_scheduler_plans_the_single_planners_entries() {
     oracle(1, false, 400, false);
@@ -1720,6 +1759,192 @@ fn a_partition_a_group_creates_under_a_number_the_front_held_still_dedups() {
         ),
         o => panic!("not a push: {o:?}"),
     }
+}
+
+/// The verdicts a push was answered with.
+fn verdicts_of(e: &Entry, id: u64) -> Vec<crate::rsm::entry::PushVerdict> {
+    let c = e
+        .commands
+        .iter()
+        .find(|c| c.request_id == rid_of(id))
+        .expect("the push was logged");
+    match &c.outcome {
+        Outcome::Push(p) => p.items.clone(),
+        o => panic!("not a push: {o:?}"),
+    }
+}
+
+/// A message whose entry is still in flight is pushed again: a duplicate, at
+/// the offset the first push gave it. The overlay keeps no row per message, so
+/// this is the dedup front saying "maybe" (the first push put the hash there
+/// when it was planned) and the probe then reading the appends in flight to
+/// the partition. With the front off, every probe reads them.
+fn a_retry_of_a_message_in_flight(front: DedupFront, threads: usize, tag: &str) {
+    let mut rig = Rig::new(tag, keep_verified(), front, 5, threads);
+    let s = no_steps();
+    // The partition exists, committed, and the front knows it.
+    rig.cycle(vec![push_cmd(1, "qd", "p0", &["a"])], &s);
+    rig.apply(1);
+    // `b` is planned and proposed, not applied: in flight.
+    let e2 = rig
+        .cycle(vec![push_cmd(2, "qd", "p0", &["b"])], &s)
+        .entry
+        .expect("b is logged");
+    let b_at = pushed_at(&e2, 2);
+    let e3 = rig
+        .cycle(vec![push_cmd(3, "qd", "p0", &["b", "c"])], &s)
+        .entry
+        .expect("c is logged");
+    let v = verdicts_of(&e3, 3);
+    assert!(
+        matches!(v[0], crate::rsm::entry::PushVerdict::Duplicate { offset, .. } if offset == b_at),
+        "the message in flight is a duplicate at {b_at}: {:?}",
+        v[0]
+    );
+    assert!(
+        matches!(v[1], crate::rsm::entry::PushVerdict::Created { .. }),
+        "the new message is appended: {:?}",
+        v[1]
+    );
+}
+
+#[test]
+fn a_message_still_in_flight_is_a_duplicate_when_it_is_pushed_again() {
+    a_retry_of_a_message_in_flight(DedupFront::new(true, 64 << 20), 1, "inflight-dup-front-1");
+    a_retry_of_a_message_in_flight(DedupFront::new(true, 64 << 20), 4, "inflight-dup-front-4");
+    a_retry_of_a_message_in_flight(DedupFront::disabled(), 1, "inflight-dup-nofront-1");
+    a_retry_of_a_message_in_flight(DedupFront::disabled(), 4, "inflight-dup-nofront-4");
+}
+
+/// The same with the product's dedup index: the front answers "scan these
+/// bands" for the hash the first push put there, the committed rows of the
+/// band do not hold it, and the appends in flight do.
+#[test]
+fn a_message_still_in_flight_is_a_duplicate_with_the_txns_index() {
+    let _txns = TxnsIndex::on();
+    a_retry_of_a_message_in_flight(DedupFront::new(true, 64 << 20), 1, "inflight-dup-txns-1");
+    a_retry_of_a_message_in_flight(DedupFront::new(true, 64 << 20), 4, "inflight-dup-txns-4");
+    a_retry_of_a_message_in_flight(DedupFront::disabled(), 1, "inflight-dup-txns-nofront-1");
+    a_retry_of_a_message_in_flight(DedupFront::disabled(), 4, "inflight-dup-txns-nofront-4");
+}
+
+/// The front is emptied while a message is in flight (what a node does when
+/// it becomes leader): the partition is seeded again at its next push, from
+/// the committed rows AND the appends in flight, so a retry of the message in
+/// flight is still a duplicate. A seed of committed rows alone would call it
+/// new, and nothing else would look.
+#[test]
+fn a_partition_seeded_again_knows_its_messages_in_flight() {
+    reseeded_with_a_message_in_flight("rows");
+    let _txns = TxnsIndex::on();
+    reseeded_with_a_message_in_flight("txns");
+}
+
+fn reseeded_with_a_message_in_flight(index: &str) {
+    for threads in [1, 4] {
+        let mut rig = Rig::new(
+            &format!("reseed-inflight-{index}-{threads}"),
+            keep_verified(),
+            DedupFront::new(true, 64 << 20),
+            5,
+            threads,
+        );
+        let s = no_steps();
+        rig.cycle(vec![push_cmd(1, "qd", "p0", &["a"])], &s);
+        rig.apply(1);
+        let e2 = rig
+            .cycle(vec![push_cmd(2, "qd", "p0", &["b"])], &s)
+            .entry
+            .expect("b is logged");
+        let b_at = pushed_at(&e2, 2);
+        rig.front.reset();
+        let e3 = rig
+            .cycle(vec![push_cmd(3, "qd", "p0", &["a", "b", "c"])], &s)
+            .entry
+            .expect("c is logged");
+        let v = verdicts_of(&e3, 3);
+        assert!(
+            matches!(v[0], crate::rsm::entry::PushVerdict::Duplicate { .. }),
+            "the committed message is a duplicate: {:?}",
+            v[0]
+        );
+        assert!(
+            matches!(v[1], crate::rsm::entry::PushVerdict::Duplicate { offset, .. } if offset == b_at),
+            "the message in flight is a duplicate at {b_at}: {:?}",
+            v[1]
+        );
+        assert!(
+            matches!(v[2], crate::rsm::entry::PushVerdict::Created { .. }),
+            "the new message is appended: {:?}",
+            v[2]
+        );
+    }
+}
+
+/// A partition a home creates is not in the front while its id is a
+/// placeholder, and is seeded at its next push. That push comes while the
+/// creating entry is still in flight: the seed reads its appends, and a retry
+/// of the first message is a duplicate.
+#[test]
+fn a_partition_a_home_created_dedups_while_its_create_is_in_flight() {
+    home_created_with_a_message_in_flight("rows");
+    let _txns = TxnsIndex::on();
+    home_created_with_a_message_in_flight("txns");
+}
+
+fn home_created_with_a_message_in_flight(index: &str) {
+    let mut rig = Rig::new(
+        &format!("home-created-inflight-{index}"),
+        keep_verified(),
+        DedupFront::new(true, 64 << 20),
+        5,
+        4,
+    );
+    let s = no_steps();
+    rig.cycle(vec![push_cmd(1, "qd", "p0", &["a"])], &s);
+    rig.apply(1);
+    let home = |name: &str| {
+        crate::rsm::planner::homes::home_of_shard(
+            crate::rsm::planner::homes::Homes::shard_of_name(TENANT, name),
+            4,
+        )
+    };
+    let new = (0..)
+        .map(|i| format!("new{i}"))
+        .find(|n| home(n) != home("p0"))
+        .expect("a name in another home");
+    let parallel0 = rig.state.planned.parallel;
+    let e2 = rig
+        .cycle(
+            vec![
+                push_cmd(2, "qd", "p0", &["b"]),
+                push_cmd(3, "qd", &new, &["n1"]),
+            ],
+            &s,
+        )
+        .entry
+        .expect("both are logged");
+    assert!(
+        rig.state.planned.parallel > parallel0,
+        "two homes planned: the new partition was created under a placeholder"
+    );
+    let n1_at = pushed_at(&e2, 3);
+    // Not applied: the create and `n1` are in flight.
+    let e3 = rig
+        .cycle(vec![push_cmd(4, "qd", &new, &["n1", "n2"])], &s)
+        .entry
+        .expect("n2 is logged");
+    let v = verdicts_of(&e3, 4);
+    assert!(
+        matches!(v[0], crate::rsm::entry::PushVerdict::Duplicate { offset, .. } if offset == n1_at),
+        "the message in flight is a duplicate at {n1_at}: {:?}",
+        v[0]
+    );
+    assert!(
+        matches!(v[1], crate::rsm::entry::PushVerdict::Created { .. }),
+        "the new message is appended: {:?}",
+        v[1]
+    );
 }
 
 #[test]

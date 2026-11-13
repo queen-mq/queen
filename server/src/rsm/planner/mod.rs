@@ -70,8 +70,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 
-use smallvec::SmallVec;
-
 use crate::rsm::fasthash::FxBuild;
 use std::rc::Rc;
 
@@ -638,7 +636,9 @@ struct Tagged<V> {
 }
 
 /// One `Append` the overlay remembers: its offset range, its stamp, and the
-/// per-frame hashes in frame order (for the delivered set and the dedup probe).
+/// per-frame hashes in frame order: the dedup probe scans them for a message
+/// still in flight ([`Planner::in_flight_min`]), and a seed of the dedup front
+/// reads them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OverlayAppend {
     base: u64,
@@ -706,13 +706,13 @@ pub struct Overlay {
     queues: HashMap<(String, String), Tagged<Option<QueueConfig>>, FxBuild>,
     groups: HashMap<(String, String, String), Tagged<Option<GroupRow>>, FxBuild>,
     pids_by_key: HashMap<(String, String, String), Tagged<Pid>, FxBuild>,
+    /// The partitions in flight, with their appends. An append keeps its
+    /// frames' hashes, and that is all the dedup state in flight there is: no
+    /// row per message. The dedup front answers "new" for a message in flight
+    /// too (a plan inserts its hashes, a seed reads these appends), and any
+    /// other answer scans the partition's appends here
+    /// ([`Planner::dedup_probe_many`]).
     parts: Shards<Pid, OverlayPart>,
-    /// `(pid, hash) → [(offset, created_at)]`: the occurrences an overlay
-    /// `Append` added, merged with committed `dedup` on a probe or a resolve.
-    /// One key per in-flight message, so the value keeps its (almost always
-    /// single) occurrence inline. No tag: an occurrence's offset is unique in
-    /// its partition, so a landed `Append` removes exactly its own.
-    dedup: Shards<(Pid, [u8; 16]), SmallVec<[DedupOccurrence; 1]>>,
     /// The outcome of every command in flight, by request id — kept by
     /// reference to its entry (B27: a push's outcome carries a verdict per
     /// message, and was cloned for every command of every entry).
@@ -904,17 +904,7 @@ impl PidKey for Pid {
     }
 }
 
-impl PidKey for (Pid, [u8; 16]) {
-    fn pid(&self) -> Pid {
-        self.0
-    }
-}
-
 pub(crate) type PartsMap = HashMap<Pid, OverlayPart, FxBuild>;
-pub(crate) type DedupMap = HashMap<(Pid, [u8; 16]), Occurrences, FxBuild>;
-
-/// One frame's occurrences in the overlay, the entries that hold it.
-pub(crate) type Occurrences = SmallVec<[DedupOccurrence; 1]>;
 
 /// A map split into [`PART_SHARDS`] maps by pid and [`NEW_SHARD`]'s, inline,
 /// so the empty overlay of a group costs no allocation. A key always lives in
@@ -975,11 +965,6 @@ impl<K: PidKey + Eq + std::hash::Hash, V> Shards<K, V> {
         self.maps[self.shard_of(k.pid())].entry(k)
     }
 
-    /// Room for `n` more keys of `pid`'s shard.
-    pub(crate) fn reserve_for(&mut self, pid: Pid, n: usize) {
-        self.maps[self.shard_of(pid)].reserve(n);
-    }
-
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.maps.iter().flat_map(|m| m.iter())
     }
@@ -1013,12 +998,11 @@ impl<K: PidKey + Eq + std::hash::Hash, V> Shards<K, V> {
 #[derive(Default)]
 pub(crate) struct PartShard {
     pub(crate) parts: PartsMap,
-    pub(crate) dedup: DedupMap,
 }
 
 impl PartShard {
     pub(crate) fn is_empty(&self) -> bool {
-        self.parts.is_empty() && self.dedup.is_empty()
+        self.parts.is_empty()
     }
 }
 
@@ -1028,7 +1012,6 @@ impl PartShard {
 #[derive(Default)]
 pub(crate) struct Spill {
     parts: Vec<(Pid, OverlayPart)>,
-    dedup: Vec<((Pid, [u8; 16]), Occurrences)>,
 }
 
 fn merge_part(mine: &mut OverlayPart, part: OverlayPart) {
@@ -1080,9 +1063,6 @@ enum TimerOverlay {
         updated_at_us: i64,
     },
 }
-
-/// One overlay dedup occurrence: `(offset, created_at_us)`.
-pub(crate) type DedupOccurrence = (u64, i64);
 
 /// B27: a command in flight's outcome, by reference to the entry that carries
 /// it (compared and printed as the outcome).
@@ -1148,7 +1128,6 @@ impl Overlay {
             groups: HashMap::default(),
             pids_by_key: HashMap::default(),
             parts: Shards::default(),
-            dedup: Shards::default(),
             request_ids: HashMap::default(),
             kv: HashMap::default(),
             timers: HashMap::default(),
@@ -1173,11 +1152,10 @@ impl Overlay {
     /// state yet: a row already filed under `pid % PART_SHARDS` would be lost.
     pub(crate) fn set_homes(&mut self, homes: Option<std::sync::Arc<homes::Homes>>) {
         debug_assert!(
-            self.parts.is_empty() && self.dedup.is_empty(),
+            self.parts.is_empty(),
             "an overlay takes its homes before it holds partition state"
         );
-        self.parts.homes = homes.clone();
-        self.dedup.homes = homes;
+        self.parts.homes = homes;
     }
 
     /// The homes of this overlay, if it has any.
@@ -1327,31 +1305,22 @@ impl Overlay {
             }
             merge_part(self.parts.entry(real).or_default(), part);
         }
-        for ((p, h), occ) in spill.dedup {
-            let Some(real) = pid(p) else {
-                ok = false;
-                continue;
-            };
-            self.dedup.entry((real, h)).or_default().extend(occ);
-        }
         ok
     }
 
     fn take_shard(&mut self, s: usize) -> PartShard {
         PartShard {
             parts: std::mem::take(self.parts.shard_mut(s)),
-            dedup: std::mem::take(self.dedup.shard_mut(s)),
         }
     }
 
     /// Put shard `s` back where it was taken from, which holds nothing.
     fn put_shard(&mut self, s: usize, sh: PartShard) {
         debug_assert!(
-            self.parts.shard(s).is_empty() && self.dedup.shard(s).is_empty(),
+            self.parts.shard(s).is_empty(),
             "a shard comes back over one that holds state"
         );
         *self.parts.shard_mut(s) = sh.parts;
-        *self.dedup.shard_mut(s) = sh.dedup;
     }
 
     /// The shards of `mask`, moved out with their numbers: what a planning
@@ -1415,26 +1384,12 @@ impl Overlay {
             let Some(p) = self.parts.get_mut(&was.pid) else {
                 continue;
             };
-            let added: Vec<OverlayAppend> = p
-                .appends
-                .drain(was.appends.min(p.appends.len())..)
-                .collect();
+            // The appends since go, and their frames' hashes with them.
+            p.appends.truncate(was.appends.min(p.appends.len()));
             p.created = was.created.clone();
             p.watermark = was.watermark.clone();
             if p.is_empty() {
                 self.parts.remove(&was.pid);
-            }
-            for a in added {
-                for (i, h) in a.hashes.iter().enumerate() {
-                    let k = (was.pid, *h);
-                    let off = a.base + i as u64;
-                    if let Some(occ) = self.dedup.get_mut(&k) {
-                        occ.retain(|o| o.0 != off);
-                        if occ.is_empty() {
-                            self.dedup.remove(&k);
-                        }
-                    }
-                }
             }
         }
     }
@@ -1562,7 +1517,6 @@ impl Overlay {
         self.file_spill(
             Spill {
                 parts: sh.parts.into_iter().collect(),
-                dedup: sh.dedup.into_iter().collect(),
             },
             pid,
         )
@@ -1580,12 +1534,6 @@ impl Overlay {
         }
         self.shards_written = 0;
         out
-    }
-
-    /// How many frame occurrences this overlay's own layer holds: the work a
-    /// merge of it costs.
-    pub(crate) fn frames_held(&self) -> usize {
-        self.dedup.len()
     }
 
     fn base(&self) -> Option<&Overlay> {
@@ -1717,19 +1665,6 @@ impl Overlay {
         let mut out = self.base().map(|b| b.appends_of(pid)).unwrap_or_default();
         if let Some(o) = self.parts.get(&pid) {
             out.extend(o.appends.iter());
-        }
-        out
-    }
-
-    /// The occurrences in flight of `hash` in `pid`, in every layer.
-    fn dedup_occurrences(&self, pid: Pid, hash: &[u8; 16]) -> SmallVec<[DedupOccurrence; 1]> {
-        self.check(pid);
-        let mut out: SmallVec<[DedupOccurrence; 1]> = self
-            .base()
-            .map(|b| b.dedup_occurrences(pid, hash))
-            .unwrap_or_default();
-        if let Some(o) = self.dedup.get(&(pid, *hash)) {
-            out.extend(o.iter().copied());
         }
         out
     }
@@ -1984,13 +1919,6 @@ impl Overlay {
                 self.check(*pid);
                 self.note_touch(*pid);
                 self.shards_written |= 1u128 << self.parts.shard_of(*pid);
-                self.dedup.reserve_for(*pid, count);
-                for (i, h) in hs.iter().enumerate() {
-                    self.dedup
-                        .entry((*pid, *h))
-                        .or_default()
-                        .push((base_offset + i as u64, *created_at_us));
-                }
                 self.parts
                     .entry(*pid)
                     .or_default()
@@ -3120,65 +3048,79 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         hash: &[u8; 16],
         window_floor_us: i64,
     ) -> Result<Option<u64>, Refusal> {
-        // The front decides whether the committed authority must be read: a
-        // "skip" is a proof that it holds no in-window occurrence of this hash
-        // (see [`DedupFront`]). Under `rows` the read is a single LMDB get on
-        // the `(pid, hash)` row; under `txns` a "maybe" names the generation
-        // offset bands, and the read is a bounded ordered scan of the txns rows
-        // (PERF-E). The overlay merge below is UNCONDITIONAL — the front fronts
-        // only the committed read, never the in-flight state, so an in-flight
-        // duplicate is still caught even on a skip. `front_prepare` must have
-        // run for this pid this command.
+        // The front decides whether anything must be read: a "skip" is a proof
+        // that no in-window occurrence of this hash exists, committed or in
+        // flight (see [`DedupFront`]: a plan inserts every survivor's hash
+        // before it commits, and a seed reads the overlay's appends beside the
+        // committed rows). Under `rows` the committed read is a single LMDB
+        // get on the `(pid, hash)` row; under `txns` a "maybe" names the
+        // generation offset bands, and the read is a bounded ordered scan of
+        // the txns rows (PERF-E). Any answer but "skip" also reads the appends
+        // in flight to the partition. A partition created this cycle is not in
+        // the front (its id is a placeholder): its appends are always read.
+        // `front_prepare` must have run for this pid this command.
         if is_placeholder(pid) {
-            return Ok(Self::in_flight_min(ov, pid, hash, window_floor_us, None));
+            return Ok(Self::in_flight_min(
+                &ov.appends_of(pid),
+                hash,
+                window_floor_us,
+                None,
+            ));
         }
-        let mut best = match self.cfg.index_mode {
+        let (best, absent) = match self.cfg.index_mode {
             IndexMode::Rows => {
                 if self.front.should_probe(pid, hash, window_floor_us) {
-                    dedup::probe_one(self.reads(), pid, hash, window_floor_us).map_err(store_err)?
+                    let found = dedup::probe_one(self.reads(), pid, hash, window_floor_us)
+                        .map_err(store_err)?;
+                    (found, false)
                 } else {
-                    None
+                    (None, true)
                 }
             }
-            IndexMode::Txns => self.dedup_probe_txns(pid, hash, window_floor_us)?,
-            IndexMode::Segment => self.dedup_probe_segment(pid, hash, window_floor_us)?,
+            IndexMode::Txns | IndexMode::Segment => {
+                let mut ranges: Vec<(u64, u64)> = Vec::new();
+                let verdict = self
+                    .front
+                    .probe_plan(pid, hash, window_floor_us, &mut ranges);
+                let found = self.dedup_committed(pid, hash, window_floor_us, verdict, &ranges)?;
+                (found, verdict == ProbeVerdict::Skip)
+            }
         };
-        best = Self::in_flight_min(ov, pid, hash, window_floor_us, best);
-        Ok(best)
+        if absent {
+            return Ok(None);
+        }
+        Ok(Self::in_flight_min(
+            &ov.appends_of(pid),
+            hash,
+            window_floor_us,
+            best,
+        ))
     }
 
-    /// `best` lowered to the earliest in-window occurrence of `hash` in `pid`
-    /// that an entry in flight (or this cycle) holds, in every overlay layer.
+    /// `best` lowered to the earliest in-window occurrence of `hash` among
+    /// `appends`, the appends in flight to its partition
+    /// ([`Overlay::appends_of`]: every layer, oldest first). A scan: an append
+    /// keeps its frames' hashes and nothing else indexes them. It runs for a
+    /// hash the front could not rule out (a real duplicate, a false positive,
+    /// a partition with no warm filter), never for a hash it called new.
     fn in_flight_min(
-        ov: &Overlay,
-        pid: Pid,
+        appends: &[&OverlayAppend],
         hash: &[u8; 16],
         window_floor_us: i64,
         mut best: Option<u64>,
     ) -> Option<u64> {
-        for (off, created) in ov.dedup_occurrences(pid, hash) {
-            if created >= window_floor_us {
-                best = Some(best.map_or(off, |b| b.min(off)));
+        for a in appends {
+            if a.created_at_us < window_floor_us {
+                continue;
+            }
+            for (i, h) in a.hashes.iter().enumerate() {
+                if h == hash {
+                    let off = a.base + i as u64;
+                    best = Some(best.map_or(off, |b| b.min(off)));
+                }
             }
         }
         best
-    }
-
-    /// The committed leg of a push probe under `DEDUP_INDEX=txns`: ask the front
-    /// for the offset bands to scan, then scan the txns rows for the hash. A
-    /// warm filter bounds the scan to one generation's band; an unseeded /
-    /// fallback / disabled front scans the whole txns window (exact).
-    fn dedup_probe_txns(
-        &self,
-        pid: Pid,
-        hash: &[u8; 16],
-        window_floor_us: i64,
-    ) -> Result<Option<u64>, Refusal> {
-        let mut ranges: Vec<(u64, u64)> = Vec::new();
-        let verdict = self
-            .front
-            .probe_plan(pid, hash, window_floor_us, &mut ranges);
-        self.dedup_committed(pid, hash, window_floor_us, verdict, &ranges)
     }
 
     /// The committed leg of a probe the front has planned (`verdict`, and for
@@ -3227,9 +3169,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // A partition a group created this cycle: nothing committed, and never
         // in the dedup front (whose entries a real pid owns).
         if is_placeholder(pid) {
+            let appends = ov.appends_of(pid);
             return Ok(items
                 .iter()
-                .map(|it| Self::in_flight_min(ov, pid, &it.hash, window_floor_us, None))
+                .map(|it| Self::in_flight_min(&appends, &it.hash, window_floor_us, None))
                 .collect());
         }
         if self.cfg.index_mode == IndexMode::Rows {
@@ -3276,6 +3219,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 .collect();
         }
         let mut out = Vec::with_capacity(items.len());
+        // The appends in flight to this partition: read once, and only when a
+        // hash needs them.
+        let mut in_flight: Option<Vec<&OverlayAppend>> = None;
         for (it, plan) in items.iter().zip(&plans) {
             let mut best = self.dedup_committed(
                 pid,
@@ -3284,35 +3230,16 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 plan.verdict,
                 &bands[plan.from..plan.to],
             )?;
-            best = Self::in_flight_min(ov, pid, &it.hash, window_floor_us, best);
+            // A "skip" is the front's proof that the hash has no in-window
+            // occurrence, committed or in flight ([`Planner::dedup_probe_one`]).
+            // Any other verdict reads the appends in flight.
+            if plan.verdict != ProbeVerdict::Skip {
+                let appends = in_flight.get_or_insert_with(|| ov.appends_of(pid));
+                best = Self::in_flight_min(appends, &it.hash, window_floor_us, best);
+            }
             out.push(best);
         }
         Ok(out)
-    }
-
-    /// The committed leg of a push probe under `DEDUP_INDEX=segment`: the front
-    /// still decides Skip vs scan (its seed and inserts are mode-agnostic — the
-    /// same in-window hashes either way), and a scan returns the exact MIN
-    /// in-window offset.
-    ///
-    /// PLAN_RAFT_DRAIN_FIX P3.1: with the qlog on, a `Ranges` verdict reads ONLY
-    /// the committed records overlapping the generation bands the front matched
-    /// ([`Planner::dedup_probe_qlog_bands`]) — O(band), not O(partition
-    /// history). `Whole` (unseeded / fallback / disabled front) and the segment
-    /// source keep the whole committed window (RAM-cached per pid this cycle); a
-    /// "maybe" band is a sound over-approximation, so the whole-window minimum
-    /// matches the `txns` verdict.
-    fn dedup_probe_segment(
-        &self,
-        pid: Pid,
-        hash: &[u8; 16],
-        window_floor_us: i64,
-    ) -> Result<Option<u64>, Refusal> {
-        let mut ranges: Vec<(u64, u64)> = Vec::new();
-        let verdict = self
-            .front
-            .probe_plan(pid, hash, window_floor_us, &mut ranges);
-        self.dedup_committed(pid, hash, window_floor_us, verdict, &ranges)
     }
 
     /// PLAN_RAFT_DRAIN_FIX P3.1: the band-limited committed probe over the qlog.

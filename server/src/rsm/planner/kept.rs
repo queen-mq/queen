@@ -71,8 +71,7 @@ use std::sync::Arc;
 
 use super::homes::Homes;
 use super::{
-    frame_hash, is_partition_state, DedupMap, InFlightOutcome, Overlay, PartsMap, Tagged,
-    NEW_SHARD, PART_SHARDS,
+    is_partition_state, InFlightOutcome, Overlay, PartsMap, Tagged, NEW_SHARD, PART_SHARDS,
 };
 use crate::rsm::effect::Effect;
 use crate::rsm::entry::Entry;
@@ -482,7 +481,6 @@ impl KeptOverlay {
             p.watermark = None;
             !p.is_empty()
         });
-        ov.dedup = Default::default();
         for k in self.entries.iter_mut() {
             k.parts = false;
         }
@@ -599,11 +597,6 @@ impl KeptOverlay {
             })
             .or_else(|| diff_parts(a, b, &pa, &pb))
             .or_else(|| {
-                (0..=NEW_SHARD).find_map(|s| {
-                    diff_map("dedup", a.dedup.shard(s), b.dedup.shard(s), |x, y| x == y)
-                })
-            })
-            .or_else(|| {
                 diff_map("timers", &a.timers, &b.timers, |x, y| {
                     x.v == y.v && pa(x.last) == pb(y.last) && pa(x.base) == pb(y.base)
                 })
@@ -700,21 +693,16 @@ fn part_effect_pid(eff: &Effect) -> Option<crate::rsm::effect::Pid> {
 }
 
 /// [`Overlay::shrink_idle`] for one shard of the partition state.
-fn shrink_shard(parts: &mut PartsMap, dedup: &mut DedupMap) {
-    fn shrink<K: Eq + Hash, V>(m: &mut HashMap<K, V, FxBuild>) {
-        if m.capacity() > 4096 && m.capacity() > 8 * m.len() {
-            m.shrink_to(2 * m.len());
-        }
+fn shrink_shard(parts: &mut PartsMap) {
+    if parts.capacity() > 4096 && parts.capacity() > 8 * parts.len() {
+        parts.shrink_to(2 * parts.len());
     }
-    shrink(parts);
-    shrink(dedup);
 }
 
 /// One effect's share of a landing in its pid's shard. `log`: the entry's
 /// appends and watermarks were folded (B27); a create's flag always is.
 fn unfold_part_effect(
     parts: &mut PartsMap,
-    dedup: &mut DedupMap,
     eff: &Effect,
     tag: u64,
     log: bool,
@@ -738,12 +726,7 @@ fn unfold_part_effect(
             }
         }
         Effect::Append {
-            pid,
-            base_offset,
-            count,
-            created_at_us,
-            hashes,
-            ..
+            pid, base_offset, ..
         } => {
             let p = parts
                 .get_mut(pid)
@@ -756,21 +739,6 @@ fn unfold_part_effect(
             p.appends.remove(at);
             if p.is_empty() {
                 parts.remove(pid);
-            }
-            for i in 0..*count as usize {
-                let key = (*pid, frame_hash(hashes, i));
-                let occ = dedup
-                    .get_mut(&key)
-                    .ok_or("a landed frame has no dedup occurrence")?;
-                let want = (base_offset + i as u64, *created_at_us);
-                let j = occ
-                    .iter()
-                    .position(|o| *o == want)
-                    .ok_or("a landed frame's dedup occurrence is missing")?;
-                occ.remove(j);
-                if occ.is_empty() {
-                    dedup.remove(&key);
-                }
             }
         }
         Effect::Watermark { pid, .. } => {
@@ -969,19 +937,13 @@ impl Overlay {
                     if mask & (1 << s) == 0 {
                         continue;
                     }
-                    unfold_part_effect(
-                        self.parts.shard_mut(s),
-                        self.dedup.shard_mut(s),
-                        eff,
-                        *tag,
-                        *log,
-                    )?;
+                    unfold_part_effect(self.parts.shard_mut(s), eff, *tag, *log)?;
                 }
             }
         }
         for s in 0..PART_SHARDS {
             if mask & (1 << s) != 0 {
-                shrink_shard(self.parts.shard_mut(s), self.dedup.shard_mut(s));
+                shrink_shard(self.parts.shard_mut(s));
             }
         }
         Ok(())

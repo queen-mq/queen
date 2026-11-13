@@ -13,6 +13,11 @@
 //! less than a tenth of it (random bytes). Level: `QUEEN_RAFT_QLOG_ZSTD_LEVEL`,
 //! default 1 (measured on the VM: 100 x 1 KB JSON 2.22x at 276 MB/s; level 3
 //! buys 2.45x for 1.7x the CPU); 0 turns the codec off.
+//!
+//! A compressed payload whose frames hold a link or headers ends with a MARK
+//! ([`mark_of`]): the framed pop hands stored records out as they are, must
+//! leave such a record to the JSON render, and reads the mark instead of
+//! decompressing every record to look at its frames' flags.
 
 use crate::obs::panic_policy::LockExt;
 use std::cell::RefCell;
@@ -75,8 +80,58 @@ pub fn compress_one(raw: &[u8]) -> Option<Vec<u8>> {
     if level == 0 || raw.len() < MIN_BYTES {
         return None;
     }
-    let z = compress_with(level, raw)?;
-    (z.len() * 10 <= raw.len() * 9).then_some(z)
+    let mut z = compress_with(level, raw)?;
+    if z.len() * 10 > raw.len() * 9 {
+        return None;
+    }
+    seal(crate::frames::flags_union(raw), &mut z);
+    Some(z)
+}
+
+// ---------------------------------------------------------------------------
+// The mark: what a compressed payload says about its frames
+// ---------------------------------------------------------------------------
+
+/// The frame flags a compressed payload answers for without being opened: a
+/// link, and headers ([`crate::frames`]). Both exist only from catalogue
+/// version 8, so no payload written before the mark holds either.
+pub const MARKED_FLAGS: u8 = crate::frames::FLAG_LINK | crate::frames::FLAG_HEADERS;
+
+/// The mark is a zstd SKIPPABLE frame after the data, which every zstd decoder
+/// skips: [`decompress`], and anything else that reads the payload, sees the
+/// same frames with or without it. `magic | u32 4 | 'Q' 'F' | version 1 |
+/// flags`.
+const MARK_MAGIC: [u8; 4] = 0x184D_2A5Fu32.to_le_bytes();
+const MARK_LEN: usize = 12;
+
+fn mark(flags: u8) -> [u8; MARK_LEN] {
+    let mut m = [0u8; MARK_LEN];
+    m[..4].copy_from_slice(&MARK_MAGIC);
+    m[4..8].copy_from_slice(&4u32.to_le_bytes());
+    m[8..].copy_from_slice(&[b'Q', b'F', 1, flags]);
+    m
+}
+
+/// Which of the [`MARKED_FLAGS`] the frames of a compressed payload carry:
+/// `None` when it has no mark, and then none of its frames is a link or
+/// carries headers. Only its last twelve bytes are read.
+///
+/// That holds for every payload this codec stores: one with either flag is
+/// marked where it is compressed ([`compress_one`]) or, for a form made
+/// elsewhere, where the writer takes it ([`Pre::finish`]).
+pub fn mark_of(z: &[u8]) -> Option<u8> {
+    let m = &z[z.len().checked_sub(MARK_LEN)?..];
+    (m[..4] == MARK_MAGIC && m[4..8] == 4u32.to_le_bytes() && m[8..11] == [b'Q', b'F', 1])
+        .then_some(m[11])
+}
+
+/// Mark `z`, a compressed payload whose frames carry `flags` (or-ed), when
+/// one of them is marked and `z` does not say so yet.
+fn seal(flags: u8, z: &mut Vec<u8>) {
+    let flags = flags & MARKED_FLAGS;
+    if flags != 0 && mark_of(z).is_none() {
+        z.extend_from_slice(&mark(flags));
+    }
 }
 
 /// [`compress_one`] for every payload of a write group, in order. A group with
@@ -129,7 +184,10 @@ pub fn compress_all(raws: &[&[u8]]) -> Vec<Option<Vec<u8>>> {
 pub enum Pre {
     /// Stored raw: under [`MIN_BYTES`], or the codec is off.
     Raw,
-    Job(Arc<Slot>),
+    /// The job, and the flags of the blob's frames when its answer may be a
+    /// form made elsewhere (the client's own compression, one a follower
+    /// sent: [`preseed`]), which carries no mark: [`Pre::finish`] marks it.
+    Job(Arc<Slot>, u8),
 }
 
 /// Where a pool job leaves its answer: read by a blocking writer thread or by
@@ -183,7 +241,8 @@ impl Pre {
         }
         if let Some(slot) = take_early(blob) {
             EARLY_HITS.fetch_add(1, Ordering::Relaxed);
-            return Pre::Job(slot);
+            // A few bytes a frame, of a blob `take_early` has just hashed.
+            return Pre::Job(slot, crate::frames::flags_union(blob));
         }
         let slot = Slot::new();
         match pool().send(Job {
@@ -193,7 +252,7 @@ impl Pre {
             },
             slot: slot.clone(),
         }) {
-            Ok(()) => Pre::Job(slot),
+            Ok(()) => Pre::Job(slot, 0),
             Err(_) => Pre::Raw,
         }
     }
@@ -204,14 +263,18 @@ impl Pre {
     pub fn finish(self) -> Option<Vec<u8>> {
         match self {
             Pre::Raw => None,
-            Pre::Job(slot) => slot.take_blocking(),
+            Pre::Job(slot, flags) => {
+                let mut z = slot.take_blocking()?;
+                seal(flags, &mut z);
+                Some(z)
+            }
         }
     }
 
     /// Wait (async) until the job has answered; [`Pre::finish`] then returns at
     /// once.
     pub async fn wait(&self) {
-        let Pre::Job(slot) = self else { return };
+        let Pre::Job(slot, _) = self else { return };
         loop {
             let notified = slot.notify.notified();
             if slot.ready() {
@@ -566,6 +629,106 @@ mod tests {
         let small = b"tiny".to_vec();
         precompress(small.clone());
         assert!(take_early(&small).is_none());
+    }
+
+    /// `n` packed frames of about 650 bytes each (`tag` makes the blob unique:
+    /// parallel tests share the early table), with a header when asked.
+    fn frames_blob(n: usize, tag: &str, headers: bool) -> Vec<u8> {
+        let block = crate::frames::encode_headers([("kind", "order.paid")]);
+        let mut raw = Vec::new();
+        for i in 0..n {
+            let txn = format!("{tag}-{i}");
+            let payload = format!("{{\"n\":{i},\"pad\":\"{}\"}}", "x".repeat(600));
+            raw.extend_from_slice(&crate::frames::pack_frames(&[crate::frames::FrameIn {
+                message_id: [i as u8; 16],
+                txn: &txn,
+                trace_id: None,
+                producer_sub: None,
+                payload: payload.as_bytes(),
+                encrypted: false,
+                headers: headers.then_some(block.as_slice()),
+                link: None,
+            }]));
+        }
+        raw
+    }
+
+    /// `n` link frames.
+    fn links_blob(n: usize) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for i in 0..n {
+            let txn = format!("link-{i}");
+            raw.extend_from_slice(&crate::frames::pack_frames(&[crate::frames::FrameIn {
+                message_id: [i as u8; 16],
+                txn: &txn,
+                trace_id: None,
+                producer_sub: None,
+                payload: b"",
+                encrypted: false,
+                headers: None,
+                link: Some(crate::frames::LinkRef {
+                    qid: 7,
+                    pid: 3,
+                    offset: i as u64,
+                }),
+            }]));
+        }
+        raw
+    }
+
+    #[test]
+    fn a_compressed_payload_says_whether_its_frames_hold_headers_or_a_link() {
+        use crate::frames::{FLAG_HEADERS, FLAG_LINK};
+        let plain = frames_blob(4, "plain", false);
+        let z = compress_one(&plain).expect("compresses");
+        assert_eq!(mark_of(&z), None, "plain frames carry no mark");
+        assert_eq!(decompress(&z).unwrap(), plain);
+
+        let with_headers = frames_blob(4, "hdr", true);
+        let z = compress_one(&with_headers).expect("compresses");
+        assert_eq!(mark_of(&z), Some(FLAG_HEADERS));
+        assert_eq!(
+            decompress(&z).unwrap(),
+            with_headers,
+            "the decoder skips the mark"
+        );
+
+        let links = links_blob(60);
+        let z = compress_one(&links).expect("compresses");
+        assert_eq!(mark_of(&z), Some(FLAG_LINK));
+        assert_eq!(decompress(&z).unwrap(), links);
+
+        // One frame with headers among plain ones marks the whole payload.
+        let mut mixed = frames_blob(3, "mixed-a", false);
+        mixed.extend_from_slice(&frames_blob(1, "mixed-b", true));
+        let z = compress_one(&mixed).expect("compresses");
+        assert_eq!(mark_of(&z), Some(FLAG_HEADERS));
+        assert_eq!(decompress(&z).unwrap(), mixed);
+    }
+
+    #[test]
+    fn a_form_made_elsewhere_is_marked_when_the_writer_takes_it() {
+        let tag = format!("{:?}-{}", std::thread::current().id(), std::process::id());
+        // Frames with headers, compressed as a client does: no mark.
+        let raw = frames_blob(4, &format!("elsewhere-hdr-{tag}"), true);
+        let z = zstd::bulk::compress(&raw, 3).expect("zstd");
+        assert_eq!(mark_of(&z), None);
+        preseed(&raw, z.clone());
+        let stored = Pre::start_append(&entry_with_append(raw.clone()), 0)
+            .finish()
+            .expect("the client's form is taken");
+        assert!(stored.starts_with(&z), "the client's bytes are kept");
+        assert_eq!(mark_of(&stored), Some(crate::frames::FLAG_HEADERS));
+        assert_eq!(decompress(&stored).unwrap(), raw);
+
+        // Plain frames a client compressed are stored byte for byte.
+        let plain = frames_blob(4, &format!("elsewhere-plain-{tag}"), false);
+        let z = zstd::bulk::compress(&plain, 3).expect("zstd");
+        preseed(&plain, z.clone());
+        let stored = Pre::start_append(&entry_with_append(plain), 0)
+            .finish()
+            .expect("the client's form is taken");
+        assert_eq!(stored, z);
     }
 
     #[test]
