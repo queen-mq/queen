@@ -1,0 +1,34 @@
+[16:13:09] abplan-homes start: fix1 | push spread t10kv t10 t100 t10w
+[16:13:09] == push on fix1
+h-push-fix1 [16:14:20] 3,000,000: offered 2,999,976 | pushed 3,000,130 | consumed 3,000,150 | shed 0 errors 0 | push p50 7.2 p99 90.1 | e2e p50 16.6 p99 145.4 | cores 14.8 / 7.5 / 5.2 | loader 18.7c  OK 
+h-push-fix1 [16:15:27] 3,250,000: offered 3,249,927 | pushed 3,250,373 | consumed 3,249,811 | shed 0 errors 0 | push p50 9.3 p99 135.2 | e2e p50 22.3 p99 198.7 | cores 15.9 / 8.1 / 5.9 | loader 19.8c  OK 
+h-push-fix1 [16:16:34] 3,500,000: offered 3,500,107 | pushed 3,500,471 | consumed 3,500,005 | shed 0 errors 0 | push p50 14.3 p99 192.5 | e2e p50 38.9 p99 266.2 | cores 17.3 / 8.8 / 6.1 | loader 20.8c  OK 
+h-push-fix1 [16:17:41] 3,750,000: offered 3,749,950 | pushed 3,750,970 | consumed 3,748,609 | shed 0 errors 0 | push p50 25.3 p99 172.0 | e2e p50 70.7 p99 327.7 | cores 17.9 / 9.3 / 6.5 | loader 21.9c  OK 
+h-push-fix1 [16:18:48] 4,000,000: offered 4,000,251 | pushed 3,671,215 | consumed 3,671,365 | shed 7,601,500 errors 0 | push p50 581.6 p99 1228.8 | e2e p50 1146.9 p99 2326.5 | cores 18.1 / 12.1 / 6.7 | loader 22.3c  NOT CARRIED 
+h-push-fix1 [16:18:48] stopping at 4000000
+[16:18:53] == spread on fix1
+h-spread-fix1 [16:20:15] 1,000,000: offered 999,980 | pushed 1,000,020 | consumed 1,000,066 | shed 0 errors 0 | push p50 4.1 p99 12.5 | e2e p50 10.9 p99 29.4 | cores 11.0 / 5.2 / 3.9 | loader 10.0c  OK 
+h-spread-fix1 [16:21:22] 1,500,000: offered 1,500,014 | pushed 1,500,007 | consumed 1,500,200 | shed 0 errors 0 | push p50 6.0 p99 67.6 | e2e p50 17.7 p99 127.0 | cores 13.5 / 6.5 / 4.8 | loader 14.3c  OK 
+h-spread-fix1 [16:22:29] 2,000,000: offered 2,000,013 | pushed 1,959,641 | consumed 1,953,793 | shed 0 errors 0 | push p50 174.1 p99 1310.7 | e2e p50 294.9 p99 1441.8 | cores 16.9 / 7.5 / 4.6 | loader 17.8c  NOT CARRIED 
+h-spread-fix1 [16:22:29] stopping at 2000000
+[16:22:34] == t10kv on fix1
+h-t10kv-fix1 [16:23:48]   200,000: offered 200,000 | workers 20,000 txn/s = 199,998 msg/s | read 199,993 | shed 0 errors 0 aborts 0 | commit p50 3.8 p99 6.8 | e2e p50 44 p99 87 | feed push p50 3.5 p99 6.1 | cores 12.3 / 6.5 / 4.9 | loaders 9.3c  OK 
+h-t10kv-fix1 [16:24:51]   240,000: offered 239,999 | workers 20,981 txn/s = 209,808 msg/s | read 209,798 | shed 0 errors 0 aborts 0 | commit p50 4.9 p99 8.6 | e2e p50 2228 p99 5308 | feed push p50 4.0 p99 7.0 | cores 13.0 / 7.0 / 5.2 | loaders 9.8c  NOT CARRIED 
+h-t10kv-fix1 [16:24:51] stopping at 240000
+[16:24:55] == t10 on fix1
+h-t10-fix1 [16:26:11]   240,000: offered 239,986 | workers 23,997 txn/s = 239,969 msg/s | read 239,967 | shed 0 errors 0 aborts 0 | commit p50 2.7 p99 5.4 | e2e p50 38 p99 74 | feed push p50 3.2 p99 5.9 | cores 11.7 / 6.1 / 4.7 | loaders 10.6c  OK 
+h-t10-fix1 [16:27:15]   280,000: offered 279,993 | workers 26,233 txn/s = 262,330 msg/s | read 262,340 | shed 0 errors 0 aborts 0 | commit p50 3.3 p99 6.1 | e2e p50 967 p99 2458 | feed push p50 3.6 p99 6.5 | cores 12.4 / 6.7 / 5.1 | loaders 11.6c  NOT CARRIED 
+h-t10-fix1 [16:27:15] stopping at 280000
+[16:27:17] == t100 on fix1
+h-t100-fix1 [16:28:30]   750,000: offered 750,002 | workers 7,501 txn/s = 750,062 msg/s | read 750,152 | shed 0 errors 0 aborts 0 | commit p50 3.6 p99 6.7 | e2e p50 16 p99 24 | feed push p50 3.8 p99 6.7 | cores 9.4 / 5.1 / 3.8 | loaders 10.2c  OK 
+h-t100-fix1 [16:29:29]   900,000: offered 900,056 | workers 8,999 txn/s = 899,923 msg/s | read 900,123 | shed 0 errors 0 aborts 0 | commit p50 4.5 p99 8.4 | e2e p50 19 p99 29 | feed push p50 4.4 p99 7.9 | cores 11.0 / 6.0 / 4.4 | loaders 12.1c  OK 
+h-t100-fix1 [16:30:29] 1,050,000: offered 1,049,957 | workers 10,497 txn/s = 1,049,723 msg/s | read 1,049,466 | shed 0 errors 0 aborts 0 | commit p50 5.6 p99 10.5 | e2e p50 24 p99 39 | feed push p50 5.4 p99 10.1 | cores 12.6 / 6.9 / 4.9 | loaders 13.9c  OK 
+h-t100-fix1 [16:31:29] 1,200,000: offered 1,200,000 | workers 11,959 txn/s = 1,195,933 msg/s | read 1,195,783 | shed 0 errors 0 aborts 0 | commit p50 7.2 p99 13.1 | e2e p50 85 p99 303 | feed push p50 6.8 p99 12.8 | cores 14.1 / 7.8 / 5.6 | loaders 15.8c  OK 
+h-t100-fix1 [16:32:35] 1,350,000: offered 1,349,974 | workers 11,204 txn/s = 1,120,350 msg/s | read 1,120,293 | shed 0 errors 0 aborts 0 | commit p50 7.4 p99 14.3 | e2e p50 3310 p99 6029 | feed push p50 7.2 p99 14.0 | cores 14.3 / 8.0 / 5.7 | loaders 15.9c  NOT CARRIED 
+h-t100-fix1 [16:32:35] stopping at 1350000
+[16:32:38] == t10w on fix1
+h-t10w-fix1 [16:33:53]   280,000: offered 279,963 | workers 28,000 txn/s = 280,000 msg/s | read 280,020 | shed 0 errors 0 aborts 0 | commit p50 3.7 p99 6.7 | e2e p50 52 p99 99 | feed push p50 3.9 p99 6.8 | cores 12.8 / 6.9 / 5.1 | loaders 12.2c  OK 
+h-t10w-fix1 [16:34:52]   320,000: offered 320,011 | workers 31,906 txn/s = 319,064 msg/s | read 319,028 | shed 0 errors 0 aborts 0 | commit p50 5.8 p99 10.0 | e2e p50 120 p99 573 | feed push p50 5.2 p99 9.5 | cores 13.6 / 8.0 / 5.7 | loaders 13.3c  OK 
+h-t10w-fix1 [16:35:56]   360,000: offered 359,992 | workers 31,444 txn/s = 314,442 msg/s | read 314,505 | shed 0 errors 0 aborts 0 | commit p50 5.9 p99 9.9 | e2e p50 2359 p99 5112 | feed push p50 5.2 p99 9.5 | cores 13.7 / 8.1 / 5.7 | loaders 13.3c  NOT CARRIED 
+h-t10w-fix1 [16:35:56] stopping at 360000
+[16:35:58] ABPLAN_HOMES_DONE fix1

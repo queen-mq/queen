@@ -1,0 +1,7 @@
+[15:19:09] run h-push-best: build best, push, 1000 partitions, steps of 40s at: 3000000 3250000 3500000 3750000 4000000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 SPREAD=1 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[15:20:16] 3,000,000: offered 2,999,958 | pushed 3,000,408 | consumed 3,001,021 | shed 0 errors 0 | push p50 6.6 p99 123.9 | e2e p50 15.4 p99 174.1 | cores 14.7 / 7.5 / 5.3 | loader 18.8c  OK 
+[15:21:23] 3,250,000: offered 3,249,849 | pushed 3,249,853 | consumed 3,249,765 | shed 0 errors 0 | push p50 9.1 p99 111.6 | e2e p50 21.8 p99 167.9 | cores 15.9 / 8.1 / 5.7 | loader 19.8c  OK 
+[15:22:31] 3,500,000: offered 3,499,939 | pushed 3,499,549 | consumed 3,500,168 | shed 0 errors 0 | push p50 12.9 p99 170.0 | e2e p50 35.3 p99 270.3 | cores 17.0 / 8.8 / 6.2 | loader 20.9c  OK 
+[15:23:39] 3,750,000: offered 3,749,841 | pushed 3,751,602 | consumed 3,749,495 | shed 0 errors 0 | push p50 32.0 p99 368.6 | e2e p50 84.0 p99 512.0 | cores 17.9 / 9.4 / 6.5 | loader 21.9c  OK 
+[15:24:46] 4,000,000: offered 4,000,094 | pushed 3,682,675 | consumed 3,682,835 | shed 7,230,200 errors 0 | push p50 548.9 p99 1212.4 | e2e p50 1130.5 p99 2195.5 | cores 18.1 / 12.2 / 6.6 | loader 22.4c  NOT CARRIED 
+[15:24:46] stopping at 4000000

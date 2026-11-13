@@ -1,0 +1,9 @@
+[16:32:52] run h-t10w-fix1: build fix1, txn, 900 partitions, steps of 40s at: 280000 320000 360000 400000 | TXN_SIZE=10 KV=0 CONS=55 PROCS=8 BATCH=100 SPREAD=1 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-wire bin | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1-in, b1-out x 900 partitions
+[16:33:53]   280,000: offered 279,963 | workers 28,000 txn/s = 280,000 msg/s | read 280,020 | shed 0 errors 0 aborts 0 | commit p50 3.7 p99 6.7 | e2e p50 52 p99 99 | feed push p50 3.9 p99 6.8 | cores 12.8 / 6.9 / 5.1 | loaders 12.2c  OK 
+[create] done: b2-in, b2-out x 900 partitions
+[16:34:52]   320,000: offered 320,011 | workers 31,906 txn/s = 319,064 msg/s | read 319,028 | shed 0 errors 0 aborts 0 | commit p50 5.8 p99 10.0 | e2e p50 120 p99 573 | feed push p50 5.2 p99 9.5 | cores 13.6 / 8.0 / 5.7 | loaders 13.3c  OK 
+[create] done: b3-in, b3-out x 900 partitions
+[16:35:56]   360,000: offered 359,992 | workers 31,444 txn/s = 314,442 msg/s | read 314,505 | shed 0 errors 0 aborts 0 | commit p50 5.9 p99 9.9 | e2e p50 2359 p99 5112 | feed push p50 5.2 p99 9.5 | cores 13.7 / 8.1 / 5.7 | loaders 13.3c  NOT CARRIED 
+[16:35:56] stopping at 360000
+RUN_DONE
