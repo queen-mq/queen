@@ -1,5 +1,5 @@
 ---
-import { Icon } from "astro-icon/components";
+import Icon from "@cloudflare/nimbus-docs/components/Icon.astro";
 import { Button } from "./ui/button";
 import { LinkButton } from "./ui/link-button";
 import { ThemeToggle } from "./ui/theme-toggle";
@@ -7,7 +7,7 @@ import { SearchTrigger } from "./ui/search";
 import { config } from "virtual:nimbus/config";
 import mark from "../assets/q.svg?raw";
 import wordmark from "../assets/queen.svg?raw";
-import { getSidebarSections } from "@cloudflare/nimbus-docs";
+import { getSidebarSections } from "@cloudflare/nimbus-docs/runtime";
 import { SITE_NAV, isOutsideDocs } from "@/lib/site-nav";
 
 interface Props {

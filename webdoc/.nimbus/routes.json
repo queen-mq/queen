@@ -1,103 +1,3857 @@
 {
-  "version": 1,
+  "version": 3,
   "base": "/",
   "knownRoutes": [
     "/",
+    "/.well-known/ai-catalog.json",
+    "/.well-known/ard.json",
     "/404",
+    "/apple-touch-icon.png",
     "/architecture",
     "/architecture/consumption-engine",
+    "/architecture/consumption-engine/index.md",
+    "/architecture/consumption-engine/index.mdx",
     "/architecture/contributing",
+    "/architecture/contributing/index.md",
+    "/architecture/contributing/index.mdx",
+    "/architecture/index.md",
+    "/architecture/index.mdx",
     "/architecture/leader-followers",
+    "/architecture/leader-followers/index.md",
+    "/architecture/leader-followers/index.mdx",
+    "/architecture/llms.txt",
     "/architecture/lmdb",
+    "/architecture/lmdb/index.md",
+    "/architecture/lmdb/index.mdx",
     "/architecture/memory-state",
+    "/architecture/memory-state/index.md",
+    "/architecture/memory-state/index.mdx",
     "/architecture/raft",
+    "/architecture/raft/index.md",
+    "/architecture/raft/index.mdx",
     "/architecture/storage",
+    "/architecture/storage/index.md",
+    "/architecture/storage/index.mdx",
     "/architecture/write-path",
+    "/architecture/write-path/index.md",
+    "/architecture/write-path/index.mdx",
     "/benchmarks",
+    "/benchmarks/index.md",
+    "/benchmarks/index.mdx",
     "/benchmarks/jepsen",
+    "/benchmarks/jepsen/index.md",
+    "/benchmarks/jepsen/index.mdx",
     "/benchmarks/kafka-clients",
+    "/benchmarks/kafka-clients/index.md",
+    "/benchmarks/kafka-clients/index.mdx",
     "/benchmarks/laravel",
+    "/benchmarks/laravel/index.md",
+    "/benchmarks/laravel/index.mdx",
+    "/benchmarks/llms.txt",
     "/benchmarks/methodology",
+    "/benchmarks/methodology/index.md",
+    "/benchmarks/methodology/index.mdx",
     "/benchmarks/partitions",
+    "/benchmarks/partitions/index.md",
+    "/benchmarks/partitions/index.mdx",
     "/benchmarks/queen-vs-kafka",
+    "/benchmarks/queen-vs-kafka/index.md",
+    "/benchmarks/queen-vs-kafka/index.mdx",
     "/benchmarks/soak",
+    "/benchmarks/soak/index.md",
+    "/benchmarks/soak/index.mdx",
     "/benchmarks/transactions",
+    "/benchmarks/transactions/index.md",
+    "/benchmarks/transactions/index.mdx",
     "/book",
+    "/book/cover.webp",
+    "/book/edition.json",
+    "/book/index.md",
+    "/book/index.mdx",
+    "/book/the-little-book-of-queenmq.pdf",
+    "/charts/laravel-control-plane-dark.svg",
+    "/charts/laravel-control-plane-light.svg",
+    "/charts/laravel-event-driven-dark.svg",
+    "/charts/laravel-event-driven-light.svg",
+    "/charts/laravel-fast-scale-up-dark.svg",
+    "/charts/laravel-fast-scale-up-light.svg",
+    "/charts/laravel-headline-dark.svg",
+    "/charts/laravel-headline-light.svg",
+    "/charts/laravel-horizon-latency-dark.svg",
+    "/charts/laravel-horizon-latency-light.svg",
+    "/charts/laravel-horizon-memory-dark.svg",
+    "/charts/laravel-horizon-memory-light.svg",
+    "/charts/laravel-horizon-throughput-dark.svg",
+    "/charts/laravel-horizon-throughput-light.svg",
+    "/charts/laravel-prefork-memory-dark.svg",
+    "/charts/laravel-prefork-memory-light.svg",
+    "/charts/laravel-queen-optimizations-dark.svg",
+    "/charts/laravel-queen-optimizations-light.svg",
+    "/charts/laravel-replicas-dark.svg",
+    "/charts/laravel-replicas-light.svg",
+    "/charts/laravel-soak-memory-dark.svg",
+    "/charts/laravel-soak-memory-light.svg",
+    "/charts/laravel-vm-capacity-dark.svg",
+    "/charts/laravel-vm-capacity-light.svg",
+    "/charts/laravel-vm-latency-dark.svg",
+    "/charts/laravel-vm-latency-light.svg",
+    "/charts/laravel-vm-memory-dark.svg",
+    "/charts/laravel-vm-memory-light.svg",
+    "/favicon-32.png",
+    "/favicon.ico",
+    "/favicon.svg",
+    "/figures/backup-restore.dark.svg",
+    "/figures/backup-restore.svg",
+    "/figures/batch-ack-rule.dark.svg",
+    "/figures/batch-ack-rule.svg",
+    "/figures/chat-burst.dark.svg",
+    "/figures/chat-burst.svg",
+    "/figures/cluster-write.dark.svg",
+    "/figures/cluster-write.svg",
+    "/figures/compose-cluster.dark.svg",
+    "/figures/compose-cluster.svg",
+    "/figures/consume-loop.dark.svg",
+    "/figures/consume-loop.svg",
+    "/figures/consumption-engine.dark.svg",
+    "/figures/consumption-engine.svg",
+    "/figures/cursor-per-group.dark.svg",
+    "/figures/cursor-per-group.svg",
+    "/figures/entry-copies.dark.svg",
+    "/figures/entry-copies.svg",
+    "/figures/ephemeral-reply.dark.svg",
+    "/figures/ephemeral-reply.svg",
+    "/figures/failover.dark.svg",
+    "/figures/failover.svg",
+    "/figures/file-rewrite.dark.svg",
+    "/figures/file-rewrite.svg",
+    "/figures/follower-offload.dark.svg",
+    "/figures/follower-offload.svg",
+    "/figures/front-doors.dark.svg",
+    "/figures/front-doors.svg",
+    "/figures/health-vs-probe.dark.svg",
+    "/figures/health-vs-probe.svg",
+    "/figures/index.json",
+    "/figures/k8s-topology.dark.svg",
+    "/figures/k8s-topology.svg",
+    "/figures/kafka-cluster.dark.svg",
+    "/figures/kafka-cluster.svg",
+    "/figures/kafka-mapping.dark.svg",
+    "/figures/kafka-mapping.svg",
+    "/figures/kafka-vs-queen.dark.svg",
+    "/figures/kafka-vs-queen.svg",
+    "/figures/lanes.dark.svg",
+    "/figures/lanes.svg",
+    "/figures/last-value.dark.svg",
+    "/figures/last-value.svg",
+    "/figures/lease-cycle.dark.svg",
+    "/figures/lease-cycle.svg",
+    "/figures/lease-fence.dark.svg",
+    "/figures/lease-fence.svg",
+    "/figures/lock-fence.dark.svg",
+    "/figures/lock-fence.svg",
+    "/figures/memory-disk.dark.svg",
+    "/figures/memory-disk.svg",
+    "/figures/one-node.dark.svg",
+    "/figures/one-node.svg",
+    "/figures/one-step-one-commit.dark.svg",
+    "/figures/one-step-one-commit.svg",
+    "/figures/order-workflow.dark.svg",
+    "/figures/order-workflow.svg",
+    "/figures/pg-sink.dark.svg",
+    "/figures/pg-sink.svg",
+    "/figures/pg-source.dark.svg",
+    "/figures/pg-source.svg",
+    "/figures/pubsub.dark.svg",
+    "/figures/pubsub.svg",
+    "/figures/push-buffer.dark.svg",
+    "/figures/push-buffer.svg",
+    "/figures/push-verdicts.dark.svg",
+    "/figures/push-verdicts.svg",
+    "/figures/queue-anatomy.dark.svg",
+    "/figures/queue-anatomy.svg",
+    "/figures/queue-mode-vs-groups.dark.svg",
+    "/figures/queue-mode-vs-groups.svg",
+    "/figures/raft-groups.dark.svg",
+    "/figures/raft-groups.svg",
+    "/figures/raft-timings.dark.svg",
+    "/figures/raft-timings.svg",
+    "/figures/record-layout.dark.svg",
+    "/figures/record-layout.svg",
+    "/figures/recovery-tree.dark.svg",
+    "/figures/recovery-tree.svg",
+    "/figures/replace-node.dark.svg",
+    "/figures/replace-node.svg",
+    "/figures/request-reply.dark.svg",
+    "/figures/request-reply.svg",
+    "/figures/retention-watermarks.dark.svg",
+    "/figures/retention-watermarks.svg",
+    "/figures/retry-dlq.dark.svg",
+    "/figures/retry-dlq.svg",
+    "/figures/rolling-upgrade.dark.svg",
+    "/figures/rolling-upgrade.svg",
+    "/figures/s3-sink.dark.svg",
+    "/figures/s3-sink.svg",
+    "/figures/short-lived-partitions.dark.svg",
+    "/figures/short-lived-partitions.svg",
+    "/figures/singleton.dark.svg",
+    "/figures/singleton.svg",
+    "/figures/sms-gate.dark.svg",
+    "/figures/sms-gate.svg",
+    "/figures/sql-schema.dark.svg",
+    "/figures/sql-schema.svg",
+    "/figures/stream-cycle.dark.svg",
+    "/figures/stream-cycle.svg",
+    "/figures/subscription-start.dark.svg",
+    "/figures/subscription-start.svg",
+    "/figures/supervisor-run.dark.svg",
+    "/figures/supervisor-run.svg",
+    "/figures/supervisor-topology.dark.svg",
+    "/figures/supervisor-topology.svg",
+    "/figures/tenants-groups.dark.svg",
+    "/figures/tenants-groups.svg",
+    "/figures/thin-clients.dark.svg",
+    "/figures/thin-clients.svg",
+    "/figures/timer-reminder.dark.svg",
+    "/figures/timer-reminder.svg",
+    "/figures/trace-merge.dark.svg",
+    "/figures/trace-merge.svg",
+    "/figures/webhook-retries.dark.svg",
+    "/figures/webhook-retries.svg",
+    "/figures/window-shapes.dark.svg",
+    "/figures/window-shapes.svg",
+    "/figures/work-queue.dark.svg",
+    "/figures/work-queue.svg",
+    "/figures/write-path.dark.svg",
+    "/figures/write-path.svg",
+    "/fonts/Inter-Bold.ttf",
+    "/fonts/OFL.txt",
+    "/index.md",
     "/integrations",
+    "/integrations/index.md",
+    "/integrations/index.mdx",
     "/integrations/kafka",
     "/integrations/kafka-frameworks",
+    "/integrations/kafka-frameworks/index.md",
+    "/integrations/kafka-frameworks/index.mdx",
+    "/integrations/kafka/index.md",
+    "/integrations/kafka/index.mdx",
     "/integrations/laravel",
     "/integrations/laravel/concepts",
+    "/integrations/laravel/concepts/index.md",
+    "/integrations/laravel/concepts/index.mdx",
     "/integrations/laravel/configuration",
+    "/integrations/laravel/configuration/index.md",
+    "/integrations/laravel/configuration/index.mdx",
     "/integrations/laravel/consume",
+    "/integrations/laravel/consume/index.md",
+    "/integrations/laravel/consume/index.mdx",
     "/integrations/laravel/dashboard",
+    "/integrations/laravel/dashboard/index.md",
+    "/integrations/laravel/dashboard/index.mdx",
     "/integrations/laravel/examples",
+    "/integrations/laravel/examples/index.md",
+    "/integrations/laravel/examples/index.mdx",
     "/integrations/laravel/examples/lease",
+    "/integrations/laravel/examples/lease/index.md",
+    "/integrations/laravel/examples/lease/index.mdx",
     "/integrations/laravel/examples/ordering",
+    "/integrations/laravel/examples/ordering/index.md",
+    "/integrations/laravel/examples/ordering/index.mdx",
     "/integrations/laravel/examples/prefetch",
+    "/integrations/laravel/examples/prefetch/index.md",
+    "/integrations/laravel/examples/prefetch/index.mdx",
     "/integrations/laravel/examples/prefork",
+    "/integrations/laravel/examples/prefork/index.md",
+    "/integrations/laravel/examples/prefork/index.mdx",
+    "/integrations/laravel/index.md",
+    "/integrations/laravel/index.mdx",
     "/integrations/laravel/kubernetes",
+    "/integrations/laravel/kubernetes/index.md",
+    "/integrations/laravel/kubernetes/index.mdx",
     "/integrations/laravel/migrate-from-horizon",
+    "/integrations/laravel/migrate-from-horizon/index.md",
+    "/integrations/laravel/migrate-from-horizon/index.mdx",
     "/integrations/laravel/monitoring",
+    "/integrations/laravel/monitoring/index.md",
+    "/integrations/laravel/monitoring/index.mdx",
     "/integrations/laravel/queen-vs-horizon",
+    "/integrations/laravel/queen-vs-horizon/index.md",
+    "/integrations/laravel/queen-vs-horizon/index.mdx",
     "/integrations/laravel/supervisors",
+    "/integrations/laravel/supervisors/index.md",
+    "/integrations/laravel/supervisors/index.mdx",
+    "/integrations/llms.txt",
     "/integrations/postgres",
+    "/integrations/postgres/index.md",
+    "/integrations/postgres/index.mdx",
     "/integrations/s3",
+    "/integrations/s3/index.md",
+    "/integrations/s3/index.mdx",
     "/introduction",
     "/introduction/about",
+    "/introduction/about/index.md",
+    "/introduction/about/index.mdx",
     "/introduction/compare",
+    "/introduction/compare/index.md",
+    "/introduction/compare/index.mdx",
     "/introduction/guarantees",
+    "/introduction/guarantees/index.md",
+    "/introduction/guarantees/index.mdx",
+    "/introduction/index.md",
+    "/introduction/index.mdx",
+    "/introduction/llms.txt",
     "/introduction/model",
+    "/introduction/model/index.md",
+    "/introduction/model/index.mdx",
     "/introduction/when-not-to-use",
+    "/introduction/when-not-to-use/index.md",
+    "/introduction/when-not-to-use/index.mdx",
     "/introduction/why",
+    "/introduction/why/index.md",
+    "/introduction/why/index.mdx",
+    "/llms-brief.txt",
+    "/llms-full.txt",
+    "/llms.txt",
     "/manage",
     "/manage/backups",
+    "/manage/backups/index.md",
+    "/manage/backups/index.mdx",
     "/manage/client-tokens",
+    "/manage/client-tokens/index.md",
+    "/manage/client-tokens/index.mdx",
     "/manage/configuration",
+    "/manage/configuration/index.md",
+    "/manage/configuration/index.mdx",
     "/manage/docker",
+    "/manage/docker/index.md",
+    "/manage/docker/index.mdx",
+    "/manage/index.md",
+    "/manage/index.mdx",
     "/manage/kubernetes",
+    "/manage/kubernetes/index.md",
+    "/manage/kubernetes/index.mdx",
+    "/manage/llms.txt",
     "/manage/operator",
+    "/manage/operator/index.md",
+    "/manage/operator/index.mdx",
     "/manage/recovery",
+    "/manage/recovery/index.md",
+    "/manage/recovery/index.mdx",
     "/manage/security",
+    "/manage/security/index.md",
+    "/manage/security/index.mdx",
     "/manage/standby",
+    "/manage/standby/index.md",
+    "/manage/standby/index.mdx",
     "/manage/tenants",
+    "/manage/tenants/index.md",
+    "/manage/tenants/index.mdx",
     "/manage/terraform",
+    "/manage/terraform/index.md",
+    "/manage/terraform/index.mdx",
     "/manage/upgrades-monitoring",
+    "/manage/upgrades-monitoring/index.md",
+    "/manage/upgrades-monitoring/index.mdx",
+    "/og.png",
+    "/og/architecture.png",
+    "/og/architecture/consumption-engine.png",
+    "/og/architecture/contributing.png",
+    "/og/architecture/leader-followers.png",
+    "/og/architecture/lmdb.png",
+    "/og/architecture/memory-state.png",
+    "/og/architecture/raft.png",
+    "/og/architecture/storage.png",
+    "/og/architecture/write-path.png",
+    "/og/benchmarks.png",
+    "/og/benchmarks/jepsen.png",
+    "/og/benchmarks/kafka-clients.png",
+    "/og/benchmarks/laravel.png",
+    "/og/benchmarks/methodology.png",
+    "/og/benchmarks/partitions.png",
+    "/og/benchmarks/queen-vs-kafka.png",
+    "/og/benchmarks/soak.png",
+    "/og/benchmarks/transactions.png",
+    "/og/book.png",
+    "/og/integrations.png",
+    "/og/integrations/kafka-frameworks.png",
+    "/og/integrations/kafka.png",
+    "/og/integrations/laravel.png",
+    "/og/integrations/laravel/concepts.png",
+    "/og/integrations/laravel/configuration.png",
+    "/og/integrations/laravel/consume.png",
+    "/og/integrations/laravel/dashboard.png",
+    "/og/integrations/laravel/examples.png",
+    "/og/integrations/laravel/examples/lease.png",
+    "/og/integrations/laravel/examples/ordering.png",
+    "/og/integrations/laravel/examples/prefetch.png",
+    "/og/integrations/laravel/examples/prefork.png",
+    "/og/integrations/laravel/kubernetes.png",
+    "/og/integrations/laravel/migrate-from-horizon.png",
+    "/og/integrations/laravel/monitoring.png",
+    "/og/integrations/laravel/queen-vs-horizon.png",
+    "/og/integrations/laravel/supervisors.png",
+    "/og/integrations/postgres.png",
+    "/og/integrations/s3.png",
+    "/og/introduction.png",
+    "/og/introduction/about.png",
+    "/og/introduction/compare.png",
+    "/og/introduction/guarantees.png",
+    "/og/introduction/model.png",
+    "/og/introduction/when-not-to-use.png",
+    "/og/introduction/why.png",
+    "/og/manage.png",
+    "/og/manage/backups.png",
+    "/og/manage/client-tokens.png",
+    "/og/manage/configuration.png",
+    "/og/manage/docker.png",
+    "/og/manage/kubernetes.png",
+    "/og/manage/operator.png",
+    "/og/manage/recovery.png",
+    "/og/manage/security.png",
+    "/og/manage/standby.png",
+    "/og/manage/tenants.png",
+    "/og/manage/terraform.png",
+    "/og/manage/upgrades-monitoring.png",
+    "/og/patterns.png",
+    "/og/patterns/delayed-messages.png",
+    "/og/patterns/last-value.png",
+    "/og/patterns/one-worker.png",
+    "/og/patterns/ordering-batching.png",
+    "/og/patterns/publish-subscribe.png",
+    "/og/patterns/rate-limiting.png",
+    "/og/patterns/request-reply.png",
+    "/og/patterns/retries-dead-letters.png",
+    "/og/patterns/windowed-aggregation.png",
+    "/og/patterns/work-queue.png",
+    "/og/patterns/workflows.png",
+    "/og/reference.png",
+    "/og/reference/changelog.png",
+    "/og/reference/configuration.png",
+    "/og/reference/errors.png",
+    "/og/reference/http.png",
+    "/og/reference/kafka.png",
+    "/og/reference/limits.png",
+    "/og/reference/metrics.png",
+    "/og/reference/queenctl.png",
+    "/og/reference/supervisor-status.png",
+    "/og/reference/transaction.png",
+    "/og/writing-applications.png",
+    "/og/writing-applications/ack.png",
+    "/og/writing-applications/ai-agents.png",
+    "/og/writing-applications/clients.png",
+    "/og/writing-applications/ephemeral.png",
+    "/og/writing-applications/kv-locks-timers.png",
+    "/og/writing-applications/pop.png",
+    "/og/writing-applications/push.png",
+    "/og/writing-applications/queues.png",
+    "/og/writing-applications/retries.png",
+    "/og/writing-applications/streams.png",
+    "/og/writing-applications/transactions.png",
+    "/openapi/queen-broker.json",
+    "/openapi/queen-proxy.json",
     "/patterns",
     "/patterns/delayed-messages",
+    "/patterns/delayed-messages/index.md",
+    "/patterns/delayed-messages/index.mdx",
+    "/patterns/index.md",
+    "/patterns/index.mdx",
     "/patterns/last-value",
+    "/patterns/last-value/index.md",
+    "/patterns/last-value/index.mdx",
+    "/patterns/llms.txt",
     "/patterns/one-worker",
+    "/patterns/one-worker/index.md",
+    "/patterns/one-worker/index.mdx",
     "/patterns/ordering-batching",
+    "/patterns/ordering-batching/index.md",
+    "/patterns/ordering-batching/index.mdx",
     "/patterns/publish-subscribe",
+    "/patterns/publish-subscribe/index.md",
+    "/patterns/publish-subscribe/index.mdx",
     "/patterns/rate-limiting",
+    "/patterns/rate-limiting/index.md",
+    "/patterns/rate-limiting/index.mdx",
     "/patterns/request-reply",
+    "/patterns/request-reply/index.md",
+    "/patterns/request-reply/index.mdx",
     "/patterns/retries-dead-letters",
+    "/patterns/retries-dead-letters/index.md",
+    "/patterns/retries-dead-letters/index.mdx",
     "/patterns/windowed-aggregation",
+    "/patterns/windowed-aggregation/index.md",
+    "/patterns/windowed-aggregation/index.mdx",
     "/patterns/work-queue",
+    "/patterns/work-queue/index.md",
+    "/patterns/work-queue/index.mdx",
     "/patterns/workflows",
+    "/patterns/workflows/index.md",
+    "/patterns/workflows/index.mdx",
+    "/queen-badge.svg",
+    "/queen-mark.svg",
+    "/queen-partitions.svg",
+    "/queen-scene-cream.svg",
+    "/queen-scene-on-dark.svg",
+    "/queen-scene-on-light.svg",
+    "/queen-scene.svg",
+    "/queen-tile.png",
     "/reference",
     "/reference/changelog",
+    "/reference/changelog/index.md",
+    "/reference/changelog/index.mdx",
     "/reference/configuration",
+    "/reference/configuration/index.md",
+    "/reference/configuration/index.mdx",
     "/reference/errors",
+    "/reference/errors/index.md",
+    "/reference/errors/index.mdx",
     "/reference/http",
+    "/reference/http/index.md",
+    "/reference/http/index.mdx",
+    "/reference/index.md",
+    "/reference/index.mdx",
     "/reference/kafka",
+    "/reference/kafka/index.md",
+    "/reference/kafka/index.mdx",
     "/reference/limits",
+    "/reference/limits/index.md",
+    "/reference/limits/index.mdx",
+    "/reference/llms.txt",
     "/reference/metrics",
+    "/reference/metrics/index.md",
+    "/reference/metrics/index.mdx",
     "/reference/queenctl",
+    "/reference/queenctl/index.md",
+    "/reference/queenctl/index.mdx",
     "/reference/supervisor-status",
+    "/reference/supervisor-status/index.md",
+    "/reference/supervisor-status/index.mdx",
     "/reference/transaction",
+    "/reference/transaction/index.md",
+    "/reference/transaction/index.mdx",
+    "/robots.txt",
+    "/screenshots/dashboard-overview.png",
+    "/screenshots/dashboard-queue-dark.webp",
+    "/screenshots/dashboard-queue-light.webp",
+    "/screenshots/laravel-dashboard-failed-job.png",
+    "/screenshots/laravel-dashboard-queue-now.png",
+    "/screenshots/laravel-dashboard-tuning.png",
+    "/screenshots/laravel-supervisor-dashboard.png",
+    "/screenshots/laravel/dashboard-failed-job.png",
+    "/screenshots/laravel/dashboard-queue-now.png",
+    "/screenshots/laravel/dashboard-tuning.png",
+    "/screenshots/soak-24h-1m-analytics.png",
+    "/screenshots/soak-24h-1m-overview.png",
+    "/screenshots/soak-24h-1m-throughput.png",
+    "/talks/coming-from-another-broker",
+    "/talks/coming-from-another-broker/deck.js",
+    "/talks/coming-from-another-broker/fonts/inter-latin-wght-normal.woff2",
+    "/talks/coming-from-another-broker/fonts/jetbrains-mono-latin-wght-normal.woff2",
+    "/talks/coming-from-another-broker/theme.js",
     "/writing-applications",
     "/writing-applications/ack",
+    "/writing-applications/ack/index.md",
+    "/writing-applications/ack/index.mdx",
     "/writing-applications/ai-agents",
+    "/writing-applications/ai-agents/index.md",
+    "/writing-applications/ai-agents/index.mdx",
     "/writing-applications/clients",
+    "/writing-applications/clients/index.md",
+    "/writing-applications/clients/index.mdx",
     "/writing-applications/ephemeral",
+    "/writing-applications/ephemeral/index.md",
+    "/writing-applications/ephemeral/index.mdx",
+    "/writing-applications/index.md",
+    "/writing-applications/index.mdx",
     "/writing-applications/kv-locks-timers",
+    "/writing-applications/kv-locks-timers/index.md",
+    "/writing-applications/kv-locks-timers/index.mdx",
+    "/writing-applications/llms.txt",
     "/writing-applications/pop",
+    "/writing-applications/pop/index.md",
+    "/writing-applications/pop/index.mdx",
     "/writing-applications/push",
+    "/writing-applications/push/index.md",
+    "/writing-applications/push/index.mdx",
     "/writing-applications/queues",
+    "/writing-applications/queues/index.md",
+    "/writing-applications/queues/index.mdx",
     "/writing-applications/retries",
+    "/writing-applications/retries/index.md",
+    "/writing-applications/retries/index.mdx",
     "/writing-applications/streams",
-    "/writing-applications/transactions"
+    "/writing-applications/streams/index.md",
+    "/writing-applications/streams/index.mdx",
+    "/writing-applications/transactions",
+    "/writing-applications/transactions/index.md",
+    "/writing-applications/transactions/index.mdx"
   ],
-  "opaqueNamespaces": []
+  "redirects": [
+    {
+      "from": "/benchmarks/cardinality-1m",
+      "to": "/benchmarks/partitions/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/cardinality-1m/",
+      "to": "/benchmarks/partitions/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/comparison",
+      "to": "/benchmarks/queen-vs-kafka/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/comparison/",
+      "to": "/benchmarks/queen-vs-kafka/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/conformance",
+      "to": "/benchmarks/jepsen/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/conformance/",
+      "to": "/benchmarks/jepsen/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/laravel-supervisors",
+      "to": "/benchmarks/laravel/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/laravel-supervisors/",
+      "to": "/benchmarks/laravel/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/method",
+      "to": "/benchmarks/methodology/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/method/",
+      "to": "/benchmarks/methodology/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/multitenant-cell",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/multitenant-cell/",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/ordered-pipeline",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/ordered-pipeline/",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/soak-24h",
+      "to": "/benchmarks/soak/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/soak-24h/",
+      "to": "/benchmarks/soak/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/compose",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/compose/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/dashboard",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/dashboard/",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/ha",
+      "to": "/manage/docker/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/ha/",
+      "to": "/manage/docker/",
+      "status": 301
+    },
+    {
+      "from": "/deploy",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/kafka",
+      "to": "/integrations/kafka/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/kafka/",
+      "to": "/integrations/kafka/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/kubernetes",
+      "to": "/manage/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/kubernetes/",
+      "to": "/manage/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/multi-tenant",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/multi-tenant/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/operations",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/operations/",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/proxy",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/proxy/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/security",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/security/",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/state",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/state/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/internals/ack-internals",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/ack-internals/",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/contributing/docs",
+      "to": "/architecture/contributing/",
+      "status": 301
+    },
+    {
+      "from": "/internals/contributing/docs/",
+      "to": "/architecture/contributing/",
+      "status": 301
+    },
+    {
+      "from": "/internals/contributing/release",
+      "to": "/architecture/contributing/",
+      "status": 301
+    },
+    {
+      "from": "/internals/contributing/release/",
+      "to": "/architecture/contributing/",
+      "status": 301
+    },
+    {
+      "from": "/internals/contributing/testing",
+      "to": "/architecture/contributing/",
+      "status": 301
+    },
+    {
+      "from": "/internals/contributing/testing/",
+      "to": "/architecture/contributing/",
+      "status": 301
+    },
+    {
+      "from": "/internals/dedup",
+      "to": "/writing-applications/push/",
+      "status": 301
+    },
+    {
+      "from": "/internals/dedup/",
+      "to": "/writing-applications/push/",
+      "status": 301
+    },
+    {
+      "from": "/internals/flow-control",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/flow-control/",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/kv",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/internals/kv/",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/internals/life-of-a-pop",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/life-of-a-pop/",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/life-of-a-push",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/life-of-a-push/",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/retention",
+      "to": "/architecture/storage/",
+      "status": 301
+    },
+    {
+      "from": "/internals/retention/",
+      "to": "/architecture/storage/",
+      "status": 301
+    },
+    {
+      "from": "/internals/stats",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/internals/stats/",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/internals/storage-model",
+      "to": "/architecture/storage/",
+      "status": 301
+    },
+    {
+      "from": "/internals/storage-model/",
+      "to": "/architecture/storage/",
+      "status": 301
+    },
+    {
+      "from": "/internals/sweeper",
+      "to": "/architecture/storage/",
+      "status": 301
+    },
+    {
+      "from": "/internals/sweeper/",
+      "to": "/architecture/storage/",
+      "status": 301
+    },
+    {
+      "from": "/internals/timers",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/internals/timers/",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/reference/compatibility",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/compatibility/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/config",
+      "to": "/reference/configuration/",
+      "status": 301
+    },
+    {
+      "from": "/reference/config/",
+      "to": "/reference/configuration/",
+      "status": 301
+    },
+    {
+      "from": "/reference/defaults",
+      "to": "/reference/limits/",
+      "status": 301
+    },
+    {
+      "from": "/reference/defaults/",
+      "to": "/reference/limits/",
+      "status": 301
+    },
+    {
+      "from": "/reference/engine",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/reference/engine/",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/ack",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/ack/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/analytics",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/analytics/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/consumer-groups",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/consumer-groups/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/ephemeral",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/ephemeral/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/kv",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/kv/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/lease",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/lease/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/messages-dlq",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/messages-dlq/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/pop",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/pop/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/push",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/push/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/queues",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/queues/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/routes",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/routes/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/status-metrics",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/status-metrics/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/streams",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/streams/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/system",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/system/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/timers",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/timers/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/traces",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/traces/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/transaction",
+      "to": "/reference/transaction/",
+      "status": 301
+    },
+    {
+      "from": "/reference/http/transaction/",
+      "to": "/reference/transaction/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/auth",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/auth/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/broker-tenancy",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/broker-tenancy/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/console",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/console/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/endpoints",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/endpoints/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/isolation",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/isolation/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/metering",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/metering/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/quotas",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/quotas/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/tenants",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/multi-tenant/tenants/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/reference/openapi",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/openapi/",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/reference/prometheus",
+      "to": "/reference/metrics/",
+      "status": 301
+    },
+    {
+      "from": "/reference/prometheus/",
+      "to": "/reference/metrics/",
+      "status": 301
+    },
+    {
+      "from": "/reference/queue-options",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/reference/queue-options/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/cpp",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/cpp/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/go",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/go/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/javascript",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/javascript/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/php",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/php/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/python",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/python/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/rust",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sdk/rust/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/security/encryption",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/reference/security/encryption/",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/reference/security/jwt",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/reference/security/jwt/",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/start/history",
+      "to": "/introduction/",
+      "status": 301
+    },
+    {
+      "from": "/start/history/",
+      "to": "/introduction/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client/hello-world",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client/hello-world/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client/multi-queue-flow",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client/multi-queue-flow/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client/replay",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client/replay/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client/transaction-ack-push",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/cpp-client/transaction-ack-push/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/embed",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/embed/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/ephemeral",
+      "to": "/writing-applications/ephemeral/",
+      "status": 301
+    },
+    {
+      "from": "/use/ephemeral/",
+      "to": "/writing-applications/ephemeral/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples",
+      "to": "/patterns/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/",
+      "to": "/patterns/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/chat",
+      "to": "/patterns/ordering-batching/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/chat/",
+      "to": "/patterns/ordering-batching/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/cross-protocol",
+      "to": "/integrations/kafka/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/cross-protocol/",
+      "to": "/integrations/kafka/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/exactly-once",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/exactly-once/",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples",
+      "to": "/patterns/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/",
+      "to": "/patterns/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/rate-limiter",
+      "to": "/patterns/rate-limiting/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/rate-limiter/",
+      "to": "/patterns/rate-limiting/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/saga",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/saga/",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/webhooks",
+      "to": "/patterns/retries-dead-letters/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/webhooks/",
+      "to": "/patterns/retries-dead-letters/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/hello-world",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/hello-world/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/multi-queue-flow",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/multi-queue-flow/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/replay",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/replay/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/streaming",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/streaming/",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/transaction-ack-push",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/go-client/transaction-ack-push/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client/hello-world",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client/hello-world/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client/multi-queue-flow",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client/multi-queue-flow/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client/replay",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client/replay/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client/transaction-ack-push",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/http-client/transaction-ack-push/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/hello-world",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/hello-world/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/multi-queue-flow",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/multi-queue-flow/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/replay",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/replay/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/streaming",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/streaming/",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/transaction-ack-push",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/js-client/transaction-ack-push/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/kv",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/use/kv/",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/dashboard",
+      "to": "/integrations/laravel/dashboard/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/dashboard/",
+      "to": "/integrations/laravel/dashboard/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel",
+      "to": "/integrations/laravel/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/",
+      "to": "/integrations/laravel/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/migrate-from-horizon",
+      "to": "/integrations/laravel/migrate-from-horizon/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/migrate-from-horizon/",
+      "to": "/integrations/laravel/migrate-from-horizon/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/queen-vs-horizon",
+      "to": "/integrations/laravel/queen-vs-horizon/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/queen-vs-horizon/",
+      "to": "/integrations/laravel/queen-vs-horizon/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/supervisors",
+      "to": "/integrations/laravel/supervisors/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/supervisors/",
+      "to": "/integrations/laravel/supervisors/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/kubernetes/",
+      "to": "/integrations/laravel/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/kubernetes",
+      "to": "/integrations/laravel/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/monitoring/",
+      "to": "/integrations/laravel/monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/monitoring",
+      "to": "/integrations/laravel/monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/concepts/",
+      "to": "/integrations/laravel/concepts/",
+      "status": 301
+    },
+    {
+      "from": "/use/laravel/concepts",
+      "to": "/integrations/laravel/concepts/",
+      "status": 301
+    },
+    {
+      "from": "/use/model",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/model/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client/hello-world",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client/hello-world/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client/multi-queue-flow",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client/multi-queue-flow/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client/replay",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client/replay/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client/transaction-ack-push",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/php-client/transaction-ack-push/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/hello-world",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/hello-world/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/multi-queue-flow",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/multi-queue-flow/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/replay",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/replay/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/streaming",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/streaming/",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/transaction-ack-push",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/python-client/transaction-ack-push/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/hello-world",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/hello-world/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/multi-queue-flow",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/multi-queue-flow/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/replay",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/replay/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/streaming",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/streaming/",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/transaction-ack-push",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/rust-client/transaction-ack-push/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/streams",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/streams/",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use/timers",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/use/timers/",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/sitemap.xml",
+      "to": "/sitemap-index.xml",
+      "status": 301
+    },
+    {
+      "from": "/index.html",
+      "to": "/",
+      "status": 301
+    },
+    {
+      "from": "/quickstart",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/quickstart.html",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/concepts.html",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/architecture",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/architecture.html",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/clients",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/clients.html",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/http-api",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/http-api.html",
+      "to": "/reference/http/",
+      "status": 301
+    },
+    {
+      "from": "/cli",
+      "to": "/reference/queenctl/",
+      "status": 301
+    },
+    {
+      "from": "/cli.html",
+      "to": "/reference/queenctl/",
+      "status": 301
+    },
+    {
+      "from": "/server",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/server.html",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/dashboard",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/dashboard.html",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/sizing",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/sizing.html",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/visual-tour",
+      "to": "/introduction/",
+      "status": 301
+    },
+    {
+      "from": "/visual-tour.html",
+      "to": "/introduction/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks.html",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks-0.16-lag",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks-0.16-lag.html",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks-0.16-matrix",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks-0.16-matrix.html",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks-0.16-soak",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks-0.16-soak.html",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks-2026-04",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks-2026-04.html",
+      "to": "/benchmarks/",
+      "status": 301
+    },
+    {
+      "from": "/use-cases",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use-cases.html",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-pipeline",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-pipeline.html",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-dedup",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-dedup.html",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-replay",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-replay.html",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-aggregations",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-aggregations.html",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-rate-limiter",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/use-case-rate-limiter.html",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/peak",
+      "to": "/benchmarks/queen-vs-kafka/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/peak/",
+      "to": "/benchmarks/queen-vs-kafka/",
+      "status": 301
+    },
+    {
+      "from": "/start/why",
+      "to": "/introduction/",
+      "status": 301
+    },
+    {
+      "from": "/start/why/",
+      "to": "/introduction/",
+      "status": 301
+    },
+    {
+      "from": "/start/limits",
+      "to": "/reference/limits/",
+      "status": 301
+    },
+    {
+      "from": "/start/limits/",
+      "to": "/reference/limits/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/ack",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/ack/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/consuming",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/consuming/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/guarantees",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/guarantees/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/leases-retries-dlq",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/leases-retries-dlq/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/producing",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/producing/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/queues-partitions",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/queues-partitions/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/replay",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/replay/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/retention",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/retention/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/transactions",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/concepts/transactions/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/javascript",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/javascript/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/python",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/python/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/go",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/go/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/rust",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/rust/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/php-laravel",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/php-laravel/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/cpp",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/cpp/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/http",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/clients/http/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/use/errors",
+      "to": "/reference/errors/",
+      "status": 301
+    },
+    {
+      "from": "/use/errors/",
+      "to": "/reference/errors/",
+      "status": 301
+    },
+    {
+      "from": "/full-examples",
+      "to": "/patterns/",
+      "status": 301
+    },
+    {
+      "from": "/full-examples/",
+      "to": "/patterns/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/dedup",
+      "to": "/writing-applications/push/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/dedup/",
+      "to": "/writing-applications/push/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/dlq",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/dlq/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/fanout",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/fanout/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/pipeline",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/pipeline/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/producer-consumer",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/producer-consumer/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/replay",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/examples/replay/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/deploy",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/deploy/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/configuration",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/configuration/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/postgres",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/postgres/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/sizing",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/sizing/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/kubernetes",
+      "to": "/manage/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/kubernetes/",
+      "to": "/manage/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/probes-restarts",
+      "to": "/manage/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/probes-restarts/",
+      "to": "/manage/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/ha",
+      "to": "/manage/docker/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/ha/",
+      "to": "/manage/docker/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/durability",
+      "to": "/manage/docker/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/durability/",
+      "to": "/manage/docker/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/observability",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/observability/",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/retention",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/retention/",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/backup",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/backup/",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/upgrade",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/upgrade/",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/dashboard",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/dashboard/",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/security",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/security/",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/security/jwt",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/security/jwt/",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/security/encryption",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/security/encryption/",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/security/postgres-tls",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/security/postgres-tls/",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/proxy",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/proxy/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/auth",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/auth/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/broker-tenancy",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/broker-tenancy/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/endpoints",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/endpoints/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/isolation",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/isolation/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/metering",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/metering/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/quotas",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/quotas/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/tenants",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/selfhost/multi-tenant/tenants/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/reproduce",
+      "to": "/benchmarks/methodology/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/reproduce/",
+      "to": "/benchmarks/methodology/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/archive",
+      "to": "/benchmarks/methodology/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/archive/",
+      "to": "/benchmarks/methodology/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/produce-consume",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/produce-consume/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/ordering-and-dedup",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/ordering-and-dedup/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/pipeline",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/use/full-examples/pipeline/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/full-examples/produce-consume",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/full-examples/ordering-and-dedup",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/full-examples/pipeline",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/reference/embed",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/reference/embed/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/postgres",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/postgres/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/sqs",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/sqs/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/s3",
+      "to": "/integrations/s3/",
+      "status": 301
+    },
+    {
+      "from": "/deploy/s3/",
+      "to": "/integrations/s3/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sqs",
+      "to": "/reference/",
+      "status": 301
+    },
+    {
+      "from": "/reference/sqs/",
+      "to": "/reference/",
+      "status": 301
+    },
+    {
+      "from": "/reference/s3",
+      "to": "/integrations/s3/",
+      "status": 301
+    },
+    {
+      "from": "/reference/s3/",
+      "to": "/integrations/s3/",
+      "status": 301
+    },
+    {
+      "from": "/reference/security/postgres-tls",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/reference/security/postgres-tls/",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/internals/hotlist",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/internals/hotlist/",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/internals/mesh",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/internals/mesh/",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/internals/schema",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/internals/schema/",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/internals/legacy",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/internals/legacy/",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/throughput",
+      "to": "/benchmarks/queen-vs-kafka/",
+      "status": 301
+    },
+    {
+      "from": "/benchmarks/throughput/",
+      "to": "/benchmarks/queen-vs-kafka/",
+      "status": 301
+    },
+    {
+      "from": "/concepts",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/",
+      "to": "/introduction/model/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/index.md",
+      "to": "/introduction/model/index.md",
+      "status": 301
+    },
+    {
+      "from": "/concepts/consuming",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/consuming/",
+      "to": "/writing-applications/pop/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/consuming/index.md",
+      "to": "/writing-applications/pop/index.md",
+      "status": 301
+    },
+    {
+      "from": "/concepts/dedup",
+      "to": "/writing-applications/push/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/dedup/",
+      "to": "/writing-applications/push/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/dedup/index.md",
+      "to": "/writing-applications/push/index.md",
+      "status": 301
+    },
+    {
+      "from": "/concepts/guarantees",
+      "to": "/introduction/guarantees/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/guarantees/",
+      "to": "/introduction/guarantees/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/guarantees/index.md",
+      "to": "/introduction/guarantees/index.md",
+      "status": 301
+    },
+    {
+      "from": "/concepts/kv",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/kv/",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/kv/index.md",
+      "to": "/writing-applications/kv-locks-timers/index.md",
+      "status": 301
+    },
+    {
+      "from": "/concepts/locks",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/locks/",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/locks/index.md",
+      "to": "/writing-applications/kv-locks-timers/index.md",
+      "status": 301
+    },
+    {
+      "from": "/concepts/partitions",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/partitions/",
+      "to": "/writing-applications/queues/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/partitions/index.md",
+      "to": "/writing-applications/queues/index.md",
+      "status": 301
+    },
+    {
+      "from": "/concepts/timers",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/timers/",
+      "to": "/writing-applications/kv-locks-timers/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/timers/index.md",
+      "to": "/writing-applications/kv-locks-timers/index.md",
+      "status": 301
+    },
+    {
+      "from": "/concepts/transactions",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/transactions/",
+      "to": "/writing-applications/transactions/",
+      "status": 301
+    },
+    {
+      "from": "/concepts/transactions/index.md",
+      "to": "/writing-applications/transactions/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples",
+      "to": "/patterns/",
+      "status": 301
+    },
+    {
+      "from": "/examples/",
+      "to": "/patterns/",
+      "status": 301
+    },
+    {
+      "from": "/examples/index.md",
+      "to": "/patterns/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/chat",
+      "to": "/patterns/ordering-batching/",
+      "status": 301
+    },
+    {
+      "from": "/examples/chat/",
+      "to": "/patterns/ordering-batching/",
+      "status": 301
+    },
+    {
+      "from": "/examples/chat/index.md",
+      "to": "/patterns/ordering-batching/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/exactly-once",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/examples/exactly-once/",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/examples/exactly-once/index.md",
+      "to": "/patterns/workflows/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/kafka-bridge",
+      "to": "/integrations/kafka/",
+      "status": 301
+    },
+    {
+      "from": "/examples/kafka-bridge/",
+      "to": "/integrations/kafka/",
+      "status": 301
+    },
+    {
+      "from": "/examples/kafka-bridge/index.md",
+      "to": "/integrations/kafka/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel",
+      "to": "/integrations/laravel/examples/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/",
+      "to": "/integrations/laravel/examples/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/index.md",
+      "to": "/integrations/laravel/examples/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/lease",
+      "to": "/integrations/laravel/examples/lease/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/lease/",
+      "to": "/integrations/laravel/examples/lease/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/lease/index.md",
+      "to": "/integrations/laravel/examples/lease/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/ordering",
+      "to": "/integrations/laravel/examples/ordering/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/ordering/",
+      "to": "/integrations/laravel/examples/ordering/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/ordering/index.md",
+      "to": "/integrations/laravel/examples/ordering/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/prefetch",
+      "to": "/integrations/laravel/examples/prefetch/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/prefetch/",
+      "to": "/integrations/laravel/examples/prefetch/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/prefetch/index.md",
+      "to": "/integrations/laravel/examples/prefetch/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/prefork",
+      "to": "/integrations/laravel/examples/prefork/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/prefork/",
+      "to": "/integrations/laravel/examples/prefork/",
+      "status": 301
+    },
+    {
+      "from": "/examples/laravel/prefork/index.md",
+      "to": "/integrations/laravel/examples/prefork/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/rate-limiter",
+      "to": "/patterns/rate-limiting/",
+      "status": 301
+    },
+    {
+      "from": "/examples/rate-limiter/",
+      "to": "/patterns/rate-limiting/",
+      "status": 301
+    },
+    {
+      "from": "/examples/rate-limiter/index.md",
+      "to": "/patterns/rate-limiting/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/saga",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/examples/saga/",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/examples/saga/index.md",
+      "to": "/patterns/workflows/index.md",
+      "status": 301
+    },
+    {
+      "from": "/examples/webhooks",
+      "to": "/patterns/retries-dead-letters/",
+      "status": 301
+    },
+    {
+      "from": "/examples/webhooks/",
+      "to": "/patterns/retries-dead-letters/",
+      "status": 301
+    },
+    {
+      "from": "/examples/webhooks/index.md",
+      "to": "/patterns/retries-dead-letters/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/guides/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/guides/index.md",
+      "to": "/writing-applications/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/ephemeral",
+      "to": "/writing-applications/ephemeral/",
+      "status": 301
+    },
+    {
+      "from": "/guides/ephemeral/",
+      "to": "/writing-applications/ephemeral/",
+      "status": 301
+    },
+    {
+      "from": "/guides/ephemeral/index.md",
+      "to": "/writing-applications/ephemeral/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/exactly-once",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/guides/exactly-once/",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/guides/exactly-once/index.md",
+      "to": "/patterns/workflows/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/kafka-frameworks",
+      "to": "/integrations/kafka-frameworks/",
+      "status": 301
+    },
+    {
+      "from": "/guides/kafka-frameworks/",
+      "to": "/integrations/kafka-frameworks/",
+      "status": 301
+    },
+    {
+      "from": "/guides/kafka-frameworks/index.md",
+      "to": "/integrations/kafka-frameworks/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/kafka",
+      "to": "/integrations/kafka/",
+      "status": 301
+    },
+    {
+      "from": "/guides/kafka/",
+      "to": "/integrations/kafka/",
+      "status": 301
+    },
+    {
+      "from": "/guides/kafka/index.md",
+      "to": "/integrations/kafka/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel",
+      "to": "/integrations/laravel/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/",
+      "to": "/integrations/laravel/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/index.md",
+      "to": "/integrations/laravel/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/concepts",
+      "to": "/integrations/laravel/concepts/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/concepts/",
+      "to": "/integrations/laravel/concepts/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/concepts/index.md",
+      "to": "/integrations/laravel/concepts/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/configuration",
+      "to": "/integrations/laravel/configuration/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/configuration/",
+      "to": "/integrations/laravel/configuration/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/configuration/index.md",
+      "to": "/integrations/laravel/configuration/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/consume",
+      "to": "/integrations/laravel/consume/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/consume/",
+      "to": "/integrations/laravel/consume/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/consume/index.md",
+      "to": "/integrations/laravel/consume/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/dashboard",
+      "to": "/integrations/laravel/dashboard/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/dashboard/",
+      "to": "/integrations/laravel/dashboard/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/dashboard/index.md",
+      "to": "/integrations/laravel/dashboard/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/kubernetes",
+      "to": "/integrations/laravel/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/kubernetes/",
+      "to": "/integrations/laravel/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/kubernetes/index.md",
+      "to": "/integrations/laravel/kubernetes/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/migrate-from-horizon",
+      "to": "/integrations/laravel/migrate-from-horizon/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/migrate-from-horizon/",
+      "to": "/integrations/laravel/migrate-from-horizon/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/migrate-from-horizon/index.md",
+      "to": "/integrations/laravel/migrate-from-horizon/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/monitoring",
+      "to": "/integrations/laravel/monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/monitoring/",
+      "to": "/integrations/laravel/monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/monitoring/index.md",
+      "to": "/integrations/laravel/monitoring/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/queen-vs-horizon",
+      "to": "/integrations/laravel/queen-vs-horizon/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/queen-vs-horizon/",
+      "to": "/integrations/laravel/queen-vs-horizon/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/queen-vs-horizon/index.md",
+      "to": "/integrations/laravel/queen-vs-horizon/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/supervisors",
+      "to": "/integrations/laravel/supervisors/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/supervisors/",
+      "to": "/integrations/laravel/supervisors/",
+      "status": 301
+    },
+    {
+      "from": "/guides/laravel/supervisors/index.md",
+      "to": "/integrations/laravel/supervisors/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/postgres",
+      "to": "/integrations/postgres/",
+      "status": 301
+    },
+    {
+      "from": "/guides/postgres/",
+      "to": "/integrations/postgres/",
+      "status": 301
+    },
+    {
+      "from": "/guides/postgres/index.md",
+      "to": "/integrations/postgres/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/s3",
+      "to": "/integrations/s3/",
+      "status": 301
+    },
+    {
+      "from": "/guides/s3/",
+      "to": "/integrations/s3/",
+      "status": 301
+    },
+    {
+      "from": "/guides/s3/index.md",
+      "to": "/integrations/s3/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/state-machines",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/guides/state-machines/",
+      "to": "/patterns/workflows/",
+      "status": 301
+    },
+    {
+      "from": "/guides/state-machines/index.md",
+      "to": "/patterns/workflows/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/streams",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/guides/streams/",
+      "to": "/writing-applications/streams/",
+      "status": 301
+    },
+    {
+      "from": "/guides/streams/index.md",
+      "to": "/writing-applications/streams/index.md",
+      "status": 301
+    },
+    {
+      "from": "/guides/webhooks",
+      "to": "/patterns/retries-dead-letters/",
+      "status": 301
+    },
+    {
+      "from": "/guides/webhooks/",
+      "to": "/patterns/retries-dead-letters/",
+      "status": 301
+    },
+    {
+      "from": "/guides/webhooks/index.md",
+      "to": "/patterns/retries-dead-letters/index.md",
+      "status": 301
+    },
+    {
+      "from": "/internals",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/internals/",
+      "to": "/architecture/",
+      "status": 301
+    },
+    {
+      "from": "/internals/index.md",
+      "to": "/architecture/index.md",
+      "status": 301
+    },
+    {
+      "from": "/internals/contributing",
+      "to": "/architecture/contributing/",
+      "status": 301
+    },
+    {
+      "from": "/internals/contributing/",
+      "to": "/architecture/contributing/",
+      "status": 301
+    },
+    {
+      "from": "/internals/contributing/index.md",
+      "to": "/architecture/contributing/index.md",
+      "status": 301
+    },
+    {
+      "from": "/internals/life-of-a-step",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/life-of-a-step/",
+      "to": "/architecture/write-path/",
+      "status": 301
+    },
+    {
+      "from": "/internals/life-of-a-step/index.md",
+      "to": "/architecture/write-path/index.md",
+      "status": 301
+    },
+    {
+      "from": "/internals/storage",
+      "to": "/architecture/storage/",
+      "status": 301
+    },
+    {
+      "from": "/internals/storage/",
+      "to": "/architecture/storage/",
+      "status": 301
+    },
+    {
+      "from": "/internals/storage/index.md",
+      "to": "/architecture/storage/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/operate/",
+      "to": "/manage/",
+      "status": 301
+    },
+    {
+      "from": "/operate/index.md",
+      "to": "/manage/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/cluster",
+      "to": "/manage/docker/",
+      "status": 301
+    },
+    {
+      "from": "/operate/cluster/",
+      "to": "/manage/docker/",
+      "status": 301
+    },
+    {
+      "from": "/operate/cluster/index.md",
+      "to": "/manage/docker/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/kubernetes",
+      "to": "/manage/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/operate/kubernetes/",
+      "to": "/manage/kubernetes/",
+      "status": 301
+    },
+    {
+      "from": "/operate/kubernetes/index.md",
+      "to": "/manage/kubernetes/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/monitoring",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/operate/monitoring/",
+      "to": "/manage/upgrades-monitoring/",
+      "status": 301
+    },
+    {
+      "from": "/operate/monitoring/index.md",
+      "to": "/manage/upgrades-monitoring/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/operator",
+      "to": "/manage/operator/",
+      "status": 301
+    },
+    {
+      "from": "/operate/operator/",
+      "to": "/manage/operator/",
+      "status": 301
+    },
+    {
+      "from": "/operate/operator/index.md",
+      "to": "/manage/operator/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/recovery-backups",
+      "to": "/manage/backups/",
+      "status": 301
+    },
+    {
+      "from": "/operate/recovery-backups/",
+      "to": "/manage/backups/",
+      "status": 301
+    },
+    {
+      "from": "/operate/recovery-backups/index.md",
+      "to": "/manage/backups/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/recovery",
+      "to": "/manage/recovery/",
+      "status": 301
+    },
+    {
+      "from": "/operate/recovery/",
+      "to": "/manage/recovery/",
+      "status": 301
+    },
+    {
+      "from": "/operate/recovery/index.md",
+      "to": "/manage/recovery/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/security",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/operate/security/",
+      "to": "/manage/security/",
+      "status": 301
+    },
+    {
+      "from": "/operate/security/index.md",
+      "to": "/manage/security/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/standby",
+      "to": "/manage/standby/",
+      "status": 301
+    },
+    {
+      "from": "/operate/standby/",
+      "to": "/manage/standby/",
+      "status": 301
+    },
+    {
+      "from": "/operate/standby/index.md",
+      "to": "/manage/standby/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/tenants",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/operate/tenants/",
+      "to": "/manage/tenants/",
+      "status": 301
+    },
+    {
+      "from": "/operate/tenants/index.md",
+      "to": "/manage/tenants/index.md",
+      "status": 301
+    },
+    {
+      "from": "/operate/terraform",
+      "to": "/manage/terraform/",
+      "status": 301
+    },
+    {
+      "from": "/operate/terraform/",
+      "to": "/manage/terraform/",
+      "status": 301
+    },
+    {
+      "from": "/operate/terraform/index.md",
+      "to": "/manage/terraform/index.md",
+      "status": 301
+    },
+    {
+      "from": "/start",
+      "to": "/introduction/",
+      "status": 301
+    },
+    {
+      "from": "/start/",
+      "to": "/introduction/",
+      "status": 301
+    },
+    {
+      "from": "/start/index.md",
+      "to": "/introduction/index.md",
+      "status": 301
+    },
+    {
+      "from": "/start/about",
+      "to": "/introduction/about/",
+      "status": 301
+    },
+    {
+      "from": "/start/about/",
+      "to": "/introduction/about/",
+      "status": 301
+    },
+    {
+      "from": "/start/about/index.md",
+      "to": "/introduction/about/index.md",
+      "status": 301
+    },
+    {
+      "from": "/start/ai-agents",
+      "to": "/writing-applications/ai-agents/",
+      "status": 301
+    },
+    {
+      "from": "/start/ai-agents/",
+      "to": "/writing-applications/ai-agents/",
+      "status": 301
+    },
+    {
+      "from": "/start/ai-agents/index.md",
+      "to": "/writing-applications/ai-agents/index.md",
+      "status": 301
+    },
+    {
+      "from": "/start/clients",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/start/clients/",
+      "to": "/writing-applications/clients/",
+      "status": 301
+    },
+    {
+      "from": "/start/clients/index.md",
+      "to": "/writing-applications/clients/index.md",
+      "status": 301
+    },
+    {
+      "from": "/start/compare",
+      "to": "/introduction/compare/",
+      "status": 301
+    },
+    {
+      "from": "/start/compare/",
+      "to": "/introduction/compare/",
+      "status": 301
+    },
+    {
+      "from": "/start/compare/index.md",
+      "to": "/introduction/compare/index.md",
+      "status": 301
+    },
+    {
+      "from": "/start/quickstart",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/start/quickstart/",
+      "to": "/writing-applications/",
+      "status": 301
+    },
+    {
+      "from": "/start/quickstart/index.md",
+      "to": "/writing-applications/index.md",
+      "status": 301
+    },
+    {
+      "from": "/start/when-not-to-use",
+      "to": "/introduction/when-not-to-use/",
+      "status": 301
+    },
+    {
+      "from": "/start/when-not-to-use/",
+      "to": "/introduction/when-not-to-use/",
+      "status": 301
+    },
+    {
+      "from": "/start/when-not-to-use/index.md",
+      "to": "/introduction/when-not-to-use/index.md",
+      "status": 301
+    }
+  ],
+  "redirectPages": [],
+  "redirectRules": "cloudflare",
+  "mounts": {
+    "docs": ""
+  },
+  "opaqueNamespaces": [],
+  "builtAt": "2026-11-13T09:29:05.172Z"
 }

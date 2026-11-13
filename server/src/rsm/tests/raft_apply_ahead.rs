@@ -156,10 +156,15 @@ async fn pipelined_proposals_keep_openraft_behind_the_store() {
     for chunk in entries.chunks(IN_FLIGHT) {
         let mut calls: Vec<_> = chunk
             .iter()
-            .map(|e| Box::pin(repl.propose(e.clone(), deadline())))
+            .map(|e| {
+                Box::pin(futures_util::future::maybe_done(
+                    repl.propose(e.clone(), deadline()),
+                ))
+            })
             .collect();
         // One poll each, in order: a proposal takes its place in the log at
         // its first poll (the batcher's contract), then all are in flight.
+        // MaybeDone keeps answers ready on that first poll from being polled again.
         for c in calls.iter_mut() {
             std::future::poll_fn(|cx| {
                 let _ = std::future::Future::poll(c.as_mut(), cx);
@@ -167,14 +172,18 @@ async fn pipelined_proposals_keep_openraft_behind_the_store() {
             })
             .await;
         }
-        let answers = tokio::time::timeout(
+        tokio::time::timeout(
             Duration::from_secs(60),
-            futures_util::future::join_all(calls),
+            futures_util::future::join_all(calls.iter_mut()),
         )
         .await
         .expect("the proposals answered within 60 s");
-        for at in answers {
-            let at = at.expect("propose");
+        for mut call in calls {
+            let at = call
+                .as_mut()
+                .take_output()
+                .expect("completed proposal")
+                .expect("propose");
             assert_eq!(at.index, last + 1, "indexes follow the submission order");
             assert!(
                 at.index <= repl.applied_index(),

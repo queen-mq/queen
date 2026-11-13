@@ -9,7 +9,7 @@
  * generate conflicting `[...slug]` paths at root.
  */
 
-import { getIndexedEntries, type IndexedEntry } from "@cloudflare/nimbus-docs";
+import { getIndexedEntries, type IndexedEntry } from "@cloudflare/nimbus-docs/runtime";
 import { config } from "virtual:nimbus/config";
 // `renderEntryAsMarkdown()` from the framework deletes every `<Render />`
 // instead of inlining the partial. This wrapper inlines it first; everything
@@ -78,7 +78,7 @@ export async function GET({ props }: { props: SlugProps }) {
     "",
     // Point at the authored source (`.mdx` twin) when it exists — the
     // `.md` alternate referencing itself was a placeholder.
-    `Source: ${new URL(sourceUrl ?? markdownUrl, config.site).href}`,
+    `Source: ${new URL(sourceUrl ?? markdownUrl ?? item.url, config.site).href}`,
     "",
   ].join("\n");
 
